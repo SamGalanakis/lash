@@ -215,6 +215,111 @@ pub fn runtime_script_for_text(
     Ok(ProviderWireScript::from_json_str(&encoded)?)
 }
 
+/// A runtime provider wire script whose mid-stream content chunk is a
+/// non-retryable MALFORMED SSE payload, so a live runtime turn that consumes it
+/// terminalizes with a terminal provider parser failure and commits no output.
+/// The request match is left intact (identical to the happy-path runtime script),
+/// so a real `session.turn().run()` matches it and the failure is delivered
+/// through the real provider wire parser — not an isolated `provider.complete()`.
+pub fn runtime_malformed_sse_script(
+    provider_kind: &str,
+) -> Result<ProviderWireScript, RuntimeProviderError> {
+    // The content SSE chunk index differs per provider; only openai-compatible is
+    // needed for the live-failure proof and its content delta is timeline[1].
+    let (raw, content_index) = match provider_kind {
+        OPENAI_COMPATIBLE => (OPENAI_COMPAT_RUNTIME_TEXT, 1usize),
+        other => {
+            return Err(RuntimeProviderError::new(format!(
+                "malformed runtime script not supported for provider `{other}`"
+            )));
+        }
+    };
+    let mut script: Value = serde_json::from_str(raw)?;
+    let slot = script
+        .get_mut("timeline")
+        .and_then(Value::as_array_mut)
+        .and_then(|timeline| timeline.get_mut(content_index))
+        .and_then(|event| event.get_mut("data"))
+        .ok_or_else(|| {
+            RuntimeProviderError::new(format!(
+                "runtime script missing timeline[{content_index}].data to malform"
+            ))
+        })?;
+    // Invalid JSON SSE chunk: the production provider parser rejects this as a
+    // terminal (non-retryable) parser error mid-stream.
+    *slot = Value::String("{ malformed provider event".to_string());
+    script["expected_provider"] = json!({
+        "mutation": "malformed_sse_chunk",
+        "expected": "provider parser error",
+    });
+    let encoded = serde_json::to_string(&script)?;
+    Ok(ProviderWireScript::from_json_str(&encoded)?)
+}
+
+/// Two real openai-compatible provider wire scripts for a suspend-roundtrip
+/// session: the first streams a native tool call for `tool_name` (which parks the
+/// live turn on the await key), the second streams the final `resumed` answer
+/// after the scheduler resolves the await. Routing these through the real
+/// `ScriptedLlmHttpTransport` (rather than a `TestProvider`) means the parked turn
+/// also exercises real provider wire parsing on both exchanges.
+pub fn suspend_roundtrip_scripts(
+    tool_name: &str,
+) -> Result<Vec<ProviderWireScript>, RuntimeProviderError> {
+    let tool_call_delta = json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "suspend-call-1",
+                    "type": "function",
+                    "function": { "name": tool_name, "arguments": "{}" }
+                }]
+            }
+        }]
+    })
+    .to_string();
+    let finish_delta = json!({
+        "choices": [{ "finish_reason": "tool_calls", "delta": {} }]
+    })
+    .to_string();
+    let tool_call_script = json!({
+        "schema": "lash.provider-wire-script.v1",
+        "name": format!("openai-compatible.chat-suspend-{tool_name}"),
+        "provider_kind": "openai-compatible",
+        "endpoint": { "method": "POST", "path": "/chat/completions" },
+        "request_match": {
+            "body": {
+                "model": { "equals": "openai/gpt-5.4" },
+                "stream": { "equals": true },
+                "messages": { "contains_role": "user" }
+            },
+            "headers": {
+                "authorization": { "present": true },
+                "content-type": { "contains": "application/json" }
+            }
+        },
+        "timeline": [
+            {
+                "at": 10,
+                "event": "response_start",
+                "status": 200,
+                "headers": [
+                    { "name": "content-type", "value": "text/event-stream; charset=utf-8" },
+                    { "name": "x-request-id", "value": "req-suspend-tool" }
+                ]
+            },
+            { "at": 20, "event": "sse", "data": tool_call_delta },
+            { "at": 21, "event": "sse", "data": finish_delta },
+            { "at": 22, "event": "sse", "data": "[DONE]" },
+            { "at": 23, "event": "end" }
+        ],
+        "expected_provider": { "terminal_reason": "tool_calls" }
+    });
+    let tool_call_script = ProviderWireScript::from_json_str(&tool_call_script.to_string())?;
+    let resumed_script = runtime_script_for_text(OPENAI_COMPATIBLE, "resumed")?;
+    Ok(vec![tool_call_script, resumed_script])
+}
+
 pub fn runtime_provider_components(
     provider_kind: &str,
     transport: &Arc<ScriptedLlmHttpTransport>,

@@ -39,7 +39,8 @@ use crate::oracles::{
     durable_effect_exactly_once, exec_code_observed, generated_final_value_semantic_channel,
     generated_suspend_resume,
     generated_runtime_provider_matrix as generated_runtime_provider_matrix_oracle,
-    ingress_sessions_opened, lease_time_monotonic, observer_convergence,
+    ingress_sessions_opened, lease_time_monotonic, live_provider_failure_terminalizes,
+    LiveProviderFailureFacts, observer_convergence,
     observer_reconnect_observed, operational_coverage, peak_concurrent_live_turns,
     pending_tool_completion, process_wake_observed, provider_mutation_rejected,
     provider_transport_mutation_classified, provider_turn_interleaving_depth,
@@ -64,8 +65,9 @@ use crate::runtime_contracts::{
     runtime_graph_invariant_facts, runtime_turn_contract, runtime_usage_invariant_facts,
 };
 use crate::runtime_providers::{
-    OPENAI_COMPATIBLE, runtime_provider_components, runtime_script_for_text,
-    runtime_scripts_for_texts as runtime_provider_scripts_for_texts,
+    OPENAI_COMPATIBLE, runtime_malformed_sse_script, runtime_provider_components,
+    runtime_script_for_text, runtime_scripts_for_texts as runtime_provider_scripts_for_texts,
+    suspend_roundtrip_scripts,
 };
 use crate::scheduler::{
     BoundaryDeliveryLog, BoundaryEvent, BoundaryKind, BoundaryScheduler, RuntimeCompletionQueue,
@@ -622,6 +624,16 @@ pub struct RuntimeFacadeProof {
     pub provider_output_invariant: OracleVerdict,
     pub pending_tool_completion: PendingToolCompletionProof,
     pub final_value_semantic_channel: FinalValueSemanticProof,
+    pub live_provider_failure_reaction: LiveProviderFailureProof,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LiveProviderFailureProof {
+    pub schema: &'static str,
+    pub name: &'static str,
+    pub provider_kind: String,
+    pub facts: LiveProviderFailureFacts,
+    pub terminalization_invariant: OracleVerdict,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3167,6 +3179,12 @@ pub async fn run_generated_sim_profile(
             .semantic_channel_invariant
             .clone(),
     );
+    oracle_verdicts.push(
+        runtime_proof
+            .live_provider_failure_reaction
+            .terminalization_invariant
+            .clone(),
+    );
 
     let events_sha256 = write_event_lines(&artifact_root.join(GENERATED_SIM_EVENTS), &event_lines)?;
     write_failure_artifact_shape(artifact_root)?;
@@ -4417,6 +4435,16 @@ impl GeneratedRuntimeWorld {
 
         let key_slot = Arc::new(tokio::sync::Mutex::new(None));
         let events = Arc::new(RuntimeProofRecordingEvents::default());
+        // Route the parked turn through the real openai-compatible provider wire
+        // transport (not a TestProvider), so both the tool-call exchange that
+        // suspends the turn and the post-resume exchange exercise real provider
+        // wire parsing.
+        let suspend_scripts = suspend_roundtrip_scripts(&tool_name)
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+        let transport = Arc::new(ScriptedLlmHttpTransport::from_scripts(suspend_scripts));
+        let (provider_handle, model, _provider_kind) =
+            runtime_provider_components(OPENAI_COMPATIBLE, &transport)
+                .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
         let core = lash::StandardCore::builder()
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
@@ -4428,11 +4456,8 @@ impl GeneratedRuntimeWorld {
             ))
             .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
                 as Arc<dyn lash_core::ProcessRegistry>)
-            .provider(suspend_roundtrip_provider(&tool_name))
-            .model(
-                lash_core::ModelSpec::from_token_limits("mock-suspend-model", None, 200_000, None)
-                    .map_err(FixedScriptRunnerError::Assertion)?,
-            )
+            .provider(provider_handle)
+            .model(model)
             .tools(Arc::new(SuspendToolProvider::new(
                 tool_name.clone(),
                 Arc::clone(&key_slot),
@@ -5039,6 +5064,7 @@ async fn prove_runtime_facade_turn() -> Result<RuntimeFacadeProof, FixedScriptRu
     )?;
     let pending_tool_completion = prove_pending_tool_completion_through_turn().await?;
     let final_value_semantic_channel = prove_final_value_semantic_channel().await?;
+    let live_provider_failure_reaction = prove_live_provider_failure_turn().await?;
     Ok(RuntimeFacadeProof {
         schema: "lash.sim.runtime-facade-proof.v1",
         name: "standard-facade-openai-compatible-scripted-turn",
@@ -5057,6 +5083,137 @@ async fn prove_runtime_facade_turn() -> Result<RuntimeFacadeProof, FixedScriptRu
         ),
         pending_tool_completion,
         final_value_semantic_channel,
+        live_provider_failure_reaction,
+    })
+}
+
+/// Drive a NON-RETRYABLE provider failure (a malformed mid-stream SSE chunk)
+/// through a LIVE runtime turn — a real `session.turn().run()`, not the isolated
+/// `provider.complete()` path. The turn parks on a scheduler-gated provider event
+/// (proving it is live), then the gate releases deliver the events to it,
+/// including the malformed chunk that fails the turn mid-stream. We assert the
+/// turn terminalizes with a terminal failure and commits NO provider output.
+async fn prove_live_provider_failure_turn()
+-> Result<LiveProviderFailureProof, FixedScriptRunnerError> {
+    let fault_kind = "malformed_sse_chunk";
+    let script = runtime_malformed_sse_script(OPENAI_COMPATIBLE)
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let schedule = ScriptedTransportSchedule::new();
+    let transport = Arc::new(
+        ScriptedLlmHttpTransport::from_scripts([script]).with_event_schedule(schedule.clone()),
+    );
+    let (provider_handle, model, provider_kind) =
+        runtime_provider_components(OPENAI_COMPATIBLE, &transport)
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let core = lash::StandardCore::builder()
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .store_factory(Arc::new(
+            lash::persistence::InMemorySessionStoreFactory::new(),
+        ))
+        .provider(provider_handle)
+        .model(model)
+        .build()
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let session = core
+        .session("sim-live-provider-failure-session")
+        .open_fresh()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+
+    let events = Arc::new(RuntimeProofRecordingEvents::default());
+    let turn_session = session.clone();
+    let turn_events = Arc::clone(&events);
+    let turn = tokio::spawn(async move {
+        turn_session
+            .turn(lash::TurnInput::text("Run the live provider failure turn."))
+            .stream_to(turn_events.as_ref())
+            .await
+    });
+
+    // Observe the turn LIVE and parked on the first scheduler-gated provider
+    // event before any failure is delivered. Liveness-bounded so it can never
+    // hang if the turn never reaches the gate.
+    let mut turn_was_live_parked = false;
+    let mut polls = 0u64;
+    loop {
+        if schedule.is_blocked(0, 0) {
+            turn_was_live_parked = true;
+            break;
+        }
+        if turn.is_finished() || polls >= MAX_PROVIDER_EVENT_POLL_YIELDS {
+            break;
+        }
+        polls += 1;
+        tokio::task::yield_now().await;
+    }
+
+    // The scheduler delivers the gated provider events to the live turn in order;
+    // the malformed (non-retryable) chunk fails the turn mid-stream. Releasing is
+    // liveness-bounded: once the turn terminalizes it parks on no further gate, so
+    // the loop stops instead of blocking forever.
+    let mut event_index = 0usize;
+    let mut idle_polls = 0u64;
+    loop {
+        if turn.is_finished() {
+            break;
+        }
+        if schedule
+            .release_if_blocked(0, event_index, "live_failure_release", event_index as u64)
+            .is_some()
+        {
+            event_index += 1;
+            idle_polls = 0;
+            continue;
+        }
+        idle_polls += 1;
+        if idle_polls >= MAX_PROVIDER_EVENT_POLL_YIELDS {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let result = turn.await.map_err(|err| {
+        FixedScriptRunnerError::Runtime(format!(
+            "live provider failure turn task failed to join: {err}"
+        ))
+    })?;
+    let (terminalized_failure, committed_assistant_message_nonempty) = match &result {
+        Ok(output) => (
+            !output.is_success(),
+            !output.assistant_message().unwrap_or_default().is_empty(),
+        ),
+        // A returned error is itself a terminal failure with no committed turn
+        // output surfaced to the caller.
+        Err(_) => (true, false),
+    };
+    let committed_assistant_prose_deltas = events.assistant_prose_delta_count().await;
+    let committed_final_values = events.final_value_events().await.len();
+    let facts = LiveProviderFailureFacts {
+        fault_kind: fault_kind.to_string(),
+        turn_was_live_parked,
+        terminalized_failure,
+        committed_assistant_prose_deltas,
+        committed_final_values,
+        committed_assistant_message_nonempty,
+    };
+    let terminalization_invariant = live_provider_failure_terminalizes(&facts);
+    if let Err(message) = require_passed(&terminalization_invariant) {
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "live provider failure turn did not terminalize cleanly: {message}; result_is_err={} facts={:?}",
+            result.is_err(),
+            facts
+        )));
+    }
+    Ok(LiveProviderFailureProof {
+        schema: "lash.sim.live-provider-failure-proof.v1",
+        name: "standard-facade-openai-compatible-live-failure-turn",
+        provider_kind,
+        facts,
+        terminalization_invariant,
     })
 }
 
@@ -5542,40 +5699,6 @@ impl lash_core::ToolProvider for SuspendToolProvider {
         *self.key_slot.lock().await = Some(key);
         lash_core::ToolResult::pending(lash_core::PendingCompletion::new())
     }
-}
-
-fn suspend_roundtrip_provider(tool_name: &str) -> ProviderHandle {
-    let responses = Arc::new(tokio::sync::Mutex::new(VecDeque::from([
-        LlmResponse {
-            parts: vec![LlmOutputPart::ToolCall {
-                call_id: "suspend-call-1".to_string(),
-                tool_name: tool_name.to_string(),
-                input_json: "{}".to_string(),
-                replay: None,
-            }],
-            ..LlmResponse::default()
-        },
-        LlmResponse {
-            full_text: "resumed".to_string(),
-            parts: vec![LlmOutputPart::Text {
-                text: "resumed".to_string(),
-                response_meta: None,
-            }],
-            ..LlmResponse::default()
-        },
-    ])));
-    lash_core::testing::TestProvider::builder()
-        .kind("lash-sim-suspend")
-        .complete(move |_request| {
-            let responses = Arc::clone(&responses);
-            async move {
-                responses.lock().await.pop_front().ok_or_else(|| {
-                    LlmTransportError::new("suspend roundtrip provider exhausted")
-                })
-            }
-        })
-        .build()
-        .into_handle()
 }
 
 fn generated_seed(profile: &str, seed_index: usize) -> u64 {

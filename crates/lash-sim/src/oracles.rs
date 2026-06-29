@@ -2901,6 +2901,63 @@ where
     .ok()
 }
 
+pub const LIVE_PROVIDER_FAILURE_ORACLE: &str = "sim.oracle.live-provider-failure-terminalizes.v1";
+
+/// Observed facts from driving a non-retryable provider failure through a LIVE
+/// runtime turn (a real `session.turn().run()` parked on a scheduler-gated
+/// provider event, not an isolated `provider.complete()`).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LiveProviderFailureFacts {
+    /// The non-retryable fault injected mid-turn (e.g. `malformed_sse_chunk`).
+    pub fault_kind: String,
+    /// The turn was observed live and parked on the first scheduler-gated
+    /// provider event before the failure was delivered (proves it is a live turn,
+    /// not a synchronous isolated call).
+    pub turn_was_live_parked: bool,
+    /// The turn ended in a terminal failure (returned an error or a non-success
+    /// outcome) rather than finishing successfully.
+    pub terminalized_failure: bool,
+    /// Count of assistant prose deltas committed during the failed turn.
+    pub committed_assistant_prose_deltas: usize,
+    /// Count of FinalValue events committed during the failed turn.
+    pub committed_final_values: usize,
+    /// Whether the committed assistant message was non-empty (leaked text).
+    pub committed_assistant_message_nonempty: bool,
+}
+
+/// A live runtime turn that receives a non-retryable provider failure mid-flight
+/// MUST terminalize with a terminal failure and commit NO provider output (no
+/// leaked partial assistant prose, no FinalValue, no assistant message). This is
+/// failing-capable: it fails loudly if the turn instead committed output or
+/// finished successfully.
+pub fn live_provider_failure_terminalizes(facts: &LiveProviderFailureFacts) -> OracleVerdict {
+    let no_committed_output = facts.committed_assistant_prose_deltas == 0
+        && facts.committed_final_values == 0
+        && !facts.committed_assistant_message_nonempty;
+    if facts.turn_was_live_parked && facts.terminalized_failure && no_committed_output {
+        OracleVerdict::passed(
+            LIVE_PROVIDER_FAILURE_ORACLE,
+            format!(
+                "a live runtime turn parked on a scheduler-gated provider event, received a non-retryable `{}` fault mid-turn, terminalized as a terminal failure, and committed no provider output (0 assistant prose deltas, 0 final values, empty assistant message)",
+                facts.fault_kind
+            ),
+        )
+    } else {
+        OracleVerdict::failed(
+            LIVE_PROVIDER_FAILURE_ORACLE,
+            format!(
+                "live provider failure turn did not terminalize cleanly for fault `{}`: live_parked={} terminalized_failure={} committed_assistant_prose_deltas={} committed_final_values={} committed_assistant_message_nonempty={}",
+                facts.fault_kind,
+                facts.turn_was_live_parked,
+                facts.terminalized_failure,
+                facts.committed_assistant_prose_deltas,
+                facts.committed_final_values,
+                facts.committed_assistant_message_nonempty
+            ),
+        )
+    }
+}
+
 pub fn combine_oracles(oracles: &[OracleVerdict]) -> OracleVerdict {
     if let Some(failure) = oracles.iter().find(|oracle| !oracle.is_passed()) {
         return failure.clone();
@@ -3179,6 +3236,57 @@ mod tests {
                 verdict.message
             );
         }
+    }
+
+    #[test]
+    fn live_provider_failure_oracle_passes_on_clean_terminalization_and_fails_on_committed_output() {
+        // Positive: a live, parked turn that terminalized as a failure and
+        // committed nothing passes.
+        let clean = LiveProviderFailureFacts {
+            fault_kind: "malformed_sse_chunk".to_string(),
+            turn_was_live_parked: true,
+            terminalized_failure: true,
+            committed_assistant_prose_deltas: 0,
+            committed_final_values: 0,
+            committed_assistant_message_nonempty: false,
+        };
+        assert!(live_provider_failure_terminalizes(&clean).is_passed());
+
+        // Negative: the turn finished successfully instead of terminalizing.
+        let succeeded = LiveProviderFailureFacts {
+            terminalized_failure: false,
+            ..clean.clone()
+        };
+        assert!(!live_provider_failure_terminalizes(&succeeded).is_passed());
+
+        // Negative: the turn leaked a committed partial assistant prose delta.
+        let leaked_prose = LiveProviderFailureFacts {
+            committed_assistant_prose_deltas: 1,
+            ..clean.clone()
+        };
+        assert!(!live_provider_failure_terminalizes(&leaked_prose).is_passed());
+
+        // Negative: the turn committed a FinalValue despite failing.
+        let leaked_final = LiveProviderFailureFacts {
+            committed_final_values: 1,
+            ..clean.clone()
+        };
+        assert!(!live_provider_failure_terminalizes(&leaked_final).is_passed());
+
+        // Negative: a leaked non-empty assistant message.
+        let leaked_message = LiveProviderFailureFacts {
+            committed_assistant_message_nonempty: true,
+            ..clean.clone()
+        };
+        assert!(!live_provider_failure_terminalizes(&leaked_message).is_passed());
+
+        // Negative: the turn was never observed live/parked (could be a
+        // synchronous isolated path rather than a live turn).
+        let not_live = LiveProviderFailureFacts {
+            turn_was_live_parked: false,
+            ..clean
+        };
+        assert!(!live_provider_failure_terminalizes(&not_live).is_passed());
     }
 
     #[test]
