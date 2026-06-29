@@ -102,9 +102,9 @@ flowchart TD
             <p>These figures are workspace-level and exclude generated build output.</p>
           </div>
           <div class="stats">
-            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">44</span><span class="stat-note">Runtime core, facade, CLI/TUI, providers, plugins (including MCP), language/runtime integration, export, tracing, file-index, harness optimizer, examples, and the distributed E2E harness.</span></article>
-            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~317k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
-            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">742</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, examples, and trace/export utilities.</span></article>
+            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">45</span><span class="stat-note">Runtime core, facade, CLI/TUI, providers, plugins (including MCP), language/runtime integration, export, tracing, file-index, harness optimizer, the deterministic-simulation harness, examples, and the distributed E2E harness.</span></article>
+            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~361k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
+            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">789</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, examples, and trace/export utilities.</span></article>
             <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang and can switch to a fresh AgentFrame via <code>continue_as</code>.</span></article>
           </div>
         </div>
@@ -142,7 +142,7 @@ flowchart TD
             <li>
               <div>
                 <h3>AgentFrame switches are runtime continuations.</h3>
-                <p>A turn can finish as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>, which transparently activates an RLM AgentFrame with a fresh window. App hosts that use <code>TurnBuilder::stream_to</code>, <code>run</code>, or pull-style <code>stream</code> get the final <code>TurnResult</code>; lower-level runtime hosts can still inspect the underlying AgentFrame chain.</p>
+                <p>A turn can finish as <code>TurnOutcome::AgentFrameSwitch { frame_id, task }</code>, which transparently activates an RLM AgentFrame with a fresh window. App hosts that use <code>TurnBuilder::stream_to</code>, <code>run</code>, or pull-style <code>stream</code> get the final <code>TurnResult</code>; lower-level runtime hosts can still inspect the underlying AgentFrame chain.</p>
               </div>
             </li>
             <li>

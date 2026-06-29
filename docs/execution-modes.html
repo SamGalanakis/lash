@@ -65,9 +65,9 @@
           <div class="listing__body"><p>The smallest prompt and the fewest protocol rules: the right default for chat-shaped and single-step tool turns.</p></div>
         </div>
       </div>
-<pre data-lang="rust"><code>use lash::LashCore;
+<pre data-lang="rust"><code>use lash::StandardCore;
 
-// `standard()` selects native provider tool-calling, the default mode.
+// `StandardCore::builder()` selects native provider tool-calling, the default mode.
 let core = StandardCore::builder()
     .provider(provider)
     .model(model)
