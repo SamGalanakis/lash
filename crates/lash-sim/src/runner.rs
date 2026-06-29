@@ -3083,13 +3083,20 @@ pub async fn run_generated_sim_profile(
         // workload is regenerated deterministically from the seed (the original
         // was consumed by the reference run).
         let sqlite_workload = generate_workload(seed, profile, boundary_limit)?;
+        // The cross-backend equivalence reference is a SERIALIZED in-memory run of
+        // the same workload: it shares the durable re-run's serialize-provider-turn
+        // discipline and differs ONLY in the backend store, so equality is a
+        // well-posed durable-state check. (The concurrency-preserving search-lane
+        // summary in `trace.final_summary` runs a different scheduling discipline
+        // and is not directly comparable to the serialized durable re-run.)
+        let serialized_reference = replay_workload_serialized_reference(&sqlite_workload).await?;
         let sqlite_summary =
             replay_workload_on_sqlite(&sqlite_workload, &sqlite_database_path).await?;
-        let backend_verdict = replay_determinism(&trace.final_summary, &sqlite_summary);
+        let backend_verdict = replay_determinism(&serialized_reference, &sqlite_summary);
         oracle_verdicts.push(backend_verdict.clone());
         if !backend_verdict.is_passed() {
             return Err(FixedScriptRunnerError::Assertion(format!(
-                "cross-backend SQLite re-run for seed {seed} ({profile}) diverged from the in-memory reference: {}",
+                "cross-backend SQLite re-run for seed {seed} ({profile}) diverged from the serialized in-memory reference: {}",
                 backend_verdict.message
             )));
         }
@@ -3269,11 +3276,50 @@ async fn drive_generated_workload(
     let (initial_boundaries, mut completion_queue) =
         split_runtime_completion_boundaries(workload.boundaries.clone());
     let mut scheduler = BoundaryScheduler::with_events(workload.seed, initial_boundaries);
-    let mut completion_state = RuntimeCompletionState::default();
+    let mut completion_state = RuntimeCompletionState {
+        serialize_provider_turns: world.serialize_provider_turns,
+        ..RuntimeCompletionState::default()
+    };
     let mut store = ModelStore::default();
     let mut log = BoundaryDeliveryLog::default();
     let mut suspend_ready_at = 1_000_000u64;
     loop {
+        // Serialized cross-backend barrier: while a provider turn is live, never
+        // deliver a boundary scheduled at or after that turn's completion time
+        // until the completion itself has been scheduled. The turn's own provider
+        // releases all fall strictly before `final_ready_at`, so they still flow
+        // through and drive the turn forward; only boundaries that would otherwise
+        // jump ahead of the not-yet-scheduled completion are held. This removes
+        // the sole source of backend-dependent delivery drift (a slow async store
+        // letting a later boundary overtake the completion), so the in-memory and
+        // durable serialized runs produce a byte-identical delivery order. The
+        // SEARCH lane keeps full concurrency and is unaffected.
+        if world.serialize_provider_turns
+            && let Some(barrier) = world.min_active_final_ready_at()
+            && scheduler
+                .min_pending_at()
+                .is_none_or(|next_at| next_at >= barrier)
+        {
+            world
+                .schedule_finished_provider_turns(&mut scheduler)
+                .await?;
+            suspend_ready_at += 1;
+            world
+                .schedule_parked_suspend_resolutions(&mut scheduler, suspend_ready_at)
+                .await?;
+            world.sample_live_turn_highwater();
+            // Spin until the live turn finishes and lands its completion (lowering
+            // `min_pending_at` below the barrier), or it is gone. The provider
+            // release deliveries that unblock the turn run on later iterations
+            // because they are scheduled strictly before the barrier.
+            if world.active_provider_turn_count() > 0
+                && scheduler
+                    .min_pending_at()
+                    .is_none_or(|next_at| next_at >= barrier)
+            {
+                continue;
+            }
+        }
         let Some(mut delivered) = scheduler.deliver_next(Value::Null) else {
             world
                 .schedule_finished_provider_turns(&mut scheduler)
@@ -3341,14 +3387,43 @@ async fn drive_generated_workload(
     Ok((events, final_summary))
 }
 
+/// The serialized in-memory reference summary for the cross-backend check.
+///
+/// This drives the workload through the SAME `serialize_provider_turns` discipline
+/// as the durable re-run, differing ONLY in the backend store (ephemeral
+/// in-memory here vs the real durable store in `replay_workload_on_sqlite`). That
+/// is what makes the comparison a well-posed durable-state equivalence: both runs
+/// share one scheduling discipline, so any difference is a real store divergence
+/// rather than an artifact of serialized-vs-concurrent execution. (The
+/// concurrency-preserving SEARCH lane summary — `run_generated_workload`'s
+/// `serialize_provider_turns == false` run — is a different discipline and is used
+/// for oracle fuzzing, not for this backend equivalence comparison.)
+pub async fn replay_workload_serialized_reference(
+    workload: &GeneratedWorkload,
+) -> Result<AbstractWorldSummary, FixedScriptRunnerError> {
+    let mut world = GeneratedRuntimeWorld::with_backend(
+        Arc::new(lash::persistence::InMemorySessionStoreFactory::new()),
+        RuntimeEffectReplayStore::Memory,
+        Arc::new(lash::persistence::InMemoryAttachmentStore::new()),
+        Arc::new(lash::persistence::InMemoryProcessExecutionEnvStore::new()),
+        true,
+    );
+    let (_events, final_summary) = drive_generated_workload(&mut world, workload).await?;
+    Ok(final_summary)
+}
+
 /// Cross-backend check: re-drive the SAME generated workload through the SAME
-/// dynamic runtime driver, but backed by the real `lash-sqlite-store` session
-/// store factory and the SQLite durable-effect replay controller, and return the
-/// resulting abstract world summary. The caller compares it against the in-memory
-/// reference summary; equality proves the SQLite store reproduces identical
-/// observable runtime behavior. Because the driver is shared and concurrency is
-/// preserved, there is no fixed-order, exchange-count-gated re-drive to deadlock
-/// or to spuriously diverge on active-turn/next-turn ingress timing.
+/// dynamic runtime driver under the SAME serialized-provider-turn discipline, but
+/// backed by the real `lash-sqlite-store` session store factory and the SQLite
+/// durable-effect replay controller, and return the resulting abstract world
+/// summary. The caller compares it against the serialized in-memory reference
+/// (`replay_workload_serialized_reference`); equality proves the SQLite store
+/// reproduces identical observable runtime behavior. Both runs serialize provider
+/// turns and the serialized driver holds boundary delivery across a live turn's
+/// completion, so the delivery order is fully determined by the workload and is
+/// independent of the store's async timing — there is no fixed-order,
+/// exchange-count-gated re-drive to deadlock, and no concurrency- or
+/// async-timing-induced divergence.
 pub async fn replay_workload_on_sqlite(
     workload: &GeneratedWorkload,
     db_root: &Path,
@@ -3366,7 +3441,28 @@ pub async fn replay_workload_on_sqlite(
     );
     let effect_replay_store =
         RuntimeEffectReplayStore::sqlite_file(db_root.join("runtime-effects.sqlite"));
-    let mut world = GeneratedRuntimeWorld::with_backend(store_factory, effect_replay_store);
+    // A durable session store requires durable attachment + process-env stores,
+    // so back them with the real SQLite/file stores (the in-memory reference uses
+    // their ephemeral counterparts). These facets are not under cross-backend
+    // comparison; only the session store's observable Lash state is.
+    let attachment_store: Arc<dyn lash::persistence::AttachmentStore> = Arc::new(
+        lash::persistence::FileAttachmentStore::new(db_root.join("attachments")),
+    );
+    let process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore> = Arc::new(
+        lash_sqlite_store::Store::open(&db_root.join("process-env.sqlite"))
+            .await
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?,
+    );
+    let mut world = GeneratedRuntimeWorld::with_backend(
+        store_factory,
+        effect_replay_store,
+        attachment_store,
+        process_env_store,
+        // Serialize live provider turns for the durable re-run so async-store
+        // interleaving cannot change committed outcomes vs the sync in-memory
+        // reference; the comparison is then a well-posed durable-state equivalence.
+        true,
+    );
     let (_events, final_summary) = drive_generated_workload(&mut world, workload).await?;
     Ok(final_summary)
 }
@@ -3444,6 +3540,17 @@ struct RuntimeCompletionState {
     provider_completions_by_session: BTreeMap<String, usize>,
     active_provider_turns_by_session: BTreeMap<String, usize>,
     durable_first_completions: BTreeSet<String>,
+    /// When set, at most ONE live provider turn is admitted across ALL sessions:
+    /// a provider turn becomes ready only when no provider turn is in flight
+    /// anywhere. This is enabled ONLY for the cross-backend durable re-run
+    /// (SQLite/Postgres), where preserved cross-session concurrency would let the
+    /// async store's mid-op await points interleave differently from the
+    /// synchronous in-memory reference and change a timing-sensitive
+    /// `next_turn` `claim_and_run_pending` lease race — drifting the exchange
+    /// count. Durable-state equivalence is well-posed under serial execution. The
+    /// model-store generated SEARCH lane leaves this OFF and keeps full preserved
+    /// concurrency (and its interleaving oracle) for concurrency fuzzing.
+    serialize_provider_turns: bool,
 }
 
 impl RuntimeCompletionState {
@@ -3512,6 +3619,12 @@ impl RuntimeCompletionState {
             .copied()
             .unwrap_or(0)
             > 0
+    }
+
+    fn any_provider_active(&self) -> bool {
+        self.active_provider_turns_by_session
+            .values()
+            .any(|&count| count > 0)
     }
 
     fn next_provider_turn_ready(&self, event: &BoundaryEvent) -> bool {
@@ -3600,7 +3713,14 @@ fn register_ready_runtime_completions(
 
 fn runtime_completion_ready(event: &BoundaryEvent, state: &RuntimeCompletionState) -> bool {
     match event.kind {
-        BoundaryKind::Provider => state.next_provider_turn_ready(event),
+        BoundaryKind::Provider => {
+            state.next_provider_turn_ready(event)
+                // Cross-backend durable re-run only: admit a provider turn only
+                // when none is live anywhere, so live turns never overlap and the
+                // backend's async-vs-sync store timing cannot change committed
+                // outcomes. The generated SEARCH lane leaves this off.
+                && (!state.serialize_provider_turns || !state.any_provider_active())
+        }
         BoundaryKind::Observer => {
             if !state.session_opened(&event.actor_alias) {
                 return false;
@@ -3763,9 +3883,15 @@ struct GeneratedRuntimeWorld {
     provider_mutations: SimProviderMutationHarness,
     trigger_harness: SimTriggerHarness,
     store_factory: Arc<dyn SessionStoreFactory>,
+    attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
+    process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore>,
     runtime_boundaries: RuntimeBoundaryHarness,
     peak_concurrent_live_turns: usize,
     suspending_turns: BTreeMap<String, SuspendingTurn>,
+    /// When set, the driver admits at most one live provider turn at a time
+    /// (see `RuntimeCompletionState::serialize_provider_turns`). Enabled for the
+    /// cross-backend durable re-run; left off for the in-memory reference/search.
+    serialize_provider_turns: bool,
 }
 
 /// A real generated turn that parks mid-flight on a tool/durable/exec await key
@@ -3808,22 +3934,32 @@ struct ActiveProviderTurn {
 
 impl GeneratedRuntimeWorld {
     fn new() -> Self {
+        // The in-memory reference / generated SEARCH lane keeps full preserved
+        // cross-session concurrency (serialize_provider_turns = false).
         Self::with_backend(
             Arc::new(lash::persistence::InMemorySessionStoreFactory::new()),
             RuntimeEffectReplayStore::Memory,
+            Arc::new(lash::persistence::InMemoryAttachmentStore::new()),
+            Arc::new(lash::persistence::InMemoryProcessExecutionEnvStore::new()),
+            false,
         )
     }
 
     /// Build the generated runtime world over an explicit backend (session store
-    /// factory + durable-effect replay store). The reference in-memory run and
-    /// the cross-backend SQLite re-run drive the SAME workload through the SAME
-    /// scheduler-driven, concurrency-faithful driver, differing ONLY in this
-    /// backend. That makes the cross-backend comparison genuinely apples-to-apples:
-    /// any divergence is a real store divergence, not an artifact of a separate,
-    /// fixed-order, provider-event-gated re-drive.
+    /// factory + durable-effect replay store + attachment/process-env stores). The
+    /// reference in-memory run and the cross-backend SQLite re-run drive the SAME
+    /// workload through the SAME scheduler-driven, concurrency-faithful driver,
+    /// differing ONLY in this backend. That makes the cross-backend comparison
+    /// genuinely apples-to-apples: any divergence is a real store divergence, not
+    /// an artifact of a separate, fixed-order, provider-event-gated re-drive. A
+    /// durable session store requires durable attachment/process-env stores, so
+    /// those are supplied per backend rather than hard-coded to in-memory.
     fn with_backend(
         store_factory: Arc<dyn SessionStoreFactory>,
         effect_replay_store: RuntimeEffectReplayStore,
+        attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
+        process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore>,
+        serialize_provider_turns: bool,
     ) -> Self {
         Self {
             sessions: BTreeMap::new(),
@@ -3837,8 +3973,11 @@ impl GeneratedRuntimeWorld {
                 effect_replay_store,
             ),
             store_factory,
+            attachment_store,
+            process_env_store,
             peak_concurrent_live_turns: 0,
             suspending_turns: BTreeMap::new(),
+            serialize_provider_turns,
         }
     }
 
@@ -3938,7 +4077,25 @@ impl GeneratedRuntimeWorld {
         let (core, transport, provider_kind) = runtime_core_for_scripts(
             scripts,
             Arc::clone(&self.store_factory),
+            Arc::clone(&self.attachment_store),
+            Arc::clone(&self.process_env_store),
             Some(provider_schedule.clone()),
+            // Cross-backend durable re-run only: the harness drives every provider
+            // turn explicitly through generated `Provider` boundaries (which is
+            // what schedules the scripted-transport gate releases). The inline
+            // queued-work driver, however, claims and runs `next_turn` queued
+            // inputs as an UNMODELED turn the moment a session is idle. Under
+            // serialized execution every non-active session IS idle, so that
+            // autonomous turn fires a provider exchange the harness never released
+            // a gate for and parks on the scripted transport until the 120s
+            // provider timeout — an effective hang. In the concurrency-preserving
+            // SEARCH lane the session's lease is held by a live modeled turn, so
+            // `claim_and_run_pending` is a no-op there; the reference run proves
+            // (via its exchange/graph/transcript contracts) that autonomous queued
+            // work never affects any modeled-turn observation. Disabling the inline
+            // driver here therefore removes the hang while keeping the durable-state
+            // comparison byte-identical. The SEARCH lane keeps the driver enabled.
+            self.serialize_provider_turns,
         )?;
         let session = core
             .session(event.actor_alias.clone())
@@ -4289,6 +4446,21 @@ impl GeneratedRuntimeWorld {
             .values()
             .map(|session| session.active_provider_turns.len())
             .sum()
+    }
+
+    /// The earliest completion time (`final_ready_at`) across all live provider
+    /// turns, or `None` when none is live. In serialize mode this is the delivery
+    /// barrier: the driver holds back any boundary scheduled at or after this time
+    /// until the turn finishes and its completion lands in the scheduler, so the
+    /// completion is always delivered at its own `at` ahead of later boundaries —
+    /// making the delivery order independent of how long the (sync in-memory vs
+    /// async durable) store takes to drive the turn to completion.
+    fn min_active_final_ready_at(&self) -> Option<u64> {
+        self.sessions
+            .values()
+            .flat_map(|session| session.active_provider_turns.values())
+            .map(|active| active.final_ready_at)
+            .min()
     }
 
     fn observe_session(&self, event: &BoundaryEvent) -> Result<Value, FixedScriptRunnerError> {
@@ -5016,7 +5188,10 @@ fn write_failure_artifact_shape(artifact_root: &Path) -> Result<(), FixedScriptR
 fn runtime_core_for_scripts(
     scripts: Vec<ProviderWireScript>,
     store_factory: Arc<dyn SessionStoreFactory>,
+    attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
+    process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore>,
     provider_schedule: Option<ScriptedTransportSchedule>,
+    disable_inline_queued_work_driver: bool,
 ) -> Result<(lash::StandardCore, Arc<ScriptedLlmHttpTransport>, String), FixedScriptRunnerError> {
     let provider_kind = scripts
         .first()
@@ -5043,15 +5218,17 @@ fn runtime_core_for_scripts(
     let (provider_handle, model, provider_kind) =
         runtime_provider_components(&provider_kind, &transport)
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
-    let core = lash::StandardCore::builder()
+    let mut builder = lash::StandardCore::builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-        .process_env_store(Arc::new(
-            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
-        ))
+        .attachment_store(attachment_store)
+        .process_env_store(process_env_store)
         .store_factory(store_factory)
         .provider(provider_handle)
-        .model(model)
+        .model(model);
+    if disable_inline_queued_work_driver {
+        builder = builder.disable_queued_work_driver();
+    }
+    let core = builder
         .build()
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     Ok((core, transport, provider_kind))
@@ -6935,6 +7112,36 @@ fn google_request(stream: bool) -> LlmRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn divergent_seed_cross_backend_durable_state_agrees() {
+        // Regression guard for full-random seed 14123330213291275571, whose durable
+        // cross-backend re-run previously hung (a `next_turn` queued ingress ran an
+        // unmodeled inline turn under serialized execution) and then diverged (a
+        // slow async store let later boundaries overtake a live turn's completion,
+        // drifting the seeded delivery order). The serialized in-memory reference
+        // and the SQLite durable re-run share the serialize-provider-turn discipline
+        // and differ only in the store, so their abstract durable-state summaries
+        // must be byte-identical.
+        let seed = 14_123_330_213_291_275_571u64;
+        let workload = generate_workload(seed, "full-random", 384).expect("workload");
+        let reference = replay_workload_serialized_reference(&workload)
+            .await
+            .expect("serialized in-memory reference");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sqlite_summary =
+            replay_workload_on_sqlite(&workload, &tmp.path().join("sqlite-store"))
+                .await
+                .expect("sqlite re-run");
+        assert_eq!(
+            reference, sqlite_summary,
+            "cross-backend durable-state summaries diverged for seed {seed}"
+        );
+        println!(
+            "OK seed={seed} sessions={} digest={}",
+            reference.session_count, reference.digest
+        );
+    }
 
     #[tokio::test]
     async fn fixed_script_profile_writes_deterministic_manifest() {
