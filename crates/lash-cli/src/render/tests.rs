@@ -931,12 +931,20 @@ fn plan_dock_renders_as_checklist_with_dim_plan_header() {
         })
         .collect();
 
-    // Header row + 3 items = 4 rows. No scribe rule.
-    assert_eq!(text.len(), 4, "expected 1 header + 3 items, got {text:?}");
-    assert!(text[0].contains("Plan"));
-    assert!(text[1].contains("✓") && text[1].contains("already done"));
-    assert!(text[2].contains("▶") && text[2].contains("in flight"));
-    assert!(text[3].contains("□") && text[3].contains("not yet"));
+    // Blank gutter + header row + 3 items = 5 rows. No scribe rule.
+    assert_eq!(
+        text.len(),
+        5,
+        "expected 1 gutter + 1 header + 3 items, got {text:?}"
+    );
+    assert!(
+        text[0].trim().is_empty(),
+        "row 0 should be the blank gutter"
+    );
+    assert!(text[1].contains("Plan"));
+    assert!(text[2].contains("✓") && text[2].contains("already done"));
+    assert!(text[3].contains("▶") && text[3].contains("in flight"));
+    assert!(text[4].contains("□") && text[4].contains("not yet"));
     assert!(
         !text.iter().any(|line| line.contains("─")),
         "no scribe rule expected, got {text:?}",
@@ -963,7 +971,7 @@ fn plan_dock_trailing_height_includes_gutter_plus_items() {
             },
         ],
     });
-    assert_eq!(crate::render::plan_dock_trailing_height(&app), 3);
+    assert_eq!(crate::render::plan_dock_trailing_height(&app), 4);
 }
 
 #[test]

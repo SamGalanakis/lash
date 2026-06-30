@@ -84,6 +84,15 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
     },
     ScenarioContractSpec {
         suite: "rlm",
+        test_name: "rlm_protocol_scenario_streamed_lashlang_cell_runs_exec_and_persists_trajectory",
+        display_name: "streamed lashlang cell execution",
+        owned_invariant: "A complete streamed Lashlang cell executes and persists trajectory events.",
+        semantic_oracle: "rlm.streamed_lashlang_cell_exec_persists_trajectory",
+        required_sim_evidence: &["exec_code", "provider_event", "provider_turn"],
+        oracle_id: "sim.oracle.scenario.rlm-contract.v1",
+    },
+    ScenarioContractSpec {
+        suite: "rlm",
         test_name: "rlm_protocol_scenario_empty_turn_options_use_natural_default",
         display_name: "empty turn options default to natural",
         owned_invariant: "Empty RLM turn options use the natural default.",
@@ -164,7 +173,7 @@ mod tests {
 
     #[test]
     fn rlm_scenario_contract_metadata_is_unique_and_complete() {
-        assert_eq!(RLM_PROTOCOL_SCENARIO_CONTRACTS.len(), 17);
+        assert_eq!(RLM_PROTOCOL_SCENARIO_CONTRACTS.len(), 18);
         let mut names = BTreeSet::new();
         for contract in RLM_PROTOCOL_SCENARIO_CONTRACTS {
             assert_eq!(contract.suite, "rlm");

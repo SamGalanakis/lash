@@ -1803,14 +1803,16 @@ write_confidence_summary() {
       "required_restate_postgres_workers_e2e": "sim/restate-postgres-workers-e2e.json",
       "restate_postgres_workers_e2e_status": "$(restate_postgres_workers_e2e_status)"
     },
-    "bounded_broad_ci": {
+    "bounded_broad_confidence": {
       "confidence_class": "bounded_broad",
-      "workflow_job": "bounded-broad-replay-backend",
-      "artifact_name": "bounded-broad-replay-backend-confidence",
-      "coverage_scope": "none",
-      "coverage_evidence_status": "not_run_by_scope",
-      "mutation_scope": "none",
-      "mutation_evidence_status": "not_run_by_scope",
+      "workflow": "Confidence",
+      "lane": "broad",
+      "trigger": "workflow_dispatch_or_schedule",
+      "artifact_name": "confidence-artifacts",
+      "coverage_scope": "${coverage_scope}",
+      "coverage_evidence_status": "$(coverage_evidence_status)",
+      "mutation_scope": "${mutation_scope}",
+      "mutation_evidence_status": "$(mutation_evidence_status)",
       "full_confidence_claim": "false"
     }
   },

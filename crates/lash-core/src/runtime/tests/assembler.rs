@@ -1,20 +1,11 @@
 use super::*;
 
 #[test]
-fn assembler_uses_last_semantic_assistant_prose_group() {
+fn assembler_ignores_streamed_text_without_durable_output() {
     let mut assembler = TurnAssembler::default();
-    assembler.push_turn_activity(&TurnActivity::new(
-        TurnActivityId::new("assistant:first"),
-        TurnEvent::AssistantProseDelta {
-            text: "first".to_string(),
-        },
-    ));
-    assembler.push_turn_activity(&TurnActivity::new(
-        TurnActivityId::new("assistant:second"),
-        TurnEvent::AssistantProseDelta {
-            text: "second".to_string(),
-        },
-    ));
+    assembler.push(&SessionEvent::TextDelta {
+        content: "streamed but not committed".to_string(),
+    });
     assembler.push(&SessionEvent::Done);
 
     let out = assembler.finish(
@@ -27,61 +18,37 @@ fn assembler_uses_last_semantic_assistant_prose_group() {
     assert_eq!(
         out.outcome,
         TurnOutcome::Finished(TurnFinish::AssistantMessage {
-            text: "second".to_string()
+            text: String::new()
         })
     );
-    assert_eq!(out.assistant_output.safe_text, "second");
+    assert!(out.assistant_output.safe_text.is_empty());
+    assert!(out.assistant_output.raw_text.is_empty());
+    assert_eq!(out.assistant_output.state, OutputState::EmptyOutput);
 }
 
 #[test]
-fn assembler_coalesces_semantic_assistant_prose_with_same_correlation_id() {
+fn cancelled_assembler_with_only_streamed_text_has_empty_assistant_output() {
     let mut assembler = TurnAssembler::default();
-    let correlation_id = TurnActivityId::new("assistant:one");
-    assembler.push_turn_activity(&TurnActivity::new(
-        correlation_id.clone(),
-        TurnEvent::AssistantProseDelta {
-            text: "hel".to_string(),
-        },
-    ));
-    assembler.push_turn_activity(&TurnActivity::new(
-        correlation_id,
-        TurnEvent::AssistantProseDelta {
-            text: "lo".to_string(),
-        },
-    ));
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionEvent::TextDelta {
+        content: "partial answer".to_string(),
+    });
 
     let out = assembler.finish(
         default_state().to_snapshot(),
-        false,
+        true,
         None,
         &TerminationPolicy::default(),
     );
 
-    assert_eq!(
-        out.outcome,
-        TurnOutcome::Finished(TurnFinish::AssistantMessage {
-            text: "hello".to_string()
-        })
-    );
-    assert_eq!(out.assistant_output.safe_text, "hello");
+    assert_eq!(out.outcome, TurnOutcome::Stopped(TurnStop::Cancelled));
+    assert!(out.assistant_output.safe_text.is_empty());
+    assert!(out.assistant_output.raw_text.is_empty());
+    assert_eq!(out.assistant_output.state, OutputState::EmptyOutput);
 }
 
 #[test]
-fn assembler_rewrites_assistant_message_outcome_to_last_semantic_prose_group() {
+fn assembler_preserves_explicit_assistant_message_outcome() {
     let mut assembler = TurnAssembler::default();
-    assembler.push_turn_activity(&TurnActivity::new(
-        TurnActivityId::new("assistant:first"),
-        TurnEvent::AssistantProseDelta {
-            text: "first".to_string(),
-        },
-    ));
-    assembler.push_turn_activity(&TurnActivity::new(
-        TurnActivityId::new("assistant:second"),
-        TurnEvent::AssistantProseDelta {
-            text: "second".to_string(),
-        },
-    ));
     assembler.push(&SessionEvent::TurnOutcome {
         outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
             text: "first\n\nsecond".to_string(),
@@ -99,9 +66,10 @@ fn assembler_rewrites_assistant_message_outcome_to_last_semantic_prose_group() {
     assert_eq!(
         out.outcome,
         TurnOutcome::Finished(TurnFinish::AssistantMessage {
-            text: "second".to_string()
+            text: "first\n\nsecond".to_string()
         })
     );
+    assert_eq!(out.assistant_output.safe_text, "first\n\nsecond");
 }
 
 #[test]
@@ -136,14 +104,8 @@ fn assembler_uses_assistant_message_outcome_without_recovery_issue_when_no_strea
 }
 
 #[test]
-fn assembler_uses_final_value_for_assistant_output_when_semantic_prose_streamed() {
+fn assembler_uses_final_value_for_assistant_output() {
     let mut assembler = TurnAssembler::default();
-    assembler.push_turn_activity(&TurnActivity::new(
-        TurnActivityId::new("assistant:before-finish"),
-        TurnEvent::AssistantProseDelta {
-            text: "thinking before finish".to_string(),
-        },
-    ));
     assembler.push(&SessionEvent::TurnOutcome {
         outcome: TurnOutcome::Finished(TurnFinish::FinalValue {
             value: serde_json::json!({ "ok": true }),
@@ -168,14 +130,8 @@ fn assembler_uses_final_value_for_assistant_output_when_semantic_prose_streamed(
 }
 
 #[test]
-fn assembler_keeps_tool_value_when_semantic_prose_streamed() {
+fn assembler_uses_tool_value_for_assistant_output() {
     let mut assembler = TurnAssembler::default();
-    assembler.push_turn_activity(&TurnActivity::new(
-        TurnActivityId::new("assistant:before-tool"),
-        TurnEvent::AssistantProseDelta {
-            text: "thinking before tool".to_string(),
-        },
-    ));
     assembler.push(&SessionEvent::TurnOutcome {
         outcome: TurnOutcome::Finished(TurnFinish::ToolValue {
             tool_name: "finish".to_string(),
@@ -198,27 +154,7 @@ fn assembler_keeps_tool_value_when_semantic_prose_streamed() {
             value: serde_json::json!("done")
         })
     );
-}
-
-#[test]
-fn interrupted_assembler_does_not_finish_with_semantic_assistant_prose() {
-    let mut assembler = TurnAssembler::default();
-    assembler.push_turn_activity(&TurnActivity::new(
-        TurnActivityId::new("assistant:partial"),
-        TurnEvent::AssistantProseDelta {
-            text: "partial answer".to_string(),
-        },
-    ));
-
-    let out = assembler.finish(
-        default_state().to_snapshot(),
-        true,
-        None,
-        &TerminationPolicy::default(),
-    );
-
-    assert_eq!(out.outcome, TurnOutcome::Stopped(TurnStop::Cancelled));
-    assert_eq!(out.assistant_output.safe_text, "partial answer");
+    assert_eq!(out.assistant_output.safe_text, "done");
 }
 
 #[test]

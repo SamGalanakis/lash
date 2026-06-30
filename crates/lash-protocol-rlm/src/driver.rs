@@ -205,7 +205,8 @@ mod catalogue_tests {
     fn finish_finalization_prompt_defaults_to_natural_guidance() {
         let prompt = rlm_finalization_prompt(&RlmTermination::default());
 
-        assert!(prompt.contains("prose-only response finishes"));
+        assert!(prompt.contains("prose-only response immediately ends the turn"));
+        assert!(prompt.contains("If any work remains, do not write prose-only"));
         assert!(prompt.contains("without `finish` is progress"));
     }
 
@@ -217,15 +218,21 @@ mod catalogue_tests {
 
         assert!(prompt.contains("finish <value>"));
         assert!(prompt.contains("REQUIRED OUTPUT"));
+        assert!(prompt.contains("Every non-terminal response must contain"));
+        assert!(prompt.contains("Prose-only does not end the turn"));
+        assert!(prompt.contains("commentary/status only"));
     }
 
     #[test]
     fn natural_finalization_prompt_allows_direct_prose() {
         let prompt = rlm_finalization_prompt(&RlmTermination::Natural);
 
-        assert!(prompt.contains("prose-only response finishes"));
+        assert!(prompt.contains("Finish with prose"));
+        assert!(prompt.contains("prose-only response immediately ends the turn"));
         assert!(prompt.contains("finish <value>"));
-        assert!(prompt.contains("raw final value"));
+        assert!(prompt.contains("Every message before the final answer"));
+        assert!(prompt.contains("Unaccompanied prose is final-answer-only"));
+        assert!(prompt.contains("Example multi-step natural turn"));
     }
 }
 
@@ -396,13 +403,34 @@ fn compact_doc_line(value: &serde_json::Value) -> Option<String> {
 fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
     match termination {
         RlmTermination::FinishRequired { schema: Some(_) } => {
-            "The turn must finish through `finish <value>` in a lashlang block, and `<value>` must match the REQUIRED OUTPUT contract. Prose alone does not end the turn."
+            "This turn uses finish-required termination. Prose-only does not end the turn. Every non-terminal response must contain a paired `<lashlang>...</lashlang>` block that performs the next step; prose before the block is commentary/status only. Never say you will continue, inspect, patch, wait, monitor, validate, or retry unless the same response also contains the block that does it. The terminal response must be a paired `<lashlang>...</lashlang>` block that calls `finish <value>`, and `<value>` must match the REQUIRED OUTPUT contract."
         }
         RlmTermination::FinishRequired { schema: None } => {
-            "The turn must finish through `finish <value>` in a lashlang block. Prose alone does not end the turn. Use `finish null` only when null is intentional."
+            "This turn uses finish-required termination. Prose-only does not end the turn. Every non-terminal response must contain a paired `<lashlang>...</lashlang>` block that performs the next step; prose before the block is commentary/status only. Never say you will continue, inspect, patch, wait, monitor, validate, or retry unless the same response also contains the block that does it. The terminal response must be a paired `<lashlang>...</lashlang>` block that calls `finish <value>`. Use `finish null` only when null is intentional."
         }
         RlmTermination::Natural => {
-            "A prose-only response finishes the turn as the final answer. A lashlang block without `finish` is progress and continues the loop. Use `finish <value>` only when you intentionally need a raw final value."
+            r#"This turn uses natural termination. Each assistant response must choose exactly one of these shapes:
+
+1. Continue working: include a paired `<lashlang>...</lashlang>` block. Brief prose may appear before the block; that prose is commentary/status for the action that follows. A block without `finish` is progress and continues the loop.
+2. Finish with prose: write prose with no `<lashlang>` block. A prose-only response immediately ends the turn as the final answer. Use this only when the task is complete and no work remains.
+3. Finish with a computed/raw value: call `finish <value>` inside a paired `<lashlang>...</lashlang>` block. This ends the turn with that value.
+
+Every message before the final answer must contain a paired `<lashlang>...</lashlang>` block. Any message may also contain prose; when prose accompanies a Lashlang block, it is commentary/status for the action that follows. Unaccompanied prose is final-answer-only. If any work remains, do not write prose-only. Never say you will continue, inspect, patch, wait, monitor, validate, or retry unless the same response also contains the `<lashlang>` block that does it.
+
+Example multi-step natural turn:
+
+I’ll inspect the current value first.
+<lashlang>
+preview = slice(to_string(value), 0, 400)
+print(preview)
+</lashlang>
+
+<lashlang>
+result = format("Checked: {}", preview)
+print(result)
+</lashlang>
+
+Done. I inspected the value and summarized the result."#
         }
     }
 }

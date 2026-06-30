@@ -28,9 +28,11 @@
 - **Compaction**: Deliberate transition to a new Agent Frame seeded from an assistant summary message of earlier context. It continues the same assignment with reduced future model context, without deleting or rewriting prior frame content.
 - **Prompt View**: Ephemeral projection of session content prepared for one model turn. Prompt View shaping does not mutate durable session history.
 - **Session Observation**: Host-facing view of a session at a point in time, paired with a Session Cursor. Live Replay may extend an observation with recent in-flight activity.
+- **Session Read View**: Durable projection of committed session state. It is the only source of settled transcript text; live streams, UI buffers, and reconnect replay may describe activity, but they do not become transcript until the read view commits them.
 - **Session Observation Event**: Observer-visible session activity that advances a Session Cursor. It may include preview activity before it is durable and committed activity that settles the session view; it is not scoped to a single turn.
-- **Turn Activity**: App-facing live stream item for one active turn.
+- **Turn Activity**: App-facing live stream item for one active turn. It is live observation only, not committed transcript state.
 - **Turn Event**: Semantic payload carried by Turn Activity.
+- **AssistantOutput.safe_text**: Terminal or durable assistant output returned with an assembled turn: explicit `TurnOutcome` text/value rendering or assistant text recovered from committed state. It is not interrupted-preview salvage.
 - **Final Value**: Terminal value produced by an RLM foreground `finish <value>`; it ends the turn as durable runtime output. Hosts decide whether and how to render that value as user-facing transcript text. _Avoid_: Submitted Value.
 - **Suspended Turn**: Active session turn parked on a Durable Wait before it commits. It remains session-owned and observable, is not durable session history, and ends if the session is deleted. Avoid: Background Process, Degenerate Process.
 - **Session Event**: Runtime-internal turn/protocol machinery tolerated inside implementation boundaries. Avoid using Session Event as app-facing vocabulary.

@@ -465,11 +465,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             "Search the web",
             lash_core::ToolScheduling::Parallel,
         ),
-        test_tool(
-            "apply_patch",
-            "Apply patches",
-            lash_core::ToolScheduling::Serial,
-        ),
+        test_tool("edit", "Edit files", lash_core::ToolScheduling::Serial),
+        test_tool("write", "Write files", lash_core::ToolScheduling::Serial),
         // Not in the plan-mode allow-list: must be removed from the catalog.
         test_tool(
             "exec_command",
@@ -498,12 +495,13 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         })
         .expect("tool catalog");
     // In plan mode, membership is the execution gate: allowed tools stay members
-    // (the default allow-list includes search_web/read_file/apply_patch), and
+    // (the default allow-list includes search_web/read_file/edit/write), and
     // plan_exit stays a member.
     assert!(surface.has_callable_tool("search_web"));
     assert!(surface.has_callable_tool("read_file"));
     assert!(surface.has_callable_tool("plan_exit"));
-    assert!(surface.has_callable_tool("apply_patch"));
+    assert!(surface.has_callable_tool("edit"));
+    assert!(surface.has_callable_tool("write"));
     assert!(!surface.has_callable_tool("exec_command"));
     // The plan-mode note is now an ordinary prompt contribution.
     let prompt = session
@@ -552,20 +550,13 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .expect("before_tool_call");
     assert!(web_allowed.is_empty());
 
-    let plan_patch_allowed = session
-        .before_tool_call(ToolCallHookContext::new("root".to_string(), "apply_patch".to_string(), json!({
-                "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
-            }), lash_core::ToolArgumentProjectionPolicy::default(), lash_core::TurnContext::default(), manager.clone()))
-        .await
-        .expect("before_tool_call");
-    assert!(plan_patch_allowed.is_empty());
-
-    let repo_patch_blocked = session
+    let plan_edit_allowed = session
         .before_tool_call(ToolCallHookContext::new(
             "root".to_string(),
-            "apply_patch".to_string(),
+            "edit".to_string(),
             json!({
-                "input": "*** Begin Patch\n*** Add File: src/main.rs\n+fn main() {}\n*** End Patch"
+                "path": ".lash/plans/run-session.md",
+                "edits": [{ "oldText": "TBD", "newText": "Write the implementation plan" }]
             }),
             lash_core::ToolArgumentProjectionPolicy::default(),
             lash_core::TurnContext::default(),
@@ -573,7 +564,39 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         ))
         .await
         .expect("before_tool_call");
-    assert!(repo_patch_blocked.iter().any(|emitted| matches!(
+    assert!(plan_edit_allowed.is_empty());
+
+    let plan_write_allowed = session
+        .before_tool_call(ToolCallHookContext::new(
+            "root".to_string(),
+            "write".to_string(),
+            json!({
+                "path": ".lash/plans/run-session.md",
+                "content": "# Plan\n\n## Goal\n- Write the implementation plan\n"
+            }),
+            lash_core::ToolArgumentProjectionPolicy::default(),
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
+        .await
+        .expect("before_tool_call");
+    assert!(plan_write_allowed.is_empty());
+
+    let repo_edit_blocked = session
+        .before_tool_call(ToolCallHookContext::new(
+            "root".to_string(),
+            "edit".to_string(),
+            json!({
+                "path": "src/main.rs",
+                "edits": [{ "oldText": "fn main() {}", "newText": "fn main() { run(); }" }]
+            }),
+            lash_core::ToolArgumentProjectionPolicy::default(),
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
+        .await
+        .expect("before_tool_call");
+    assert!(repo_edit_blocked.iter().any(|emitted| matches!(
         &emitted.value,
         PluginDirective::AbortTurn { code, message }
             if code == "plan_mode_tool_blocked"
@@ -671,7 +694,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::new(
-        PlanModePluginConfig::default().with_allowed_tools(["apply_patch", "read_file"]),
+        PlanModePluginConfig::default().with_allowed_tools(["edit", "read_file"]),
     ));
     let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
@@ -691,13 +714,21 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
         .expect("before_tool_call");
     assert!(allowed.is_empty());
 
-    let apply_patch_allowed = session
-        .before_tool_call(ToolCallHookContext::new("root".to_string(), "apply_patch".to_string(), json!({
-                "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
-            }), lash_core::ToolArgumentProjectionPolicy::default(), lash_core::TurnContext::default(), manager.clone()))
+    let edit_allowed = session
+        .before_tool_call(ToolCallHookContext::new(
+            "root".to_string(),
+            "edit".to_string(),
+            json!({
+                "path": ".lash/plans/run-session.md",
+                "edits": [{ "oldText": "TBD", "newText": "Plan" }]
+            }),
+            lash_core::ToolArgumentProjectionPolicy::default(),
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
         .await
         .expect("before_tool_call");
-    assert!(apply_patch_allowed.is_empty());
+    assert!(edit_allowed.is_empty());
 }
 
 #[tokio::test]

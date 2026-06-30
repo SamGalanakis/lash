@@ -21,11 +21,7 @@ pub(crate) fn run_timeline_projection_once(workload: UiPerfWorkload) -> UiPerfRu
     let total_started = Instant::now();
     let build_started = Instant::now();
     let read_view = build_projection_read_view(workload.turn_count);
-    let ui_state = UiProjectionState {
-        live_assistant_text: Some("live assistant tail that should be reconciled".to_string()),
-        live_reasoning_text: Some("live reasoning tail".to_string()),
-        ..UiProjectionState::default()
-    };
+    let ui_state = UiProjectionState::default();
     let build_case_ms = elapsed_ms(build_started);
 
     let mut result = UiPerfRunResult::new(total_started);

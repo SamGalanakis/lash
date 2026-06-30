@@ -426,7 +426,6 @@ pub(crate) fn timeline_from_read_view(
     let projection = read_view.chronological_projection();
     let mut timeline = timeline_from_chronological(&projection);
     apply_activity_journal(&mut timeline, &ui_state.activity_journal);
-    append_live_projection_items(&mut timeline, ui_state);
     timeline.extend(
         ui_state
             .plugin_panels
@@ -550,105 +549,6 @@ fn append_lashlang_step_items(
     if let Some(final_output) = &step.final_output {
         let _ = push_assistant_text_item(timeline, &final_value_display_text(final_output));
     }
-}
-
-pub(crate) fn interrupted_assistant_tail(blocks: &[UiTimelineItem], text: &str) -> Option<String> {
-    let cleaned = normalize_assistant_text(text);
-    if cleaned.is_empty() {
-        return None;
-    }
-    // Providers like codex emit prose between tool calls and commit each
-    // chunk as its own assistant message, so the transcript already
-    // projected into multiple AssistantText blocks for the current turn.
-    // The runtime hands us the ENTIRE accumulated `text_deltas` as
-    // uncommitted assistant text on abort — pushing it whole would
-    // duplicate every prose block already on screen. Walk the current
-    // turn's AssistantText blocks in order and peel each from the front
-    // of `cleaned`; any leftover is the uncommitted mid-stream tail.
-    let scan_start = blocks
-        .iter()
-        .rposition(|block| {
-            matches!(
-                block,
-                UiTimelineItem::TurnStart(turn) if turn.role == TurnRole::User
-            )
-        })
-        .unwrap_or(0);
-    let mut peeled_count = 0usize;
-    let mut peel_failed = false;
-    let mut remaining = cleaned.as_str();
-    for block in &blocks[scan_start..] {
-        let UiTimelineItem::AssistantText(existing) = block else {
-            continue;
-        };
-        let normalized = normalize_assistant_text(existing);
-        if normalized.is_empty() {
-            continue;
-        }
-        match remaining.strip_prefix(normalized.as_str()) {
-            Some(rest) => {
-                remaining = rest.trim_start_matches('\n');
-                peeled_count += 1;
-            }
-            None => {
-                peel_failed = true;
-                break;
-            }
-        }
-    }
-    if peeled_count > 0 && !peel_failed {
-        let trailing = remaining.trim();
-        return (!trailing.is_empty()).then(|| trailing.to_string());
-    }
-
-    if let Some(UiTimelineItem::AssistantText(existing)) = blocks.last() {
-        let normalized = normalize_assistant_text(existing);
-        if cleaned.starts_with(normalized.as_str()) {
-            let trailing = cleaned[normalized.len()..].trim_start_matches('\n').trim();
-            return (!trailing.is_empty()).then(|| trailing.to_string());
-        }
-        if normalized.starts_with(cleaned.as_str()) {
-            return None;
-        }
-    }
-
-    Some(cleaned)
-}
-
-fn append_live_projection_items(timeline: &mut UiTimeline, ui_state: &UiProjectionState) {
-    if let Some(text) = ui_state.live_reasoning_text.as_deref()
-        && !reasoning_already_committed(timeline.items(), text)
-    {
-        let _ = push_assistant_reasoning_item(timeline, text);
-    }
-    if let Some(text) = ui_state.live_assistant_text.as_deref()
-        && let Some(tail) = interrupted_assistant_tail(timeline.items(), text)
-    {
-        let _ = push_assistant_text_item(timeline, &tail);
-    }
-}
-
-/// Whether the live reasoning tail is already represented by a reasoning block
-/// committed to history. The durable-commit and the live-buffer clear are not
-/// synchronized, so after a turn commits its reasoning to history the live
-/// buffer can still hold the same text — appending it would render the
-/// reasoning twice (visible in full under Alt+O). During streaming the
-/// committed copy doesn't exist yet, so the live tail still renders.
-fn reasoning_already_committed(items: &[UiTimelineItem], live_text: &str) -> bool {
-    let live = normalize_assistant_text(live_text);
-    if live.is_empty() {
-        return false;
-    }
-    items.iter().any(|item| {
-        matches!(
-            item,
-            UiTimelineItem::AssistantReasoning(existing)
-                if {
-                    let existing = normalize_assistant_text(existing);
-                    existing == live || existing.contains(&live)
-                }
-        )
-    })
 }
 
 pub(crate) fn preview_text_lines(text: &str) -> Vec<String> {

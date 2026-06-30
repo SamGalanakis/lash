@@ -1057,6 +1057,9 @@ fn operational_cases_for_semantic(semantic_oracle: &str) -> &'static [&'static s
         | "standard.tool_failure_feedback_reenters_model"
         | "standard.parallel_tool_results_checkpoint_once" => &["tool-loop"],
         "rlm.lashlang_cell_exec_continues" => &["rlm-lashlang-exec", "triggers-wakeups"],
+        "rlm.streamed_lashlang_cell_exec_persists_trajectory" => {
+            &["rlm-lashlang-exec", "scheduler-owned-provider-events"]
+        }
         "rlm.typed_schema_mismatch_repair_loop" | "rlm.typed_schema_any_of_mismatch" => {
             &["provider-failure", "repair-loop"]
         }
@@ -1189,6 +1192,7 @@ fn scenario_transition_facts(
             facts.push(provider_success_terminal_fact(contract, selected_events)?);
         }
         "rlm.lashlang_cell_exec_continues"
+        | "rlm.streamed_lashlang_cell_exec_persists_trajectory"
         | "rlm.exec_error_max_turn_stop"
         | "rlm.exec_tool_control_frame_switch_terminal"
         | "rlm.exec_tool_control_fail_terminal"
@@ -2021,6 +2025,9 @@ fn scenario_transition_kind(contract: &ScenarioContractSpec) -> &'static str {
         }
         "standard.initial_request_projection" => "standard.initial-request-projection-transition",
         "rlm.lashlang_cell_exec_continues" => "rlm.lashlang-cell-exec-continue-transition",
+        "rlm.streamed_lashlang_cell_exec_persists_trajectory" => {
+            "rlm.streamed-lashlang-cell-exec-trajectory-transition"
+        }
         "rlm.exec_error_max_turn_stop" => "rlm.exec-error-max-turn-stop-transition",
         "rlm.exec_tool_control_frame_switch_terminal" => {
             "rlm.exec-tool-control-frame-switch-terminal-transition"
@@ -4270,6 +4277,7 @@ fn rlm_protocol_contract_executions() -> Result<Vec<Value>, FixedScriptRunnerErr
         rlm_cell_diagnostic_counts_execution()?,
         rlm_retired_marker_plain_lashlang_text_execution()?,
         rlm_lashlang_cell_exec_continues_execution()?,
+        rlm_streamed_lashlang_cell_exec_persists_trajectory_execution()?,
         rlm_empty_options_natural_default_execution()?,
         rlm_exec_result_no_tool_call_replay_execution()?,
         rlm_exec_tool_control_frame_switch_terminal_execution()?,
@@ -4493,6 +4501,31 @@ fn rlm_lashlang_cell_exec_continues_execution() -> Result<Value, FixedScriptRunn
         "rlm.lashlang_cell_exec_continues",
         "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
         "rlm_protocol_scenario_lashlang_cell_runs_exec_and_continues",
+        result,
+    )
+}
+
+fn rlm_streamed_lashlang_cell_exec_persists_trajectory_execution()
+-> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm streamed LashLang cell exec persists trajectory",
+        "stream and run some code",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![
+            RlmContractStep::StreamedLlm(vec![rlm_text_part(&rlm_lashlang_block_with_prose(
+                "Streaming check.\n",
+                "print \"streamed\"",
+            ))]),
+            RlmContractStep::Exec(rlm_exec_response(&["streamed\n"], None, None)),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.streamed_lashlang_cell_exec_persists_trajectory",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_streamed_lashlang_cell_runs_exec_and_persists_trajectory",
         result,
     )
 }
@@ -4725,6 +4758,7 @@ fn rlm_typed_schema_any_of_mismatch_execution() -> Result<Value, FixedScriptRunn
 #[derive(Clone)]
 enum RlmContractStep {
     Llm(Vec<LlmOutputPart>),
+    StreamedLlm(Vec<LlmOutputPart>),
     Exec(lash_core::ExecResponse),
     Checkpoint,
 }
@@ -4737,6 +4771,7 @@ struct RlmContractObserved {
     llm_response_full_texts: Vec<String>,
     llm_response_part_counts: Vec<usize>,
     llm_response_parts: Vec<Vec<Value>>,
+    llm_response_text_streamed: Vec<bool>,
     llm_call_count: usize,
     turn_outcomes: Vec<lash_core::TurnOutcome>,
     final_message_event: bool,
@@ -4815,7 +4850,12 @@ fn run_rlm_protocol_contract(
     observed.record(&effects);
     for step in steps {
         match step {
-            RlmContractStep::Llm(parts) => {
+            step @ (RlmContractStep::Llm(_) | RlmContractStep::StreamedLlm(_)) => {
+                let text_streamed = matches!(&step, RlmContractStep::StreamedLlm(_));
+                let parts = match step {
+                    RlmContractStep::Llm(parts) | RlmContractStep::StreamedLlm(parts) => parts,
+                    RlmContractStep::Exec(_) | RlmContractStep::Checkpoint => unreachable!(),
+                };
                 let llm_id = *find_contract_llm_call(&effects).ok_or_else(|| {
                     FixedScriptRunnerError::Assertion(format!(
                         "{scenario_name} expected a pending LLM call"
@@ -4853,9 +4893,10 @@ fn run_rlm_protocol_contract(
                     .push(response.full_text.clone());
                 observed.llm_response_part_counts.push(response.parts.len());
                 observed.llm_response_parts.push(response_part_summary);
+                observed.llm_response_text_streamed.push(text_streamed);
                 machine.handle_response(lash_core::sansio::Response::LlmComplete {
                     id: llm_id,
-                    text_streamed: false,
+                    text_streamed,
                     result: Ok(response),
                 });
             }
@@ -4909,6 +4950,7 @@ fn run_rlm_protocol_contract(
         "llm_response_full_texts": observed.llm_response_full_texts,
         "llm_response_part_counts": observed.llm_response_part_counts,
         "llm_response_parts": observed.llm_response_parts,
+        "llm_response_text_streamed": observed.llm_response_text_streamed,
         "done": machine.is_done(),
         "checkpoints": observed.checkpoints,
         "exec_codes": observed.exec_codes,

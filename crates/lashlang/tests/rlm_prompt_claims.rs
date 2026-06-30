@@ -169,8 +169,16 @@ fn test_host_environment() -> lashlang::LashlangHostEnvironment {
     resources.add_module_operation(
         ["files"],
         "Files",
-        "patch",
-        "apply_patch",
+        "edit",
+        "edit",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
+    resources.add_module_operation(
+        ["files"],
+        "Files",
+        "write",
+        "write",
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
@@ -259,7 +267,8 @@ impl MockHost {
                 record.insert("exit_code".into(), Value::Number(exit_code.into()));
                 Ok(Value::Record(record.into()))
             }
-            "apply_patch" => Ok(Value::String("patch applied".into())),
+            "edit" => Ok(Value::String("edit applied".into())),
+            "write" => Ok(Value::String("write applied".into())),
             "spawn_agent" | "inspect_chunk" => {
                 let task = args
                     .get("task")
@@ -1264,13 +1273,7 @@ async fn prompt_example_validates_nontrivial_edit_before_finish() {
     assert_eq!(
         run(
             &host,
-            r##"patch = r"""*** Begin Patch
-*** Update File: src/lib.rs
-@@
--old
-+new
-*** End Patch"""
-await files.patch({ input: patch })?
+            r##"await files.edit({ path: "src/lib.rs", edits: [{ oldText: "old", newText: "new" }] })?
 check = await shell.exec({ cmd: "cargo check --workspace --all-targets" })?
 if check.exit_code != 0 {
   print slice(check.output, 0, 4000)

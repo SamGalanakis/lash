@@ -173,72 +173,6 @@ jobs:
         env:
           LASH_POSTGRES_DATABASE_URL: postgres://lash:lash@localhost:5432/lash
 
-  bounded-broad-replay-backend:
-    name: Bounded Broad Replay/Backend
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: lash
-          POSTGRES_PASSWORD: lash
-          POSTGRES_DB: lash
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U lash -d lash"
-          --health-interval 2s
-          --health-timeout 2s
-          --health-retries 30
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Restore cargo cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-          shared-key: linux-debug
-          save-if: false
-
-      - name: Install protoc
-        uses: taiki-e/install-action@v2
-        with:
-          tool: protoc
-
-      - name: Run bounded broad replay/backend confidence
-        run: bash scripts/confidence-gate.sh broad
-        env:
-          LASH_POSTGRES_DATABASE_URL: postgres://lash:lash@localhost:5432/lash
-          LASH_CONFIDENCE_OUT_DIR: target/confidence-ci/bounded-broad-replay-backend
-          LASH_CONFIDENCE_MUTATION_SCOPE: none
-          LASH_CONFIDENCE_COVERAGE_SCOPE: none
-          LASH_SIM_PROFILE: fast-random
-          LASH_SIM_SEEDS: 2
-          LASH_SIM_MAX_BOUNDARIES: 72
-          LASH_BROAD_SIM_SEEDS: 2
-          LASH_BROAD_SIM_MAX_BOUNDARIES: 72
-          LASH_SCHEDULED_SIM_PROFILE: fast-random
-          LASH_SCHEDULED_SIM_SEEDS: 4
-          LASH_SCHEDULED_SIM_MAX_BOUNDARIES: 256
-          LASH_POSTGRES_GENERATED_PROFILE: fast-random
-          LASH_POSTGRES_GENERATED_MAX_BOUNDARIES: 72
-
-      - name: Upload bounded broad replay/backend confidence artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bounded-broad-replay-backend-confidence
-          path: target/confidence-ci/bounded-broad-replay-backend/broad
-
   stack-budget:
     name: Stack budget
     runs-on: ubuntu-latest
@@ -443,7 +377,6 @@ jobs:
     needs:
       - test
       - postgres-store
-      - bounded-broad-replay-backend
       - stack-budget
       - cross-check
       - linux-release-cache

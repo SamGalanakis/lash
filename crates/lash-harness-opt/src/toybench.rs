@@ -96,7 +96,8 @@ impl ToybenchProject {
                 forbidden_terms: vec![
                     "exec_command".to_string(),
                     "read_file".to_string(),
-                    "apply_patch".to_string(),
+                    "edit".to_string(),
+                    "write".to_string(),
                 ],
                 format_hint: Some(
                     "Markdown guidance with a fenced lashlang diary example".to_string(),

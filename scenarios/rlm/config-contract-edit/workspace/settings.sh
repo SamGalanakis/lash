@@ -1,0 +1,4 @@
+#!/bin/sh
+
+PREFIX="draft"
+

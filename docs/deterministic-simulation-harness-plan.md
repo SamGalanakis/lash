@@ -1036,7 +1036,7 @@ Existing tests plug in by extracting narrow shared specs/oracles:
 | --- | --- |
 | Runtime Scenarios | `lash-core::runtime::RUNTIME_SCENARIO_CONTRACTS` exports contract metadata and required sim evidence. Generated summaries serialize the contract set and `sim.oracle.scenario.runtime-contract.v1` checks the trace evidence. |
 | Standard Protocol Scenarios | `lash_protocol_standard::scenario_contracts::STANDARD_PROTOCOL_SCENARIO_CONTRACTS` exports protocol contract metadata without importing the test file. Provider/tool evidence is checked by `sim.oracle.scenario.standard-contract.v1`. |
-| RLM Protocol Scenarios | `lash_protocol_rlm::scenario_contracts::RLM_PROTOCOL_SCENARIO_CONTRACTS` exports response, exec, repair, and final-value contract metadata. Exec/trigger/durable evidence is checked by `sim.oracle.scenario.rlm-contract.v1`. |
+| RLM Protocol Scenarios | `lash_protocol_rlm::scenario_contracts::RLM_PROTOCOL_SCENARIO_CONTRACTS` exports response, exec, repair, stream-mask, and final-value contract metadata. Exec/provider-event/trigger/durable evidence is checked by `sim.oracle.scenario.rlm-contract.v1`. |
 | Agent Scenarios | `lash::scenario_contracts::AGENT_SCENARIO_CONTRACTS` exports facade/graph contract metadata. Multi-session observer/reconnect evidence is checked by `sim.oracle.scenario.agent-contract.v1`. |
 | Provider conformance | Convert canonical provider conformance cases into Provider Wire Script templates and provider normalization oracles. |
 | Persistence conformance | Run model store, SQLite, and Postgres against existing suites; use conformance cases to seed storage-heavy simulation operations. |

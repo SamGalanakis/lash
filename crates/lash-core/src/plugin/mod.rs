@@ -46,7 +46,8 @@ pub use history::{
 };
 pub use hooks::{
     AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantResponseHookContext,
-    AssistantResponseTransform, AssistantStreamHook, AssistantStreamHookContext,
+    AssistantResponseTransform, AssistantStreamFinishReason, AssistantStreamFinishedContext,
+    AssistantStreamFinishedHook, AssistantStreamHook, AssistantStreamHookContext,
     AssistantStreamTransform, BeforeToolCallHook, BeforeTurnHook, CheckpointHook,
     CheckpointHookContext, PluginFuture, PluginLifecycleEvent, PluginLifecycleEventHook,
     PluginLifecycleFuture, PluginSessionTask, PromptContributor, PromptHookContext,

@@ -385,7 +385,7 @@ fn grep_tool_definition() -> ToolDefinition {
             )
             .with_examples(vec![
                 r#"await files.grep({ query: "ToolProvider", path: "crates/lash/src" })?"#.into(),
-                r#"await files.grep({ query: "*.rs apply_patch", path: "." })?"#.into(),
+                r#"await files.grep({ query: "*.rs files.edit", path: "." })?"#.into(),
                 r#"await files.grep({ query: "current_query" })?"#.into(),
             ])
             .with_lashlang_binding(lash_tool_support::lashlang_binding(

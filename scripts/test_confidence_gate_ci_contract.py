@@ -8,12 +8,14 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+CONFIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "confidence.yml"
 GATE = ROOT / "scripts" / "confidence-gate.sh"
 FOCUSED_SQLITE_REPRO = ROOT / "scripts" / "lash-sim-focused-sqlite-repro.sh"
-BROAD_STEP_NAME = "Run bounded broad replay/backend confidence"
-BOUNDED_BROAD_JOB_ID = "bounded-broad-replay-backend"
-BOUNDED_BROAD_ARTIFACT = "bounded-broad-replay-backend-confidence"
-BOUNDED_BROAD_OUT_ROOT = "target/confidence-ci/bounded-broad-replay-backend"
+FAST_STEP_NAME = "Confidence gate fast lane"
+OLD_BROAD_CI_STEP_NAME = "Run bounded broad " + "replay/backend confidence"
+OLD_BROAD_CI_JOB_ID = "bounded-" + "broad-replay-backend"
+OLD_BROAD_CI_ARTIFACT = "bounded-" + "broad-replay-backend-confidence"
+OLD_BROAD_CI_OUT_ROOT = "target/confidence-ci/" + OLD_BROAD_CI_JOB_ID
 
 
 def shell_int_constant(script: str, name: str) -> int:
@@ -23,55 +25,53 @@ def shell_int_constant(script: str, name: str) -> int:
     return int(match.group(1))
 
 
-def broad_step_env(workflow: str) -> dict[str, str]:
-    marker = f"- name: {BROAD_STEP_NAME}"
+def step_block(workflow: str, step_name: str) -> str:
+    marker = f"- name: {step_name}"
     try:
         section = workflow.split(marker, 1)[1]
     except IndexError as exc:
-        raise AssertionError(f"missing workflow step {BROAD_STEP_NAME!r}") from exc
-    section = section.split("\n      - name:", 1)[0]
-    env: dict[str, str] = {}
-    for name, value in re.findall(r"^\s{10}([A-Z0-9_]+):\s*(\S+)\s*$", section, re.MULTILINE):
-        env[name] = value
-    return env
+        raise AssertionError(f"missing workflow step {step_name!r}") from exc
+    return section.split("\n      - name:", 1)[0]
 
 
 class ConfidenceGateCiContractTest(unittest.TestCase):
-    def test_ci_broad_scheduled_depth_matches_gate_thresholds(self) -> None:
+    def test_ci_runs_only_fast_confidence_not_broad_replay_backend(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         gate = GATE.read_text(encoding="utf-8")
-        env = broad_step_env(workflow)
+        fast_step = step_block(workflow, FAST_STEP_NAME)
+
+        self.assertIn("bash scripts/confidence-gate.sh fast", fast_step)
+        self.assertNotIn(OLD_BROAD_CI_JOB_ID, workflow)
+        self.assertNotIn("Bounded Broad " + "Replay/Backend", workflow)
+        self.assertNotIn(OLD_BROAD_CI_STEP_NAME, workflow)
+        self.assertNotIn(OLD_BROAD_CI_ARTIFACT, workflow)
+        self.assertNotIn(OLD_BROAD_CI_OUT_ROOT, workflow)
 
         min_seeds = shell_int_constant(gate, "BROAD_SCHEDULED_DEPTH_MIN_SEEDS")
         min_boundaries = shell_int_constant(gate, "BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES")
+        self.assertGreaterEqual(min_seeds, 4)
+        self.assertGreaterEqual(min_boundaries, 256)
 
-        self.assertGreaterEqual(int(env["LASH_SCHEDULED_SIM_SEEDS"]), min_seeds)
-        self.assertGreaterEqual(
-            int(env["LASH_SCHEDULED_SIM_MAX_BOUNDARIES"]),
-            min_boundaries,
-        )
-
-    def test_ci_broad_lane_is_explicitly_bounded_not_full_confidence(self) -> None:
+    def test_broad_lane_is_manual_or_scheduled_confidence_not_ci_cd(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
+        confidence_workflow = CONFIDENCE_WORKFLOW.read_text(encoding="utf-8")
         gate = GATE.read_text(encoding="utf-8")
-        env = broad_step_env(workflow)
 
-        self.assertIn(
-            f"  {BOUNDED_BROAD_JOB_ID}:\n    name: Bounded Broad Replay/Backend",
-            workflow,
-        )
-        self.assertNotIn("confidence-" + "broad-replay-backend", workflow)
-        self.assertNotIn("Confidence " + "Broad Replay/Backend", workflow)
-        self.assertEqual(env["LASH_CONFIDENCE_OUT_DIR"], BOUNDED_BROAD_OUT_ROOT)
-        self.assertEqual(env["LASH_CONFIDENCE_MUTATION_SCOPE"], "none")
-        self.assertEqual(env["LASH_CONFIDENCE_COVERAGE_SCOPE"], "none")
-        self.assertIn(f"name: {BOUNDED_BROAD_ARTIFACT}", workflow)
-        self.assertIn(f"path: {BOUNDED_BROAD_OUT_ROOT}/broad", workflow)
-        self.assertIn('"bounded_broad_ci": {', gate)
-        self.assertIn(f'"workflow_job": "{BOUNDED_BROAD_JOB_ID}"', gate)
-        self.assertIn(f'"artifact_name": "{BOUNDED_BROAD_ARTIFACT}"', gate)
-        self.assertIn('"coverage_evidence_status": "not_run_by_scope"', gate)
-        self.assertIn('"mutation_evidence_status": "not_run_by_scope"', gate)
+        self.assertIn("- fast", confidence_workflow)
+        self.assertIn("- default", confidence_workflow)
+        self.assertIn("- broad", confidence_workflow)
+        self.assertIn("- full", confidence_workflow)
+        self.assertIn("run: bash scripts/confidence-gate.sh", confidence_workflow)
+        self.assertIn("inputs.lane || 'full'", confidence_workflow)
+        self.assertIn("schedule:", confidence_workflow)
+        self.assertNotIn("bash scripts/confidence-gate.sh broad", workflow)
+
+        self.assertIn('"bounded_broad_confidence": {', gate)
+        self.assertIn('"workflow": "Confidence"', gate)
+        self.assertIn('"lane": "broad"', gate)
+        self.assertIn('"trigger": "workflow_dispatch_or_schedule"', gate)
+        self.assertIn('"artifact_name": "confidence-artifacts"', gate)
+        self.assertIn('"full_confidence_claim": "false"', gate)
 
     def test_full_lane_artifact_contract_requires_true_full_evidence(self) -> None:
         gate = GATE.read_text(encoding="utf-8")
@@ -154,22 +154,26 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
 
     def test_generated_postgres_dynamic_rerun_is_bounded_and_artifacted(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
+        confidence_workflow = CONFIDENCE_WORKFLOW.read_text(encoding="utf-8")
         gate = GATE.read_text(encoding="utf-8")
-        env = broad_step_env(workflow)
 
         required_snippets = [
             "run_generated_postgres_dynamic_replay()",
             'step "Generated Postgres dynamic backend rerun"',
             "cargo run -p lash-sim --locked -- run-postgres",
             '--seed "$seed"',
+            'LASH_POSTGRES_GENERATED_PROFILE:-full-random',
             'LASH_POSTGRES_GENERATED_MAX_BOUNDARIES:-128',
             '"confidence_lane": "generated_dynamic_postgres_backend_rerun"',
             '"generated_postgres_dynamic_replay": "$([ -f "${out_dir}/sim/postgres-generated-rerun/summary.json" ]',
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, gate)
-        self.assertEqual(env["LASH_POSTGRES_GENERATED_PROFILE"], "fast-random")
-        self.assertEqual(env["LASH_POSTGRES_GENERATED_MAX_BOUNDARIES"], "72")
+
+        self.assertIn("- broad", confidence_workflow)
+        self.assertIn("inputs.lane || 'full'", confidence_workflow)
+        self.assertNotIn("LASH_POSTGRES_GENERATED_PROFILE", workflow)
+        self.assertNotIn("LASH_POSTGRES_GENERATED_MAX_BOUNDARIES", workflow)
 
 
 if __name__ == "__main__":

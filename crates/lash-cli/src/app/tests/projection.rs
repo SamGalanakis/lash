@@ -285,11 +285,7 @@ fn read_view_timeline_preserves_assistant_part_order() {
 }
 
 #[test]
-fn committed_reasoning_is_not_duplicated_by_stale_live_buffer() {
-    // The durable commit and the live-buffer clear are not synchronized, so a
-    // turn whose reasoning is already committed to history can still have the
-    // same text sitting in the live buffer. The live tail must not be appended
-    // a second time (otherwise it renders twice, visibly so under Alt+O).
+fn read_view_reasoning_renders_exactly_once() {
     let message = Message {
         id: "a1".into(),
         role: MessageRole::Assistant,
@@ -305,20 +301,16 @@ fn committed_reasoning_is_not_duplicated_by_stale_live_buffer() {
         origin: None,
     };
 
-    let ui_state = UiProjectionState {
-        live_reasoning_text: Some("Planning the refactor in detail.".to_string()),
-        ..UiProjectionState::default()
-    };
-
     let events = events_from_messages(std::slice::from_ref(&message));
-    let blocks = timeline_items_from_test_read_view(&events, &[message], &[], &ui_state);
+    let blocks =
+        timeline_items_from_test_read_view(&events, &[message], &[], &UiProjectionState::default());
     let reasoning_count = blocks
         .iter()
         .filter(|item| matches!(item, projection::UiTimelineItem::AssistantReasoning(_)))
         .count();
     assert_eq!(
         reasoning_count, 1,
-        "committed reasoning must not be duplicated by the stale live buffer: {blocks:?}"
+        "read-view reasoning must render exactly once: {blocks:?}"
     );
 }
 
@@ -327,11 +319,7 @@ fn read_view_timeline_round_trips_to_existing_display_blocks() {
     let user = text_message("u1", MessageRole::User, "Summarize this");
     let assistant = text_message("a1", MessageRole::Assistant, "Summary.");
     let events = events_from_messages(&[user.clone(), assistant.clone()]);
-    let ui_state = UiProjectionState {
-        live_reasoning_text: Some("Checking final wording.".to_string()),
-        live_assistant_text: Some("Summary.\n\nOne more sentence.".to_string()),
-        ..UiProjectionState::default()
-    };
+    let ui_state = UiProjectionState::default();
 
     let timeline = timeline_from_test_read_view(&events, &[user, assistant], &[], &ui_state);
     let blocks = timeline_items_from_test_read_view(
@@ -362,16 +350,7 @@ fn read_view_timeline_round_trips_to_existing_display_blocks() {
             projection::UiTimelineItem::Splash => "Splash",
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        variants,
-        vec![
-            "TurnStart",
-            "UserInput",
-            "AssistantText",
-            "AssistantReasoning",
-            "AssistantText",
-        ]
-    );
+    assert_eq!(variants, vec!["TurnStart", "UserInput", "AssistantText"]);
 }
 
 #[test]
@@ -973,6 +952,10 @@ fn finish_interrupted_turn_from_read_view_preserves_local_system_messages() {
             .count(),
         1
     );
+    assert!(!app.timeline.iter().any(|block| matches!(
+        block,
+        UiTimelineItem::AssistantText(text) if text == "Partial answer"
+    )));
     assert!(matches!(
         app.timeline.last(),
         Some(UiTimelineItem::SystemMessage(message)) if message == "Cancelled."
@@ -980,22 +963,85 @@ fn finish_interrupted_turn_from_read_view_preserves_local_system_messages() {
 }
 
 #[test]
-fn interrupted_read_view_preserves_partial_assistant_text() {
+fn cancel_then_queued_turn_uses_read_view_without_preview_duplication() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let prior_messages = vec![
+        text_message("u0", MessageRole::User, "Earlier question"),
+        text_message("a0", MessageRole::Assistant, "Prior durable answer"),
+    ];
+    let prior_events = events_from_messages(&prior_messages);
+    app.finish_turn_from_read_view(&test_read_view(&prior_events, &prior_messages, &[]));
+
+    let cancelled_turn = PreparedTurn::new("Cancel this".into(), Vec::new());
+    app.push_prepared_user_input(&cancelled_turn);
+    app.start_turn();
+    app.handle_session_event(SessionEvent::TextDelta {
+        content: "Cancelled live preview".into(),
+    });
+
+    let cancelled_messages = vec![
+        text_message("u0", MessageRole::User, "Earlier question"),
+        text_message("a0", MessageRole::Assistant, "Prior durable answer"),
+        text_message("u1", MessageRole::User, "Cancel this"),
+    ];
+    let cancelled_events = events_from_messages(&cancelled_messages);
+    let ui_state = app.ui_projection_state();
+    app.finish_interrupted_turn_from_read_view(
+        &test_read_view(&cancelled_events, &cancelled_messages, &[]),
+        &ui_state,
+        "Cancelled.",
+    );
+
+    let queued_turn = PreparedTurn::new("Queued follow-up".into(), Vec::new());
+    app.push_prepared_user_input(&queued_turn);
+    app.start_turn();
+    let final_messages = vec![
+        text_message("u0", MessageRole::User, "Earlier question"),
+        text_message("a0", MessageRole::Assistant, "Prior durable answer"),
+        text_message("u1", MessageRole::User, "Cancel this"),
+        text_message("u2", MessageRole::User, "Queued follow-up"),
+        text_message("a2", MessageRole::Assistant, "Queued durable answer"),
+    ];
+    let final_events = events_from_messages(&final_messages);
+    app.finish_turn_from_read_view(&test_read_view(&final_events, &final_messages, &[]));
+
+    let assistant_texts = app
+        .timeline
+        .iter()
+        .filter_map(|block| match block {
+            UiTimelineItem::AssistantText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assistant_texts,
+        vec!["Prior durable answer", "Queued durable answer"]
+    );
+    assert!(
+        !app.timeline.iter().any(|block| matches!(
+            block,
+            UiTimelineItem::AssistantText(text) if text == "Cancelled live preview"
+        )),
+        "cancelled live preview must not survive into the queued follow-up projection"
+    );
+}
+
+#[test]
+fn interrupted_read_view_discards_non_durable_assistant_text() {
     let blocks = interrupted_blocks_from_test_read_view(
         &[],
         &[],
         &[],
-        &UiProjectionState {
-            live_assistant_text: Some("Partial streamed answer".to_string()),
-            ..UiProjectionState::default()
-        },
+        &UiProjectionState::default(),
         "Cancelled.",
     );
 
-    assert!(matches!(
-        blocks.first(),
-        Some(UiTimelineItem::AssistantText(text)) if text == "Partial streamed answer"
-    ));
+    assert!(
+        !blocks
+            .iter()
+            .any(|block| matches!(block, UiTimelineItem::AssistantText(_))),
+        "interrupted projection must not synthesize assistant text from live buffers: {blocks:#?}"
+    );
     assert!(matches!(
         blocks.last(),
         Some(UiTimelineItem::SystemMessage(msg)) if msg == "Cancelled."
@@ -1003,12 +1049,7 @@ fn interrupted_read_view_preserves_partial_assistant_text() {
 }
 
 #[test]
-fn interrupted_read_view_does_not_duplicate_already_committed_prose() {
-    // Codex emits multiple prose chunks intermixed with tool calls. Each
-    // prose chunk is committed as a separate assistant message, and on
-    // interrupt the runtime hands the UI the entire concatenation as
-    // `live_assistant_text`. The projection must not re-render that
-    // concat as an additional block on top of the already-rendered ones.
+fn interrupted_read_view_renders_committed_prose_exactly_once() {
     let messages = vec![
         text_message("m0", MessageRole::User, "go"),
         text_message("m1", MessageRole::Assistant, "first prose"),
@@ -1019,10 +1060,7 @@ fn interrupted_read_view_does_not_duplicate_already_committed_prose() {
         &events,
         &messages,
         &[],
-        &UiProjectionState {
-            live_assistant_text: Some("first prose\n\nsecond prose".into()),
-            ..UiProjectionState::default()
-        },
+        &UiProjectionState::default(),
         "Cancelled.",
     );
 
@@ -1037,20 +1075,14 @@ fn interrupted_read_view_does_not_duplicate_already_committed_prose() {
 }
 
 #[test]
-fn interrupted_read_view_appends_only_uncommitted_tail() {
-    // If the streamed text contains everything in the committed messages
-    // PLUS a trailing chunk the model was mid-stream on when the abort
-    // landed, only that trailing chunk should be appended as a new block.
+fn interrupted_read_view_never_appends_uncommitted_tail() {
     let messages = vec![text_message("m0", MessageRole::Assistant, "first prose")];
     let events = events_from_messages(&messages);
     let blocks = interrupted_blocks_from_test_read_view(
         &events,
         &messages,
         &[],
-        &UiProjectionState {
-            live_assistant_text: Some("first prose\n\nmid stream tail".into()),
-            ..UiProjectionState::default()
-        },
+        &UiProjectionState::default(),
         "Cancelled.",
     );
 
@@ -1061,7 +1093,7 @@ fn interrupted_read_view_appends_only_uncommitted_tail() {
             _ => None,
         })
         .collect();
-    assert_eq!(assistant_texts, vec!["first prose", "mid stream tail"]);
+    assert_eq!(assistant_texts, vec!["first prose"]);
 }
 
 #[test]
@@ -1100,30 +1132,6 @@ fn interrupted_read_view_hides_rlm_finish_reminder_system_messages() {
         blocks.last(),
         Some(UiTimelineItem::SystemMessage(text)) if text == crate::util::manual_interrupt_message()
     ));
-}
-
-#[test]
-fn interrupted_assistant_tail_ignores_visible_blocks_already_on_screen() {
-    let blocks = vec![
-        UiTimelineItem::TurnStart(Turn::user(false)),
-        UiTimelineItem::UserInput("ship it".into()),
-        UiTimelineItem::AssistantText(
-            "Still running - cargo test in progress. Waiting for completion.".into(),
-        ),
-        UiTimelineItem::AssistantText(
-            "It looks like there's a rendering issue stripping my variable names. Let me use a different approach.".into(),
-        ),
-    ];
-
-    let tail = interrupted_assistant_tail(
-        &blocks,
-        "Still running - cargo test in progress. Waiting for completion.\n\nIt looks like there's a rendering issue stripping my variable names. Let me use a different approach.\n\nLet me check the current state first.",
-    );
-
-    assert_eq!(
-        tail.as_deref(),
-        Some("Let me check the current state first.")
-    );
 }
 
 #[test]

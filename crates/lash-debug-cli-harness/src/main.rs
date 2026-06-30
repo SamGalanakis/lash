@@ -81,6 +81,7 @@ fn main() -> Result<()> {
 }
 
 fn run_control_loop(config: HarnessConfig) -> Result<()> {
+    let command_timeout = config.timeout;
     let mut harness = LiveHarness::start(config)?;
     println!("HARNESS ready");
     print_artifact_paths(&harness);
@@ -94,7 +95,12 @@ fn run_control_loop(config: HarnessConfig) -> Result<()> {
         if command.is_empty() {
             continue;
         }
-        match handle_control_command(&mut harness, command, &mut pending_submit_raw_len) {
+        match handle_control_command(
+            &mut harness,
+            command,
+            &mut pending_submit_raw_len,
+            command_timeout,
+        ) {
             Ok(ControlFlow::Continue) => {}
             Ok(ControlFlow::QuitCleanly) => {
                 let run = harness.finish_cleanly()?;
@@ -136,6 +142,7 @@ fn handle_control_command(
     harness: &mut LiveHarness,
     command: &str,
     pending_submit_raw_len: &mut Option<usize>,
+    command_timeout: Duration,
 ) -> Result<ControlFlow> {
     let (verb, rest) = command.split_once(' ').unwrap_or((command, ""));
     match verb {
@@ -163,14 +170,14 @@ fn handle_control_command(
             println!("HARNESS ok");
         }
         "wait" => {
-            harness.wait_for_text(rest, Duration::from_secs(45))?;
+            harness.wait_for_text(rest, command_timeout)?;
             println!("HARNESS ok");
         }
         "idle" => {
             if let Some(raw_len_before_submit) = pending_submit_raw_len.take() {
-                harness.wait_submitted_turn_idle(raw_len_before_submit, Duration::from_secs(45))?;
+                harness.wait_submitted_turn_idle(raw_len_before_submit, command_timeout)?;
             } else {
-                harness.wait_idle(Duration::from_secs(45))?;
+                harness.wait_idle(command_timeout)?;
             }
             println!("HARNESS ok");
         }

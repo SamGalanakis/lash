@@ -319,22 +319,6 @@ impl App {
         }
     }
 
-    pub(super) fn live_assistant_normalized_text(&self) -> Option<String> {
-        self.live
-            .assistant
-            .has_renderable_output()
-            .then(|| self.live.assistant.normalized_text())
-            .flatten()
-    }
-
-    pub(super) fn live_reasoning_normalized_text(&self) -> Option<String> {
-        self.live
-            .reasoning
-            .has_renderable_output()
-            .then(|| self.live.reasoning.normalized_text())
-            .flatten()
-    }
-
     pub(super) fn ensure_live_markdown_rendered(&mut self, viewport_width: usize) {
         self.live.reasoning.ensure_rendered(viewport_width);
         self.live.assistant.ensure_rendered(viewport_width);

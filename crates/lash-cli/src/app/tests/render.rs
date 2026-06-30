@@ -273,7 +273,7 @@ fn text_delta_stays_in_live_assistant_until_committed() {
 
     assert!(app.timeline.is_empty());
     assert_eq!(
-        app.live_assistant_normalized_text().as_deref(),
+        app.live.assistant.normalized_text().as_deref(),
         Some("Draft answer")
     );
 }
@@ -1206,37 +1206,33 @@ fn handle_tool_call_merges_contiguous_edit_activity() {
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc5".into()),
-        name: "apply_patch".into(),
-        args: serde_json::json!({}),
+        name: "edit".into(),
+        args: serde_json::json!({"path": "a.rs"}),
         output: lash_core::ToolCallOutput::success(serde_json::json!({
-            "summary": "Applied patch to 1 file",
-            "added": 1,
-            "removed": 1,
-            "files": [{
-                "path": "a.rs",
-                "status": "modified",
-                "added": 1,
-                "removed": 1,
-                "diff": "--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,1 @@\n-old\n+new"
-            }]
+            "summary": "Successfully replaced 1 block(s) in a.rs.",
+            "path": "a.rs",
+            "replacements": 1,
+            "details": {
+                "patch": "--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,1 @@\n-old\n+new",
+                "diff": "--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,1 @@\n-old\n+new",
+                "firstChangedLine": 1
+            }
         })),
         duration_ms: 7,
     });
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc6".into()),
-        name: "apply_patch".into(),
-        args: serde_json::json!({}),
+        name: "edit".into(),
+        args: serde_json::json!({"path": "b.rs"}),
         output: lash_core::ToolCallOutput::success(serde_json::json!({
-            "summary": "Applied patch to 1 file",
-            "added": 2,
-            "removed": 0,
-            "files": [{
-                "path": "b.rs",
-                "status": "added",
-                "added": 2,
-                "removed": 0,
-                "diff": "--- a/b.rs\n+++ b/b.rs\n@@ -0,0 +1,2 @@\n+fn one() {}\n+fn two() {}"
-            }]
+            "summary": "Successfully replaced 1 block(s) in b.rs.",
+            "path": "b.rs",
+            "replacements": 1,
+            "details": {
+                "patch": "--- a/b.rs\n+++ b/b.rs\n@@ -0,0 +1,2 @@\n+fn one() {}\n+fn two() {}",
+                "diff": "--- a/b.rs\n+++ b/b.rs\n@@ -0,0 +1,2 @@\n+fn one() {}\n+fn two() {}",
+                "firstChangedLine": 1
+            }
         })),
         duration_ms: 5,
     });

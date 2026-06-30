@@ -1618,6 +1618,80 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
     );
 }
 
+#[tokio::test]
+async fn cancelled_provider_stream_does_not_commit_partial_output() {
+    let (delta_sent_tx, delta_sent_rx) = tokio::sync::oneshot::channel::<()>();
+    let delta_sent_tx = Arc::new(Mutex::new(Some(delta_sent_tx)));
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete({
+            let delta_sent_tx = Arc::clone(&delta_sent_tx);
+            move |request| {
+                let delta_sent_tx = Arc::clone(&delta_sent_tx);
+                async move {
+                    let stream = request
+                        .stream_events
+                        .expect("streaming runtime should request provider stream events");
+                    let _ = stream.send(LlmStreamEvent::Delta("partial provider text".to_string()));
+                    if let Some(tx) = delta_sent_tx.lock().expect("delta signal").take() {
+                        let _ = tx.send(());
+                    }
+                    std::future::pending::<Result<LlmResponse, LlmTransportError>>().await
+                }
+            }
+        })
+        .build();
+    let mut runtime = standard_runtime_with_transport(transport).await;
+    let cancel = CancellationToken::new();
+    let turn_cancel = cancel.clone();
+    let turn_events = RecordingTurnEvents::default();
+    let turn_events_for_task = turn_events.clone();
+    let turn = tokio::spawn(async move {
+        runtime
+            .stream_turn(
+                TurnInput::text("cancel after partial stream"),
+                TurnOptions::new(
+                    turn_cancel,
+                    named_turn_scope("root", "cancel-partial-provider-stream"),
+                )
+                .with_turn_events(&turn_events_for_task),
+            )
+            .await
+    });
+
+    delta_sent_rx
+        .await
+        .expect("provider should emit the visible partial text");
+    cancel.cancel();
+    let assembled = turn
+        .await
+        .expect("turn task")
+        .expect("cancelled turn should assemble");
+
+    assert!(matches!(
+        assembled.outcome,
+        TurnOutcome::Stopped(TurnStop::Cancelled)
+    ));
+    assert!(assembled.assistant_output.safe_text.is_empty());
+    assert!(assembled.assistant_output.raw_text.is_empty());
+    assert!(
+        turn_events.snapshot().iter().any(|activity| matches!(
+            &activity.event,
+            TurnEvent::AssistantProseDelta { text } if text == "partial provider text"
+        )),
+        "partial provider text should remain observable only as live turn activity"
+    );
+    assert!(
+        active_conversation_messages(&assembled.state)
+            .iter()
+            .filter(|message| message.role == MessageRole::Assistant)
+            .flat_map(|message| message.parts.iter())
+            .all(|part| !part.content.contains("partial provider text")),
+        "cancelled streamed partial must not be committed to read-view history"
+    );
+}
+
 // Boundary: busy and lease-loss tests stay in `turns.rs` because they exercise
 // live `LashRuntime` lease acquisition, public busy/no-op scheduling, turn
 // phase probes, provider suspension, and runtime error-code mapping. Runtime

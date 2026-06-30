@@ -524,16 +524,17 @@ mod tests {
 
         let history = render::history_area(&app, 40, 9);
         let snapshot = lash_tui::render_snapshot(40, 9, |frame| draw(frame, &mut app));
+        // "alpha/beta/gamma" is 3 lines; bottom-anchored in the history
+        // viewport it gains `height - 3` rows of headroom above it, so the
+        // selected "beta" row lands at `top_pad + 1`.
+        let top_pad = history.height as usize - 3;
+        let row = history.y + (top_pad + 1) as u16;
         assert_eq!(
-            snapshot
-                .cell(2, history.y + 1)
-                .and_then(|cell| cell.style.bg),
+            snapshot.cell(2, row).and_then(|cell| cell.style.bg),
             Some(theme::SELECTION_BG)
         );
         assert_eq!(
-            snapshot
-                .cell(4, history.y + 1)
-                .and_then(|cell| cell.style.bg),
+            snapshot.cell(4, row).and_then(|cell| cell.style.bg),
             Some(theme::SELECTION_BG)
         );
     }
@@ -541,8 +542,11 @@ mod tests {
     #[test]
     fn history_selection_tracks_content_rows_while_scrolled() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+        // Eight lines overflow the ~5-row history viewport, so the transcript
+        // is genuinely scrolled (top-anchor pad is zero) and `scroll_offset`
+        // is meaningful — the regime this test is about.
         app.timeline = vec![crate::app::UiTimelineItem::UserInput(
-            "alpha\nbeta\ngamma\ndelta".into(),
+            "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta".into(),
         )]
         .into();
         app.scroll_offset = 1;
@@ -552,6 +556,7 @@ mod tests {
 
         let history = render::history_area(&app, 40, 9);
         let snapshot = lash_tui::render_snapshot(40, 9, |frame| draw(frame, &mut app));
+        // Content row 2 ("gamma") with scroll_offset 1 sits at viewport row 1.
         assert_eq!(
             snapshot
                 .cell(2, history.y + 1)
@@ -706,5 +711,147 @@ mod tests {
         let visible = snapshot.visible_lines_trimmed().join("\n");
 
         assert!(visible.contains("OVERLAY"));
+    }
+
+    #[test]
+    fn short_transcript_bottom_anchors_against_input_with_plan_gutter() {
+        use crate::app::{PlanDockItem, PlanDockItemStatus, PlanDockState, UiTimelineItem};
+        let mut app = App::new("gpt-5.5".into(), "test".into(), "test-session-id".into());
+        app.model_variant = Some("xhigh".into());
+        app.execution_mode_label = "rlm".into();
+        app.repo_status = None;
+        app.cwd = String::new();
+        app.timeline = vec![UiTimelineItem::UserInput(
+            "ok make the required changes and ship it".into(),
+        )]
+        .into();
+        app.plan_dock = Some(PlanDockState {
+            title: "Plan".into(),
+            meta: None,
+            items: vec![
+                PlanDockItem {
+                    text: "Check git state vs main".into(),
+                    status: PlanDockItemStatus::Done,
+                },
+                PlanDockItem {
+                    text: "Monitor GitHub Actions and fix failures".into(),
+                    status: PlanDockItemStatus::Active,
+                },
+            ],
+        });
+
+        let lines = lash_tui::render_snapshot(80, 16, |frame| draw(frame, &mut app))
+            .visible_lines_trimmed();
+        let row = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in {lines:?}"))
+        };
+
+        // Headroom is at the top: a short transcript drops to the floor of
+        // the viewport rather than stranding the input below an empty gap.
+        assert!(
+            lines[0].trim().is_empty(),
+            "expected top headroom, got {:?}",
+            lines[0]
+        );
+
+        // The user message and the Plan header are separated by a blank gutter.
+        let message = row("ok make the required changes");
+        let plan = row("Plan");
+        assert_eq!(plan, message + 2, "expected one gutter row before Plan");
+        assert!(lines[message + 1].trim().is_empty(), "gutter row not blank");
+
+        // The last checklist item hugs the input: the row directly below it is
+        // the input's top rule (full-width ─), not empty space.
+        let last_item = row("Monitor GitHub Actions");
+        assert!(
+            lines[last_item + 1].starts_with("───"),
+            "checklist should sit directly above the input rule, got {:?}",
+            lines[last_item + 1]
+        );
+    }
+
+    #[test]
+    fn slash_suggestions_use_clean_band_and_name_description_hierarchy() {
+        use crate::editor::{Suggestion, SuggestionKind};
+        let mut app = App::new("gpt-5.5".into(), "test".into(), "test-session-id".into());
+        app.repo_status = None;
+        app.cwd = String::new();
+        app.set_input("/".into());
+        app.editor.suggestion_kind = SuggestionKind::Command;
+        app.editor.suggestion_idx = 0;
+        app.editor.suggestions = vec![
+            Suggestion {
+                name: "/clear".into(),
+                description: "Reset conversation".into(),
+                match_indices: vec![0],
+            },
+            Suggestion {
+                name: "/compact".into(),
+                description: "Open a compaction frame".into(),
+                match_indices: vec![0],
+            },
+        ];
+
+        let snapshot = lash_tui::render_snapshot(80, 18, |frame| draw(frame, &mut app));
+        let lines = snapshot.visible_lines_trimmed();
+        let sel_y = lines.iter().position(|l| l.contains("clear")).expect("clear row") as u16;
+        let idle_y = lines
+            .iter()
+            .position(|l| l.contains("compact"))
+            .expect("compact row") as u16;
+
+        // The two name/description tiers are actually distinct colors, so the
+        // hierarchy this test asserts isn't a no-op.
+        assert_ne!(theme::text_primary(), theme::text_muted());
+        assert_ne!(theme::text_muted(), theme::text_subtle());
+
+        // Selected row: a chalk rail (the old gold ▶ marker is gone — no brand
+        // on the gutter) over a full-width amber band.
+        let rail = snapshot.cell(1, sel_y).expect("rail cell");
+        assert_eq!(rail.ch, '▌');
+        assert_eq!(rail.style.fg, Some(theme::text_primary()));
+        assert_ne!(rail.style.fg, Some(theme::brand()));
+        assert_eq!(rail.style.bg, Some(theme::selected_row_bg()));
+        // Band runs edge-to-edge: it reaches just inside the right border and
+        // fills most of the row, rather than stopping where the text ends.
+        let right_border = (0..80u16)
+            .rev()
+            .find(|&x| snapshot.cell(x, sel_y).map(|c| c.ch) == Some('│'))
+            .expect("right border");
+        assert_eq!(
+            snapshot
+                .cell(right_border - 1, sel_y)
+                .and_then(|c| c.style.bg),
+            Some(theme::selected_row_bg()),
+            "selection band should reach the right edge",
+        );
+        let band_cells = (1..right_border)
+            .filter(|&x| {
+                snapshot.cell(x, sel_y).and_then(|c| c.style.bg) == Some(theme::selected_row_bg())
+            })
+            .count();
+        assert!(band_cells >= 25, "selection band should fill the row, got {band_cells}");
+
+        // Selected name reads at full chalk; its description one tier down.
+        assert_eq!(snapshot.cell(3, sel_y).and_then(|c| c.style.fg), Some(theme::text_primary()));
+        let sel_desc_x = lines[sel_y as usize].find("Reset").expect("desc") as u16;
+        assert_eq!(
+            snapshot.cell(sel_desc_x, sel_y).and_then(|c| c.style.fg),
+            Some(theme::text_muted())
+        );
+
+        // Idle row: the matched '/' carries the brand, the rest of the name sits
+        // at muted chalk, and the description recedes another tier — name and
+        // description are no longer the same flat gray.
+        assert_eq!(snapshot.cell(3, idle_y).and_then(|c| c.style.fg), Some(theme::brand()));
+        assert_eq!(snapshot.cell(4, idle_y).and_then(|c| c.style.fg), Some(theme::text_muted()));
+        let idle_desc_x = lines[idle_y as usize].find("Open").expect("desc") as u16;
+        assert_eq!(
+            snapshot.cell(idle_desc_x, idle_y).and_then(|c| c.style.fg),
+            Some(theme::text_subtle())
+        );
     }
 }

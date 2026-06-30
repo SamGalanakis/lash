@@ -67,6 +67,11 @@ const LASHLANG_CELL_EXECUTION: RlmProtocolScenarioCoverage = rlm_protocol_covera
     "lashlang cell execution",
     "Lashlang cell execution feeds the protocol loop and continues."
 );
+const STREAMED_LASHLANG_CELL_EXECUTION: RlmProtocolScenarioCoverage = rlm_protocol_coverage!(
+    rlm_protocol_scenario_streamed_lashlang_cell_runs_exec_and_persists_trajectory,
+    "streamed lashlang cell execution",
+    "A complete streamed Lashlang cell executes and persists trajectory events."
+);
 const EMPTY_TURN_OPTIONS_DEFAULT: RlmProtocolScenarioCoverage = rlm_protocol_coverage!(
     rlm_protocol_scenario_empty_turn_options_use_natural_default,
     "empty turn options default to natural",
@@ -118,6 +123,7 @@ const RLM_PROTOCOL_SCENARIO_COVERAGE: &[RlmProtocolScenarioCoverage] = &[
     CELL_REASONING_PROSE_CODE_DIAGNOSTIC,
     RETIRED_PERCENT_MARKER,
     LASHLANG_CELL_EXECUTION,
+    STREAMED_LASHLANG_CELL_EXECUTION,
     EMPTY_TURN_OPTIONS_DEFAULT,
     EXEC_RESULT_TOOL_CALL_IDS_INTERNAL,
     EXEC_TOOL_CONTROL_FRAME_SWITCH,
@@ -130,7 +136,7 @@ const RLM_PROTOCOL_SCENARIO_COVERAGE: &[RlmProtocolScenarioCoverage] = &[
 
 #[test]
 fn rlm_protocol_scenario_coverage_metadata_is_unique_and_complete() {
-    assert_eq!(RLM_PROTOCOL_SCENARIO_COVERAGE.len(), 17);
+    assert_eq!(RLM_PROTOCOL_SCENARIO_COVERAGE.len(), 18);
     let mut names = BTreeSet::new();
     for coverage in RLM_PROTOCOL_SCENARIO_COVERAGE {
         let _declared_test = coverage.declared_test;
@@ -440,6 +446,33 @@ fn rlm_protocol_scenario_lashlang_cell_runs_exec_and_continues() {
             trajectory_last: Some(RlmTrajectoryExpectation {
                 code: "print \"hi\"",
                 output: vec!["hi\n".to_string()],
+                error: None,
+                final_output: None,
+            }),
+            ..RlmProtocolExpectations::default()
+        })
+        .run();
+}
+
+#[test]
+fn rlm_protocol_scenario_streamed_lashlang_cell_runs_exec_and_persists_trajectory() {
+    RlmProtocolScenario::new(STREAMED_LASHLANG_CELL_EXECUTION.display_name)
+        .user_message("run streamed code")
+        .streamed_llm_response(vec![text_part(&lashlang_block_with_prose(
+            "Streaming visible prose.\n",
+            "print \"streamed hi\"",
+        ))])
+        .exec_result(exec_response(&["streamed hi\n"], None, None))
+        .checkpoint()
+        .expect(RlmProtocolExpectations {
+            initial_request_tools_empty: true,
+            exec_codes: vec!["print \"streamed hi\""],
+            checkpoints: vec![CheckpointKind::AfterWork],
+            llm_call_count: Some(2),
+            done: Some(false),
+            trajectory_last: Some(RlmTrajectoryExpectation {
+                code: "print \"streamed hi\"",
+                output: vec!["streamed hi\n".to_string()],
                 error: None,
                 final_output: None,
             }),

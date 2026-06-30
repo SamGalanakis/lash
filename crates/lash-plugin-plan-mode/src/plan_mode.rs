@@ -16,8 +16,7 @@ use lash_core::{
     ToolScheduling,
 };
 use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
-use lash_tool_support::{StaticToolExecute, StaticToolProvider};
-use lash_tools::apply_patch::{PatchAction, inspect_patch_ops};
+use lash_tool_support::{StaticToolExecute, StaticToolProvider, resolve_under};
 
 mod prompt;
 mod state;
@@ -47,7 +46,8 @@ fn default_allowed_tools() -> BTreeSet<String> {
         "read_file",
         "search_tools",
         "search_web",
-        "apply_patch",
+        "edit",
+        "write",
         "plan_exit",
     ]
     .into_iter()
@@ -247,36 +247,32 @@ fn plan_mode_payload(
     }
 }
 
-fn patch_allowed_for_plan_file(args: &serde_json::Value, plan_path: &Path) -> Result<(), String> {
-    let input = args
-        .get("input")
+fn file_mutation_allowed_for_plan_file(
+    tool_name: &str,
+    args: &serde_json::Value,
+    plan_path: &Path,
+) -> Result<(), String> {
+    let path = args
+        .get("path")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| "plan mode requires `apply_patch.input`".to_string())?;
-    let workdir = args
-        .get("workdir")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty());
-    let ops = inspect_patch_ops(input, workdir)?;
-    if ops.is_empty() {
-        return Err("plan mode requires a non-empty patch".to_string());
+        .ok_or_else(|| format!("plan mode requires `{tool_name}.path`"))?;
+    let cwd = std::env::current_dir().map_err(|err| format!("Failed to determine cwd: {err}"))?;
+    let resolved = resolve_under(&cwd, Path::new(path));
+    if resolved != plan_path {
+        return Err(format!(
+            "plan mode only allows `{tool_name}` to edit `{}`",
+            plan_display_path(plan_path)
+        ));
     }
-    for op in ops {
-        match op.action {
-            PatchAction::Add | PatchAction::Update
-                if op.path == plan_path && op.move_path.is_none() => {}
-            PatchAction::Add | PatchAction::Update => {
-                return Err(format!(
-                    "plan mode only allows `apply_patch` to edit `{}`",
-                    plan_display_path(plan_path)
-                ));
-            }
-            PatchAction::Delete => {
-                return Err(format!(
-                    "plan mode does not allow deleting `{}`",
-                    plan_display_path(plan_path)
-                ));
-            }
-        }
+    if tool_name == "edit"
+        && args
+            .get("edits")
+            .and_then(|value| value.as_array())
+            .is_none_or(Vec::is_empty)
+    {
+        return Err(
+            "plan mode requires `edit.edits` to contain at least one replacement".to_string(),
+        );
     }
     Ok(())
 }
@@ -583,10 +579,12 @@ impl SessionPlugin for PlanModePlugin {
                     }]);
                 }
 
-                if ctx.tool_name == "apply_patch" {
+                if matches!(ctx.tool_name.as_str(), "edit" | "write") {
                     let snapshot = ctx.session_snapshot().await?;
                     let plan_path = ensure_plan_path_from_snapshot(&state, &snapshot)?;
-                    if let Err(message) = patch_allowed_for_plan_file(&ctx.args, &plan_path) {
+                    if let Err(message) =
+                        file_mutation_allowed_for_plan_file(&ctx.tool_name, &ctx.args, &plan_path)
+                    {
                         return Ok(vec![PluginDirective::AbortTurn {
                             code: "plan_mode_tool_blocked".to_string(),
                             message,
@@ -648,7 +646,10 @@ impl SessionPlugin for PlanModePlugin {
                     .lock()
                     .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
                     .enabled;
-                if !enabled || ctx.tool_name != "apply_patch" || !ctx.result.is_success() {
+                if !enabled
+                    || !matches!(ctx.tool_name.as_str(), "edit" | "write")
+                    || !ctx.result.is_success()
+                {
                     return Ok(Vec::new());
                 }
 

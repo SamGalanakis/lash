@@ -20,8 +20,7 @@ use crate::{TurnFinish, TurnOutcome, TurnStop};
 
 use super::usage::TokenLedgerEntry;
 use super::{
-    AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, TerminationPolicy, TurnActivity,
-    TurnActivityId, TurnEvent, TurnIssue,
+    AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, TerminationPolicy, TurnIssue,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -531,8 +530,6 @@ fn reconcile_text_snapshot(existing: &mut String, snapshot: &str) {
 }
 
 pub(super) struct TurnAssembler {
-    pub(super) current_assistant_prose_id: Option<TurnActivityId>,
-    pub(super) current_assistant_prose: Option<String>,
     pub(super) tool_calls: Vec<ToolCallRecord>,
     pub(super) token_usage: TokenUsage,
     pub(super) last_llm_usage: Option<TokenUsage>,
@@ -557,8 +554,6 @@ impl Default for TurnAssembler {
 impl TurnAssembler {
     pub(super) fn new() -> Self {
         Self {
-            current_assistant_prose_id: None,
-            current_assistant_prose: None,
             tool_calls: Vec::new(),
             token_usage: TokenUsage::default(),
             last_llm_usage: None,
@@ -568,20 +563,6 @@ impl TurnAssembler {
             saw_tool_failure: false,
             outcome: None,
         }
-    }
-
-    pub(super) fn push_turn_activity(&mut self, activity: &TurnActivity) {
-        let TurnEvent::AssistantProseDelta { text } = &activity.event else {
-            return;
-        };
-        if self.current_assistant_prose_id.as_ref() == Some(&activity.correlation_id) {
-            if let Some(current) = self.current_assistant_prose.as_mut() {
-                current.push_str(text);
-            }
-            return;
-        }
-        self.current_assistant_prose_id = Some(activity.correlation_id.clone());
-        self.current_assistant_prose = Some(text.clone());
     }
 
     pub(super) fn push(&mut self, event: &SessionEvent) {
@@ -671,16 +652,10 @@ impl TurnAssembler {
                     .any(|part| part.content.contains("Turn limit reached ("))
         });
 
-        let raw_output = if let Some(TurnOutcome::Finished(TurnFinish::FinalValue { value })) =
-            self.outcome.as_ref()
+        let raw_output = if let Some(output) =
+            self.outcome.as_ref().and_then(render_outcome_for_output)
         {
-            render_final_value_for_output(value)
-        } else if let Some(assistant_prose) = self.current_assistant_prose {
-            assistant_prose
-        } else if let Some(TurnOutcome::Finished(TurnFinish::AssistantMessage { text })) =
-            self.outcome.as_ref()
-        {
-            text.clone()
+            output
         } else {
             let recovered = recovered_assistant_output_from_state(&state);
             if !recovered.is_empty() {
@@ -784,6 +759,29 @@ fn render_final_value_for_output(value: &serde_json::Value) -> String {
         serde_json::Value::Null => String::new(),
         serde_json::Value::String(text) => text.clone(),
         other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+
+fn render_outcome_for_output(outcome: &TurnOutcome) -> Option<String> {
+    match outcome {
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) => Some(text.clone()),
+        TurnOutcome::Finished(TurnFinish::FinalValue { value })
+        | TurnOutcome::Finished(TurnFinish::ToolValue { value, .. })
+        | TurnOutcome::Stopped(TurnStop::SubmittedError { value })
+        | TurnOutcome::Stopped(TurnStop::ToolError { value, .. }) => {
+            Some(render_final_value_for_output(value))
+        }
+        TurnOutcome::AgentFrameSwitch { .. }
+        | TurnOutcome::Stopped(
+            TurnStop::Cancelled
+            | TurnStop::Incomplete
+            | TurnStop::InvalidInput
+            | TurnStop::MaxTurns
+            | TurnStop::ToolFailure
+            | TurnStop::ProviderError
+            | TurnStop::PluginAbort
+            | TurnStop::RuntimeError,
+        ) => None,
     }
 }
 

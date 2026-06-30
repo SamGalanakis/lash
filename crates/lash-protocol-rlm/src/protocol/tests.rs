@@ -111,6 +111,9 @@ fn execution_section_makes_paired_lashlang_tag_contract_explicit() {
     assert!(
         section.contains("Only `finish` once you have observed and verified the relevant results")
     );
+    assert!(!section.contains("### Persistence"));
+    assert!(!section.contains("Every message before the final answer"));
+    assert!(!section.contains("Prose-only does not end the turn"));
 }
 
 #[test]
@@ -330,7 +333,8 @@ fn execution_section_keeps_tool_specific_examples_out_of_core_prompt() {
     for tool_name in [
         "read_file",
         "exec_command",
-        "apply_patch",
+        "files.edit",
+        "files.write",
         "llm_query",
         "spawn_agent",
         "continue_as",

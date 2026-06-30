@@ -1,8 +1,9 @@
 /// Render the plan checklist as trailing transcript content: one blank
-/// gutter row for visual separation from the prior block, then one row
-/// per step. No `PLAN` header (the glyphs are self-explanatory) and no
-/// scribe rule (that was dock-chrome — inline the checklist just reads
-/// like a regular block). Returns `None` when no plan is active.
+/// gutter row separating it from the prior block, a dim `Plan` header,
+/// then one row per step. No scribe rule (that was dock-chrome — inline
+/// the checklist just reads like a regular block). Returns `None` when no
+/// plan is active. The row count here must match
+/// [`plan_dock_trailing_height`](crate::render::plan_dock_trailing_height).
 pub fn plan_dock_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'static>>> {
     use crate::app::PlanDockItemStatus;
 
@@ -13,6 +14,9 @@ pub fn plan_dock_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    // Blank gutter so the checklist breathes away from the message or
+    // assistant trace it trails, then the dim header.
+    lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
         "  Plan",
         theme::text_faint_style().add_modifier(Modifier::Dim),

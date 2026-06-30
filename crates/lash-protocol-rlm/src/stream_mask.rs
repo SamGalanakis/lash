@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use lash_core::PluginRuntimeEvent;
 use lash_core::plugin::{
-    AssistantStreamHookContext, AssistantStreamTransform, PluginError, PluginRegistrar,
+    AssistantStreamFinishedContext, AssistantStreamHookContext, AssistantStreamTransform,
+    PluginError, PluginRegistrar,
 };
 
 use crate::cell_scan::{
@@ -50,6 +51,18 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
             })
         },
     ));
+
+    let cleanup_state = Arc::clone(&state);
+    reg.output()
+        .stream_finished(Arc::new(move |ctx: AssistantStreamFinishedContext| {
+            let state = Arc::clone(&cleanup_state);
+            Box::pin(async move {
+                let _reason = ctx.reason;
+                let mut detector = state.lock().expect("cell detector lock");
+                detector.reset();
+                Ok(())
+            })
+        }));
 
     Ok(())
 }
@@ -308,6 +321,41 @@ mod tests {
         let t = d.process_chunk("New response.\n\n<lashlang>\ncode\n");
         assert_eq!(t.chunk, "New response.\n\n");
         assert!(!t.chunk.contains("How can I help"));
+    }
+
+    #[test]
+    fn reset_after_partial_cell_isolates_next_response() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("Visible.\n<lashlang>\nfinish 1");
+        assert_eq!(t.chunk, "Visible.\n");
+        assert!(d.inside_cell);
+        assert!(!d.cell_closed);
+        assert_eq!(d.cell_body, "finish 1");
+
+        d.reset();
+
+        let t = d.process_chunk("Next response.");
+        assert_eq!(t.chunk, "Next response.");
+        assert!(!d.inside_cell);
+        assert!(!d.cell_closed);
+        assert!(d.cell_body.is_empty());
+    }
+
+    #[test]
+    fn reset_after_closed_cell_isolates_next_response() {
+        let mut d = CellDetector::new();
+        let t = d.process_chunk("Visible.\n<lashlang>\nfinish 1\n</lashlang>");
+        assert_eq!(t.chunk, "Visible.\n");
+        assert!(t.abort_stream);
+        assert!(d.cell_closed);
+
+        d.reset();
+
+        let t = d.process_chunk("Next response.");
+        assert_eq!(t.chunk, "Next response.");
+        assert!(!t.abort_stream);
+        assert!(!d.inside_cell);
+        assert!(!d.cell_closed);
     }
 
     #[test]
