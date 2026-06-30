@@ -1229,7 +1229,7 @@ fn write_generated_backend_regression_fixtures(
                 "sim.oracle.scenario.rlm-contract.v1:rlm_protocol_scenario_exec_any_tool_control_fail_is_terminal_error",
                 "sim.oracle.scenario.rlm-contract.v1:rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal",
             ],
-            regression_contract: "standard provider-error terminalization and RLM exec terminal boundaries stay represented by backend-valid generated transitions",
+            regression_contract: "standard provider-error terminalization and RLM exec terminal boundaries stay represented by generated transitions with dynamic backend evidence",
             predicate: trace_has_protocol_terminal_boundary_mix,
         },
     ];
@@ -1965,7 +1965,7 @@ fn scenario_backend_regression_reference(
         | "rlm.exec_tool_control_frame_switch_terminal"
         | "rlm.exec_result_no_tool_call_replay" => (
             "rlm-standard-protocol-terminal-boundaries",
-            "standard provider-error terminalization and RLM exec terminal boundaries stay represented by backend-valid generated transitions",
+            "standard provider-error terminalization and RLM exec terminal boundaries stay represented by generated transitions with dynamic backend evidence",
         ),
         "standard.max_turns_after_tool_result" => (
             "backend-retry-terminalization",

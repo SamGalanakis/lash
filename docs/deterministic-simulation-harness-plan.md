@@ -318,13 +318,15 @@ extend that contract instead of creating a second gate.
 - `default` runs broader generated workloads, selected SQLite replay, and
   enough provider matrix coverage to catch normal PR regressions.
 - `broad` runs a bounded full-profile generated workload, reviewed replay
-  fixtures, backend-replayable generated packages, targeted mutation evidence,
-  and SQLite/Postgres replay when available. It is broad current evidence, not
-  a true full confidence claim.
+  fixtures, generated backend-regression packages, targeted mutation evidence,
+  static model replay evidence, generated SQLite/Postgres dynamic backend
+  reruns when available, and backend contention/conformance checks. It is
+  broad current evidence, not a true full confidence claim.
 - `full` runs long randomized workloads, full migrated-provider matrix,
-  SQLite/Postgres replay, full mutation/property test lanes, and failure
-  artifact verification. A green `full` lane means full mutation actually ran
-  and the true DST done-line criteria above are being exercised.
+  generated SQLite/Postgres dynamic backend reruns, full mutation/property test
+  lanes, and failure artifact verification. A green `full` lane means full
+  mutation actually ran and the true DST done-line criteria above are being
+  exercised.
 
 The gate emits machine-readable summaries and reproduction commands under
 `target/confidence/<lane>/sim/`. Bounded broad artifacts report
@@ -488,8 +490,8 @@ Suggested modules:
 | `runtime_boundaries` | Local scripted runtime-effect host, effect replay store, and boundary execution checks. |
 | `runtime_providers` | Runtime provider-turn construction through migrated provider crates and scripted transports. |
 | `runtime_contracts` | Per-turn runtime invariant fact/oracle builders (graph acyclicity, single active Agent Frame, usage monotonicity, Final Value semantic channel) supplying per-contract Runtime evidence. |
-| `store` | Model store, abstract-state model, store event log, worker/lease topology, backend replayable regression metadata. |
-| `sqlite_replay` / `postgres_replay` | Trace replay through production persistence APIs and backend-specific effect history. |
+| `store` | Model store, abstract-state model, store event log, worker/lease topology, generated backend-regression metadata. |
+| `sqlite_replay` / `postgres_replay` | Static trace replay for traces whose backend schedule is explicitly supported, plus backend-specific effect history. |
 | `backend_contention` | SQLite/Postgres contention and fencing conformance scenarios. |
 | `minimize` | Simulation Replay Script minimization and failing fixture preservation. |
 | `oracles` | Runtime/session/graph invariants plus adapters to protocol/provider/persistence/scenario oracles. |
@@ -789,8 +791,8 @@ Each workload contains:
   operations.
 - `worker_topology`: worker aliases, lease owner IDs, initial incarnations, and
   scheduled lifecycle events.
-- `storage_plan`: model store only, selected SQLite replay, or full
-  SQLite/Postgres replay.
+- `storage_plan`: model store only, generated SQLite dynamic rerun, generated
+  Postgres dynamic rerun, or explicitly reviewed static backend replay.
 - `oracle_plan`: invariant sets and scenario/conformance coverage tags expected
   to be exercised.
 
@@ -967,8 +969,8 @@ Minimization should reduce:
 
 Only a reviewed minimized failure becomes a Simulation Replay Script under
 `crates/lash-sim/replays/` with a stable test name. A generated trace,
-backend-replayable package, or family negative fixture does not count as a
-promoted real regression until review records the source failure, owned
+generated backend-regression package, or family negative fixture does not count
+as a promoted real regression until review records the source failure, owned
 invariant, and replay command.
 
 ### Replay And Minimization Acceptance Rules
@@ -980,8 +982,8 @@ helpers:
 | --- | --- |
 | Exact rerun | `lash-sim replay <trace>` must reproduce the same terminal verdict, failing oracle id, stable actor aliases, delivered boundary sequence, Provider Wire Script hashes, and final abstract world summary. Volatile timing and raw UUIDs may differ only through documented alias normalization. |
 | Shrink preservation | `lash-sim minimize <trace>` may remove operations, chunks, worker events, and boundaries only when the minimized replay still fails the same oracle class for the same semantic reason. A minimized trace that changes the failure class is rejected as a different bug. |
-| Model-store/backend divergence | A replay that passes on the model store but fails on SQLite/Postgres is a backend divergence failure. A replay that fails on the model store but passes on SQLite/Postgres is a model-store bug or over-strong oracle until proven otherwise. Neither case is skipped; both write a divergence artifact. |
-| Backend unsupported features | If a replay uses a model-store-only introspection hook, SQLite/Postgres replay must mark it `not-backend-replayable` at fixture review time with a concrete reason. Runtime-visible semantics cannot use this escape hatch. |
+| Model-store/backend divergence | A static replay that claims SQLite/Postgres support and then fails on that backend is a backend divergence failure. Generated dynamic backend reruns compare the same generated workload against a serialized in-memory reference and also fail with divergence artifacts on mismatch. |
+| Backend unsupported features | If a static replay uses a model-store-only introspection hook or generated scheduler exchange pattern that the backend replay driver cannot own, SQLite/Postgres static replay must mark it unsupported at fixture review time with a concrete reason. Runtime-visible semantics cannot use this escape hatch; they must be covered by generated dynamic backend reruns or another production-backed lane. |
 | Schema compatibility | Replay loaders accept the current schema and explicitly supported older schemas. Unsupported schemas fail with an actionable migration message; they do not run best-effort. |
 | Migration behavior | A replay schema migrator must preserve script hashes, seed, generator version, semantic boundary order, and expected oracle id. Migration output is written beside the original and is reviewed before replacing a fixture. |
 | Artifact completeness | Every failure/minimization output includes the original trace, minimized trace when available, replay command, fixture promotion metadata, and backend divergence report if any backend replay was attempted. |
@@ -1481,8 +1483,8 @@ PR 12.2: Default lane.
 
 PR 12.3: Full lane.
 
-- Add long randomized simulation, provider matrix, SQLite/Postgres replay, and
-  shard support.
+- Add long randomized simulation, provider matrix, generated SQLite/Postgres
+  dynamic backend reruns, and shard support.
 - Ensure missing external tools fail with actionable messages, matching the
   existing confidence-gate policy.
 
