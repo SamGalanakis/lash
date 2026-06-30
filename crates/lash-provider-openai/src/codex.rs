@@ -44,6 +44,8 @@ const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
 const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 const SESSION_WEBSOCKET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const SESSION_WEBSOCKET_FALLBACK_TTL: Duration = Duration::from_secs(60);
+const MAX_SESSION_WEBSOCKET_CACHE_ENTRIES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,13 +74,19 @@ struct CodexWebsocketSessionCache {
 
 impl std::fmt::Debug for CodexWebsocketSessionCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let len = self
+        let (sessions_len, fallback_sessions_len) = self
             .inner
             .lock()
-            .map(|sessions| sessions.by_session.len())
+            .map(|sessions| {
+                (
+                    sessions.by_session.len(),
+                    sessions.fallback_by_session.len(),
+                )
+            })
             .unwrap_or_default();
         f.debug_struct("CodexWebsocketSessionCache")
-            .field("sessions", &len)
+            .field("sessions", &sessions_len)
+            .field("fallback_sessions", &fallback_sessions_len)
             .finish()
     }
 }
@@ -86,6 +94,12 @@ impl std::fmt::Debug for CodexWebsocketSessionCache {
 #[derive(Default)]
 struct CodexWebsocketSessions {
     by_session: HashMap<String, CodexWebsocketSessionEntry>,
+    fallback_by_session: HashMap<String, CodexWebsocketFallbackState>,
+}
+
+struct CodexWebsocketFallbackState {
+    until: Instant,
+    reason: String,
 }
 
 struct CodexWebsocketSessionEntry {
@@ -137,6 +151,7 @@ struct CodexWebsocketAttemptDiagnostics {
     sent_input_items: usize,
     request_bytes: usize,
     retry_after_stale_previous_response: bool,
+    retry_after_dead_reused_connection: bool,
 }
 
 struct CodexWebSocketAttemptError {
@@ -589,9 +604,89 @@ impl CodexProvider {
 
     fn prune_idle_websocket_sessions(sessions: &mut CodexWebsocketSessions) {
         let now = Instant::now();
+        Self::prune_expired_websocket_fallbacks(sessions, now);
+        // Dropping a cached WebSocketStream closes the socket. This prune path is
+        // deliberately synchronous because the cache lock is provider-local.
         sessions.by_session.retain(|_, entry| {
             entry.busy || now.duration_since(entry.last_used) <= SESSION_WEBSOCKET_CACHE_TTL
         });
+    }
+
+    fn prune_expired_websocket_fallbacks(sessions: &mut CodexWebsocketSessions, now: Instant) {
+        sessions
+            .fallback_by_session
+            .retain(|_, fallback| fallback.until > now);
+    }
+
+    fn enforce_websocket_session_cache_cap(sessions: &mut CodexWebsocketSessions) {
+        let excess = sessions
+            .by_session
+            .len()
+            .saturating_sub(MAX_SESSION_WEBSOCKET_CACHE_ENTRIES);
+        if excess == 0 {
+            return;
+        }
+
+        let mut removable = sessions
+            .by_session
+            .iter()
+            .filter(|(_, entry)| !entry.busy)
+            .map(|(session_id, entry)| (session_id.clone(), entry.last_used))
+            .collect::<Vec<_>>();
+        removable.sort_by_key(|(_, last_used)| *last_used);
+        for (session_id, _) in removable.into_iter().take(excess) {
+            sessions.by_session.remove(&session_id);
+        }
+    }
+
+    fn websocket_fallback_reason(&self, req: &LlmRequest) -> Option<String> {
+        let session_id = req.session_id.as_deref()?;
+        let mut sessions = self
+            .websocket_sessions
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::prune_expired_websocket_fallbacks(&mut sessions, Instant::now());
+        sessions
+            .fallback_by_session
+            .get(session_id)
+            .map(|fallback| fallback.reason.clone())
+    }
+
+    fn record_websocket_fallback(&self, req: &LlmRequest, error: &LlmTransportError) {
+        let Some(session_id) = req.session_id.as_deref() else {
+            return;
+        };
+        let mut sessions = self
+            .websocket_sessions
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        Self::prune_expired_websocket_fallbacks(&mut sessions, now);
+        let reason = error
+            .code
+            .as_deref()
+            .map(|code| format!("{code}: {}", error.message))
+            .unwrap_or_else(|| error.message.clone());
+        sessions.fallback_by_session.insert(
+            session_id.to_string(),
+            CodexWebsocketFallbackState {
+                until: now + SESSION_WEBSOCKET_FALLBACK_TTL,
+                reason,
+            },
+        );
+    }
+
+    fn clear_websocket_fallback(&self, req: &LlmRequest) {
+        if let Some(session_id) = req.session_id.as_deref() {
+            let mut sessions = self
+                .websocket_sessions
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            sessions.fallback_by_session.remove(session_id);
+        }
     }
 
     async fn connect_websocket(
@@ -656,7 +751,10 @@ impl CodexProvider {
                     output_started: false,
                     stale_previous_response: false,
                 })?;
-            headers.insert("session_id", value.clone());
+            // Lash currently exposes one stable provider session key. Codex
+            // upstream has separate session/thread ids, while PI uses this same
+            // gateway path with one id for both session affinity headers.
+            headers.insert("session-id", value.clone());
             headers.insert("x-client-request-id", value);
         }
         if let Some(account_id) = self.account_id.as_deref() {
@@ -725,6 +823,7 @@ impl CodexProvider {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             Self::prune_idle_websocket_sessions(&mut sessions);
+            Self::enforce_websocket_session_cache_cap(&mut sessions);
             if let Some(entry) = sessions.by_session.get_mut(&session_id) {
                 if entry.busy {
                     AcquireDecision::ConnectEphemeral
@@ -808,6 +907,8 @@ impl CodexProvider {
                 last_used: Instant::now(),
             },
         );
+        Self::prune_idle_websocket_sessions(&mut sessions);
+        Self::enforce_websocket_session_cache_cap(&mut sessions);
     }
 
     fn response_state_started_output(state: &shared::ResponsesStreamState) -> bool {
@@ -847,9 +948,11 @@ impl CodexProvider {
             response_start_timeout(timeouts.request_timeout, timeouts.chunk_timeout, true)
                 .unwrap_or(timeouts.chunk_timeout);
         let mut retry_after_stale_previous_response = false;
+        let mut retry_after_dead_reused_connection = false;
         let mut allow_cached_context = self.websocket_continuation_enabled();
         loop {
             let lease = self.acquire_websocket(&req, connect_timeout).await?;
+            let reused_connection = lease.reused;
             let plan = self.websocket_request_plan(
                 &full_body,
                 lease.continuation.as_ref(),
@@ -863,6 +966,7 @@ impl CodexProvider {
                     lease,
                     plan,
                     retry_after_stale_previous_response,
+                    retry_after_dead_reused_connection,
                     timeouts.chunk_timeout,
                 )
                 .await
@@ -883,6 +987,19 @@ impl CodexProvider {
                         "Codex WebSocket cached continuation was stale; retrying once with full context"
                     );
                 }
+                Err(err)
+                    if reused_connection
+                        && !err.events_seen
+                        && !retry_after_dead_reused_connection =>
+                {
+                    retry_after_dead_reused_connection = true;
+                    allow_cached_context = false;
+                    tracing::debug!(
+                        target: "lash_core::llm::codex_oauth",
+                        error = %err.error.message,
+                        "Codex WebSocket cached connection failed before stream start; reconnecting once with full context"
+                    );
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -895,6 +1012,7 @@ impl CodexProvider {
         lease: CodexWebsocketLease,
         plan: CodexWebsocketRequestPlan,
         retry_after_stale_previous_response: bool,
+        retry_after_dead_reused_connection: bool,
         read_timeout: Duration,
     ) -> Result<LlmResponse, CodexWebSocketAttemptError> {
         let stream_events = req.stream_events.clone();
@@ -925,6 +1043,7 @@ impl CodexProvider {
             sent_input_items: plan.sent_input_items,
             request_bytes: request_body.len(),
             retry_after_stale_previous_response,
+            retry_after_dead_reused_connection,
         };
         self.emit_websocket_attempt_trace(provider_trace.as_ref(), &diagnostics);
         let mut lease = Some(lease);
@@ -1137,13 +1256,14 @@ impl CodexProvider {
 
     fn websocket_http_summary(&self, diagnostics: &CodexWebsocketAttemptDiagnostics) -> String {
         format!(
-            "WS {} transport={:?} reused={} cached={} cache_miss={} retry_after_stale={} input_items={}/{} previous_response_id={} request_bytes={}",
+            "WS {} transport={:?} reused={} cached={} cache_miss={} retry_after_stale={} retry_after_dead_reused={} input_items={}/{} previous_response_id={} request_bytes={}",
             self.websocket_url,
             diagnostics.configured_transport,
             diagnostics.reused_connection,
             diagnostics.cached_request,
             diagnostics.cache_miss_reason.unwrap_or("<none>"),
             diagnostics.retry_after_stale_previous_response,
+            diagnostics.retry_after_dead_reused_connection,
             diagnostics.sent_input_items,
             diagnostics.full_input_items,
             diagnostics
@@ -1167,6 +1287,7 @@ impl CodexProvider {
             "continuation_available": diagnostics.continuation_available,
             "cache_miss_reason": diagnostics.cache_miss_reason,
             "retry_after_stale_previous_response": diagnostics.retry_after_stale_previous_response,
+            "retry_after_dead_reused_connection": diagnostics.retry_after_dead_reused_connection,
             "previous_response_id": diagnostics.previous_response_id,
             "full_input_items": diagnostics.full_input_items,
             "sent_input_items": diagnostics.sent_input_items,
@@ -1313,19 +1434,45 @@ impl Provider for CodexProvider {
 
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         if !matches!(self.transport, CodexTransport::Sse) {
-            match self.complete_websocket(req.clone()).await {
-                Ok(response) => return Ok(response),
-                Err(err) if matches!(self.transport, CodexTransport::Auto) && !err.events_seen => {
-                    self.clear_continuation(&req);
-                    tracing::debug!(
-                        target: "lash_core::llm::codex_oauth",
-                        error = %err.error.message,
-                        "Codex WebSocket failed before stream start; falling back to SSE"
-                    );
-                }
-                Err(err) => {
-                    self.clear_continuation(&req);
-                    return Err(err.error);
+            let fallback_reason = matches!(self.transport, CodexTransport::Auto)
+                .then(|| self.websocket_fallback_reason(&req))
+                .flatten();
+            if let Some(reason) = fallback_reason {
+                emit_provider_trace(
+                    req.provider_trace.as_ref(),
+                    "codex",
+                    &json!({
+                        "type": "lash.codex.websocket_fallback_skip",
+                        "transport": format!("{:?}", self.transport),
+                        "reason": reason,
+                    })
+                    .to_string(),
+                );
+                tracing::debug!(
+                    target: "lash_core::llm::codex_oauth",
+                    reason = %reason,
+                    "Skipping Codex WebSocket for session with active Auto fallback"
+                );
+            } else {
+                match self.complete_websocket(req.clone()).await {
+                    Ok(response) => {
+                        self.clear_websocket_fallback(&req);
+                        return Ok(response);
+                    }
+                    Err(err)
+                        if matches!(self.transport, CodexTransport::Auto) && !err.events_seen =>
+                    {
+                        self.record_websocket_fallback(&req, &err.error);
+                        tracing::debug!(
+                            target: "lash_core::llm::codex_oauth",
+                            error = %err.error.message,
+                            "Codex WebSocket failed before stream start; falling back to SSE"
+                        );
+                    }
+                    Err(err) => {
+                        self.clear_continuation(&req);
+                        return Err(err.error);
+                    }
                 }
             }
         }
@@ -1350,8 +1497,10 @@ impl Provider for CodexProvider {
             .header("User-Agent", Self::codex_user_agent())
             .json(&body);
         if let Some(session_id) = req.session_id.as_deref() {
+            // See the WebSocket header path: Lash has one provider session key,
+            // so use it for Codex gateway affinity and request correlation.
             http = http
-                .header("session_id", session_id)
+                .header("session-id", session_id)
                 .header("x-client-request-id", session_id);
         }
         if let Some(id) = account_id.as_deref() {
@@ -1629,7 +1778,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite::handshake::server::{
+        Request as WsHandshakeRequest, Response as WsHandshakeResponse,
+    };
     use tokio_tungstenite::tungstenite::protocol::Message as TestWsMessage;
 
     fn process_event(state: &mut CodexStreamState, event: Value) {
@@ -1698,6 +1850,11 @@ mod tests {
             message_id: &'static str,
             text: &'static str,
         },
+        CompleteAndClose {
+            response_id: &'static str,
+            message_id: &'static str,
+            text: &'static str,
+        },
         Error {
             message: &'static str,
         },
@@ -1716,12 +1873,20 @@ mod tests {
     struct ScriptedWsServer {
         url: String,
         captured: Arc<Mutex<Vec<Value>>>,
+        handshakes: Arc<Mutex<Vec<Vec<(String, String)>>>>,
         task: JoinHandle<()>,
     }
 
     impl ScriptedWsServer {
         fn captured(&self) -> Vec<Value> {
             self.captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn handshakes(&self) -> Vec<Vec<(String, String)>> {
+            self.handshakes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
@@ -1739,8 +1904,10 @@ mod tests {
         let addr = listener.local_addr().expect("ws addr");
         let actions = Arc::new(Mutex::new(VecDeque::from(actions)));
         let captured = Arc::new(Mutex::new(Vec::new()));
+        let handshakes = Arc::new(Mutex::new(Vec::new()));
         let task_actions = Arc::clone(&actions);
         let task_captured = Arc::clone(&captured);
+        let task_handshakes = Arc::clone(&handshakes);
         let task = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -1748,8 +1915,27 @@ mod tests {
                 };
                 let actions = Arc::clone(&task_actions);
                 let captured = Arc::clone(&task_captured);
+                let handshakes = Arc::clone(&task_handshakes);
                 tokio::spawn(async move {
-                    let Ok(mut ws) = accept_async(stream).await else {
+                    let callback =
+                        move |request: &WsHandshakeRequest, response: WsHandshakeResponse| {
+                            let headers = request
+                                .headers()
+                                .iter()
+                                .filter_map(|(name, value)| {
+                                    value
+                                        .to_str()
+                                        .ok()
+                                        .map(|value| (name.as_str().to_string(), value.to_string()))
+                                })
+                                .collect::<Vec<_>>();
+                            handshakes
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .push(headers);
+                            Ok(response)
+                        };
+                    let Ok(mut ws) = accept_hdr_async(stream, callback).await else {
                         return;
                     };
                     while let Some(Ok(message)) = ws.next().await {
@@ -1783,6 +1969,16 @@ mod tests {
                             } => {
                                 send_completed_ws_response(&mut ws, response_id, message_id, text)
                                     .await;
+                            }
+                            ScriptedWsAction::CompleteAndClose {
+                                response_id,
+                                message_id,
+                                text,
+                            } => {
+                                send_completed_ws_response(&mut ws, response_id, message_id, text)
+                                    .await;
+                                let _ = ws.close(None).await;
+                                break;
                             }
                             ScriptedWsAction::Error { message } => {
                                 send_ws_json(
@@ -1836,6 +2032,7 @@ mod tests {
         ScriptedWsServer {
             url: format!("ws://{addr}/codex/responses"),
             captured,
+            handshakes,
             task,
         }
     }
@@ -1882,6 +2079,13 @@ mod tests {
     }
 
     impl HttpSseServer {
+        fn captured(&self) -> Vec<String> {
+            self.captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
         fn captured_len(&self) -> usize {
             self.captured
                 .lock()
@@ -1901,6 +2105,12 @@ mod tests {
         message_id: &'static str,
         text: &'static str,
     ) -> HttpSseServer {
+        spawn_http_sse_sequence(vec![(response_id, message_id, text)]).await
+    }
+
+    async fn spawn_http_sse_sequence(
+        responses: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> HttpSseServer {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind http");
@@ -1908,39 +2118,41 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let task_captured = Arc::clone(&captured);
         let task = tokio::spawn(async move {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            let mut request = Vec::new();
-            let mut buf = [0u8; 1024];
-            loop {
-                let Ok(n) = stream.read(&mut buf).await else {
+            for (response_id, message_id, text) in responses {
+                let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
-                if n == 0 {
-                    return;
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
                 }
-                request.extend_from_slice(&buf[..n]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
+                task_captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(String::from_utf8_lossy(&request).into_owned());
+                let item = assistant_item(message_id, text);
+                let body = format!(
+                    "data: {}\n\ndata: {}\n\n",
+                    json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                    json!({"type":"response.completed","response":{"id":response_id,"status":"completed","output":[assistant_item(message_id, text)],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}})
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
             }
-            task_captured
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(String::from_utf8_lossy(&request).into_owned());
-            let item = assistant_item(message_id, text);
-            let body = format!(
-                "data: {}\n\ndata: {}\n\n",
-                json!({"type":"response.output_item.done","output_index":0,"item":item}),
-                json!({"type":"response.completed","response":{"id":response_id,"status":"completed","output":[assistant_item(message_id, text)],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}})
-            );
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
         });
         HttpSseServer {
             url: format!("http://{addr}/codex/responses"),
@@ -2205,6 +2417,60 @@ mod tests {
         assert_eq!(websocket_body["input"], json!([]));
     }
 
+    #[test]
+    fn codex_websocket_session_cache_prunes_idle_entries_and_caps_oldest() {
+        let now = Instant::now();
+        let mut sessions = CodexWebsocketSessions::default();
+        sessions.by_session.insert(
+            "idle".to_string(),
+            CodexWebsocketSessionEntry {
+                connection: None,
+                continuation: None,
+                busy: false,
+                last_used: now - SESSION_WEBSOCKET_CACHE_TTL - Duration::from_secs(1),
+            },
+        );
+        sessions.by_session.insert(
+            "busy".to_string(),
+            CodexWebsocketSessionEntry {
+                connection: None,
+                continuation: None,
+                busy: true,
+                last_used: now - SESSION_WEBSOCKET_CACHE_TTL - Duration::from_secs(1),
+            },
+        );
+
+        CodexProvider::prune_idle_websocket_sessions(&mut sessions);
+
+        assert!(!sessions.by_session.contains_key("idle"));
+        assert!(sessions.by_session.contains_key("busy"));
+
+        sessions.by_session.clear();
+        for index in 0..(MAX_SESSION_WEBSOCKET_CACHE_ENTRIES + 3) {
+            sessions.by_session.insert(
+                format!("session-{index}"),
+                CodexWebsocketSessionEntry {
+                    connection: None,
+                    continuation: None,
+                    busy: false,
+                    last_used: now - Duration::from_secs((100 - index) as u64),
+                },
+            );
+        }
+
+        CodexProvider::enforce_websocket_session_cache_cap(&mut sessions);
+
+        assert_eq!(
+            sessions.by_session.len(),
+            MAX_SESSION_WEBSOCKET_CACHE_ENTRIES
+        );
+        assert!(!sessions.by_session.contains_key("session-0"));
+        assert!(sessions.by_session.contains_key(&format!(
+            "session-{}",
+            MAX_SESSION_WEBSOCKET_CACHE_ENTRIES + 2
+        )));
+    }
+
     #[tokio::test]
     async fn codex_scripted_websocket_full_turn_sends_response_create() {
         let ws = spawn_scripted_websocket(vec![ScriptedWsAction::Complete {
@@ -2229,6 +2495,16 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0]["type"], "response.create");
         assert!(captured[0].get("previous_response_id").is_none());
+        let headers = ws.handshakes();
+        assert_eq!(headers.len(), 1);
+        let header = |name: &str| {
+            headers[0]
+                .iter()
+                .find_map(|(header_name, value)| (header_name == name).then_some(value.as_str()))
+        };
+        assert_eq!(header("session-id"), Some("session-1"));
+        assert_eq!(header("x-client-request-id"), Some("session-1"));
+        assert_eq!(header("session_id"), None);
     }
 
     #[tokio::test]
@@ -2357,6 +2633,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_scripted_websocket_dead_reused_socket_reconnects_full_context() {
+        let ws = spawn_scripted_websocket(vec![
+            ScriptedWsAction::CompleteAndClose {
+                response_id: "resp_1",
+                message_id: "msg_1",
+                text: "answer",
+            },
+            ScriptedWsAction::Complete {
+                response_id: "resp_2",
+                message_id: "msg_2",
+                text: "reconnected",
+            },
+        ])
+        .await;
+        let mut provider = websocket_test_provider(
+            CodexTransport::WebsocketCached,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+
+        provider
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .await
+            .expect("first response");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let second = request(vec![
+            LlmMessage::text(LlmRole::User, "hello"),
+            LlmMessage::new(
+                LlmRole::Assistant,
+                vec![lash_core::llm::types::LlmContentBlock::Text {
+                    text: "answer".into(),
+                    response_meta: Some(ResponseTextMeta {
+                        id: Some("msg_1".to_string()),
+                        status: Some("completed".to_string()),
+                        phase: Some("final_answer".to_string()),
+                        ..ResponseTextMeta::default()
+                    }),
+                    cache_breakpoint: false,
+                }],
+            ),
+            LlmMessage::text(LlmRole::User, "next"),
+        ]);
+        let full_body = provider.build_request_body(&second, true).unwrap();
+        let response = provider
+            .complete(second)
+            .await
+            .expect("dead reused socket reconnect response");
+
+        assert_eq!(response.full_text, "reconnected");
+        assert!(
+            response
+                .http_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("retry_after_dead_reused=true")
+        );
+        let captured = ws.captured();
+        assert_eq!(captured.len(), 2);
+        assert!(captured[1].get("previous_response_id").is_none());
+        assert_eq!(captured[1]["input"], full_body["input"]);
+        assert_eq!(ws.handshakes().len(), 2);
+    }
+
+    #[tokio::test]
     async fn codex_scripted_websocket_mid_stream_failure_does_not_fallback() {
         let ws = spawn_scripted_websocket(vec![ScriptedWsAction::MidStreamError {
             message_id: "msg_1",
@@ -2393,6 +2733,52 @@ mod tests {
         assert_eq!(response.full_text, "fallback");
         assert_eq!(ws.captured().len(), 1);
         assert_eq!(http.captured_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn codex_auto_skips_websocket_while_session_fallback_is_active() {
+        let http = spawn_http_sse_sequence(vec![
+            ("resp_http_1", "msg_http_1", "fallback-one"),
+            ("resp_http_2", "msg_http_2", "fallback-two"),
+        ])
+        .await;
+        let mut provider = websocket_test_provider(
+            CodexTransport::Auto,
+            http.url.clone(),
+            "ws://127.0.0.1:1/codex/responses".to_string(),
+        );
+
+        let first = provider
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .await
+            .expect("first SSE fallback response");
+
+        assert_eq!(first.full_text, "fallback-one");
+        assert!(
+            provider
+                .websocket_fallback_reason(&request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+                .is_some()
+        );
+
+        let ws = spawn_scripted_websocket(vec![ScriptedWsAction::Complete {
+            response_id: "resp_ws",
+            message_id: "msg_ws",
+            text: "should-not-run",
+        }])
+        .await;
+        provider.websocket_url = ws.url.clone();
+        let second = provider
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "next")]))
+            .await
+            .expect("second SSE fallback response");
+
+        assert_eq!(second.full_text, "fallback-two");
+        assert_eq!(ws.captured().len(), 0);
+        assert_eq!(http.captured_len(), 2);
+        let sse_request = http.captured().remove(0);
+        assert!(sse_request.contains("session-id: session-1"));
+        assert!(sse_request.contains("x-client-request-id: session-1"));
+        assert!(!sse_request.contains("session_id:"));
     }
 
     #[tokio::test]

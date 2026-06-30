@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Credentialed live probe. This is intentionally opt-in and is not part of
+# normal CI; it copies local Codex auth into a temporary LASH_HOME.
+
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
 
@@ -156,6 +159,16 @@ if trace_arg:
                 stack.extend(current)
     if len(diagnostics) < 2:
         raise SystemExit(f"{transport}: expected at least two websocket diagnostics in {trace_path}")
+    required_keys = {
+        "reused_connection",
+        "cached_request",
+        "retry_after_stale_previous_response",
+        "retry_after_dead_reused_connection",
+    }
+    for index, item in enumerate(diagnostics):
+        missing = sorted(required_keys.difference(item))
+        if missing:
+            raise SystemExit(f"{transport}: websocket diagnostic {index} missing keys: {missing}")
     if transport in {"websocket_cached", "auto"}:
         followups = diagnostics[1:]
         if not any(item.get("reused_connection") is True for item in followups):
@@ -168,6 +181,9 @@ if trace_arg:
                 raise SystemExit(f"{transport}: second turn had no continuation metadata")
             reasons = sorted({str(item.get("cache_miss_reason")) for item in followups})
             print(f"{transport}: websocket reused; delta not sent because {', '.join(reasons)}", file=sys.stderr)
+        if any(item.get("retry_after_stale_previous_response") is True for item in followups):
+            if not any(item.get("cached_request") is False for item in followups):
+                raise SystemExit(f"{transport}: stale retry did not produce a full-context follow-up")
 PY
 
   echo "Codex websocket live multi-turn probe passed for $transport." >&2
