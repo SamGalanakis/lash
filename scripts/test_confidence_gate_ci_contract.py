@@ -153,7 +153,9 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         )
 
     def test_generated_postgres_dynamic_rerun_is_bounded_and_artifacted(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
         gate = GATE.read_text(encoding="utf-8")
+        env = broad_step_env(workflow)
 
         required_snippets = [
             "run_generated_postgres_dynamic_replay()",
@@ -166,6 +168,8 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, gate)
+        self.assertEqual(env["LASH_POSTGRES_GENERATED_PROFILE"], "fast-random")
+        self.assertEqual(env["LASH_POSTGRES_GENERATED_MAX_BOUNDARIES"], "72")
 
 
 if __name__ == "__main__":
