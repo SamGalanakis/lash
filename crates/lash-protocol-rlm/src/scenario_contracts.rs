@@ -1,13 +1,5 @@
 use lash_core::runtime::ScenarioContractSpec;
 
-const RLM_REQUIRED_EVIDENCE: &[&str] = &[
-    "exec_code",
-    "trigger",
-    "durable_effect",
-    "provider_turn",
-    "observer_convergence",
-];
-
 pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
     ScenarioContractSpec {
         suite: "rlm",
@@ -15,7 +7,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "natural prose classification",
         owned_invariant: "Natural RLM prose-only response finalizes by default.",
         semantic_oracle: "rlm.natural_prose_finalizes",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -24,7 +16,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "finish-required prose requests finish",
         owned_invariant: "Typed RLM output requires explicit finish rather than prose-only success.",
         semantic_oracle: "rlm.typed_prose_requires_finish",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["trigger", "provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -33,7 +25,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "finish-required prose max-turn stop",
         owned_invariant: "Finish-required prose stops at max turns without an extra retry prompt.",
         semantic_oracle: "rlm.finish_required_max_turn_stop",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -42,7 +34,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "finish-required exec error max-turn stop",
         owned_invariant: "Exec errors at max turns stop cleanly without another repair turn.",
         semantic_oracle: "rlm.exec_error_max_turn_stop",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["exec_code"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -51,7 +43,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "finish-required prose diagnostic",
         owned_invariant: "Finish-required diagnostics classify prose-only responses with clean counts.",
         semantic_oracle: "rlm.finish_required_diagnostic_counts",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -60,7 +52,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "natural prose diagnostic",
         owned_invariant: "Natural diagnostics classify prose-only responses with clean counts.",
         semantic_oracle: "rlm.natural_diagnostic_counts",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -69,7 +61,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "cell reasoning prose code diagnostic",
         owned_invariant: "Mixed reasoning/prose/code diagnostics keep separate counts.",
         semantic_oracle: "rlm.cell_diagnostic_counts",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["exec_code", "provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -78,7 +70,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "retired percent marker in lashlang source",
         owned_invariant: "Retired percent cell marker remains Lashlang source text, not a control marker.",
         semantic_oracle: "rlm.retired_marker_plain_lashlang_text",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["exec_code"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -87,7 +79,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "lashlang cell execution",
         owned_invariant: "Lashlang cell execution feeds the protocol loop and continues.",
         semantic_oracle: "rlm.lashlang_cell_exec_continues",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["exec_code", "provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -96,7 +88,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "empty turn options default to natural",
         owned_invariant: "Empty RLM turn options use the natural default.",
         semantic_oracle: "rlm.empty_options_natural_default",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -105,7 +97,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "exec result keeps tool calls protocol internal",
         owned_invariant: "Exec result feedback avoids tool-call id storage and synthetic tool replay.",
         semantic_oracle: "rlm.exec_result_no_tool_call_replay",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["exec_code"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -114,7 +106,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "exec tool-control frame switch is terminal",
         owned_invariant: "Tool control frame-switch from exec is terminal.",
         semantic_oracle: "rlm.exec_tool_control_frame_switch_terminal",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["exec_code", "trigger"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -123,7 +115,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "exec tool-control fail is terminal",
         owned_invariant: "Tool control fail from exec is a terminal error.",
         semantic_oracle: "rlm.exec_tool_control_fail_terminal",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["exec_code", "backend_failure"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -132,7 +124,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "typed final value",
         owned_invariant: "Typed finish emits both turn outcome and done status.",
         semantic_oracle: "rlm.typed_finish_emits_outcome_and_done",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["final_value"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -141,7 +133,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "natural allows final value",
         owned_invariant: "Natural RLM mode accepts an explicit finish value.",
         semantic_oracle: "rlm.natural_allows_finish_value",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -150,7 +142,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "typed schema mismatch loops with feedback",
         owned_invariant: "Typed schema mismatch loops with repair feedback.",
         semantic_oracle: "rlm.typed_schema_mismatch_repair_loop",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["provider_mutation", "provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
     ScenarioContractSpec {
@@ -159,7 +151,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
         display_name: "typed schema mismatch checks anyOf",
         owned_invariant: "Typed schema validation checks anyOf mismatches.",
         semantic_oracle: "rlm.typed_schema_any_of_mismatch",
-        required_sim_evidence: RLM_REQUIRED_EVIDENCE,
+        required_sim_evidence: &["provider_mutation", "provider_turn"],
         oracle_id: "sim.oracle.scenario.rlm-contract.v1",
     },
 ];

@@ -189,6 +189,6 @@ AGENT_WORKBENCH_E2E_ENDPOINT_URL="http://127.0.0.1:$((port_base + 33))" \
 
 step "Restate/Postgres/MinIO workers e2e"
 LASH_E2E_MINIO_PORT="$((port_base + 40))" \
-  just restate-postgres-workers-e2e
+  bash scripts/restate-postgres-workers-e2e.sh
 
 step "Push gate passed"

@@ -71,11 +71,11 @@
           </div>
           <dl class="def-list">
             <dt><code>LashlangToolBinding</code></dt>
-            <dd>Tool manifests choose the authored call path. <code>LashlangToolBinding::new(["board"], "play")</code> maps the tool to <code>board.play</code>; leaving it empty falls back to <code>tools.&lt;tool_name&gt;</code>. Module path segments must be lowercase ASCII identifiers, and duplicate callable paths are rejected when the tool catalog is built.</dd>
+            <dd>Tool manifests choose the authored call path. <code>LashlangToolBinding::new(["board"], "play")</code> maps the tool to <code>board.play</code>. Every callable catalog tool needs an explicit binding: a tool with no binding, or one whose module path is empty, is rejected when the tool catalog is built. Module path segments must be ASCII identifiers, and duplicate callable paths are rejected.</dd>
             <dt><code>LashlangHostCatalog</code></dt>
             <dd>The catalog records module instances, resource authority types, receiver operations, pure constructors, named host data types, and trigger-source event metadata. Trigger and trigger payloads are validated named object types such as <code>cron.Tick</code>; source values such as <code>cron.Schedule</code> remain opaque host identities.</dd>
-            <dt><code>PluginFactory::lashlang_resources</code></dt>
-            <dd>Plugins use this hook for language resources that are not ordinary tools: configured trigger-source constructors such as <code>cron.Schedule(...)</code>, typed resource constructors, and other host descriptor constructors. Zero-config trigger sources such as <code>ui.button.pressed({})</code> are added to the session catalog from <code>reg.triggers().declare(...)</code>. Session plugins can still register normal tools through <code>reg.tools()</code>; those tools become module operations through their manifest metadata.</dd>
+            <dt><code>PluginFactory::extension_contributions</code></dt>
+            <dd>Plugins contribute language resources that are not ordinary tools through this hook, which returns a <code>LashlangSurfaceContribution</code> (abilities, language features, and a <code>LashlangHostCatalog</code>) under the <code>lashlang.surface</code> extension id: configured trigger-source constructors such as <code>cron.Schedule(...)</code>, typed resource constructors, and other host descriptor constructors. Zero-config trigger sources such as <code>ui.button.pressed({})</code> are added to the session catalog from <code>reg.triggers().declare(...)</code>. Session plugins can still register normal tools through <code>reg.tools()</code>; those tools become module operations through their manifest metadata.</dd>
             <dt><code>LashlangAbilities</code></dt>
             <dd>The host enables process starts, sleep, process signals, and trigger registry operations explicitly. A configured process registry supplies the generic process plane; the Lashlang runtime derives process/lifecycle availability from that plane for RLM sessions. Plugins such as the built-in session-trigger plugin contribute trigger operations and resources.</dd>
             <dt><code>LashlangLanguageFeatures</code></dt>
@@ -86,7 +86,7 @@
     .with_lashlang_binding(LashlangToolBinding::new(["board"], "read"))
 }
 
-fn lashlang_resources(&self) -&gt; lashlang::LashlangHostCatalog {
+fn extension_contributions(&self) -&gt; Vec&lt;PluginExtensionContribution&gt; {
   let mut resources = lashlang::LashlangHostCatalog::new();
   resources.add_trigger_source_constructor(
     ["cron", "Schedule"],
@@ -96,7 +96,14 @@ fn lashlang_resources(&self) -&gt; lashlang::LashlangHostCatalog {
       vec![lashlang::TypeField { name: "fired_at".into(), ty: lashlang::TypeExpr::Str, optional: false }],
     ).expect("valid cron tick type"),
   ).expect("valid cron trigger source");
-  resources
+  vec![PluginExtensionContribution::new(
+    LASHLANG_SURFACE_EXTENSION_ID,
+    LashlangSurfaceContribution::new(
+      LashlangAbilities::default().with_triggers(),
+      LashlangLanguageFeatures::default(),
+      resources,
+    ),
+  ).expect("valid lashlang surface")]
 }</code></pre>
         </div>
 
@@ -278,13 +285,11 @@ core.triggers()
         <div class="section" id="terminator-effects">
           <div class="section-header">
             <h2>Terminator Effects</h2>
-            <p><code>finish</code>, <code>finish</code>, and <code>fail</code> are ability operations too, not VM-local short-circuits. The VM hands the terminal value to <code>ExecutionHost::perform</code> as <code>AbilityOp::Submit</code>, <code>Finish</code>, or <code>Fail</code> before unwinding. Default handlers pass the value through unchanged; custom handlers can transform it, observe it, or record it for replay. The VM still enforces divergence: the handler may change the value but cannot prevent termination.</p>
+            <p><code>finish</code> and <code>fail</code> are ability operations too, not VM-local short-circuits. The VM hands the terminal value to <code>ExecutionHost::perform</code> as <code>AbilityOp::Finish</code> or <code>Fail</code> before unwinding. Default handlers pass the value through unchanged; custom handlers can transform it, observe it, or record it for replay. The VM still enforces divergence: the handler may change the value but cannot prevent termination.</p>
           </div>
           <dl class="def-list">
-            <dt><code>AbilityOp::Submit(value)</code></dt>
-            <dd>Foreground program terminator. Runs once per paired <code>&lt;lashlang&gt;</code> block when the program reaches <code>finish value</code>; the value returned by the handler becomes <code>ExecutionOutcome::Finished</code>. RLM's host bridge passes it through unchanged.</dd>
             <dt><code>AbilityOp::Finish(value)</code></dt>
-            <dd>Process-mode terminator emitted by <code>finish value</code> inside a named <code>process</code> body. The handler-returned value becomes the process's terminal output.</dd>
+            <dd>The single program terminator, emitted by <code>finish value</code> in both foreground blocks and named <code>process</code> bodies. The VM's <code>VmMode</code> decides the outcome: a foreground block produces <code>VmOutcome::Finished</code> (running once per paired <code>&lt;lashlang&gt;</code> block) and a process body produces <code>VmOutcome::ProcessFinished</code>, with both mapping to <code>ExecutionOutcome::Finished</code>. The handler-returned value becomes the terminal output, and RLM's host bridge passes it through unchanged. The earlier foreground <code>submit</code> keyword has been removed; the parser rejects it.</dd>
             <dt><code>AbilityOp::Fail(value)</code></dt>
             <dd>Process-mode failure path emitted by <code>fail value</code>. The handler may transform the value but the outcome stays on the failure path (<code>ExecutionOutcome::Failed</code>).</dd>
             <dt>Handler errors</dt>

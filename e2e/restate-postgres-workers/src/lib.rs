@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use lash::durability::EffectHost;
 use lash::persistence::{
     AttachmentStore, LashlangArtifactStore, ProcessExecutionEnvStore, SessionStoreFactory,
@@ -23,7 +23,9 @@ use lash_s3_store::{S3AttachmentStore, S3AttachmentStoreConfig};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +39,8 @@ pub const EXPECTED_PARENT_DURABLE_INPUT_TEXT: &str = "parent-durable-input-compl
 pub const EXPECTED_TOOL_BATCH_TEXT: &str = "tool-batch-complete";
 pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
 pub const ATTACHMENT_MIME: &str = "image/png";
+pub const E2E_PRODUCT_STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+pub const LASH_E2E_TOKIO_STACK_BYTES_ENV: &str = "LASH_E2E_TOKIO_STACK_BYTES";
 
 pub fn default_session_originator_scope_id() -> String {
     format!("session:{DEFAULT_SESSION_ID}")
@@ -54,6 +58,25 @@ pub fn required_env(name: &str) -> Result<String> {
     std::env::var(name).with_context(|| format!("{name} must be set"))
 }
 
+pub fn e2e_tokio_thread_stack_bytes() -> Result<usize> {
+    e2e_tokio_thread_stack_bytes_from_raw(std::env::var(LASH_E2E_TOKIO_STACK_BYTES_ENV).ok())
+}
+
+fn e2e_tokio_thread_stack_bytes_from_raw(raw: Option<String>) -> Result<usize> {
+    let Some(raw) = raw else {
+        return Ok(E2E_PRODUCT_STACK_BUDGET_BYTES);
+    };
+    let stack_bytes = raw.parse::<usize>().with_context(|| {
+        format!("{LASH_E2E_TOKIO_STACK_BYTES_ENV} must be an integer byte count")
+    })?;
+    if stack_bytes > E2E_PRODUCT_STACK_BUDGET_BYTES {
+        bail!(
+            "{LASH_E2E_TOKIO_STACK_BYTES_ENV}={stack_bytes} exceeds product/e2e stack budget {E2E_PRODUCT_STACK_BUDGET_BYTES}; stack growth above 2 MiB is a runtime bug, not a CI default"
+        );
+    }
+    Ok(stack_bytes)
+}
+
 pub fn s3_store_from_env() -> Result<S3AttachmentStore> {
     S3AttachmentStore::from_config(S3AttachmentStoreConfig {
         endpoint_url: Some(env("MINIO_ENDPOINT", "http://minio:9000")),
@@ -65,6 +88,42 @@ pub fn s3_store_from_env() -> Result<S3AttachmentStore> {
         path_style: true,
     })
     .context("build S3 attachment store")
+}
+
+#[cfg(test)]
+mod stack_policy_tests {
+    use super::{E2E_PRODUCT_STACK_BUDGET_BYTES, e2e_tokio_thread_stack_bytes_from_raw};
+
+    #[test]
+    fn e2e_tokio_stack_policy_defaults_to_product_budget_and_rejects_growth() {
+        assert_eq!(
+            e2e_tokio_thread_stack_bytes_from_raw(None).expect("default stack budget"),
+            E2E_PRODUCT_STACK_BUDGET_BYTES
+        );
+        assert_eq!(
+            e2e_tokio_thread_stack_bytes_from_raw(Some(E2E_PRODUCT_STACK_BUDGET_BYTES.to_string()))
+                .expect("exact stack budget"),
+            E2E_PRODUCT_STACK_BUDGET_BYTES
+        );
+        let too_large = e2e_tokio_thread_stack_bytes_from_raw(Some(
+            (E2E_PRODUCT_STACK_BUDGET_BYTES + 1).to_string(),
+        ))
+        .expect_err("larger product/e2e stacks must fail loudly");
+        assert!(
+            too_large
+                .to_string()
+                .contains("exceeds product/e2e stack budget"),
+            "unexpected stack-budget error: {too_large:#}"
+        );
+        let invalid = e2e_tokio_thread_stack_bytes_from_raw(Some("not-a-number".to_string()))
+            .expect_err("invalid stack byte count must fail");
+        assert!(
+            invalid
+                .to_string()
+                .contains("must be an integer byte count"),
+            "unexpected parse error: {invalid:#}"
+        );
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -854,22 +913,32 @@ struct E2eTools {
     fail_once: bool,
 }
 
+type E2eToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
+
 #[async_trait::async_trait]
 impl StaticToolExecute for E2eTools {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        match call.name {
-            "app_lookup" => self.app_lookup(call).await,
-            "async_lookup" => self.async_lookup(call).await,
-            "batch_side_effect" => self.batch_side_effect(call).await,
-            "make_attachment" => self.make_attachment(call).await,
-            "crash_once" => self.crash_once(call).await,
-            "durable_input_request" => self.durable_input_request(call).await,
-            other => ToolResult::err_fmt(format_args!("unknown e2e tool `{other}`")),
-        }
+        self.execute_selected_tool(call).await
     }
 }
 
 impl E2eTools {
+    fn execute_selected_tool<'a>(&'a self, call: ToolCall<'a>) -> E2eToolFuture<'a> {
+        match call.name {
+            "app_lookup" => Box::pin(self.app_lookup(call)),
+            "async_lookup" => Box::pin(self.async_lookup(call)),
+            "batch_side_effect" => Box::pin(self.batch_side_effect(call)),
+            "make_attachment" => Box::pin(self.make_attachment(call)),
+            "crash_once" => Box::pin(self.crash_once(call)),
+            "durable_input_request" => Box::pin(self.durable_input_request(call)),
+            other => {
+                Box::pin(
+                    async move { ToolResult::err_fmt(format_args!("unknown e2e tool `{other}`")) },
+                )
+            }
+        }
+    }
+
     async fn app_lookup(&self, call: ToolCall<'_>) -> ToolResult {
         let workflow_id = workflow_id_from_args(call.context.session_id(), call.args);
         let key = call

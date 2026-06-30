@@ -1,0 +1,16 @@
+{
+  "schema": "lash.sim.failing-trace-fixture.v1",
+  "fixture_id": "standard-max-turn-stop-missing",
+  "seed": 47,
+  "profile": "fast-random",
+  "max_boundaries": 32,
+  "mutation": {
+    "contract_execution_field": {
+      "contract": "standard.max_turns_after_tool_result",
+      "pointer": "/result/turn_outcomes/0/stop_reason",
+      "replacement": "runtime_error"
+    }
+  },
+  "expected_oracle_id": "sim.oracle.scenario.standard-contract.v1:standard_protocol_scenario_max_turns_terminates_after_tool_result",
+  "expected_reason_contains": "fixed-source replay validation"
+}

@@ -290,19 +290,15 @@ async fn cross_backend_active_turn_cancel_then_turn_agrees() {
     // Variant B: cancel BEFORE turn 1 runs (closest to the recorded trace
     // timing: cancel precedes turn 1's AfterWork checkpoint).
     let (mem_core, mem_tx) = build_in_memory(8).await;
-    let (b_mem, b_mem_cancel) =
-        drive_cancel_before_turn(&mem_core, &mem_tx, "mem-B").await;
+    let (b_mem, b_mem_cancel) = drive_cancel_before_turn(&mem_core, &mem_tx, "mem-B").await;
     let (sq_core, sq_tx) = build_sqlite(&tmp.path().join("sqlite-B"), 8).await;
-    let (b_sq, b_sq_cancel) =
-        drive_cancel_before_turn(&sq_core, &sq_tx, "sql-B").await;
+    let (b_sq, b_sq_cancel) = drive_cancel_before_turn(&sq_core, &sq_tx, "sql-B").await;
 
     // Variant A: cancel AFTER turn 1 (task-literal ordering).
     let (mem_core_a, mem_tx_a) = build_in_memory(8).await;
-    let (a_mem, a_mem_cancel) =
-        drive_cancel_after_turn(&mem_core_a, &mem_tx_a, "mem-A").await;
+    let (a_mem, a_mem_cancel) = drive_cancel_after_turn(&mem_core_a, &mem_tx_a, "mem-A").await;
     let (sq_core_a, sq_tx_a) = build_sqlite(&tmp.path().join("sqlite-A"), 8).await;
-    let (a_sq, a_sq_cancel) =
-        drive_cancel_after_turn(&sq_core_a, &sq_tx_a, "sql-A").await;
+    let (a_sq, a_sq_cancel) = drive_cancel_after_turn(&sq_core_a, &sq_tx_a, "sql-A").await;
 
     // Variant C: no cancel control (active-turn input should be claimed).
     let (mem_core_c, mem_tx_c) = build_in_memory(8).await;
@@ -339,11 +335,20 @@ async fn cross_backend_active_turn_cancel_then_turn_agrees() {
     println!("  in-memory turns:  {d_mem:#?}");
     println!("  sqlite    turns:  {d_sq:#?}");
 
-    assert_eq!(b_mem_cancel, b_sq_cancel, "variant B cancel outcome diverged");
+    assert_eq!(
+        b_mem_cancel, b_sq_cancel,
+        "variant B cancel outcome diverged"
+    );
     assert_eq!(b_mem, b_sq, "variant B per-turn output diverged");
-    assert_eq!(a_mem_cancel, a_sq_cancel, "variant A cancel outcome diverged");
+    assert_eq!(
+        a_mem_cancel, a_sq_cancel,
+        "variant A cancel outcome diverged"
+    );
     assert_eq!(a_mem, a_sq, "variant A per-turn output diverged");
     assert_eq!(c_mem, c_sq, "variant C (control) per-turn output diverged");
-    assert_eq!(d_mem_cancel, d_sq_cancel, "variant D cancel outcome diverged");
+    assert_eq!(
+        d_mem_cancel, d_sq_cancel,
+        "variant D cancel outcome diverged"
+    );
     assert_eq!(d_mem, d_sq, "variant D per-turn output diverged");
 }

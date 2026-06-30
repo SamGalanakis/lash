@@ -18,12 +18,10 @@ use lash_restate_postgres_workers_e2e::{
     DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT,
     EXPECTED_PARENT_DURABLE_INPUT_TEXT, HealthResponse, TurnRequest, TurnResponse, TurnScenario,
     build_e2e_core, default_session_child_originator_scope_pattern,
-    default_session_originator_scope_id, ensure_e2e_schema, env, process_registry_from_storage,
-    record_terminal_result, record_turn_activity, record_worker_event, required_env,
-    s3_store_from_env,
+    default_session_originator_scope_id, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
+    process_registry_from_storage, record_terminal_result, record_turn_activity,
+    record_worker_event, required_env, s3_store_from_env,
 };
-
-const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 fn terminal_error(err: impl Display) -> TerminalError {
     TerminalError::new(err.to_string())
@@ -110,11 +108,28 @@ impl AppState {
         let controller = RestateRuntimeEffectController::new(ctx);
         let core = self.build_core().map_err(terminal_error)?;
         if request.scenario == TurnScenario::SignalProcess {
-            return self
-                .signal_process(&controller, &core, &request)
+            return Box::pin(self.signal_process(&controller, &core, &request))
                 .await
                 .map(Json);
         }
+
+        if request.scenario == TurnScenario::DrainQueued {
+            return Box::pin(self.drain_queued_turn_with_restate(&controller, &core, request))
+                .await
+                .map(Json);
+        }
+
+        Box::pin(self.main_turn_with_restate(&controller, &core, request))
+            .await
+            .map(Json)
+    }
+
+    async fn drain_queued_turn_with_restate(
+        &self,
+        controller: &RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+        core: &lash::RlmCore,
+        request: TurnRequest,
+    ) -> HandlerResult<TurnResponse> {
         let session_execution_owner_id = format!("E2eTurnWorkflow/{}/run", request.workflow_id);
         let session_execution_owner = LeaseOwnerIdentity::opaque(
             session_execution_owner_id.clone(),
@@ -129,36 +144,54 @@ impl AppState {
 
         let cursor = session.observe().current_observation().cursor;
         let cursor_text = cursor.as_str().to_string();
-        if request.scenario == TurnScenario::DrainQueued {
-            let sink = RecordingTurnSink::new(
-                self.storage.pool().clone(),
-                request.workflow_id.clone(),
-                self.worker_id.clone(),
-                "queued",
-                Some(cursor_text.clone()),
-            );
-            let turn = session
-                .queued_turn()
-                .drain_id(request.workflow_id.clone())
-                .effects(&controller)
-                .stream_to(&sink)
-                .await
-                .map_err(terminal_error)?;
-            let final_value = turn
-                .as_ref()
-                .and_then(|turn| turn.final_value().cloned())
-                .unwrap_or(serde_json::Value::Null);
-            return self
-                .finish_response(
-                    &request,
-                    final_value,
-                    sink.count().await,
-                    Some(cursor_text),
-                    turn.is_some(),
-                )
-                .await
-                .map(Json);
-        }
+        let sink = RecordingTurnSink::new(
+            self.storage.pool().clone(),
+            request.workflow_id.clone(),
+            self.worker_id.clone(),
+            "queued",
+            Some(cursor_text.clone()),
+        );
+        let turn = session
+            .queued_turn()
+            .drain_id(request.workflow_id.clone())
+            .effects(controller)
+            .stream_to(&sink)
+            .await
+            .map_err(terminal_error)?;
+        let final_value = turn
+            .as_ref()
+            .and_then(|turn| turn.final_value().cloned())
+            .unwrap_or(serde_json::Value::Null);
+        self.finish_response(
+            &request,
+            final_value,
+            sink.count().await,
+            Some(cursor_text),
+            turn.is_some(),
+        )
+        .await
+    }
+
+    async fn main_turn_with_restate(
+        &self,
+        controller: &RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+        core: &lash::RlmCore,
+        request: TurnRequest,
+    ) -> HandlerResult<TurnResponse> {
+        let session_execution_owner_id = format!("E2eTurnWorkflow/{}/run", request.workflow_id);
+        let session_execution_owner = LeaseOwnerIdentity::opaque(
+            session_execution_owner_id.clone(),
+            format!("{session_execution_owner_id}/incarnation"),
+        );
+        let session = core
+            .session(DEFAULT_SESSION_ID)
+            .session_execution_owner(session_execution_owner)
+            .open()
+            .await
+            .map_err(terminal_error)?;
+
+        let cursor = session.observe().current_observation().cursor;
+        let cursor_text = cursor.as_str().to_string();
 
         let sink = RecordingTurnSink::new(
             self.storage.pool().clone(),
@@ -172,7 +205,7 @@ impl AppState {
         let turn = session
             .turn(input)
             .turn_id(request.workflow_id.clone())
-            .effects(&controller)
+            .effects(controller)
             .stream_to(&sink)
             .await
             .map_err(terminal_error)?;
@@ -219,7 +252,6 @@ impl AppState {
             false,
         )
         .await
-        .map(Json)
     }
 
     async fn finish_response(
@@ -506,10 +538,7 @@ impl E2eTurnWorkflow for E2eTurnWorkflowImpl {
 }
 
 fn main() -> Result<()> {
-    let stack_bytes = std::env::var("LASH_E2E_TOKIO_STACK_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    let stack_bytes = e2e_tokio_thread_stack_bytes()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(stack_bytes)

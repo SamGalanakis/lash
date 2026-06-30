@@ -86,7 +86,7 @@ sequenceDiagram
         <div class="section">
           <div class="section-header">
             <h2>AgentFrameSwitch Continuations</h2>
-            <p>RLM's <code>continue_as</code> tool ends the current trajectory and creates a fresh AgentFrame in the same session with the packed <code>task</code> + <code>seed</code>. The low-level runtime exposes this as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>. App hosts call <code>TurnBuilder::stream_to</code>, <code>run</code>, or pull-style <code>stream</code>; the <code>lash</code> facade drives AgentFrame chains and returns the final turn result. The underlying runtime primitive is <code>stream_turn_with_agent_frames</code>.</p>
+            <p>RLM's <code>continue_as</code> tool ends the current trajectory and creates a fresh AgentFrame in the same session with the packed <code>task</code> + <code>seed</code>. The low-level runtime exposes this as <code>TurnOutcome::AgentFrameSwitch { frame_id, task }</code>. App hosts call <code>TurnBuilder::stream_to</code>, <code>run</code>, or pull-style <code>stream</code>; the <code>lash</code> facade drives AgentFrame chains and returns the final turn result. The underlying runtime primitive is <code>stream_turn_with_agent_frames</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">AgentFrameSwitch drive loop (runtime internal)</div>
@@ -118,7 +118,7 @@ flowchart LR
               </tbody>
             </table>
           </div>
-          <p>Limits are configured via <code>ToolOutputBudgetConfig</code> (<code>ToolOutputBudgetMode::{Bytes, Tokens}</code>; defaults: 16 KiB, 400 lines). RLM reuses this projector for its own <code>print</code> observations through <code>project_observation_text</code>.</p>
+          <p>Limits are configured via <code>ToolOutputBudgetConfig</code> (<code>ToolOutputBudgetMode::{Bytes, Tokens}</code>; defaults: 16 KiB, 400 lines). RLM budgets its own <code>print</code> observation history with a separate <code>BudgetedJsonProjector</code> built by <code>print_history_projector</code>.</p>
         </div>
 
         <div class="section">

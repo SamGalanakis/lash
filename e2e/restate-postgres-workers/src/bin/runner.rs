@@ -14,8 +14,8 @@ use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
     EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_PARENT_DURABLE_INPUT_TEXT,
     EXPECTED_TOOL_BATCH_TEXT, ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse,
-    TurnScenario, build_e2e_core, ensure_e2e_schema, env, expected_attachment_bytes,
-    process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
+    TurnScenario, build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
+    expected_attachment_bytes, process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -23,13 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
-
 fn main() -> Result<()> {
-    let stack_bytes = std::env::var("LASH_E2E_TOKIO_STACK_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    let stack_bytes = e2e_tokio_thread_stack_bytes()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(stack_bytes)

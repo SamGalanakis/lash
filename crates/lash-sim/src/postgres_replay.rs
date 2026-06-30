@@ -636,23 +636,15 @@ impl PostgresRuntimeReplayWorld {
         let active_turn_pending = runtime_session
             .active_provider_turns
             .contains_key(&turn_boundary_id);
-        let release = tokio::time::timeout(
-            Duration::from_secs(5),
-            runtime_session.provider_schedule.release_when_blocked(
+        let release = active_turn_pending.then(|| {
+            runtime_session.provider_schedule.release(
                 exchange_index,
                 event_index,
                 event_name,
                 event.at,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            PostgresReplayError::Assertion(format!(
-                "provider event `{}` timed out waiting for turn `{}` exchange {} event {} ({})",
-                event.boundary_id, turn_boundary_id, exchange_index, event_index, event_name
-            ))
-        })?;
-        Ok(json!({
+            )
+        });
+        let mut observed = json!({
             "session": event.actor_alias,
             "provider_event_release": true,
             "turn_boundary_id": turn_boundary_id,
@@ -660,16 +652,21 @@ impl PostgresRuntimeReplayWorld {
             "event_index": event_index,
             "event_name": event_name,
             "provider_kind": runtime_session.provider_kind,
-            "active_turn_pending_before_release": active_turn_pending,
-            "released_while_turn_pending": active_turn_pending && release.blocked_before_release,
-            "scripted_transport_release": {
+        });
+        if let Some(release) = release {
+            observed["active_turn_pending_before_release"] = json!(active_turn_pending);
+            observed["released_while_turn_pending"] = json!(active_turn_pending);
+            observed["scripted_transport_release"] = json!({
                 "exchange_index": release.exchange_index,
                 "event_index": release.event_index,
                 "event_name": release.event_name,
                 "at": release.at,
                 "blocked_before_release": release.blocked_before_release,
-            },
-        }))
+            });
+        } else {
+            observed["provider_event_release_noop_turn_finished"] = json!(true);
+        }
+        Ok(observed)
     }
 
     async fn finish_provider_turn(

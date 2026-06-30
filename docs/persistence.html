@@ -211,7 +211,7 @@ match session.turn(input).run().await {
             </article>
             <article class="panel">
               <h3><code>vacuum()</code></h3>
-              <p>Removes tombstoned graph-node rows already detached by gc, returns a <code>VacuumReport</code>. Run after <code>gc_unreachable</code> to reclaim file size.</p>
+              <p>Removes tombstoned graph-node rows already detached by gc and prunes terminal pending-turn-input evidence rows, returns a <code>VacuumReport</code>. Run after <code>gc_unreachable</code> to reclaim file size.</p>
             </article>
           </div>
     </div>

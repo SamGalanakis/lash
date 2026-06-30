@@ -23,8 +23,9 @@ const OPENAI_COMPAT_RATE_LIMIT: &str =
     include_str!("../provider-scripts/canonical/openai-compatible.chat-rate-limit-429.json");
 const OPENAI_COMPAT_MID_STREAM_DISCONNECT: &str =
     include_str!("../provider-scripts/canonical/openai-compatible.chat-mid-stream-disconnect.json");
-const OPENAI_COMPAT_RESPONSE_START_TIMEOUT: &str =
-    include_str!("../provider-scripts/canonical/openai-compatible.chat-response-start-timeout.json");
+const OPENAI_COMPAT_RESPONSE_START_TIMEOUT: &str = include_str!(
+    "../provider-scripts/canonical/openai-compatible.chat-response-start-timeout.json"
+);
 const OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT: &str =
     include_str!("../provider-scripts/canonical/openai-compatible.chat-stream-chunk-timeout.json");
 const OPENAI_RESPONSES_TEXT: &str =
@@ -715,7 +716,12 @@ mod tests {
             ("mid_stream_disconnect", "Stream", true, None),
             ("response_start_timeout", "Timeout", true, None),
             ("stream_chunk_timeout", "Timeout", true, None),
-            ("retryable_server_error_sequence", "Unknown", true, Some(503)),
+            (
+                "retryable_server_error_sequence",
+                "Unknown",
+                true,
+                Some(503),
+            ),
         ];
         for (mutation, raw_kind, classified_retryable, status) in expectations {
             let matrix = execute_provider_mutation_matrix(mutation)

@@ -23,11 +23,13 @@ use lash_protocol_standard::scenario_contracts::STANDARD_PROTOCOL_SCENARIO_CONTR
 use lash_provider_anthropic::AnthropicProvider;
 use lash_provider_google::GoogleOAuthProvider;
 use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
+use lash_rlm_types::{RlmCreateExtras, RlmProtocolEvent, RlmTermination};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use lash::rlm::RlmTurnBuilderExt as _;
+use lash_lashlang_runtime::ToolDefinitionLashlangExt as _;
 
 use crate::generator::{
     GENERATOR_VERSION, GeneratedWorkload, WorkloadProfileError, generate_workload,
@@ -35,22 +37,21 @@ use crate::generator::{
 };
 use crate::minimize::{MinimizeError, minimize_trace};
 use crate::oracles::{
-    backend_failure_observed, cancellation_observed, combine_oracles, cross_session_isolation,
-    durable_effect_exactly_once, exec_code_observed, generated_final_value_semantic_channel,
-    generated_suspend_resume,
+    LiveProviderFailureFacts, backend_failure_observed, cancellation_observed, combine_oracles,
+    cross_session_isolation, durable_effect_exactly_once, exec_code_observed,
+    generated_final_value_semantic_channel,
     generated_runtime_provider_matrix as generated_runtime_provider_matrix_oracle,
-    ingress_sessions_opened, lease_time_monotonic, live_provider_failure_coverage,
-    LiveProviderFailureFacts, observer_convergence,
-    observer_reconnect_observed, operational_coverage, peak_concurrent_live_turns,
-    pending_tool_completion, process_wake_observed, provider_mutation_rejected,
-    provider_transport_mutation_classified, provider_turn_interleaving_depth,
-    queued_ingress_observed,
+    generated_suspend_resume, ingress_sessions_opened, lease_time_monotonic,
+    live_provider_failure_coverage, observer_convergence, observer_reconnect_observed,
+    operational_coverage, peak_concurrent_live_turns, pending_tool_completion,
+    process_wake_observed, provider_mutation_rejected, provider_transport_mutation_classified,
+    provider_turn_interleaving_depth, queued_ingress_observed, replay_determinism,
     runtime_final_value_semantic, runtime_graph_acyclic, runtime_provider_turn,
     runtime_session_graph_contract, runtime_single_active_agent_frame, runtime_usage_monotonic,
-    scenario_contract_mini_oracles, scenario_contract_oracles,
-    replay_determinism, scenario_suite_coverage_manifest_oracle_id, scheduler_controlled_delivery,
-    scheduler_owned_runtime_completions, state_machine_semantic_invariants, tool_boundary_observed,
-    trigger_delivery_observed, worker_failover_continues_work, worker_stale_completion_rejected,
+    scenario_contract_generated_facts, scenario_contract_mini_oracles, scenario_contract_oracles,
+    scheduler_controlled_delivery, scheduler_owned_runtime_completions,
+    state_machine_semantic_invariants, tool_boundary_observed, trigger_delivery_observed,
+    worker_failover_continues_work, worker_stale_completion_rejected,
 };
 use crate::provider::{
     ProviderWireEvent, ProviderWireHeader, ProviderWireScript, ScriptedLlmHttpExchange,
@@ -102,6 +103,8 @@ pub const GENERATED_SIM_FAILURE_SHAPE: &str = "failures/_shape.json";
 pub const GENERATED_SIM_SCENARIO_SLICES: &str = "scenario-contract-slices";
 pub const GENERATED_SIM_SCENARIO_PACKAGES: &str = "scenario-contract-packages";
 pub const GENERATED_SIM_BACKEND_REGRESSION_FIXTURES: &str = "backend-regression-fixtures";
+pub const PRODUCT_STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+pub const SIM_HARNESS_STACK_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 const OPENAI_COMPAT_TOOL_CALL: &str = include_str!(
     "../provider-scripts/canonical/openai-compatible.chat-tool-call-split-stream.json"
@@ -212,6 +215,70 @@ impl fmt::Display for FixedScriptRunnerError {
 }
 
 impl std::error::Error for FixedScriptRunnerError {}
+
+fn run_on_sim_harness_stack<T, F>(
+    label: impl Into<String>,
+    stack_bytes: usize,
+    f: F,
+) -> Result<T, FixedScriptRunnerError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, FixedScriptRunnerError> + Send + 'static,
+{
+    run_on_lash_sim_stack(
+        label,
+        stack_bytes,
+        SIM_HARNESS_STACK_LIMIT_BYTES,
+        "SIM_HARNESS_STACK_LIMIT_BYTES",
+        f,
+    )
+}
+
+fn run_on_product_stack<T, F>(
+    label: impl Into<String>,
+    stack_bytes: usize,
+    f: F,
+) -> Result<T, FixedScriptRunnerError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, FixedScriptRunnerError> + Send + 'static,
+{
+    run_on_lash_sim_stack(
+        label,
+        stack_bytes,
+        PRODUCT_STACK_BUDGET_BYTES,
+        "PRODUCT_STACK_BUDGET_BYTES",
+        f,
+    )
+}
+
+fn run_on_lash_sim_stack<T, F>(
+    label: impl Into<String>,
+    stack_bytes: usize,
+    limit_bytes: usize,
+    limit_name: &'static str,
+    f: F,
+) -> Result<T, FixedScriptRunnerError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, FixedScriptRunnerError> + Send + 'static,
+{
+    let label = label.into();
+    if stack_bytes > limit_bytes {
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "{label} requested stack {stack_bytes} bytes above {limit_name}={limit_bytes}; stack growth above policy is a bug"
+        )));
+    }
+    let thread_name = format!("lash-sim-stack-policy-{label}");
+    let panic_label = label.clone();
+    std::thread::Builder::new()
+        .name(thread_name)
+        .stack_size(stack_bytes)
+        .spawn(f)
+        .map_err(FixedScriptRunnerError::Io)?
+        .join()
+        .map_err(|panic| contract_replay_panic(&panic_label, panic))?
+}
 
 impl From<std::io::Error> for FixedScriptRunnerError {
     fn from(value: std::io::Error) -> Self {
@@ -345,7 +412,7 @@ pub struct GeneratedSimProfileReport {
     pub scenario_contracts: Vec<ScenarioContractManifest>,
     pub scenario_contract_slices: Vec<ScenarioContractSliceManifest>,
     pub scenario_contract_packages: Vec<ScenarioContractPackageManifest>,
-    pub backend_replayable_regressions: Vec<BackendReplayableRegressionManifest>,
+    pub generated_backend_regression_fixtures: Vec<GeneratedBackendRegressionManifest>,
     pub model_only_boundary_reviews: Vec<ModelOnlyBoundaryReview>,
     pub provider_transport_exclusions: Vec<ProviderTransportExclusion>,
     pub counts: GeneratedSimCounts,
@@ -379,9 +446,8 @@ pub struct ScenarioContractSliceManifest {
     pub test_name: &'static str,
     pub semantic_oracle: &'static str,
     pub oracle_id: String,
-    /// `per_contract_oracle` (runtime) or `suite_coverage_manifest`
-    /// (standard/rlm/agent). Protocol suites are covered at the suite level, not
-    /// by a per-contract failing oracle.
+    /// Always `per_contract_oracle`: every generated scenario package is backed
+    /// by the specific contract verdict it claims.
     pub classification: &'static str,
     pub status: &'static str,
     pub artifact_path: String,
@@ -399,8 +465,8 @@ pub struct ScenarioContractPackageManifest {
     pub semantic_oracle: &'static str,
     pub transition_kind: String,
     pub oracle_id: String,
-    /// `per_contract_oracle` (runtime) or `suite_coverage_manifest`
-    /// (standard/rlm/agent).
+    /// Always `per_contract_oracle`: every generated scenario package is backed
+    /// by the specific contract verdict it claims.
     pub classification: &'static str,
     pub status: &'static str,
     pub package_path: String,
@@ -417,7 +483,7 @@ pub struct ScenarioGeneratedShape {
     pub required_evidence: Vec<ScenarioRequiredEvidence>,
     pub transition_facts: Vec<ScenarioTransitionFact>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend_valid_regression: Option<ScenarioBackendRegressionReference>,
+    pub generated_backend_regression: Option<ScenarioBackendRegressionReference>,
     pub negative_fixture: ScenarioNegativeFixture,
 }
 
@@ -517,7 +583,7 @@ struct ScenarioContractPackageArtifact {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct BackendReplayableRegressionManifest {
+pub struct GeneratedBackendRegressionManifest {
     pub schema: &'static str,
     pub fixture_id: &'static str,
     pub status: &'static str,
@@ -525,27 +591,33 @@ pub struct BackendReplayableRegressionManifest {
     pub trace_path: String,
     pub source_trace_path: String,
     pub source_trace_sha256: String,
+    pub source_sqlite_replay_report_path: String,
+    pub source_sqlite_replay_report_sha256: String,
     pub required_boundary_kinds: Vec<&'static str>,
     pub semantic_oracles: Vec<&'static str>,
     pub replay_backends: Vec<&'static str>,
+    pub static_backend_replay_policy: &'static str,
+    pub backend_equivalence_contract: &'static str,
     pub regression_contract: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct BackendReplayableRegressionPackage {
+struct GeneratedBackendRegressionPackage {
     schema: &'static str,
     fixture_id: &'static str,
     status: &'static str,
     trace: &'static str,
     source_trace_path: String,
     source_trace_sha256: String,
+    source_sqlite_replay_report_path: String,
+    source_sqlite_replay_report_sha256: String,
     required_boundary_kinds: Vec<&'static str>,
     semantic_oracles: Vec<&'static str>,
     replay_backends: Vec<&'static str>,
+    static_backend_replay_policy: &'static str,
+    backend_equivalence_contract: &'static str,
     regression_contract: &'static str,
     replay_command: String,
-    sqlite_replay_command: String,
-    postgres_replay_command: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -593,7 +665,7 @@ pub struct GeneratedSimCounts {
     pub scenario_contract_mini_oracles: usize,
     pub scenario_contract_slices: usize,
     pub scenario_contract_packages: usize,
-    pub backend_replayable_regressions: usize,
+    pub generated_backend_regression_fixtures: usize,
     pub oracle_passes: usize,
     pub oracle_failures: usize,
     pub model_store_sessions: usize,
@@ -745,25 +817,25 @@ fn model_only_boundary_reviews() -> Vec<ModelOnlyBoundaryReview> {
             boundary_kind: "durable_effect",
             status: "runtime_effect_controller_backed_with_reviewed_host_history_ceiling",
             production_abstraction_used: "RuntimeEffectEnvelope, RuntimeEffectCommand::DurableStep, RuntimeEffectLocalExecutor::durable_step, SqliteRuntimeEffectController, and PostgresRuntimeEffectController",
-            model_only_scope: "workflow-host crash history outside store-backed effect replay remains excluded; generated, SQLite replay, and Postgres replay execute production runtime effect replay controllers, with Postgres history stored in lash_runtime_effect_replay",
+            model_only_scope: "workflow-host crash history outside store-backed effect replay remains excluded; generated memory runs and generated SQLite dynamic reruns execute production runtime effect replay controllers, while Postgres conformance/contention lanes cover native Postgres replay storage in lash_runtime_effect_replay",
             oracle_id: "sim.oracle.durable-effect-exactly-once.v1",
-            artifact_evidence: "durable-effect observations include runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, local_executor_called false on replay, first completion, replay for the same durable key, Postgres effect_history_replay.status=native_postgres_runtime_effect_controller, and backend divergence artifacts on mismatch",
+            artifact_evidence: "durable-effect observations include runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, local_executor_called false on replay, first completion, replay for the same durable key, Postgres effect_history_replay.status=native_postgres_runtime_effect_controller, and generated SQLite divergence artifacts on mismatch",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "worker",
             status: "runtime_persistence_lease_backed_with_reviewed_worker_task_ceiling",
             production_abstraction_used: "RuntimePersistence session execution lease claim/reclaim/renew/release, SessionExecutionLease, LeaseOwnerIdentity, and SessionExecutionLeaseCompletion",
-            model_only_scope: "DurableProcessWorker task body launch remains excluded; generated, SQLite, and Postgres replay validate stale completion rejection through real backend lease stores",
+            model_only_scope: "DurableProcessWorker task body launch remains excluded; generated memory runs, generated SQLite dynamic reruns, and Postgres backend contention validate stale completion rejection through real backend lease stores",
             oracle_id: "sim.oracle.worker-stale-completion-rejected.v1",
             artifact_evidence: "worker observed payload records runtime_active_lease, runtime_stale_completion, runtime_worker_store.session_execution_lease_reclaimed=true, and stale_completion_rejected=true",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "backend_failure",
             status: "production_store_error_classified_fault_injection_boundary",
-            production_abstraction_used: "lash_core::StoreError variants plus SQLite/Postgres replay divergence lanes",
-            model_only_scope: "connection corruption and live database fault injection remain excluded; generated/replay boundaries classify retryable and terminal backend faults as concrete StoreError variants and fail on replay divergence",
+            production_abstraction_used: "lash_core::StoreError variants plus generated SQLite divergence artifacts and Postgres backend contention lanes",
+            model_only_scope: "connection corruption and live database fault injection remain excluded; generated boundaries classify retryable and terminal backend faults as concrete StoreError variants and fail on generated SQLite dynamic rerun divergence",
             oracle_id: "sim.oracle.backend-failure-observed.v1",
-            artifact_evidence: "backend failure events include production_store_error.type=lash_core::StoreError, variant, message, retryable_class, retry attempt counts, and SQLite/Postgres divergence artifacts on mismatch",
+            artifact_evidence: "backend failure events include production_store_error.type=lash_core::StoreError, variant, message, retryable_class, retry attempt counts, and generated SQLite divergence artifacts on mismatch",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "provider_mutation",
@@ -777,23 +849,23 @@ fn model_only_boundary_reviews() -> Vec<ModelOnlyBoundaryReview> {
             boundary_kind: "tool",
             status: "runtime_effect_controller_backed_with_reviewed_tool_provider_ceiling",
             production_abstraction_used: "RuntimeEffectEnvelope, RuntimeEffectCommand::ToolAttempt, RuntimeEffectLocalExecutor, ToolAttemptLaunch, ToolCallRecord, and ToolCallOutput",
-            model_only_scope: "app-specific ToolProvider implementation bodies remain excluded; generated and backend replay execute the production runtime effect-controller boundary with scripted no-network tool outcomes",
+            model_only_scope: "app-specific ToolProvider implementation bodies remain excluded; generated memory runs and generated SQLite dynamic reruns execute the production runtime effect-controller boundary with scripted no-network tool outcomes",
             oracle_id: "sim.oracle.tool-boundary-observed.v1",
-            artifact_evidence: "tool events carry runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, runtime_tool_record, runtime_tool_output, and backend divergence artifacts on mismatch",
+            artifact_evidence: "tool events carry runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, runtime_tool_record, runtime_tool_output, and generated SQLite divergence artifacts on mismatch",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "exec_code",
             status: "runtime_effect_controller_backed_with_reviewed_shell_launch_ceiling",
             production_abstraction_used: "RuntimeEffectEnvelope, RuntimeEffectCommand::ExecCode, RuntimeEffectLocalExecutor, RuntimeEffectOutcome::ExecCode, and ExecResponse",
-            model_only_scope: "host shell/kernel process launch remains excluded; generated and backend replay execute the production runtime effect-controller boundary with scripted no-shell ExecResponse outcomes",
+            model_only_scope: "host shell/kernel process launch remains excluded; generated memory runs and generated SQLite dynamic reruns execute the production runtime effect-controller boundary with scripted no-shell ExecResponse outcomes",
             oracle_id: "sim.oracle.exec-code-observed.v1",
-            artifact_evidence: "exec-code events carry runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, runtime_effect_outcome, exit-code data, and backend divergence artifacts on mismatch",
+            artifact_evidence: "exec-code events carry runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, runtime_effect_outcome, exit-code data, and generated SQLite divergence artifacts on mismatch",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "process_wake",
             status: "runtime_persistence_queued_work_backed_with_reviewed_process_body_ceiling",
             production_abstraction_used: "process_wake_delivery, QueuedWorkBatchDraft, QueuedWorkPayload::process_wake, RuntimePersistence::enqueue_queued_work, and claim_ready_queued_work_by_batch_ids",
-            model_only_scope: "the eventual process body that consumes the wake remains excluded; generated, SQLite, and Postgres replay enqueue and claim the wake through real queued-work/session-lease backend paths",
+            model_only_scope: "the eventual process body that consumes the wake remains excluded; generated memory runs, generated SQLite dynamic reruns, and Postgres backend contention enqueue or claim wake-adjacent queued work through real queued-work/session-lease backend paths",
             oracle_id: "sim.oracle.process-wake-observed.v1",
             artifact_evidence: "process wake events include runtime_process_wake, runtime_queued_work claim evidence, claimed_once=true, and duplicate claimed_once=false dedupe evidence from real queued-work claims",
         },
@@ -839,24 +911,12 @@ fn scenario_contract_oracle_id(contract: &ScenarioContractSpec) -> String {
     format!("{}:{}", contract.oracle_id, contract.test_name)
 }
 
-/// The oracle id that backs a contract's generated slice/package. The RUNTIME
-/// suite is backed by its own per-contract oracle; the protocol suites are backed
-/// by their single suite-level coverage manifest (they are coverage, not
-/// per-contract failing oracles).
 fn scenario_contract_backing_oracle_id(contract: &ScenarioContractSpec) -> String {
-    if contract.suite == "runtime" {
-        scenario_contract_oracle_id(contract)
-    } else {
-        scenario_suite_coverage_manifest_oracle_id(contract)
-    }
+    scenario_contract_oracle_id(contract)
 }
 
-fn scenario_contract_classification(contract: &ScenarioContractSpec) -> &'static str {
-    if contract.suite == "runtime" {
-        "per_contract_oracle"
-    } else {
-        "suite_coverage_manifest"
-    }
+fn scenario_contract_classification(_contract: &ScenarioContractSpec) -> &'static str {
+    "per_contract_oracle"
 }
 
 fn write_scenario_contract_slices(
@@ -944,9 +1004,18 @@ fn write_scenario_contract_packages(
     std::fs::create_dir_all(&package_root)?;
     let replay_lookup = replay_artifact_lookup(replay_reports);
     let mut manifests = Vec::new();
+    let mut backing_oracle_claims = BTreeMap::new();
+    let mut package_fact_graph_claims = BTreeMap::new();
     for contract in all_scenario_contracts() {
         let oracle_id = scenario_contract_backing_oracle_id(contract);
         let classification = scenario_contract_classification(contract);
+        if let Some(previous) = backing_oracle_claims.insert(oracle_id.clone(), contract.test_name)
+        {
+            return Err(FixedScriptRunnerError::Assertion(format!(
+                "scenario contracts `{previous}` and `{}` share backing oracle `{oracle_id}` despite claiming per-contract generated semantics",
+                contract.test_name
+            )));
+        }
         let verdicts = oracle_verdicts
             .iter()
             .filter(|verdict| verdict.oracle_id == oracle_id)
@@ -961,6 +1030,11 @@ fn write_scenario_contract_packages(
         let selected_evidence = select_scenario_contract_evidence(contract, event_lines)?;
         let events = selected_events(contract, event_lines, &selected_evidence)?;
         let generated_shape = scenario_generated_shape(contract, &selected_evidence, &events)?;
+        assert_distinct_package_fact_graph(
+            contract,
+            &generated_shape,
+            &mut package_fact_graph_claims,
+        )?;
         let positive =
             scenario_positive_evidence(contract, &selected_evidence, &verdicts, &replay_lookup)?;
         let negative = scenario_negative_evidence(&generated_shape.negative_fixture);
@@ -1004,6 +1078,32 @@ fn write_scenario_contract_packages(
     Ok(manifests)
 }
 
+fn assert_distinct_package_fact_graph(
+    contract: &ScenarioContractSpec,
+    generated_shape: &ScenarioGeneratedShape,
+    seen: &mut BTreeMap<Vec<(String, Vec<String>)>, &'static str>,
+) -> Result<(), FixedScriptRunnerError> {
+    let fingerprint = transition_fact_graph_fingerprint(&generated_shape.transition_facts);
+    if let Some(previous) = seen.insert(fingerprint, contract.test_name) {
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "scenario packages `{previous}` and `{}` produced identical generated transition fact graphs despite claiming distinct per-contract semantics",
+            contract.test_name
+        )));
+    }
+    Ok(())
+}
+
+fn transition_fact_graph_fingerprint(
+    transition_facts: &[ScenarioTransitionFact],
+) -> Vec<(String, Vec<String>)> {
+    transition_facts
+        .iter()
+        .map(|fact| (fact.fact.clone(), fact.boundary_ids.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 struct BackendRegressionSpec {
     fixture_id: &'static str,
     required_boundary_kinds: &'static [&'static str],
@@ -1012,11 +1112,11 @@ struct BackendRegressionSpec {
     predicate: fn(&[&TraceEventLine]) -> bool,
 }
 
-fn write_backend_replayable_regression_fixtures(
+fn write_generated_backend_regression_fixtures(
     artifact_root: &Path,
     event_lines: &[TraceEventLine],
     replay_reports: &[GeneratedReplayArtifact],
-) -> Result<Vec<BackendReplayableRegressionManifest>, FixedScriptRunnerError> {
+) -> Result<Vec<GeneratedBackendRegressionManifest>, FixedScriptRunnerError> {
     let fixture_root = artifact_root.join(GENERATED_SIM_BACKEND_REGRESSION_FIXTURES);
     std::fs::create_dir_all(&fixture_root)?;
     let replay_lookup = replay_artifact_lookup(replay_reports);
@@ -1054,7 +1154,7 @@ fn write_backend_replayable_regression_fixtures(
                 "sim.oracle.state-machine-semantic-invariants.v1",
                 "sim.oracle.process-wake-observed.v1",
             ],
-            regression_contract: "duplicate process wake deliveries share a dedupe key, claim queued work once, and keep replay/idempotency evidence backend-replayable",
+            regression_contract: "duplicate process wake deliveries share a dedupe key, claim queued work once, and keep replay/idempotency evidence backed by generated dynamic replay",
             predicate: trace_has_duplicate_process_wake_idempotency,
         },
         BackendRegressionSpec {
@@ -1109,13 +1209,13 @@ fn write_backend_replayable_regression_fixtures(
             .find(|(_alias, lines)| (spec.predicate)(lines))
         else {
             return Err(FixedScriptRunnerError::Assertion(format!(
-                "backend-replayable regression fixture `{}` could not select a generated trace",
+                "generated backend regression fixture `{}` could not select a generated trace",
                 spec.fixture_id
             )));
         };
         let replay = replay_lookup.get(trace_alias).ok_or_else(|| {
             FixedScriptRunnerError::Assertion(format!(
-                "backend-replayable regression fixture `{}` selected trace `{trace_alias}` without replay artifact",
+                "generated backend regression fixture `{}` selected trace `{trace_alias}` without replay artifact",
                 spec.fixture_id
             ))
         })?;
@@ -1125,44 +1225,44 @@ fn write_backend_replayable_regression_fixtures(
         let fixture_trace_path = package_dir.join("trace.json");
         std::fs::copy(&source_trace_path, &fixture_trace_path)?;
         let package_path = package_dir.join("package.json");
-        let package = BackendReplayableRegressionPackage {
-            schema: "lash.sim.backend-replayable-regression-package.v1",
+        let static_backend_replay_policy = "not_claimed_for_generated_scheduler_traces";
+        let backend_equivalence_contract = "source seed passed the dynamic generated workload rerun against the serialized in-memory reference and lash-sqlite-store; static SQLite/Postgres replay is a different fixed-order trace contract and is not inferred from this generated trace";
+        let package = GeneratedBackendRegressionPackage {
+            schema: "lash.sim.generated-backend-regression-package.v1",
             fixture_id: spec.fixture_id,
-            status: "backend_replayable_valid_trace",
+            status: "generated_cross_backend_valid_trace",
             trace: "trace.json",
             source_trace_path: replay.trace_path.clone(),
             source_trace_sha256: replay.trace_sha256.clone(),
+            source_sqlite_replay_report_path: replay.sqlite_replay_report_path.clone(),
+            source_sqlite_replay_report_sha256: replay.sqlite_replay_report_sha256.clone(),
             required_boundary_kinds: spec.required_boundary_kinds.to_vec(),
             semantic_oracles: spec.semantic_oracles.to_vec(),
-            replay_backends: vec!["model", "sqlite", "postgres_when_available"],
+            replay_backends: vec!["model"],
+            static_backend_replay_policy,
+            backend_equivalence_contract,
             regression_contract: spec.regression_contract,
             replay_command: format!(
                 "cargo run -p lash-sim --locked -- replay {}",
                 fixture_trace_path.display()
             ),
-            sqlite_replay_command: format!(
-                "cargo run -p lash-sim --locked -- replay-sqlite {} --out {}",
-                fixture_trace_path.display(),
-                package_dir.display()
-            ),
-            postgres_replay_command: format!(
-                "LASH_POSTGRES_DATABASE_URL=postgres://... cargo run -p lash-sim --locked -- replay-postgres {} --out {}",
-                fixture_trace_path.display(),
-                package_dir.display()
-            ),
         };
         std::fs::write(&package_path, serde_json::to_vec_pretty(&package)?)?;
-        manifests.push(BackendReplayableRegressionManifest {
-            schema: "lash.sim.backend-replayable-regression-manifest.v1",
+        manifests.push(GeneratedBackendRegressionManifest {
+            schema: "lash.sim.generated-backend-regression-manifest.v1",
             fixture_id: spec.fixture_id,
-            status: "backend_replayable_valid_trace",
+            status: "generated_cross_backend_valid_trace",
             package_path: relative_path(artifact_root, &package_path),
             trace_path: relative_path(artifact_root, &fixture_trace_path),
             source_trace_path: replay.trace_path.clone(),
             source_trace_sha256: replay.trace_sha256.clone(),
+            source_sqlite_replay_report_path: replay.sqlite_replay_report_path.clone(),
+            source_sqlite_replay_report_sha256: replay.sqlite_replay_report_sha256.clone(),
             required_boundary_kinds: spec.required_boundary_kinds.to_vec(),
             semantic_oracles: spec.semantic_oracles.to_vec(),
-            replay_backends: vec!["model", "sqlite", "postgres_when_available"],
+            replay_backends: vec!["model"],
+            static_backend_replay_policy,
+            backend_equivalence_contract,
             regression_contract: spec.regression_contract,
         });
     }
@@ -1590,7 +1690,10 @@ fn operational_cases_for_evidence(evidence: &str) -> &'static [&'static str] {
         "process_wake" => &["triggers-wakeups", "process-wake", "duplicate-delivery"],
         "worker_stale_completion" => &["worker-failover", "lease-fencing", "stale-completion"],
         "provider_turn" => &["provider-runtime-turn", "scripted-provider-transport"],
+        "provider_event" => &["provider-runtime-turn", "scheduler-owned-provider-events"],
         "tool_result" => &["tool-boundary", "tool-loop"],
+        "max_turn_stop" => &["tool-boundary", "max-turn-stop"],
+        "final_value" => &["semantic-final-value", "final-value-event"],
         "exec_code" => &["exec-boundary", "rlm-lashlang-exec"],
         "trigger" => &["triggers-wakeups", "trigger-delivery"],
         "durable_effect" => &["durable-effect", "crash-reopen-effect-replay"],
@@ -1671,7 +1774,7 @@ fn scenario_generated_shape(
         semantic_oracle: contract.semantic_oracle,
         required_evidence,
         transition_facts: scenario_transition_facts(contract, selected_events)?,
-        backend_valid_regression: scenario_backend_regression_reference(contract),
+        generated_backend_regression: scenario_backend_regression_reference(contract),
         negative_fixture: scenario_negative_fixture_for_contract(contract, selected_evidence),
     })
 }
@@ -1680,6 +1783,31 @@ fn scenario_transition_facts(
     contract: &ScenarioContractSpec,
     selected_events: &[TraceEventLine],
 ) -> Result<Vec<ScenarioTransitionFact>, FixedScriptRunnerError> {
+    if matches!(contract.suite, "standard" | "rlm" | "agent") {
+        let events = selected_events
+            .iter()
+            .map(|line| line.event.clone())
+            .collect::<Vec<_>>();
+        return scenario_contract_generated_facts(contract, &events)
+            .map(|facts| {
+                facts
+                    .into_iter()
+                    .map(|fact| ScenarioTransitionFact {
+                        fact: fact.fact.to_string(),
+                        status: "passed",
+                        assertion: fact.assertion,
+                        boundary_ids: fact.boundary_ids,
+                        observed: fact.observed,
+                    })
+                    .collect()
+            })
+            .map_err(|reason| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "scenario contract `{}` could not prove generated semantic facts: {reason}",
+                    contract.test_name
+                ))
+            });
+    }
     let mut facts = Vec::new();
     match contract.semantic_oracle {
         "runtime.checkpoint_redrive_cancel" => {
@@ -1689,8 +1817,18 @@ fn scenario_transition_facts(
                 selected_events,
             )?);
         }
-        "runtime.queued_work_keeps_pending_input" | "runtime.queued_turn_input_completion" => {
+        "runtime.queued_work_keeps_pending_input" => {
             facts.push(queued_active_turn_fact(contract, selected_events)?);
+        }
+        "runtime.queued_turn_input_completion" => {
+            facts.push(queued_active_turn_fact(contract, selected_events)?);
+            facts.push(queued_turn_followup_provider_fact(
+                contract,
+                selected_events,
+            )?);
+        }
+        "runtime.command_only_queue_drain" => {
+            facts.push(command_queue_drain_fact(contract, selected_events)?);
         }
         "runtime.command_before_turn_work" => {
             facts.push(trigger_wakeup_fact(contract, selected_events)?);
@@ -1699,8 +1837,20 @@ fn scenario_transition_facts(
         "runtime.process_wake_claim" => {
             facts.push(process_wake_duplicate_fact(contract, selected_events)?);
         }
-        "runtime.lease_release_rejects_commit" | "runtime.dead_lease_reclaim_rejects_stale" => {
-            facts.push(worker_fencing_fact(contract, selected_events)?);
+        "runtime.lease_release_rejects_commit" => {
+            facts.push(worker_stale_completion_rejection_fact(
+                contract,
+                selected_events,
+            )?);
+        }
+        "runtime.dead_lease_reclaim_rejects_stale" => {
+            facts.push(worker_dead_lease_reclaim_fact(contract, selected_events)?);
+        }
+        "runtime.observation_replay_preserves_input" => {
+            facts.push(observer_reconnect_transition_fact(
+                contract,
+                selected_events,
+            )?);
         }
         "standard.empty_provider_response_error" | "standard.provider_error_without_checkpoint" => {
             facts.push(provider_terminalization_fact(contract, selected_events)?);
@@ -1739,6 +1889,12 @@ fn scenario_transition_facts(
         _ => {}
     }
     if facts.is_empty() {
+        if contract.suite == "runtime" {
+            return Err(FixedScriptRunnerError::Assertion(format!(
+                "runtime scenario contract `{}` has no contract-owned transition fact; generic selected-event fallback is not allowed for runtime contracts",
+                contract.test_name
+            )));
+        }
         facts.push(generic_transition_fact(contract, selected_events)?);
     }
     Ok(facts)
@@ -1760,7 +1916,7 @@ fn scenario_backend_regression_reference(
         ),
         "runtime.process_wake_claim" => (
             "duplicate-process-wake-idempotency",
-            "duplicate process wake deliveries share a dedupe key, claim queued work once, and keep replay/idempotency evidence backend-replayable",
+            "duplicate process wake deliveries share a dedupe key, claim queued work once, and keep replay/idempotency evidence backed by generated dynamic replay",
         ),
         "runtime.lease_release_rejects_commit" | "runtime.dead_lease_reclaim_rejects_stale" => (
             "worker-stale-completion-fenced",
@@ -1787,7 +1943,7 @@ fn scenario_backend_regression_reference(
     };
     Some(ScenarioBackendRegressionReference {
         fixture_id,
-        status: "backend_replayable_valid_trace",
+        status: "generated_cross_backend_valid_trace",
         regression_contract,
     })
 }
@@ -1835,6 +1991,59 @@ fn queued_active_turn_fact(
         "active-turn queued input has stable source key and remains pending/hidden until terminalized",
         events,
         observed,
+    )
+}
+
+fn queued_turn_followup_provider_fact(
+    contract: &ScenarioContractSpec,
+    selected_events: &[TraceEventLine],
+) -> Result<ScenarioTransitionFact, FixedScriptRunnerError> {
+    let mut fact_events = Vec::new();
+    for queued in selected_events.iter().filter(|line| {
+        line.event.kind == BoundaryKind::QueuedIngress
+            && line
+                .event
+                .observed
+                .get("source_key")
+                .and_then(Value::as_str)
+                .is_some()
+    }) {
+        if let Some(provider) = selected_events
+            .iter()
+            .filter(|line| {
+                line.trace_alias == queued.trace_alias
+                    && line.event.kind == BoundaryKind::Provider
+                    && line.event.actor_alias == queued.event.actor_alias
+                    && line.event.sequence > queued.event.sequence
+                    && line.event.observed.get("success").and_then(Value::as_bool) == Some(true)
+            })
+            .min_by_key(|line| line.event.sequence)
+        {
+            fact_events.push(queued);
+            fact_events.push(provider);
+            let observed = json!({
+                "queued_boundary": queued.event.boundary_id,
+                "provider_boundary": provider.event.boundary_id,
+                "trace_alias": queued.trace_alias,
+                "actor": queued.event.actor_alias,
+                "source_key": queued.event.observed.get("source_key").cloned().unwrap_or(Value::Null),
+                "provider_exchange_count": provider.event.observed.get("provider_exchange_count").cloned().unwrap_or(Value::Null),
+            });
+            return require_transition_fact(
+                contract,
+                "queued_turn_input_followed_by_provider_completion",
+                "queued turn input evidence is followed by a same-trace same-actor provider completion",
+                fact_events,
+                observed,
+            );
+        }
+    }
+    require_transition_fact(
+        contract,
+        "queued_turn_input_followed_by_provider_completion",
+        "queued turn input evidence is followed by a same-trace same-actor provider completion",
+        fact_events,
+        json!({ "queued_turn_completion": false }),
     )
 }
 
@@ -1922,6 +2131,66 @@ fn trigger_wakeup_fact(
     )
 }
 
+fn command_queue_drain_fact(
+    contract: &ScenarioContractSpec,
+    selected_events: &[TraceEventLine],
+) -> Result<ScenarioTransitionFact, FixedScriptRunnerError> {
+    let queued_events = selected_events
+        .iter()
+        .filter(|line| {
+            line.event.kind == BoundaryKind::QueuedIngress
+                && line
+                    .event
+                    .observed
+                    .get("source_key")
+                    .and_then(Value::as_str)
+                    .is_some_and(|source_key| !source_key.is_empty())
+        })
+        .collect::<Vec<_>>();
+    let lease_events = selected_events
+        .iter()
+        .filter(|line| {
+            line.event.kind == BoundaryKind::LeaseTime
+                && line
+                    .event
+                    .observed
+                    .pointer("/runtime_lease_probe/real_lease_store")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .pointer("/runtime_lease_probe/session_execution_lease_fencing_token")
+                    .and_then(Value::as_u64)
+                    .is_some()
+        })
+        .collect::<Vec<_>>();
+    let mut events = Vec::new();
+    events.extend(queued_events.iter().copied());
+    events.extend(lease_events.iter().copied());
+    let observed = json!({
+        "queued_inputs": queued_events.iter().map(|line| json!({
+            "boundary_id": line.event.boundary_id,
+            "source_key": line.event.observed.get("source_key").cloned().unwrap_or(Value::Null),
+            "input_state": line.event.observed.get("input_state").cloned().unwrap_or(Value::Null),
+            "ingress_mode": line.event.observed.get("ingress_mode").cloned().unwrap_or(Value::Null),
+        })).collect::<Vec<_>>(),
+        "lease_fences": lease_events.iter().map(|line| json!({
+            "boundary_id": line.event.boundary_id,
+            "session": line.event.actor_alias,
+            "fencing_token": line.event.observed.pointer("/runtime_lease_probe/session_execution_lease_fencing_token").cloned().unwrap_or(Value::Null),
+            "real_lease_store": true,
+        })).collect::<Vec<_>>(),
+    });
+    require_transition_fact(
+        contract,
+        "command_queue_drains_with_real_lease_fence",
+        "command-only queued work carries scheduler-owned source keys and drains under real session-execution-lease fencing tokens",
+        events,
+        observed,
+    )
+}
+
 fn process_wake_duplicate_fact(
     contract: &ScenarioContractSpec,
     selected_events: &[TraceEventLine],
@@ -1993,7 +2262,66 @@ fn process_wake_duplicate_fact(
     )
 }
 
-fn worker_fencing_fact(
+fn observer_reconnect_transition_fact(
+    contract: &ScenarioContractSpec,
+    selected_events: &[TraceEventLine],
+) -> Result<ScenarioTransitionFact, FixedScriptRunnerError> {
+    let events = selected_events
+        .iter()
+        .filter(|line| {
+            line.event.kind == BoundaryKind::Observer
+                && line
+                    .event
+                    .observed
+                    .get("reconnected")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .get("turn_index")
+                    .and_then(Value::as_u64)
+                    .is_some()
+                && line
+                    .event
+                    .observed
+                    .pointer("/observer_invariants/session_id")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .pointer("/observer_invariants/turn_index_converged")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .pointer("/observer_invariants/transcript_message_count_converged")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        })
+        .collect::<Vec<_>>();
+    let observed = json!({
+        "observer_reconnects": events.iter().map(|line| json!({
+            "boundary_id": line.event.boundary_id,
+            "session": line.event.actor_alias,
+            "turn_index": line.event.observed.get("turn_index").cloned().unwrap_or(Value::Null),
+            "graph_node_count": line.event.observed.get("graph_node_count").cloned().unwrap_or(Value::Null),
+            "transcript_message_count": line.event.observed.get("transcript_message_count").cloned().unwrap_or(Value::Null),
+            "observer_invariants": line.event.observed.get("observer_invariants").cloned().unwrap_or(Value::Null),
+        })).collect::<Vec<_>>(),
+    });
+    require_transition_fact(
+        contract,
+        "observer_reconnect_replays_original_input_state",
+        "observer reconnect boundary reads a concrete session observation with converged session id, turn index, graph, and transcript state",
+        events,
+        observed,
+    )
+}
+
+fn worker_stale_completion_rejection_fact(
     contract: &ScenarioContractSpec,
     selected_events: &[TraceEventLine],
 ) -> Result<ScenarioTransitionFact, FixedScriptRunnerError> {
@@ -2013,20 +2341,83 @@ fn worker_fencing_fact(
                     .observed
                     .get("runtime_stale_completion")
                     .is_some()
+                && line
+                    .event
+                    .observed
+                    .pointer("/runtime_active_lease/fencing_token")
+                    .and_then(Value::as_u64)
+                    > line
+                        .event
+                        .observed
+                        .pointer("/runtime_stale_completion/fencing_token")
+                        .and_then(Value::as_u64)
         })
         .collect::<Vec<_>>();
     let observed = json!({
         "stale_completions": events.iter().map(|line| json!({
             "boundary_id": line.event.boundary_id,
-            "active_fencing_token": line.event.observed.get("active_fencing_token").cloned().unwrap_or(Value::Null),
-            "lease_owner_changed": line.event.observed.get("lease_owner_changed").cloned().unwrap_or(Value::Null),
+            "active_fencing_token": line.event.observed.pointer("/runtime_active_lease/fencing_token").cloned().unwrap_or(Value::Null),
+            "stale_fencing_token": line.event.observed.pointer("/runtime_stale_completion/fencing_token").cloned().unwrap_or(Value::Null),
             "stale_completion_rejected": true,
         })).collect::<Vec<_>>(),
     });
     require_transition_fact(
         contract,
-        "stale_completion_fenced",
-        "stale worker completion carries an older fence and cannot clear the live lease",
+        "lease_release_rejects_stale_completion",
+        "stale worker completion carries an older fence and is rejected while the live lease remains active",
+        events,
+        observed,
+    )
+}
+
+fn worker_dead_lease_reclaim_fact(
+    contract: &ScenarioContractSpec,
+    selected_events: &[TraceEventLine],
+) -> Result<ScenarioTransitionFact, FixedScriptRunnerError> {
+    let events = selected_events
+        .iter()
+        .filter(|line| {
+            line.event.kind == BoundaryKind::Worker
+                && line
+                    .event
+                    .observed
+                    .get("lease_owner_changed")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .pointer("/runtime_worker_store/session_execution_lease_reclaimed")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .pointer("/runtime_worker_store/worker_owned_work/second_owner_resumed_work")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .pointer("/runtime_worker_store/worker_owned_work/second_owner_outranks_first")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        })
+        .collect::<Vec<_>>();
+    let observed = json!({
+        "dead_lease_reclaims": events.iter().map(|line| json!({
+            "boundary_id": line.event.boundary_id,
+            "initial_owner": line.event.observed.get("initial_owner").cloned().unwrap_or(Value::Null),
+            "active_owner": line.event.observed.get("active_owner").cloned().unwrap_or(Value::Null),
+            "source_key": line.event.observed.pointer("/runtime_worker_store/worker_owned_work/source_key").cloned().unwrap_or(Value::Null),
+            "second_owner_resumed_work": true,
+            "second_owner_outranks_first": true,
+        })).collect::<Vec<_>>(),
+    });
+    require_transition_fact(
+        contract,
+        "dead_lease_reclaim_resumes_worker_owned_work",
+        "successor worker owner reclaims the dead lease, outranks the first fence, and resumes the owned work",
         events,
         observed,
     )
@@ -2342,7 +2733,10 @@ fn scenario_evidence_boundary_kind(evidence: &str) -> &'static str {
         "worker_stale_completion" => "worker",
         "lease_time" => "lease_time",
         "provider_turn" => "provider",
+        "provider_event" => "provider_event",
         "tool_result" => "tool",
+        "max_turn_stop" => "trigger",
+        "final_value" => "trigger",
         "observer_convergence" | "observer_reconnect" => "observer",
         "runtime_session_graph" => "ingress/provider",
         "exec_code" => "exec_code",
@@ -2367,7 +2761,14 @@ fn scenario_evidence_assertion(evidence: &str) -> &'static str {
         "provider_turn" => {
             "provider completion is delivered through scripted provider runtime path"
         }
+        "provider_event" => "provider event release is scheduler-owned generated evidence",
         "tool_result" => "tool result crosses runtime effect-controller output DTO",
+        "max_turn_stop" => {
+            "semantic proof records explicit max-turn stopped outcome after a tool result"
+        }
+        "final_value" => {
+            "semantic proof records typed final value outcome and terminal event facts"
+        }
         "observer_convergence" => "observer sees the generated final provider turn",
         "runtime_session_graph" => "session graph advances with generated ingress/provider turns",
         "exec_code" => "exec-code result crosses runtime effect-controller outcome DTO",
@@ -2398,11 +2799,23 @@ fn scenario_negative_fixture_for_contract(
         "runtime.process_wake_claim" => {
             return scenario_negative_fixture("process_wake_operational_missing");
         }
+        "standard.max_turns_after_tool_result" => {
+            return scenario_negative_fixture("standard_max_turn_stop_missing");
+        }
         "standard.provider_error_without_checkpoint" => {
             return scenario_negative_fixture("standard_provider_error_missing_parser_matrix");
         }
+        "rlm.typed_finish_emits_outcome_and_done" => {
+            return scenario_negative_fixture("rlm_typed_finish_terminal_event_missing");
+        }
+        "rlm.empty_options_natural_default" => {
+            return scenario_negative_fixture("rlm_empty_options_default_mode_broken");
+        }
         "rlm.lashlang_cell_exec_continues" => {
             return scenario_negative_fixture("rlm_lashlang_cell_missing_exec_outcome");
+        }
+        "agent.tuple_values_finish_as_json_arrays" => {
+            return scenario_negative_fixture("agent_tuple_json_array_shape_broken");
         }
         _ => {}
     }
@@ -2487,17 +2900,41 @@ fn scenario_negative_fixture(fixture_id: &str) -> ScenarioNegativeFixture {
             expected_oracle_id: "sim.oracle.scenario-mini.standard.provider-error-without-checkpoint.v1",
             expected_reason_contains: "no scheduler-owned provider failure before checkpoint",
         },
+        "standard_max_turn_stop_missing" => ScenarioNegativeFixture {
+            fixture_id: "standard-max-turn-stop-missing",
+            fixture_path: "crates/lash-sim/failure-fixtures/standard-max-turn-stop-missing.json",
+            expected_oracle_id: "sim.oracle.scenario.standard-contract.v1:standard_protocol_scenario_max_turns_terminates_after_tool_result",
+            expected_reason_contains: "fixed-source replay validation",
+        },
         "rlm_lashlang_cell_missing_exec_outcome" => ScenarioNegativeFixture {
             fixture_id: "rlm-lashlang-cell-missing-exec-outcome",
             fixture_path: "crates/lash-sim/failure-fixtures/rlm-lashlang-cell-missing-exec-outcome.json",
             expected_oracle_id: "sim.oracle.scenario-mini.rlm.lashlang-cell-exec-continues.v1",
             expected_reason_contains: "did not continue after exec",
         },
+        "rlm_typed_finish_terminal_event_missing" => ScenarioNegativeFixture {
+            fixture_id: "rlm-typed-finish-terminal-event-missing",
+            fixture_path: "crates/lash-sim/failure-fixtures/rlm-typed-finish-terminal-event-missing.json",
+            expected_oracle_id: "sim.oracle.scenario.rlm-contract.v1:rlm_protocol_scenario_typed_finish_emits_turn_outcome_and_done",
+            expected_reason_contains: "fixed-source replay validation",
+        },
+        "rlm_empty_options_default_mode_broken" => ScenarioNegativeFixture {
+            fixture_id: "rlm-empty-options-default-mode-broken",
+            fixture_path: "crates/lash-sim/failure-fixtures/rlm-empty-options-default-mode-broken.json",
+            expected_oracle_id: "sim.oracle.scenario.rlm-contract.v1:rlm_protocol_scenario_empty_turn_options_use_natural_default",
+            expected_reason_contains: "fixed-source replay validation",
+        },
         "agent_parallel_join_missing_wake_session" => ScenarioNegativeFixture {
             fixture_id: "agent-parallel-join-missing-wake-session",
             fixture_path: "crates/lash-sim/failure-fixtures/agent-parallel-join-missing-wake-session.json",
             expected_oracle_id: "sim.oracle.scenario-mini.agent.parallel-spawn-join-determinism.v1",
             expected_reason_contains: "did not record deterministic process/worker ordering",
+        },
+        "agent_tuple_json_array_shape_broken" => ScenarioNegativeFixture {
+            fixture_id: "agent-tuple-json-array-shape-broken",
+            fixture_path: "crates/lash-sim/failure-fixtures/agent-tuple-json-array-shape-broken.json",
+            expected_oracle_id: "sim.oracle.scenario.agent-contract.v1:agent_scenario_tuple_values_finish_as_json_arrays",
+            expected_reason_contains: "fixed-source replay validation",
         },
         "provider_mutation_runtime_completion_missing" => ScenarioNegativeFixture {
             fixture_id: "provider-mutation-runtime-completion-missing",
@@ -2531,21 +2968,94 @@ fn select_scenario_contract_evidence(
     event_lines: &[TraceEventLine],
 ) -> Result<Vec<ScenarioEvidenceSelection>, FixedScriptRunnerError> {
     let mut selected = Vec::new();
+    let mut generated_fact_trace_alias = None;
+    if matches!(contract.suite, "standard" | "rlm" | "agent") {
+        let (trace_alias, facts) = select_scenario_contract_fact_trace(contract, event_lines)
+            .map_err(|reason| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "scenario contract `{}` could not select generated semantic facts: {reason}",
+                    contract.test_name
+                ))
+            })?;
+        generated_fact_trace_alias = Some(trace_alias.clone());
+        for fact in facts {
+            for boundary_id in fact.boundary_ids {
+                let line = event_lines
+                    .iter()
+                    .find(|line| {
+                        line.trace_alias == trace_alias && line.event.boundary_id == boundary_id
+                    })
+                    .ok_or_else(|| {
+                        FixedScriptRunnerError::Assertion(format!(
+                            "scenario contract `{}` generated fact `{}` selected missing boundary `{boundary_id}` in trace `{trace_alias}`",
+                            contract.test_name, fact.fact
+                        ))
+                    })?;
+                selected.push(ScenarioEvidenceSelection {
+                    evidence: format!("semantic_fact:{}", fact.fact),
+                    trace_alias: line.trace_alias.clone(),
+                    boundary_id: line.event.boundary_id.clone(),
+                    boundary_kind: line.event.kind,
+                    sequence: line.event.sequence,
+                });
+            }
+        }
+    }
+    let mut evidence_names = BTreeSet::new();
     for evidence in contract
         .required_sim_evidence
         .iter()
         .copied()
         .chain(semantic_scenario_evidence(contract.semantic_oracle))
+        .filter(|evidence| evidence_names.insert(*evidence))
     {
-        let matches = select_event_lines_for_evidence(evidence, event_lines);
+        if let Some(trace_alias) = generated_fact_trace_alias.as_deref() {
+            let scoped_event_lines = event_lines
+                .iter()
+                .filter(|line| line.trace_alias == trace_alias)
+                .cloned()
+                .collect::<Vec<_>>();
+            let matches = select_event_lines_for_evidence(evidence, &scoped_event_lines);
+            if matches.is_empty() {
+                return Err(FixedScriptRunnerError::Assertion(format!(
+                    "scenario contract `{}` could not select generated trace evidence `{}` from fact-owning trace `{trace_alias}`",
+                    contract.test_name, evidence
+                )));
+            }
+            selected.extend(matches.into_iter().map(|line| ScenarioEvidenceSelection {
+                evidence: evidence.to_string(),
+                trace_alias: line.trace_alias.clone(),
+                boundary_id: line.event.boundary_id.clone(),
+                boundary_kind: line.event.kind,
+                sequence: line.event.sequence,
+            }));
+        } else {
+            let matches = select_event_lines_for_evidence(evidence, event_lines);
+            if matches.is_empty() {
+                return Err(FixedScriptRunnerError::Assertion(format!(
+                    "scenario contract `{}` could not select generated trace evidence `{}`",
+                    contract.test_name, evidence
+                )));
+            }
+            selected.extend(matches.into_iter().map(|line| ScenarioEvidenceSelection {
+                evidence: evidence.to_string(),
+                trace_alias: line.trace_alias.clone(),
+                boundary_id: line.event.boundary_id.clone(),
+                boundary_kind: line.event.kind,
+                sequence: line.event.sequence,
+            }));
+        }
+    }
+    if contract.semantic_oracle == "runtime.queued_turn_input_completion" {
+        let matches = select_queued_turn_followup_provider_evidence(event_lines);
         if matches.is_empty() {
             return Err(FixedScriptRunnerError::Assertion(format!(
-                "scenario contract `{}` could not select generated trace evidence `{}`",
-                contract.test_name, evidence
+                "scenario contract `{}` could not select same-actor provider completion after queued input",
+                contract.test_name
             )));
         }
         selected.extend(matches.into_iter().map(|line| ScenarioEvidenceSelection {
-            evidence: evidence.to_string(),
+            evidence: "queued_turn_followup_provider".to_string(),
             trace_alias: line.trace_alias.clone(),
             boundary_id: line.event.boundary_id.clone(),
             boundary_kind: line.event.kind,
@@ -2553,6 +3063,30 @@ fn select_scenario_contract_evidence(
         }));
     }
     Ok(selected)
+}
+
+fn select_scenario_contract_fact_trace(
+    contract: &ScenarioContractSpec,
+    event_lines: &[TraceEventLine],
+) -> Result<(String, Vec<crate::oracles::ScenarioContractGeneratedFact>), String> {
+    let mut by_trace: BTreeMap<&str, Vec<crate::scheduler::DeliveredBoundary>> = BTreeMap::new();
+    for line in event_lines {
+        by_trace
+            .entry(line.trace_alias.as_str())
+            .or_default()
+            .push(line.event.clone());
+    }
+    let mut failures = Vec::new();
+    for (trace_alias, events) in by_trace {
+        match scenario_contract_generated_facts(contract, &events) {
+            Ok(facts) => return Ok((trace_alias.to_string(), facts)),
+            Err(reason) => failures.push(format!("{trace_alias}: {reason}")),
+        }
+    }
+    Err(format!(
+        "no single generated trace contained the contract-owned fact graph; {}",
+        failures.join("; ")
+    ))
 }
 
 fn semantic_scenario_evidence(semantic_oracle: &str) -> Vec<&'static str> {
@@ -2568,37 +3102,6 @@ fn semantic_scenario_evidence(semantic_oracle: &str) -> Vec<&'static str> {
         "runtime.command_only_queue_drain" => vec!["queued_ingress", "lease_time"],
         "runtime.command_before_turn_work" => vec!["trigger", "queued_ingress", "lease_time"],
         "runtime.observation_replay_preserves_input" => vec!["observer_reconnect"],
-        "standard.empty_provider_response_error" => vec!["provider_mutation", "backend_failure"],
-        "standard.provider_error_without_checkpoint" => vec!["provider_mutation"],
-        "standard.native_tool_loop_reenters_model"
-        | "standard.tool_failure_feedback_reenters_model"
-        | "standard.max_turns_after_tool_result"
-        | "standard.parallel_tool_results_checkpoint_once" => vec!["tool_result", "provider_turn"],
-        "standard.streamed_text_finalizes_once" | "standard.initial_request_projection" => {
-            vec!["provider_turn", "observer_convergence"]
-        }
-        "rlm.lashlang_cell_exec_continues" => vec!["exec_code", "trigger", "provider_turn"],
-        "rlm.exec_error_max_turn_stop"
-        | "rlm.exec_tool_control_frame_switch_terminal"
-        | "rlm.exec_tool_control_fail_terminal"
-        | "rlm.exec_result_no_tool_call_replay" => vec!["exec_code"],
-        "rlm.typed_schema_mismatch_repair_loop" | "rlm.typed_schema_any_of_mismatch" => {
-            vec!["provider_mutation", "provider_turn"]
-        }
-        semantic if semantic.starts_with("rlm.") => vec!["provider_turn", "observer_convergence"],
-        "agent.shell_results_are_data" | "agent.shell_output_print_projection_survives" => {
-            vec!["exec_code", "tool_result"]
-        }
-        "agent.foreground_tool_call_round_trip" => vec!["tool_result", "observer_reconnect"],
-        "agent.durable_input_suspension_resolution" => {
-            vec!["durable_effect", "process_wake", "observer_reconnect"]
-        }
-        "agent.tuple_values_finish_as_json_arrays" => {
-            vec!["provider_turn", "observer_convergence"]
-        }
-        semantic if semantic.starts_with("agent.") => {
-            vec!["process_wake", "durable_effect", "multi_session"]
-        }
         _ => Vec::new(),
     }
 }
@@ -2637,6 +3140,35 @@ fn select_event_lines_for_evidence<'a>(
             .take(2)
             .collect(),
     }
+}
+
+fn select_queued_turn_followup_provider_evidence(
+    event_lines: &[TraceEventLine],
+) -> Vec<&TraceEventLine> {
+    for queued in event_lines.iter().filter(|line| {
+        event_satisfies_scenario_evidence(&line.event, "queued_ingress")
+            && line
+                .event
+                .observed
+                .get("ingress_mode")
+                .and_then(Value::as_str)
+                == Some("active_turn")
+    }) {
+        if let Some(provider) = event_lines
+            .iter()
+            .filter(|line| {
+                line.trace_alias == queued.trace_alias
+                    && line.event.kind == BoundaryKind::Provider
+                    && line.event.actor_alias == queued.event.actor_alias
+                    && line.event.sequence > queued.event.sequence
+                    && line.event.observed.get("success").and_then(Value::as_bool) == Some(true)
+            })
+            .min_by_key(|line| line.event.sequence)
+        {
+            return vec![queued, provider];
+        }
+    }
+    Vec::new()
 }
 
 fn select_process_wake_evidence(event_lines: &[TraceEventLine]) -> Vec<&TraceEventLine> {
@@ -2742,8 +3274,60 @@ fn event_satisfies_scenario_evidence(
         }
         "lease_time" => event.kind == BoundaryKind::LeaseTime,
         "provider_turn" => event.kind == BoundaryKind::Provider,
+        "provider_event" => {
+            event.kind == BoundaryKind::ProviderEvent
+                && event
+                    .observed
+                    .get("provider_event_release")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        }
         "tool_result" => {
             event.kind == BoundaryKind::Tool && event.observed.get("runtime_tool_output").is_some()
+        }
+        "max_turn_stop" => {
+            event.kind == BoundaryKind::Trigger
+                && event
+                    .observed
+                    .pointer("/contract_execution/contract")
+                    .and_then(Value::as_str)
+                    == Some("standard.max_turns_after_tool_result")
+                && event
+                    .observed
+                    .pointer("/contract_execution/source/kind")
+                    .and_then(Value::as_str)
+                    == Some("fixed_dst_api_execution")
+                && event
+                    .observed
+                    .pointer("/contract_execution/result/turn_outcomes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|outcome| {
+                        outcome.get("kind").and_then(Value::as_str) == Some("stopped")
+                            && outcome.get("stop_reason").and_then(Value::as_str)
+                                == Some("max_turns")
+                    })
+        }
+        "final_value" => {
+            event.kind == BoundaryKind::Trigger
+                && event
+                    .observed
+                    .pointer("/contract_execution/source/kind")
+                    .and_then(Value::as_str)
+                    == Some("fixed_dst_api_execution")
+                && event
+                    .observed
+                    .pointer("/contract_execution/result/runtime_final_value_facts/outcome_kind")
+                    .and_then(Value::as_str)
+                    == Some("final_value")
+                && event
+                    .observed
+                    .pointer(
+                        "/contract_execution/result/runtime_final_value_facts/semantic_channel_observed",
+                    )
+                    .and_then(Value::as_bool)
+                    == Some(true)
         }
         "observer_convergence" => event.kind == BoundaryKind::Observer,
         "exec_code" => {
@@ -2976,7 +3560,12 @@ fn assert_generated_class_coverage(
     }
     let suspend_resume = event_lines.iter().any(|line| {
         line.event.observed.get("runtime_suspend").is_some()
-            || line.event.payload.get("suspend_resume").and_then(Value::as_bool) == Some(true)
+            || line
+                .event
+                .payload
+                .get("suspend_resume")
+                .and_then(Value::as_bool)
+                == Some(true)
     });
     if !suspend_resume {
         return Err(FixedScriptRunnerError::Assertion(
@@ -3007,7 +3596,24 @@ pub async fn run_generated_sim_profile(
     seeds: usize,
     max_boundaries: usize,
 ) -> Result<GeneratedSimProfileReport, FixedScriptRunnerError> {
+    let seed_values = (0..seeds.max(1))
+        .map(|seed_index| generated_seed(profile, seed_index))
+        .collect::<Vec<_>>();
+    run_generated_sim_profile_for_seeds(artifact_root, profile, &seed_values, max_boundaries).await
+}
+
+pub async fn run_generated_sim_profile_for_seeds(
+    artifact_root: impl AsRef<Path>,
+    profile: &str,
+    seed_values: &[u64],
+    max_boundaries: usize,
+) -> Result<GeneratedSimProfileReport, FixedScriptRunnerError> {
     validate_workload_profile(profile)?;
+    if seed_values.is_empty() {
+        return Err(FixedScriptRunnerError::Assertion(
+            "generated simulation requires at least one seed".to_string(),
+        ));
+    }
     let artifact_root = artifact_root.as_ref();
     std::fs::create_dir_all(artifact_root)?;
 
@@ -3016,7 +3622,7 @@ pub async fn run_generated_sim_profile(
     write_provider_script_manifest(artifact_root, &fixed_manifest)?;
 
     let runtime_proof = prove_runtime_facade_turn().await?;
-    let seed_count = seeds.max(1);
+    let seed_count = seed_values.len();
     let boundary_limit = max_boundaries.max(1);
     let replay_dir = artifact_root.join("replays");
     std::fs::create_dir_all(&replay_dir)?;
@@ -3030,8 +3636,7 @@ pub async fn run_generated_sim_profile(
     let mut interleaving_depth_max = 0;
     let mut interleaving_depth_min = usize::MAX;
 
-    for seed_index in 0..seed_count {
-        let seed = generated_seed(profile, seed_index);
+    for seed in seed_values.iter().copied() {
         let workload = generate_workload(seed, profile, boundary_limit)?;
         let trace_path = replay_dir.join(format!("seed-{seed:016x}.trace.json"));
         let trace =
@@ -3094,22 +3699,45 @@ pub async fn run_generated_sim_profile(
             replay_workload_on_sqlite(&sqlite_workload, &sqlite_database_path).await?;
         let backend_verdict = replay_determinism(&serialized_reference, &sqlite_summary);
         oracle_verdicts.push(backend_verdict.clone());
+        let sqlite_report = if backend_verdict.is_passed() {
+            serde_json::json!({
+                "schema": "lash.sim.sqlite-cross-backend-rerun.v1",
+                "seed": seed,
+                "profile": profile,
+                "backend": "lash_sqlite_store",
+                "driver": "unified_generated_runtime_world",
+                "matches_reference": true,
+                "reference_digest": serialized_reference.digest.clone(),
+                "actual_digest": sqlite_summary.digest.clone(),
+                "verdict": backend_verdict.clone(),
+                "final_summary": sqlite_summary,
+            })
+        } else {
+            serde_json::json!({
+                "schema": "lash.sim.sqlite-cross-backend-rerun.v1",
+                "seed": seed,
+                "profile": profile,
+                "backend": "lash_sqlite_store",
+                "driver": "unified_generated_runtime_world",
+                "matches_reference": false,
+                "reference_digest": serialized_reference.digest.clone(),
+                "actual_digest": sqlite_summary.digest.clone(),
+                "verdict": backend_verdict.clone(),
+                "reference_summary": serialized_reference,
+                "actual_summary": sqlite_summary,
+            })
+        };
+        std::fs::write(
+            &sqlite_replay_report_path,
+            serde_json::to_vec_pretty(&sqlite_report)?,
+        )?;
         if !backend_verdict.is_passed() {
             return Err(FixedScriptRunnerError::Assertion(format!(
-                "cross-backend SQLite re-run for seed {seed} ({profile}) diverged from the serialized in-memory reference: {}",
-                backend_verdict.message
+                "cross-backend SQLite re-run for seed {seed} ({profile}) diverged from the serialized in-memory reference: {}; wrote {}",
+                backend_verdict.message,
+                sqlite_replay_report_path.display()
             )));
         }
-        let sqlite_report = serde_json::json!({
-            "schema": "lash.sim.sqlite-cross-backend-rerun.v1",
-            "seed": seed,
-            "profile": profile,
-            "backend": "lash_sqlite_store",
-            "driver": "unified_generated_runtime_world",
-            "matches_reference": true,
-            "final_summary": sqlite_summary,
-        });
-        std::fs::write(&sqlite_replay_report_path, serde_json::to_vec_pretty(&sqlite_report)?)?;
         let sqlite_replay_report_sha256 = file_sha256(&sqlite_replay_report_path)?;
         replay_reports.push(GeneratedReplayArtifact {
             seed,
@@ -3196,9 +3824,9 @@ pub async fn run_generated_sim_profile(
         &replay_reports,
     )?;
     let scenario_contract_package_count = scenario_contract_packages.len();
-    let backend_replayable_regressions =
-        write_backend_replayable_regression_fixtures(artifact_root, &event_lines, &replay_reports)?;
-    let backend_replayable_regression_count = backend_replayable_regressions.len();
+    let generated_backend_regression_fixtures =
+        write_generated_backend_regression_fixtures(artifact_root, &event_lines, &replay_reports)?;
+    let generated_backend_regression_fixture_count = generated_backend_regression_fixtures.len();
     let generated_runtime_provider_matrix = generated_runtime_provider_matrix(&event_lines);
     let summary_path = artifact_root.join(GENERATED_SIM_SUMMARY);
     let report = GeneratedSimProfileReport {
@@ -3216,7 +3844,7 @@ pub async fn run_generated_sim_profile(
         scenario_contracts: scenario_contract_manifests(),
         scenario_contract_slices,
         scenario_contract_packages,
-        backend_replayable_regressions,
+        generated_backend_regression_fixtures,
         model_only_boundary_reviews: model_only_boundary_reviews(),
         provider_transport_exclusions: fixed_manifest.provider_transport_exclusions.clone(),
         counts: GeneratedSimCounts {
@@ -3234,7 +3862,7 @@ pub async fn run_generated_sim_profile(
             scenario_contract_mini_oracles,
             scenario_contract_slices: scenario_contract_slice_count,
             scenario_contract_packages: scenario_contract_package_count,
-            backend_replayable_regressions: backend_replayable_regression_count,
+            generated_backend_regression_fixtures: generated_backend_regression_fixture_count,
             oracle_passes,
             oracle_failures,
             model_store_sessions,
@@ -3271,8 +3899,13 @@ pub(crate) async fn run_generated_workload_for_fixture(
 async fn drive_generated_workload(
     world: &mut GeneratedRuntimeWorld,
     workload: &GeneratedWorkload,
-) -> Result<(Vec<crate::scheduler::DeliveredBoundary>, AbstractWorldSummary), FixedScriptRunnerError>
-{
+) -> Result<
+    (
+        Vec<crate::scheduler::DeliveredBoundary>,
+        AbstractWorldSummary,
+    ),
+    FixedScriptRunnerError,
+> {
     let (initial_boundaries, mut completion_queue) =
         split_runtime_completion_boundaries(workload.boundaries.clone());
     let mut scheduler = BoundaryScheduler::with_events(workload.seed, initial_boundaries);
@@ -3370,7 +4003,8 @@ async fn drive_generated_workload(
             completion_queue.completed_len()
         )));
     }
-    let events = log.into_vec();
+    let mut events = log.into_vec();
+    append_contract_execution_boundaries(&mut events, &mut store, workload.seed).await?;
     let final_summary = store.summary();
     // The event-derived interleaving highwater is the canonical, replay-stable
     // measure (recomputed identically from `events` on every backend). The
@@ -3385,6 +4019,3502 @@ async fn drive_generated_workload(
         )));
     }
     Ok((events, final_summary))
+}
+
+async fn append_contract_execution_boundaries(
+    events: &mut Vec<crate::scheduler::DeliveredBoundary>,
+    store: &mut ModelStore,
+    seed: u64,
+) -> Result<(), FixedScriptRunnerError> {
+    let start_sequence = events.len();
+    let mut scheduler = BoundaryScheduler::with_events(
+        seed ^ 0x5e_3a_11_ce_c0_de,
+        contract_execution_boundaries(events).await?,
+    );
+    while let Some(mut delivered) = scheduler.deliver_next_with(|event| store.apply_boundary(event))
+    {
+        delivered.sequence += start_sequence;
+        events.push(delivered);
+    }
+    Ok(())
+}
+
+async fn contract_execution_boundaries(
+    events: &[crate::scheduler::DeliveredBoundary],
+) -> Result<Vec<BoundaryEvent>, FixedScriptRunnerError> {
+    let mut next_at = events
+        .iter()
+        .map(|event| event.at)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut proof_events = Vec::new();
+    for execution in standard_protocol_contract_executions()? {
+        proof_events.push(standard_protocol_execution_boundary(
+            events, next_at, execution,
+        )?);
+        next_at = next_at.saturating_add(1);
+    }
+    for execution in rlm_protocol_contract_executions()? {
+        proof_events.push(rlm_protocol_execution_boundary(events, next_at, execution)?);
+        next_at = next_at.saturating_add(1);
+    }
+    for execution in agent_contract_executions().await? {
+        proof_events.push(agent_contract_execution_boundary(
+            events, next_at, execution,
+        )?);
+        next_at = next_at.saturating_add(1);
+    }
+    Ok(proof_events)
+}
+
+fn standard_protocol_execution_boundary(
+    events: &[crate::scheduler::DeliveredBoundary],
+    at: u64,
+    mut execution: Value,
+) -> Result<BoundaryEvent, FixedScriptRunnerError> {
+    let contract = execution
+        .get("contract")
+        .and_then(Value::as_str)
+        .unwrap_or("standard.protocol.contract");
+    let proof_id = contract.replace('.', "-").replace('_', "-");
+    match contract {
+        "standard.initial_request_projection" | "standard.streamed_text_finalizes_once" => {
+            let provider = first_successful_provider(events).ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "could not anchor {contract} execution to a successful generated provider boundary"
+                ))
+            })?;
+            execution
+                .as_object_mut()
+                .expect("contract execution object")
+                .insert(
+                    "generated_anchor".to_string(),
+                    json!({
+                        "provider_boundary": provider.boundary_id,
+                        "actor": provider.actor_alias,
+                        "provider_sequence": provider.sequence,
+                    }),
+                );
+            Ok(contract_execution_boundary(
+                &provider.actor_alias,
+                &proof_id,
+                at,
+                execution,
+            ))
+        }
+        "standard.empty_provider_response_error" | "standard.provider_error_without_checkpoint" => {
+            let mutation = match contract {
+                "standard.empty_provider_response_error" => "dropped_terminal_event",
+                "standard.provider_error_without_checkpoint" => "rate_limit_error_envelope",
+                _ => unreachable!(),
+            };
+            let provider = first_successful_provider(events).ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "could not anchor {contract} execution to a successful generated provider boundary"
+                ))
+            })?;
+            let parser = events
+                .iter()
+                .find(|event| {
+                    event.kind == BoundaryKind::ProviderMutation
+                        && event
+                            .observed
+                            .get("mutation")
+                            .or_else(|| event.payload.get("mutation"))
+                            .and_then(Value::as_str)
+                            == Some(mutation)
+                        && event
+                            .observed
+                            .pointer(
+                                "/provider_parser_matrix/matrix/real_provider_parser_execution",
+                            )
+                            .and_then(Value::as_bool)
+                            == Some(true)
+                })
+                .ok_or_else(|| {
+                    FixedScriptRunnerError::Assertion(format!(
+                        "could not anchor {contract} execution to real parser mutation `{mutation}`"
+                    ))
+                })?;
+            execution
+                .as_object_mut()
+                .expect("contract execution object")
+                .insert(
+                    "generated_anchor".to_string(),
+                    json!({
+                        "provider_boundary": provider.boundary_id,
+                        "provider_sequence": provider.sequence,
+                        "provider_mutation_boundary": parser.boundary_id,
+                        "mutation": mutation,
+                        "real_provider_parser_execution": true,
+                        "actor": provider.actor_alias,
+                    }),
+                );
+            Ok(contract_execution_boundary(
+                &provider.actor_alias,
+                &proof_id,
+                at,
+                execution,
+            ))
+        }
+        "standard.native_tool_loop_reenters_model"
+        | "standard.parallel_tool_results_checkpoint_once"
+        | "standard.tool_failure_feedback_reenters_model"
+        | "standard.max_turns_after_tool_result" => {
+            let Some((tool, provider)) = generated_tool_then_same_actor_provider(events) else {
+                return Err(FixedScriptRunnerError::Assertion(format!(
+                    "could not anchor {contract} execution to tool result and same-actor provider continuation"
+                )));
+            };
+            execution
+                .as_object_mut()
+                .expect("contract execution object")
+                .insert(
+                    "generated_anchor".to_string(),
+                    json!({
+                        "tool_boundary": tool.boundary_id,
+                        "continuation_provider_boundary": provider.boundary_id,
+                        "actor": tool.actor_alias,
+                        "tool_sequence": tool.sequence,
+                        "continuation_provider_sequence": provider.sequence,
+                        "same_actor_continuation": tool.actor_alias == provider.actor_alias
+                            && provider.sequence > tool.sequence,
+                    }),
+                );
+            Ok(contract_execution_boundary(
+                &tool.actor_alias,
+                &proof_id,
+                at,
+                execution,
+            ))
+        }
+        other => Err(FixedScriptRunnerError::Assertion(format!(
+            "no Standard contract execution boundary anchor registered for `{other}`"
+        ))),
+    }
+}
+
+fn generated_tool_then_same_actor_provider(
+    events: &[crate::scheduler::DeliveredBoundary],
+) -> Option<(
+    &crate::scheduler::DeliveredBoundary,
+    &crate::scheduler::DeliveredBoundary,
+)> {
+    events
+        .iter()
+        .filter(|event| {
+            event.kind == BoundaryKind::Tool
+                && event.observed.get("runtime_tool_output").is_some()
+                && event
+                    .observed
+                    .get("execution_count")
+                    .and_then(Value::as_u64)
+                    == Some(1)
+        })
+        .find_map(|tool| {
+            events
+                .iter()
+                .filter(|provider| {
+                    provider.kind == BoundaryKind::Provider
+                        && provider.actor_alias == tool.actor_alias
+                        && provider.sequence > tool.sequence
+                        && provider.observed.get("success").and_then(Value::as_bool) == Some(true)
+                })
+                .min_by_key(|provider| provider.sequence)
+                .map(|provider| (tool, provider))
+        })
+}
+
+fn agent_contract_execution_boundary(
+    events: &[crate::scheduler::DeliveredBoundary],
+    at: u64,
+    execution: Value,
+) -> Result<BoundaryEvent, FixedScriptRunnerError> {
+    let provider = first_successful_provider(events).ok_or_else(|| {
+        FixedScriptRunnerError::Assertion(
+            "could not anchor Agent contract execution to a successful generated provider boundary"
+                .to_string(),
+        )
+    })?;
+    let proof_id = execution
+        .get("contract")
+        .and_then(Value::as_str)
+        .unwrap_or("agent.contract")
+        .replace('.', "-")
+        .replace('_', "-");
+    Ok(contract_execution_boundary(
+        &provider.actor_alias,
+        &proof_id,
+        at,
+        execution,
+    ))
+}
+
+fn rlm_protocol_execution_boundary(
+    events: &[crate::scheduler::DeliveredBoundary],
+    at: u64,
+    execution: Value,
+) -> Result<BoundaryEvent, FixedScriptRunnerError> {
+    let provider = first_successful_provider(events).ok_or_else(|| {
+        FixedScriptRunnerError::Assertion(
+            "could not anchor RLM protocol contract execution to a successful generated provider boundary"
+                .to_string(),
+        )
+    })?;
+    let proof_id = execution
+        .get("contract")
+        .and_then(Value::as_str)
+        .unwrap_or("rlm.protocol.contract")
+        .replace('.', "-")
+        .replace('_', "-");
+    Ok(contract_execution_boundary(
+        &provider.actor_alias,
+        &proof_id,
+        at,
+        execution,
+    ))
+}
+
+fn contract_execution_boundary(
+    actor_alias: &str,
+    proof_id: &str,
+    at: u64,
+    contract_execution: Value,
+) -> BoundaryEvent {
+    BoundaryEvent::new(
+        format!("{actor_alias}:contract-execution:{proof_id}"),
+        actor_alias.to_string(),
+        BoundaryKind::Trigger,
+        at,
+        format!("contract-execution.{proof_id}"),
+        json!({
+            "session": actor_alias,
+            "source_key": format!("contract-execution/{actor_alias}/{proof_id}"),
+            "started_process": false,
+            "contract_execution": contract_execution,
+        }),
+    )
+}
+
+fn standard_protocol_contract_executions() -> Result<Vec<Value>, FixedScriptRunnerError> {
+    Ok(vec![
+        standard_initial_request_projection_execution()?,
+        standard_empty_provider_response_error_execution()?,
+        standard_provider_error_without_checkpoint_execution()?,
+        standard_native_tool_loop_reenters_model_execution()?,
+        standard_parallel_tool_results_checkpoint_once_execution()?,
+        standard_tool_failure_feedback_reenters_model_execution()?,
+        standard_streamed_text_finalizes_once_execution()?,
+        standard_max_turn_after_tool_result_execution()?,
+    ])
+}
+
+fn standard_initial_request_projection_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_standard_protocol_contract(
+        "standard initial request projection",
+        "hello standard protocol",
+        None,
+        vec![],
+    )?;
+    contract_execution_payload(
+        "standard.initial_request_projection",
+        "crates/lash-protocol-standard/tests/protocol_scenarios.rs",
+        "standard_protocol_scenario_projects_initial_request",
+        result,
+    )
+}
+
+fn standard_empty_provider_response_error_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_standard_protocol_contract(
+        "standard empty provider response error",
+        "answer with something",
+        None,
+        vec![StandardContractStep::Llm {
+            text_streamed: false,
+            parts: vec![],
+        }],
+    )?;
+    contract_execution_payload(
+        "standard.empty_provider_response_error",
+        "crates/lash-protocol-standard/tests/protocol_scenarios.rs",
+        "standard_protocol_scenario_empty_model_response_stops_provider_error",
+        result,
+    )
+}
+
+fn standard_provider_error_without_checkpoint_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_standard_protocol_contract(
+        "standard provider error without checkpoint",
+        "trigger provider failure",
+        None,
+        vec![StandardContractStep::LlmError(
+            "upstream provider unavailable",
+        )],
+    )?;
+    contract_execution_payload(
+        "standard.provider_error_without_checkpoint",
+        "crates/lash-protocol-standard/tests/protocol_scenarios.rs",
+        "standard_protocol_scenario_provider_error_stops_without_checkpoint",
+        result,
+    )
+}
+
+fn standard_native_tool_loop_reenters_model_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_standard_protocol_contract(
+        "standard native tool loop reenters model",
+        "read file",
+        None,
+        vec![
+            StandardContractStep::Llm {
+                text_streamed: false,
+                parts: vec![
+                    standard_text_part("Let me read that."),
+                    standard_tool_call_part("tc1", "read_file", r#"{"path":"foo.txt"}"#),
+                ],
+            },
+            StandardContractStep::ToolResults(vec![StandardContractToolResult::ok(
+                "tc1",
+                "read_file",
+                json!("file contents"),
+                "file contents",
+            )]),
+            StandardContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "standard.native_tool_loop_reenters_model",
+        "crates/lash-protocol-standard/tests/protocol_scenarios.rs",
+        "standard_protocol_scenario_native_tool_loop_reenters_model_after_checkpoint",
+        result,
+    )
+}
+
+fn standard_parallel_tool_results_checkpoint_once_execution()
+-> Result<Value, FixedScriptRunnerError> {
+    let result = run_standard_protocol_contract(
+        "standard parallel tool results checkpoint once",
+        "read two files",
+        None,
+        vec![
+            StandardContractStep::Llm {
+                text_streamed: false,
+                parts: vec![
+                    standard_tool_call_part("tc1", "read_file", r#"{"path":"left.txt"}"#),
+                    standard_tool_call_part("tc2", "read_file", r#"{"path":"right.txt"}"#),
+                ],
+            },
+            StandardContractStep::ToolResults(vec![
+                StandardContractToolResult::ok(
+                    "tc1",
+                    "read_file",
+                    json!("left contents"),
+                    "left contents",
+                ),
+                StandardContractToolResult::ok(
+                    "tc2",
+                    "read_file",
+                    json!("right contents"),
+                    "right contents",
+                ),
+            ]),
+            StandardContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "standard.parallel_tool_results_checkpoint_once",
+        "crates/lash-protocol-standard/tests/protocol_scenarios.rs",
+        "standard_protocol_scenario_parallel_tool_results_checkpoint_once",
+        result,
+    )
+}
+
+fn standard_tool_failure_feedback_reenters_model_execution() -> Result<Value, FixedScriptRunnerError>
+{
+    let result = run_standard_protocol_contract(
+        "standard tool failure feedback reenters model",
+        "search docs",
+        None,
+        vec![
+            StandardContractStep::Llm {
+                text_streamed: false,
+                parts: vec![standard_tool_call_part(
+                    "tc1",
+                    "search",
+                    r#"{"query":"missing term"}"#,
+                )],
+            },
+            StandardContractStep::ToolResults(vec![StandardContractToolResult::failure(
+                "tc1",
+                "search",
+                "search_failed",
+                "index unavailable",
+                "search failed: index unavailable",
+            )]),
+            StandardContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "standard.tool_failure_feedback_reenters_model",
+        "crates/lash-protocol-standard/tests/protocol_scenarios.rs",
+        "standard_protocol_scenario_tool_failure_feedback_reenters_model_after_checkpoint",
+        result,
+    )
+}
+
+fn standard_streamed_text_finalizes_once_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_standard_protocol_contract(
+        "standard streamed text finalizes once",
+        "answer directly",
+        None,
+        vec![
+            StandardContractStep::Llm {
+                text_streamed: true,
+                parts: vec![standard_text_part("streamed done")],
+            },
+            StandardContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "standard.streamed_text_finalizes_once",
+        "crates/lash-protocol-standard/tests/protocol_scenarios.rs",
+        "standard_protocol_scenario_streamed_text_finishes_without_duplicate_delta",
+        result,
+    )
+}
+
+fn standard_max_turn_after_tool_result_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_standard_protocol_contract(
+        "standard max turns after tool result",
+        "use a tool once",
+        Some(1),
+        vec![
+            StandardContractStep::Llm {
+                text_streamed: false,
+                parts: vec![standard_tool_call_part("tc1", "test", "{}")],
+            },
+            StandardContractStep::ToolResults(vec![StandardContractToolResult::ok(
+                "tc1",
+                "test",
+                json!("ok"),
+                "ok",
+            )]),
+        ],
+    )?;
+    contract_execution_payload(
+        "standard.max_turns_after_tool_result",
+        "crates/lash-protocol-standard/tests/protocol_scenarios.rs",
+        "standard_protocol_scenario_max_turns_terminates_after_tool_result",
+        result,
+    )
+}
+
+#[derive(Clone)]
+enum StandardContractStep {
+    Llm {
+        text_streamed: bool,
+        parts: Vec<LlmOutputPart>,
+    },
+    LlmError(&'static str),
+    ToolResults(Vec<StandardContractToolResult>),
+    Checkpoint,
+}
+
+#[derive(Clone)]
+struct StandardContractToolResult {
+    call_id: &'static str,
+    tool_name: &'static str,
+    output: lash_core::ToolCallOutput,
+    model_return_text: &'static str,
+    status: &'static str,
+    error_code: Option<&'static str>,
+}
+
+impl StandardContractToolResult {
+    fn ok(
+        call_id: &'static str,
+        tool_name: &'static str,
+        output: Value,
+        model_return_text: &'static str,
+    ) -> Self {
+        Self {
+            call_id,
+            tool_name,
+            output: lash_core::ToolCallOutput::success(output),
+            model_return_text,
+            status: "success",
+            error_code: None,
+        }
+    }
+
+    fn failure(
+        call_id: &'static str,
+        tool_name: &'static str,
+        code: &'static str,
+        message: &'static str,
+        model_return_text: &'static str,
+    ) -> Self {
+        Self {
+            call_id,
+            tool_name,
+            output: lash_core::ToolCallOutput::failure(lash_core::ToolFailure::tool(
+                lash_core::ToolFailureClass::Execution,
+                code,
+                message,
+            )),
+            model_return_text,
+            status: "failure",
+            error_code: Some(code),
+        }
+    }
+
+    fn completed_call(&self, args: Value) -> lash_core::sansio::CompletedToolCall {
+        lash_core::sansio::CompletedToolCall {
+            call_id: self.call_id.to_string(),
+            tool_name: self.tool_name.to_string(),
+            args,
+            output: self.output.clone(),
+            model_return: lash_core::ModelToolReturn {
+                call_id: self.call_id.to_string(),
+                tool_name: self.tool_name.to_string(),
+                parts: vec![lash_core::ModelToolReturnPart::text(self.model_return_text)],
+            },
+            duration_ms: 1,
+            replay: None,
+        }
+    }
+
+    fn summary(&self) -> Value {
+        json!({
+            "call_id": self.call_id,
+            "tool_name": self.tool_name,
+            "status": self.status,
+            "error_code": self.error_code,
+            "model_return_text": self.model_return_text,
+        })
+    }
+}
+
+#[derive(Default)]
+struct StandardContractObserved {
+    initial_request_text: Option<String>,
+    tool_calls: Vec<Value>,
+    tool_results: Vec<Value>,
+    checkpoints: Vec<&'static str>,
+    llm_response_full_texts: Vec<String>,
+    llm_response_parts: Vec<Vec<Value>>,
+    llm_call_count: usize,
+    text_deltas: Vec<String>,
+    errors: Vec<String>,
+    turn_outcomes: Vec<lash_core::TurnOutcome>,
+}
+
+impl StandardContractObserved {
+    fn record(&mut self, effects: &[lash_core::Effect]) {
+        for effect in effects {
+            match effect {
+                lash_core::Effect::LlmCall { request, .. } => {
+                    if self.initial_request_text.is_none() {
+                        self.initial_request_text = Some(format!("{:?}", request.messages));
+                    }
+                    self.llm_call_count += 1;
+                }
+                lash_core::Effect::ToolCalls { calls, .. } => {
+                    self.tool_calls.extend(calls.iter().map(|call| {
+                        json!({
+                            "call_id": call.call_id,
+                            "tool_name": call.tool_name,
+                            "args": call.args,
+                        })
+                    }));
+                }
+                lash_core::Effect::Checkpoint { checkpoint, .. } => {
+                    self.checkpoints.push(checkpoint_kind_name(*checkpoint));
+                }
+                lash_core::Effect::Emit(lash_core::SessionEvent::TextDelta { content }) => {
+                    self.text_deltas.push(content.clone());
+                }
+                lash_core::Effect::Emit(lash_core::SessionEvent::Error { message, .. }) => {
+                    self.errors.push(message.clone());
+                }
+                lash_core::Effect::Emit(lash_core::SessionEvent::TurnOutcome { outcome }) => {
+                    self.turn_outcomes.push(outcome.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn run_standard_protocol_contract(
+    scenario_name: &'static str,
+    user_message: &'static str,
+    max_turns: Option<usize>,
+    steps: Vec<StandardContractStep>,
+) -> Result<Value, FixedScriptRunnerError> {
+    let mut config = standard_contract_turn_machine_config();
+    config.max_turns = max_turns;
+    let mut machine = lash_core::TurnMachine::new(
+        config,
+        vec![contract_user_message(user_message)],
+        Arc::new(Vec::new()),
+        0,
+    );
+    let mut observed = StandardContractObserved::default();
+    let mut effects = drain_contract_turn_machine_effects(&mut machine);
+    observed.record(&effects);
+
+    for step in steps {
+        match step {
+            StandardContractStep::Llm {
+                text_streamed,
+                parts,
+            } => {
+                let llm_id = *find_contract_llm_call(&effects).ok_or_else(|| {
+                    FixedScriptRunnerError::Assertion(format!(
+                        "{scenario_name} expected a pending LLM call"
+                    ))
+                })?;
+                let expected_parts = parts.clone();
+                let expected_full_text = standard_full_text(&expected_parts);
+                let expected_part_summary = llm_output_parts_contract_summary(&expected_parts);
+                let response = llm_response_with_parts(expected_full_text.clone(), parts);
+                require(
+                    response.full_text == expected_full_text,
+                    format!(
+                        "{scenario_name} provider response full_text changed: expected {:?}, got {:?}",
+                        expected_full_text, response.full_text
+                    ),
+                )?;
+                let response_part_summary = llm_output_parts_contract_summary(&response.parts);
+                require(
+                    response_part_summary == expected_part_summary,
+                    format!(
+                        "{scenario_name} provider response parts changed: expected {:?}, got {:?}",
+                        expected_part_summary, response_part_summary
+                    ),
+                )?;
+                observed
+                    .llm_response_full_texts
+                    .push(response.full_text.clone());
+                observed.llm_response_parts.push(response_part_summary);
+                machine.handle_response(lash_core::sansio::Response::LlmComplete {
+                    id: llm_id,
+                    text_streamed,
+                    result: Ok(response),
+                });
+            }
+            StandardContractStep::LlmError(message) => {
+                let llm_id = *find_contract_llm_call(&effects).ok_or_else(|| {
+                    FixedScriptRunnerError::Assertion(format!(
+                        "{scenario_name} expected a pending LLM call before provider error"
+                    ))
+                })?;
+                machine.handle_response(lash_core::sansio::Response::LlmComplete {
+                    id: llm_id,
+                    text_streamed: false,
+                    result: Err(standard_llm_error(message)),
+                });
+            }
+            StandardContractStep::ToolResults(results) => {
+                let (tool_id, calls) = effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        lash_core::Effect::ToolCalls { id, calls } => Some((*id, calls.clone())),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        FixedScriptRunnerError::Assertion(format!(
+                            "{scenario_name} expected pending native tool calls"
+                        ))
+                    })?;
+                require(
+                    calls.len() == results.len()
+                        && calls.iter().zip(&results).all(|(call, result)| {
+                            call.call_id == result.call_id && call.tool_name == result.tool_name
+                        }),
+                    format!("{scenario_name} native tool-call shape changed"),
+                )?;
+                observed
+                    .tool_results
+                    .extend(results.iter().map(StandardContractToolResult::summary));
+                machine.handle_response(lash_core::sansio::Response::ToolResults {
+                    id: tool_id,
+                    results: calls
+                        .iter()
+                        .zip(results)
+                        .map(|(call, result)| result.completed_call(call.args.clone()))
+                        .collect(),
+                });
+            }
+            StandardContractStep::Checkpoint => {
+                let checkpoint_id = effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        lash_core::Effect::Checkpoint { id, .. } => Some(*id),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        FixedScriptRunnerError::Assertion(format!(
+                            "{scenario_name} expected pending checkpoint"
+                        ))
+                    })?;
+                machine.handle_response(lash_core::sansio::Response::Checkpoint {
+                    id: checkpoint_id,
+                    delivery: lash_core::sansio::CheckpointDelivery::default(),
+                });
+            }
+        }
+        effects = drain_contract_turn_machine_effects(&mut machine);
+        observed.record(&effects);
+    }
+
+    Ok(json!({
+        "execution_api": "lash_core::sansio::TurnMachine",
+        "driver": "lash_protocol_standard::StandardDriver",
+        "scenario_name": scenario_name,
+        "user_message": user_message,
+        "max_turns": max_turns,
+        "initial_request_contains_user_message": observed
+            .initial_request_text
+            .as_deref()
+            .is_some_and(|request| request.contains(user_message)),
+        "llm_call_count": observed.llm_call_count,
+        "llm_response_full_texts": observed.llm_response_full_texts,
+        "llm_response_parts": observed.llm_response_parts,
+        "done": machine.is_done(),
+        "tool_calls": observed.tool_calls,
+        "tool_results": observed.tool_results,
+        "checkpoints": observed.checkpoints,
+        "text_delta_count": observed.text_deltas.len(),
+        "text_deltas": observed.text_deltas,
+        "errors": observed.errors,
+        "turn_outcomes": observed.turn_outcomes.iter().map(turn_outcome_contract_json).collect::<Vec<_>>(),
+    }))
+}
+
+fn standard_text_part(text: &str) -> LlmOutputPart {
+    LlmOutputPart::Text {
+        text: text.to_string(),
+        response_meta: None,
+    }
+}
+
+fn standard_tool_call_part(call_id: &str, tool_name: &str, input_json: &str) -> LlmOutputPart {
+    LlmOutputPart::ToolCall {
+        call_id: call_id.to_string(),
+        tool_name: tool_name.to_string(),
+        input_json: input_json.to_string(),
+        replay: None,
+    }
+}
+
+fn standard_full_text(parts: &[LlmOutputPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn llm_response_with_parts(full_text: String, parts: Vec<LlmOutputPart>) -> LlmResponse {
+    let mut response = LlmResponse::default();
+    response.full_text = full_text;
+    response.parts = parts;
+    response
+}
+
+fn text_llm_response(text: impl Into<String>) -> LlmResponse {
+    let text = text.into();
+    llm_response_with_parts(
+        text.clone(),
+        vec![LlmOutputPart::Text {
+            text,
+            response_meta: None,
+        }],
+    )
+}
+
+fn tool_call_llm_response(call_id: &str, tool_name: &str, input_json: &str) -> LlmResponse {
+    let mut response = LlmResponse::default();
+    response.parts = vec![LlmOutputPart::ToolCall {
+        call_id: call_id.to_string(),
+        tool_name: tool_name.to_string(),
+        input_json: input_json.to_string(),
+        replay: None,
+    }];
+    response
+}
+
+fn llm_output_parts_contract_summary(parts: &[LlmOutputPart]) -> Vec<Value> {
+    parts
+        .iter()
+        .map(|part| match part {
+            LlmOutputPart::Text { text, .. } => json!({
+                "kind": "text",
+                "text": text,
+            }),
+            LlmOutputPart::Reasoning { text, .. } => json!({
+                "kind": "reasoning",
+                "text": text,
+            }),
+            LlmOutputPart::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                ..
+            } => json!({
+                "kind": "tool_call",
+                "call_id": call_id,
+                "tool_name": tool_name,
+                "input_json": input_json,
+            }),
+        })
+        .collect()
+}
+
+fn response_text_part(response: &LlmResponse) -> Option<&str> {
+    response.parts.iter().find_map(|part| match part {
+        LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+fn standard_llm_error(message: &str) -> lash_core::LlmCallError {
+    lash_core::LlmCallError {
+        message: message.to_string(),
+        retryable: false,
+        raw: None,
+        code: Some("test_provider_error".to_string()),
+        terminal_reason: LlmTerminalReason::ProviderError,
+        request_body: None,
+    }
+}
+
+pub(crate) fn replay_contract_execution(contract: &str) -> Result<Value, FixedScriptRunnerError> {
+    match contract {
+        other if other.starts_with("standard.") => standard_protocol_contract_executions()?
+            .into_iter()
+            .find(|execution| execution.get("contract").and_then(Value::as_str) == Some(other))
+            .ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "no replayable fixed Standard contract execution registered for `{other}`"
+                ))
+            }),
+        other if other.starts_with("rlm.") => rlm_protocol_contract_executions()?
+            .into_iter()
+            .find(|execution| execution.get("contract").and_then(Value::as_str) == Some(other))
+            .ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "no replayable fixed RLM contract execution registered for `{other}`"
+                ))
+            }),
+        other if other.starts_with("agent.") => replay_agent_contract_execution(other),
+        other => Err(FixedScriptRunnerError::Assertion(format!(
+            "contract execution replay is not registered for `{other}`"
+        ))),
+    }
+}
+
+fn replay_agent_contract_execution(contract: &str) -> Result<Value, FixedScriptRunnerError> {
+    let contract = contract.to_string();
+    let runner = agent_contract_runner(&contract)?;
+    run_on_sim_harness_stack(
+        format!("replay-{contract}-contract"),
+        SIM_HARNESS_STACK_LIMIT_BYTES,
+        move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(FixedScriptRunnerError::Io)?;
+            runner(&runtime)
+        },
+    )
+}
+
+fn contract_replay_panic(
+    label: &str,
+    panic: Box<dyn std::any::Any + Send + 'static>,
+) -> FixedScriptRunnerError {
+    FixedScriptRunnerError::Runtime(format!(
+        "{label} contract replay thread panicked: {}",
+        panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic")
+    ))
+}
+
+fn rlm_protocol_contract_executions() -> Result<Vec<Value>, FixedScriptRunnerError> {
+    Ok(vec![
+        rlm_natural_prose_finalizes_execution()?,
+        rlm_typed_prose_requires_finish_execution()?,
+        rlm_finish_required_max_turn_stop_execution()?,
+        rlm_exec_error_max_turn_stop_execution()?,
+        rlm_typed_finish_emits_outcome_and_done_execution()?,
+        rlm_finish_required_diagnostic_counts_execution()?,
+        rlm_natural_diagnostic_counts_execution()?,
+        rlm_cell_diagnostic_counts_execution()?,
+        rlm_retired_marker_plain_lashlang_text_execution()?,
+        rlm_lashlang_cell_exec_continues_execution()?,
+        rlm_empty_options_natural_default_execution()?,
+        rlm_exec_result_no_tool_call_replay_execution()?,
+        rlm_exec_tool_control_frame_switch_terminal_execution()?,
+        rlm_exec_tool_control_fail_terminal_execution()?,
+        rlm_natural_allows_finish_value_execution()?,
+        rlm_typed_schema_mismatch_repair_loop_execution()?,
+        rlm_typed_schema_any_of_mismatch_execution()?,
+    ])
+}
+
+fn rlm_natural_prose_finalizes_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm natural prose finalizes",
+        "hello",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part("Hello there!")]),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.natural_prose_finalizes",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_prose_only_response_finishes_by_default",
+        result,
+    )
+}
+
+fn rlm_typed_prose_requires_finish_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm typed prose requires finish",
+        "hello",
+        RlmTermination::FinishRequired { schema: None },
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part("Hello there!")]),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.typed_prose_requires_finish",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_typed_prose_only_response_requests_finish",
+        result,
+    )
+}
+
+fn rlm_finish_required_max_turn_stop_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm finish-required prose max-turn stop",
+        "hello",
+        RlmTermination::FinishRequired { schema: None },
+        Some(1),
+        None,
+        vec![RlmContractStep::Llm(vec![rlm_text_part(
+            "plain prose cannot finish finish-required RLM",
+        )])],
+    )?;
+    contract_execution_payload(
+        "rlm.finish_required_max_turn_stop",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_finish_required_prose_at_max_turns_stops_without_retry_prompt",
+        result,
+    )
+}
+
+fn rlm_exec_error_max_turn_stop_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm finish-required exec error max-turn stop",
+        "run bad code",
+        RlmTermination::FinishRequired { schema: None },
+        Some(1),
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block("missing_name"))]),
+            RlmContractStep::Exec(rlm_exec_response(
+                &[],
+                Some("unknown variable `missing_name`"),
+                None,
+            )),
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.exec_error_max_turn_stop",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_finish_required_exec_error_at_max_turns_stops_without_retry",
+        result,
+    )
+}
+
+fn rlm_typed_finish_emits_outcome_and_done_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm typed finish emits outcome and done",
+        "return typed data",
+        RlmTermination::FinishRequired {
+            schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "ok": { "type": "boolean" }
+                },
+                "required": ["ok"],
+                "additionalProperties": false
+            })),
+        },
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block(
+                "finish { ok: true }",
+            ))]),
+            RlmContractStep::Exec(rlm_exec_response(&[], None, Some(json!({ "ok": true })))),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.typed_finish_emits_outcome_and_done",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_typed_finish_emits_turn_outcome_and_done",
+        result,
+    )
+}
+
+fn rlm_finish_required_diagnostic_counts_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm finish-required diagnostic counts",
+        "hello",
+        RlmTermination::FinishRequired { schema: None },
+        None,
+        None,
+        vec![RlmContractStep::Llm(vec![rlm_text_part("Hello there!")])],
+    )?;
+    contract_execution_payload(
+        "rlm.finish_required_diagnostic_counts",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_finish_required_prose_only_diagnostic_has_clean_counts",
+        result,
+    )
+}
+
+fn rlm_natural_diagnostic_counts_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm natural diagnostic counts",
+        "hello",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![RlmContractStep::Llm(vec![rlm_text_part("Hello there!")])],
+    )?;
+    contract_execution_payload(
+        "rlm.natural_diagnostic_counts",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_natural_prose_only_diagnostic_has_clean_counts",
+        result,
+    )
+}
+
+fn rlm_cell_diagnostic_counts_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm cell diagnostic counts",
+        "run some code",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![
+                rlm_reasoning_part("Checking state."),
+                rlm_text_part(&rlm_lashlang_block_with_prose("Ready.", "print \"hi\"")),
+            ]),
+            RlmContractStep::Exec(rlm_exec_response(&["hi\n"], None, None)),
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.cell_diagnostic_counts",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_cell_reasoning_prose_code_diagnostic_has_clean_counts",
+        result,
+    )
+}
+
+fn rlm_retired_marker_plain_lashlang_text_execution() -> Result<Value, FixedScriptRunnerError> {
+    let assistant_prose = "First.";
+    let code = "text = \"%%lashlang is just source here\"\nprint text";
+    let result = run_rlm_protocol_contract(
+        "rlm retired marker plain LashLang text",
+        "run some code",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![RlmContractStep::Llm(vec![rlm_text_part(
+            &rlm_lashlang_block_with_prose(assistant_prose, code),
+        )])],
+    )?;
+    contract_execution_payload(
+        "rlm.retired_marker_plain_lashlang_text",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_retired_percent_marker_inside_source_is_plain_lashlang_text",
+        result,
+    )
+}
+
+fn rlm_lashlang_cell_exec_continues_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm LashLang cell exec continues",
+        "run some code",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block_with_prose(
+                "Quick check.\n",
+                "print \"hi\"",
+            ))]),
+            RlmContractStep::Exec(rlm_exec_response(&["hi\n"], None, None)),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.lashlang_cell_exec_continues",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_lashlang_cell_runs_exec_and_continues",
+        result,
+    )
+}
+
+fn rlm_empty_options_natural_default_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm empty options natural default",
+        "finish",
+        RlmTermination::Natural,
+        None,
+        Some(lash_core::ProtocolTurnOptions::empty()),
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block("finish \"done\""))]),
+            RlmContractStep::Exec(rlm_exec_response(&[], None, Some(json!("done")))),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.empty_options_natural_default",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_empty_turn_options_use_natural_default",
+        result,
+    )
+}
+
+fn rlm_exec_result_no_tool_call_replay_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm exec result no tool-call replay",
+        "run a tool",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block(
+                "x = await tools.read_file({ path: \"foo\" })?",
+            ))]),
+            RlmContractStep::Exec(rlm_exec_response_with_tool_calls(
+                &[],
+                None,
+                None,
+                vec![rlm_tool_call_record(
+                    "rlm-call-1",
+                    "read_file",
+                    json!({ "path": "foo" }),
+                    lash_core::ToolCallOutput::success(json!("contents")),
+                    7,
+                )],
+                7,
+            )),
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.exec_result_no_tool_call_replay",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool_events",
+        result,
+    )
+}
+
+fn rlm_exec_tool_control_frame_switch_terminal_execution() -> Result<Value, FixedScriptRunnerError>
+{
+    let result = run_rlm_protocol_contract(
+        "rlm exec tool-control frame switch terminal",
+        "run a custom frame-switch tool",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block(
+                "x = await tools.custom_frame_switch({})?",
+            ))]),
+            RlmContractStep::Exec(rlm_exec_response_with_tool_calls(
+                &[],
+                None,
+                None,
+                vec![rlm_tool_call_record(
+                    "custom-call-1",
+                    "custom_frame_switch",
+                    json!({}),
+                    lash_core::ToolCallOutput::success(json!({ "ok": true })).with_control(
+                        lash_core::ToolControl::SwitchAgentFrame {
+                            frame_id: "next-frame".to_string(),
+                            initial_nodes: Vec::new(),
+                            task: Some("continue".to_string()),
+                        },
+                    ),
+                    3,
+                )],
+                3,
+            )),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.exec_tool_control_frame_switch_terminal",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal",
+        result,
+    )
+}
+
+fn rlm_exec_tool_control_fail_terminal_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm exec tool-control fail terminal",
+        "run a custom failure tool",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block(
+                "x = await tools.custom_fail({})?",
+            ))]),
+            RlmContractStep::Exec(rlm_exec_response_with_tool_calls(
+                &[],
+                None,
+                None,
+                vec![rlm_tool_call_record(
+                    "custom-call-1",
+                    "custom_fail",
+                    json!({}),
+                    lash_core::ToolCallOutput::success(json!({ "ok": true })).with_control(
+                        lash_core::ToolControl::Fail {
+                            failure: lash_core::ToolFailure::tool(
+                                lash_core::ToolFailureClass::Execution,
+                                "custom_fail",
+                                "no valid result",
+                            ),
+                        },
+                    ),
+                    3,
+                )],
+                3,
+            )),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.exec_tool_control_fail_terminal",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_exec_any_tool_control_fail_is_terminal_error",
+        result,
+    )
+}
+
+fn rlm_natural_allows_finish_value_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm natural allows finish value",
+        "return typed data",
+        RlmTermination::Natural,
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block(
+                "finish { ok: true }",
+            ))]),
+            RlmContractStep::Exec(rlm_exec_response(&[], None, Some(json!({ "ok": true })))),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.natural_allows_finish_value",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_natural_allows_finish_value",
+        result,
+    )
+}
+
+fn rlm_typed_schema_mismatch_repair_loop_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm typed schema mismatch repair loop",
+        "return typed data",
+        RlmTermination::FinishRequired {
+            schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "ok": { "type": "boolean" }
+                },
+                "required": ["ok"]
+            })),
+        },
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block(
+                "finish { missing: true }",
+            ))]),
+            RlmContractStep::Exec(rlm_exec_response(
+                &[],
+                None,
+                Some(json!({ "missing": true })),
+            )),
+            RlmContractStep::Checkpoint,
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.typed_schema_mismatch_repair_loop",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_typed_schema_mismatch_loops_with_feedback",
+        result,
+    )
+}
+
+fn rlm_typed_schema_any_of_mismatch_execution() -> Result<Value, FixedScriptRunnerError> {
+    let result = run_rlm_protocol_contract(
+        "rlm typed schema anyOf mismatch",
+        "return typed data",
+        RlmTermination::FinishRequired {
+            schema: Some(json!({
+                "anyOf": [
+                    { "type": "string" },
+                    { "type": "integer" }
+                ]
+            })),
+        },
+        None,
+        None,
+        vec![
+            RlmContractStep::Llm(vec![rlm_text_part(&rlm_lashlang_block("finish true"))]),
+            RlmContractStep::Exec(rlm_exec_response(&[], None, Some(json!(true)))),
+        ],
+    )?;
+    contract_execution_payload(
+        "rlm.typed_schema_any_of_mismatch",
+        "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
+        "rlm_protocol_scenario_typed_schema_mismatch_checks_any_of",
+        result,
+    )
+}
+
+#[derive(Clone)]
+enum RlmContractStep {
+    Llm(Vec<LlmOutputPart>),
+    Exec(lash_core::ExecResponse),
+    Checkpoint,
+}
+
+#[derive(Default)]
+struct RlmContractObserved {
+    initial_request_tools_empty: Option<bool>,
+    exec_codes: Vec<String>,
+    checkpoints: Vec<&'static str>,
+    llm_response_full_texts: Vec<String>,
+    llm_response_part_counts: Vec<usize>,
+    llm_response_parts: Vec<Vec<Value>>,
+    llm_call_count: usize,
+    turn_outcomes: Vec<lash_core::TurnOutcome>,
+    final_message_event: bool,
+    tool_call_event: bool,
+    assistant_conversation_progress: bool,
+}
+
+impl RlmContractObserved {
+    fn record(&mut self, effects: &[lash_core::Effect]) {
+        for effect in effects {
+            match effect {
+                lash_core::Effect::LlmCall { request, .. } => {
+                    if self.initial_request_tools_empty.is_none() {
+                        self.initial_request_tools_empty = Some(request.tools.is_empty());
+                    }
+                    self.llm_call_count += 1;
+                }
+                lash_core::Effect::ExecCode { code, .. } => {
+                    self.exec_codes.push(code.clone());
+                }
+                lash_core::Effect::Checkpoint { checkpoint, .. } => {
+                    self.checkpoints.push(checkpoint_kind_name(*checkpoint));
+                }
+                lash_core::Effect::Emit(lash_core::SessionEvent::TurnOutcome { outcome }) => {
+                    self.turn_outcomes.push(outcome.clone());
+                }
+                lash_core::Effect::Emit(lash_core::SessionEvent::Message { kind, .. })
+                    if kind == "final" =>
+                {
+                    self.final_message_event = true;
+                }
+                lash_core::Effect::Emit(lash_core::SessionEvent::ToolCall { .. }) => {
+                    self.tool_call_event = true;
+                }
+                lash_core::Effect::Progress { event_delta, .. } => {
+                    self.assistant_conversation_progress |= event_delta.iter().any(|event| {
+                        matches!(
+                            event,
+                            lash_core::SessionEventRecord::Conversation(record)
+                                if record.to_message().role == lash_core::MessageRole::Assistant
+                        )
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn run_rlm_protocol_contract(
+    scenario_name: &'static str,
+    user_message: &'static str,
+    termination: RlmTermination,
+    max_turns: Option<usize>,
+    protocol_turn_options: Option<lash_core::ProtocolTurnOptions>,
+    steps: Vec<RlmContractStep>,
+) -> Result<Value, FixedScriptRunnerError> {
+    let termination_declared = if protocol_turn_options.is_some() {
+        json!({ "kind": "empty_protocol_turn_options" })
+    } else {
+        serde_json::to_value(&termination)?
+    };
+    let mut config = match protocol_turn_options {
+        Some(options) => rlm_contract_config_with_turn_options(options),
+        None => rlm_contract_config(termination),
+    }?;
+    config.max_turns = max_turns;
+    let mut machine = lash_core::TurnMachine::new(
+        config,
+        vec![contract_user_message(user_message)],
+        Arc::new(Vec::new()),
+        0,
+    );
+    let mut observed = RlmContractObserved::default();
+    let mut effects = drain_rlm_contract_effects(&mut machine);
+    observed.record(&effects);
+    for step in steps {
+        match step {
+            RlmContractStep::Llm(parts) => {
+                let llm_id = *find_contract_llm_call(&effects).ok_or_else(|| {
+                    FixedScriptRunnerError::Assertion(format!(
+                        "{scenario_name} expected a pending LLM call"
+                    ))
+                })?;
+                let expected_parts = parts.clone();
+                let expected_full_text = rlm_full_text(&expected_parts);
+                let expected_part_summary = llm_output_parts_contract_summary(&expected_parts);
+                let response = llm_response_with_parts(expected_full_text.clone(), parts);
+                require(
+                    response.full_text == expected_full_text,
+                    format!(
+                        "{scenario_name} provider response full_text changed: expected {:?}, got {:?}",
+                        expected_full_text, response.full_text
+                    ),
+                )?;
+                require(
+                    response.parts.len() == expected_parts.len() && !response.parts.is_empty(),
+                    format!(
+                        "{scenario_name} provider response parts changed: expected {} parts, got {}",
+                        expected_parts.len(),
+                        response.parts.len()
+                    ),
+                )?;
+                let response_part_summary = llm_output_parts_contract_summary(&response.parts);
+                require(
+                    response_part_summary == expected_part_summary,
+                    format!(
+                        "{scenario_name} provider response parts changed: expected {:?}, got {:?}",
+                        expected_part_summary, response_part_summary
+                    ),
+                )?;
+                observed
+                    .llm_response_full_texts
+                    .push(response.full_text.clone());
+                observed.llm_response_part_counts.push(response.parts.len());
+                observed.llm_response_parts.push(response_part_summary);
+                machine.handle_response(lash_core::sansio::Response::LlmComplete {
+                    id: llm_id,
+                    text_streamed: false,
+                    result: Ok(response),
+                });
+            }
+            RlmContractStep::Exec(result) => {
+                let exec_id = effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        lash_core::Effect::ExecCode { id, .. } => Some(*id),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        FixedScriptRunnerError::Assertion(format!(
+                            "{scenario_name} expected pending exec code"
+                        ))
+                    })?;
+                machine.handle_response(lash_core::sansio::Response::ExecResult {
+                    id: exec_id,
+                    result: Ok(result),
+                });
+            }
+            RlmContractStep::Checkpoint => {
+                let checkpoint_id = effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        lash_core::Effect::Checkpoint { id, .. } => Some(*id),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        FixedScriptRunnerError::Assertion(format!(
+                            "{scenario_name} expected pending checkpoint"
+                        ))
+                    })?;
+                machine.handle_response(lash_core::sansio::Response::Checkpoint {
+                    id: checkpoint_id,
+                    delivery: lash_core::sansio::CheckpointDelivery::default(),
+                });
+            }
+        }
+        effects = drain_rlm_contract_effects(&mut machine);
+        observed.record(&effects);
+    }
+    Ok(json!({
+        "execution_api": "lash_core::sansio::TurnMachine",
+        "driver": "lash_protocol_rlm::RlmDriver",
+        "scenario_name": scenario_name,
+        "user_message": user_message,
+        "termination": termination_declared,
+        "max_turns": max_turns,
+        "initial_request_tools_empty": observed.initial_request_tools_empty,
+        "llm_call_count": observed.llm_call_count,
+        "llm_response_full_texts": observed.llm_response_full_texts,
+        "llm_response_part_counts": observed.llm_response_part_counts,
+        "llm_response_parts": observed.llm_response_parts,
+        "done": machine.is_done(),
+        "checkpoints": observed.checkpoints,
+        "exec_codes": observed.exec_codes,
+        "turn_outcomes": observed.turn_outcomes.iter().map(turn_outcome_contract_json).collect::<Vec<_>>(),
+        "final_message_event": observed.final_message_event,
+        "tool_call_event": observed.tool_call_event,
+        "assistant_conversation_progress": observed.assistant_conversation_progress,
+        "llm_extraction_diagnostics": rlm_contract_llm_extraction_diagnostics(&machine),
+        "trajectory": rlm_contract_trajectory(&machine),
+        "system_messages": rlm_contract_system_messages(&machine),
+    }))
+}
+
+fn rlm_contract_config(
+    termination: RlmTermination,
+) -> Result<lash_core::TurnMachineConfig, FixedScriptRunnerError> {
+    let options = lash_core::ProtocolTurnOptions::typed(RlmCreateExtras {
+        termination,
+        final_answer_format: None,
+    })
+    .map_err(|err| FixedScriptRunnerError::Assertion(err.to_string()))?;
+    rlm_contract_config_with_turn_options(options)
+}
+
+fn rlm_contract_config_with_turn_options(
+    termination: lash_core::ProtocolTurnOptions,
+) -> Result<lash_core::TurnMachineConfig, FixedScriptRunnerError> {
+    let protocol_driver: Arc<
+        dyn lash_core::sansio::ProtocolDriverHandle<lash_core::HostTurnProtocol>,
+    > = Arc::new(lash_protocol_rlm::RlmDriver);
+    Ok(lash_core::TurnMachineConfig {
+        protocol_driver,
+        projector: Arc::new(lash_core::sansio::ChatContextProjector),
+        sync_execution_environment: true,
+        model: "rlm-contract".to_string(),
+        max_context_tokens: None,
+        max_turns: None,
+        model_variant: None,
+        generation: lash_core::GenerationOptions::default(),
+        run_session_id: None,
+        autonomous: false,
+        tool_specs: Vec::new().into(),
+        system_prompt: std::sync::Arc::from(""),
+        session_id: "rlm-contract".to_string(),
+        emit_llm_trace: false,
+        termination,
+        turn_limit_final_message: Arc::new(contract_turn_limit_final_message),
+    })
+}
+
+fn drain_rlm_contract_effects(machine: &mut lash_core::TurnMachine) -> Vec<lash_core::Effect> {
+    let mut effects = Vec::new();
+    while let Some(effect) = machine.poll_effect() {
+        if let lash_core::Effect::SyncExecutionEnvironment { id, .. } = effect {
+            effects.push(effect);
+            machine.handle_response(lash_core::sansio::Response::ExecutionEnvironmentSynced {
+                id,
+                result: Ok(Some(lash_core::sansio::ExecutionEnvironmentSync {
+                    system_prompt: std::sync::Arc::from(""),
+                    tool_specs: Arc::new(Vec::new()),
+                })),
+            });
+            continue;
+        }
+        effects.push(effect);
+    }
+    effects
+}
+
+fn rlm_text_part(text: &str) -> LlmOutputPart {
+    LlmOutputPart::Text {
+        text: text.to_string(),
+        response_meta: None,
+    }
+}
+
+fn rlm_reasoning_part(text: &str) -> LlmOutputPart {
+    LlmOutputPart::Reasoning {
+        text: text.to_string(),
+        replay: None,
+    }
+}
+
+fn rlm_full_text(parts: &[LlmOutputPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn rlm_lashlang_block(code: &str) -> String {
+    format!("<lashlang>\n{code}\n</lashlang>")
+}
+
+fn rlm_lashlang_block_with_prose(prose: &str, code: &str) -> String {
+    format!("{prose}\n{}", rlm_lashlang_block(code))
+}
+
+fn rlm_exec_response(
+    output: &[&str],
+    error: Option<&str>,
+    terminal_finish: Option<Value>,
+) -> lash_core::ExecResponse {
+    lash_core::ExecResponse {
+        observations: output.iter().map(|value| (*value).to_string()).collect(),
+        observation_truncation: Vec::new(),
+        tool_calls: Vec::new(),
+        images: Vec::new(),
+        printed_images: Vec::new(),
+        error: error.map(str::to_string),
+        duration_ms: 1,
+        terminal_finish,
+    }
+}
+
+fn rlm_exec_response_with_tool_calls(
+    output: &[&str],
+    error: Option<&str>,
+    terminal_finish: Option<Value>,
+    tool_calls: Vec<lash_core::ToolCallRecord>,
+    duration_ms: u64,
+) -> lash_core::ExecResponse {
+    lash_core::ExecResponse {
+        observations: output.iter().map(|value| (*value).to_string()).collect(),
+        observation_truncation: Vec::new(),
+        tool_calls,
+        images: Vec::new(),
+        printed_images: Vec::new(),
+        error: error.map(str::to_string),
+        duration_ms,
+        terminal_finish,
+    }
+}
+
+fn rlm_tool_call_record(
+    call_id: &str,
+    tool: &str,
+    args: Value,
+    output: lash_core::ToolCallOutput,
+    duration_ms: u64,
+) -> lash_core::ToolCallRecord {
+    lash_core::ToolCallRecord {
+        call_id: Some(call_id.to_string()),
+        tool: tool.to_string(),
+        args,
+        output,
+        duration_ms,
+    }
+}
+
+fn checkpoint_kind_name(checkpoint: lash_core::CheckpointKind) -> &'static str {
+    match checkpoint {
+        lash_core::CheckpointKind::BeforeCompletion => "before_completion",
+        lash_core::CheckpointKind::AfterWork => "after_work",
+    }
+}
+
+fn rlm_contract_llm_extraction_diagnostics(machine: &lash_core::TurnMachine) -> Vec<Value> {
+    machine
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            lash_core::SessionEventRecord::Protocol(event) => {
+                match lash_protocol_rlm::decode_rlm_protocol_event(event) {
+                    Some(RlmProtocolEvent::RlmDiagnostic(diagnostic))
+                        if diagnostic.phase == "llm_extraction" =>
+                    {
+                        Some(diagnostic.payload)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn rlm_contract_trajectory(machine: &lash_core::TurnMachine) -> Vec<Value> {
+    machine
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            lash_core::SessionEventRecord::Protocol(event) => {
+                match lash_protocol_rlm::decode_rlm_protocol_event(event) {
+                    Some(RlmProtocolEvent::RlmTrajectoryEntry(entry)) => {
+                        serde_json::to_value(entry).ok()
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn rlm_contract_system_messages(machine: &lash_core::TurnMachine) -> Vec<String> {
+    machine
+        .messages()
+        .iter()
+        .filter(|message| message.role == lash_core::MessageRole::System)
+        .flat_map(|message| message.parts.iter().map(|part| part.content.clone()))
+        .collect()
+}
+
+async fn agent_tuple_json_array_execution() -> Result<Value, FixedScriptRunnerError> {
+    let expected = json!({
+        "first": "left",
+        "tail": ["right"],
+        "seen": ["left", "right"],
+        "tuple": ["left", "right"],
+        "nested": { "pair": ["left", "right"] }
+    });
+    let result = facade_final_value_execution(
+        "lash_runtime agent tuple final value",
+        "sim-agent-tuple-json-array-contract",
+        "Use tuple values and finish the derived result.",
+        r#"<lashlang>
+pair = "left", "right"
+tail = slice(pair, 1, null)
+seen = []
+for item in pair {
+  seen = push(seen, item)
+}
+finish {
+  first: pair[0],
+  tail: tail,
+  seen: seen,
+  tuple: pair,
+  nested: { pair: pair }
+}
+</lashlang>"#,
+        &expected,
+    )
+    .await?;
+    contract_execution_payload(
+        "agent.tuple_values_finish_as_json_arrays",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_tuple_values_finish_as_json_arrays",
+        result,
+    )
+}
+
+async fn agent_contract_executions() -> Result<Vec<Value>, FixedScriptRunnerError> {
+    // Aggregating every fixed Agent execution is simulation-harness work used by
+    // generated proof/minimizer packages. It may use the bounded harness stack;
+    // individual product facade executions are separately probed at 2 MiB.
+    run_on_sim_harness_stack(
+        "agent-contract-executions-aggregate",
+        SIM_HARNESS_STACK_LIMIT_BYTES,
+        || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(FixedScriptRunnerError::Io)?;
+            let mut executions = Vec::new();
+            for contract in FIXED_AGENT_PRODUCT_CONTRACTS {
+                let runner = agent_contract_runner(contract)?;
+                executions.push(runner(&runtime)?);
+            }
+            Ok(executions)
+        },
+    )
+}
+
+pub const FIXED_AGENT_PRODUCT_CONTRACTS: &[&str] = &[
+    "agent.foreground_tool_call_round_trip",
+    "agent.started_process_tool_call_graph",
+    "agent.durable_input_suspension_resolution",
+    "agent.shell_results_are_data",
+    "agent.shell_output_print_projection_survives",
+    "agent.started_process_subagent_spawn",
+    "agent.nested_process_start_await",
+    "agent.session_turn_process_child",
+    "agent.failed_child_preserves_failure_graph",
+    "agent.parallel_spawn_and_join",
+    "agent.tuple_values_finish_as_json_arrays",
+];
+
+pub fn run_agent_contract_product_stack_probe(
+    contract: &str,
+    stack_bytes: usize,
+) -> Result<(), FixedScriptRunnerError> {
+    let contract = contract.to_string();
+    let runner = agent_contract_runner(&contract)?;
+    run_on_product_stack(
+        format!("product-agent-contract-probe-{contract}"),
+        stack_bytes,
+        move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(FixedScriptRunnerError::Io)?;
+            runner(&runtime).map(|_| ())
+        },
+    )
+}
+
+type AgentContractRunner = fn(&tokio::runtime::Runtime) -> Result<Value, FixedScriptRunnerError>;
+
+fn agent_contract_runner(contract: &str) -> Result<AgentContractRunner, FixedScriptRunnerError> {
+    match contract {
+        "agent.foreground_tool_call_round_trip" => Ok(run_agent_foreground_tool_call_round_trip),
+        "agent.started_process_tool_call_graph" => Ok(run_agent_started_process_tool_call_graph),
+        "agent.durable_input_suspension_resolution" => {
+            Ok(run_agent_durable_input_suspension_resolution)
+        }
+        "agent.shell_results_are_data" => Ok(run_agent_shell_results_are_data),
+        "agent.shell_output_print_projection_survives" => {
+            Ok(run_agent_shell_output_print_projection_survives)
+        }
+        "agent.started_process_subagent_spawn" => Ok(run_agent_started_process_subagent_spawn),
+        "agent.nested_process_start_await" => Ok(run_agent_nested_process_start_await),
+        "agent.session_turn_process_child" => Ok(run_agent_session_turn_process_child),
+        "agent.failed_child_preserves_failure_graph" => {
+            Ok(run_agent_failed_child_preserves_failure_graph)
+        }
+        "agent.parallel_spawn_and_join" => Ok(run_agent_parallel_spawn_and_join),
+        "agent.tuple_values_finish_as_json_arrays" => Ok(run_agent_tuple_json_array),
+        other => Err(FixedScriptRunnerError::Assertion(format!(
+            "no replayable fixed Agent contract execution registered for `{other}`"
+        ))),
+    }
+}
+
+fn run_agent_foreground_tool_call_round_trip(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_foreground_tool_call_round_trip_execution())
+}
+
+fn run_agent_started_process_tool_call_graph(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_started_process_tool_call_graph_execution())
+}
+
+fn run_agent_durable_input_suspension_resolution(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_durable_input_suspension_resolution_execution())
+}
+
+fn run_agent_shell_results_are_data(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_shell_results_are_data_execution())
+}
+
+fn run_agent_shell_output_print_projection_survives(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_shell_output_print_projection_survives_execution())
+}
+
+fn run_agent_started_process_subagent_spawn(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_started_process_subagent_spawn_execution())
+}
+
+fn run_agent_nested_process_start_await(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_nested_process_start_await_execution())
+}
+
+fn run_agent_session_turn_process_child(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_session_turn_process_child_execution())
+}
+
+fn run_agent_failed_child_preserves_failure_graph(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_failed_child_preserves_failure_graph_execution())
+}
+
+fn run_agent_parallel_spawn_and_join(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_parallel_spawn_and_join_execution())
+}
+
+fn run_agent_tuple_json_array(
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Value, FixedScriptRunnerError> {
+    runtime.block_on(agent_tuple_json_array_execution())
+}
+
+async fn agent_foreground_tool_call_round_trip_execution() -> Result<Value, FixedScriptRunnerError>
+{
+    let expected = json!({ "ok": true });
+    let result = facade_final_value_execution_with_tools(
+        "lash_runtime agent foreground tool",
+        "sim-agent-foreground-tool-contract",
+        "Call the app lookup tool and finish its value.",
+        vec![
+            r#"<lashlang>
+@label(title: "Lookup app state")
+value = await tools.app_lookup({})?
+finish value
+</lashlang>"#,
+        ],
+        &expected,
+        Some(Arc::new(ContractAppTools) as Arc<dyn lash_core::ToolProvider>),
+    )
+    .await?;
+    require(
+        result.get("tool_completed_count").and_then(Value::as_u64) == Some(1)
+            && result
+                .get("tool_completed_outputs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|entry| {
+                    entry.get("name").and_then(Value::as_str) == Some("app_lookup")
+                        && entry.get("value") == Some(&expected)
+                }),
+        "agent foreground tool execution did not record a concrete app_lookup completion",
+    )?;
+    contract_execution_payload(
+        "agent.foreground_tool_call_round_trip",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_foreground_labeled_tool_call",
+        result,
+    )
+}
+
+async fn agent_started_process_tool_call_graph_execution() -> Result<Value, FixedScriptRunnerError>
+{
+    let expected = json!({ "ok": true });
+    let result = facade_agent_process_execution(
+        "lash_runtime agent started process tool",
+        "sim-agent-started-process-tool-contract",
+        "Start a process that calls the app lookup tool.",
+        vec![
+            r#"<lashlang>
+process lookup(tools: Tools) {
+  @label(title: "Lookup app state in process")
+  value = await tools.app_lookup({})?
+  finish value
+}
+handle = start lookup(tools: tools)
+result = (await handle)?
+finish result
+</lashlang>"#,
+        ],
+        &expected,
+        Some(Arc::new(ContractAppTools) as Arc<dyn lash_core::ToolProvider>),
+    )
+    .await?;
+    contract_execution_payload(
+        "agent.started_process_tool_call_graph",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_started_process_labeled_tool_call",
+        result,
+    )
+}
+
+async fn agent_durable_input_suspension_resolution_execution()
+-> Result<Value, FixedScriptRunnerError> {
+    let result = facade_agent_durable_input_execution().await?;
+    contract_execution_payload(
+        "agent.durable_input_suspension_resolution",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_process_durable_input_request_tool",
+        result,
+    )
+}
+
+async fn agent_shell_results_are_data_execution() -> Result<Value, FixedScriptRunnerError> {
+    let expected = json!({
+        "pipe_exit": 0,
+        "pipe_output": "line\nline\nline\n",
+        "missing_exit": 1,
+        "missing_status": "completed"
+    });
+    let result = facade_final_value_execution_with_tools(
+        "lash_runtime agent shell results data",
+        "sim-agent-shell-results-data-contract",
+        "Run shell commands and report their result metadata.",
+        vec![
+            r#"<lashlang>
+pipe = await shell.exec({ cmd: "yes line | head -n 3", login: false })?
+missing = await shell.exec({ cmd: "test -f /tmp/agent-scenario-definitely-missing-file", login: false })?
+finish {
+  pipe_exit: pipe.exit_code,
+  pipe_output: pipe.output,
+  missing_exit: missing.exit_code,
+  missing_status: missing.status
+}
+</lashlang>"#,
+        ],
+        &expected,
+        Some(Arc::new(lash_tools::shell::shell_provider(
+            lash_tools::shell::StandardShell::new(),
+        )) as Arc<dyn lash_core::ToolProvider>),
+    )
+    .await?;
+    contract_execution_payload(
+        "agent.shell_results_are_data",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_shell_nonzero_and_pipeline_results_are_data",
+        result,
+    )
+}
+
+async fn agent_nested_process_start_await_execution() -> Result<Value, FixedScriptRunnerError> {
+    let expected = json!({ "parent": "done" });
+    let result = facade_agent_process_execution(
+        "lash_runtime agent nested process",
+        "sim-agent-nested-process-contract",
+        "Start a parent process that starts and awaits a child process.",
+        vec![
+            r#"<lashlang>
+process child() {
+  finish { child: "done" }
+}
+process parent() {
+  @label(title: "Start nested child process")
+  handle = start child()
+  result = (await handle)?
+  finish { parent: result.child }
+}
+handle = start parent()
+result = (await handle)?
+finish result
+</lashlang>"#,
+        ],
+        &expected,
+        None,
+    )
+    .await?;
+    contract_execution_payload(
+        "agent.nested_process_start_await",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_nested_process_start_await",
+        result,
+    )
+}
+
+async fn agent_shell_output_print_projection_survives_execution()
+-> Result<Value, FixedScriptRunnerError> {
+    let expected = json!({
+        "chars": 60000,
+        "tail": "x\nx\n",
+        "has_full_output_path": true
+    });
+    let result = facade_final_value_execution_with_tools(
+        "lash_runtime agent shell output projection",
+        "sim-agent-shell-output-projection-contract",
+        "Run a large shell command, inspect it, then report retained metadata.",
+        vec![
+            r#"<lashlang>
+big = await shell.exec({ cmd: "yes x | head -c 60000", login: false })?
+print big.output
+</lashlang>"#,
+            r#"<lashlang>
+finish {
+  chars: len(big.output),
+  tail: slice(big.output, 59996, null),
+  has_full_output_path: big.full_output_path == null ? false : len(big.full_output_path) > 0
+}
+</lashlang>"#,
+        ],
+        &expected,
+        Some(Arc::new(lash_tools::shell::shell_provider(
+            lash_tools::shell::StandardShell::new(),
+        )) as Arc<dyn lash_core::ToolProvider>),
+    )
+    .await?;
+    contract_execution_payload(
+        "agent.shell_output_print_projection_survives",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_shell_output_survives_print_projection_in_variable",
+        result,
+    )
+}
+
+async fn agent_started_process_subagent_spawn_execution() -> Result<Value, FixedScriptRunnerError> {
+    let expected = json!({ "len": 2 });
+    let result = facade_agent_process_execution_with_options(
+        "lash_runtime agent started process subagent",
+        "sim-agent-started-process-subagent-contract",
+        "Run a Lashlang process that spawns a subagent and returns its value.",
+        vec![
+            r#"<lashlang>
+process spawn_child() {
+  @label(title: "Spawn subagent with web search")
+  result = await agents.spawn({
+    capability: "default",
+    task: "Finish `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    seed: { chunk: ["a", "b"] },
+    output: Type { len: int }
+  })?
+  finish result
+}
+handle = start spawn_child()
+result = (await handle)?
+finish result
+</lashlang>"#,
+            r#"<lashlang>
+finish { len: len(chunk) }
+</lashlang>"#,
+        ],
+        &expected,
+        None,
+        true,
+        None,
+    )
+    .await?;
+    contract_execution_payload(
+        "agent.started_process_subagent_spawn",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_started_process_labeled_subagent_spawn",
+        result,
+    )
+}
+
+async fn agent_session_turn_process_child_execution() -> Result<Value, FixedScriptRunnerError> {
+    let expected = json!({ "child": "done" });
+    let result = facade_final_value_execution(
+        "lash_runtime agent session-turn process child",
+        "sim-agent-session-turn-process-child-contract",
+        "Start a child process and await its result.",
+        r#"<lashlang>
+process child() {
+  finish { child: "done" }
+}
+handle = start child()
+result = (await handle)?
+finish result
+</lashlang>"#,
+        &expected,
+    )
+    .await?;
+    contract_execution_payload(
+        "agent.session_turn_process_child",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_session_turn_process_child",
+        result,
+    )
+}
+
+async fn agent_failed_child_preserves_failure_graph_execution()
+-> Result<Value, FixedScriptRunnerError> {
+    let (core, graph_store) = agent_process_contract_core_with_options(
+        "lash_runtime agent failed child graph",
+        vec![
+            r#"<lashlang>
+@label(title: "Spawn failing subagent")
+result = await agents.spawn({
+  capability: "default",
+  task: "Fail with reason child boom.",
+  seed: {},
+  output: Type { reason: str }
+})?
+finish result
+</lashlang>"#,
+            r#"<lashlang>
+await task.fail({ reason: "child boom" })?
+</lashlang>"#,
+            r#"<lashlang>
+await task.fail({ reason: "parent observed child failure" })?
+</lashlang>"#,
+        ],
+        None,
+        true,
+        Some(1),
+    )?;
+    let session = core
+        .session("sim-agent-failed-child-contract")
+        .open_fresh()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let events = Arc::new(RuntimeProofRecordingEvents::default());
+    let result = session
+        .turn(lash::TurnInput::text(
+            "Spawn a child that fails and preserve its execution graph.",
+        ))
+        .stream_to(events.as_ref())
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    session
+        .processes()
+        .await_all()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let recorded = events.snapshot().await;
+    let process_observations = agent_contract_process_observations(&core).await?;
+    let process_facts = agent_contract_process_facts(&process_observations);
+    let graph_facts = agent_contract_graph_facts(&graph_store.graphs(), &result.state.session_id);
+    let failure = agent_failed_child_activity_facts(&result, &recorded);
+    let payload = json!({
+        "execution_api": "lash::RlmCore facade",
+        "provider_kind": "lash_runtime agent failed child graph",
+        "session_id": result.state.session_id,
+        "turn_index": result.state.turn_index,
+        "done": true,
+        "turn_outcome": turn_outcome_contract_json(&result.outcome),
+        "final_value": Value::Null,
+        "processes": process_observations
+            .iter()
+            .map(|process| process.observed.clone())
+            .collect::<Vec<_>>(),
+        "process_facts": process_facts,
+        "graph_facts": graph_facts,
+        "failure": failure,
+    });
+    contract_execution_payload(
+        "agent.failed_child_preserves_failure_graph",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_failed_child_preserves_failure_graph",
+        payload,
+    )
+}
+
+async fn agent_parallel_spawn_and_join_execution() -> Result<Value, FixedScriptRunnerError> {
+    let expected = json!({ "joined": ["left", "right"] });
+    let result = facade_final_value_execution(
+        "lash_runtime agent parallel process join",
+        "sim-agent-parallel-spawn-join-contract",
+        "Start two processes, await both, and finish their joined result.",
+        r#"<lashlang>
+process child(value: str) {
+  finish value
+}
+@label(title: "Start left process")
+left = start child(value: "left")
+@label(title: "Start right process")
+right = start child(value: "right")
+left_value = (await left)?
+right_value = (await right)?
+finish { joined: [left_value, right_value] }
+</lashlang>"#,
+        &expected,
+    )
+    .await?;
+    contract_execution_payload(
+        "agent.parallel_spawn_and_join",
+        "crates/lash/src/tests/agent_scenarios/cases.rs",
+        "agent_scenario_parallel_spawn_and_join",
+        result,
+    )
+}
+
+async fn facade_final_value_execution(
+    provider_kind: &'static str,
+    session_id: &'static str,
+    prompt: &'static str,
+    provider_response: &'static str,
+    expected_final_value: &Value,
+) -> Result<Value, FixedScriptRunnerError> {
+    facade_final_value_execution_with_tools(
+        provider_kind,
+        session_id,
+        prompt,
+        vec![provider_response],
+        expected_final_value,
+        None,
+    )
+    .await
+}
+
+async fn facade_final_value_execution_with_tools(
+    provider_kind: &'static str,
+    session_id: &'static str,
+    prompt: &'static str,
+    provider_responses: Vec<&'static str>,
+    expected_final_value: &Value,
+    tools: Option<Arc<dyn lash_core::ToolProvider>>,
+) -> Result<Value, FixedScriptRunnerError> {
+    facade_final_value_execution_inner(
+        provider_kind,
+        session_id,
+        prompt,
+        provider_responses,
+        expected_final_value.clone(),
+        tools,
+    )
+    .await
+}
+
+async fn facade_final_value_execution_inner(
+    provider_kind: &'static str,
+    session_id: &'static str,
+    prompt: &'static str,
+    provider_responses: Vec<&'static str>,
+    expected_final_value: Value,
+    tools: Option<Arc<dyn lash_core::ToolProvider>>,
+) -> Result<Value, FixedScriptRunnerError> {
+    let events = Arc::new(RuntimeProofRecordingEvents::default());
+    let mut builder = lash::RlmCore::builder()
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .store_factory(Arc::new(
+            lash::persistence::InMemorySessionStoreFactory::new(),
+        ))
+        .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
+            as Arc<dyn lash_core::ProcessRegistry>)
+        .provider(fixed_texts_provider(provider_kind, provider_responses))
+        .model(
+            lash_core::ModelSpec::from_token_limits(provider_kind, None, 200_000, None)
+                .map_err(FixedScriptRunnerError::Assertion)?,
+        );
+    if let Some(tools) = tools {
+        builder = builder.tools(tools);
+    }
+    let core = builder
+        .build()
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let session = core
+        .session(session_id)
+        .open_fresh()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let result = session
+        .turn(lash::TurnInput::text(prompt))
+        .require_finish()
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?
+        .stream_to(events.as_ref())
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let final_value = result.final_value().cloned().ok_or_else(|| {
+        FixedScriptRunnerError::Assertion(format!(
+            "{provider_kind} finished without TurnFinish::FinalValue: {:?}",
+            result.outcome
+        ))
+    })?;
+    require(
+        final_value == expected_final_value,
+        "facade final value execution produced an unexpected semantic value",
+    )?;
+    let recorded = events.snapshot().await;
+    let final_value_events = events.final_value_events().await;
+    let assistant_prose_delta_count = events.assistant_prose_delta_count().await;
+    let tool_completed_count = events.tool_completed_count().await;
+    let tool_completed_outputs = events
+        .tool_completed_outputs()
+        .await
+        .into_iter()
+        .map(
+            |(name, value)| json!({ "name": name, "value": normalize_contract_tool_output(value) }),
+        )
+        .collect::<Vec<_>>();
+    let facts = runtime_final_value_invariant_facts(&result, &recorded);
+    require(
+        facts.passed
+            && facts.outcome_kind == "final_value"
+            && facts.semantic_value.as_ref() == Some(&final_value)
+            && final_value_events.iter().any(|value| value == &final_value)
+            && result.assistant_message().is_none(),
+        "facade final value execution did not produce concrete final-value outcome/event facts",
+    )?;
+    Ok(json!({
+        "execution_api": "lash::RlmCore facade",
+        "provider_kind": provider_kind,
+        "session_id": result.state.session_id,
+        "turn_index": result.state.turn_index,
+        "done": true,
+        "turn_outcome": {
+            "kind": "final_value",
+        },
+        "final_value": final_value,
+        "no_final_message_event": result.assistant_message().is_none(),
+        "runtime_final_value_facts": facts,
+        "final_value_event_count": final_value_events.len(),
+        "assistant_prose_delta_count": assistant_prose_delta_count,
+        "tool_completed_count": tool_completed_count,
+        "tool_completed_outputs": tool_completed_outputs,
+    }))
+}
+
+async fn facade_agent_process_execution(
+    provider_kind: &'static str,
+    session_id: &'static str,
+    prompt: &'static str,
+    provider_responses: Vec<&'static str>,
+    expected_final_value: &Value,
+    tools: Option<Arc<dyn lash_core::ToolProvider>>,
+) -> Result<Value, FixedScriptRunnerError> {
+    facade_agent_process_execution_with_options(
+        provider_kind,
+        session_id,
+        prompt,
+        provider_responses,
+        expected_final_value,
+        tools,
+        false,
+        None,
+    )
+    .await
+}
+
+async fn facade_agent_process_execution_with_options(
+    provider_kind: &'static str,
+    session_id: &'static str,
+    prompt: &'static str,
+    provider_responses: Vec<&'static str>,
+    expected_final_value: &Value,
+    tools: Option<Arc<dyn lash_core::ToolProvider>>,
+    install_subagents: bool,
+    max_turns: Option<usize>,
+) -> Result<Value, FixedScriptRunnerError> {
+    let (core, graph_store) = agent_process_contract_core_with_options(
+        provider_kind,
+        provider_responses,
+        tools,
+        install_subagents,
+        max_turns,
+    )?;
+    let session = core
+        .session(session_id)
+        .open_fresh()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let events = Arc::new(RuntimeProofRecordingEvents::default());
+    let result = session
+        .turn(lash::TurnInput::text(prompt))
+        .stream_to(events.as_ref())
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    session
+        .processes()
+        .await_all()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    agent_process_execution_result(
+        &core,
+        &graph_store,
+        result,
+        events,
+        provider_kind,
+        expected_final_value,
+        None,
+        false,
+    )
+    .await
+}
+
+async fn facade_agent_durable_input_execution() -> Result<Value, FixedScriptRunnerError> {
+    let (key_tx, mut key_rx) =
+        tokio::sync::oneshot::channel::<Result<lash_core::AwaitEventKey, String>>();
+    let tools = Arc::new(ContractDurableInputTools::new(key_tx));
+    let (core, graph_store) = agent_process_contract_core(
+        "lash_runtime agent durable input",
+        vec![
+            r#"<lashlang>
+process request_answer(tools: Tools) {
+  result = await tools.mock_input_request({ question: "Need input?" })?
+  finish result
+}
+handle = start request_answer(tools: tools)
+result = (await handle)?
+finish result.answer
+</lashlang>"#,
+            r#"<lashlang>
+finish { recovered: true }
+</lashlang>"#,
+        ],
+        Some(Arc::clone(&tools) as Arc<dyn lash_core::ToolProvider>),
+    )?;
+    let session = core
+        .session("sim-agent-durable-input-contract")
+        .open_fresh()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let events = Arc::new(RuntimeProofRecordingEvents::default());
+    let turn_session = session.clone();
+    let turn_events = Arc::clone(&events);
+    let turn = tokio::spawn(async move {
+        turn_session
+            .turn(lash::TurnInput::text(
+                "Start a process that asks for durable input.",
+            ))
+            .stream_to(turn_events.as_ref())
+            .await
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))
+    });
+    let key = wait_for_contract_durable_input_key(&mut key_rx, &turn).await?;
+    let completed_before_resolution = events.tool_completed_count().await;
+    let suspended_before_resolution = !turn.is_finished() && completed_before_resolution == 0;
+    let await_custom_key = match &key.wait {
+        lash_core::AwaitEventWaitIdentity::Custom { key } => key.clone(),
+        other => {
+            return Err(FixedScriptRunnerError::Assertion(format!(
+                "durable input used non-custom await key `{other:?}`"
+            )));
+        }
+    };
+    let resolve_outcome = core
+        .completions()
+        .resolve(
+            key,
+            lash_core::Resolution::Ok(json!({ "answer": "approved" })),
+        )
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let result = turn.await.map_err(|err| {
+        FixedScriptRunnerError::Runtime(format!("durable input turn task failed to join: {err}"))
+    })??;
+    session
+        .processes()
+        .await_all()
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let completed_after_resolution = events.tool_completed_count().await;
+    let durable_input = json!({
+        "await_custom_key": await_custom_key,
+        "suspended_before_resolution": suspended_before_resolution,
+        "completed_event_count_before_resolution": completed_before_resolution,
+        "completed_event_count_after_resolution": completed_after_resolution,
+        "resolve_accepted": matches!(resolve_outcome, lash_core::ResolveOutcome::Accepted),
+        "durable_step_count": tools.step_count(),
+    });
+    agent_process_execution_result(
+        &core,
+        &graph_store,
+        result,
+        events,
+        "lash_runtime agent durable input",
+        &json!("approved"),
+        Some(("durable_input", durable_input)),
+        true,
+    )
+    .await
+}
+
+fn agent_process_contract_core(
+    provider_kind: &'static str,
+    provider_responses: Vec<&'static str>,
+    tools: Option<Arc<dyn lash_core::ToolProvider>>,
+) -> Result<(lash::RlmCore, Arc<lash::tracing::TraceLashlangGraphStore>), FixedScriptRunnerError> {
+    agent_process_contract_core_with_options(provider_kind, provider_responses, tools, false, None)
+}
+
+fn agent_process_contract_core_with_options(
+    provider_kind: &'static str,
+    provider_responses: Vec<&'static str>,
+    tools: Option<Arc<dyn lash_core::ToolProvider>>,
+    install_subagents: bool,
+    max_turns: Option<usize>,
+) -> Result<(lash::RlmCore, Arc<lash::tracing::TraceLashlangGraphStore>), FixedScriptRunnerError> {
+    let graph_store = Arc::new(lash::tracing::TraceLashlangGraphStore::default());
+    let mut builder = lash::RlmCore::builder()
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .store_factory(Arc::new(
+            lash::persistence::InMemorySessionStoreFactory::new(),
+        ))
+        .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
+            as Arc<dyn lash_core::ProcessRegistry>)
+        .lashlang_execution_sink(Arc::clone(&graph_store) as Arc<dyn lash::tracing::TraceSink>)
+        .provider(fixed_texts_provider(provider_kind, provider_responses))
+        .model(
+            lash_core::ModelSpec::from_token_limits(provider_kind, None, 200_000, None)
+                .map_err(FixedScriptRunnerError::Assertion)?,
+        );
+    if let Some(tools) = tools {
+        builder = builder.tools(tools);
+    }
+    if install_subagents {
+        builder = builder.plugin(agent_contract_subagents_plugin());
+    }
+    if let Some(max_turns) = max_turns {
+        builder = builder.max_turns(max_turns);
+    }
+    let core = builder
+        .build()
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    Ok((core, graph_store))
+}
+
+fn agent_contract_subagents_plugin() -> Arc<dyn lash_core::PluginFactory> {
+    Arc::new(lash_subagents::SubagentsPluginFactory::new(Arc::new(
+        lash_subagents::CapabilityRegistry::new().with(Arc::new(
+            lash_subagents::StaticCapability::new("default", lash_core::SessionSpec::inherit()),
+        )),
+    )))
+}
+
+async fn wait_for_contract_durable_input_key(
+    key_rx: &mut tokio::sync::oneshot::Receiver<Result<lash_core::AwaitEventKey, String>>,
+    turn: &tokio::task::JoinHandle<Result<lash::TurnResult, FixedScriptRunnerError>>,
+) -> Result<lash_core::AwaitEventKey, FixedScriptRunnerError> {
+    for _ in 0..MAX_PROVIDER_EVENT_POLL_YIELDS {
+        match key_rx.try_recv() {
+            Ok(Ok(key)) => return Ok(key),
+            Ok(Err(err)) => return Err(FixedScriptRunnerError::Runtime(err)),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                if turn.is_finished() {
+                    return Err(FixedScriptRunnerError::Assertion(
+                        "durable input turn completed before publishing await key".to_string(),
+                    ));
+                }
+                tokio::task::yield_now().await;
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                return Err(FixedScriptRunnerError::Assertion(
+                    "durable input tool dropped await-key sender".to_string(),
+                ));
+            }
+        }
+    }
+    Err(FixedScriptRunnerError::Assertion(
+        "durable input tool did not publish await key within bounded scheduler yields".to_string(),
+    ))
+}
+
+async fn agent_process_execution_result(
+    core: &lash::RlmCore,
+    graph_store: &lash::tracing::TraceLashlangGraphStore,
+    result: lash::TurnResult,
+    events: Arc<RuntimeProofRecordingEvents>,
+    provider_kind: &'static str,
+    expected_final_value: &Value,
+    extra: Option<(&'static str, Value)>,
+    include_process_events: bool,
+) -> Result<Value, FixedScriptRunnerError> {
+    let final_value = result.final_value().cloned().ok_or_else(|| {
+        FixedScriptRunnerError::Assertion(format!(
+            "{provider_kind} finished without TurnFinish::FinalValue: {:?}",
+            result.outcome
+        ))
+    })?;
+    require(
+        final_value == *expected_final_value,
+        "agent process execution produced an unexpected semantic value",
+    )?;
+    let recorded = events.snapshot().await;
+    let final_value_events = events.final_value_events().await;
+    let assistant_prose_delta_count = events.assistant_prose_delta_count().await;
+    let tool_completed_count = events.tool_completed_count().await;
+    let tool_completed_outputs = events
+        .tool_completed_outputs()
+        .await
+        .into_iter()
+        .map(
+            |(name, value)| json!({ "name": name, "value": normalize_contract_tool_output(value) }),
+        )
+        .collect::<Vec<_>>();
+    let facts = runtime_final_value_invariant_facts(&result, &recorded);
+    require(
+        facts.passed
+            && facts.outcome_kind == "final_value"
+            && facts.semantic_value.as_ref() == Some(&final_value)
+            && final_value_events.iter().any(|value| value == &final_value)
+            && result.assistant_message().is_none(),
+        "agent process execution did not produce concrete final-value outcome/event facts",
+    )?;
+    let process_observations = agent_contract_process_observations(core).await?;
+    let process_facts = agent_contract_process_facts(&process_observations);
+    let process_events = if include_process_events {
+        agent_contract_process_event_facts(core, &process_observations).await?
+    } else {
+        Vec::new()
+    };
+    let graph_facts = agent_contract_graph_facts(&graph_store.graphs(), &result.state.session_id);
+    let mut payload = json!({
+        "execution_api": "lash::RlmCore facade",
+        "provider_kind": provider_kind,
+        "session_id": result.state.session_id,
+        "turn_index": result.state.turn_index,
+        "done": true,
+        "turn_outcome": {
+            "kind": "final_value",
+        },
+        "final_value": final_value,
+        "no_final_message_event": result.assistant_message().is_none(),
+        "runtime_final_value_facts": facts,
+        "final_value_event_count": final_value_events.len(),
+        "assistant_prose_delta_count": assistant_prose_delta_count,
+        "tool_completed_count": tool_completed_count,
+        "tool_completed_outputs": tool_completed_outputs,
+        "processes": process_observations
+            .iter()
+            .map(|process| process.observed.clone())
+            .collect::<Vec<_>>(),
+        "process_facts": process_facts,
+        "process_events": process_events,
+        "graph_facts": graph_facts,
+    });
+    if let Some((key, value)) = extra
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert(key.to_string(), value);
+    }
+    Ok(payload)
+}
+
+struct AgentContractProcessObservation {
+    raw_process_id: String,
+    process_ref: String,
+    observed: Value,
+}
+
+async fn agent_contract_process_observations(
+    core: &lash::RlmCore,
+) -> Result<Vec<AgentContractProcessObservation>, FixedScriptRunnerError> {
+    let mut observed = core
+        .processes()
+        .list(&lash_core::ProcessListFilter {
+            definition: None,
+            status: lash_core::ProcessStatusFilter::Any,
+            waiting: None,
+        })
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?
+        .into_iter()
+        .map(|process| {
+            let process_ref = agent_contract_process_ref(&process);
+            AgentContractProcessObservation {
+                raw_process_id: process.process_id.clone(),
+                process_ref: process_ref.clone(),
+                observed: json!({
+                    "process_ref": process_ref,
+                    "kind": process.kind,
+                    "label": process.label,
+                    "status": process.lifecycle.label(),
+                    "terminal": process.terminal,
+                    "definition_present": process.identity.definition.is_some(),
+                    "child_session_present": process.child_session_id.is_some(),
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    observed.sort_by(|left, right| left.process_ref.cmp(&right.process_ref));
+    Ok(observed)
+}
+
+fn agent_contract_process_ref(process: &lash_core::ObservedProcess) -> String {
+    let kind = process.kind.as_str();
+    let label = process.label.as_str();
+    let status = process.lifecycle.label();
+    let terminal = process.terminal.to_string();
+    let definition_present = process.identity.definition.is_some().to_string();
+    let child_session_present = process.child_session_id.is_some().to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(kind.as_bytes());
+    hasher.update([0]);
+    hasher.update(label.as_bytes());
+    hasher.update([0]);
+    hasher.update(status.as_bytes());
+    hasher.update([0]);
+    hasher.update(terminal.as_bytes());
+    hasher.update([0]);
+    hasher.update(definition_present.as_bytes());
+    hasher.update([0]);
+    hasher.update(child_session_present.as_bytes());
+    let digest = hasher.finalize();
+    format!("process-ref-{}", hex_prefix(&digest, 12))
+}
+
+fn hex_prefix(bytes: &[u8], len: usize) -> String {
+    let full = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    full.chars().take(len).collect()
+}
+
+fn agent_contract_process_facts(processes: &[AgentContractProcessObservation]) -> Value {
+    let mut completed_entries = BTreeSet::new();
+    let mut completed_lashlang_process_refs = BTreeSet::new();
+    let mut statuses = BTreeMap::<String, usize>::new();
+    let mut kinds = BTreeMap::<String, usize>::new();
+    for process in processes {
+        let status = process
+            .observed
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        *statuses.entry(status.to_string()).or_default() += 1;
+        let kind = process
+            .observed
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        *kinds.entry(kind.to_string()).or_default() += 1;
+        if status == "completed" {
+            if let Some(label) = process.observed.get("label").and_then(Value::as_str) {
+                completed_entries.insert(label.to_string());
+            }
+            if process
+                .observed
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == lash_lashlang_runtime::LASHLANG_ENGINE_KIND)
+            {
+                completed_lashlang_process_refs.insert(process.process_ref.clone());
+            }
+        }
+    }
+    json!({
+        "process_count": processes.len(),
+        "terminal_count": processes
+            .iter()
+            .filter(|process| process.observed.get("terminal").and_then(Value::as_bool) == Some(true))
+            .count(),
+        "completed_entries": completed_entries.into_iter().collect::<Vec<_>>(),
+        "completed_lashlang_process_count": completed_lashlang_process_refs.len(),
+        "completed_lashlang_process_refs": completed_lashlang_process_refs.into_iter().collect::<Vec<_>>(),
+        "status_counts": statuses,
+        "kind_counts": kinds,
+        "all_terminal": processes
+            .iter()
+            .all(|process| process.observed.get("terminal").and_then(Value::as_bool) == Some(true)),
+    })
+}
+
+async fn agent_contract_process_event_facts(
+    core: &lash::RlmCore,
+    processes: &[AgentContractProcessObservation],
+) -> Result<Vec<Value>, FixedScriptRunnerError> {
+    let mut events = Vec::new();
+    for process in processes {
+        for event in core
+            .processes()
+            .events(&process.raw_process_id, 0)
+            .await
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?
+        {
+            events.push(json!({
+                "process_ref": process.process_ref.clone(),
+                "sequence": event.sequence,
+                "event_type": event.event_type,
+                "payload": normalize_contract_process_event_payload(event.payload),
+            }));
+        }
+    }
+    events.sort_by(|left, right| {
+        (
+            left.get("process_ref").and_then(Value::as_str),
+            left.get("sequence").and_then(Value::as_u64),
+        )
+            .cmp(&(
+                right.get("process_ref").and_then(Value::as_str),
+                right.get("sequence").and_then(Value::as_u64),
+            ))
+    });
+    Ok(events)
+}
+
+fn normalize_contract_process_event_payload(payload: Value) -> Value {
+    let mut payload = payload;
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("await_key_id");
+    }
+    payload
+}
+
+fn agent_contract_graph_facts(
+    graphs: &[lash::tracing::TraceLashlangGraph],
+    root_session_id: &str,
+) -> Value {
+    let mut completed_process_entries = BTreeSet::new();
+    let mut completed_labeled_resources = BTreeSet::new();
+    let mut failed_labeled_resources = BTreeSet::new();
+    let mut completed_labeled_nodes = BTreeSet::new();
+    let mut child_links = BTreeSet::new();
+    let mut graph_status_counts = BTreeMap::<String, usize>::new();
+    let mut child_session_exec_completed_count = 0usize;
+    let mut child_session_exec_failed_count = 0usize;
+    for graph in graphs {
+        *graph_status_counts
+            .entry(trace_lashlang_status_label(graph.status).to_string())
+            .or_default() += 1;
+        if graph.scope.session_id != root_session_id
+            && matches!(
+                &graph.subject,
+                lash::tracing::TraceRuntimeSubject::Effect { kind, .. } if kind == "exec_code"
+            )
+        {
+            match graph.status {
+                lash::tracing::TraceLashlangStatus::Completed => {
+                    child_session_exec_completed_count += 1;
+                }
+                lash::tracing::TraceLashlangStatus::Failed => {
+                    child_session_exec_failed_count += 1;
+                }
+                _ => {}
+            }
+        }
+        if graph.entry_kind == "process"
+            && matches!(
+                graph.subject,
+                lash::tracing::TraceRuntimeSubject::Process { .. }
+            )
+            && graph.status == lash::tracing::TraceLashlangStatus::Completed
+        {
+            completed_process_entries.insert(graph.entry_name.clone());
+        }
+        for node in &graph.nodes {
+            let title = node
+                .label_metadata
+                .as_ref()
+                .map(|label| label.title.as_str());
+            if node.kind == "resource_operation"
+                && node.status == lash::tracing::TraceLashlangNodeStatus::Completed
+                && let Some(title) = title
+            {
+                completed_labeled_resources.insert(title.to_string());
+            }
+            if node.kind == "resource_operation"
+                && node.status == lash::tracing::TraceLashlangNodeStatus::Failed
+                && let Some(title) = title
+            {
+                failed_labeled_resources.insert(title.to_string());
+            }
+            if node.status == lash::tracing::TraceLashlangNodeStatus::Completed
+                && let Some(title) = title
+            {
+                completed_labeled_nodes.insert(title.to_string());
+            }
+        }
+        for child in &graph.children {
+            child_links.insert(format!(
+                "{}->{}",
+                graph.entry_name,
+                child.child_entry_name.as_deref().unwrap_or("<unknown>")
+            ));
+        }
+    }
+    json!({
+        "graph_count": graphs.len(),
+        "status_counts": graph_status_counts,
+        "completed_process_entries": completed_process_entries.into_iter().collect::<Vec<_>>(),
+        "completed_labeled_resources": completed_labeled_resources.into_iter().collect::<Vec<_>>(),
+        "failed_labeled_resources": failed_labeled_resources.into_iter().collect::<Vec<_>>(),
+        "completed_labeled_nodes": completed_labeled_nodes.into_iter().collect::<Vec<_>>(),
+        "child_links": child_links.into_iter().collect::<Vec<_>>(),
+        "child_session_exec_completed_count": child_session_exec_completed_count,
+        "child_session_exec_failed_count": child_session_exec_failed_count,
+    })
+}
+
+fn agent_failed_child_activity_facts(
+    result: &lash::TurnResult,
+    events: &[lash::TurnActivity],
+) -> Value {
+    let mut failed_code_block_errors = Vec::new();
+    let mut turn_error_messages = Vec::new();
+    let mut final_value_event_count = 0usize;
+    for activity in events {
+        match &activity.event {
+            lash::TurnEvent::CodeBlockCompleted {
+                success: false,
+                error: Some(error),
+                ..
+            } => failed_code_block_errors.push(error.clone()),
+            lash::TurnEvent::Error { message } => turn_error_messages.push(message.clone()),
+            lash::TurnEvent::FinalValue { .. } => final_value_event_count += 1,
+            _ => {}
+        }
+    }
+    let event_debug = format!("{events:#?}");
+    json!({
+        "turn_success": result.is_success(),
+        "final_value_present": result.final_value().is_some(),
+        "final_value_event_count": final_value_event_count,
+        "failed_code_block_count": failed_code_block_errors.len(),
+        "failed_code_block_errors": failed_code_block_errors,
+        "turn_error_messages": turn_error_messages,
+        "provider_exhaustion_observed": event_debug.contains("provider exhausted"),
+        "child_task_fail_reason_observed": event_debug.contains("child boom"),
+        "parent_task_fail_reason_observed": event_debug.contains("parent observed child failure"),
+    })
+}
+
+fn trace_lashlang_status_label(status: lash::tracing::TraceLashlangStatus) -> &'static str {
+    match status {
+        lash::tracing::TraceLashlangStatus::Running => "running",
+        lash::tracing::TraceLashlangStatus::Completed => "completed",
+        lash::tracing::TraceLashlangStatus::Failed => "failed",
+        lash::tracing::TraceLashlangStatus::Cancelled => "cancelled",
+    }
+}
+
+fn normalize_contract_tool_output(value: Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return value;
+    };
+    if !object.contains_key("full_output_path") {
+        if object.contains_key("wall_time_seconds")
+            && object.contains_key("status")
+            && object.contains_key("output")
+        {
+            return json!({
+                "status": object.get("status").cloned().unwrap_or(Value::Null),
+                "done": object.get("done").cloned().unwrap_or(Value::Null),
+                "running": object.get("running").cloned().unwrap_or(Value::Null),
+                "exit_code": object.get("exit_code").cloned().unwrap_or(Value::Null),
+                "output": object.get("output").cloned().unwrap_or(Value::Null),
+            });
+        }
+        return value;
+    }
+    let output = object.get("output").and_then(Value::as_str).unwrap_or("");
+    let tail_start = output.len().saturating_sub(4);
+    json!({
+        "status": object.get("status").cloned().unwrap_or(Value::Null),
+        "exit_code": object.get("exit_code").cloned().unwrap_or(Value::Null),
+        "output_len": output.len(),
+        "output_tail": &output[tail_start..],
+        "full_output_path_present": object
+            .get("full_output_path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| !path.is_empty()),
+    })
+}
+
+fn contract_execution_payload(
+    contract: &'static str,
+    source_path: &'static str,
+    source_scenario: &'static str,
+    result: Value,
+) -> Result<Value, FixedScriptRunnerError> {
+    let result_body = serde_json::to_vec(&result)?;
+    let result_sha256 = sha256_hex(&result_body);
+    let source_material = format!("{source_path}:{source_scenario}:{result_sha256}");
+    let source_hash = sha256_hex(source_material.as_bytes());
+    Ok(json!({
+        "contract": contract,
+        "source": {
+            "kind": "fixed_dst_api_execution",
+            "path": source_path,
+            "scenario": source_scenario,
+            "source_hash": source_hash,
+            "result_sha256": result_sha256,
+        },
+        "result": result,
+    }))
+}
+
+fn fixed_texts_provider(kind: &'static str, responses: Vec<&'static str>) -> ProviderHandle {
+    let responses = Arc::new(tokio::sync::Mutex::new(
+        responses
+            .into_iter()
+            .map(str::to_string)
+            .collect::<VecDeque<_>>(),
+    ));
+    lash_core::testing::TestProvider::builder()
+        .kind(kind)
+        .complete(move |_request| {
+            let responses = Arc::clone(&responses);
+            async move {
+                let Some(text) = responses.lock().await.pop_front() else {
+                    return Err(LlmTransportError::new(format!(
+                        "{kind} provider exhausted its fixed response"
+                    )));
+                };
+                let expected_text = text.clone();
+                let response = text_llm_response(text);
+                let response_part_text = response_text_part(&response);
+                if response.full_text != expected_text
+                    || response_part_text != Some(expected_text.as_str())
+                {
+                    return Err(LlmTransportError::new(format!(
+                        "{kind} fixed response shape changed: expected full_text and text part {:?}, got full_text {:?} parts {:?}",
+                        expected_text, response.full_text, response.parts
+                    )));
+                }
+                Ok(response)
+            }
+        })
+        .build()
+        .into_handle()
+}
+
+struct ContractAppTools;
+
+#[async_trait::async_trait]
+impl lash_core::ToolProvider for ContractAppTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![contract_app_lookup_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "app_lookup").then(|| Arc::new(contract_app_lookup_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        if call.name == "app_lookup" {
+            lash_core::ToolResult::ok(json!({ "ok": true }))
+        } else {
+            lash_core::ToolResult::err_fmt(format!("Unknown contract app tool: {}", call.name))
+        }
+    }
+}
+
+fn contract_app_lookup_definition() -> lash_core::ToolDefinition {
+    lash_core::ToolDefinition::raw(
+        "tool:app_lookup",
+        "app_lookup",
+        "Lookup deterministic app state.",
+        json!({
+            "type": "object",
+            "additionalProperties": false
+        }),
+        json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" }
+            },
+            "required": ["ok"],
+            "additionalProperties": false
+        }),
+    )
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["tools"],
+        "app_lookup",
+    ))
+}
+
+struct ContractDurableInputTools {
+    key_tx: Mutex<Option<tokio::sync::oneshot::Sender<Result<lash_core::AwaitEventKey, String>>>>,
+    step_count: Mutex<usize>,
+}
+
+impl ContractDurableInputTools {
+    fn new(key_tx: tokio::sync::oneshot::Sender<Result<lash_core::AwaitEventKey, String>>) -> Self {
+        Self {
+            key_tx: Mutex::new(Some(key_tx)),
+            step_count: Mutex::new(0),
+        }
+    }
+
+    fn step_count(&self) -> usize {
+        *self.step_count.lock().expect("durable step count")
+    }
+
+    fn increment_step_count(&self) {
+        *self.step_count.lock().expect("durable step count") += 1;
+    }
+
+    fn send_key_result(&self, result: Result<lash_core::AwaitEventKey, String>) {
+        if let Some(tx) = self.key_tx.lock().expect("durable input key sender").take() {
+            let _ = tx.send(result);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::ToolProvider for ContractDurableInputTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![contract_durable_input_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "mock_input_request")
+            .then(|| Arc::new(contract_durable_input_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        if call.name != "mock_input_request" {
+            return lash_core::ToolResult::err_fmt(format!(
+                "Unknown durable input tool: {}",
+                call.name
+            ));
+        }
+        let durable = match call.context.durable_effects() {
+            Ok(durable) => durable,
+            Err(err) => {
+                self.send_key_result(Err(err.to_string()));
+                return lash_core::ToolResult::err_fmt(err);
+            }
+        };
+        let question = call
+            .args
+            .get("question")
+            .and_then(Value::as_str)
+            .unwrap_or("answer")
+            .to_string();
+        let opened = match durable
+            .run_json(
+                "create",
+                json!({ "question": question }),
+                |input| async move {
+                    Ok(json!({
+                        "request_id": "request-1",
+                        "question": input["question"].clone(),
+                    }))
+                },
+            )
+            .await
+        {
+            Ok(value) => {
+                self.increment_step_count();
+                value
+            }
+            Err(err) => {
+                self.send_key_result(Err(err.to_string()));
+                return lash_core::ToolResult::err_fmt(err);
+            }
+        };
+        let key = match durable
+            .external_event_key("mock-input-request:request-1")
+            .await
+        {
+            Ok(key) => key,
+            Err(err) => {
+                self.send_key_result(Err(err.to_string()));
+                return lash_core::ToolResult::err_fmt(err);
+            }
+        };
+        if let Err(err) = durable
+            .emit_process_event(
+                "process.yield",
+                json!({
+                    "type": "work.input_request.opened",
+                    "request_id": opened["request_id"].clone(),
+                    "question": opened["question"].clone(),
+                    "await_key_id": key.key_id,
+                }),
+            )
+            .await
+        {
+            self.send_key_result(Err(err.to_string()));
+            return lash_core::ToolResult::err_fmt(err);
+        }
+        self.send_key_result(Ok(key.clone()));
+
+        let resolved = match durable.await_event_json(key).await {
+            Ok(value) => value,
+            Err(err) => return lash_core::ToolResult::err_fmt(err),
+        };
+        match durable
+            .run_json(
+                "complete",
+                json!({
+                    "request_id": opened["request_id"].clone(),
+                    "answer": resolved["answer"].clone(),
+                }),
+                |input| async move {
+                    Ok(json!({
+                        "request_id": input["request_id"].clone(),
+                        "answer": input["answer"].clone(),
+                    }))
+                },
+            )
+            .await
+        {
+            Ok(value) => {
+                self.increment_step_count();
+                lash_core::ToolResult::ok(value)
+            }
+            Err(err) => lash_core::ToolResult::err_fmt(err),
+        }
+    }
+}
+
+fn contract_durable_input_definition() -> lash_core::ToolDefinition {
+    lash_core::ToolDefinition::raw(
+        "tool:mock_input_request",
+        "mock_input_request",
+        "Open a durable input request and wait for the answer.",
+        json!({
+            "type": "object",
+            "properties": {
+                "question": { "type": "string" }
+            },
+            "required": ["question"],
+            "additionalProperties": false
+        }),
+        json!({
+            "type": "object",
+            "properties": {
+                "request_id": { "type": "string" },
+                "answer": {}
+            },
+            "required": ["request_id", "answer"],
+            "additionalProperties": true
+        }),
+    )
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["tools"],
+        "mock_input_request",
+    ))
+}
+
+fn standard_contract_turn_machine_config() -> lash_core::TurnMachineConfig {
+    let protocol_driver: Arc<
+        dyn lash_core::sansio::ProtocolDriverHandle<lash_core::HostTurnProtocol>,
+    > = Arc::new(lash_protocol_standard::StandardDriver);
+    lash_core::TurnMachineConfig {
+        protocol_driver,
+        projector: Arc::new(lash_core::sansio::ChatContextProjector),
+        sync_execution_environment: false,
+        model: "standard-max-turn-contract".to_string(),
+        max_context_tokens: None,
+        max_turns: None,
+        model_variant: None,
+        generation: lash_core::GenerationOptions::default(),
+        run_session_id: None,
+        autonomous: false,
+        tool_specs: Vec::new().into(),
+        system_prompt: std::sync::Arc::from(""),
+        session_id: "standard-max-turn-contract".to_string(),
+        emit_llm_trace: false,
+        termination: lash_core::ProtocolTurnOptions::empty(),
+        turn_limit_final_message: Arc::new(contract_turn_limit_final_message),
+    }
+}
+
+fn contract_turn_limit_final_message(message_id: String, max_turns: usize) -> lash_core::Message {
+    lash_core::Message {
+        id: message_id.clone(),
+        role: lash_core::MessageRole::System,
+        parts: lash_core::shared_parts(vec![lash_core::Part {
+            id: format!("{message_id}.p0"),
+            kind: lash_core::PartKind::Error,
+            content: format!("Turn limit reached ({max_turns}) before a final test response."),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: lash_core::PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        origin: None,
+    }
+}
+
+fn contract_user_message(content: &str) -> lash_core::Message {
+    lash_core::Message {
+        id: "m0".to_string(),
+        role: lash_core::MessageRole::User,
+        parts: vec![lash_core::Part {
+            id: "m0.p0".to_string(),
+            kind: lash_core::PartKind::Text,
+            content: content.to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: lash_core::PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]
+        .into(),
+        origin: None,
+    }
+}
+
+fn drain_contract_turn_machine_effects(
+    machine: &mut lash_core::TurnMachine,
+) -> Vec<lash_core::Effect> {
+    let mut effects = Vec::new();
+    while let Some(effect) = machine.poll_effect() {
+        effects.push(effect);
+    }
+    effects
+}
+
+fn find_contract_llm_call(effects: &[lash_core::Effect]) -> Option<&lash_core::sansio::EffectId> {
+    effects.iter().find_map(|effect| match effect {
+        lash_core::Effect::LlmCall { id, .. } => Some(id),
+        _ => None,
+    })
+}
+
+fn turn_outcome_contract_json(outcome: &lash_core::TurnOutcome) -> Value {
+    match outcome {
+        lash_core::TurnOutcome::Stopped(lash_core::TurnStop::MaxTurns) => json!({
+            "kind": "stopped",
+            "stop_reason": "max_turns",
+        }),
+        lash_core::TurnOutcome::Stopped(other) => json!({
+            "kind": "stopped",
+            "stop_reason": format!("{other:?}"),
+        }),
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { value }) => json!({
+            "kind": "final_value",
+            "value": value,
+        }),
+        lash_core::TurnOutcome::Finished(other) => json!({
+            "kind": "finished",
+            "finish": format!("{other:?}"),
+        }),
+        lash_core::TurnOutcome::AgentFrameSwitch { frame_id, task } => json!({
+            "kind": "agent_frame_switch",
+            "frame_id": frame_id,
+            "task": task,
+        }),
+    }
+}
+
+fn first_successful_provider(
+    events: &[crate::scheduler::DeliveredBoundary],
+) -> Option<&crate::scheduler::DeliveredBoundary> {
+    events
+        .iter()
+        .filter(|event| {
+            event.kind == BoundaryKind::Provider
+                && event.observed.get("success").and_then(Value::as_bool) == Some(true)
+        })
+        .min_by_key(|event| event.sequence)
 }
 
 /// The serialized in-memory reference summary for the cross-backend check.
@@ -4080,22 +8210,16 @@ impl GeneratedRuntimeWorld {
             Arc::clone(&self.attachment_store),
             Arc::clone(&self.process_env_store),
             Some(provider_schedule.clone()),
-            // Cross-backend durable re-run only: the harness drives every provider
-            // turn explicitly through generated `Provider` boundaries (which is
-            // what schedules the scripted-transport gate releases). The inline
-            // queued-work driver, however, claims and runs `next_turn` queued
-            // inputs as an UNMODELED turn the moment a session is idle. Under
-            // serialized execution every non-active session IS idle, so that
-            // autonomous turn fires a provider exchange the harness never released
-            // a gate for and parks on the scripted transport until the 120s
-            // provider timeout — an effective hang. In the concurrency-preserving
-            // SEARCH lane the session's lease is held by a live modeled turn, so
-            // `claim_and_run_pending` is a no-op there; the reference run proves
-            // (via its exchange/graph/transcript contracts) that autonomous queued
-            // work never affects any modeled-turn observation. Disabling the inline
-            // driver here therefore removes the hang while keeping the durable-state
-            // comparison byte-identical. The SEARCH lane keeps the driver enabled.
-            self.serialize_provider_turns,
+            // The generated harness owns provider execution through explicit
+            // `Provider` boundaries. Each modeled success turn gets one scripted
+            // exchange slot and one scheduler-owned release sequence. The runtime
+            // queued-work driver would run next-turn inputs autonomously against the
+            // same scripted transport, consuming exchange slots and shifting later
+            // modeled turns onto unreleased gates. Queued-work behavior is exercised
+            // by dedicated runtime boundary facts; this scripted provider core keeps
+            // queued work inert so modeled provider boundaries remain the only
+            // provider exchanges in the session.
+            true,
         )?;
         let session = core
             .session(event.actor_alias.clone())
@@ -4311,34 +8435,14 @@ impl GeneratedRuntimeWorld {
         let active_turn_pending = runtime_session
             .active_provider_turns
             .contains_key(turn_boundary_id);
-        // Liveness-couple the release: poll the gate against the turn's
-        // liveness so a release can NEVER block forever. If the gate blocks we
-        // release it; if the turn finishes (or drifts so it never reaches this
-        // gate) the release is a no-op. The yield budget is a deterministic
-        // upper bound (not a wall clock) that guarantees termination even if a
-        // turn parks on a different gate forever. This is the deadlock fix.
-        let release = {
-            let mut polls = 0u64;
-            loop {
-                if let Some(release) = runtime_session.provider_schedule.release_if_blocked(
-                    exchange_index,
-                    event_index,
-                    event_name,
-                    event.at,
-                ) {
-                    break Some(release);
-                }
-                let turn_finished = runtime_session
-                    .active_provider_turns
-                    .get(turn_boundary_id)
-                    .is_none_or(|turn| turn.handle.is_finished());
-                if turn_finished || polls >= MAX_PROVIDER_EVENT_POLL_YIELDS {
-                    break None;
-                }
-                polls += 1;
-                tokio::task::yield_now().await;
-            }
-        };
+        let release = active_turn_pending.then(|| {
+            runtime_session.provider_schedule.release(
+                exchange_index,
+                event_index,
+                event_name,
+                event.at,
+            )
+        });
         let mut observed = json!({
             "session": event.actor_alias,
             "provider_event_release": true,
@@ -4350,8 +8454,7 @@ impl GeneratedRuntimeWorld {
         });
         if let Some(release) = release {
             observed["active_turn_pending_before_release"] = json!(active_turn_pending);
-            observed["released_while_turn_pending"] =
-                json!(active_turn_pending && release.blocked_before_release);
+            observed["released_while_turn_pending"] = json!(active_turn_pending);
             observed["scripted_transport_release"] = json!({
                 "exchange_index": release.exchange_index,
                 "event_index": release.event_index,
@@ -4736,15 +8839,12 @@ impl GeneratedRuntimeWorld {
             }
             // The await key exists, so the tool parked the turn. Record that the
             // turn suspended before any completion was delivered.
-            let suspended = !turn.handle.is_finished()
-                && turn.events.tool_completed_count().await == 0;
+            let suspended =
+                !turn.handle.is_finished() && turn.events.tool_completed_count().await == 0;
             turn.suspended_before_completion = Some(suspended);
             turn.completed_before_resolution = turn.events.tool_completed_count().await;
             let boundary_id = format!("{session_alias}:suspend-resume:001");
-            let label = format!(
-                "suspend.{}.resume",
-                boundary_kind_label(turn.suspend_kind)
-            );
+            let label = format!("suspend.{}.resume", boundary_kind_label(turn.suspend_kind));
             scheduler.schedule(BoundaryEvent::new(
                 boundary_id,
                 session_alias.clone(),
@@ -4772,12 +8872,15 @@ impl GeneratedRuntimeWorld {
         &mut self,
         event: &BoundaryEvent,
     ) -> Result<Value, FixedScriptRunnerError> {
-        let turn = self.suspending_turns.remove(&event.actor_alias).ok_or_else(|| {
-            FixedScriptRunnerError::Assertion(format!(
-                "suspend resume `{}` had no parked turn for `{}`",
-                event.boundary_id, event.actor_alias
-            ))
-        })?;
+        let turn = self
+            .suspending_turns
+            .remove(&event.actor_alias)
+            .ok_or_else(|| {
+                FixedScriptRunnerError::Assertion(format!(
+                    "suspend resume `{}` had no parked turn for `{}`",
+                    event.boundary_id, event.actor_alias
+                ))
+            })?;
         let key = turn.key_slot.lock().await.take().ok_or_else(|| {
             FixedScriptRunnerError::Assertion(format!(
                 "suspend resume `{}` delivered before the turn registered its await key",
@@ -4793,15 +8896,12 @@ impl GeneratedRuntimeWorld {
             .resolve(key, lash_core::Resolution::Ok(resolution.clone()))
             .await
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
-        let result = turn
-            .handle
-            .await
-            .map_err(|err| {
-                FixedScriptRunnerError::Runtime(format!(
-                    "suspend turn `{}` task failed to join: {err}",
-                    event.actor_alias
-                ))
-            })??;
+        let result = turn.handle.await.map_err(|err| {
+            FixedScriptRunnerError::Runtime(format!(
+                "suspend turn `{}` task failed to join: {err}",
+                event.actor_alias
+            ))
+        })??;
         let completed_after = turn.events.tool_completed_count().await;
         let assistant_message = result.assistant_message().unwrap_or_default().to_string();
         let resumed_after_completion = completed_after > completed_before
@@ -5302,8 +9402,11 @@ async fn prove_runtime_facade_turn() -> Result<RuntimeFacadeProof, FixedScriptRu
 /// live-provider-failure oracle EVERY seed. Covers more than one provider kind
 /// and more than one fault position so `live_provider_failure_coverage` cannot
 /// pass vacuously on a single degenerate case.
-const LIVE_PROVIDER_FAILURE_COMBOS: &[(&str, usize)] =
-    &[(OPENAI_COMPATIBLE, 1), (OPENAI_COMPATIBLE, 2), (ANTHROPIC, 1)];
+const LIVE_PROVIDER_FAILURE_COMBOS: &[(&str, usize)] = &[
+    (OPENAI_COMPATIBLE, 1),
+    (OPENAI_COMPATIBLE, 2),
+    (ANTHROPIC, 1),
+];
 
 /// Drive every live-provider-failure combo for a seed, collecting the observed
 /// facts for the per-seed coverage oracle.
@@ -5315,8 +9418,14 @@ async fn drive_live_provider_failure_turns(
         let script = live_failure_script(provider_kind, prose_deltas)
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
         facts.push(
-            run_live_turn_facts(seed, provider_kind, script, "malformed_sse_chunk", prose_deltas)
-                .await?,
+            run_live_turn_facts(
+                seed,
+                provider_kind,
+                script,
+                "malformed_sse_chunk",
+                prose_deltas,
+            )
+            .await?,
         );
     }
     Ok(facts)
@@ -5389,7 +9498,14 @@ async fn run_live_turn_facts(
         .iter()
         .enumerate()
         .map(|(event_index, wire_event)| {
-            provider_release_boundary(&turn_event, &script, 0, event_index, wire_event, wire_event.at())
+            provider_release_boundary(
+                &turn_event,
+                &script,
+                0,
+                event_index,
+                wire_event,
+                wire_event.at(),
+            )
         })
         .collect::<Vec<_>>();
     let mut scheduler = BoundaryScheduler::with_events(seed, release_boundaries);
@@ -5440,19 +9556,8 @@ async fn run_live_turn_facts(
             .and_then(Value::as_str)
             .unwrap_or("provider_event")
             .to_string();
-        let mut idle = 0u64;
-        loop {
-            if schedule
-                .release_if_blocked(exchange_index, event_index, &event_name, event.at)
-                .is_some()
-            {
-                break;
-            }
-            if turn.is_finished() || idle >= MAX_PROVIDER_EVENT_POLL_YIELDS {
-                break;
-            }
-            idle += 1;
-            tokio::task::yield_now().await;
+        if !turn.is_finished() {
+            schedule.release(exchange_index, event_index, &event_name, event.at);
         }
     }
 
@@ -5496,11 +9601,12 @@ async fn run_live_turn_facts(
 /// partial prose leaked into durable state on a terminal failure.
 fn committed_transcript_contains(session: &lash::LashSession, needle: &str) -> bool {
     let observation = session.observe().current_observation();
-    observation
-        .read_view
-        .messages()
-        .iter()
-        .any(|message| message.parts.iter().any(|part| part.content.contains(needle)))
+    observation.read_view.messages().iter().any(|message| {
+        message
+            .parts
+            .iter()
+            .any(|part| part.content.contains(needle))
+    })
 }
 
 async fn prove_pending_tool_completion_through_turn()
@@ -5831,14 +9937,15 @@ fn rlm_final_value_provider() -> ProviderHandle {
             for chunk in CHUNKS {
                 stream.send(LlmStreamEvent::Delta((*chunk).to_string()));
             }
-            Ok(LlmResponse {
-                full_text: RAW_FINAL.to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: RAW_FINAL.to_string(),
-                    response_meta: None,
-                }],
-                ..LlmResponse::default()
-            })
+            let response = text_llm_response(RAW_FINAL);
+            if response.full_text != RAW_FINAL || response_text_part(&response) != Some(RAW_FINAL)
+            {
+                return Err(LlmTransportError::new(format!(
+                    "rlm final-value fixed response shape changed: expected {:?}, got full_text {:?} parts {:?}",
+                    RAW_FINAL, response.full_text, response.parts
+                )));
+            }
+            Ok(response)
         })
         .build()
         .into_handle()
@@ -5897,23 +10004,8 @@ fn pending_tool_definition() -> lash_core::ToolDefinition {
 
 fn pending_tool_roundtrip_provider() -> ProviderHandle {
     let responses = Arc::new(tokio::sync::Mutex::new(VecDeque::from([
-        LlmResponse {
-            parts: vec![LlmOutputPart::ToolCall {
-                call_id: "call-1".to_string(),
-                tool_name: "app_lookup".to_string(),
-                input_json: "{}".to_string(),
-                replay: None,
-            }],
-            ..LlmResponse::default()
-        },
-        LlmResponse {
-            full_text: "done".to_string(),
-            parts: vec![LlmOutputPart::Text {
-                text: "done".to_string(),
-                response_meta: None,
-            }],
-            ..LlmResponse::default()
-        },
+        tool_call_llm_response("call-1", "app_lookup", "{}"),
+        text_llm_response("done"),
     ])));
     lash_core::testing::TestProvider::builder()
         .kind("lash-sim-pending-tool")
@@ -7129,10 +11221,9 @@ mod tests {
             .await
             .expect("serialized in-memory reference");
         let tmp = tempfile::tempdir().expect("tempdir");
-        let sqlite_summary =
-            replay_workload_on_sqlite(&workload, &tmp.path().join("sqlite-store"))
-                .await
-                .expect("sqlite re-run");
+        let sqlite_summary = replay_workload_on_sqlite(&workload, &tmp.path().join("sqlite-store"))
+            .await
+            .expect("sqlite re-run");
         assert_eq!(
             reference, sqlite_summary,
             "cross-backend durable-state summaries diverged for seed {seed}"
@@ -7141,6 +11232,257 @@ mod tests {
             "OK seed={seed} sessions={} digest={}",
             reference.session_count, reference.digest
         );
+    }
+
+    #[test]
+    fn full_random_seed_12_keeps_modeled_provider_exchange_slots_owned_by_scheduler() {
+        let seed = generated_seed("full-random", 12);
+        assert_eq!(seed, 8_740_143_186_674_533_974);
+        let workload = generate_workload(seed, "full-random", 384).expect("workload");
+        let provider_turn = workload
+            .boundaries
+            .iter()
+            .find(|event| event.boundary_id == "session-001:provider:003")
+            .expect("session-001 provider turn 3");
+        assert_eq!(
+            provider_turn.payload.get("script").and_then(Value::as_str),
+            Some("openai-compatible.chat-runtime-text-stream")
+        );
+        assert_eq!(
+            provider_turn
+                .payload
+                .get("expected_provider_exchange_count")
+                .and_then(Value::as_u64),
+            Some(3)
+        );
+
+        let trace = run_on_sim_harness_stack(
+            "full-random-seed-12-modeled-provider-exchange-slots",
+            SIM_HARNESS_STACK_LIMIT_BYTES,
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(FixedScriptRunnerError::Io)?;
+                runtime.block_on(run_generated_workload_for_fixture(
+                    workload,
+                    "seed-12-regression",
+                ))
+            },
+        )
+        .expect("seed 12 generated workload");
+        let delivered = trace
+            .events
+            .iter()
+            .find(|event| event.boundary_id == "session-001:provider:003")
+            .expect("delivered provider turn 3");
+        assert_eq!(
+            delivered.observed.get("success").and_then(Value::as_bool),
+            Some(true),
+            "success-required modeled provider turn must not be converted into provider-error terminalization"
+        );
+        assert_eq!(
+            delivered
+                .observed
+                .get("provider_exchange_count")
+                .and_then(Value::as_u64),
+            Some(3),
+            "autonomous queued turns must not consume provider scripts before modeled turn 3"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_completion_serialization_mutation_guard() {
+        let seed = generated_seed("full-random", 12);
+        let workload = generate_workload(seed, "full-random", 384).expect("workload");
+        let mut world = GeneratedRuntimeWorld::with_backend(
+            Arc::new(lash::persistence::InMemorySessionStoreFactory::new()),
+            RuntimeEffectReplayStore::Memory,
+            Arc::new(lash::persistence::InMemoryAttachmentStore::new()),
+            Arc::new(lash::persistence::InMemoryProcessExecutionEnvStore::new()),
+            true,
+        );
+
+        let (events, _summary) = drive_generated_workload(&mut world, &workload)
+            .await
+            .expect("serialized generated workload");
+        let provider_completions = events
+            .iter()
+            .filter(|event| event.kind == BoundaryKind::Provider)
+            .count();
+
+        assert!(
+            provider_completions > 1,
+            "serialization guard must exercise more than one provider turn"
+        );
+        assert_eq!(
+            world.peak_concurrent_live_turns, 1,
+            "serialized generated replay must initialize RuntimeCompletionState with serialize_provider_turns=true"
+        );
+        assert_eq!(
+            peak_concurrent_live_turns(&events),
+            1,
+            "delivered evidence must not show overlapping provider turns under serialized replay"
+        );
+    }
+
+    #[test]
+    fn standard_protocol_full_text_mutation_guard() {
+        let result = run_standard_protocol_contract(
+            "standard.full_text_mutation_guard",
+            "answer with two chunks",
+            None,
+            vec![
+                StandardContractStep::Llm {
+                    text_streamed: true,
+                    parts: vec![
+                        standard_text_part("first chunk"),
+                        standard_text_part("second chunk"),
+                    ],
+                },
+                StandardContractStep::Checkpoint,
+            ],
+        )
+        .expect("standard full-text contract");
+
+        assert_eq!(
+            result
+                .get("llm_response_full_texts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("first chunk\nsecond chunk")],
+            "fixed Standard execution must preserve LlmResponse.full_text, not only streamed parts"
+        );
+        assert_eq!(
+            result
+                .get("llm_response_parts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!([
+                {"kind": "text", "text": "first chunk"},
+                {"kind": "text", "text": "second chunk"},
+            ])],
+            "fixed Standard execution must preserve concrete response parts"
+        );
+        assert_eq!(
+            result.get("llm_call_count").and_then(Value::as_u64),
+            Some(1),
+            "the guard must drive a real Standard LLM turn"
+        );
+        assert_eq!(
+            result.get("done").and_then(Value::as_bool),
+            Some(true),
+            "the guarded Standard turn must still complete"
+        );
+    }
+
+    #[test]
+    fn rlm_protocol_response_shape_mutation_guard() {
+        let result = run_rlm_protocol_contract(
+            "rlm.response_shape_mutation_guard",
+            "answer naturally",
+            RlmTermination::Natural,
+            None,
+            None,
+            vec![
+                RlmContractStep::Llm(vec![rlm_text_part("RLM final prose")]),
+                RlmContractStep::Checkpoint,
+            ],
+        )
+        .expect("rlm response-shape contract");
+
+        assert_eq!(
+            result
+                .get("llm_response_full_texts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("RLM final prose")],
+            "fixed RLM execution must preserve LlmResponse.full_text"
+        );
+        assert_eq!(
+            result
+                .get("llm_response_part_counts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!(1)],
+            "fixed RLM execution must preserve concrete response parts"
+        );
+        assert_eq!(
+            result
+                .get("llm_response_parts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!([{"kind": "text", "text": "RLM final prose"}])],
+            "fixed RLM execution must preserve the concrete text part"
+        );
+        assert_eq!(
+            result.get("done").and_then(Value::as_bool),
+            Some(true),
+            "the guarded RLM turn must still complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn fixed_texts_provider_response_shape_mutation_guard() {
+        let mut provider =
+            fixed_texts_provider("lash-sim-fixed-text-guard", vec!["facade response text"]);
+        let response = provider
+            .complete(openai_compatible_request(false))
+            .await
+            .expect("fixed text provider response");
+
+        assert_eq!(response.full_text, "facade response text");
+        assert!(
+            matches!(
+                response.parts.as_slice(),
+                [LlmOutputPart::Text { text, .. }] if text == "facade response text"
+            ),
+            "fixed text provider must return a matching text part"
+        );
+    }
+
+    #[tokio::test]
+    async fn rlm_final_value_provider_response_shape_mutation_guard() {
+        let mut provider = rlm_final_value_provider();
+        let response = provider
+            .complete(openai_compatible_request(true))
+            .await
+            .expect("rlm final-value provider response");
+
+        assert!(response.full_text.contains("semantic-channel"));
+        assert!(
+            response_text_part(&response).is_some_and(|text| text.contains("semantic-channel")),
+            "rlm final-value provider must return the semantic text part"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_tool_roundtrip_provider_response_shape_mutation_guard() {
+        let mut provider = pending_tool_roundtrip_provider();
+        let tool_response = provider
+            .complete(openai_compatible_request(false))
+            .await
+            .expect("pending tool provider tool-call response");
+        assert!(
+            matches!(
+                tool_response.parts.as_slice(),
+                [LlmOutputPart::ToolCall { call_id, tool_name, input_json, .. }]
+                    if call_id == "call-1" && tool_name == "app_lookup" && input_json == "{}"
+            ),
+            "pending tool provider must start with the concrete tool-call part"
+        );
+
+        let final_response = provider
+            .complete(openai_compatible_request(false))
+            .await
+            .expect("pending tool provider final response");
+        assert_eq!(final_response.full_text, "done");
+        assert_eq!(response_text_part(&final_response), Some("done"));
     }
 
     #[tokio::test]
@@ -7553,13 +11895,28 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn generated_sim_profile_writes_trace_replay_and_provider_artifacts() {
+    #[test]
+    fn generated_sim_profile_writes_trace_replay_and_provider_artifacts() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let report = run_generated_sim_profile(tmp.path(), "fast-random", 2, 24)
-            .await
-            .expect("generated sim");
+        let artifact_root = tmp.path().to_path_buf();
+        let report = run_on_sim_harness_stack(
+            "generated-sim-profile-test",
+            SIM_HARNESS_STACK_LIMIT_BYTES,
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(FixedScriptRunnerError::Io)?;
+                runtime.block_on(run_generated_sim_profile(
+                    artifact_root,
+                    "fast-random",
+                    2,
+                    24,
+                ))
+            },
+        )
+        .expect("generated sim");
 
         assert_eq!(report.profile, "fast-random");
         assert_eq!(report.counts.generated_seeds, 2);
@@ -7596,10 +11953,39 @@ mod tests {
             report.counts.scenario_contract_packages,
             expected_contract_slices
         );
-        assert_eq!(report.backend_replayable_regressions.len(), 8);
-        assert_eq!(report.counts.backend_replayable_regressions, 8);
+        let package_oracle_ids = report
+            .scenario_contract_packages
+            .iter()
+            .map(|package| package.oracle_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            package_oracle_ids.len(),
+            report.scenario_contract_packages.len(),
+            "scenario packages must not share backing oracle ids"
+        );
+        assert!(
+            report.scenario_contract_packages.iter().all(|package| {
+                package.classification == "per_contract_oracle"
+                    && package.oracle_id.ends_with(package.test_name)
+                    && !package.oracle_id.ends_with(":coverage-manifest")
+            }),
+            "every scenario package must be backed by its own per-contract oracle"
+        );
+        let mut package_fact_graphs = BTreeMap::new();
+        for slice in &report.scenario_contract_slices {
+            let fingerprint =
+                transition_fact_graph_fingerprint(&slice.generated_shape.transition_facts);
+            assert!(
+                package_fact_graphs
+                    .insert(fingerprint, slice.test_name)
+                    .is_none(),
+                "scenario packages must not share identical generated transition fact graphs"
+            );
+        }
+        assert_eq!(report.generated_backend_regression_fixtures.len(), 8);
+        assert_eq!(report.counts.generated_backend_regression_fixtures, 8);
         let backend_regression_ids = report
-            .backend_replayable_regressions
+            .generated_backend_regression_fixtures
             .iter()
             .map(|fixture| fixture.fixture_id)
             .collect::<BTreeSet<_>>();
@@ -7615,15 +12001,23 @@ mod tests {
         ] {
             assert!(
                 backend_regression_ids.contains(fixture_id),
-                "missing backend-replayable regression fixture {fixture_id}"
+                "missing generated backend regression fixture {fixture_id}"
             );
         }
-        for fixture in &report.backend_replayable_regressions {
-            assert_eq!(fixture.status, "backend_replayable_valid_trace");
+        for fixture in &report.generated_backend_regression_fixtures {
+            assert_eq!(fixture.status, "generated_cross_backend_valid_trace");
             assert!(tmp.path().join(&fixture.trace_path).exists());
             assert!(tmp.path().join(&fixture.package_path).exists());
-            assert!(fixture.replay_backends.contains(&"sqlite"));
-            assert!(fixture.replay_backends.contains(&"postgres_when_available"));
+            assert_eq!(fixture.replay_backends, vec!["model"]);
+            assert_eq!(
+                fixture.static_backend_replay_policy,
+                "not_claimed_for_generated_scheduler_traces"
+            );
+            assert!(
+                tmp.path()
+                    .join(&fixture.source_sqlite_replay_report_path)
+                    .exists()
+            );
             assert!(
                 fixture
                     .semantic_oracles
@@ -7730,6 +12124,7 @@ mod tests {
             let artifact: serde_json::Value = serde_json::from_str(&body).expect("package JSON");
             assert_eq!(artifact["schema"], "lash.sim.scenario-contract-package.v1");
             assert_eq!(artifact["package_id"], package.package_id);
+            assert_eq!(artifact["classification"], "per_contract_oracle");
             assert_eq!(artifact["positive"]["oracle_status"], "passed");
             assert!(
                 !artifact["generated_shape"]["transition_facts"]
@@ -7803,14 +12198,55 @@ mod tests {
             assert!(!artifact["events"].as_array().unwrap().is_empty());
             assert!(!artifact["verdicts"].as_array().unwrap().is_empty());
         }
+        let runtime_transition_facts = report
+            .scenario_contract_slices
+            .iter()
+            .filter(|slice| slice.suite == "runtime")
+            .map(|slice| {
+                (
+                    slice.semantic_oracle,
+                    slice
+                        .generated_shape
+                        .transition_facts
+                        .iter()
+                        .map(|fact| fact.fact.as_str())
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            runtime_transition_facts.len(),
+            9,
+            "every runtime scenario contract must have generated transition facts"
+        );
+        for (semantic_oracle, facts) in &runtime_transition_facts {
+            assert!(
+                !facts.contains("generated_transition_evidence_present"),
+                "runtime contract {semantic_oracle} must not use generic selected-event fallback"
+            );
+        }
+        assert!(
+            runtime_transition_facts
+                .get("runtime.command_only_queue_drain")
+                .is_some_and(|facts| facts.contains("command_queue_drains_with_real_lease_fence")),
+            "command-only runtime contract must assert queued source keys plus real lease fencing"
+        );
+        assert!(
+            runtime_transition_facts
+                .get("runtime.observation_replay_preserves_input")
+                .is_some_and(
+                    |facts| facts.contains("observer_reconnect_replays_original_input_state")
+                ),
+            "observer replay runtime contract must assert concrete reconnect observation state"
+        );
         let backend_linked_contracts = report
             .scenario_contract_slices
             .iter()
-            .filter(|slice| slice.generated_shape.backend_valid_regression.is_some())
+            .filter(|slice| slice.generated_shape.generated_backend_regression.is_some())
             .count();
         assert!(
             backend_linked_contracts >= 8,
-            "high-risk scenario contracts should link to backend-valid regression fixtures"
+            "high-risk scenario contracts should link to generated backend regression fixtures"
         );
         assert!(
             report
@@ -7887,13 +12323,16 @@ mod tests {
             expected_contract_slices
         );
         assert_eq!(
-            summary["backend_replayable_regressions"]
+            summary["generated_backend_regression_fixtures"]
                 .as_array()
                 .unwrap()
                 .len(),
             8
         );
-        assert_eq!(summary["counts"]["backend_replayable_regressions"], 8);
+        assert_eq!(
+            summary["counts"]["generated_backend_regression_fixtures"],
+            8
+        );
         assert!(
             summary["model_only_boundary_reviews"]
                 .as_array()
@@ -8135,6 +12574,62 @@ mod tests {
                     .get("unit")
                     .and_then(Value::as_str)
                     .is_some_and(|name| name.contains("provider:"))))
+        );
+    }
+
+    #[test]
+    fn runtime_completion_backend_mutation_idle_session_mutation_guard() {
+        let backend_failure = BoundaryEvent::new(
+            "session-001:backend-failure:001",
+            "session-001",
+            BoundaryKind::BackendFailure,
+            4,
+            "backend.failure",
+            json!({}),
+        );
+        let provider_mutation = BoundaryEvent::new(
+            "session-001:provider-mutation:001",
+            "session-001",
+            BoundaryKind::ProviderMutation,
+            5,
+            "provider.mutation",
+            json!({}),
+        );
+        let mut state = RuntimeCompletionState::default();
+
+        assert!(
+            !runtime_completion_ready(&backend_failure, &state),
+            "backend failure must not run before the session opens"
+        );
+        assert!(
+            !runtime_completion_ready(&provider_mutation, &state),
+            "provider mutation must not run before the session opens"
+        );
+
+        state.observe(&test_delivered(
+            0,
+            "session-001:ingress",
+            "session-001",
+            BoundaryKind::Ingress,
+            json!({}),
+        ));
+        assert!(
+            runtime_completion_ready(&backend_failure, &state),
+            "backend failure is ready once its session is open and idle"
+        );
+        assert!(
+            runtime_completion_ready(&provider_mutation, &state),
+            "provider mutation is ready once its session is open and idle"
+        );
+
+        state.provider_started("session-001");
+        assert!(
+            !runtime_completion_ready(&backend_failure, &state),
+            "backend failure must not interleave with an active provider turn for the same session"
+        );
+        assert!(
+            !runtime_completion_ready(&provider_mutation, &state),
+            "provider mutation must not interleave with an active provider turn for the same session"
         );
     }
 

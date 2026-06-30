@@ -38,6 +38,7 @@ async fn run() -> Result<(), String> {
             let mut out = None;
             let mut profile = "fast-random".to_string();
             let mut seeds = None;
+            let mut explicit_seeds = Vec::new();
             let mut max_boundaries = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
@@ -53,6 +54,12 @@ async fn run() -> Result<(), String> {
                             .ok_or_else(|| format!("missing --seeds value\n\n{}", usage()))?;
                         seeds = Some(parse_usize("--seeds", &raw)?);
                     }
+                    "--seed" => {
+                        let raw = args
+                            .next()
+                            .ok_or_else(|| format!("missing --seed value\n\n{}", usage()))?;
+                        explicit_seeds.push(parse_u64("--seed", &raw)?);
+                    }
                     "--max-boundaries" => {
                         let raw = args.next().ok_or_else(|| {
                             format!("missing --max-boundaries value\n\n{}", usage())
@@ -66,6 +73,12 @@ async fn run() -> Result<(), String> {
             let Some(out) = out else {
                 return Err(format!("missing --out\n\n{}", usage()));
             };
+            if !explicit_seeds.is_empty() && seeds.is_some() {
+                return Err(format!(
+                    "--seed and --seeds are mutually exclusive\n\n{}",
+                    usage()
+                ));
+            }
             let seeds = match seeds {
                 Some(seeds) => seeds,
                 None => lash_sim::generator::default_seed_count(&profile)
@@ -76,10 +89,20 @@ async fn run() -> Result<(), String> {
                 None => lash_sim::generator::default_max_boundaries(&profile)
                     .map_err(|err| err.to_string())?,
             };
-            let report =
+            let report = if explicit_seeds.is_empty() {
                 lash_sim::run_generated_sim_profile(out.as_path(), &profile, seeds, max_boundaries)
                     .await
-                    .map_err(|err| err.to_string())?;
+                    .map_err(|err| err.to_string())?
+            } else {
+                lash_sim::run_generated_sim_profile_for_seeds(
+                    out.as_path(),
+                    &profile,
+                    &explicit_seeds,
+                    max_boundaries,
+                )
+                .await
+                .map_err(|err| err.to_string())?
+            };
             println!("{}", report.summary_path.display());
             Ok(())
         }
@@ -186,6 +209,50 @@ async fn run() -> Result<(), String> {
             println!("{}", report.report_path.display());
             Ok(())
         }
+        "stack-probe" => {
+            let Some(kind) = args.next() else {
+                return Err(format!("missing stack-probe kind\n\n{}", usage()));
+            };
+            match kind.as_str() {
+                "agent-contract" => {
+                    let mut contract = None;
+                    let mut stack_bytes = None;
+                    while let Some(arg) = args.next() {
+                        match arg.as_str() {
+                            "--contract" => {
+                                contract = Some(args.next().ok_or_else(|| {
+                                    format!("missing --contract value\n\n{}", usage())
+                                })?);
+                            }
+                            "--stack-bytes" => {
+                                let raw = args.next().ok_or_else(|| {
+                                    format!("missing --stack-bytes value\n\n{}", usage())
+                                })?;
+                                stack_bytes = Some(parse_usize("--stack-bytes", &raw)?);
+                            }
+                            "-h" | "--help" => return Err(usage()),
+                            other => {
+                                return Err(format!("unknown argument `{other}`\n\n{}", usage()));
+                            }
+                        }
+                    }
+                    let Some(contract) = contract else {
+                        return Err(format!("missing --contract\n\n{}", usage()));
+                    };
+                    let Some(stack_bytes) = stack_bytes else {
+                        return Err(format!("missing --stack-bytes\n\n{}", usage()));
+                    };
+                    lash_sim::runner::run_agent_contract_product_stack_probe(
+                        &contract,
+                        stack_bytes,
+                    )
+                    .map_err(|err| err.to_string())?;
+                    println!("{contract} passed product stack probe at {stack_bytes} bytes");
+                    Ok(())
+                }
+                other => Err(format!("unknown stack-probe kind `{other}`\n\n{}", usage())),
+            }
+        }
         "minimize" => {
             let trace = args
                 .next()
@@ -224,14 +291,20 @@ fn parse_usize(name: &str, raw: &str) -> Result<usize, String> {
         .map_err(|err| format!("invalid {name} value `{raw}`: {err}"))
 }
 
+fn parse_u64(name: &str, raw: &str) -> Result<u64, String> {
+    raw.parse::<u64>()
+        .map_err(|err| format!("invalid {name} value `{raw}`: {err}"))
+}
+
 fn usage() -> String {
     "Usage:
   lash-sim fixed-scripts --out <artifact-root>
-  lash-sim run --out <artifact-root> [--profile fast-random] [--seeds N] [--max-boundaries N]
+  lash-sim run --out <artifact-root> [--profile fast-random] [--seeds N | --seed U64 ...] [--max-boundaries N]
   lash-sim replay <trace> [--out <artifact-root>]
   lash-sim replay-sqlite <trace> --out <artifact-root>
   lash-sim replay-postgres <trace> --out <artifact-root>
   lash-sim backend-contention --out <artifact-root>
+  lash-sim stack-probe agent-contract --contract <semantic-oracle> --stack-bytes <bytes>
   lash-sim minimize <trace> --out <artifact-root>"
         .to_string()
 }

@@ -445,8 +445,8 @@ impl StateMachinePlanner {
         // class so every generated run also drives a socket disconnect, a
         // response-start/chunk timeout, or a retryable 5xx through a live
         // provider request.
-        let transport_mutation = TRANSPORT_PROVIDER_MUTATIONS
-            [self.next_usize() % TRANSPORT_PROVIDER_MUTATIONS.len()];
+        let transport_mutation =
+            TRANSPORT_PROVIDER_MUTATIONS[self.next_usize() % TRANSPORT_PROVIDER_MUTATIONS.len()];
         self.plan_provider_mutation(secondary, transport_mutation);
         self.plan_tool(primary);
         self.plan_exec_code(primary, 0);
@@ -1139,7 +1139,6 @@ impl TimelineCursor {
 /// completion boundary. Tool is enabled today; durable-effect and exec-code
 /// follow the same mechanism.
 const SUSPEND_KINDS: &[&str] = &["tool", "durable_effect", "exec_code"];
-
 
 const PROVIDER_MUTATIONS: &[&str] = &[
     "malformed_sse_chunk",

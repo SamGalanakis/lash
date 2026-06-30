@@ -62,41 +62,46 @@ Implemented DST substance (each item below is landed and gated by
   futures whose scripted-transport SSE chunks are released by scheduler-delivered
   `ProviderEvent` boundaries in seeded order, and the generated lane asserts a
   peak of at least two concurrent live turns
-  (`sim.oracle.provider-turn-interleaving-depth`).
+  (`sim.oracle.provider-turn-interleaving-depth.v1`).
 - Tool, durable-effect, and exec-code coverage pass through real turns that
   SUSPEND and RESUME: a generated suspend session runs a real
   `session.turn().run()` over the real `ScriptedLlmHttpTransport`, parks on a
   tool/durable/exec await key, and is resumed only by a scheduler-delivered
-  completion boundary (`sim.oracle.generated-suspend-resume`). Both the
+  completion boundary (`sim.oracle.generated-suspend-resume.v1`). Both the
   tool-call exchange that suspends the turn and the post-resume exchange exercise
   real provider wire parsing.
 - A non-retryable provider FAILURE is driven through a LIVE turn: a malformed
   mid-stream SSE chunk is delivered to a parked turn via the scripted-transport
-  gating, and `sim.oracle.live-provider-failure-terminalizes` asserts the turn
+  gating, and `sim.oracle.live-provider-failure-terminalizes.v1` asserts the turn
   terminalizes with a terminal failure and commits no provider output (no leaked
   partial assistant prose, no Final Value).
 - The invariant floor is enforced: graph acyclicity, exactly one active Agent
   Frame, monotonic usage accounting, and Final Value as a semantic outcome
   distinct from transcript/prose, each as a named failing-capable oracle and
-  re-verified from recorded facts on replay. The Runtime suite proves each
-  contract with distinct per-contract evidence; the Standard/RLM/Agent protocol
-  suites — not distinctly exercised per-contract by the generic generated
-  workload — are honestly collapsed to one failing-capable suite-level coverage
-  manifest each (plus the real per-behavior mini-oracles), so the oracle count
-  no longer overstates per-contract assurance.
-- One real discovered regression is minimized and promoted: the
-  `queued-active-turn-cancel-race` fixture under `crates/lash-sim/replays/` is a
-  deterministic regression guard. Separately, the broad/full lane's cross-backend
-  comparison surfaced a behavioral divergence on the active-turn-cancel shape
-  which, on investigation, was a replay-FIDELITY gap in the harness's own SQLite
-  re-drive — NOT a product bug (see Known limitations). It is retained as the
-  `cross-backend-sqlite-active-turn-divergence` regression fixture.
+  re-verified from recorded facts on replay. The Runtime, Standard, RLM, and
+  Agent suites each emit distinct per-contract generated semantic oracles, with
+  package guards preventing protocol/agent contracts from sharing the same
+  backing verdict or high-risk selected evidence while still retaining the 13
+  real per-behavior mini-oracles.
+- Two regression fixtures are promoted under `crates/lash-sim/replays/`, and the
+  promotion metadata is explicit that neither is a discovered product bug. The
+  `queued-active-turn-cancel-race` fixture is a generated fast-random DST trace
+  promoted as a deterministic regression GUARD that pins the active-turn
+  queued-input/cancel contract; its package manifest records
+  `historical_production_regression: false`, so it guards against future
+  regressions rather than recording one found in production. Separately, the
+  broad/full lane's cross-backend comparison surfaced a behavioral divergence on
+  the active-turn-cancel shape which, on investigation, was a replay-FIDELITY gap
+  in the harness's own SQLite re-drive — NOT a product bug (see Known
+  limitations). It is retained as the
+  `cross-backend-sqlite-active-turn-divergence` regression fixture. No product
+  regression has been discovered by this lane to date.
 - Generator substance is real: the fast profile is genuinely seed-random,
   provider mutations have distinct executable behaviors, queued-ingress mode
   varies, and worker failover is generated as REAL failover — a second worker
   incarnation reclaims the crashed owner's session-execution lease at a strictly
   higher fencing token and CONTINUES the queued work the dead owner could not,
-  rejecting its stale completion (`sim.oracle.worker-failover-continues-work`).
+  rejecting its stale completion (`sim.oracle.worker-failover-continues-work.v1`).
   The abstract model no longer fabricates worker fencing: it carries the real
   reclaim/fence facts produced by the live lease store, re-verified by the
   SQLite/Postgres backend replays.
@@ -450,6 +455,7 @@ flowchart TB
 | `lash-sim::provider` | `lash-sim` | Provider Wire Script registry, request matching, scheduled response chunks, transport failures, script mutation. |
 | `lash-sim::runtime_boundaries` | `lash-sim` | Scripted local runtime-effect host for provider/tool/exec/durable-effect/process-wake boundaries and replay-by-key checks. |
 | `lash-sim::runtime_providers` | `lash-sim` | No-live provider execution through migrated provider crates and scripted transports. |
+| `lash-sim::runtime_contracts` | `lash-sim` | Per-turn runtime contract evidence: turn observations plus graph-acyclicity, single-active-Agent-Frame, usage-monotonicity, and Final Value semantic-channel invariant facts and oracle verdicts. |
 | `lash-sim::provider_mutations` | `lash-sim` | Provider parser/failure mutation matrices, including retryable and terminal parser/error paths. |
 | `lash-sim::store` | `lash-sim` | Model store, abstract-state snapshots, worker/lease topology state, instrumentation, and replay summaries. |
 | `lash-sim::sqlite_replay` / `postgres_replay` | `lash-sim` | Backend replay through production-facing SQLite/Postgres persistence and native Postgres runtime effect history. |
@@ -481,6 +487,7 @@ Suggested modules:
 | `provider_mutations` | Provider parser/fault mutation matrices for no-live provider crates. |
 | `runtime_boundaries` | Local scripted runtime-effect host, effect replay store, and boundary execution checks. |
 | `runtime_providers` | Runtime provider-turn construction through migrated provider crates and scripted transports. |
+| `runtime_contracts` | Per-turn runtime invariant fact/oracle builders (graph acyclicity, single active Agent Frame, usage monotonicity, Final Value semantic channel) supplying per-contract Runtime evidence. |
 | `store` | Model store, abstract-state model, store event log, worker/lease topology, backend replayable regression metadata. |
 | `sqlite_replay` / `postgres_replay` | Trace replay through production persistence APIs and backend-specific effect history. |
 | `backend_contention` | SQLite/Postgres contention and fencing conformance scenarios. |

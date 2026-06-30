@@ -296,17 +296,18 @@ impl ScriptedTransportSchedule {
             .await;
     }
 
-    pub async fn release_when_blocked(
+    /// Release the scheduler-owned provider event whether or not the provider
+    /// future has already parked on the gate. A delivered boundary represents byte
+    /// availability, so an early release must be buffered instead of being dropped.
+    pub fn release(
         &self,
         exchange_index: usize,
         event_index: usize,
         event_name: impl Into<String>,
         at: u64,
     ) -> ScriptedProviderEventRelease {
-        let event_name = event_name.into();
         let gate = self.gate(exchange_index, event_index);
-        gate.wait_until_blocked().await;
-        self.open_gate(&gate, exchange_index, event_index, event_name, at)
+        self.open_gate(&gate, exchange_index, event_index, event_name.into(), at)
     }
 
     /// Whether the turn future is currently parked on this gate. Lets the
@@ -314,24 +315,6 @@ impl ScriptedTransportSchedule {
     /// the gate blocks or the turn finishes) instead of blocking forever.
     pub fn is_blocked(&self, exchange_index: usize, event_index: usize) -> bool {
         self.gate(exchange_index, event_index).is_blocked()
-    }
-
-    /// Release the gate only if the turn is already parked on it; otherwise
-    /// return `None` without blocking. The caller polls this against the turn's
-    /// liveness so a release can never deadlock waiting for a block that will
-    /// never come (e.g. a turn that finished or drifted to a different exchange).
-    pub fn release_if_blocked(
-        &self,
-        exchange_index: usize,
-        event_index: usize,
-        event_name: impl Into<String>,
-        at: u64,
-    ) -> Option<ScriptedProviderEventRelease> {
-        let gate = self.gate(exchange_index, event_index);
-        if !gate.is_blocked() {
-            return None;
-        }
-        Some(self.open_gate(&gate, exchange_index, event_index, event_name.into(), at))
     }
 
     fn open_gate(
@@ -1633,6 +1616,50 @@ mod tests {
                     && header.value == "[redacted]")
         );
         assert!(exchanges[0].response.event_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scripted_transport_buffers_scheduler_releases_before_provider_parks() {
+        let schedule = ScriptedTransportSchedule::new();
+        let script =
+            ProviderWireScript::from_json_str(TOOL_CALL_SPLIT_STREAM_SCRIPT).expect("script");
+        for (event_index, wire_event) in script.timeline.iter().enumerate() {
+            let release =
+                schedule.release(0, event_index, wire_event.event_name(), wire_event.at());
+            assert!(
+                !release.blocked_before_release,
+                "regression setup must release before the provider parks on event {event_index}"
+            );
+        }
+        let transport = Arc::new(
+            ScriptedLlmHttpTransport::from_scripts([script]).with_event_schedule(schedule),
+        );
+        let provider_transport: Arc<dyn lash_llm_transport::LlmHttpTransport> = transport.clone();
+        let (events, sender) = event_collector();
+        let mut provider = OpenAiCompatibleProvider::new("test-key", "https://provider.test")
+            .with_options(ProviderOptions {
+                reliability: ProviderReliability::default()
+                    .request_timeout(Some(RequestTimeout::Millis(1)))
+                    .stream_chunk_timeout_ms(Some(1)),
+                ..ProviderOptions::default()
+            })
+            .with_transport(provider_transport);
+
+        let response = provider
+            .complete(request(Some(sender)))
+            .await
+            .expect("early scheduler releases must be buffered, not retried into no-script");
+
+        assert_eq!(response.terminal_reason, LlmTerminalReason::ToolUse);
+        assert_eq!(response.full_text, "café ");
+        assert_eq!(text_deltas(&events), vec!["café ".to_string()]);
+        assert_eq!(transport.remaining_scripts().expect("remaining scripts"), 0);
+        let exchanges = transport.exchanges().expect("exchange log");
+        assert_eq!(
+            exchanges.len(),
+            1,
+            "a success-required turn with one script must not retry after scheduler-owned releases"
+        );
     }
 
     #[test]

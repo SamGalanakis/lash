@@ -11,6 +11,8 @@ out_root="${LASH_CONFIDENCE_OUT_DIR:-$repo/target/confidence}"
 out_dir="${out_root}/${lane}"
 ci_features="${LASH_CI_FEATURES:--F lash-cli/fff-zlob -F lash-cli/bench}"
 critical_packages=(lash-core lashlang lash-protocol-rlm lash-protocol-standard)
+BROAD_SCHEDULED_DEPTH_MIN_SEEDS=4
+BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES=256
 case "$lane" in
   fast) default_mutation_scope="none" ;;
   default) default_mutation_scope="targeted" ;;
@@ -19,6 +21,7 @@ case "$lane" in
   *) default_mutation_scope="none" ;;
 esac
 mutation_scope="${LASH_CONFIDENCE_MUTATION_SCOPE:-$default_mutation_scope}"
+coverage_scope="${LASH_CONFIDENCE_COVERAGE_SCOPE:-run}"
 mutation_failures=0
 
 mkdir -p "$out_dir"
@@ -35,18 +38,23 @@ Lanes:
   fast     deterministic scenario harnesses, state-machine/property checks,
            generated DST replay/provider proof, durable fault-matrix metadata,
            and perf guard identity tests.
-  default  fast + local backend conformance, coverage blind-spot artifacts,
-           and targeted cargo-mutants evidence.
+  default  fast + focused generated SQLite seed-tail repro, local backend
+           conformance, coverage blind-spot artifacts, and targeted
+           cargo-mutants evidence.
   broad    bounded broad evidence: default + Postgres conformance when
-           available, all generated/minimized trace cross-backend replay,
-           and targeted mutation. This is not true full confidence.
+           available, static model replay evidence for generated/minimized
+           traces, backend contention evidence, and targeted mutation. This is
+           not true full confidence.
   full     true full confidence: broad semantics plus full cargo-mutants over
            critical crates. The full lane refuses non-full mutation scopes.
 
-Tool policy:
+  Tool policy:
   default/broad/full require cargo-llvm-cov and cargo-mutants for their
            configured mutation scope. Set LASH_CONFIDENCE_MUTATION_SCOPE for
            default/broad only; true full always requires scope=full.
+          Set LASH_CONFIDENCE_COVERAGE_SCOPE=none for bounded default/broad
+          replay/backend lanes that must record coverage as not_run rather than
+          install cargo-llvm-cov. True full always requires coverage.
   Set LASH_CONFIDENCE_BOOTSTRAP=1 to install pinned versions if missing.
   Missing required tools fail the lane; skipped coverage or mutation shards are
   recorded as not_run, never as passed.
@@ -100,6 +108,14 @@ case "$lane" in
     ;;
 esac
 
+case "$coverage_scope" in
+  run|none) ;;
+  *)
+    echo "Unknown LASH_CONFIDENCE_COVERAGE_SCOPE=${coverage_scope}; expected run or none" >&2
+    exit 2
+    ;;
+esac
+
 if [ "$lane" = "full" ] && [ "$mutation_scope" != "full" ]; then
   cat >"${out_dir}/confidence-summary.json" <<EOF
 {
@@ -114,6 +130,23 @@ if [ "$lane" = "full" ] && [ "$mutation_scope" != "full" ]; then
 }
 EOF
   echo "The full lane requires LASH_CONFIDENCE_MUTATION_SCOPE=full. Use the broad lane for bounded targeted evidence." >&2
+  exit 2
+fi
+
+if [ "$lane" = "full" ] && [ "$coverage_scope" != "run" ]; then
+  cat >"${out_dir}/confidence-summary.json" <<EOF
+{
+  "schema": "lash.confidence.summary.v1",
+  "lane": "full",
+  "status": "failed",
+  "failure_kind": "invalid_full_lane_coverage_scope",
+  "coverage_scope": "${coverage_scope}",
+  "reason": "true full confidence must run coverage; LASH_CONFIDENCE_COVERAGE_SCOPE=none is only for bounded default/broad replay/backend lanes",
+  "bounded_alternative": "LASH_CONFIDENCE_COVERAGE_SCOPE=none LASH_CONFIDENCE_MUTATION_SCOPE=none LASH_CONFIDENCE_OUT_DIR=${out_root} scripts/confidence-gate.sh broad",
+  "artifacts_root": "${out_dir}"
+}
+EOF
+  echo "The full lane requires coverage. Use a bounded broad lane for replay/backend evidence without coverage." >&2
   exit 2
 fi
 
@@ -344,6 +377,12 @@ run_sim_provider_scripts() {
     rlm-lashlang-cell-missing-exec-outcome \
     agent-parallel-join-missing-wake-session \
     standard-provider-error-missing-parser-matrix \
+    standard-max-turn-stop-missing \
+    rlm-typed-finish-terminal-event-missing \
+    rlm-empty-options-default-mode-broken \
+    agent-tuple-json-array-shape-broken \
+    agent-started-process-subagent-child-graph-missing \
+    agent-failed-child-task-fail-evidence-missing \
     provider-mutation-runtime-completion-missing \
     worker-failover-stale-rejection-missing \
     backend-retry-runtime-completion-missing
@@ -365,6 +404,12 @@ run_sim_provider_scripts() {
     "crates/lash-sim/failure-fixtures/rlm-lashlang-cell-missing-exec-outcome.json",
     "crates/lash-sim/failure-fixtures/agent-parallel-join-missing-wake-session.json",
     "crates/lash-sim/failure-fixtures/standard-provider-error-missing-parser-matrix.json",
+    "crates/lash-sim/failure-fixtures/standard-max-turn-stop-missing.json",
+    "crates/lash-sim/failure-fixtures/rlm-typed-finish-terminal-event-missing.json",
+    "crates/lash-sim/failure-fixtures/rlm-empty-options-default-mode-broken.json",
+    "crates/lash-sim/failure-fixtures/agent-tuple-json-array-shape-broken.json",
+    "crates/lash-sim/failure-fixtures/agent-started-process-subagent-child-graph-missing.json",
+    "crates/lash-sim/failure-fixtures/agent-failed-child-task-fail-evidence-missing.json",
     "crates/lash-sim/failure-fixtures/provider-mutation-runtime-completion-missing.json",
     "crates/lash-sim/failure-fixtures/worker-failover-stale-rejection-missing.json",
     "crates/lash-sim/failure-fixtures/backend-retry-runtime-completion-missing.json"
@@ -380,6 +425,12 @@ run_sim_provider_scripts() {
     "rlm_lashlang_cell_missing_exec_outcome": "failing-fixtures/rlm-lashlang-cell-missing-exec-outcome/minimized-regression/package.json",
     "agent_parallel_join_missing_wake_session": "failing-fixtures/agent-parallel-join-missing-wake-session/minimized-regression/package.json",
     "standard_provider_error_missing_parser_matrix": "failing-fixtures/standard-provider-error-missing-parser-matrix/minimized-regression/package.json",
+    "standard_max_turn_stop_missing": "failing-fixtures/standard-max-turn-stop-missing/minimized-regression/package.json",
+    "rlm_typed_finish_terminal_event_missing": "failing-fixtures/rlm-typed-finish-terminal-event-missing/minimized-regression/package.json",
+    "rlm_empty_options_default_mode_broken": "failing-fixtures/rlm-empty-options-default-mode-broken/minimized-regression/package.json",
+    "agent_tuple_json_array_shape_broken": "failing-fixtures/agent-tuple-json-array-shape-broken/minimized-regression/package.json",
+    "agent_started_process_subagent_child_graph_missing": "failing-fixtures/agent-started-process-subagent-child-graph-missing/minimized-regression/package.json",
+    "agent_failed_child_task_fail_evidence_missing": "failing-fixtures/agent-failed-child-task-fail-evidence-missing/minimized-regression/package.json",
     "provider_mutation_runtime_completion_missing": "failing-fixtures/provider-mutation-runtime-completion-missing/minimized-regression/package.json",
     "worker_failover_stale_rejection_missing": "failing-fixtures/worker-failover-stale-rejection-missing/minimized-regression/package.json",
     "backend_retry_runtime_completion_missing": "failing-fixtures/backend-retry-runtime-completion-missing/minimized-regression/package.json"
@@ -395,20 +446,24 @@ run_scheduled_depth_sim_artifact() {
     local scheduled_profile="${LASH_SCHEDULED_SIM_PROFILE:-full-random}"
     local scheduled_seeds="${LASH_SCHEDULED_SIM_SEEDS:-8}"
     local scheduled_max_boundaries="${LASH_SCHEDULED_SIM_MAX_BOUNDARIES:-384}"
+    local scheduled_min_seeds="${BROAD_SCHEDULED_DEPTH_MIN_SEEDS}"
+    local scheduled_min_max_boundaries="${BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES}"
     local scheduled_dir="${out_dir}/sim-scheduled-depth"
     cargo run -p lash-sim --locked -- run \
       --out "$scheduled_dir" \
       --profile "$scheduled_profile" \
       --seeds "$scheduled_seeds" \
       --max-boundaries "$scheduled_max_boundaries"
-    python3 - "${scheduled_dir}/summary.json" "${out_dir}/sim/scheduled-depth.json" "$scheduled_profile" "$scheduled_seeds" "$scheduled_max_boundaries" <<'PY'
+    python3 - "${scheduled_dir}/summary.json" "${out_dir}/sim/scheduled-depth.json" "$scheduled_profile" "$scheduled_seeds" "$scheduled_max_boundaries" "$scheduled_min_seeds" "$scheduled_min_max_boundaries" <<'PY'
 import json
 import sys
 
-summary_path, output_path, profile, seeds, max_boundaries = sys.argv[1:6]
+summary_path, output_path, profile, seeds, max_boundaries, min_seeds, min_max_boundaries = sys.argv[1:8]
 with open(summary_path, "r", encoding="utf-8") as handle:
     summary = json.load(handle)
 counts = summary.get("counts") or {}
+min_seeds = int(min_seeds)
+min_max_boundaries = int(min_max_boundaries)
 artifact = {
     "schema": "lash.confidence.scheduled-depth-generated-run.v1",
     "status": "passed",
@@ -416,13 +471,15 @@ artifact = {
     "profile": profile,
     "configured_seeds": int(seeds),
     "configured_max_boundaries": int(max_boundaries),
+    "required_min_seeds": min_seeds,
+    "required_min_max_boundaries": min_max_boundaries,
     "summary_path": summary_path,
     "counts": {
         "generated_seeds": counts.get("generated_seeds"),
         "boundary_events": counts.get("boundary_events"),
         "oracle_passes": counts.get("oracle_passes"),
         "oracle_failures": counts.get("oracle_failures"),
-        "backend_replayable_regressions": counts.get("backend_replayable_regressions"),
+        "generated_backend_regression_fixtures": counts.get("generated_backend_regression_fixtures"),
         "scheduler_owned_runtime_completions": counts.get("scheduler_owned_runtime_completions"),
         "scenario_contract_packages": counts.get("scenario_contract_packages"),
         "interleaving_depth_max": counts.get("interleaving_depth_max"),
@@ -432,10 +489,10 @@ artifact = {
 }
 required_interleaving_depth = 2
 errors = []
-if counts.get("generated_seeds", 0) < 4:
-    errors.append("scheduled-depth run must use at least 4 generated seeds")
-if int(max_boundaries) < 256:
-    errors.append("scheduled-depth run must configure at least 256 max boundaries")
+if counts.get("generated_seeds", 0) < min_seeds:
+    errors.append(f"scheduled-depth run must use at least {min_seeds} generated seeds")
+if int(max_boundaries) < min_max_boundaries:
+    errors.append(f"scheduled-depth run must configure at least {min_max_boundaries} max boundaries")
 if counts.get("boundary_events", 0) < 512:
     errors.append("scheduled-depth run produced fewer than 512 boundary events")
 if counts.get("oracle_failures", 1) != 0:
@@ -487,7 +544,7 @@ artifact = {
         "boundary_events": counts.get("boundary_events"),
         "oracle_passes": counts.get("oracle_passes"),
         "oracle_failures": counts.get("oracle_failures"),
-        "backend_replayable_regressions": counts.get("backend_replayable_regressions"),
+        "generated_backend_regression_fixtures": counts.get("generated_backend_regression_fixtures"),
         "scheduler_owned_runtime_completions": counts.get("scheduler_owned_runtime_completions"),
         "scenario_contract_packages": counts.get("scenario_contract_packages"),
         "interleaving_depth_max": counts.get("interleaving_depth_max"),
@@ -506,6 +563,29 @@ if errors:
     sys.exit(1)
 PY
   fi
+}
+
+run_focused_sqlite_seed_tail_repro() {
+  mkdir -p "${out_dir}/sim"
+  local repro_dir="${out_dir}/sim/focused-sqlite-seed-tail"
+  local repro_artifact="${repro_dir}/focused-sqlite-seed-tail.json"
+  if [ "$lane" = "fast" ] && [ "${LASH_RUN_FOCUSED_SQLITE_REPRO_IN_FAST:-0}" != "1" ]; then
+    mkdir -p "$repro_dir"
+    cat >"$repro_artifact" <<EOF
+{
+  "schema": "lash.confidence.focused-sqlite-seed-tail-repro.v1",
+  "status": "not_run",
+  "lane": "${lane}",
+  "reason": "focused full-random SQLite seed-tail repro runs in default/broad/full; set LASH_RUN_FOCUSED_SQLITE_REPRO_IN_FAST=1 to include it in fast",
+  "exact_command": "scripts/lash-sim-focused-sqlite-repro.sh ${repro_dir}",
+  "seeds": [17785827714152183977, 4101155038242989457]
+}
+EOF
+    return
+  fi
+
+  step "Focused generated SQLite seed-tail repro"
+  scripts/lash-sim-focused-sqlite-repro.sh "$repro_dir"
 }
 
 write_provider_transport_exclusion_evidence() {
@@ -648,6 +728,7 @@ write_sim_lane_declarations() {
   "scenario_contract_manifests": "included_in_lash_sim_summary",
   "scenario_contract_slices": "included_in_lash_sim_summary_with_generated_shape_transition_kind_and_negative_fixture",
   "scheduled_depth_generated_run": "$([ -f "${out_dir}/sim/scheduled-depth.json" ] && echo "sim/scheduled-depth.json" || echo "not_in_${lane}_lane")",
+  "focused_sqlite_seed_tail_repro": "$([ -f "${out_dir}/sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" ] && echo "sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" || echo "not_written")",
   "model_only_boundary_reviews": "included_in_lash_sim_summary",
   "provider_transport_exclusions": "sim/provider-transport-exclusions.json",
   "backend_contention": "$([[ "$lane" = "default" || "$lane" = "broad" || "$lane" = "full" ]] && echo "sim/backend-contention/backend-contention.json" || echo "not_in_${lane}_lane")",
@@ -838,11 +919,76 @@ EOF
 EOF
 }
 
+write_restate_postgres_workers_e2e_lane_status() {
+  if [ "$lane" = "full" ]; then
+    return
+  fi
+  mkdir -p "${out_dir}/sim"
+  cat >"${out_dir}/sim/restate-postgres-workers-e2e.json" <<EOF
+{
+  "schema": "lash.confidence.restate-postgres-workers-e2e.v1",
+  "status": "not_run",
+  "lane": "${lane}",
+  "reason": "distributed Restate/Postgres/MinIO worker e2e is full-lane-only",
+  "script": "scripts/restate-postgres-workers-e2e.sh",
+  "full_lane_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full"
+}
+EOF
+}
+
+run_restate_postgres_workers_e2e() {
+  if [ "$lane" != "full" ]; then
+    return
+  fi
+  step "Restate/Postgres/MinIO workers e2e"
+  local artifact log_dir minio_port exit_code
+  artifact="${out_dir}/sim/restate-postgres-workers-e2e.json"
+  log_dir="${out_dir}/sim/restate-postgres-workers-e2e"
+  minio_port="${LASH_CONFIDENCE_RESTATE_WORKERS_MINIO_PORT:-$((51000 + ($$ % 10000)))}"
+  mkdir -p "$log_dir"
+  set +e
+  LASH_E2E_MINIO_PORT="$minio_port" \
+    bash scripts/restate-postgres-workers-e2e.sh \
+    >"${log_dir}/stdout.log" 2>"${log_dir}/stderr.log"
+  exit_code=$?
+  set -e
+  if [ "$exit_code" -eq 0 ]; then
+    cat >"$artifact" <<EOF
+{
+  "schema": "lash.confidence.restate-postgres-workers-e2e.v1",
+  "status": "passed",
+  "lane": "full",
+  "script": "scripts/restate-postgres-workers-e2e.sh",
+  "minio_port": "${minio_port}",
+  "stdout": "sim/restate-postgres-workers-e2e/stdout.log",
+  "stderr": "sim/restate-postgres-workers-e2e/stderr.log",
+  "evidence": "two Restate workers behind proxy with Postgres state, MinIO attachments, host-built worker binaries, and runner-owned end-to-end assertions"
+}
+EOF
+    return
+  fi
+  cat >"$artifact" <<EOF
+{
+  "schema": "lash.confidence.restate-postgres-workers-e2e.v1",
+  "status": "failed",
+  "lane": "full",
+  "script": "scripts/restate-postgres-workers-e2e.sh",
+  "exit_code": ${exit_code},
+  "minio_port": "${minio_port}",
+  "stdout": "sim/restate-postgres-workers-e2e/stdout.log",
+  "stderr": "sim/restate-postgres-workers-e2e/stderr.log",
+  "exact_retry_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full"
+}
+EOF
+  write_confidence_summary "failed"
+  exit "$exit_code"
+}
+
 run_broad_postgres_evidence() {
   if [ "$lane" != "broad" ]; then
     return
   fi
-  step "Broad Postgres/cross-backend replay evidence"
+  step "Broad Postgres/static replay evidence"
   if [ -n "${LASH_POSTGRES_DATABASE_URL:-}" ]; then
     cargo test -p lash-postgres-store --locked --test conformance
     run_cross_backend_replay_suite "$LASH_POSTGRES_DATABASE_URL" "env"
@@ -1091,7 +1237,7 @@ run_cross_backend_command() {
 run_cross_backend_replay_suite() {
   local database_url="$1"
   local mode="$2"
-  step "Cross-backend replay matrix"
+  step "Static replay evidence matrix"
   local matrix_dir rows_file
   matrix_dir="${out_dir}/sim/cross-backend-replay"
   rows_file="${matrix_dir}/rows.jsonl"
@@ -1100,13 +1246,16 @@ run_cross_backend_replay_suite() {
   : >"$rows_file"
 
   local trace trace_id case_dir fixture_name
+  local generated_static_backend_skip_reason generated_backend_fixture_static_skip_reason
+  generated_static_backend_skip_reason="generated scheduler traces are model-replayed in this matrix; SQLite/Postgres static trace replay is not a claimed contract because generated provider exchange ordering is proven by dynamic per-seed backend rerun artifacts instead"
+  generated_backend_fixture_static_skip_reason="generated backend regression fixtures are selected from dynamic generated scheduler traces; model static replay is claimed here, while backend equivalence is inherited from the source seed dynamic backend rerun artifacts recorded in package.json"
   while IFS= read -r trace; do
     [ -n "$trace" ] || continue
     trace_id="$(basename "$trace" .trace.json)"
     case_dir="${matrix_dir}/generated/${trace_id}"
     run_cross_backend_command "generated" "$trace_id" "model" "$trace" "${case_dir}/model" "" "$rows_file"
-    run_cross_backend_command "generated" "$trace_id" "sqlite" "$trace" "${case_dir}/sqlite" "" "$rows_file"
-    run_cross_backend_command "generated" "$trace_id" "postgres" "$trace" "${case_dir}/postgres" "$database_url" "$rows_file"
+    run_cross_backend_command "generated" "$trace_id" "sqlite" "$trace" "${case_dir}/sqlite" "" "$rows_file" "$generated_static_backend_skip_reason"
+    run_cross_backend_command "generated" "$trace_id" "postgres" "$trace" "${case_dir}/postgres" "$database_url" "$rows_file" "$generated_static_backend_skip_reason"
   done < <(find "${out_dir}/sim/replays" -name '*.trace.json' -type f 2>/dev/null | sort)
 
   while IFS= read -r trace; do
@@ -1126,9 +1275,9 @@ run_cross_backend_replay_suite() {
     fixture_name="$(basename "$(dirname "$trace")")"
     trace_id="${fixture_name}"
     case_dir="${matrix_dir}/backend-regression/${trace_id}"
-    run_cross_backend_command "backend_replayable_regression" "$trace_id" "model" "$trace" "${case_dir}/model" "" "$rows_file"
-    run_cross_backend_command "backend_replayable_regression" "$trace_id" "sqlite" "$trace" "${case_dir}/sqlite" "" "$rows_file"
-    run_cross_backend_command "backend_replayable_regression" "$trace_id" "postgres" "$trace" "${case_dir}/postgres" "$database_url" "$rows_file"
+    run_cross_backend_command "generated_backend_regression_fixture" "$trace_id" "model" "$trace" "${case_dir}/model" "" "$rows_file"
+    run_cross_backend_command "generated_backend_regression_fixture" "$trace_id" "sqlite" "$trace" "${case_dir}/sqlite" "" "$rows_file" "$generated_backend_fixture_static_skip_reason"
+    run_cross_backend_command "generated_backend_regression_fixture" "$trace_id" "postgres" "$trace" "${case_dir}/postgres" "$database_url" "$rows_file" "$generated_backend_fixture_static_skip_reason"
   done < <(find "${out_dir}/sim/backend-regression-fixtures" -name 'trace.json' -type f 2>/dev/null | sort)
 
   python3 - "$rows_file" "${matrix_dir}/summary.json" "$mode" <<'PY'
@@ -1160,16 +1309,16 @@ for corpus in sorted({row["corpus"] for row in rows}):
 failures = [row for row in rows if row["status"] == "failed"]
 skips = [row for row in rows if row["status"] == "skipped"]
 generated = by_corpus.get("generated", {"trace_count": 0})
-backend_replayable = by_corpus.get("backend_replayable_regression", {"trace_count": 0})
+generated_backend_regression = by_corpus.get("generated_backend_regression_fixture", {"trace_count": 0})
 status = "passed"
-if generated["trace_count"] == 0 or backend_replayable["trace_count"] == 0 or failures:
+if generated["trace_count"] == 0 or generated_backend_regression["trace_count"] == 0 or failures:
     status = "failed"
 
 summary = {
-    "schema": "lash.confidence.cross-backend-replay-matrix.v1",
+    "schema": "lash.confidence.static-replay-evidence-matrix.v1",
     "status": status,
     "postgres_mode": mode,
-    "semantics": "Every generated trace and every backend-replayable regression trace is replayed through model, SQLite, and Postgres when a database URL or Docker bootstrap is available. Every minimized failing-regression trace is replayed through the model replay to prove deterministic oracle preservation; SQLite/Postgres rows are skipped with per-fixture reasons when the minimized trace intentionally removes scheduler or observed runtime evidence that backend recomputation must reject or repair.",
+    "semantics": "Generated scheduler traces and generated backend regression fixtures are model-replayed in this static matrix. SQLite/Postgres static rows for those dynamic traces are skipped with explicit reasons because backend equivalence is proved by per-seed generated workload rerun artifacts, not by fixed-order provider-event-gated replay. Minimized failing-regression traces are model-replayed to prove deterministic oracle preservation; SQLite/Postgres rows are skipped with per-fixture reasons when the minimized trace intentionally removes scheduler or observed runtime evidence that backend recomputation must reject or repair.",
     "row_count": len(rows),
     "corpora": by_corpus,
     "failures": failures,
@@ -1184,17 +1333,30 @@ PY
   local matrix_status
   matrix_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "${matrix_dir}/summary.json")"
   if [ "$matrix_status" != "passed" ]; then
-    echo "Cross-backend replay matrix failed; see ${matrix_dir}/summary.json" >&2
+    echo "Static replay evidence matrix failed; see ${matrix_dir}/summary.json" >&2
     exit 1
   fi
 }
 
 run_coverage_blind_spots() {
   step "Coverage blind-spot map"
-  require_tool cargo-llvm-cov cargo-llvm-cov 0.8.7
-  require_llvm_tools
   local coverage_dir="${out_dir}/coverage"
   mkdir -p "$coverage_dir"
+  if [ "$coverage_scope" = "none" ]; then
+    cat >"${coverage_dir}/summary.json" <<EOF
+{
+  "schema": "lash.confidence.coverage-summary.v1",
+  "lane": "${lane}",
+  "status": "not_run",
+  "scope": "none",
+  "reason": "LASH_CONFIDENCE_COVERAGE_SCOPE=none requested a bounded replay/backend lane without cargo-llvm-cov",
+  "full_lane_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full"
+}
+EOF
+    return
+  fi
+  require_tool cargo-llvm-cov cargo-llvm-cov 0.8.7
+  require_llvm_tools
   cargo llvm-cov clean --workspace
   cargo llvm-cov --locked \
     -p lash-core \
@@ -1399,17 +1561,95 @@ mutation_artifact_json() {
     "${exit_code:-null}"
 }
 
+full_mutation_suites_complete() {
+  local package
+  for package in "${critical_packages[@]}"; do
+    if [ ! -f "${out_dir}/mutants-${package}-full/confidence-status.json" ]; then
+      return 1
+    fi
+  done
+}
+
+full_mutation_status() {
+  if [ "$lane" = "full" ] && [ "$mutation_scope" = "full" ]; then
+    if full_mutation_suites_complete; then
+      echo "run"
+    else
+      echo "incomplete_full_mutation_suites"
+    fi
+    return
+  fi
+  if [ "$lane" = "full" ]; then
+    echo "not_run_by_mutation_scope_${mutation_scope}"
+  else
+    echo "not_run_in_${lane}_lane"
+  fi
+}
+
+mutation_evidence_status() {
+  if [ "$lane" = "fast" ]; then
+    echo "not_in_fast_lane"
+    return
+  fi
+  if [ "$mutation_scope" = "none" ]; then
+    echo "not_run_by_scope"
+    return
+  fi
+  if [ "$lane" = "full" ] \
+    && [ "$mutation_scope" = "full" ] \
+    && ! full_mutation_suites_complete; then
+    echo "incomplete_full_mutation_suites"
+    return
+  fi
+  if [ "$mutation_failures" -eq 0 ]; then
+    echo "passed"
+  else
+    echo "failed"
+  fi
+}
+
+coverage_evidence_status() {
+  if [ "$coverage_scope" = "none" ]; then
+    echo "not_run_by_scope"
+  elif [ -f "${out_dir}/coverage/summary.json" ]; then
+    echo "present"
+  else
+    echo "required_not_written"
+  fi
+}
+
+mutation_evidence_path() {
+  if [ "$lane" = "fast" ]; then
+    echo "not_in_fast_lane"
+  elif [ -f "${out_dir}/mutation-evidence.json" ]; then
+    echo "mutation-evidence.json"
+  else
+    echo "not_written"
+  fi
+}
+
+restate_postgres_workers_e2e_status() {
+  local artifact="${out_dir}/sim/restate-postgres-workers-e2e.json"
+  if [ ! -f "$artifact" ]; then
+    echo "not_written"
+  elif grep -q '"status": "passed"' "$artifact"; then
+    echo "passed"
+  elif grep -q '"status": "failed"' "$artifact"; then
+    echo "failed"
+  elif grep -q '"status": "not_run"' "$artifact"; then
+    echo "not_run"
+  else
+    echo "present_unknown"
+  fi
+}
+
 write_mutation_evidence_summary() {
   if [ "$lane" = "fast" ]; then
     return
   fi
   local path="${out_dir}/mutation-evidence.json"
   local evidence_status
-  if [ "$mutation_failures" -eq 0 ]; then
-    evidence_status="passed"
-  else
-    evidence_status="failed"
-  fi
+  evidence_status="$(mutation_evidence_status)"
   {
     cat <<EOF
 {
@@ -1457,7 +1697,7 @@ EOF
   ],
   "smoke_shard": "${LASH_MUTATION_SMOKE_SHARD:-1/64}",
   "critical_package_smoke_status": "$([[ "$mutation_scope" = "smoke" || "$mutation_scope" = "full" ]] && echo "run" || echo "not_run_by_mutation_scope")",
-  "full_mutation_status": "$(case "${lane}:${mutation_scope}" in full:full) echo "run" ;; full:*) echo "not_run_by_mutation_scope_${mutation_scope}" ;; *) echo "not_run_in_${lane}_lane" ;; esac)",
+  "full_mutation_status": "$(full_mutation_status)",
   "true_full_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full",
   "bounded_broad_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_BROAD_SIM_SEEDS=2 LASH_BROAD_SIM_MAX_BOUNDARIES=128 LASH_MUTATION_JOBS=2 LASH_MUTATION_TIMEOUT_SECONDS=300 scripts/confidence-gate.sh broad"
 }
@@ -1478,17 +1718,49 @@ write_confidence_summary() {
   "failing_minimizer_fixtures": "sim/failing-minimizer-fixtures.json",
   "confidence_class": "$(case "$lane" in broad) echo "bounded_broad" ;; full) echo "true_full" ;; default) echo "default_targeted" ;; fast) echo "fast" ;; esac)",
   "coverage_summary": "$([ -f "${out_dir}/coverage/summary.json" ] && echo "coverage/summary.json" || echo "not_run")",
+  "coverage_scope": "${coverage_scope}",
+  "coverage_evidence_status": "$(coverage_evidence_status)",
   "scheduled_depth_generated_run": "$([ -f "${out_dir}/sim/scheduled-depth.json" ] && echo "sim/scheduled-depth.json" || echo "not_run")",
-  "mutation_evidence": "$([ "$lane" = "fast" ] && echo "not_in_fast_lane" || echo "mutation-evidence.json")",
+  "focused_sqlite_seed_tail_repro": "$([ -f "${out_dir}/sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" ] && echo "sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" || echo "not_run")",
+  "mutation_evidence": "$(mutation_evidence_path)",
+  "mutation_evidence_status": "$(mutation_evidence_status)",
   "mutation_scope": "${mutation_scope}",
+  "full_mutation_status": "$(full_mutation_status)",
   "postgres_backend_conformance": "$([[ "$lane" = "broad" || "$lane" = "full" ]] && echo "included_or_explicitly_skipped_in_postgres_conformance_artifact" || echo "env_gated_broad_or_full_lane_only")",
   "postgres_current_trace_replay": "$([ "$lane" = "default" ] && echo "sim/postgres-current/status.json" || echo "not_in_lane")",
   "postgres_current_trace_replay_report": "$([ -f "${out_dir}/sim/postgres-replay/postgres-replay.json" ] && echo "sim/postgres-replay/postgres-replay.json" || echo "not_run")",
   "backend_contention": "$([ -f "${out_dir}/sim/backend-contention/backend-contention.json" ] && echo "sim/backend-contention/backend-contention.json" || echo "not_run")",
   "cross_backend_replay_matrix": "$([ -f "${out_dir}/sim/cross-backend-replay/summary.json" ] && echo "sim/cross-backend-replay/summary.json" || echo "not_run")",
+  "restate_postgres_workers_e2e": "$([ -f "${out_dir}/sim/restate-postgres-workers-e2e.json" ] && echo "sim/restate-postgres-workers-e2e.json" || echo "not_written")",
   "provider_transport_exclusions": "$([ -f "${out_dir}/sim/provider-transport-exclusions.json" ] && echo "sim/provider-transport-exclusions.json" || echo "not_written")",
   "postgres_native_effect_history_replay": "native_postgres_runtime_effect_controller",
   "postgres_effect_history_status": "$([ -f "${out_dir}/sim/postgres-effect-history-status.json" ] && echo "sim/postgres-effect-history-status.json" || echo "not_written")",
+  "artifact_contract": {
+    "schema": "lash.confidence.summary-artifact-contract.v1",
+    "full_lane": {
+      "confidence_class": "true_full",
+      "required_coverage_scope": "run",
+      "effective_coverage_scope": "${coverage_scope}",
+      "coverage_evidence_status": "$(coverage_evidence_status)",
+      "required_mutation_scope": "full",
+      "effective_mutation_scope": "${mutation_scope}",
+      "mutation_evidence": "$(mutation_evidence_path)",
+      "mutation_evidence_status": "$(mutation_evidence_status)",
+      "full_mutation_status": "$(full_mutation_status)",
+      "required_restate_postgres_workers_e2e": "sim/restate-postgres-workers-e2e.json",
+      "restate_postgres_workers_e2e_status": "$(restate_postgres_workers_e2e_status)"
+    },
+    "bounded_broad_ci": {
+      "confidence_class": "bounded_broad",
+      "workflow_job": "bounded-broad-replay-backend",
+      "artifact_name": "bounded-broad-replay-backend-confidence",
+      "coverage_scope": "none",
+      "coverage_evidence_status": "not_run_by_scope",
+      "mutation_scope": "none",
+      "mutation_evidence_status": "not_run_by_scope",
+      "full_confidence_claim": "false"
+    }
+  },
   "mutation_testing": "$(case "$lane" in fast) echo "not_in_fast_lane" ;; default) echo "configured_${mutation_scope}_scope_lash_core_direct_model_and_lash_sim_scheduler_oracle_targets" ;; broad) echo "bounded_broad_configured_${mutation_scope}_scope_targeted_regressions_without_full_mutation_claim" ;; full) echo "true_full_configured_full_scope_targeted_smoke_and_full_mutation" ;; esac)",
   "true_full_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full",
   "bounded_broad_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} scripts/confidence-gate.sh broad",
@@ -1502,10 +1774,12 @@ bootstrap_tools
 run_scenario_harnesses
 run_state_machine_and_fault_matrix
 run_sim_provider_scripts
+run_focused_sqlite_seed_tail_repro
 write_provider_transport_exclusion_evidence
 write_sim_lane_declarations
 write_full_lane_prerequisites
 write_postgres_effect_history_status
+write_restate_postgres_workers_e2e_lane_status
 run_perf_identity_checks
 
 if [ "$lane" = "default" ] || [ "$lane" = "broad" ] || [ "$lane" = "full" ]; then
@@ -1540,6 +1814,7 @@ fi
 
 if [ "$lane" = "full" ]; then
   run_postgres_conformance
+  run_restate_postgres_workers_e2e
   run_mutation_full
   write_mutation_evidence_summary
   if [ "$mutation_failures" -ne 0 ]; then

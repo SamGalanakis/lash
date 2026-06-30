@@ -181,7 +181,7 @@ request.validate()?;</code></pre>
     <div class="listing">
       <div class="listing__row">
         <div class="listing__label">grant</div>
-        <div class="listing__body"><p><code>RemoteToolGrant</code> defines the advertised name, schemas, projection overrides, output contract, examples, activation, scheduling, retry policy, and required lashlang binding. Host-owned bindings decide how granted tools execute.</p></div>
+        <div class="listing__body"><p><code>RemoteToolGrant</code> defines the advertised name, schemas, projection overrides, output contract, examples, activation, scheduling, retry policy, and Lashlang call-path bindings. Host-owned bindings decide how granted tools execute.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">executor</div>
@@ -189,7 +189,7 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">call path</div>
-        <div class="listing__body"><p>The grant's <code>lashlang_binding.module_path</code> plus <code>operation</code> forms the remote call path. Duplicate call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div>
+        <div class="listing__body"><p>A binding in the grant's <code>bindings</code> map resolves to a <code>RemoteCallPathBinding</code> whose <code>module_path</code> plus <code>operation</code> forms the remote call path. Duplicate call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div>
       </div>
     </div>
   </div>
@@ -207,7 +207,7 @@ request.validate()?;</code></pre>
       <div class="listing__row"><div class="listing__label">generation</div><div class="listing__body"><p><code>RemoteGenerationOptions.output_token_cap</code> must be greater than zero when present. Temperature and top-p are strings so provider-specific precision can round-trip.</p></div></div>
       <div class="listing__row"><div class="listing__label">triggers</div><div class="listing__body"><p>Trigger occurrence requests require non-empty <code>source_type</code>, <code>source_key</code>, and <code>idempotency_key</code>. Trigger subscription filters validate any supplied <code>RemoteProcessDefinitionIdentity</code> target. Trigger filters and emit reports validate protocol version but leave authorization and tenant scoping to the boundary host.</p></div></div>
       <div class="listing__row"><div class="listing__label">process env</div><div class="listing__body"><p>Process start environments are closed: <code>env_spec</code> accepts only <code>plugin_options</code> and <code>policy</code>. Unknown fields, including old product metadata such as <code>tool_grants</code> or <code>resolved_tool_bindings</code> under <code>env_spec</code>, fail deserialization. Model limits must be positive when supplied.</p></div></div>
-      <div class="listing__row"><div class="listing__label">remote tools</div><div class="listing__body"><p>Remote tool grants require non-empty names, schemas, and Lashlang bindings. Duplicate <code>module_path</code> / <code>operation</code> call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div></div>
+      <div class="listing__row"><div class="listing__label">remote tools</div><div class="listing__body"><p>Remote tool grants require a non-empty <code>id</code> and <code>name</code>, plus non-empty keys on any bindings present; schemas and bindings are optional. Duplicate <code>module_path</code> / <code>operation</code> call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div></div>
     </div>
     <aside class="gotcha">
       <strong>Gotcha</strong>
