@@ -214,6 +214,14 @@ impl RuntimeTurnDriver<'_> {
         let provider_trace =
             self.provider_trace_sender(protocol_iteration, llm_call_id.clone(), &debug);
         let llm_request = LlmRequest {
+            scope: crate::LlmRequestScope::new(
+                self.session_id.clone(),
+                self.turn_pipeline.state().current_agent_frame_id.clone(),
+                format!(
+                    "{}:turn:{}:llm:{}",
+                    self.session_id, self.turn_id, protocol_iteration
+                ),
+            ),
             stream_events: transport_stream_events(self.policy.provider(), Some(llm_stream_tx)),
             provider_trace,
             generation: request.generation.clone(),

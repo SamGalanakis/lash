@@ -170,7 +170,11 @@ fn empty_request() -> LlmRequest {
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
         model_variant: None,
-        session_id: None,
+        scope: crate::LlmRequestScope::new(
+            "provider-test",
+            "provider-test:frame",
+            "provider-test:request",
+        ),
         output_spec: None,
         stream_events: None,
         generation: GenerationOptions::default(),

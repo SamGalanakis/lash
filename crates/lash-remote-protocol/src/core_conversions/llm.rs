@@ -8,7 +8,7 @@ impl RemoteLlmRequest {
             tool_choice,
             model_variant,
             generation,
-            session_id,
+            scope,
             output_spec,
             stream_events: _,
             provider_trace: _,
@@ -16,6 +16,7 @@ impl RemoteLlmRequest {
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             request_id: request_id.into(),
+            scope: scope.into(),
             model_intent: RemoteModelIntent {
                 model,
                 variant: model_variant,
@@ -28,11 +29,6 @@ impl RemoteLlmRequest {
             tool_choice: tool_choice.into(),
             output_spec: output_spec.map(Into::into),
             generation: generation.into(),
-            request_metadata: RemoteLlmRequestMetadata {
-                session_id,
-                idempotency_key: None,
-                trace_id: None,
-            },
             metadata: HashMap::new(),
         }
     }
@@ -53,7 +49,7 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
             tool_choice,
             output_spec,
             generation,
-            request_metadata,
+            scope,
             metadata: _,
         } = value;
         let RemoteModelIntent {
@@ -62,11 +58,6 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
             provider: _,
             metadata: _,
         } = model_intent;
-        let RemoteLlmRequestMetadata {
-            session_id,
-            idempotency_key: _,
-            trace_id: _,
-        } = request_metadata;
         Ok(Self {
             model,
             messages: messages.into_iter().map(Into::into).collect(),
@@ -78,11 +69,27 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
             tool_choice: tool_choice.into(),
             model_variant: variant,
             generation: generation.try_into()?,
-            session_id,
+            scope: scope.into(),
             output_spec: output_spec.map(Into::into),
             stream_events: None,
             provider_trace: None,
         })
+    }
+}
+
+impl From<core_llm::LlmRequestScope> for RemoteLlmRequestScope {
+    fn from(value: core_llm::LlmRequestScope) -> Self {
+        Self {
+            session_id: value.session_id,
+            agent_frame_id: value.agent_frame_id,
+            request_id: value.request_id,
+        }
+    }
+}
+
+impl From<RemoteLlmRequestScope> for core_llm::LlmRequestScope {
+    fn from(value: RemoteLlmRequestScope) -> Self {
+        Self::new(value.session_id, value.agent_frame_id, value.request_id)
     }
 }
 

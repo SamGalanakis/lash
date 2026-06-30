@@ -7,7 +7,6 @@ use crate::turn_driver::TurnDriverPreamble;
 
 pub struct SansIoTurnInput<M: TurnProtocol = UnitTurnProtocol> {
     pub session_id: String,
-    pub run_session_id: Option<String>,
     pub autonomous: bool,
     pub model: String,
     /// Model context-window size in tokens, if known. Threaded into the kernel
@@ -46,7 +45,6 @@ pub fn build_turn<M: TurnProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
             max_turns: input.max_turns,
             model_variant: input.model_variant,
             generation: input.generation,
-            run_session_id: input.run_session_id,
             autonomous: input.autonomous,
             tool_specs: input.turn_driver_preamble.tool_specs.clone(),
             system_prompt: Arc::clone(&input.prepared_prompt.system_prompt),
@@ -175,7 +173,6 @@ mod tests {
         });
         let prepared = build_turn(SansIoTurnInput {
             session_id: "session".to_string(),
-            run_session_id: Some("run".to_string()),
             autonomous: false,
             model: "gpt-5".to_string(),
             max_context_tokens: None,

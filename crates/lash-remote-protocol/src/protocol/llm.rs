@@ -79,6 +79,7 @@ fn default_remote_input_schema() -> RemoteSchemaContract {
 pub struct RemoteLlmRequest {
     pub protocol_version: u32,
     pub request_id: String,
+    pub scope: RemoteLlmRequestScope,
     pub model_intent: RemoteModelIntent,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<RemoteLlmMessage>,
@@ -92,8 +93,6 @@ pub struct RemoteLlmRequest {
     pub output_spec: Option<RemoteLlmOutputSpec>,
     #[serde(default, skip_serializing_if = "RemoteGenerationOptions::is_empty")]
     pub generation: RemoteGenerationOptions,
-    #[serde(default, skip_serializing_if = "RemoteLlmRequestMetadata::is_empty")]
-    pub request_metadata: RemoteLlmRequestMetadata,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -102,6 +101,7 @@ impl RemoteLlmRequest {
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
         require_non_empty("RemoteLlmRequest", "request_id", &self.request_id)?;
+        self.scope.validate()?;
         self.model_intent.validate()?;
         self.generation.validate("RemoteLlmRequest")?;
         for (index, message) in self.messages.iter().enumerate() {
@@ -206,19 +206,35 @@ impl RemoteGenerationOptions {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteLlmRequestMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_id: Option<String>,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteLlmRequestScope {
+    pub session_id: String,
+    pub agent_frame_id: String,
+    pub request_id: String,
 }
 
-impl RemoteLlmRequestMetadata {
-    pub fn is_empty(&self) -> bool {
-        self.session_id.is_none() && self.idempotency_key.is_none() && self.trace_id.is_none()
+impl RemoteLlmRequestScope {
+    pub fn new(
+        session_id: impl Into<String>,
+        agent_frame_id: impl Into<String>,
+        request_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            agent_frame_id: agent_frame_id.into(),
+            request_id: request_id.into(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), RemoteProtocolError> {
+        require_non_empty("RemoteLlmRequestScope", "session_id", &self.session_id)?;
+        require_non_empty(
+            "RemoteLlmRequestScope",
+            "agent_frame_id",
+            &self.agent_frame_id,
+        )?;
+        require_non_empty("RemoteLlmRequestScope", "request_id", &self.request_id)?;
+        Ok(())
     }
 }
 

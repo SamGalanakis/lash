@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 
 #[cfg(test)]
 use lash_core::llm::types::LlmContentBlock;
-use lash_core::llm::types::{LlmMessage, LlmRole, LlmToolChoice};
+use lash_core::llm::types::{LlmMessage, LlmRequestScope, LlmRole, LlmToolChoice};
 use lash_core::sansio::ContextProjector;
 use lash_core::{
     LlmRequest, ProjectorContext, PromptContribution, PromptUsage, ProtocolBuildInput,
@@ -280,7 +280,14 @@ impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::None,
             model_variant: ctx.config.model_variant.clone(),
-            session_id: ctx.config.run_session_id.clone(),
+            scope: LlmRequestScope::new(
+                ctx.config.session_id.clone(),
+                format!("{}:frame:sansio", ctx.config.session_id),
+                format!(
+                    "{}:sansio:rlm:{}",
+                    ctx.config.session_id, ctx.protocol_iteration
+                ),
+            ),
             output_spec: None,
             stream_events: None,
             generation: ctx.config.generation.clone(),

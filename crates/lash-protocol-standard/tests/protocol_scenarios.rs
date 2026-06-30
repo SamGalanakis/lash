@@ -449,7 +449,6 @@ fn standard_config() -> TurnMachineConfig {
         max_turns: None,
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),
-        run_session_id: None,
         autonomous: false,
         tool_specs: Vec::new().into(),
         system_prompt: std::sync::Arc::from(""),
