@@ -152,6 +152,25 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
             gate,
         )
 
+    def test_generated_postgres_dynamic_rerun_is_bounded_and_artifacted(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        gate = GATE.read_text(encoding="utf-8")
+        env = broad_step_env(workflow)
+
+        required_snippets = [
+            "run_generated_postgres_dynamic_replay()",
+            'step "Generated Postgres dynamic backend rerun"',
+            "cargo run -p lash-sim --locked -- run-postgres",
+            '--seed "$seed"',
+            'LASH_POSTGRES_GENERATED_MAX_BOUNDARIES:-128',
+            '"confidence_lane": "generated_dynamic_postgres_backend_rerun"',
+            '"generated_postgres_dynamic_replay": "$([ -f "${out_dir}/sim/postgres-generated-rerun/summary.json" ]',
+        ]
+        for snippet in required_snippets:
+            self.assertIn(snippet, gate)
+        self.assertEqual(env["LASH_POSTGRES_GENERATED_PROFILE"], "fast-random")
+        self.assertEqual(env["LASH_POSTGRES_GENERATED_MAX_BOUNDARIES"], "72")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -229,6 +229,8 @@ jobs:
           LASH_SCHEDULED_SIM_PROFILE: fast-random
           LASH_SCHEDULED_SIM_SEEDS: 4
           LASH_SCHEDULED_SIM_MAX_BOUNDARIES: 256
+          LASH_POSTGRES_GENERATED_PROFILE: fast-random
+          LASH_POSTGRES_GENERATED_MAX_BOUNDARIES: 72
 
       - name: Upload bounded broad replay/backend confidence artifact
         if: always()
