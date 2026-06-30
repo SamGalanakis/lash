@@ -126,7 +126,11 @@ fn llm_spec() -> lash_core::LlmRequestSpec {
         tool_choice: Default::default(),
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),
-        session_id: Some("session".to_string()),
+        scope: lash_core::LlmRequestScope::new(
+            "session".to_string(),
+            "session:frame:test".to_string(),
+            "session:request:test".to_string(),
+        ),
         output_spec: None,
     }
 }

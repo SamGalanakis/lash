@@ -492,7 +492,14 @@ impl<M: TurnProtocol> ContextProjector<M> for ChatContextProjector {
             },
             model_variant: ctx.config.model_variant.clone(),
             generation: ctx.config.generation.clone(),
-            scope: None,
+            scope: crate::llm::types::LlmRequestScope::new(
+                ctx.config.session_id.clone(),
+                format!("{}:frame:sansio", ctx.config.session_id),
+                format!(
+                    "{}:sansio:llm:{}",
+                    ctx.config.session_id, ctx.protocol_iteration
+                ),
+            ),
             output_spec: None,
             stream_events: None,
             provider_trace: None,
@@ -559,7 +566,6 @@ pub struct TurnMachineConfig<M: TurnProtocol = UnitTurnProtocol> {
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
     pub generation: crate::llm::types::GenerationOptions,
-    pub run_session_id: Option<String>,
     pub autonomous: bool,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
     pub system_prompt: Arc<str>,

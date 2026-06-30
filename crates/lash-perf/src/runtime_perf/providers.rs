@@ -4,8 +4,8 @@ use std::{
 };
 
 use lash_core::llm::types::{
-    LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEvent,
-    LlmUsage,
+    LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmRequestScope, LlmResponse,
+    LlmStreamEvent, LlmUsage,
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
@@ -1223,10 +1223,7 @@ fn benchmark_stream_profile_for_request(
     if matches!(
         scenario,
         RuntimePerfScenario::ObservationalMemoryMaintenance
-    ) && request
-        .session_id
-        .as_deref()
-        .is_some_and(|id| id.ends_with("-om-observer"))
+    ) && request.session_id().ends_with("-om-observer")
     {
         return text_profile(
             "<observations>Runtime perf observer captured persisted benchmark messages.</observations>\n\
@@ -1235,12 +1232,7 @@ fn benchmark_stream_profile_for_request(
         );
     }
 
-    if request.output_spec.is_some()
-        || request
-            .session_id
-            .as_deref()
-            .is_some_and(|id| id.ends_with("-llm-query"))
-    {
+    if request.output_spec.is_some() || request.session_id().ends_with("-llm-query") {
         if request.output_spec.as_ref().is_some_and(|spec| {
             matches!(spec, LlmOutputSpec::JsonSchema(schema) if schema.name == "tool_search_rerank")
         }) {
@@ -1756,7 +1748,11 @@ fn empty_request() -> LlmRequest {
         tool_choice: Default::default(),
         generation: Default::default(),
         model_variant: None,
-        session_id: None,
+        scope: LlmRequestScope::new(
+            "runtime-perf-empty".to_string(),
+            "runtime-perf-empty:frame".to_string(),
+            "runtime-perf-empty:request".to_string(),
+        ),
         output_spec: None,
         stream_events: None,
         provider_trace: None,

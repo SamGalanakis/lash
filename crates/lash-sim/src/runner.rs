@@ -4948,7 +4948,6 @@ fn rlm_contract_config_with_turn_options(
         max_turns: None,
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),
-        run_session_id: None,
         autonomous: false,
         tool_specs: Vec::new().into(),
         system_prompt: std::sync::Arc::from(""),
@@ -6719,7 +6718,6 @@ fn standard_contract_turn_machine_config() -> lash_core::TurnMachineConfig {
         max_turns: None,
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),
-        run_session_id: None,
         autonomous: false,
         tool_specs: Vec::new().into(),
         system_prompt: std::sync::Arc::from(""),
@@ -10599,11 +10597,11 @@ fn openai_compatible_request_with_events(stream_events: Option<LlmEventSender>) 
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),
-        scope: Some(lash_core::LlmRequestScope::new(
+        scope: lash_core::LlmRequestScope::new(
             "session-1",
             "session-1:frame:sim",
             "session-1:request:sim",
-        )),
+        ),
         output_spec: None,
         stream_events,
         provider_trace: None,
@@ -10628,11 +10626,11 @@ fn openai_responses_request() -> LlmRequest {
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),
-        scope: Some(lash_core::LlmRequestScope::new(
+        scope: lash_core::LlmRequestScope::new(
             "session-1",
             "session-1:frame:sim",
             "session-1:request:sim",
-        )),
+        ),
         output_spec: None,
         stream_events: Some(LlmEventSender::new(|_event| {})),
         provider_trace: None,
@@ -10648,11 +10646,11 @@ fn anthropic_messages_request() -> LlmRequest {
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),
-        scope: Some(lash_core::LlmRequestScope::new(
+        scope: lash_core::LlmRequestScope::new(
             "session-1",
             "session-1:frame:sim",
             "session-1:request:sim",
-        )),
+        ),
         output_spec: None,
         stream_events: Some(LlmEventSender::new(|_event| {})),
         provider_trace: None,
@@ -10668,11 +10666,11 @@ fn google_request(stream: bool) -> LlmRequest {
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),
-        scope: Some(lash_core::LlmRequestScope::new(
+        scope: lash_core::LlmRequestScope::new(
             "session-1",
             "session-1:frame:sim",
             "session-1:request:sim",
-        )),
+        ),
         output_spec: None,
         stream_events: stream.then(|| LlmEventSender::new(|_event| {})),
         provider_trace: None,

@@ -237,8 +237,13 @@ impl LlmMessage {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LlmRequestScope {
+    /// Logical Lash session.
     pub session_id: String,
+    /// Durable agent frame/branch inside the session. Providers must use this
+    /// when caching continuation state so frame switches do not inherit each
+    /// other's provider-local response ids.
     pub agent_frame_id: String,
+    /// One provider call, suitable for request correlation/idempotency.
     pub request_id: String,
 }
 
@@ -327,8 +332,7 @@ pub struct LlmRequest {
     pub model_variant: Option<String>,
     #[serde(default)]
     pub generation: GenerationOptions,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<LlmRequestScope>,
+    pub scope: LlmRequestScope,
     pub output_spec: Option<LlmOutputSpec>,
     #[serde(default, skip)]
     pub stream_events: Option<LlmEventSender>,
@@ -337,22 +341,20 @@ pub struct LlmRequest {
 }
 
 impl LlmRequest {
-    pub fn session_id(&self) -> Option<&str> {
-        self.scope.as_ref().map(|scope| scope.session_id.as_str())
+    pub fn session_id(&self) -> &str {
+        self.scope.session_id.as_str()
     }
 
-    pub fn agent_frame_id(&self) -> Option<&str> {
-        self.scope
-            .as_ref()
-            .map(|scope| scope.agent_frame_id.as_str())
+    pub fn agent_frame_id(&self) -> &str {
+        self.scope.agent_frame_id.as_str()
     }
 
-    pub fn request_id(&self) -> Option<&str> {
-        self.scope.as_ref().map(|scope| scope.request_id.as_str())
+    pub fn request_id(&self) -> &str {
+        self.scope.request_id.as_str()
     }
 
-    pub fn continuation_key(&self) -> Option<String> {
-        self.scope.as_ref().map(LlmRequestScope::continuation_key)
+    pub fn continuation_key(&self) -> String {
+        self.scope.continuation_key()
     }
 }
 

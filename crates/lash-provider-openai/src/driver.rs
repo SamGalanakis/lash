@@ -101,11 +101,12 @@ pub(crate) async fn complete(
         ("Content-Type".to_string(), "application/json".to_string()),
         ("Accept".to_string(), "text/event-stream".to_string()),
     ];
-    if compat.cache_session_affinity
-        && let Some(scope) = req.scope.as_ref()
-    {
-        headers.push(("session_id".to_string(), scope.session_id.clone()));
-        headers.push(("x-client-request-id".to_string(), scope.request_id.clone()));
+    if compat.cache_session_affinity {
+        headers.push(("session_id".to_string(), req.scope.session_id.clone()));
+        headers.push((
+            "x-client-request-id".to_string(),
+            req.scope.request_id.clone(),
+        ));
     }
     let http_request = LlmHttpRequest {
         method: LlmHttpMethod::Post,

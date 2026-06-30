@@ -207,7 +207,7 @@ pub mod remote {
         RemoteAttachmentRef, RemoteCausalRef, RemoteDiagnostic, RemoteExecutionSummary,
         RemoteGenerationOptions, RemoteInputItem, RemoteLiveReplayGap, RemoteLiveReplayGapReason,
         RemoteLlmAttachment, RemoteLlmContentBlock, RemoteLlmMessage, RemoteLlmOutputPart,
-        RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestMetadata, RemoteLlmResponse,
+        RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestScope, RemoteLlmResponse,
         RemoteLlmRole, RemoteLlmTerminalReason, RemoteLlmToolChoice, RemoteLlmToolSpec,
         RemoteModelIntent, RemoteObservedProcess, RemoteObservedProcessEvent,
         RemotePersistProcessEnvRequest, RemotePersistProcessEnvResult, RemoteProcessAwaitOutput,

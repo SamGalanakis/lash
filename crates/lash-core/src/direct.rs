@@ -324,13 +324,21 @@ pub(crate) fn build_llm_request(
         }
     }
 
-    let scope = session_id.as_ref().map(|session_id| {
-        LlmRequestScope::new(
+    let scope = match session_id {
+        Some(session_id) => LlmRequestScope::new(
             session_id.clone(),
             format!("{session_id}:frame:direct"),
             format!("{session_id}:direct"),
-        )
-    });
+        ),
+        None => {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            LlmRequestScope::new(
+                format!("direct:{request_id}"),
+                format!("direct:{request_id}:frame"),
+                request_id,
+            )
+        }
+    };
 
     LlmRequest {
         model,
@@ -475,10 +483,9 @@ mod tests {
             .clone()
             .expect("provider should receive a request");
         assert_eq!(captured.model, "direct-model");
-        let scope = captured.scope.as_ref().expect("direct request scope");
-        assert_eq!(scope.session_id, "direct-session");
-        assert_eq!(scope.agent_frame_id, "direct-session:frame:direct");
-        assert_eq!(scope.request_id, "direct-session:direct");
+        assert_eq!(captured.scope.session_id, "direct-session");
+        assert_eq!(captured.scope.agent_frame_id, "direct-session:frame:direct");
+        assert_eq!(captured.scope.request_id, "direct-session:direct");
         assert!(matches!(
             captured.output_spec,
             Some(LlmOutputSpec::JsonObject)

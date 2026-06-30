@@ -424,10 +424,8 @@ impl CodexProvider {
             }
             body["reasoning"] = reasoning;
         }
-        if policy.cache_retention != CacheRetention::None
-            && let Some(scope_key) = req.continuation_key()
-        {
-            body["prompt_cache_key"] = json!(scope_key);
+        if policy.cache_retention != CacheRetention::None {
+            body["prompt_cache_key"] = json!(req.continuation_key());
         }
         if let Some(output_spec) = &req.output_spec {
             body["text"]["format"] = match output_spec {
@@ -576,15 +574,14 @@ impl CodexProvider {
     }
 
     fn clear_continuation(&self, req: &LlmRequest) {
-        if let Some(scope_key) = req.continuation_key() {
-            let mut sessions = self
-                .websocket_sessions
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = sessions.by_scope.get_mut(&scope_key) {
-                entry.continuation = None;
-            }
+        let scope_key = req.continuation_key();
+        let mut sessions = self
+            .websocket_sessions
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = sessions.by_scope.get_mut(&scope_key) {
+            entry.continuation = None;
         }
     }
 
@@ -635,7 +632,7 @@ impl CodexProvider {
     }
 
     fn websocket_fallback_reason(&self, req: &LlmRequest) -> Option<String> {
-        let scope_key = req.continuation_key()?;
+        let scope_key = req.continuation_key();
         let mut sessions = self
             .websocket_sessions
             .inner
@@ -649,9 +646,7 @@ impl CodexProvider {
     }
 
     fn record_websocket_fallback(&self, req: &LlmRequest, error: &LlmTransportError) {
-        let Some(scope_key) = req.continuation_key() else {
-            return;
-        };
+        let scope_key = req.continuation_key();
         let mut sessions = self
             .websocket_sessions
             .inner
@@ -674,14 +669,13 @@ impl CodexProvider {
     }
 
     fn clear_websocket_fallback(&self, req: &LlmRequest) {
-        if let Some(scope_key) = req.continuation_key() {
-            let mut sessions = self
-                .websocket_sessions
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            sessions.fallback_by_scope.remove(&scope_key);
-        }
+        let scope_key = req.continuation_key();
+        let mut sessions = self
+            .websocket_sessions
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sessions.fallback_by_scope.remove(&scope_key);
     }
 
     async fn connect_websocket(
@@ -736,30 +730,28 @@ impl CodexProvider {
                 }
             })?,
         );
-        if let Some(scope) = req.scope.as_ref() {
-            let session_value = HeaderValue::from_str(&scope.session_id).map_err(|error| {
-                CodexWebSocketAttemptError {
-                    error: LlmTransportError::new(format!(
-                        "Invalid Codex WebSocket session header: {error}"
-                    )),
-                    events_seen: false,
-                    output_started: false,
-                    stale_previous_response: false,
-                }
-            })?;
-            let request_value = HeaderValue::from_str(&scope.request_id).map_err(|error| {
-                CodexWebSocketAttemptError {
-                    error: LlmTransportError::new(format!(
-                        "Invalid Codex WebSocket request header: {error}"
-                    )),
-                    events_seen: false,
-                    output_started: false,
-                    stale_previous_response: false,
-                }
-            })?;
-            headers.insert("session-id", session_value);
-            headers.insert("x-client-request-id", request_value);
-        }
+        let session_value = HeaderValue::from_str(&req.scope.session_id).map_err(|error| {
+            CodexWebSocketAttemptError {
+                error: LlmTransportError::new(format!(
+                    "Invalid Codex WebSocket session header: {error}"
+                )),
+                events_seen: false,
+                output_started: false,
+                stale_previous_response: false,
+            }
+        })?;
+        let request_value = HeaderValue::from_str(&req.scope.request_id).map_err(|error| {
+            CodexWebSocketAttemptError {
+                error: LlmTransportError::new(format!(
+                    "Invalid Codex WebSocket request header: {error}"
+                )),
+                events_seen: false,
+                output_started: false,
+                stale_previous_response: false,
+            }
+        })?;
+        headers.insert("session-id", session_value);
+        headers.insert("x-client-request-id", request_value);
         if let Some(account_id) = self.account_id.as_deref() {
             headers.insert(
                 "ChatGPT-Account-ID",
@@ -802,16 +794,7 @@ impl CodexProvider {
         req: &LlmRequest,
         connect_timeout: Duration,
     ) -> Result<CodexWebsocketLease, CodexWebSocketAttemptError> {
-        let Some(scope_key) = req.continuation_key() else {
-            let websocket = self.connect_websocket(req, connect_timeout).await?;
-            return Ok(CodexWebsocketLease {
-                websocket,
-                scope_key: None,
-                reusable: false,
-                reused: false,
-                continuation: None,
-            });
-        };
+        let scope_key = req.continuation_key();
 
         enum AcquireDecision {
             Reuse(CodexWebsocketLease),
@@ -1499,11 +1482,9 @@ impl Provider for CodexProvider {
             .header("originator", Self::CODEX_ORIGINATOR)
             .header("User-Agent", Self::codex_user_agent())
             .json(&body);
-        if let Some(scope) = req.scope.as_ref() {
-            http = http
-                .header("session-id", &scope.session_id)
-                .header("x-client-request-id", &scope.request_id);
-        }
+        http = http
+            .header("session-id", &req.scope.session_id)
+            .header("x-client-request-id", &req.scope.request_id);
         if let Some(id) = account_id.as_deref() {
             http = http.header("ChatGPT-Account-ID", id);
         }
@@ -1809,11 +1790,11 @@ mod tests {
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: None,
-            scope: Some(LlmRequestScope::new(
+            scope: LlmRequestScope::new(
                 "session-1",
                 "session-1:frame:test",
                 "session-1:request:test",
-            )),
+            ),
             output_spec: None,
             stream_events: None,
             generation: lash_core::GenerationOptions::default(),
@@ -2806,6 +2787,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_scripted_websocket_same_session_different_frame_does_not_reuse_continuation() {
+        let ws = spawn_scripted_websocket(vec![
+            ScriptedWsAction::Complete {
+                response_id: "resp_1",
+                message_id: "msg_1",
+                text: "answer",
+            },
+            ScriptedWsAction::Complete {
+                response_id: "resp_2",
+                message_id: "msg_2",
+                text: "done",
+            },
+        ])
+        .await;
+        let mut provider = websocket_test_provider(
+            CodexTransport::WebsocketCached,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+
+        provider
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .await
+            .expect("first response");
+        let mut second = request(vec![
+            LlmMessage::text(LlmRole::User, "hello"),
+            LlmMessage::new(
+                LlmRole::Assistant,
+                vec![lash_core::llm::types::LlmContentBlock::Text {
+                    text: "answer".into(),
+                    response_meta: Some(ResponseTextMeta {
+                        id: Some("msg_1".to_string()),
+                        status: Some("completed".to_string()),
+                        phase: Some("final_answer".to_string()),
+                        ..ResponseTextMeta::default()
+                    }),
+                    cache_breakpoint: false,
+                }],
+            ),
+            LlmMessage::text(LlmRole::User, "next"),
+        ]);
+        second.scope = LlmRequestScope::new(
+            "session-1",
+            "session-1:frame:other",
+            "session-1:request:other",
+        );
+        let response = provider.complete(second).await.expect("second response");
+
+        assert_eq!(response.full_text, "done");
+        assert!(
+            response
+                .http_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cache_miss=missing_continuation")
+        );
+        let captured = ws.captured();
+        assert_eq!(captured.len(), 2);
+        assert!(captured[1].get("previous_response_id").is_none());
+        assert_eq!(captured[1]["input"].as_array().unwrap().len(), 3);
+        let handshakes = ws.handshakes();
+        assert_eq!(
+            handshakes[1]
+                .iter()
+                .find_map(|(name, value)| (name == "session-id").then_some(value.as_str())),
+            Some("session-1")
+        );
+        assert_eq!(
+            handshakes[1].iter().find_map(|(name, value)| {
+                (name == "x-client-request-id").then_some(value.as_str())
+            }),
+            Some("session-1:request:other")
+        );
+    }
+
+    #[tokio::test]
     async fn codex_scripted_websocket_stale_previous_response_retries_full_context_once() {
         let ws = spawn_scripted_websocket(vec![
             ScriptedWsAction::Complete {
@@ -2986,7 +3043,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_auto_without_scope_uses_uncached_ephemeral_websockets() {
+    async fn codex_auto_with_distinct_scopes_uses_uncached_websockets() {
         let ws = spawn_scripted_websocket(vec![
             ScriptedWsAction::Complete {
                 response_id: "resp_1",
@@ -3006,9 +3063,9 @@ mod tests {
             ws.url.clone(),
         );
         let mut first = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-        first.scope = None;
+        first.scope = LlmRequestScope::new("direct-a", "direct-a:frame", "direct-a:request");
         let mut second = request(vec![LlmMessage::text(LlmRole::User, "next")]);
-        second.scope = None;
+        second.scope = LlmRequestScope::new("direct-b", "direct-b:frame", "direct-b:request");
 
         let first_response = provider.complete(first).await.expect("first response");
         let second_response = provider.complete(second).await.expect("second response");
@@ -3025,14 +3082,21 @@ mod tests {
         assert_eq!(ws.captured().len(), 2);
         let handshakes = ws.handshakes();
         assert_eq!(handshakes.len(), 2);
-        for headers in handshakes {
-            assert!(!headers.iter().any(|(name, _)| name == "session-id"));
-            assert!(
-                !headers
-                    .iter()
-                    .any(|(name, _)| name == "x-client-request-id")
-            );
+        fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+            headers
+                .iter()
+                .find_map(|(header_name, value)| (header_name == name).then_some(value.as_str()))
         }
+        assert_eq!(header(&handshakes[0], "session-id"), Some("direct-a"));
+        assert_eq!(
+            header(&handshakes[0], "x-client-request-id"),
+            Some("direct-a:request")
+        );
+        assert_eq!(header(&handshakes[1], "session-id"), Some("direct-b"));
+        assert_eq!(
+            header(&handshakes[1], "x-client-request-id"),
+            Some("direct-b:request")
+        );
     }
 
     #[tokio::test]

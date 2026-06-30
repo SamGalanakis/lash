@@ -16,6 +16,7 @@ fn remote_llm_request_json_round_trips() {
     let request = RemoteLlmRequest {
         protocol_version: REMOTE_PROTOCOL_VERSION,
         request_id: "request-1".to_string(),
+        scope: RemoteLlmRequestScope::new("session", "session:frame:test", "request-1"),
         model_intent: RemoteModelIntent::new("gpt-test"),
         messages: vec![RemoteLlmMessage {
             role: RemoteLlmRole::User,
@@ -39,12 +40,6 @@ fn remote_llm_request_json_round_trips() {
             output_token_cap: Some(128),
             ..Default::default()
         },
-        request_metadata: RemoteLlmRequestMetadata {
-            session_id: Some("session".to_string()),
-            agent_frame_id: Some("session:frame:test".to_string()),
-            idempotency_key: Some("idem".to_string()),
-            trace_id: None,
-        },
         metadata: HashMap::new(),
     };
 
@@ -53,6 +48,7 @@ fn remote_llm_request_json_round_trips() {
     let decoded: RemoteLlmRequest = serde_json::from_value(value).expect("deserialize");
     assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(decoded.request_id, request.request_id);
+    assert_eq!(decoded.scope, request.scope);
     assert_eq!(decoded.messages, request.messages);
 }
 

@@ -41,11 +41,11 @@ mod tests {
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::None,
             model_variant: Some("fast".to_string()),
-            scope: Some(crate::LlmRequestScope::new(
+            scope: crate::LlmRequestScope::new(
                 "session",
                 "session:frame:test",
                 "session:turn:test:llm:0",
-            )),
+            ),
             output_spec: None,
             stream_events: Some(LlmEventSender::new(|_| {})),
             generation: crate::GenerationOptions::default(),

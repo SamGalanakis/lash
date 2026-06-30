@@ -265,9 +265,7 @@ impl GoogleOAuthProvider {
         if let Some(system_instruction) = Self::system_instruction(req) {
             request["request"]["systemInstruction"] = system_instruction;
         }
-        if let Some(session_id) = req.session_id() {
-            request["request"]["sessionId"] = json!(session_id);
-        }
+        request["request"]["sessionId"] = json!(req.session_id());
         if let Some(config) = policy.thinking {
             match config {
                 GoogleThinkingConfig::Level { level } => {

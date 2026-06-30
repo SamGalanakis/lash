@@ -7,9 +7,9 @@ for closing transport sessions on runtime shutdown or provider removal.
 
 Known design concerns to keep explicit:
 
-- Lash attaches an optional `LlmRequestScope` at the runtime provider boundary.
+- Lash attaches `LlmRequestScope` at every provider request boundary.
   Runtime LLM calls include `session_id`, `agent_frame_id`, and `request_id`.
-  Direct/stateless calls may omit scope and therefore use ephemeral WebSockets.
+  Direct calls without a user session get an explicit generated direct scope.
 - The provider uses `session_id` for Codex gateway affinity, `request_id` for
   request correlation, and `session_id + agent_frame_id` as its local
   continuation/cache key. A frame switch must not inherit another frame's
@@ -26,7 +26,7 @@ Known design concerns to keep explicit:
 ## Minimal Core Continuation Contract
 
 Core does not expose provider-specific conversation state. It supplies request
-scope only:
+scope only, and scope is always present on provider requests:
 
 - `session_id`: logical Lash session.
 - `agent_frame_id`: durable frame/branch within that session.

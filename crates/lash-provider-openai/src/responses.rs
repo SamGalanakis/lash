@@ -80,11 +80,8 @@ impl OpenAiCompatibleProvider {
             }
             body["text"]["format"] = format;
         }
-        if policy.cache_retention != CacheRetention::None
-            && let Some(scope_key) = req.continuation_key()
-            && compat.cache_session_affinity
-        {
-            body["prompt_cache_key"] = json!(scope_key);
+        if policy.cache_retention != CacheRetention::None && compat.cache_session_affinity {
+            body["prompt_cache_key"] = json!(req.continuation_key());
         }
         if policy.cache_retention == CacheRetention::Long && compat.prompt_cache_retention {
             body["prompt_cache_retention"] = json!("24h");

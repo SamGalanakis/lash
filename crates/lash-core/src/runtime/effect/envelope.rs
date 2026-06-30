@@ -639,8 +639,7 @@ pub struct LlmRequestSpec {
     pub model_variant: Option<String>,
     #[serde(default)]
     pub generation: crate::GenerationOptions,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<crate::LlmRequestScope>,
+    pub scope: crate::LlmRequestScope,
     pub output_spec: Option<LlmOutputSpec>,
 }
 

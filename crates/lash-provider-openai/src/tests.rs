@@ -14,11 +14,11 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         tools: Arc::new(Vec::<LlmToolSpec>::new()),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
-        scope: Some(LlmRequestScope::new(
+        scope: LlmRequestScope::new(
             "session-1",
             "session-1:frame:test",
             "session-1:request:test",
-        )),
+        ),
         output_spec: None,
         stream_events: None,
         generation: lash_core::GenerationOptions::default(),

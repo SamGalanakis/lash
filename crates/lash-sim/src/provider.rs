@@ -1724,11 +1724,11 @@ mod tests {
             tool_choice: LlmToolChoice::Auto,
             model_variant: None,
             generation: lash_core::GenerationOptions::default(),
-            scope: Some(lash_core::LlmRequestScope::new(
+            scope: lash_core::LlmRequestScope::new(
                 "session-1",
                 "session-1:frame:sim",
                 "session-1:request:sim",
-            )),
+            ),
             output_spec: None,
             stream_events,
             provider_trace: None,
@@ -1744,11 +1744,11 @@ mod tests {
             tool_choice: LlmToolChoice::Auto,
             model_variant: None,
             generation: lash_core::GenerationOptions::default(),
-            scope: Some(lash_core::LlmRequestScope::new(
+            scope: lash_core::LlmRequestScope::new(
                 "session-1",
                 "session-1:frame:sim",
                 "session-1:request:sim",
-            )),
+            ),
             output_spec: None,
             stream_events: Some(LlmEventSender::new(|_event| {})),
             provider_trace: None,

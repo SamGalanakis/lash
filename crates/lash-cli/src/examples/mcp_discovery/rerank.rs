@@ -152,7 +152,7 @@ pub(crate) fn llm_rerank_request(
         generation: lash_core::GenerationOptions::default(),
         session_id: None,
         caused_by: None,
-                    replay: None,
+        replay: None,
     }
 }
 

@@ -113,7 +113,6 @@ impl RuntimeTurnDriver<'_> {
         );
         let prepared = crate::build_turn(crate::SansIoTurnInput {
             session_id: self.session_id.clone(),
-            run_session_id: session_policy.session_id.clone(),
             autonomous: session_policy.autonomous,
             model,
             max_context_tokens: Some(session_policy.context_window_tokens()),

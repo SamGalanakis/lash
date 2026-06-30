@@ -302,7 +302,6 @@ fn checkpoint_config(
         max_turns: Some(8),
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),
-        run_session_id: Some("runtime-perf-turn-checkpoint".to_string()),
         autonomous: false,
         tool_specs: Arc::new(Vec::new()),
         system_prompt: Arc::from(
