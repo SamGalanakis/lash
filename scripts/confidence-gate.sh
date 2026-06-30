@@ -729,6 +729,7 @@ write_sim_lane_declarations() {
   "scenario_contract_slices": "included_in_lash_sim_summary_with_generated_shape_transition_kind_and_negative_fixture",
   "scheduled_depth_generated_run": "$([ -f "${out_dir}/sim/scheduled-depth.json" ] && echo "sim/scheduled-depth.json" || echo "not_in_${lane}_lane")",
   "focused_sqlite_seed_tail_repro": "$([ -f "${out_dir}/sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" ] && echo "sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" || echo "not_written")",
+  "generated_postgres_dynamic_replay": "$([[ "$lane" = "broad" || "$lane" = "full" ]] && echo "sim/postgres-generated-rerun/summary.json" || echo "not_in_${lane}_lane")",
   "model_only_boundary_reviews": "included_in_lash_sim_summary",
   "provider_transport_exclusions": "sim/provider-transport-exclusions.json",
   "backend_contention": "$([[ "$lane" = "default" || "$lane" = "broad" || "$lane" = "full" ]] && echo "sim/backend-contention/backend-contention.json" || echo "not_in_${lane}_lane")",
@@ -852,10 +853,57 @@ run_backend_contention_evidence() {
   cargo run -p lash-sim --locked -- backend-contention --out "${out_dir}/sim/backend-contention"
 }
 
+run_generated_postgres_dynamic_replay() {
+  local database_url="$1"
+  local mode="$2"
+  step "Generated Postgres dynamic backend rerun"
+  local replay_dir="${out_dir}/sim/postgres-generated-rerun"
+  local profile="${LASH_POSTGRES_GENERATED_PROFILE:-full-random}"
+  local seed="${LASH_POSTGRES_GENERATED_SEED:-4101155038242989457}"
+  local max_boundaries="${LASH_POSTGRES_GENERATED_MAX_BOUNDARIES:-128}"
+  LASH_POSTGRES_DATABASE_URL="$database_url" \
+    cargo run -p lash-sim --locked -- run-postgres \
+      --out "$replay_dir" \
+      --profile "$profile" \
+      --seed "$seed" \
+      --max-boundaries "$max_boundaries"
+  python3 - "${replay_dir}/summary.json" "$mode" <<'PY'
+import json
+import sys
+
+path, mode = sys.argv[1:3]
+with open(path, "r", encoding="utf-8") as handle:
+    summary = json.load(handle)
+summary["postgres_mode"] = mode
+summary["confidence_lane"] = "generated_dynamic_postgres_backend_rerun"
+summary["semantics"] = (
+    "same generated workload rerun through the serialized in-memory reference "
+    "and real lash-postgres-store backend; this is dynamic generated-driver "
+    "equivalence, not fixed-order trace replay"
+)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(summary, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
+write_generated_postgres_dynamic_replay_skipped() {
+  mkdir -p "${out_dir}/sim/postgres-generated-rerun"
+  cat >"${out_dir}/sim/postgres-generated-rerun/summary.json" <<EOF
+{
+  "schema": "lash.sim.postgres-generated-rerun-summary.v1",
+  "status": "skipped",
+  "reason": "Docker and LASH_POSTGRES_DATABASE_URL are unavailable for generated Postgres dynamic backend rerun",
+  "confidence_lane": "generated_dynamic_postgres_backend_rerun"
+}
+EOF
+}
+
 run_postgres_conformance() {
   step "Postgres backend conformance"
   if [ -n "${LASH_POSTGRES_DATABASE_URL:-}" ]; then
     cargo test -p lash-postgres-store --locked --test conformance
+    run_generated_postgres_dynamic_replay "$LASH_POSTGRES_DATABASE_URL" "env"
     run_cross_backend_replay_suite "$LASH_POSTGRES_DATABASE_URL" "env"
     run_backend_contention_evidence
     mkdir -p "${out_dir}/sim"
@@ -904,6 +952,7 @@ EOF
 
   LASH_POSTGRES_DATABASE_URL="postgres://lash:lash@127.0.0.1:${port}/lash" \
     cargo test -p lash-postgres-store --locked --test conformance
+  run_generated_postgres_dynamic_replay "postgres://lash:lash@127.0.0.1:${port}/lash" "docker"
   run_cross_backend_replay_suite "postgres://lash:lash@127.0.0.1:${port}/lash" "docker"
   LASH_POSTGRES_DATABASE_URL="postgres://lash:lash@127.0.0.1:${port}/lash" \
     run_backend_contention_evidence
@@ -991,6 +1040,7 @@ run_broad_postgres_evidence() {
   step "Broad Postgres/static replay evidence"
   if [ -n "${LASH_POSTGRES_DATABASE_URL:-}" ]; then
     cargo test -p lash-postgres-store --locked --test conformance
+    run_generated_postgres_dynamic_replay "$LASH_POSTGRES_DATABASE_URL" "env"
     run_cross_backend_replay_suite "$LASH_POSTGRES_DATABASE_URL" "env"
     run_backend_contention_evidence
     mkdir -p "${out_dir}/sim"
@@ -1007,6 +1057,7 @@ EOF
 
   if ! command -v docker >/dev/null 2>&1; then
     run_cross_backend_replay_suite "" "postgres_unavailable"
+    write_generated_postgres_dynamic_replay_skipped
     mkdir -p "${out_dir}/sim"
     cat >"${out_dir}/sim/postgres-conformance.json" <<EOF
 {
@@ -1048,6 +1099,7 @@ EOF
 
   LASH_POSTGRES_DATABASE_URL="postgres://lash:lash@127.0.0.1:${port}/lash" \
     cargo test -p lash-postgres-store --locked --test conformance
+  run_generated_postgres_dynamic_replay "postgres://lash:lash@127.0.0.1:${port}/lash" "docker"
   run_cross_backend_replay_suite "postgres://lash:lash@127.0.0.1:${port}/lash" "docker"
   LASH_POSTGRES_DATABASE_URL="postgres://lash:lash@127.0.0.1:${port}/lash" \
     run_backend_contention_evidence
@@ -1729,6 +1781,7 @@ write_confidence_summary() {
   "postgres_backend_conformance": "$([[ "$lane" = "broad" || "$lane" = "full" ]] && echo "included_or_explicitly_skipped_in_postgres_conformance_artifact" || echo "env_gated_broad_or_full_lane_only")",
   "postgres_current_trace_replay": "$([ "$lane" = "default" ] && echo "sim/postgres-current/status.json" || echo "not_in_lane")",
   "postgres_current_trace_replay_report": "$([ -f "${out_dir}/sim/postgres-replay/postgres-replay.json" ] && echo "sim/postgres-replay/postgres-replay.json" || echo "not_run")",
+  "generated_postgres_dynamic_replay": "$([ -f "${out_dir}/sim/postgres-generated-rerun/summary.json" ] && echo "sim/postgres-generated-rerun/summary.json" || echo "not_run")",
   "backend_contention": "$([ -f "${out_dir}/sim/backend-contention/backend-contention.json" ] && echo "sim/backend-contention/backend-contention.json" || echo "not_run")",
   "cross_backend_replay_matrix": "$([ -f "${out_dir}/sim/cross-backend-replay/summary.json" ] && echo "sim/cross-backend-replay/summary.json" || echo "not_run")",
   "restate_postgres_workers_e2e": "$([ -f "${out_dir}/sim/restate-postgres-workers-e2e.json" ] && echo "sim/restate-postgres-workers-e2e.json" || echo "not_written")",

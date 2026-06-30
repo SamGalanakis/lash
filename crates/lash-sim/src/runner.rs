@@ -650,6 +650,38 @@ pub struct GeneratedReplayArtifact {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct GeneratedPostgresReplayReport {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub profile: String,
+    pub configured_max_boundaries: usize,
+    pub database_url_redacted: String,
+    pub cases: Vec<GeneratedPostgresReplayCase>,
+    pub counts: GeneratedPostgresReplayCounts,
+    #[serde(skip)]
+    pub summary_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GeneratedPostgresReplayCase {
+    pub seed: u64,
+    pub trace_alias: String,
+    pub status: &'static str,
+    pub report_path: String,
+    pub report_sha256: String,
+    pub reference_digest: String,
+    pub actual_digest: String,
+    pub verdict: OracleVerdict,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GeneratedPostgresReplayCounts {
+    pub seeds: usize,
+    pub passed: usize,
+    pub failed: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct GeneratedSimCounts {
     pub generated_seeds: usize,
     pub boundary_events: usize,
@@ -7595,6 +7627,159 @@ pub async fn replay_workload_on_sqlite(
     );
     let (_events, final_summary) = drive_generated_workload(&mut world, workload).await?;
     Ok(final_summary)
+}
+
+/// Cross-backend check for Postgres using the same dynamic generated workload
+/// driver and serialized-provider-turn discipline as the SQLite equivalence
+/// lane. This is intentionally not fixed-order trace replay: generated traces
+/// can contain provider-exchange scheduling that only the generated driver owns.
+pub async fn replay_workload_on_postgres(
+    workload: &GeneratedWorkload,
+    database_url: &str,
+    artifact_root: &Path,
+) -> Result<AbstractWorldSummary, FixedScriptRunnerError> {
+    let storage = Arc::new(
+        lash_postgres_store::PostgresStorage::connect(database_url)
+            .await
+            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?,
+    );
+    crate::postgres_replay::reset_postgres_for_replay(storage.as_ref())
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+    let attachment_root = artifact_root.join("attachments");
+    if attachment_root.exists() {
+        std::fs::remove_dir_all(&attachment_root)?;
+    }
+    std::fs::create_dir_all(&attachment_root)?;
+    let store_factory: Arc<dyn SessionStoreFactory> = Arc::new(storage.session_store_factory());
+    let effect_replay_store = RuntimeEffectReplayStore::postgres(Arc::clone(&storage));
+    let attachment_store: Arc<dyn lash::persistence::AttachmentStore> =
+        Arc::new(lash::persistence::FileAttachmentStore::new(attachment_root));
+    let process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore> =
+        Arc::new(storage.process_env_store());
+    let mut world = GeneratedRuntimeWorld::with_backend(
+        store_factory,
+        effect_replay_store,
+        attachment_store,
+        process_env_store,
+        true,
+    );
+    let (_events, final_summary) = drive_generated_workload(&mut world, workload).await?;
+    Ok(final_summary)
+}
+
+pub async fn run_generated_postgres_replay_for_seeds(
+    artifact_root: impl AsRef<Path>,
+    profile: &str,
+    seed_values: &[u64],
+    max_boundaries: usize,
+    database_url: &str,
+) -> Result<GeneratedPostgresReplayReport, FixedScriptRunnerError> {
+    validate_workload_profile(profile)?;
+    if seed_values.is_empty() {
+        return Err(FixedScriptRunnerError::Assertion(
+            "generated Postgres replay requires at least one seed".to_string(),
+        ));
+    }
+    let artifact_root = artifact_root.as_ref();
+    std::fs::create_dir_all(artifact_root)?;
+    let boundary_limit = max_boundaries.max(1);
+    let mut cases = Vec::new();
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut first_failure = None;
+    for seed in seed_values.iter().copied() {
+        let workload = generate_workload(seed, profile, boundary_limit)?;
+        let reference = replay_workload_serialized_reference(&workload).await?;
+        let case_dir = artifact_root.join(format!("seed-{seed:016x}"));
+        std::fs::create_dir_all(&case_dir)?;
+        let actual = replay_workload_on_postgres(&workload, database_url, &case_dir).await?;
+        let verdict = replay_determinism(&reference, &actual);
+        let report_path = case_dir.join("postgres-generated-rerun.json");
+        let matches_reference = verdict.is_passed();
+        let case_report = if matches_reference {
+            json!({
+                "schema": "lash.sim.postgres-generated-rerun.v1",
+                "seed": seed,
+                "profile": profile,
+                "backend": "lash_postgres_store",
+                "driver": "unified_generated_runtime_world",
+                "matches_reference": true,
+                "reference_digest": reference.digest.clone(),
+                "actual_digest": actual.digest.clone(),
+                "verdict": verdict.clone(),
+                "final_summary": actual,
+            })
+        } else {
+            json!({
+                "schema": "lash.sim.postgres-generated-rerun.v1",
+                "seed": seed,
+                "profile": profile,
+                "backend": "lash_postgres_store",
+                "driver": "unified_generated_runtime_world",
+                "matches_reference": false,
+                "reference_digest": reference.digest.clone(),
+                "actual_digest": actual.digest.clone(),
+                "verdict": verdict.clone(),
+                "reference_summary": reference,
+                "actual_summary": actual,
+            })
+        };
+        std::fs::write(&report_path, serde_json::to_vec_pretty(&case_report)?)?;
+        let report_sha256 = file_sha256(&report_path)?;
+        if matches_reference {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+        cases.push(GeneratedPostgresReplayCase {
+            seed,
+            trace_alias: format!("seed-{seed:016x}"),
+            status: if matches_reference {
+                "passed"
+            } else {
+                "failed"
+            },
+            report_path: relative_path(artifact_root, &report_path),
+            report_sha256,
+            reference_digest: case_report["reference_digest"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            actual_digest: case_report["actual_digest"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            verdict: verdict.clone(),
+        });
+        if !matches_reference && first_failure.is_none() {
+            first_failure = Some(format!(
+                "generated Postgres re-run for seed {seed} ({profile}) diverged from the serialized in-memory reference: {}; wrote {}",
+                verdict.message,
+                report_path.display()
+            ));
+        }
+    }
+    let summary_path = artifact_root.join("summary.json");
+    let report = GeneratedPostgresReplayReport {
+        schema: "lash.sim.postgres-generated-rerun-summary.v1",
+        status: if failed == 0 { "passed" } else { "failed" },
+        profile: profile.to_string(),
+        configured_max_boundaries: boundary_limit,
+        database_url_redacted: crate::postgres_replay::redact_database_url(database_url),
+        cases,
+        counts: GeneratedPostgresReplayCounts {
+            seeds: seed_values.len(),
+            passed,
+            failed,
+        },
+        summary_path: summary_path.clone(),
+    };
+    std::fs::write(&summary_path, serde_json::to_vec_pretty(&report)?)?;
+    if let Some(message) = first_failure {
+        return Err(FixedScriptRunnerError::Assertion(message));
+    }
+    Ok(report)
 }
 
 async fn run_generated_workload(

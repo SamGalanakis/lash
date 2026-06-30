@@ -983,7 +983,9 @@ fn runtime_core_for_scripts(
     Ok((core, transport, provider_kind))
 }
 
-async fn reset_postgres_for_replay(storage: &PostgresStorage) -> Result<(), PostgresReplayError> {
+pub(crate) async fn reset_postgres_for_replay(
+    storage: &PostgresStorage,
+) -> Result<(), PostgresReplayError> {
     sqlx::query(
         r#"
         TRUNCATE
@@ -1156,7 +1158,7 @@ fn boundary_family_name(kind: BoundaryKind) -> &'static str {
     }
 }
 
-fn redact_database_url(database_url: &str) -> String {
+pub(crate) fn redact_database_url(database_url: &str) -> String {
     let Some((scheme, rest)) = database_url.split_once("://") else {
         return "[redacted]".to_string();
     };

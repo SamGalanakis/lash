@@ -106,6 +106,63 @@ async fn run() -> Result<(), String> {
             println!("{}", report.summary_path.display());
             Ok(())
         }
+        "run-postgres" => {
+            let mut out = None;
+            let mut profile = "fast-random".to_string();
+            let mut explicit_seeds = Vec::new();
+            let mut max_boundaries = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--out" => out = args.next().map(PathBuf::from),
+                    "--profile" => {
+                        profile = args
+                            .next()
+                            .ok_or_else(|| format!("missing --profile value\n\n{}", usage()))?
+                    }
+                    "--seed" => {
+                        let value = args
+                            .next()
+                            .ok_or_else(|| format!("missing --seed value\n\n{}", usage()))?;
+                        explicit_seeds.push(parse_u64("--seed", &value)?);
+                    }
+                    "--max-boundaries" => {
+                        let value = args.next().ok_or_else(|| {
+                            format!("missing --max-boundaries value\n\n{}", usage())
+                        })?;
+                        max_boundaries = Some(parse_usize("--max-boundaries", &value)?);
+                    }
+                    "-h" | "--help" => return Err(usage()),
+                    other => return Err(format!("unknown argument `{other}`\n\n{}", usage())),
+                }
+            }
+            let Some(out) = out else {
+                return Err(format!("missing --out\n\n{}", usage()));
+            };
+            if explicit_seeds.is_empty() {
+                return Err(format!(
+                    "run-postgres requires at least one --seed\n\n{}",
+                    usage()
+                ));
+            }
+            let max_boundaries = match max_boundaries {
+                Some(max_boundaries) => max_boundaries,
+                None => lash_sim::generator::default_max_boundaries(&profile)
+                    .map_err(|err| err.to_string())?,
+            };
+            let database_url = std::env::var("LASH_POSTGRES_DATABASE_URL")
+                .map_err(|_| "missing LASH_POSTGRES_DATABASE_URL".to_string())?;
+            let report = lash_sim::run_generated_postgres_replay_for_seeds(
+                out.as_path(),
+                &profile,
+                &explicit_seeds,
+                max_boundaries,
+                &database_url,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            println!("{}", report.summary_path.display());
+            Ok(())
+        }
         "replay" => {
             let trace = args
                 .next()
@@ -300,6 +357,7 @@ fn usage() -> String {
     "Usage:
   lash-sim fixed-scripts --out <artifact-root>
   lash-sim run --out <artifact-root> [--profile fast-random] [--seeds N | --seed U64 ...] [--max-boundaries N]
+  lash-sim run-postgres --out <artifact-root> [--profile fast-random] --seed U64 ... [--max-boundaries N]
   lash-sim replay <trace> [--out <artifact-root>]
   lash-sim replay-sqlite <trace> --out <artifact-root>
   lash-sim replay-postgres <trace> --out <artifact-root>
