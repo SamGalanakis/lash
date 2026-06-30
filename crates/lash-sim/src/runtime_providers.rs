@@ -8,6 +8,9 @@ use lash_provider_google::GoogleOAuthProvider;
 use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
 use serde_json::{Value, json};
 
+use crate::canonical_scripts::{
+    ANTHROPIC_MESSAGES_TEXT, GOOGLE_STREAM_GENERATE_TEXT, OPENAI_RESPONSES_TEXT,
+};
 use crate::provider::{ProviderWireScript, ScriptedLlmHttpTransport};
 
 pub const OPENAI_COMPATIBLE: &str = "openai-compatible";
@@ -20,12 +23,6 @@ pub const MIGRATED_RUNTIME_PROVIDER_KINDS: &[&str] =
 
 const OPENAI_COMPAT_RUNTIME_TEXT: &str =
     include_str!("../provider-scripts/runtime/openai-compatible.chat-runtime-text-stream.json");
-const OPENAI_RESPONSES_TEXT: &str =
-    include_str!("../provider-scripts/canonical/openai.responses-text-stream.json");
-const ANTHROPIC_MESSAGES_TEXT: &str =
-    include_str!("../provider-scripts/canonical/anthropic.messages-text-stream.json");
-const GOOGLE_STREAM_GENERATE_TEXT: &str =
-    include_str!("../provider-scripts/canonical/google.stream-generate-content-text-stream.json");
 
 #[derive(Debug)]
 pub struct RuntimeProviderError {

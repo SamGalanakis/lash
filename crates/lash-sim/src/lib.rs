@@ -1,5 +1,7 @@
 #![allow(clippy::result_large_err)]
 
+mod canonical_scripts;
+
 pub mod backend_contention;
 pub mod generator;
 pub mod minimize;

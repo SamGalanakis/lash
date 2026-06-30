@@ -31,6 +31,12 @@ use sha2::{Digest, Sha256};
 use lash::rlm::RlmTurnBuilderExt as _;
 use lash_lashlang_runtime::ToolDefinitionLashlangExt as _;
 
+use crate::canonical_scripts::{
+    ANTHROPIC_MESSAGES_TEXT, CANONICAL_SCRIPTS, GOOGLE_GENERATE_RATE_LIMIT, GOOGLE_GENERATE_TEXT,
+    GOOGLE_STREAM_GENERATE_TEXT, OPENAI_COMPAT_DISCONNECT, OPENAI_COMPAT_RATE_LIMIT,
+    OPENAI_COMPAT_RESPONSE_START_TIMEOUT, OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT,
+    OPENAI_COMPAT_TOOL_CALL, OPENAI_COMPAT_VALIDATION, OPENAI_RESPONSES_TEXT,
+};
 use crate::generator::{
     GENERATOR_VERSION, GeneratedWorkload, WorkloadProfileError, generate_workload,
     validate_workload_profile,
@@ -106,83 +112,6 @@ pub const GENERATED_SIM_FAILURE_SHAPE: &str = "failures/_shape.json";
 pub const GENERATED_SIM_SCENARIO_SLICES: &str = "scenario-contract-slices";
 pub const GENERATED_SIM_SCENARIO_PACKAGES: &str = "scenario-contract-packages";
 pub const GENERATED_SIM_BACKEND_REGRESSION_FIXTURES: &str = "backend-regression-fixtures";
-
-const OPENAI_COMPAT_TOOL_CALL: &str = include_str!(
-    "../provider-scripts/canonical/openai-compatible.chat-tool-call-split-stream.json"
-);
-const OPENAI_COMPAT_RATE_LIMIT: &str =
-    include_str!("../provider-scripts/canonical/openai-compatible.chat-rate-limit-429.json");
-const OPENAI_COMPAT_VALIDATION: &str =
-    include_str!("../provider-scripts/canonical/openai-compatible.chat-validation-error.json");
-const OPENAI_COMPAT_DISCONNECT: &str =
-    include_str!("../provider-scripts/canonical/openai-compatible.chat-mid-stream-disconnect.json");
-const OPENAI_COMPAT_RESPONSE_START_TIMEOUT: &str = include_str!(
-    "../provider-scripts/canonical/openai-compatible.chat-response-start-timeout.json"
-);
-const OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT: &str =
-    include_str!("../provider-scripts/canonical/openai-compatible.chat-stream-chunk-timeout.json");
-const OPENAI_RESPONSES_TEXT: &str =
-    include_str!("../provider-scripts/canonical/openai.responses-text-stream.json");
-const ANTHROPIC_MESSAGES_TEXT: &str =
-    include_str!("../provider-scripts/canonical/anthropic.messages-text-stream.json");
-const GOOGLE_STREAM_GENERATE_TEXT: &str =
-    include_str!("../provider-scripts/canonical/google.stream-generate-content-text-stream.json");
-const GOOGLE_GENERATE_TEXT: &str =
-    include_str!("../provider-scripts/canonical/google.generate-content-text.json");
-const GOOGLE_GENERATE_RATE_LIMIT: &str =
-    include_str!("../provider-scripts/canonical/google.generate-content-rate-limit-429.json");
-#[derive(Clone, Copy)]
-struct CanonicalScript {
-    path: &'static str,
-    content: &'static str,
-}
-
-const CANONICAL_SCRIPTS: &[CanonicalScript] = &[
-    CanonicalScript {
-        path: "provider-scripts/canonical/anthropic.messages-text-stream.json",
-        content: ANTHROPIC_MESSAGES_TEXT,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/google.generate-content-rate-limit-429.json",
-        content: GOOGLE_GENERATE_RATE_LIMIT,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/google.generate-content-text.json",
-        content: GOOGLE_GENERATE_TEXT,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/google.stream-generate-content-text-stream.json",
-        content: GOOGLE_STREAM_GENERATE_TEXT,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/openai-compatible.chat-mid-stream-disconnect.json",
-        content: OPENAI_COMPAT_DISCONNECT,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/openai-compatible.chat-rate-limit-429.json",
-        content: OPENAI_COMPAT_RATE_LIMIT,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/openai-compatible.chat-response-start-timeout.json",
-        content: OPENAI_COMPAT_RESPONSE_START_TIMEOUT,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/openai-compatible.chat-stream-chunk-timeout.json",
-        content: OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/openai-compatible.chat-tool-call-split-stream.json",
-        content: OPENAI_COMPAT_TOOL_CALL,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/openai-compatible.chat-validation-error.json",
-        content: OPENAI_COMPAT_VALIDATION,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/openai.responses-text-stream.json",
-        content: OPENAI_RESPONSES_TEXT,
-    },
-];
 
 #[derive(Debug)]
 pub enum FixedScriptRunnerError {
