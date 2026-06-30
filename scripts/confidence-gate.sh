@@ -38,8 +38,9 @@ Lanes:
   fast     deterministic scenario harnesses, state-machine/property checks,
            generated DST replay/provider proof, durable fault-matrix metadata,
            and perf guard identity tests.
-  default  fast + local backend conformance, coverage blind-spot artifacts,
-           and targeted cargo-mutants evidence.
+  default  fast + focused generated SQLite seed-tail repro, local backend
+           conformance, coverage blind-spot artifacts, and targeted
+           cargo-mutants evidence.
   broad    bounded broad evidence: default + Postgres conformance when
            available, all generated/minimized trace cross-backend replay,
            and targeted mutation. This is not true full confidence.
@@ -563,6 +564,29 @@ PY
   fi
 }
 
+run_focused_sqlite_seed_tail_repro() {
+  mkdir -p "${out_dir}/sim"
+  local repro_dir="${out_dir}/sim/focused-sqlite-seed-tail"
+  local repro_artifact="${repro_dir}/focused-sqlite-seed-tail.json"
+  if [ "$lane" = "fast" ] && [ "${LASH_RUN_FOCUSED_SQLITE_REPRO_IN_FAST:-0}" != "1" ]; then
+    mkdir -p "$repro_dir"
+    cat >"$repro_artifact" <<EOF
+{
+  "schema": "lash.confidence.focused-sqlite-seed-tail-repro.v1",
+  "status": "not_run",
+  "lane": "${lane}",
+  "reason": "focused full-random SQLite seed-tail repro runs in default/broad/full; set LASH_RUN_FOCUSED_SQLITE_REPRO_IN_FAST=1 to include it in fast",
+  "exact_command": "scripts/lash-sim-focused-sqlite-repro.sh ${repro_dir}",
+  "seeds": [17785827714152183977, 4101155038242989457]
+}
+EOF
+    return
+  fi
+
+  step "Focused generated SQLite seed-tail repro"
+  scripts/lash-sim-focused-sqlite-repro.sh "$repro_dir"
+}
+
 write_provider_transport_exclusion_evidence() {
   step "Provider transport exclusion contract"
   python3 - "${out_dir}/sim/summary.json" "${out_dir}/sim/provider-transport-exclusions.json" <<'PY'
@@ -703,6 +727,7 @@ write_sim_lane_declarations() {
   "scenario_contract_manifests": "included_in_lash_sim_summary",
   "scenario_contract_slices": "included_in_lash_sim_summary_with_generated_shape_transition_kind_and_negative_fixture",
   "scheduled_depth_generated_run": "$([ -f "${out_dir}/sim/scheduled-depth.json" ] && echo "sim/scheduled-depth.json" || echo "not_in_${lane}_lane")",
+  "focused_sqlite_seed_tail_repro": "$([ -f "${out_dir}/sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" ] && echo "sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" || echo "not_written")",
   "model_only_boundary_reviews": "included_in_lash_sim_summary",
   "provider_transport_exclusions": "sim/provider-transport-exclusions.json",
   "backend_contention": "$([[ "$lane" = "default" || "$lane" = "broad" || "$lane" = "full" ]] && echo "sim/backend-contention/backend-contention.json" || echo "not_in_${lane}_lane")",
@@ -1692,6 +1717,7 @@ write_confidence_summary() {
   "coverage_scope": "${coverage_scope}",
   "coverage_evidence_status": "$(coverage_evidence_status)",
   "scheduled_depth_generated_run": "$([ -f "${out_dir}/sim/scheduled-depth.json" ] && echo "sim/scheduled-depth.json" || echo "not_run")",
+  "focused_sqlite_seed_tail_repro": "$([ -f "${out_dir}/sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" ] && echo "sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" || echo "not_run")",
   "mutation_evidence": "$(mutation_evidence_path)",
   "mutation_evidence_status": "$(mutation_evidence_status)",
   "mutation_scope": "${mutation_scope}",
@@ -1744,6 +1770,7 @@ bootstrap_tools
 run_scenario_harnesses
 run_state_machine_and_fault_matrix
 run_sim_provider_scripts
+run_focused_sqlite_seed_tail_repro
 write_provider_transport_exclusion_evidence
 write_sim_lane_declarations
 write_full_lane_prerequisites

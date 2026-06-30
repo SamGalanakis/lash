@@ -9,6 +9,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 GATE = ROOT / "scripts" / "confidence-gate.sh"
+FOCUSED_SQLITE_REPRO = ROOT / "scripts" / "lash-sim-focused-sqlite-repro.sh"
 BROAD_STEP_NAME = "Run bounded broad replay/backend confidence"
 BOUNDED_BROAD_JOB_ID = "bounded-broad-replay-backend"
 BOUNDED_BROAD_ARTIFACT = "bounded-broad-replay-backend-confidence"
@@ -103,6 +104,33 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
 
         for snippet in required_snippets:
             self.assertIn(snippet, gate)
+
+    def test_focused_sqlite_seed_tail_repro_gate_is_named_and_exact(self) -> None:
+        gate = GATE.read_text(encoding="utf-8")
+        repro = FOCUSED_SQLITE_REPRO.read_text(encoding="utf-8")
+
+        required_gate_snippets = [
+            "run_focused_sqlite_seed_tail_repro()",
+            'step "Focused generated SQLite seed-tail repro"',
+            'scripts/lash-sim-focused-sqlite-repro.sh "$repro_dir"',
+            "run_focused_sqlite_seed_tail_repro",
+            '"focused_sqlite_seed_tail_repro": "$([ -f "${out_dir}/sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" ]',
+        ]
+        for snippet in required_gate_snippets:
+            self.assertIn(snippet, gate)
+
+        required_repro_snippets = [
+            '"schema": "lash.confidence.focused-sqlite-seed-tail-repro.v1"',
+            'focused_single_seed="4101155038242989457"',
+            'focused_tail_previous_seed="17785827714152183977"',
+            '--profile "$profile"',
+            '--max-boundaries "$max_boundaries"',
+            'run_case "single-seed-4101155038242989457" "$focused_single_seed"',
+            '"tail-seeds-17785827714152183977-4101155038242989457"',
+            '"sqlite_divergence_reports"',
+        ]
+        for snippet in required_repro_snippets:
+            self.assertIn(snippet, repro)
 
 
 if __name__ == "__main__":

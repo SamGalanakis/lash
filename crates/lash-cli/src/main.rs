@@ -76,6 +76,7 @@ pub(crate) use interactive::{injected_image_part_indices, make_injected_plugin_m
 pub(crate) use skill_catalog::{LoadedSkill, SkillCatalog};
 
 const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+const PRODUCT_TOKIO_THREAD_STACK_BUDGET_BYTES: usize = DEFAULT_TOKIO_THREAD_STACK_BYTES;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_GIT_HEAD: &str = env!("LASH_BUILD_GIT_HEAD");
@@ -420,7 +421,7 @@ fn cleanup_terminal() {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse_from(normalized_cli_args());
-    let worker_stack_bytes = tokio_thread_stack_bytes(&args);
+    let worker_stack_bytes = tokio_thread_stack_bytes()?;
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
     runtime.thread_stack_size(worker_stack_bytes);
@@ -429,11 +430,28 @@ fn main() -> anyhow::Result<()> {
         .block_on(async_main(args, worker_stack_bytes))
 }
 
-fn tokio_thread_stack_bytes(_args: &Args) -> usize {
-    std::env::var("LASH_TOKIO_STACK_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES)
+fn tokio_thread_stack_bytes() -> anyhow::Result<usize> {
+    tokio_thread_stack_bytes_from_env(std::env::var("LASH_TOKIO_STACK_BYTES").ok().as_deref())
+}
+
+fn tokio_thread_stack_bytes_from_env(raw: Option<&str>) -> anyhow::Result<usize> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    };
+    let stack_bytes = raw.parse::<usize>().map_err(|err| {
+        anyhow::anyhow!("invalid LASH_TOKIO_STACK_BYTES value `{raw}`: expected bytes: {err}")
+    })?;
+    if stack_bytes == 0 {
+        anyhow::bail!("LASH_TOKIO_STACK_BYTES must be greater than zero");
+    }
+    if stack_bytes > PRODUCT_TOKIO_THREAD_STACK_BUDGET_BYTES {
+        anyhow::bail!(
+            "LASH_TOKIO_STACK_BYTES={} exceeds the lash-cli product stack budget of {} bytes; stack overflows must be fixed rather than hidden with larger product runtime stacks",
+            stack_bytes,
+            PRODUCT_TOKIO_THREAD_STACK_BUDGET_BYTES
+        );
+    }
+    Ok(stack_bytes)
 }
 
 async fn async_main(args: Args, worker_stack_bytes: usize) -> anyhow::Result<()> {
@@ -513,6 +531,47 @@ mod tests {
 
     use crate::app::App;
     use crate::keybindings::{CopyBinding, copy_binding_from_env};
+
+    #[test]
+    fn tokio_thread_stack_defaults_to_product_budget() {
+        assert_eq!(
+            tokio_thread_stack_bytes_from_env(None).expect("default stack"),
+            PRODUCT_TOKIO_THREAD_STACK_BUDGET_BYTES
+        );
+        assert_eq!(PRODUCT_TOKIO_THREAD_STACK_BUDGET_BYTES, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn tokio_thread_stack_accepts_values_within_product_budget() {
+        assert_eq!(
+            tokio_thread_stack_bytes_from_env(Some("1048576")).expect("1 MiB stack"),
+            1024 * 1024
+        );
+        assert_eq!(
+            tokio_thread_stack_bytes_from_env(Some("2097152")).expect("2 MiB stack"),
+            PRODUCT_TOKIO_THREAD_STACK_BUDGET_BYTES
+        );
+    }
+
+    #[test]
+    fn tokio_thread_stack_rejects_invalid_or_above_product_budget_values() {
+        let invalid = tokio_thread_stack_bytes_from_env(Some("not-a-number"))
+            .expect_err("invalid stack bytes");
+        assert!(
+            invalid
+                .to_string()
+                .contains("invalid LASH_TOKIO_STACK_BYTES")
+        );
+
+        let zero = tokio_thread_stack_bytes_from_env(Some("0")).expect_err("zero stack bytes");
+        assert!(zero.to_string().contains("must be greater than zero"));
+
+        let too_large = tokio_thread_stack_bytes_from_env(Some("8388608"))
+            .expect_err("oversized product stack");
+        let message = too_large.to_string();
+        assert!(message.contains("exceeds the lash-cli product stack budget"));
+        assert!(message.contains("2097152"));
+    }
 
     fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
         let root = std::env::temp_dir().join(format!("lash-main-skills-{}", uuid::Uuid::new_v4()));
