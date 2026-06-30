@@ -8275,34 +8275,14 @@ impl GeneratedRuntimeWorld {
         let active_turn_pending = runtime_session
             .active_provider_turns
             .contains_key(turn_boundary_id);
-        // Liveness-couple the release: poll the gate against the turn's
-        // liveness so a release can NEVER block forever. If the gate blocks we
-        // release it; if the turn finishes (or drifts so it never reaches this
-        // gate) the release is a no-op. The yield budget is a deterministic
-        // upper bound (not a wall clock) that guarantees termination even if a
-        // turn parks on a different gate forever. This is the deadlock fix.
-        let release = {
-            let mut polls = 0u64;
-            loop {
-                if let Some(release) = runtime_session.provider_schedule.release_if_blocked(
-                    exchange_index,
-                    event_index,
-                    event_name,
-                    event.at,
-                ) {
-                    break Some(release);
-                }
-                let turn_finished = runtime_session
-                    .active_provider_turns
-                    .get(turn_boundary_id)
-                    .is_none_or(|turn| turn.handle.is_finished());
-                if turn_finished || polls >= MAX_PROVIDER_EVENT_POLL_YIELDS {
-                    break None;
-                }
-                polls += 1;
-                tokio::task::yield_now().await;
-            }
-        };
+        let release = active_turn_pending.then(|| {
+            runtime_session.provider_schedule.release(
+                exchange_index,
+                event_index,
+                event_name,
+                event.at,
+            )
+        });
         let mut observed = json!({
             "session": event.actor_alias,
             "provider_event_release": true,
@@ -8314,8 +8294,7 @@ impl GeneratedRuntimeWorld {
         });
         if let Some(release) = release {
             observed["active_turn_pending_before_release"] = json!(active_turn_pending);
-            observed["released_while_turn_pending"] =
-                json!(active_turn_pending && release.blocked_before_release);
+            observed["released_while_turn_pending"] = json!(active_turn_pending);
             observed["scripted_transport_release"] = json!({
                 "exchange_index": release.exchange_index,
                 "event_index": release.event_index,
@@ -9417,19 +9396,8 @@ async fn run_live_turn_facts(
             .and_then(Value::as_str)
             .unwrap_or("provider_event")
             .to_string();
-        let mut idle = 0u64;
-        loop {
-            if schedule
-                .release_if_blocked(exchange_index, event_index, &event_name, event.at)
-                .is_some()
-            {
-                break;
-            }
-            if turn.is_finished() || idle >= MAX_PROVIDER_EVENT_POLL_YIELDS {
-                break;
-            }
-            idle += 1;
-            tokio::task::yield_now().await;
+        if !turn.is_finished() {
+            schedule.release(exchange_index, event_index, &event_name, event.at);
         }
     }
 

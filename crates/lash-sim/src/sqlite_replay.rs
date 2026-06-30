@@ -595,33 +595,14 @@ impl SqliteRuntimeReplayWorld {
         let active_turn_pending = runtime_session
             .active_provider_turns
             .contains_key(&turn_boundary_id);
-        // Liveness-couple the release instead of a fixed 5s timeout: poll the
-        // gate against the turn's liveness so the replay-sqlite path can NEVER
-        // deadlock on a release that waits for a block which will never come.
-        // The yield budget deterministically bounds the poll even if the turn
-        // drifts onto a different exchange.
-        let release = {
-            let mut polls = 0u64;
-            loop {
-                if let Some(release) = runtime_session.provider_schedule.release_if_blocked(
-                    exchange_index,
-                    event_index,
-                    event_name,
-                    event.at,
-                ) {
-                    break Some(release);
-                }
-                let turn_finished = runtime_session
-                    .active_provider_turns
-                    .get(&turn_boundary_id)
-                    .is_none_or(|turn| turn.handle.is_finished());
-                if turn_finished || polls >= crate::runner::MAX_PROVIDER_EVENT_POLL_YIELDS {
-                    break None;
-                }
-                polls += 1;
-                tokio::task::yield_now().await;
-            }
-        };
+        let release = active_turn_pending.then(|| {
+            runtime_session.provider_schedule.release(
+                exchange_index,
+                event_index,
+                event_name,
+                event.at,
+            )
+        });
         let mut observed = json!({
             "session": event.actor_alias,
             "provider_event_release": true,
@@ -633,8 +614,7 @@ impl SqliteRuntimeReplayWorld {
         });
         if let Some(release) = release {
             observed["active_turn_pending_before_release"] = json!(active_turn_pending);
-            observed["released_while_turn_pending"] =
-                json!(active_turn_pending && release.blocked_before_release);
+            observed["released_while_turn_pending"] = json!(active_turn_pending);
             observed["scripted_transport_release"] = json!({
                 "exchange_index": release.exchange_index,
                 "event_index": release.event_index,
