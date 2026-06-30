@@ -492,7 +492,7 @@ impl<M: TurnProtocol> ContextProjector<M> for ChatContextProjector {
             },
             model_variant: ctx.config.model_variant.clone(),
             generation: ctx.config.generation.clone(),
-            session_id: ctx.config.run_session_id.clone(),
+            scope: None,
             output_spec: None,
             stream_events: None,
             provider_trace: None,

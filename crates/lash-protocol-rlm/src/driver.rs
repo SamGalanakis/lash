@@ -280,7 +280,7 @@ impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::None,
             model_variant: ctx.config.model_variant.clone(),
-            session_id: ctx.config.run_session_id.clone(),
+            scope: None,
             output_spec: None,
             stream_events: None,
             generation: ctx.config.generation.clone(),

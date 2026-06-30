@@ -236,6 +236,31 @@ impl LlmMessage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LlmRequestScope {
+    pub session_id: String,
+    pub agent_frame_id: String,
+    pub request_id: String,
+}
+
+impl LlmRequestScope {
+    pub fn new(
+        session_id: impl Into<String>,
+        agent_frame_id: impl Into<String>,
+        request_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            agent_frame_id: agent_frame_id.into(),
+            request_id: request_id.into(),
+        }
+    }
+
+    pub fn continuation_key(&self) -> String {
+        format!("{}::{}", self.session_id, self.agent_frame_id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LlmAttachment {
     pub mime: String,
     pub data: Vec<u8>,
@@ -302,12 +327,33 @@ pub struct LlmRequest {
     pub model_variant: Option<String>,
     #[serde(default)]
     pub generation: GenerationOptions,
-    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<LlmRequestScope>,
     pub output_spec: Option<LlmOutputSpec>,
     #[serde(default, skip)]
     pub stream_events: Option<LlmEventSender>,
     #[serde(default, skip)]
     pub provider_trace: Option<LlmProviderTraceSender>,
+}
+
+impl LlmRequest {
+    pub fn session_id(&self) -> Option<&str> {
+        self.scope.as_ref().map(|scope| scope.session_id.as_str())
+    }
+
+    pub fn agent_frame_id(&self) -> Option<&str> {
+        self.scope
+            .as_ref()
+            .map(|scope| scope.agent_frame_id.as_str())
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        self.scope.as_ref().map(|scope| scope.request_id.as_str())
+    }
+
+    pub fn continuation_key(&self) -> Option<String> {
+        self.scope.as_ref().map(LlmRequestScope::continuation_key)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

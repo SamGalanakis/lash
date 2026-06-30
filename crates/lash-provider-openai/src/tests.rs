@@ -14,7 +14,11 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         tools: Arc::new(Vec::<LlmToolSpec>::new()),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
-        session_id: Some("session-1".to_string()),
+        scope: Some(LlmRequestScope::new(
+            "session-1",
+            "session-1:frame:test",
+            "session-1:request:test",
+        )),
         output_spec: None,
         stream_events: None,
         generation: lash_core::GenerationOptions::default(),
@@ -135,7 +139,7 @@ fn builds_responses_body_with_instructions_and_input() {
     assert_eq!(body["stream"], true);
     assert!(body.get("messages").is_none());
     assert!(body.get("cache_control").is_none());
-    assert_eq!(body["prompt_cache_key"], "session-1");
+    assert_eq!(body["prompt_cache_key"], "session-1::session-1:frame:test");
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(body["input"][0]["role"], "user");
     assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
@@ -517,7 +521,7 @@ fn responses_long_cache_retention_emits_openai_retention() {
 
     let body = provider.build_responses_request_body(&req, true).unwrap();
 
-    assert_eq!(body["prompt_cache_key"], "session-1");
+    assert_eq!(body["prompt_cache_key"], "session-1::session-1:frame:test");
     assert_eq!(body["prompt_cache_retention"], "24h");
     assert!(body.get("cache_control").is_none());
 }

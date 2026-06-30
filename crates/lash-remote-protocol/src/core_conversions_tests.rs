@@ -119,7 +119,11 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         generation: core_llm::GenerationOptions {
             output_token_cap: NonZeroUsize::new(42),
         },
-        session_id: Some("session-1".to_string()),
+        scope: Some(core_llm::LlmRequestScope::new(
+            "session-1",
+            "session-1:frame:test",
+            "session-1:request:test",
+        )),
         output_spec: Some(core_llm::LlmOutputSpec::JsonObject),
         stream_events: None,
         provider_trace: None,
@@ -129,9 +133,16 @@ fn llm_request_and_response_round_trip_owned_dtos() {
     remote.validate().expect("valid remote request");
     assert_eq!(remote.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(remote.request_id, "request-1");
+    assert_eq!(
+        remote.request_metadata.agent_frame_id.as_deref(),
+        Some("session-1:frame:test")
+    );
     let core = core_llm::LlmRequest::try_from(remote).expect("core request");
     assert_eq!(core.model, "gpt-test");
     assert_eq!(core.model_variant.as_deref(), Some("fast"));
+    assert_eq!(core.session_id(), Some("session-1"));
+    assert_eq!(core.agent_frame_id(), Some("session-1:frame:test"));
+    assert_eq!(core.request_id(), Some("session-1:request:test"));
     assert_eq!(core.attachments[0].data, vec![1, 2, 3]);
     assert_eq!(
         core.tools[0].input_schema.projection.overrides[0].dialect,

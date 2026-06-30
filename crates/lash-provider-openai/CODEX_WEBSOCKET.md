@@ -7,48 +7,36 @@ for closing transport sessions on runtime shutdown or provider removal.
 
 Known design concerns to keep explicit:
 
-- Lash exposes one stable `LlmRequest::session_id`. Upstream Codex carries both a
-  `session_id` and `thread_id`; PI uses this gateway path with one id for
-  `session-id` and `x-client-request-id`. Lash intentionally uses
-  `req.session_id` for both headers until core has a separate thread/turn
-  affinity field.
+- Lash attaches an optional `LlmRequestScope` at the runtime provider boundary.
+  Runtime LLM calls include `session_id`, `agent_frame_id`, and `request_id`.
+  Direct/stateless calls may omit scope and therefore use ephemeral WebSockets.
+- The provider uses `session_id` for Codex gateway affinity, `request_id` for
+  request correlation, and `session_id + agent_frame_id` as its local
+  continuation/cache key. A frame switch must not inherit another frame's
+  `previous_response_id`.
 - The provider can only send a cached WebSocket delta when the next full request
   starts with the previous request input plus previous response output. Runtime
   turn-local prompt insertions can break that prefix and force a full-context
   request.
-- Auto transport records a short per-session WebSocket fallback cooldown after
+- Auto transport records a short per-scope WebSocket fallback cooldown after
   pre-output transport failures. That avoids repeatedly hitting a known-bad
   WebSocket path without turning an explicit `websocket` or `websocket_cached`
   user choice into SSE.
 
 ## Minimal Core Continuation Contract
 
-Codex continuation needs a stable/transient distinction before runtime-level
-prompt injection can reliably preserve cached WebSocket deltas.
+Core does not expose provider-specific conversation state. It supplies request
+scope only:
 
-The minimal core-facing contract is:
+- `session_id`: logical Lash session.
+- `agent_frame_id`: durable frame/branch within that session.
+- `request_id`: one provider call, suitable for correlation/idempotency.
 
-- Each prompt/history item that reaches a provider is marked
-  `stable_for_continuation` or `transient_for_turn`.
-- Stable items are durable conversation state: persisted user messages,
-  assistant responses, tool calls, and tool results. For a cached delta, the next
-  request's stable sequence must begin with the previous request's stable input
-  followed by the previous response output, byte-for-byte after provider
-  projection.
-- Transient items are volatile turn-local context: current-turn reminders,
-  scheduler/wake metadata, UI status, retry notes, and runtime hints. They must
-  be included in full-context requests when needed, but must not participate in
-  the cached-prefix baseline or invalidate a continuation by moving around.
-- Non-input request properties that affect model semantics remain part of the
-  continuation fingerprint: model, reasoning effort, tools, tool choice,
-  instructions, output schema, cache retention, and attachment projections.
-  Transient prompt text must not change this fingerprint unless it changes one of
-  those semantic request properties.
-
-With that contract, the Codex provider can compute `previous_response_id` deltas
-from stable history while still sending transient current-turn context in the
-new delta input. Without it, the provider must conservatively fall back to a
-full-context WebSocket request on `input_prefix_mismatch`.
+The Codex provider owns the WebSocket mechanics. It may reuse a cached
+`previous_response_id` only when the current projected request has the same
+non-input fingerprint and its input prefix exactly matches the prior request
+input plus prior response output. Otherwise it sends the full context and records
+the explicit cache miss reason, such as `input_prefix_mismatch`.
 
 ## Runtime Test Seam
 

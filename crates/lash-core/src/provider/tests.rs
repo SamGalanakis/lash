@@ -170,7 +170,7 @@ fn empty_request() -> LlmRequest {
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
         model_variant: None,
-        session_id: None,
+        scope: None,
         output_spec: None,
         stream_events: None,
         generation: GenerationOptions::default(),

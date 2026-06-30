@@ -60,7 +60,7 @@ pub use direct::{
     DirectRequest, DirectRole,
 };
 pub use lash_sansio::llm::types::{
-    GenerationOptions, LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason,
+    GenerationOptions, LlmOutputPart, LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalReason,
 };
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,

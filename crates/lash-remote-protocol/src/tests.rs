@@ -41,6 +41,7 @@ fn remote_llm_request_json_round_trips() {
         },
         request_metadata: RemoteLlmRequestMetadata {
             session_id: Some("session".to_string()),
+            agent_frame_id: Some("session:frame:test".to_string()),
             idempotency_key: Some("idem".to_string()),
             trace_id: None,
         },

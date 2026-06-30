@@ -1,7 +1,8 @@
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{
     LlmAttachment, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputSpec,
-    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice,
+    LlmRequest, LlmRequestScope, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason,
+    LlmToolChoice,
 };
 use crate::provider::ProviderHandle;
 use crate::{LashSchema, SchemaContract};
@@ -323,6 +324,14 @@ pub(crate) fn build_llm_request(
         }
     }
 
+    let scope = session_id.as_ref().map(|session_id| {
+        LlmRequestScope::new(
+            session_id.clone(),
+            format!("{session_id}:frame:direct"),
+            format!("{session_id}:direct"),
+        )
+    });
+
     LlmRequest {
         model,
         messages: llm_messages,
@@ -331,7 +340,7 @@ pub(crate) fn build_llm_request(
         tool_choice: LlmToolChoice::None,
         model_variant,
         generation,
-        session_id,
+        scope,
         output_spec,
         stream_events,
         provider_trace: None,
@@ -466,7 +475,10 @@ mod tests {
             .clone()
             .expect("provider should receive a request");
         assert_eq!(captured.model, "direct-model");
-        assert_eq!(captured.session_id.as_deref(), Some("direct-session"));
+        let scope = captured.scope.as_ref().expect("direct request scope");
+        assert_eq!(scope.session_id, "direct-session");
+        assert_eq!(scope.agent_frame_id, "direct-session:frame:direct");
+        assert_eq!(scope.request_id, "direct-session:direct");
         assert!(matches!(
             captured.output_spec,
             Some(LlmOutputSpec::JsonObject)

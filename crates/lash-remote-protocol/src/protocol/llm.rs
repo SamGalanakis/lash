@@ -211,6 +211,8 @@ pub struct RemoteLlmRequestMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
@@ -218,7 +220,10 @@ pub struct RemoteLlmRequestMetadata {
 
 impl RemoteLlmRequestMetadata {
     pub fn is_empty(&self) -> bool {
-        self.session_id.is_none() && self.idempotency_key.is_none() && self.trace_id.is_none()
+        self.session_id.is_none()
+            && self.agent_frame_id.is_none()
+            && self.idempotency_key.is_none()
+            && self.trace_id.is_none()
     }
 }
 

@@ -8,11 +8,20 @@ impl RemoteLlmRequest {
             tool_choice,
             model_variant,
             generation,
-            session_id,
+            scope,
             output_spec,
             stream_events: _,
             provider_trace: _,
         } = value;
+        let (session_id, agent_frame_id, idempotency_key) = scope
+            .map(|scope| {
+                (
+                    Some(scope.session_id),
+                    Some(scope.agent_frame_id),
+                    Some(scope.request_id),
+                )
+            })
+            .unwrap_or((None, None, None));
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             request_id: request_id.into(),
@@ -30,7 +39,8 @@ impl RemoteLlmRequest {
             generation: generation.into(),
             request_metadata: RemoteLlmRequestMetadata {
                 session_id,
-                idempotency_key: None,
+                agent_frame_id,
+                idempotency_key,
                 trace_id: None,
             },
             metadata: HashMap::new(),
@@ -45,7 +55,7 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
         value.validate()?;
         let RemoteLlmRequest {
             protocol_version: _,
-            request_id: _,
+            request_id,
             model_intent,
             messages,
             attachments,
@@ -64,9 +74,20 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
         } = model_intent;
         let RemoteLlmRequestMetadata {
             session_id,
-            idempotency_key: _,
+            agent_frame_id,
+            idempotency_key,
             trace_id: _,
         } = request_metadata;
+        let scope = match (session_id, agent_frame_id) {
+            (Some(session_id), Some(agent_frame_id)) => {
+                Some(core_llm::LlmRequestScope::new(
+                    session_id,
+                    agent_frame_id,
+                    idempotency_key.unwrap_or(request_id),
+                ))
+            }
+            _ => None,
+        };
         Ok(Self {
             model,
             messages: messages.into_iter().map(Into::into).collect(),
@@ -78,7 +99,7 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
             tool_choice: tool_choice.into(),
             model_variant: variant,
             generation: generation.try_into()?,
-            session_id,
+            scope,
             output_spec: output_spec.map(Into::into),
             stream_events: None,
             provider_trace: None,

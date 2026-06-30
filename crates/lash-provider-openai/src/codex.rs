@@ -77,12 +77,7 @@ impl std::fmt::Debug for CodexWebsocketSessionCache {
         let (sessions_len, fallback_sessions_len) = self
             .inner
             .lock()
-            .map(|sessions| {
-                (
-                    sessions.by_session.len(),
-                    sessions.fallback_by_session.len(),
-                )
-            })
+            .map(|sessions| (sessions.by_scope.len(), sessions.fallback_by_scope.len()))
             .unwrap_or_default();
         f.debug_struct("CodexWebsocketSessionCache")
             .field("sessions", &sessions_len)
@@ -93,8 +88,8 @@ impl std::fmt::Debug for CodexWebsocketSessionCache {
 
 #[derive(Default)]
 struct CodexWebsocketSessions {
-    by_session: HashMap<String, CodexWebsocketSessionEntry>,
-    fallback_by_session: HashMap<String, CodexWebsocketFallbackState>,
+    by_scope: HashMap<String, CodexWebsocketSessionEntry>,
+    fallback_by_scope: HashMap<String, CodexWebsocketFallbackState>,
 }
 
 struct CodexWebsocketFallbackState {
@@ -122,7 +117,7 @@ impl CodexWebsocketSessionEntry {
 
 struct CodexWebsocketLease {
     websocket: CodexWsStream,
-    session_id: Option<String>,
+    scope_key: Option<String>,
     reusable: bool,
     reused: bool,
     continuation: Option<CodexContinuation>,
@@ -430,9 +425,9 @@ impl CodexProvider {
             body["reasoning"] = reasoning;
         }
         if policy.cache_retention != CacheRetention::None
-            && let Some(session_id) = req.session_id.as_deref()
+            && let Some(scope_key) = req.continuation_key()
         {
-            body["prompt_cache_key"] = json!(session_id);
+            body["prompt_cache_key"] = json!(scope_key);
         }
         if let Some(output_spec) = &req.output_spec {
             body["text"]["format"] = match output_spec {
@@ -581,25 +576,25 @@ impl CodexProvider {
     }
 
     fn clear_continuation(&self, req: &LlmRequest) {
-        if let Some(session_id) = req.session_id.as_deref() {
+        if let Some(scope_key) = req.continuation_key() {
             let mut sessions = self
                 .websocket_sessions
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = sessions.by_session.get_mut(session_id) {
+            if let Some(entry) = sessions.by_scope.get_mut(&scope_key) {
                 entry.continuation = None;
             }
         }
     }
 
-    fn remove_websocket_session(&self, session_id: &str) {
+    fn remove_websocket_scope(&self, scope_key: &str) {
         let mut sessions = self
             .websocket_sessions
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        sessions.by_session.remove(session_id);
+        sessions.by_scope.remove(scope_key);
     }
 
     fn prune_idle_websocket_sessions(sessions: &mut CodexWebsocketSessions) {
@@ -607,20 +602,20 @@ impl CodexProvider {
         Self::prune_expired_websocket_fallbacks(sessions, now);
         // Dropping a cached WebSocketStream closes the socket. This prune path is
         // deliberately synchronous because the cache lock is provider-local.
-        sessions.by_session.retain(|_, entry| {
+        sessions.by_scope.retain(|_, entry| {
             entry.busy || now.duration_since(entry.last_used) <= SESSION_WEBSOCKET_CACHE_TTL
         });
     }
 
     fn prune_expired_websocket_fallbacks(sessions: &mut CodexWebsocketSessions, now: Instant) {
         sessions
-            .fallback_by_session
+            .fallback_by_scope
             .retain(|_, fallback| fallback.until > now);
     }
 
     fn enforce_websocket_session_cache_cap(sessions: &mut CodexWebsocketSessions) {
         let excess = sessions
-            .by_session
+            .by_scope
             .len()
             .saturating_sub(MAX_SESSION_WEBSOCKET_CACHE_ENTRIES);
         if excess == 0 {
@@ -628,19 +623,19 @@ impl CodexProvider {
         }
 
         let mut removable = sessions
-            .by_session
+            .by_scope
             .iter()
             .filter(|(_, entry)| !entry.busy)
-            .map(|(session_id, entry)| (session_id.clone(), entry.last_used))
+            .map(|(scope_key, entry)| (scope_key.clone(), entry.last_used))
             .collect::<Vec<_>>();
         removable.sort_by_key(|(_, last_used)| *last_used);
-        for (session_id, _) in removable.into_iter().take(excess) {
-            sessions.by_session.remove(&session_id);
+        for (scope_key, _) in removable.into_iter().take(excess) {
+            sessions.by_scope.remove(&scope_key);
         }
     }
 
     fn websocket_fallback_reason(&self, req: &LlmRequest) -> Option<String> {
-        let session_id = req.session_id.as_deref()?;
+        let scope_key = req.continuation_key()?;
         let mut sessions = self
             .websocket_sessions
             .inner
@@ -648,13 +643,13 @@ impl CodexProvider {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::prune_expired_websocket_fallbacks(&mut sessions, Instant::now());
         sessions
-            .fallback_by_session
-            .get(session_id)
+            .fallback_by_scope
+            .get(&scope_key)
             .map(|fallback| fallback.reason.clone())
     }
 
     fn record_websocket_fallback(&self, req: &LlmRequest, error: &LlmTransportError) {
-        let Some(session_id) = req.session_id.as_deref() else {
+        let Some(scope_key) = req.continuation_key() else {
             return;
         };
         let mut sessions = self
@@ -669,8 +664,8 @@ impl CodexProvider {
             .as_deref()
             .map(|code| format!("{code}: {}", error.message))
             .unwrap_or_else(|| error.message.clone());
-        sessions.fallback_by_session.insert(
-            session_id.to_string(),
+        sessions.fallback_by_scope.insert(
+            scope_key,
             CodexWebsocketFallbackState {
                 until: now + SESSION_WEBSOCKET_FALLBACK_TTL,
                 reason,
@@ -679,13 +674,13 @@ impl CodexProvider {
     }
 
     fn clear_websocket_fallback(&self, req: &LlmRequest) {
-        if let Some(session_id) = req.session_id.as_deref() {
+        if let Some(scope_key) = req.continuation_key() {
             let mut sessions = self
                 .websocket_sessions
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            sessions.fallback_by_session.remove(session_id);
+            sessions.fallback_by_scope.remove(&scope_key);
         }
     }
 
@@ -741,21 +736,29 @@ impl CodexProvider {
                 }
             })?,
         );
-        if let Some(session_id) = req.session_id.as_deref() {
-            let value =
-                HeaderValue::from_str(session_id).map_err(|error| CodexWebSocketAttemptError {
+        if let Some(scope) = req.scope.as_ref() {
+            let session_value = HeaderValue::from_str(&scope.session_id).map_err(|error| {
+                CodexWebSocketAttemptError {
                     error: LlmTransportError::new(format!(
                         "Invalid Codex WebSocket session header: {error}"
                     )),
                     events_seen: false,
                     output_started: false,
                     stale_previous_response: false,
-                })?;
-            // Lash currently exposes one stable provider session key. Codex
-            // upstream has separate session/thread ids, while PI uses this same
-            // gateway path with one id for both session affinity headers.
-            headers.insert("session-id", value.clone());
-            headers.insert("x-client-request-id", value);
+                }
+            })?;
+            let request_value = HeaderValue::from_str(&scope.request_id).map_err(|error| {
+                CodexWebSocketAttemptError {
+                    error: LlmTransportError::new(format!(
+                        "Invalid Codex WebSocket request header: {error}"
+                    )),
+                    events_seen: false,
+                    output_started: false,
+                    stale_previous_response: false,
+                }
+            })?;
+            headers.insert("session-id", session_value);
+            headers.insert("x-client-request-id", request_value);
         }
         if let Some(account_id) = self.account_id.as_deref() {
             headers.insert(
@@ -799,11 +802,11 @@ impl CodexProvider {
         req: &LlmRequest,
         connect_timeout: Duration,
     ) -> Result<CodexWebsocketLease, CodexWebSocketAttemptError> {
-        let Some(session_id) = req.session_id.clone() else {
+        let Some(scope_key) = req.continuation_key() else {
             let websocket = self.connect_websocket(req, connect_timeout).await?;
             return Ok(CodexWebsocketLease {
                 websocket,
-                session_id: None,
+                scope_key: None,
                 reusable: false,
                 reused: false,
                 continuation: None,
@@ -824,7 +827,7 @@ impl CodexProvider {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             Self::prune_idle_websocket_sessions(&mut sessions);
             Self::enforce_websocket_session_cache_cap(&mut sessions);
-            if let Some(entry) = sessions.by_session.get_mut(&session_id) {
+            if let Some(entry) = sessions.by_scope.get_mut(&scope_key) {
                 if entry.busy {
                     AcquireDecision::ConnectEphemeral
                 } else if let Some(websocket) = entry.connection.take() {
@@ -832,20 +835,20 @@ impl CodexProvider {
                     entry.last_used = Instant::now();
                     AcquireDecision::Reuse(CodexWebsocketLease {
                         websocket,
-                        session_id: Some(session_id),
+                        scope_key: Some(scope_key),
                         reusable: true,
                         reused: true,
                         continuation: entry.continuation.clone(),
                     })
                 } else {
                     *entry = CodexWebsocketSessionEntry::reserved();
-                    AcquireDecision::ConnectReusable(session_id.clone())
+                    AcquireDecision::ConnectReusable(scope_key.clone())
                 }
             } else {
                 sessions
-                    .by_session
-                    .insert(session_id.clone(), CodexWebsocketSessionEntry::reserved());
-                AcquireDecision::ConnectReusable(session_id.clone())
+                    .by_scope
+                    .insert(scope_key.clone(), CodexWebsocketSessionEntry::reserved());
+                AcquireDecision::ConnectReusable(scope_key.clone())
             }
         };
 
@@ -855,23 +858,23 @@ impl CodexProvider {
                 let websocket = self.connect_websocket(req, connect_timeout).await?;
                 Ok(CodexWebsocketLease {
                     websocket,
-                    session_id: None,
+                    scope_key: None,
                     reusable: false,
                     reused: false,
                     continuation: None,
                 })
             }
-            AcquireDecision::ConnectReusable(session_id) => {
+            AcquireDecision::ConnectReusable(scope_key) => {
                 let websocket = match self.connect_websocket(req, connect_timeout).await {
                     Ok(websocket) => websocket,
                     Err(error) => {
-                        self.remove_websocket_session(&session_id);
+                        self.remove_websocket_scope(&scope_key);
                         return Err(error);
                     }
                 };
                 Ok(CodexWebsocketLease {
                     websocket,
-                    session_id: Some(session_id),
+                    scope_key: Some(scope_key),
                     reusable: true,
                     reused: false,
                     continuation: None,
@@ -886,11 +889,11 @@ impl CodexProvider {
         keep_connection: bool,
         continuation: Option<CodexContinuation>,
     ) {
-        let Some(session_id) = lease.session_id else {
+        let Some(scope_key) = lease.scope_key else {
             return;
         };
         if !lease.reusable || !keep_connection {
-            self.remove_websocket_session(&session_id);
+            self.remove_websocket_scope(&scope_key);
             return;
         }
         let mut sessions = self
@@ -898,8 +901,8 @@ impl CodexProvider {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        sessions.by_session.insert(
-            session_id,
+        sessions.by_scope.insert(
+            scope_key,
             CodexWebsocketSessionEntry {
                 connection: Some(lease.websocket),
                 continuation,
@@ -1496,12 +1499,10 @@ impl Provider for CodexProvider {
             .header("originator", Self::CODEX_ORIGINATOR)
             .header("User-Agent", Self::codex_user_agent())
             .json(&body);
-        if let Some(session_id) = req.session_id.as_deref() {
-            // See the WebSocket header path: Lash has one provider session key,
-            // so use it for Codex gateway affinity and request correlation.
+        if let Some(scope) = req.scope.as_ref() {
             http = http
-                .header("session-id", session_id)
-                .header("x-client-request-id", session_id);
+                .header("session-id", &scope.session_id)
+                .header("x-client-request-id", &scope.request_id);
         }
         if let Some(id) = account_id.as_deref() {
             http = http.header("ChatGPT-Account-ID", id);
@@ -1767,7 +1768,7 @@ impl ProviderFactory for CodexProviderFactory {
 mod tests {
     use super::*;
     use lash_core::llm::types::{
-        LlmJsonSchema, LlmMessage, LlmOutputPart, LlmProviderTraceSender, LlmRole,
+        LlmJsonSchema, LlmMessage, LlmOutputPart, LlmProviderTraceSender, LlmRequestScope, LlmRole,
         LlmTerminalReason, LlmToolChoice, LlmToolSpec, ResponseTextMeta,
     };
     use lash_core::provider::{Provider, ProviderModelPolicy, RequestTimeout};
@@ -1808,7 +1809,11 @@ mod tests {
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: None,
-            session_id: Some("session-1".to_string()),
+            scope: Some(LlmRequestScope::new(
+                "session-1",
+                "session-1:frame:test",
+                "session-1:request:test",
+            )),
             output_spec: None,
             stream_events: None,
             generation: lash_core::GenerationOptions::default(),
@@ -2531,10 +2536,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_websocket_session_cache_prunes_idle_entries_and_caps_oldest() {
+    fn codex_websocket_scope_cache_prunes_idle_entries_and_caps_oldest() {
         let now = Instant::now();
         let mut sessions = CodexWebsocketSessions::default();
-        sessions.by_session.insert(
+        sessions.by_scope.insert(
             "idle".to_string(),
             CodexWebsocketSessionEntry {
                 connection: None,
@@ -2543,7 +2548,7 @@ mod tests {
                 last_used: now - SESSION_WEBSOCKET_CACHE_TTL - Duration::from_secs(1),
             },
         );
-        sessions.by_session.insert(
+        sessions.by_scope.insert(
             "busy".to_string(),
             CodexWebsocketSessionEntry {
                 connection: None,
@@ -2555,13 +2560,13 @@ mod tests {
 
         CodexProvider::prune_idle_websocket_sessions(&mut sessions);
 
-        assert!(!sessions.by_session.contains_key("idle"));
-        assert!(sessions.by_session.contains_key("busy"));
+        assert!(!sessions.by_scope.contains_key("idle"));
+        assert!(sessions.by_scope.contains_key("busy"));
 
-        sessions.by_session.clear();
+        sessions.by_scope.clear();
         for index in 0..(MAX_SESSION_WEBSOCKET_CACHE_ENTRIES + 3) {
-            sessions.by_session.insert(
-                format!("session-{index}"),
+            sessions.by_scope.insert(
+                format!("scope-{index}"),
                 CodexWebsocketSessionEntry {
                     connection: None,
                     continuation: None,
@@ -2573,13 +2578,10 @@ mod tests {
 
         CodexProvider::enforce_websocket_session_cache_cap(&mut sessions);
 
-        assert_eq!(
-            sessions.by_session.len(),
-            MAX_SESSION_WEBSOCKET_CACHE_ENTRIES
-        );
-        assert!(!sessions.by_session.contains_key("session-0"));
-        assert!(sessions.by_session.contains_key(&format!(
-            "session-{}",
+        assert_eq!(sessions.by_scope.len(), MAX_SESSION_WEBSOCKET_CACHE_ENTRIES);
+        assert!(!sessions.by_scope.contains_key("scope-0"));
+        assert!(sessions.by_scope.contains_key(&format!(
+            "scope-{}",
             MAX_SESSION_WEBSOCKET_CACHE_ENTRIES + 2
         )));
     }
@@ -2737,7 +2739,10 @@ mod tests {
                 .find_map(|(header_name, value)| (header_name == name).then_some(value.as_str()))
         };
         assert_eq!(header("session-id"), Some("session-1"));
-        assert_eq!(header("x-client-request-id"), Some("session-1"));
+        assert_eq!(
+            header("x-client-request-id"),
+            Some("session-1:request:test")
+        );
         assert_eq!(header("session_id"), None);
     }
 
@@ -2981,7 +2986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_auto_without_session_id_uses_uncached_ephemeral_websockets() {
+    async fn codex_auto_without_scope_uses_uncached_ephemeral_websockets() {
         let ws = spawn_scripted_websocket(vec![
             ScriptedWsAction::Complete {
                 response_id: "resp_1",
@@ -3001,9 +3006,9 @@ mod tests {
             ws.url.clone(),
         );
         let mut first = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-        first.session_id = None;
+        first.scope = None;
         let mut second = request(vec![LlmMessage::text(LlmRole::User, "next")]);
-        second.session_id = None;
+        second.scope = None;
 
         let first_response = provider.complete(first).await.expect("first response");
         let second_response = provider.complete(second).await.expect("second response");
@@ -3111,7 +3116,7 @@ mod tests {
         assert_eq!(http.captured_len(), 2);
         let sse_request = http.captured().remove(0);
         assert!(sse_request.contains("session-id: session-1"));
-        assert!(sse_request.contains("x-client-request-id: session-1"));
+        assert!(sse_request.contains("x-client-request-id: session-1:request:test"));
         assert!(!sse_request.contains("session_id:"));
     }
 

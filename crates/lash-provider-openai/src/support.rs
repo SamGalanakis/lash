@@ -17,7 +17,7 @@ pub(crate) use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
 // lib free of unused-import warnings.
 pub(crate) use crate::schema::{model_id, responses_error_is_retryable};
 #[cfg(test)]
-pub(crate) use lash_core::llm::types::ResponseTextMeta;
+pub(crate) use lash_core::llm::types::{LlmRequestScope, ResponseTextMeta};
 pub(crate) use lash_core::provider::{
     CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy,
     ProviderOptions, resolve_generation_policy,

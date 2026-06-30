@@ -639,7 +639,8 @@ pub struct LlmRequestSpec {
     pub model_variant: Option<String>,
     #[serde(default)]
     pub generation: crate::GenerationOptions,
-    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<crate::LlmRequestScope>,
     pub output_spec: Option<LlmOutputSpec>,
 }
 
@@ -657,7 +658,7 @@ impl LlmRequestSpec {
             tool_choice: request.tool_choice.clone(),
             model_variant: request.model_variant.clone(),
             generation: request.generation.clone(),
-            session_id: request.session_id.clone(),
+            scope: request.scope.clone(),
             output_spec: request.output_spec.clone(),
         })
     }
@@ -679,7 +680,7 @@ impl LlmRequestSpec {
             tool_choice: self.tool_choice,
             model_variant: self.model_variant,
             generation: self.generation,
-            session_id: self.session_id,
+            scope: self.scope,
             output_spec: self.output_spec,
             stream_events,
             provider_trace,

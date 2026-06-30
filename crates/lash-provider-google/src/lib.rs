@@ -34,7 +34,7 @@ mod tests {
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: model_variant.map(str::to_string),
-            session_id: None,
+            scope: None,
             output_spec: None,
             stream_events: None::<LlmEventSender>,
             generation: lash_core::GenerationOptions::default(),
