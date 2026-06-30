@@ -102,6 +102,7 @@ impl CodexProvider {
     const CODEX_ORIGINATOR: &'static str = "codex_cli_rs";
     const CODEX_RESPONSES_URL: &'static str = "https://chatgpt.com/backend-api/codex/responses";
     const CODEX_RESPONSES_WS_URL: &'static str = "wss://chatgpt.com/backend-api/codex/responses";
+    const CODEX_RESPONSES_WS_BETA: &'static str = "responses_websockets=2026-02-06";
 
     pub fn new(
         access_token: impl Into<String>,
@@ -390,6 +391,15 @@ impl CodexProvider {
         (body, true)
     }
 
+    fn websocket_create_request(body: &Value) -> Value {
+        let mut request = body
+            .as_object()
+            .cloned()
+            .unwrap_or_else(serde_json::Map::new);
+        request.insert("type".to_string(), json!("response.create"));
+        Value::Object(request)
+    }
+
     fn record_continuation(&mut self, req: &LlmRequest, full_body: &Value, final_response: &Value) {
         let Some(session_id) = req.session_id.as_deref() else {
             return;
@@ -435,8 +445,9 @@ impl CodexProvider {
         } else {
             (full_body.clone(), false)
         };
+        let websocket_body = Self::websocket_create_request(&body);
         let request_body =
-            serde_json::to_string(&body).map_err(|error| CodexWebSocketAttemptError {
+            serde_json::to_string(&websocket_body).map_err(|error| CodexWebSocketAttemptError {
                 error: LlmTransportError::new(format!(
                     "Failed to serialize Codex WebSocket body: {error}"
                 )),
@@ -466,7 +477,7 @@ impl CodexProvider {
         );
         headers.insert(
             "OpenAI-Beta",
-            HeaderValue::from_static("responses=experimental"),
+            HeaderValue::from_static(Self::CODEX_RESPONSES_WS_BETA),
         );
         headers.insert(
             "originator",
@@ -1323,6 +1334,35 @@ mod tests {
                 - first_body["input"].as_array().unwrap().len()
         );
         assert_eq!(cached_body["input"][0]["type"], "message");
+    }
+
+    #[test]
+    fn codex_websocket_request_uses_response_create_event_shape() {
+        let provider = CodexProvider::new("access", "refresh", 0);
+        let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        let body = provider.build_request_body(&req, true).unwrap();
+        let websocket_body = CodexProvider::websocket_create_request(&body);
+
+        assert_eq!(websocket_body["type"], "response.create");
+        assert_eq!(websocket_body["model"], body["model"]);
+        assert_eq!(websocket_body["input"], body["input"]);
+        assert_eq!(websocket_body["stream"], true);
+        assert!(websocket_body.get("response").is_none());
+    }
+
+    #[test]
+    fn codex_websocket_request_keeps_cached_previous_response_id() {
+        let provider = CodexProvider::new("access", "refresh", 0);
+        let req = request(vec![LlmMessage::text(LlmRole::User, "next")]);
+        let mut body = provider.build_request_body(&req, true).unwrap();
+        body["previous_response_id"] = json!("resp_1");
+        body["input"] = json!([]);
+
+        let websocket_body = CodexProvider::websocket_create_request(&body);
+
+        assert_eq!(websocket_body["type"], "response.create");
+        assert_eq!(websocket_body["previous_response_id"], "resp_1");
+        assert_eq!(websocket_body["input"], json!([]));
     }
 
     #[test]
