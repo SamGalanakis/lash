@@ -75,6 +75,9 @@ use crate::scheduler::{
     RuntimeCompletionUnit,
 };
 use crate::sqlite_replay::SqliteReplayError;
+use crate::stack_policy::{
+    SIM_HARNESS_STACK_LIMIT_BYTES, run_on_product_stack, run_on_sim_harness_stack,
+};
 use crate::store::{ModelStore, backend_fault_observation};
 use crate::trace::{
     AbstractWorldSummary, OracleStatus, OracleVerdict, SimulationTrace, TraceEventLine,
@@ -103,8 +106,6 @@ pub const GENERATED_SIM_FAILURE_SHAPE: &str = "failures/_shape.json";
 pub const GENERATED_SIM_SCENARIO_SLICES: &str = "scenario-contract-slices";
 pub const GENERATED_SIM_SCENARIO_PACKAGES: &str = "scenario-contract-packages";
 pub const GENERATED_SIM_BACKEND_REGRESSION_FIXTURES: &str = "backend-regression-fixtures";
-pub const PRODUCT_STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
-pub const SIM_HARNESS_STACK_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 const OPENAI_COMPAT_TOOL_CALL: &str = include_str!(
     "../provider-scripts/canonical/openai-compatible.chat-tool-call-split-stream.json"
@@ -215,70 +216,6 @@ impl fmt::Display for FixedScriptRunnerError {
 }
 
 impl std::error::Error for FixedScriptRunnerError {}
-
-fn run_on_sim_harness_stack<T, F>(
-    label: impl Into<String>,
-    stack_bytes: usize,
-    f: F,
-) -> Result<T, FixedScriptRunnerError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, FixedScriptRunnerError> + Send + 'static,
-{
-    run_on_lash_sim_stack(
-        label,
-        stack_bytes,
-        SIM_HARNESS_STACK_LIMIT_BYTES,
-        "SIM_HARNESS_STACK_LIMIT_BYTES",
-        f,
-    )
-}
-
-fn run_on_product_stack<T, F>(
-    label: impl Into<String>,
-    stack_bytes: usize,
-    f: F,
-) -> Result<T, FixedScriptRunnerError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, FixedScriptRunnerError> + Send + 'static,
-{
-    run_on_lash_sim_stack(
-        label,
-        stack_bytes,
-        PRODUCT_STACK_BUDGET_BYTES,
-        "PRODUCT_STACK_BUDGET_BYTES",
-        f,
-    )
-}
-
-fn run_on_lash_sim_stack<T, F>(
-    label: impl Into<String>,
-    stack_bytes: usize,
-    limit_bytes: usize,
-    limit_name: &'static str,
-    f: F,
-) -> Result<T, FixedScriptRunnerError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, FixedScriptRunnerError> + Send + 'static,
-{
-    let label = label.into();
-    if stack_bytes > limit_bytes {
-        return Err(FixedScriptRunnerError::Assertion(format!(
-            "{label} requested stack {stack_bytes} bytes above {limit_name}={limit_bytes}; stack growth above policy is a bug"
-        )));
-    }
-    let thread_name = format!("lash-sim-stack-policy-{label}");
-    let panic_label = label.clone();
-    std::thread::Builder::new()
-        .name(thread_name)
-        .stack_size(stack_bytes)
-        .spawn(f)
-        .map_err(FixedScriptRunnerError::Io)?
-        .join()
-        .map_err(|panic| contract_replay_panic(&panic_label, panic))?
-}
 
 impl From<std::io::Error> for FixedScriptRunnerError {
     fn from(value: std::io::Error) -> Self {
@@ -4965,20 +4902,6 @@ fn replay_agent_contract_execution(contract: &str) -> Result<Value, FixedScriptR
             runner(&runtime)
         },
     )
-}
-
-fn contract_replay_panic(
-    label: &str,
-    panic: Box<dyn std::any::Any + Send + 'static>,
-) -> FixedScriptRunnerError {
-    FixedScriptRunnerError::Runtime(format!(
-        "{label} contract replay thread panicked: {}",
-        panic
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("unknown panic")
-    ))
 }
 
 fn rlm_protocol_contract_executions() -> Result<Vec<Value>, FixedScriptRunnerError> {
