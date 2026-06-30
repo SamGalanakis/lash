@@ -2196,6 +2196,17 @@ pub fn scenario_contract_generated_facts_for_semantic(
                 ExecFactRequirement::ReentersProvider,
             )?,
         ]),
+        "rlm.streamed_lashlang_cell_exec_persists_trajectory" => Ok(vec![
+            rlm_protocol_execution_fact(
+                events,
+                "rlm.streamed_lashlang_cell_exec_persists_trajectory",
+            )?,
+            exec_semantic_fact(
+                events,
+                "rlm_streamed_lashlang_cell_exec_persists_trajectory",
+                ExecFactRequirement::ReentersProvider,
+            )?,
+        ]),
         "rlm.empty_options_natural_default" => Ok(vec![rlm_protocol_execution_fact(
             events,
             "rlm.empty_options_natural_default",
@@ -3954,6 +3965,23 @@ fn rlm_protocol_execution_fact(
                 "trajectory_output": "hi\n",
             })
         }
+        "rlm.streamed_lashlang_cell_exec_persists_trajectory" => {
+            require_rlm_bool(result, "/done", false, contract)?;
+            require_rlm_u64(result, "/llm_call_count", 2, contract)?;
+            require_rlm_response_text_streamed(result, 0, true, contract)?;
+            require_rlm_exec_code(result, "print \"streamed\"", contract)?;
+            require_rlm_checkpoint(result, "after_work", contract)?;
+            require_rlm_trajectory_error(result, None, contract)?;
+            require_rlm_trajectory_output_contains(result, "streamed\n", contract)?;
+            json!({
+                "done": false,
+                "llm_call_count": 2,
+                "text_streamed": true,
+                "exec_code": "print \"streamed\"",
+                "checkpoint": "after_work",
+                "trajectory_output": "streamed\n",
+            })
+        }
         "rlm.empty_options_natural_default" => {
             require_rlm_bool(result, "/done", true, contract)?;
             require_rlm_final_value(result, &json!("done"), contract)?;
@@ -4140,6 +4168,11 @@ fn rlm_protocol_contract_metadata(
             "rlm_lashlang_cell_exec_continues",
             "LashLang cell execution records concrete output, checkpoints after work, and re-enters the model loop",
         )),
+        "rlm.streamed_lashlang_cell_exec_persists_trajectory" => Ok((
+            "rlm_protocol_scenario_streamed_lashlang_cell_runs_exec_and_persists_trajectory",
+            "rlm_streamed_lashlang_cell_exec_persists_trajectory",
+            "streamed LashLang cell execution records concrete output, checkpoints after work, and preserves trajectory evidence before re-entering the model loop",
+        )),
         "rlm.empty_options_natural_default" => Ok((
             "rlm_protocol_scenario_empty_turn_options_use_natural_default",
             "rlm_empty_options_natural_default",
@@ -4216,6 +4249,27 @@ fn require_rlm_checkpoint(result: &Value, checkpoint: &str, contract: &str) -> R
         Ok(())
     } else {
         Err(format!("{contract} missing checkpoint `{checkpoint}`"))
+    }
+}
+
+fn require_rlm_response_text_streamed(
+    result: &Value,
+    index: usize,
+    expected: bool,
+    contract: &str,
+) -> Result<(), String> {
+    if result
+        .get("llm_response_text_streamed")
+        .and_then(Value::as_array)
+        .and_then(|values| values.get(index))
+        .and_then(Value::as_bool)
+        == Some(expected)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} expected llm_response_text_streamed[{index}]={expected}"
+        ))
     }
 }
 
@@ -6247,6 +6301,7 @@ mod tests {
             "rlm.exec_error_max_turn_stop",
             "rlm.retired_marker_plain_lashlang_text",
             "rlm.lashlang_cell_exec_continues",
+            "rlm.streamed_lashlang_cell_exec_persists_trajectory",
             "rlm.exec_result_no_tool_call_replay",
             "rlm.exec_tool_control_frame_switch_terminal",
             "rlm.exec_tool_control_fail_terminal",
@@ -8252,6 +8307,7 @@ mod tests {
             "rlm.cell_diagnostic_counts",
             "rlm.retired_marker_plain_lashlang_text",
             "rlm.lashlang_cell_exec_continues",
+            "rlm.streamed_lashlang_cell_exec_persists_trajectory",
             "rlm.empty_options_natural_default",
             "rlm.exec_result_no_tool_call_replay",
             "rlm.exec_tool_control_frame_switch_terminal",

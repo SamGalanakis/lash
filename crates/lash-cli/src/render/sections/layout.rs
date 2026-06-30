@@ -29,12 +29,12 @@ fn queue_preview_height(app: &App, frame_width: u16) -> u16 {
 }
 
 /// Rows the plan checklist contributes to the trailing end of the
-/// transcript: 1 blank gutter + N items. Drops the `PLAN` header and
-/// the scribe rule that were dock-chrome when the panel was pinned —
-/// inline in scrollable history neither earns its row.
+/// transcript: 1 blank gutter + 1 `Plan` header + N items. Must stay in
+/// lockstep with [`plan_dock_lines_snapshot`](crate::render::plan_dock_lines_snapshot),
+/// since the bottom-anchor pad derives the underflow from this total.
 pub fn plan_dock_trailing_height(app: &App) -> usize {
     match app.plan_dock.as_ref() {
-        Some(plan) if !plan.is_empty() => 1 + plan.items.len(),
+        Some(plan) if !plan.is_empty() => 2 + plan.items.len(),
         _ => 0,
     }
 }

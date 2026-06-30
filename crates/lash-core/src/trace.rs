@@ -40,6 +40,7 @@ pub(crate) fn emit_trace_at(
     };
     let mut merged = base_context.clone();
     merge_context(&mut merged, context);
+    assign_span_identity(&mut merged, &event);
     if let Err(err) = sink.append(&TraceRecord::new_with_timestamp(merged, event, timestamp)) {
         tracing::warn!(error = %err, "failed to append trace record");
     }
@@ -91,6 +92,120 @@ fn merge_context(base: &mut TraceContext, overlay: TraceContext) {
     base.metadata.extend(overlay.metadata);
 }
 
+/// Stamp the span identity (`graph_node_id`) and parent link
+/// (`parent_graph_node_id`) for the span this record represents, derived purely
+/// from data lash already carries (session / turn / llm / tool ids and any
+/// `caused_by` causal parent). This makes the trace stream self-describing: a
+/// consumer builds a correctly-nested span tree from `(graph_node_id,
+/// parent_graph_node_id)` with a single `id -> span` map, with no heuristic
+/// hierarchy reconstruction.
+///
+/// The tree is `session -> turn -> { llm call, tool call, … }`. A turn's parent
+/// is its causal origin (`caused_by` — e.g. the tool call in a parent session
+/// that spawned this subagent) when one is already on the context, otherwise
+/// the session root. Records that already carry their own node identity in the
+/// payload, and host-defined custom events, are left untouched.
+fn assign_span_identity(context: &mut TraceContext, event: &TraceEvent) {
+    let session_node = context.session_id.as_deref().map(session_node_id);
+    let turn_node = turn_node_id(context);
+
+    match event {
+        TraceEvent::SessionStarted { .. } => set_span(context, session_node, None),
+        TraceEvent::TurnStarted { .. } | TraceEvent::TurnCompleted { .. } => {
+            let parent = context.parent_graph_node_id.clone().or(session_node);
+            set_span(context, turn_node, parent);
+        }
+        TraceEvent::LlmCallStarted { .. }
+        | TraceEvent::LlmCallCompleted { .. }
+        | TraceEvent::LlmCallFailed { .. } => {
+            let self_id = context.llm_call_id.as_deref().map(llm_node_id);
+            set_span(context, self_id, turn_node);
+        }
+        TraceEvent::ToolCallStarted { call_id, .. }
+        | TraceEvent::ToolCallCompleted { call_id, .. } => {
+            let self_id = call_id.as_deref().map(tool_node_id);
+            set_span(context, self_id, turn_node);
+        }
+        TraceEvent::ProviderStreamEvent { .. } | TraceEvent::RuntimeStreamEvent { .. } => {
+            let parent = context
+                .llm_call_id
+                .as_deref()
+                .map(llm_node_id)
+                .or(turn_node);
+            set_span(context, None, parent);
+        }
+        TraceEvent::PromptBuilt { .. }
+        | TraceEvent::ProtocolStep { .. }
+        | TraceEvent::TokenUsage { .. } => set_span(context, None, turn_node),
+        // Events that already carry their own node identity in the payload, and
+        // host-defined custom events, keep whatever the emitter set.
+        _ => {}
+    }
+}
+
+/// Apply a computed `(self_id, parent_id)` without clobbering identity an
+/// emitter set explicitly, and never letting a span become its own parent.
+fn set_span(context: &mut TraceContext, self_id: Option<String>, parent_id: Option<String>) {
+    if context.graph_node_id.is_none() {
+        context.graph_node_id = self_id;
+    }
+    if let Some(parent_id) = parent_id
+        && context.graph_node_id.as_deref() != Some(parent_id.as_str())
+    {
+        context.parent_graph_node_id = Some(parent_id);
+    }
+}
+
+fn session_node_id(session_id: &str) -> String {
+    format!("session:{session_id}")
+}
+
+fn turn_node_id(context: &TraceContext) -> Option<String> {
+    let session_id = context.session_id.as_deref()?;
+    if let Some(turn_id) = context.turn_id.as_deref() {
+        Some(format!("turn:{session_id}:{turn_id}"))
+    } else {
+        context
+            .turn_index
+            .map(|turn_index| format!("turn:{session_id}:idx{turn_index}"))
+    }
+}
+
+fn llm_node_id(llm_call_id: &str) -> String {
+    format!("llm:{llm_call_id}")
+}
+
+fn tool_node_id(call_id: &str) -> String {
+    format!("tool:{call_id}")
+}
+
+/// Map a `caused_by` reference onto the node id its target span carries, so a
+/// child session/turn nests under whatever spawned it. The `Turn` / `ToolCall`
+/// arms intentionally mirror [`turn_node_id`] / [`tool_node_id`] so the
+/// cross-session parent reference resolves to a real span.
+fn causal_node_id(caused_by: &crate::CausalRef) -> String {
+    match caused_by {
+        crate::CausalRef::Turn {
+            session_id,
+            turn_id,
+        } => format!("turn:{session_id}:{turn_id}"),
+        crate::CausalRef::Effect { effect_id, .. } => format!("effect:{effect_id}"),
+        crate::CausalRef::ToolCall { call_id, .. } => format!("tool:{call_id}"),
+        crate::CausalRef::Process { process_id } => format!("process:{process_id}"),
+        crate::CausalRef::ProcessEvent {
+            process_id,
+            sequence,
+        } => format!("process:{process_id}:{sequence}"),
+        crate::CausalRef::TriggerOccurrence { occurrence_id } => {
+            format!("trigger:{occurrence_id}")
+        }
+        crate::CausalRef::SessionNode {
+            session_id,
+            node_id,
+        } => format!("node:{session_id}:{node_id}"),
+    }
+}
+
 pub(crate) fn trace_context_from_invocation(invocation: &crate::RuntimeInvocation) -> TraceContext {
     let mut context = TraceContext::default().for_session(invocation.scope.session_id.clone());
     if let Some(turn_id) = invocation.scope.turn_id.as_ref() {
@@ -112,6 +227,9 @@ pub(crate) fn trace_context_from_invocation(invocation: &crate::RuntimeInvocatio
     }
     if let Some(caused_by) = invocation.caused_by.as_ref() {
         context = trace_context_with_causal_ref(context, caused_by);
+        if context.parent_graph_node_id.is_none() {
+            context.parent_graph_node_id = Some(causal_node_id(caused_by));
+        }
     }
     context
 }
@@ -323,4 +441,124 @@ pub(crate) fn trace_output_parts(parts: &[LlmOutputPart]) -> Option<serde_json::
         })
         .collect::<Vec<_>>();
     (!parts.is_empty()).then_some(serde_json::Value::Array(parts))
+}
+
+#[cfg(test)]
+mod span_identity_tests {
+    use super::*;
+
+    fn turn_context() -> TraceContext {
+        TraceContext::default()
+            .for_session("sess")
+            .for_turn_index(0)
+            .for_turn("turn-1")
+    }
+
+    fn sample_request() -> TraceLlmRequest {
+        TraceLlmRequest {
+            model: "openai/test".to_string(),
+            model_variant: None,
+            messages: Vec::new(),
+            attachments: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: "auto".to_string(),
+            output_spec: None,
+            stream: false,
+        }
+    }
+
+    #[test]
+    fn turn_span_parents_under_session() {
+        let mut context = turn_context();
+        assign_span_identity(
+            &mut context,
+            &TraceEvent::TurnStarted {
+                metadata: Default::default(),
+            },
+        );
+        assert_eq!(context.graph_node_id.as_deref(), Some("turn:sess:turn-1"));
+        assert_eq!(
+            context.parent_graph_node_id.as_deref(),
+            Some("session:sess")
+        );
+    }
+
+    #[test]
+    fn llm_span_parents_under_turn() {
+        let mut context = turn_context().for_llm_call("sess:0:0:0");
+        assign_span_identity(
+            &mut context,
+            &TraceEvent::LlmCallStarted {
+                request: sample_request(),
+            },
+        );
+        assert_eq!(context.graph_node_id.as_deref(), Some("llm:sess:0:0:0"));
+        assert_eq!(
+            context.parent_graph_node_id.as_deref(),
+            Some("turn:sess:turn-1")
+        );
+    }
+
+    #[test]
+    fn tool_span_parents_under_turn_and_matches_causal_tool_ref() {
+        let mut context = turn_context();
+        assign_span_identity(
+            &mut context,
+            &TraceEvent::ToolCallStarted {
+                call_id: Some("call_abc".to_string()),
+                name: "read_file".to_string(),
+                args: serde_json::json!({}),
+            },
+        );
+        assert_eq!(context.graph_node_id.as_deref(), Some("tool:call_abc"));
+        assert_eq!(
+            context.parent_graph_node_id.as_deref(),
+            Some("turn:sess:turn-1")
+        );
+        // A subagent caused_by this tool call must resolve to the same node id.
+        assert_eq!(
+            causal_node_id(&crate::CausalRef::ToolCall {
+                session_id: "sess".to_string(),
+                call_id: "call_abc".to_string(),
+            }),
+            "tool:call_abc"
+        );
+    }
+
+    #[test]
+    fn turn_keeps_causal_parent_when_present() {
+        let mut context = turn_context();
+        context.parent_graph_node_id = Some("tool:call_parent".to_string());
+        assign_span_identity(
+            &mut context,
+            &TraceEvent::TurnCompleted {
+                status: "completed".to_string(),
+                done_reason: "modelstop".to_string(),
+                agent_frame_switch: None,
+            },
+        );
+        assert_eq!(context.graph_node_id.as_deref(), Some("turn:sess:turn-1"));
+        assert_eq!(
+            context.parent_graph_node_id.as_deref(),
+            Some("tool:call_parent")
+        );
+    }
+
+    #[test]
+    fn tool_call_without_id_has_no_self_node_but_still_nests() {
+        let mut context = turn_context();
+        assign_span_identity(
+            &mut context,
+            &TraceEvent::ToolCallStarted {
+                call_id: None,
+                name: "read_file".to_string(),
+                args: serde_json::json!({}),
+            },
+        );
+        assert_eq!(context.graph_node_id, None);
+        assert_eq!(
+            context.parent_graph_node_id.as_deref(),
+            Some("turn:sess:turn-1")
+        );
+    }
 }

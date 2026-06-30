@@ -183,6 +183,13 @@ impl PluginSession {
         !self.contributions.assistant_stream_hooks.is_empty()
     }
 
+    pub fn has_assistant_stream_finished_hooks(&self) -> bool {
+        !self
+            .contributions
+            .assistant_stream_finished_hooks
+            .is_empty()
+    }
+
     /// Chain registered turn-context transforms, piping each one's output
     /// into the next in priority order.
     pub async fn prepare_turn_context(
@@ -381,6 +388,21 @@ impl PluginSession {
             });
         }
         Ok(transforms)
+    }
+
+    pub async fn finish_assistant_stream(
+        &self,
+        session_id: &str,
+        reason: AssistantStreamFinishReason,
+    ) -> Result<(), PluginError> {
+        for registered in &self.contributions.assistant_stream_finished_hooks {
+            (registered.hook)(AssistantStreamFinishedContext {
+                session_id: session_id.to_string(),
+                reason,
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn project_tool_result(

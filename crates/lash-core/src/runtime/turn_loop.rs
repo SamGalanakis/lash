@@ -1880,7 +1880,6 @@ async fn emit_runtime_stream_event_to_sinks(
             emit_session_event_to_sink(events, event).await;
         }
         RuntimeStreamEvent::Turn(activity) => {
-            assembler.push_turn_activity(&activity);
             emit_turn_activity_to_sink(turn_events, activity).await;
         }
     }

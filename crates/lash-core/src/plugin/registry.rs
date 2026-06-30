@@ -10,13 +10,13 @@
 use std::sync::Arc;
 
 use super::{
-    AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantStreamHook,
-    BeforeToolCallHook, BeforeTurnHook, CheckpointHook, ContextCompactor, PluginCommand,
-    PluginCommandHandler, PluginCommandInvokeFuture, PluginCommandOutcome, PluginError, PluginHost,
-    PluginLifecycleEventHook, PluginOperationDef, PluginOperationFailure, PluginOperationKind,
-    PluginQuery, PluginQueryHandler, PluginQueryInvokeFuture, PluginRegistrar, PluginSnapshotMeta,
-    PluginTask, PluginTaskHandler, PluginTaskInvokeFuture, PluginTaskOutcome, PromptContributor,
-    SessionConfigMutator, SessionToolAccess, SnapshotReader, SnapshotWriter,
+    AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantStreamFinishedHook,
+    AssistantStreamHook, BeforeToolCallHook, BeforeTurnHook, CheckpointHook, ContextCompactor,
+    PluginCommand, PluginCommandHandler, PluginCommandInvokeFuture, PluginCommandOutcome,
+    PluginError, PluginHost, PluginLifecycleEventHook, PluginOperationDef, PluginOperationFailure,
+    PluginOperationKind, PluginQuery, PluginQueryHandler, PluginQueryInvokeFuture, PluginRegistrar,
+    PluginSnapshotMeta, PluginTask, PluginTaskHandler, PluginTaskInvokeFuture, PluginTaskOutcome,
+    PromptContributor, SessionConfigMutator, SessionToolAccess, SnapshotReader, SnapshotWriter,
     SubagentSessionContext, ToolCatalogContributor, ToolResultProjector, TurnContextTransform,
 };
 use crate::{PluginOptions, ToolProvider};
@@ -95,6 +95,7 @@ pub struct PluginSpec {
     pub checkpoint_hooks: Vec<CheckpointHook>,
     pub assistant_stream_hooks: Vec<AssistantStreamHook>,
     pub assistant_response_hooks: Vec<AssistantResponseHook>,
+    pub assistant_stream_finished_hooks: Vec<AssistantStreamFinishedHook>,
     pub tool_result_projector: Option<ToolResultProjector>,
     pub runtime_event_hooks: Vec<PluginLifecycleEventHook>,
     pub session_config_mutators: Vec<SessionConfigMutator>,
@@ -162,6 +163,11 @@ impl PluginSpec {
 
     pub fn with_assistant_response(mut self, hook: AssistantResponseHook) -> Self {
         self.assistant_response_hooks.push(hook);
+        self
+    }
+
+    pub fn with_assistant_stream_finished(mut self, hook: AssistantStreamFinishedHook) -> Self {
+        self.assistant_stream_finished_hooks.push(hook);
         self
     }
 
@@ -595,6 +601,9 @@ impl SessionPlugin for SpecPlugin {
         }
         for hook in &self.spec.assistant_response_hooks {
             reg.output().response(Arc::clone(hook));
+        }
+        for hook in &self.spec.assistant_stream_finished_hooks {
+            reg.output().stream_finished(Arc::clone(hook));
         }
         if let Some(projector) = &self.spec.tool_result_projector {
             reg.tool_results().projector(Arc::clone(projector))?;

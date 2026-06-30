@@ -373,6 +373,12 @@ impl RuntimeTurnDriver<'_> {
             }
         };
 
+        self.finish_assistant_stream_hooks(assistant_stream_finish_reason(
+            &result,
+            abort_requested,
+        ))
+        .await;
+
         if let Err(err) = &result {
             tracing::error!(
                 session_id = %self.session_id,
@@ -418,6 +424,28 @@ impl RuntimeTurnDriver<'_> {
                 .insert(protocol_iteration, debug.summary);
         }
         (result, text_streamed)
+    }
+
+    async fn finish_assistant_stream_hooks(
+        &mut self,
+        reason: crate::plugin::AssistantStreamFinishReason,
+    ) {
+        if !self.session.plugins().has_assistant_stream_finished_hooks() {
+            return;
+        }
+        if let Err(err) = self
+            .session
+            .plugins()
+            .finish_assistant_stream(&self.session_id, reason)
+            .await
+        {
+            tracing::error!(
+                session_id = %self.session_id,
+                reason = ?reason,
+                error = %err,
+                "assistant stream cleanup hook failed"
+            );
+        }
     }
 
     pub(super) fn handle_log_event(&mut self, event: crate::sansio::LogEvent) {
@@ -871,6 +899,24 @@ impl RuntimeTurnDriver<'_> {
                 .await?;
         }
         Ok(())
+    }
+}
+
+fn assistant_stream_finish_reason(
+    result: &Result<LlmResponse, LlmCallError>,
+    abort_requested: bool,
+) -> crate::plugin::AssistantStreamFinishReason {
+    use crate::plugin::AssistantStreamFinishReason;
+
+    if abort_requested && result.is_ok() {
+        return AssistantStreamFinishReason::Aborted;
+    }
+    match result {
+        Ok(_) => AssistantStreamFinishReason::Complete,
+        Err(err) if err.terminal_reason == crate::LlmTerminalReason::Cancelled => {
+            AssistantStreamFinishReason::Cancelled
+        }
+        Err(_) => AssistantStreamFinishReason::ProviderError,
     }
 }
 

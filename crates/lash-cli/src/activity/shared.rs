@@ -188,7 +188,7 @@ pub(super) fn named_description_detail_lines(result: &Value, limit: usize) -> Ve
 
 // ─── Generic semantic summary fallback ───────────────────────────────────────
 //
-// Used by: `apply_patch` when the result has no semantic summary and
+// Used by: edit tools when the result has no semantic summary and
 // the generic projector as the last-ditch label for unknown tools.
 // Known tool names get a hand-tuned phrase; others fall back to
 // `"tool_name_with_underscores"` → `"tool name with underscores"`.
@@ -206,7 +206,12 @@ pub(super) fn semantic_tool_summary(name: &str, args: &Value) -> String {
                 label
             })
             .unwrap_or_else(|| "read file".to_string()),
-        "apply_patch" => "apply patch".to_string(),
+        "edit" => tool_arg_str(args, "path")
+            .map(|path| format!("edit {}", compact_path_display(path)))
+            .unwrap_or_else(|| "edit file".to_string()),
+        "write" => tool_arg_str(args, "path")
+            .map(|path| format!("write {}", compact_path_display(path)))
+            .unwrap_or_else(|| "write file".to_string()),
         "grep" => super::projectors::exploration::grep_label(args),
         "glob" => super::projectors::exploration::glob_label(args),
         "exec_command" | "start_command" => tool_arg_str(args, "cmd")

@@ -2,6 +2,19 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.fill(area, ' ', theme::surface_base().fill());
     let viewport_height = area.height as usize;
     let viewport_width = area.width as usize;
+
+    // Bottom-anchor: when the whole transcript fits, drop it to the floor
+    // of the viewport so the latest line hugs the input box instead of
+    // leaving the input stranded below an empty gap. The leftover space
+    // becomes headroom at the top, which reads as the start of scrollback.
+    // Once the content overflows (and scrolling kicks in) the pad is zero,
+    // so paging behaviour is unchanged.
+    let content_height = app.total_content_height(viewport_width, viewport_height);
+    let top_pad = viewport_height.saturating_sub(content_height);
+    app.history_top_pad = top_pad;
+    let base_y = area.y + top_pad as u16;
+    let row_budget = viewport_height - top_pad;
+
     let scroll = app.scroll_offset;
     let block_height = app.height_cache_snapshot().last().copied().unwrap_or(0);
     let (first_idx, mut skip_lines) = if scroll >= block_height {
@@ -18,50 +31,50 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             continue;
         }
         for line in block_lines.iter().skip(skip_lines) {
-            if written_rows >= viewport_height {
+            if written_rows >= row_budget {
                 break 'blocks;
             }
-            frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
+            frame.write_line(area.x, base_y + written_rows as u16, line, area.width);
             written_rows += 1;
         }
         skip_lines = 0;
     }
 
-    if written_rows < viewport_height
+    if written_rows < row_budget
         && let Some(live_lines) = app.live_reasoning_lines_snapshot()
     {
         if app.live_reasoning_leading_padding() > 0 {
             if skip_lines > 0 {
                 skip_lines -= 1;
-            } else if written_rows < viewport_height {
+            } else if written_rows < row_budget {
                 written_rows += 1;
             }
         }
         for line in live_lines.iter().skip(skip_lines) {
-            if written_rows >= viewport_height {
+            if written_rows >= row_budget {
                 break;
             }
-            frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
+            frame.write_line(area.x, base_y + written_rows as u16, line, area.width);
             written_rows += 1;
         }
         skip_lines = skip_lines.saturating_sub(live_lines.len());
     }
 
-    if written_rows < viewport_height
+    if written_rows < row_budget
         && let Some(live_lines) = app.live_assistant_lines_snapshot()
     {
         if app.live_assistant_leading_padding() > 0 {
             if skip_lines > 0 {
                 skip_lines -= 1;
-            } else if written_rows < viewport_height {
+            } else if written_rows < row_budget {
                 written_rows += 1;
             }
         }
         for line in live_lines.iter().skip(skip_lines) {
-            if written_rows >= viewport_height {
+            if written_rows >= row_budget {
                 break;
             }
-            frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
+            frame.write_line(area.x, base_y + written_rows as u16, line, area.width);
             written_rows += 1;
         }
         // Advance skip_lines past the live markdown content rows so a
@@ -72,14 +85,14 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // Plan checklist renders at the logical tail of history — part of
     // the scroll, not a pinned dock. Appears just after the live-
     // assistant trace so new turns push it down the transcript.
-    if written_rows < viewport_height
+    if written_rows < row_budget
         && let Some(plan_lines) = render::plan_dock_lines_snapshot(app, area.width)
     {
         for line in plan_lines.iter().skip(skip_lines) {
-            if written_rows >= viewport_height {
+            if written_rows >= row_budget {
                 break;
             }
-            frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
+            frame.write_line(area.x, base_y + written_rows as u16, line, area.width);
             written_rows += 1;
         }
     }
@@ -173,8 +186,10 @@ fn apply_selection_highlight(frame: &mut Frame<'_>, app: &App, history_area: Rec
     }
 
     let ((start_col, start_row), (end_col, end_row)) = selection_ordered(&app.selection);
+    let top_pad = app.history_top_pad;
     let view_top = app.scroll_offset;
-    let view_bottom = app.scroll_offset + history_area.height as usize;
+    let view_bottom =
+        app.scroll_offset + (history_area.height as usize).saturating_sub(top_pad);
     let visible_start = start_row.max(view_top);
     let visible_end = end_row.min(view_bottom.saturating_sub(1));
 
@@ -183,7 +198,7 @@ fn apply_selection_highlight(frame: &mut Frame<'_>, app: &App, history_area: Rec
     }
 
     for row in visible_start..=visible_end {
-        let screen_y = history_area.y + (row - app.scroll_offset) as u16;
+        let screen_y = history_area.y + top_pad as u16 + (row - app.scroll_offset) as u16;
         let col_start = if row == start_row {
             start_col
         } else {

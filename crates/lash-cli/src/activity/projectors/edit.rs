@@ -1,8 +1,8 @@
-//! Edit projector: `apply_patch`.
+//! Edit projector: `edit` / `write`.
 //!
 //! Produces an `Edit` block with a `PatchPreview` artifact listing the
 //! changed files. Consecutive edits merge via `merge_edit_activity`
-//! through `ActivityState` so a run of patches collapses into a single
+//! through `ActivityState` so a run of edits collapses into a single
 //! "Edited N files (+M -K)" block.
 
 use std::collections::HashSet;
@@ -19,7 +19,7 @@ pub(crate) struct EditProjector;
 
 impl ToolProjector for EditProjector {
     fn tool_names(&self) -> &'static [&'static str] {
-        &["apply_patch"]
+        &["edit", "write"]
     }
 
     fn project(&self, ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
@@ -28,8 +28,8 @@ impl ToolProjector for EditProjector {
         } else {
             ActivityStatus::Failed
         };
-        let artifact = patch_preview_artifact(&ctx.result);
-        let summary = patch_summary(&ctx.result)
+        let artifact = patch_preview_artifact(ctx.name, &ctx.args, &ctx.result);
+        let summary = patch_summary(&artifact)
             .or_else(|| {
                 ctx.result
                     .get("summary")
@@ -54,48 +54,20 @@ impl ToolProjector for EditProjector {
     }
 }
 
-// ─── Patch helpers ───────────────────────────────────────────────────────────
+// ─── Patch preview helpers ───────────────────────────────────────────────────
 
-fn patch_preview_artifact(result: &Value) -> Option<ActivityArtifact> {
-    let files = result
-        .get("files")
-        .and_then(|value| value.as_array())
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|file| {
-                    let path = file.get("path").and_then(|value| value.as_str())?;
-                    let status = file
-                        .get("status")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("modified")
-                        .to_string();
-                    let from_path = file
-                        .get("from_path")
-                        .and_then(|value| value.as_str())
-                        .map(str::to_string);
-                    let diff = file
-                        .get("diff")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let (added, removed) = patch_file_counts(file, &diff);
-                    Some(PatchFilePreview {
-                        path: path.to_string(),
-                        from_path,
-                        status,
-                        added,
-                        removed,
-                        diff,
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+fn patch_preview_artifact(name: &str, args: &Value, result: &Value) -> Option<ActivityArtifact> {
+    let files = if name == "edit" {
+        edit_result_file_preview(args, result).into_iter().collect()
+    } else {
+        Vec::new()
+    };
 
     if files.is_empty() {
         return result
-            .get("diff")
+            .get("details")
+            .and_then(|details| details.get("diff"))
+            .or_else(|| result.get("diff"))
             .and_then(|value| value.as_str())
             .filter(|diff| !diff.trim().is_empty())
             .map(|diff| ActivityArtifact::DiffPreview {
@@ -104,16 +76,8 @@ fn patch_preview_artifact(result: &Value) -> Option<ActivityArtifact> {
             });
     }
 
-    let total_added = result
-        .get("added")
-        .and_then(|value| value.as_u64())
-        .map(|value| value as usize)
-        .unwrap_or_else(|| files.iter().map(|file| file.added).sum());
-    let total_removed = result
-        .get("removed")
-        .and_then(|value| value.as_u64())
-        .map(|value| value as usize)
-        .unwrap_or_else(|| files.iter().map(|file| file.removed).sum());
+    let total_added = files.iter().map(|file| file.added).sum();
+    let total_removed = files.iter().map(|file| file.removed).sum();
 
     Some(ActivityArtifact::PatchPreview {
         files,
@@ -122,20 +86,46 @@ fn patch_preview_artifact(result: &Value) -> Option<ActivityArtifact> {
     })
 }
 
-fn patch_summary(result: &Value) -> Option<String> {
+fn edit_result_file_preview(args: &Value, result: &Value) -> Option<PatchFilePreview> {
+    let path = result
+        .get("path")
+        .and_then(|value| value.as_str())
+        .or_else(|| args.get("path").and_then(|value| value.as_str()))?;
+    let diff = result
+        .get("details")
+        .and_then(|details| details.get("patch"))
+        .or_else(|| {
+            result
+                .get("details")
+                .and_then(|details| details.get("diff"))
+        })
+        .and_then(|value| value.as_str())
+        .filter(|diff| !diff.trim().is_empty())?;
+    let (added, removed) = count_diff_delta(diff);
+    Some(PatchFilePreview {
+        path: path.to_string(),
+        from_path: None,
+        status: "modified".to_string(),
+        added,
+        removed,
+        diff: diff.to_string(),
+    })
+}
+
+fn patch_summary(artifact: &Option<ActivityArtifact>) -> Option<String> {
     let ActivityArtifact::PatchPreview {
         files,
         total_added,
         total_removed,
-    } = patch_preview_artifact(result)?
+    } = artifact.as_ref()?
     else {
         return None;
     };
 
     Some(patch_summary_from_preview(
-        &files,
-        total_added,
-        total_removed,
+        files,
+        *total_added,
+        *total_removed,
     ))
 }
 
@@ -211,21 +201,6 @@ fn patch_count_suffix(added: usize, removed: usize) -> String {
     format!("(+{} -{})", added, removed)
 }
 
-fn patch_file_counts(file: &Value, diff: &str) -> (usize, usize) {
-    let added = file
-        .get("added")
-        .and_then(|value| value.as_u64())
-        .map(|value| value as usize);
-    let removed = file
-        .get("removed")
-        .and_then(|value| value.as_u64())
-        .map(|value| value as usize);
-    match (added, removed) {
-        (Some(added), Some(removed)) => (added, removed),
-        _ => count_diff_delta(diff),
-    }
-}
-
 fn count_diff_delta(diff: &str) -> (usize, usize) {
     let mut added = 0usize;
     let mut removed = 0usize;
@@ -280,22 +255,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn apply_patch_summary_prefers_semantic_single_file_copy() {
+    fn edit_summary_uses_result_details_patch() {
         let mut state = ActivityState::new();
         let blocks = state.project_tool_call(
-            "apply_patch",
-            json!({}),
+            "edit",
+            json!({"path": "crates/lash-cli/src/render/mod.rs"}),
             json!({
-                "summary": "Applied patch to 1 file",
-                "added": 3,
-                "removed": 1,
-                "files": [{
-                    "path": "crates/lash-cli/src/render/mod.rs",
-                    "status": "modified",
-                    "added": 3,
-                    "removed": 1,
-                    "diff": "--- a/crates/lash-cli/src/render/mod.rs\n+++ b/crates/lash-cli/src/render/mod.rs\n@@\n-old\n+new"
-                }]
+                "summary": "Successfully replaced 1 block(s) in crates/lash-cli/src/render/mod.rs.",
+                "path": "crates/lash-cli/src/render/mod.rs",
+                "replacements": 1,
+                "details": {
+                    "patch": "--- a/crates/lash-cli/src/render/mod.rs\n+++ b/crates/lash-cli/src/render/mod.rs\n@@\n-old\n+new",
+                    "diff": "--- a/crates/lash-cli/src/render/mod.rs\n+++ b/crates/lash-cli/src/render/mod.rs\n@@\n-old\n+new",
+                    "firstChangedLine": 12
+                }
             }),
             true,
             18,
@@ -303,12 +276,12 @@ mod tests {
 
         assert_eq!(
             blocks[0].call.summary,
-            "Edited crates/lash-cli/src/render/mod.rs (+3 -1)"
+            "Edited crates/lash-cli/src/render/mod.rs (+1 -1)"
         );
         assert!(matches!(
             blocks[0].result.artifact,
             Some(ActivityArtifact::PatchPreview {
-                total_added: 3,
+                total_added: 1,
                 total_removed: 1,
                 ..
             })
@@ -316,28 +289,24 @@ mod tests {
     }
 
     #[test]
-    fn apply_patch_summary_shows_move_arrow() {
+    fn write_summary_uses_tool_result_summary_without_patch_preview() {
         let mut state = ActivityState::new();
         let blocks = state.project_tool_call(
-            "apply_patch",
-            json!({}),
+            "write",
+            json!({"path": "new.rs", "content": "fn main() {}\n"}),
             json!({
-                "summary": "Applied patch to 1 file",
-                "added": 2,
-                "removed": 2,
-                "files": [{
-                    "path": "new.rs",
-                    "from_path": "old.rs",
-                    "status": "moved",
-                    "added": 2,
-                    "removed": 2,
-                    "diff": "--- a/new.rs\n+++ b/new.rs\n@@\n-old\n+new"
-                }]
+                "summary": "Successfully wrote 13 bytes to new.rs.",
+                "path": "new.rs",
+                "bytes": 13
             }),
             true,
             11,
         );
 
-        assert_eq!(blocks[0].call.summary, "Moved old.rs → new.rs (+2 -2)");
+        assert_eq!(
+            blocks[0].call.summary,
+            "Successfully wrote 13 bytes to new.rs."
+        );
+        assert!(blocks[0].result.artifact.is_none());
     }
 }

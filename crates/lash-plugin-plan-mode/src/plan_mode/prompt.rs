@@ -32,7 +32,7 @@ pub(crate) fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     PluginMessage::text(
         lash_core::MessageRole::System,
         format!(
-            "Plan mode: use `{display}` as the single source of truth. Use `files.glob`, `files.grep`, `files.read`, `web.search`, `web.fetch`, and `user.ask` as needed, and update only that file with `files.patch`. Do not present the plan with snippets, showcases, or prose checklists; the host can surface the file path while planning. When the plan is ready for review, call `plan.exit`."
+            "Plan mode: use `{display}` as the single source of truth. Use `files.glob`, `files.grep`, `files.read`, `web.search`, `web.fetch`, and `user.ask` as needed, and update only that file with `files.edit` or `files.write`. Do not present the plan with snippets, showcases, or prose checklists; the host can surface the file path while planning. When the plan is ready for review, call `plan.exit`."
         ),
     )
 }
@@ -40,10 +40,10 @@ pub(crate) fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
 pub(crate) fn plan_mode_tool_note(plan_path: Option<&Path>) -> String {
     match plan_path {
         Some(path) => format!(
-            "Plan mode tools: `files.glob`, `files.grep`, `files.read`, `web.search`, `web.fetch`, `user.ask`, `files.patch` for `{}`, `plan.exit`. The host can surface the plan file path; full review happens in `plan.exit`.",
+            "Plan mode tools: `files.glob`, `files.grep`, `files.read`, `web.search`, `web.fetch`, `user.ask`, `files.edit`/`files.write` for `{}`, `plan.exit`. The host can surface the plan file path; full review happens in `plan.exit`.",
             plan_display_path(path)
         ),
-        None => "Plan mode tools: `files.glob`, `files.grep`, `files.read`, `web.search`, `web.fetch`, `user.ask`, plan-file `files.patch`, `plan.exit`. The host can surface the plan file path; full review happens in `plan.exit`.".to_string(),
+        None => "Plan mode tools: `files.glob`, `files.grep`, `files.read`, `web.search`, `web.fetch`, `user.ask`, plan-file `files.edit`/`files.write`, `plan.exit`. The host can surface the plan file path; full review happens in `plan.exit`.".to_string(),
     }
 }
 

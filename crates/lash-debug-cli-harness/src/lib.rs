@@ -226,7 +226,7 @@ impl LiveHarness {
     }
 
     pub fn wait_idle(&mut self, timeout: Duration) -> Result<String> {
-        self.wait_until("Idle", timeout, |visible| visible.contains("Idle"))
+        self.wait_settled_idle(timeout)
     }
 
     pub fn wait_submitted_turn_idle(
@@ -236,14 +236,17 @@ impl LiveHarness {
     ) -> Result<String> {
         let deadline = Instant::now() + timeout;
         let mut saw_output_after_submit = false;
+        let mut saw_busy_after_submit = false;
         loop {
             let visible = self.refresh_screen()?;
             saw_output_after_submit |= self.pty.raw_output().len() > raw_len_before_submit;
-            if !visible.contains("Idle") {
-                return self.wait_idle(timeout);
-            }
-            if saw_output_after_submit && input_prompt_is_empty(&visible) {
-                return Ok(visible);
+            saw_busy_after_submit |= visible_run_state_is_busy(&visible);
+            if saw_busy_after_submit
+                && saw_output_after_submit
+                && visible_run_state_is_idle(&visible)
+                && input_prompt_is_empty(&visible)
+            {
+                return self.wait_settled_idle(remaining_timeout(deadline)?);
             }
             if let Some(status) = self.pty.try_wait()? {
                 bail!("lash exited before submitted turn settled: {status:?}\n\n{visible}");
@@ -384,6 +387,41 @@ impl LiveHarness {
             if Instant::now() >= deadline {
                 self.write_current_artifacts()?;
                 bail!("timed out waiting for `{label}`\n\n{visible}");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn wait_settled_idle(&mut self, timeout: Duration) -> Result<String> {
+        let deadline = Instant::now() + timeout;
+        let settle_duration = Duration::from_secs(2);
+        let mut candidate_since: Option<Instant> = None;
+        let mut candidate_raw_len = 0;
+        loop {
+            let visible = self.refresh_screen()?;
+            let raw_len = self.pty.raw_output().len();
+            if visible_run_state_is_idle(&visible) && input_prompt_is_empty(&visible) {
+                match candidate_since {
+                    Some(since)
+                        if candidate_raw_len == raw_len && since.elapsed() >= settle_duration =>
+                    {
+                        return Ok(visible);
+                    }
+                    Some(_) if candidate_raw_len == raw_len => {}
+                    _ => {
+                        candidate_since = Some(Instant::now());
+                        candidate_raw_len = raw_len;
+                    }
+                }
+            } else {
+                candidate_since = None;
+            }
+            if let Some(status) = self.pty.try_wait()? {
+                bail!("lash exited before settled idle: {status:?}\n\n{visible}");
+            }
+            if Instant::now() >= deadline {
+                self.write_current_artifacts()?;
+                bail!("timed out waiting for settled idle\n\n{visible}");
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -785,6 +823,33 @@ fn input_prompt_is_empty(visible: &str) -> bool {
         .any(|line| line.trim_start().starts_with("❯ Message"))
 }
 
+fn visible_run_state_is_idle(visible: &str) -> bool {
+    visible_run_state_is(visible, "Idle")
+}
+
+fn visible_run_state_is_busy(visible: &str) -> bool {
+    ["Thinking", "Responding", "Running", "Waiting"]
+        .iter()
+        .any(|state| visible_run_state_is(visible, state))
+}
+
+fn visible_run_state_is(visible: &str, state: &str) -> bool {
+    const SPINNER_PREFIXES: [&str; 5] = ["/LASH", "L/ASH", "LA/SH", "LAS/H", "LASH/"];
+    let status = format!("  {state}");
+    visible.lines().any(|line| {
+        let line = line.trim_start();
+        SPINNER_PREFIXES
+            .iter()
+            .any(|prefix| line.starts_with(prefix) && line.contains(&status))
+    })
+}
+
+fn remaining_timeout(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .context("deadline elapsed before idle settled")
+}
+
 pub fn key_sequence(name: &str) -> Result<Vec<u8>> {
     let lower = name.trim().to_ascii_lowercase();
     let bytes: &[u8] = match lower.as_str() {
@@ -929,6 +994,34 @@ mod tests {
         ));
         assert!(!input_prompt_is_empty(
             "conversation\n/LASH  Idle\n ❯ QC scenario still in input"
+        ));
+    }
+
+    #[test]
+    fn run_state_detection_uses_status_label_not_history_text() {
+        assert!(visible_run_state_is_idle(
+            "conversation mentions Idle earlier\n\n          L/ASH  Idle\n ❯ Message"
+        ));
+        assert!(visible_run_state_is_idle(
+            "conversation mentions Idle earlier\n\n          /LASH  Idle\n ❯ Message"
+        ));
+        assert!(visible_run_state_is_idle(
+            "conversation mentions Idle earlier\n\n          LA/SH  Idle\n ❯ Message"
+        ));
+        assert!(visible_run_state_is_idle(
+            "conversation mentions Idle earlier\n\n          LASH/  Idle\n ❯ Message"
+        ));
+        assert!(visible_run_state_is_busy(
+            "conversation mentions Idle earlier\n\n          L/ASH  Thinking\n ❯ Message"
+        ));
+        assert!(visible_run_state_is_busy(
+            "conversation mentions Idle earlier\n\n          /LASH  Responding\n ❯ Message"
+        ));
+        assert!(!visible_run_state_is_idle(
+            "conversation mentions Idle earlier\n\n          L/ASH  Thinking\n ❯ Message"
+        ));
+        assert!(!visible_run_state_is_idle(
+            "conversation mentions L/ASH  Idle earlier\n\n          plain history text only\n ❯ Message"
         ));
     }
 

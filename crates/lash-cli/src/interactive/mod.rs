@@ -469,11 +469,7 @@ pub(crate) async fn run_app(
                             Some(UiTimelineItem::SystemMessage(message))
                                 if message == crate::util::manual_interrupt_message()
                         );
-                        let mut ui_projection_state = app.ui_projection_state();
-                        ui_projection_state.live_assistant_text = app::interrupted_assistant_tail(
-                            &app.timeline,
-                            &done.result.assistant_output.safe_text,
-                        );
+                        let ui_projection_state = app.ui_projection_state();
                         let interrupted_message = if had_manual_interrupt_message {
                             crate::util::manual_interrupt_message().to_string()
                         } else {

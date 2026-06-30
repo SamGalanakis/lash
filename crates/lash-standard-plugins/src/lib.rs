@@ -8,8 +8,7 @@ pub use lash_plugin_observational_memory::ObservationalMemoryConfig;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_process_controls::SessionProcessAdminPluginFactory;
 use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
-use lash_tools::apply_patch::apply_patch_provider;
-use lash_tools::files::{glob_provider, read_file_provider};
+use lash_tools::files::{edit_provider, glob_provider, read_file_provider, write_provider};
 use lash_tools::shell::StandardShellPluginFactory;
 use lash_tools::web::{fetch_url_provider, web_search_provider};
 pub use rolling_history::RollingHistoryConfig;
@@ -105,9 +104,12 @@ fn push_local_runtime_tools(stack: &mut PluginStack, include_cancel_process: boo
     stack.push(Arc::new(processess));
     stack.push(Arc::new(StandardShellPluginFactory::new()));
     stack.push(Arc::new(StaticPluginFactory::new(
-        "apply_patch",
-        PluginSpec::new()
-            .with_tool_provider(Arc::new(apply_patch_provider()) as Arc<dyn ToolProvider>),
+        "edit",
+        PluginSpec::new().with_tool_provider(Arc::new(edit_provider()) as Arc<dyn ToolProvider>),
+    )));
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "write",
+        PluginSpec::new().with_tool_provider(Arc::new(write_provider()) as Arc<dyn ToolProvider>),
     )));
     stack.push(Arc::new(StaticPluginFactory::new(
         "read_file",
@@ -230,6 +232,8 @@ mod tests {
 
         assert!(names.contains(&"glob".to_string()));
         assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"edit".to_string()));
+        assert!(names.contains(&"write".to_string()));
         assert!(!names.contains(&"ls".to_string()));
     }
 

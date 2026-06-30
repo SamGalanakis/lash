@@ -9,6 +9,7 @@ on:
         default: "full"
         type: choice
         options:
+          - fast
           - default
           - broad
           - full

@@ -5,7 +5,7 @@ use crate::{SchemaContract, SchemaProjectionOverride};
 ///
 /// Tools that only *read* state (`read_file`, `grep`, `glob`, ...) can run
 /// in parallel safely and should use the default [`ToolScheduling::Parallel`].
-/// Tools that *mutate* shared state (`apply_patch`, `exec_command`,
+/// Tools that *mutate* shared state (`edit`, `write`, `exec_command`,
 /// `write_stdin`) should declare
 /// [`ToolScheduling::Serial`] so the dispatcher runs them one-at-a-time
 /// and avoids interleaving with each other.

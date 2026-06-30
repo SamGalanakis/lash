@@ -281,7 +281,8 @@ pub(in crate::interactive) fn handle_mouse_event(
                 column = mouse.column,
                 "selection started from mouse down"
             );
-            let vrow = app.scroll_offset + (mouse.row - ha.y) as usize;
+            let vrow = app.scroll_offset
+                + (mouse.row.saturating_sub(ha.y) as usize).saturating_sub(app.history_top_pad);
             app.selection.anchor = (mouse.column, vrow);
             app.selection.end = (mouse.column, vrow);
             app.selection.active = true;
@@ -328,7 +329,8 @@ pub(in crate::interactive) fn handle_mouse_event(
             }
 
             let clamped_row = mouse.row.clamp(ha.y, ha.y + ha.height.saturating_sub(1));
-            let vrow = app.scroll_offset + (clamped_row - ha.y) as usize;
+            let vrow = app.scroll_offset
+                + (clamped_row.saturating_sub(ha.y) as usize).saturating_sub(app.history_top_pad);
             app.selection.end = (col, vrow);
             app.selection.visible = true;
             tracing::debug!(
@@ -414,7 +416,7 @@ pub(in crate::interactive) fn handle_mouse_event(
             app.scroll_down(scroll_lines, vh, vw);
             if app.selection.active {
                 // Extend selection to bottom of viewport after scroll
-                let vrow = app.scroll_offset + vh.saturating_sub(1);
+                let vrow = app.scroll_offset + vh.saturating_sub(app.history_top_pad + 1);
                 app.selection.end = (ha.x + ha.width, vrow);
                 app.selection.visible = true;
             }

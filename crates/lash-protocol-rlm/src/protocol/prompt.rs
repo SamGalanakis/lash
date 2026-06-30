@@ -169,13 +169,6 @@ fn render_execution_intro(has_operations: bool) -> String {
     section.push_str(
         r#"
 
-### Persistence
-
-Keep going until the request is fully resolved. End your turn only when you `finish` a final answer or genuinely have nothing left to do — until then, every step is another `<lashlang>` block.
-
-- If you say you will do something ("let me…", "I'll keep going"), emit the `<lashlang>` block that does it in the same reply. Never describe an action and then stop without running it.
-- You are solving the task, not narrating how it could be solved. Prefer acting over asking; ask only when genuinely blocked by a missing decision or permission.
-
 ### `print` vs `finish`
 
 - `print <expr>` — inspect a value and keep going; output appears on the next step. Print the part you need to decide the next step: a whole value when it is small and all of it is useful (e.g. state you consult each turn), otherwise selected fields, samples, or slices. Avoid dumping a large value when only part of it is relevant.
@@ -187,7 +180,7 @@ Do not finish with final results that depend on operations, files, generated pat
 
 ### Response shape
 
-Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The start and close tag lines must be standalone after trimming. Prose may be used when no action is needed. When action is needed, place the Lashlang block after any visible prose. If the block calls `finish`, that final value is the final answer; any preceding prose should be brief setup, not a second answer.
+Executable code must be inside paired `<lashlang>` and `</lashlang>` tags. The start and close tag lines must be standalone after trimming. When action is needed, place the Lashlang block after any visible prose or omit prose. Any turn-ending rules for prose-only responses versus `finish` are listed in the current **FINALIZATION** section.
 "#,
     );
     section

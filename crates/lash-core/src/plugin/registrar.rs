@@ -95,6 +95,7 @@ pub(crate) struct PluginContributions {
     pub(crate) checkpoint_hooks: Vec<RegisteredHook<CheckpointHook>>,
     pub(crate) assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     pub(crate) assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
+    pub(crate) assistant_stream_finished_hooks: Vec<RegisteredHook<AssistantStreamFinishedHook>>,
     pub(crate) tool_result_projector: Option<RegisteredExclusiveHook<ToolResultProjector>>,
     pub(crate) runtime_event_hooks: Vec<RegisteredHook<PluginLifecycleEventHook>>,
     pub(crate) session_config_mutators: Vec<SessionConfigMutator>,
@@ -199,6 +200,10 @@ impl OutputRegistrations<'_> {
 
     pub fn response(self, hook: AssistantResponseHook) {
         self.reg.add_assistant_response_hook(hook);
+    }
+
+    pub fn stream_finished(self, hook: AssistantStreamFinishedHook) {
+        self.reg.add_assistant_stream_finished_hook(hook);
     }
 
     pub fn assistant_prose_projector(
@@ -620,6 +625,14 @@ impl PluginRegistrar {
     fn add_assistant_response_hook(&mut self, hook: AssistantResponseHook) {
         push_registered_hook(
             &mut self.contributions.assistant_response_hooks,
+            &self.registering_plugin_id,
+            hook,
+        );
+    }
+
+    fn add_assistant_stream_finished_hook(&mut self, hook: AssistantStreamFinishedHook) {
+        push_registered_hook(
+            &mut self.contributions.assistant_stream_finished_hooks,
             &self.registering_plugin_id,
             hook,
         );

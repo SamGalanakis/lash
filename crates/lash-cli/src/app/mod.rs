@@ -31,8 +31,8 @@ use crate::stream_markdown::LiveMarkdown;
 use self::cache::BlockRenderCacheEntry;
 pub(super) use self::live::{LiveToolOutput, LiveTurnState};
 pub(crate) use self::projection::{
-    UiActivityJournal, UiActivityRecord, UiTimeline, UiTimelineItem, interrupted_assistant_tail,
-    preview_text_lines, smart_truncate_preview_line, timeline_from_read_view,
+    UiActivityJournal, UiActivityRecord, UiTimeline, UiTimelineItem, preview_text_lines,
+    smart_truncate_preview_line, timeline_from_read_view,
 };
 #[cfg(test)]
 pub(crate) use self::projection::{interrupted_blocks_from_read_view, strip_ansi_escape_sequences};
@@ -411,10 +411,6 @@ pub struct UiProjectionState {
     #[serde(default)]
     pub live_tool_output: LiveToolOutput,
     #[serde(default)]
-    pub live_assistant_text: Option<String>,
-    #[serde(default)]
-    pub live_reasoning_text: Option<String>,
-    #[serde(default)]
     pub activity_journal: UiActivityJournal,
 }
 
@@ -432,8 +428,6 @@ impl UiProjectionState {
                 })
                 .collect(),
             live_tool_output: app.live.tool_output.clone(),
-            live_assistant_text: app.live_assistant_normalized_text(),
-            live_reasoning_text: app.live_reasoning_normalized_text(),
             activity_journal: app.ui_activity_journal.clone(),
         }
     }
@@ -589,6 +583,12 @@ pub struct App {
     pub dirty: bool,
     /// Output-following mode for the history viewport.
     pub follow_mode: FollowOutputMode,
+    /// Blank rows inserted above the transcript on the last frame so a
+    /// short conversation hugs the input box instead of stranding it
+    /// below an empty gap. Recomputed every `draw_history`; consumed by
+    /// selection/mouse mapping so screen rows still resolve to the right
+    /// transcript line. Zero whenever the content overflows the viewport.
+    pub history_top_pad: usize,
     /// Incrementally maintained render/height caches for the viewport.
     render_cache: RenderCache,
     /// Owned editor/input state.
@@ -873,6 +873,7 @@ impl App {
             live: LiveTurnView::default(),
             dirty: true,
             follow_mode: FollowOutputMode::PinnedBottom,
+            history_top_pad: 0,
             render_cache: RenderCache::default(),
             editor: EditorState::default(),
             skills: SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),

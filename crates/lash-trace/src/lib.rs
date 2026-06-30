@@ -52,8 +52,16 @@ pub struct TraceContext {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// Stable id of the span this record represents (e.g. `turn:<session>:<turn>`,
+    /// `llm:<call_id>`, `tool:<call_id>`). Populated by the runtime for turn /
+    /// llm / tool / session records so a consumer can build a nested span tree
+    /// from `(graph_node_id, parent_graph_node_id)` with a single `id -> span`
+    /// map. Lashlang execution sets its own graph node id here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_node_id: Option<String>,
+    /// Id of the enclosing span — the value of some other record's
+    /// `graph_node_id`. A turn's parent is its causal origin (the spawning tool
+    /// call / effect, via `caused_by`) when known, otherwise the session root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_graph_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

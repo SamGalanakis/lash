@@ -34,6 +34,8 @@ pub type AssistantStreamHook =
 pub type AssistantResponseHook = Arc<
     dyn Fn(AssistantResponseHookContext) -> PluginFuture<AssistantResponseTransform> + Send + Sync,
 >;
+pub type AssistantStreamFinishedHook =
+    Arc<dyn Fn(AssistantStreamFinishedContext) -> PluginFuture<()> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct PromptHookContext {
@@ -252,4 +254,18 @@ pub struct AssistantResponseHookContext {
 pub struct AssistantResponseTransform {
     pub response: crate::LlmResponse,
     pub events: Vec<PluginRuntimeEvent>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssistantStreamFinishReason {
+    Complete,
+    Aborted,
+    Cancelled,
+    ProviderError,
+}
+
+#[derive(Clone)]
+pub struct AssistantStreamFinishedContext {
+    pub session_id: String,
+    pub reason: AssistantStreamFinishReason,
 }

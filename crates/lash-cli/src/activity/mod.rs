@@ -484,7 +484,7 @@ impl ActivityState {
 fn running_activity_kind(name: &str) -> ActivityKind {
     match name {
         "read_file" | "grep" | "glob" => ActivityKind::Exploration,
-        "apply_patch" => ActivityKind::Edit,
+        "edit" | "write" => ActivityKind::Edit,
         "exec_command" | "start_command" => ActivityKind::ShellCommand,
         "write_stdin" => ActivityKind::ShellInteraction,
         "search_web" => ActivityKind::WebSearch,
