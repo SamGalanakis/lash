@@ -8044,22 +8044,16 @@ impl GeneratedRuntimeWorld {
             Arc::clone(&self.attachment_store),
             Arc::clone(&self.process_env_store),
             Some(provider_schedule.clone()),
-            // Cross-backend durable re-run only: the harness drives every provider
-            // turn explicitly through generated `Provider` boundaries (which is
-            // what schedules the scripted-transport gate releases). The inline
-            // queued-work driver, however, claims and runs `next_turn` queued
-            // inputs as an UNMODELED turn the moment a session is idle. Under
-            // serialized execution every non-active session IS idle, so that
-            // autonomous turn fires a provider exchange the harness never released
-            // a gate for and parks on the scripted transport until the 120s
-            // provider timeout — an effective hang. In the concurrency-preserving
-            // SEARCH lane the session's lease is held by a live modeled turn, so
-            // `claim_and_run_pending` is a no-op there; the reference run proves
-            // (via its exchange/graph/transcript contracts) that autonomous queued
-            // work never affects any modeled-turn observation. Disabling the inline
-            // driver here therefore removes the hang while keeping the durable-state
-            // comparison byte-identical. The SEARCH lane keeps the driver enabled.
-            self.serialize_provider_turns,
+            // The generated harness owns provider execution through explicit
+            // `Provider` boundaries. Each modeled success turn gets one scripted
+            // exchange slot and one scheduler-owned release sequence. The runtime
+            // queued-work driver would run next-turn inputs autonomously against the
+            // same scripted transport, consuming exchange slots and shifting later
+            // modeled turns onto unreleased gates. Queued-work behavior is exercised
+            // by dedicated runtime boundary facts; this scripted provider core keeps
+            // queued work inert so modeled provider boundaries remain the only
+            // provider exchanges in the session.
+            true,
         )?;
         let session = core
             .session(event.actor_alias.clone())
@@ -11085,6 +11079,63 @@ mod tests {
         println!(
             "OK seed={seed} sessions={} digest={}",
             reference.session_count, reference.digest
+        );
+    }
+
+    #[test]
+    fn full_random_seed_12_keeps_modeled_provider_exchange_slots_owned_by_scheduler() {
+        let seed = generated_seed("full-random", 12);
+        assert_eq!(seed, 8_740_143_186_674_533_974);
+        let workload = generate_workload(seed, "full-random", 384).expect("workload");
+        let provider_turn = workload
+            .boundaries
+            .iter()
+            .find(|event| event.boundary_id == "session-001:provider:003")
+            .expect("session-001 provider turn 3");
+        assert_eq!(
+            provider_turn.payload.get("script").and_then(Value::as_str),
+            Some("openai-compatible.chat-runtime-text-stream")
+        );
+        assert_eq!(
+            provider_turn
+                .payload
+                .get("expected_provider_exchange_count")
+                .and_then(Value::as_u64),
+            Some(3)
+        );
+
+        let trace = run_on_sim_harness_stack(
+            "full-random-seed-12-modeled-provider-exchange-slots",
+            SIM_HARNESS_STACK_LIMIT_BYTES,
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(FixedScriptRunnerError::Io)?;
+                runtime.block_on(run_generated_workload_for_fixture(
+                    workload,
+                    "seed-12-regression",
+                ))
+            },
+        )
+        .expect("seed 12 generated workload");
+        let delivered = trace
+            .events
+            .iter()
+            .find(|event| event.boundary_id == "session-001:provider:003")
+            .expect("delivered provider turn 3");
+        assert_eq!(
+            delivered.observed.get("success").and_then(Value::as_bool),
+            Some(true),
+            "success-required modeled provider turn must not be converted into provider-error terminalization"
+        );
+        assert_eq!(
+            delivered
+                .observed
+                .get("provider_exchange_count")
+                .and_then(Value::as_u64),
+            Some(3),
+            "autonomous queued turns must not consume provider scripts before modeled turn 3"
         );
     }
 
