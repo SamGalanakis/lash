@@ -24,5 +24,5 @@ pub use provider::{
 pub use runner::{
     FIXED_SCRIPT_PROFILE, FixedScriptManifest, FixedScriptProof, FixedScriptSummary,
     GeneratedSimProfileReport, ScriptHashManifest, run_fixed_script_profile,
-    run_generated_sim_profile,
+    run_generated_sim_profile, run_generated_sim_profile_for_seeds,
 };

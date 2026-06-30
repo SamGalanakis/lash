@@ -3590,7 +3590,24 @@ pub async fn run_generated_sim_profile(
     seeds: usize,
     max_boundaries: usize,
 ) -> Result<GeneratedSimProfileReport, FixedScriptRunnerError> {
+    let seed_values = (0..seeds.max(1))
+        .map(|seed_index| generated_seed(profile, seed_index))
+        .collect::<Vec<_>>();
+    run_generated_sim_profile_for_seeds(artifact_root, profile, &seed_values, max_boundaries).await
+}
+
+pub async fn run_generated_sim_profile_for_seeds(
+    artifact_root: impl AsRef<Path>,
+    profile: &str,
+    seed_values: &[u64],
+    max_boundaries: usize,
+) -> Result<GeneratedSimProfileReport, FixedScriptRunnerError> {
     validate_workload_profile(profile)?;
+    if seed_values.is_empty() {
+        return Err(FixedScriptRunnerError::Assertion(
+            "generated simulation requires at least one seed".to_string(),
+        ));
+    }
     let artifact_root = artifact_root.as_ref();
     std::fs::create_dir_all(artifact_root)?;
 
@@ -3599,7 +3616,7 @@ pub async fn run_generated_sim_profile(
     write_provider_script_manifest(artifact_root, &fixed_manifest)?;
 
     let runtime_proof = prove_runtime_facade_turn().await?;
-    let seed_count = seeds.max(1);
+    let seed_count = seed_values.len();
     let boundary_limit = max_boundaries.max(1);
     let replay_dir = artifact_root.join("replays");
     std::fs::create_dir_all(&replay_dir)?;
@@ -3613,8 +3630,7 @@ pub async fn run_generated_sim_profile(
     let mut interleaving_depth_max = 0;
     let mut interleaving_depth_min = usize::MAX;
 
-    for seed_index in 0..seed_count {
-        let seed = generated_seed(profile, seed_index);
+    for seed in seed_values.iter().copied() {
         let workload = generate_workload(seed, profile, boundary_limit)?;
         let trace_path = replay_dir.join(format!("seed-{seed:016x}.trace.json"));
         let trace =
@@ -3677,25 +3693,45 @@ pub async fn run_generated_sim_profile(
             replay_workload_on_sqlite(&sqlite_workload, &sqlite_database_path).await?;
         let backend_verdict = replay_determinism(&serialized_reference, &sqlite_summary);
         oracle_verdicts.push(backend_verdict.clone());
-        if !backend_verdict.is_passed() {
-            return Err(FixedScriptRunnerError::Assertion(format!(
-                "cross-backend SQLite re-run for seed {seed} ({profile}) diverged from the serialized in-memory reference: {}",
-                backend_verdict.message
-            )));
-        }
-        let sqlite_report = serde_json::json!({
-            "schema": "lash.sim.sqlite-cross-backend-rerun.v1",
-            "seed": seed,
-            "profile": profile,
-            "backend": "lash_sqlite_store",
-            "driver": "unified_generated_runtime_world",
-            "matches_reference": true,
-            "final_summary": sqlite_summary,
-        });
+        let sqlite_report = if backend_verdict.is_passed() {
+            serde_json::json!({
+                "schema": "lash.sim.sqlite-cross-backend-rerun.v1",
+                "seed": seed,
+                "profile": profile,
+                "backend": "lash_sqlite_store",
+                "driver": "unified_generated_runtime_world",
+                "matches_reference": true,
+                "reference_digest": serialized_reference.digest.clone(),
+                "actual_digest": sqlite_summary.digest.clone(),
+                "verdict": backend_verdict.clone(),
+                "final_summary": sqlite_summary,
+            })
+        } else {
+            serde_json::json!({
+                "schema": "lash.sim.sqlite-cross-backend-rerun.v1",
+                "seed": seed,
+                "profile": profile,
+                "backend": "lash_sqlite_store",
+                "driver": "unified_generated_runtime_world",
+                "matches_reference": false,
+                "reference_digest": serialized_reference.digest.clone(),
+                "actual_digest": sqlite_summary.digest.clone(),
+                "verdict": backend_verdict.clone(),
+                "reference_summary": serialized_reference,
+                "actual_summary": sqlite_summary,
+            })
+        };
         std::fs::write(
             &sqlite_replay_report_path,
             serde_json::to_vec_pretty(&sqlite_report)?,
         )?;
+        if !backend_verdict.is_passed() {
+            return Err(FixedScriptRunnerError::Assertion(format!(
+                "cross-backend SQLite re-run for seed {seed} ({profile}) diverged from the serialized in-memory reference: {}; wrote {}",
+                backend_verdict.message,
+                sqlite_replay_report_path.display()
+            )));
+        }
         let sqlite_replay_report_sha256 = file_sha256(&sqlite_replay_report_path)?;
         replay_reports.push(GeneratedReplayArtifact {
             seed,
