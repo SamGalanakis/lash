@@ -1532,17 +1532,95 @@ mutation_artifact_json() {
     "${exit_code:-null}"
 }
 
+full_mutation_suites_complete() {
+  local package
+  for package in "${critical_packages[@]}"; do
+    if [ ! -f "${out_dir}/mutants-${package}-full/confidence-status.json" ]; then
+      return 1
+    fi
+  done
+}
+
+full_mutation_status() {
+  if [ "$lane" = "full" ] && [ "$mutation_scope" = "full" ]; then
+    if full_mutation_suites_complete; then
+      echo "run"
+    else
+      echo "incomplete_full_mutation_suites"
+    fi
+    return
+  fi
+  if [ "$lane" = "full" ]; then
+    echo "not_run_by_mutation_scope_${mutation_scope}"
+  else
+    echo "not_run_in_${lane}_lane"
+  fi
+}
+
+mutation_evidence_status() {
+  if [ "$lane" = "fast" ]; then
+    echo "not_in_fast_lane"
+    return
+  fi
+  if [ "$mutation_scope" = "none" ]; then
+    echo "not_run_by_scope"
+    return
+  fi
+  if [ "$lane" = "full" ] \
+    && [ "$mutation_scope" = "full" ] \
+    && ! full_mutation_suites_complete; then
+    echo "incomplete_full_mutation_suites"
+    return
+  fi
+  if [ "$mutation_failures" -eq 0 ]; then
+    echo "passed"
+  else
+    echo "failed"
+  fi
+}
+
+coverage_evidence_status() {
+  if [ "$coverage_scope" = "none" ]; then
+    echo "not_run_by_scope"
+  elif [ -f "${out_dir}/coverage/summary.json" ]; then
+    echo "present"
+  else
+    echo "required_not_written"
+  fi
+}
+
+mutation_evidence_path() {
+  if [ "$lane" = "fast" ]; then
+    echo "not_in_fast_lane"
+  elif [ -f "${out_dir}/mutation-evidence.json" ]; then
+    echo "mutation-evidence.json"
+  else
+    echo "not_written"
+  fi
+}
+
+restate_postgres_workers_e2e_status() {
+  local artifact="${out_dir}/sim/restate-postgres-workers-e2e.json"
+  if [ ! -f "$artifact" ]; then
+    echo "not_written"
+  elif grep -q '"status": "passed"' "$artifact"; then
+    echo "passed"
+  elif grep -q '"status": "failed"' "$artifact"; then
+    echo "failed"
+  elif grep -q '"status": "not_run"' "$artifact"; then
+    echo "not_run"
+  else
+    echo "present_unknown"
+  fi
+}
+
 write_mutation_evidence_summary() {
   if [ "$lane" = "fast" ]; then
     return
   fi
   local path="${out_dir}/mutation-evidence.json"
   local evidence_status
-  if [ "$mutation_failures" -eq 0 ]; then
-    evidence_status="passed"
-  else
-    evidence_status="failed"
-  fi
+  evidence_status="$(mutation_evidence_status)"
   {
     cat <<EOF
 {
@@ -1590,7 +1668,7 @@ EOF
   ],
   "smoke_shard": "${LASH_MUTATION_SMOKE_SHARD:-1/64}",
   "critical_package_smoke_status": "$([[ "$mutation_scope" = "smoke" || "$mutation_scope" = "full" ]] && echo "run" || echo "not_run_by_mutation_scope")",
-  "full_mutation_status": "$(case "${lane}:${mutation_scope}" in full:full) echo "run" ;; full:*) echo "not_run_by_mutation_scope_${mutation_scope}" ;; *) echo "not_run_in_${lane}_lane" ;; esac)",
+  "full_mutation_status": "$(full_mutation_status)",
   "true_full_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full",
   "bounded_broad_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_BROAD_SIM_SEEDS=2 LASH_BROAD_SIM_MAX_BOUNDARIES=128 LASH_MUTATION_JOBS=2 LASH_MUTATION_TIMEOUT_SECONDS=300 scripts/confidence-gate.sh broad"
 }
@@ -1612,9 +1690,12 @@ write_confidence_summary() {
   "confidence_class": "$(case "$lane" in broad) echo "bounded_broad" ;; full) echo "true_full" ;; default) echo "default_targeted" ;; fast) echo "fast" ;; esac)",
   "coverage_summary": "$([ -f "${out_dir}/coverage/summary.json" ] && echo "coverage/summary.json" || echo "not_run")",
   "coverage_scope": "${coverage_scope}",
+  "coverage_evidence_status": "$(coverage_evidence_status)",
   "scheduled_depth_generated_run": "$([ -f "${out_dir}/sim/scheduled-depth.json" ] && echo "sim/scheduled-depth.json" || echo "not_run")",
-  "mutation_evidence": "$([ "$lane" = "fast" ] && echo "not_in_fast_lane" || echo "mutation-evidence.json")",
+  "mutation_evidence": "$(mutation_evidence_path)",
+  "mutation_evidence_status": "$(mutation_evidence_status)",
   "mutation_scope": "${mutation_scope}",
+  "full_mutation_status": "$(full_mutation_status)",
   "postgres_backend_conformance": "$([[ "$lane" = "broad" || "$lane" = "full" ]] && echo "included_or_explicitly_skipped_in_postgres_conformance_artifact" || echo "env_gated_broad_or_full_lane_only")",
   "postgres_current_trace_replay": "$([ "$lane" = "default" ] && echo "sim/postgres-current/status.json" || echo "not_in_lane")",
   "postgres_current_trace_replay_report": "$([ -f "${out_dir}/sim/postgres-replay/postgres-replay.json" ] && echo "sim/postgres-replay/postgres-replay.json" || echo "not_run")",
@@ -1624,6 +1705,32 @@ write_confidence_summary() {
   "provider_transport_exclusions": "$([ -f "${out_dir}/sim/provider-transport-exclusions.json" ] && echo "sim/provider-transport-exclusions.json" || echo "not_written")",
   "postgres_native_effect_history_replay": "native_postgres_runtime_effect_controller",
   "postgres_effect_history_status": "$([ -f "${out_dir}/sim/postgres-effect-history-status.json" ] && echo "sim/postgres-effect-history-status.json" || echo "not_written")",
+  "artifact_contract": {
+    "schema": "lash.confidence.summary-artifact-contract.v1",
+    "full_lane": {
+      "confidence_class": "true_full",
+      "required_coverage_scope": "run",
+      "effective_coverage_scope": "${coverage_scope}",
+      "coverage_evidence_status": "$(coverage_evidence_status)",
+      "required_mutation_scope": "full",
+      "effective_mutation_scope": "${mutation_scope}",
+      "mutation_evidence": "$(mutation_evidence_path)",
+      "mutation_evidence_status": "$(mutation_evidence_status)",
+      "full_mutation_status": "$(full_mutation_status)",
+      "required_restate_postgres_workers_e2e": "sim/restate-postgres-workers-e2e.json",
+      "restate_postgres_workers_e2e_status": "$(restate_postgres_workers_e2e_status)"
+    },
+    "bounded_broad_ci": {
+      "confidence_class": "bounded_broad",
+      "workflow_job": "bounded-broad-replay-backend",
+      "artifact_name": "bounded-broad-replay-backend-confidence",
+      "coverage_scope": "none",
+      "coverage_evidence_status": "not_run_by_scope",
+      "mutation_scope": "none",
+      "mutation_evidence_status": "not_run_by_scope",
+      "full_confidence_claim": "false"
+    }
+  },
   "mutation_testing": "$(case "$lane" in fast) echo "not_in_fast_lane" ;; default) echo "configured_${mutation_scope}_scope_lash_core_direct_model_and_lash_sim_scheduler_oracle_targets" ;; broad) echo "bounded_broad_configured_${mutation_scope}_scope_targeted_regressions_without_full_mutation_claim" ;; full) echo "true_full_configured_full_scope_targeted_smoke_and_full_mutation" ;; esac)",
   "true_full_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} LASH_CONFIDENCE_MUTATION_SCOPE=full scripts/confidence-gate.sh full",
   "bounded_broad_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} scripts/confidence-gate.sh broad",

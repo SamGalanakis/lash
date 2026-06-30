@@ -173,8 +173,8 @@ jobs:
         env:
           LASH_POSTGRES_DATABASE_URL: postgres://lash:lash@localhost:5432/lash
 
-  confidence-broad-replay-backend:
-    name: Confidence Broad Replay/Backend
+  bounded-broad-replay-backend:
+    name: Bounded Broad Replay/Backend
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -218,7 +218,7 @@ jobs:
         run: bash scripts/confidence-gate.sh broad
         env:
           LASH_POSTGRES_DATABASE_URL: postgres://lash:lash@localhost:5432/lash
-          LASH_CONFIDENCE_OUT_DIR: target/confidence-ci
+          LASH_CONFIDENCE_OUT_DIR: target/confidence-ci/bounded-broad-replay-backend
           LASH_CONFIDENCE_MUTATION_SCOPE: none
           LASH_CONFIDENCE_COVERAGE_SCOPE: none
           LASH_SIM_PROFILE: fast-random
@@ -230,12 +230,12 @@ jobs:
           LASH_SCHEDULED_SIM_SEEDS: 4
           LASH_SCHEDULED_SIM_MAX_BOUNDARIES: 256
 
-      - name: Upload broad replay/backend confidence artifact
+      - name: Upload bounded broad replay/backend confidence artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: confidence-broad-replay-backend
-          path: target/confidence-ci/broad
+          name: bounded-broad-replay-backend-confidence
+          path: target/confidence-ci/bounded-broad-replay-backend/broad
 
   stack-budget:
     name: Stack budget
@@ -441,7 +441,7 @@ jobs:
     needs:
       - test
       - postgres-store
-      - confidence-broad-replay-backend
+      - bounded-broad-replay-backend
       - stack-budget
       - cross-check
       - linux-release-cache
