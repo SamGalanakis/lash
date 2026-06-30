@@ -914,7 +914,7 @@ fn remote_observation_assistant_delta(
 }
 
 #[tokio::test]
-async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
+async fn turn_stream_finish_returns_committed_assistant_prose() -> Result<()> {
     let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(semantic_group_provider())
         .model(mock_model_spec())
@@ -929,13 +929,14 @@ async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
     let result = stream.finish().await?;
 
     assert_eq!(assistant_prose(&activities), "firstsecond");
-    assert_eq!(result.assistant_message(), Some("second"));
+    assert_eq!(result.assistant_message(), Some("first\n\nsecond"));
+    assert_eq!(result.assistant_output.safe_text, "first\n\nsecond");
     assert!(result.is_success());
     Ok(())
 }
 
 #[tokio::test]
-async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -> Result<()> {
+async fn turn_run_collects_activities_and_returns_committed_assistant_prose() -> Result<()> {
     let core = explicit_ephemeral_facets(StandardCore::builder())
         .provider(semantic_group_provider())
         .model(mock_model_spec())
@@ -945,7 +946,14 @@ async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -
     let collected = session.turn(TurnInput::text("run groups")).run().await?;
 
     assert_eq!(assistant_prose(&collected.activities), "firstsecond");
-    assert_eq!(collected.result.assistant_message(), Some("second"));
+    assert_eq!(
+        collected.result.assistant_message(),
+        Some("first\n\nsecond")
+    );
+    assert_eq!(
+        collected.result.assistant_output.safe_text,
+        "first\n\nsecond"
+    );
     Ok(())
 }
 
