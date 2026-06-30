@@ -11,6 +11,8 @@ out_root="${LASH_CONFIDENCE_OUT_DIR:-$repo/target/confidence}"
 out_dir="${out_root}/${lane}"
 ci_features="${LASH_CI_FEATURES:--F lash-cli/fff-zlob -F lash-cli/bench}"
 critical_packages=(lash-core lashlang lash-protocol-rlm lash-protocol-standard)
+BROAD_SCHEDULED_DEPTH_MIN_SEEDS=4
+BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES=256
 case "$lane" in
   fast) default_mutation_scope="none" ;;
   default) default_mutation_scope="targeted" ;;
@@ -442,20 +444,24 @@ run_scheduled_depth_sim_artifact() {
     local scheduled_profile="${LASH_SCHEDULED_SIM_PROFILE:-full-random}"
     local scheduled_seeds="${LASH_SCHEDULED_SIM_SEEDS:-8}"
     local scheduled_max_boundaries="${LASH_SCHEDULED_SIM_MAX_BOUNDARIES:-384}"
+    local scheduled_min_seeds="${BROAD_SCHEDULED_DEPTH_MIN_SEEDS}"
+    local scheduled_min_max_boundaries="${BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES}"
     local scheduled_dir="${out_dir}/sim-scheduled-depth"
     cargo run -p lash-sim --locked -- run \
       --out "$scheduled_dir" \
       --profile "$scheduled_profile" \
       --seeds "$scheduled_seeds" \
       --max-boundaries "$scheduled_max_boundaries"
-    python3 - "${scheduled_dir}/summary.json" "${out_dir}/sim/scheduled-depth.json" "$scheduled_profile" "$scheduled_seeds" "$scheduled_max_boundaries" <<'PY'
+    python3 - "${scheduled_dir}/summary.json" "${out_dir}/sim/scheduled-depth.json" "$scheduled_profile" "$scheduled_seeds" "$scheduled_max_boundaries" "$scheduled_min_seeds" "$scheduled_min_max_boundaries" <<'PY'
 import json
 import sys
 
-summary_path, output_path, profile, seeds, max_boundaries = sys.argv[1:6]
+summary_path, output_path, profile, seeds, max_boundaries, min_seeds, min_max_boundaries = sys.argv[1:8]
 with open(summary_path, "r", encoding="utf-8") as handle:
     summary = json.load(handle)
 counts = summary.get("counts") or {}
+min_seeds = int(min_seeds)
+min_max_boundaries = int(min_max_boundaries)
 artifact = {
     "schema": "lash.confidence.scheduled-depth-generated-run.v1",
     "status": "passed",
@@ -463,6 +469,8 @@ artifact = {
     "profile": profile,
     "configured_seeds": int(seeds),
     "configured_max_boundaries": int(max_boundaries),
+    "required_min_seeds": min_seeds,
+    "required_min_max_boundaries": min_max_boundaries,
     "summary_path": summary_path,
     "counts": {
         "generated_seeds": counts.get("generated_seeds"),
@@ -479,10 +487,10 @@ artifact = {
 }
 required_interleaving_depth = 2
 errors = []
-if counts.get("generated_seeds", 0) < 4:
-    errors.append("scheduled-depth run must use at least 4 generated seeds")
-if int(max_boundaries) < 256:
-    errors.append("scheduled-depth run must configure at least 256 max boundaries")
+if counts.get("generated_seeds", 0) < min_seeds:
+    errors.append(f"scheduled-depth run must use at least {min_seeds} generated seeds")
+if int(max_boundaries) < min_max_boundaries:
+    errors.append(f"scheduled-depth run must configure at least {min_max_boundaries} max boundaries")
 if counts.get("boundary_events", 0) < 512:
     errors.append("scheduled-depth run produced fewer than 512 boundary events")
 if counts.get("oracle_failures", 1) != 0:

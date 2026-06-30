@@ -71,6 +71,7 @@ jobs:
           python3 scripts/test_release_version.py
           python3 scripts/test_publish_workspace.py
           python3 scripts/test_profile_guard.py
+          python3 scripts/test_confidence_gate_ci_contract.py
           python3 scripts/test_release_notes.py
 
       # Compiles every target of every workspace crate — libs, bins, tests,
@@ -226,8 +227,8 @@ jobs:
           LASH_BROAD_SIM_SEEDS: 2
           LASH_BROAD_SIM_MAX_BOUNDARIES: 72
           LASH_SCHEDULED_SIM_PROFILE: fast-random
-          LASH_SCHEDULED_SIM_SEEDS: 2
-          LASH_SCHEDULED_SIM_MAX_BOUNDARIES: 96
+          LASH_SCHEDULED_SIM_SEEDS: 4
+          LASH_SCHEDULED_SIM_MAX_BOUNDARIES: 256
 
       - name: Upload broad replay/backend confidence artifact
         if: always()
