@@ -412,7 +412,7 @@ pub struct GeneratedSimProfileReport {
     pub scenario_contracts: Vec<ScenarioContractManifest>,
     pub scenario_contract_slices: Vec<ScenarioContractSliceManifest>,
     pub scenario_contract_packages: Vec<ScenarioContractPackageManifest>,
-    pub backend_replayable_regressions: Vec<BackendReplayableRegressionManifest>,
+    pub generated_backend_regression_fixtures: Vec<GeneratedBackendRegressionManifest>,
     pub model_only_boundary_reviews: Vec<ModelOnlyBoundaryReview>,
     pub provider_transport_exclusions: Vec<ProviderTransportExclusion>,
     pub counts: GeneratedSimCounts,
@@ -483,7 +483,7 @@ pub struct ScenarioGeneratedShape {
     pub required_evidence: Vec<ScenarioRequiredEvidence>,
     pub transition_facts: Vec<ScenarioTransitionFact>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend_valid_regression: Option<ScenarioBackendRegressionReference>,
+    pub generated_backend_regression: Option<ScenarioBackendRegressionReference>,
     pub negative_fixture: ScenarioNegativeFixture,
 }
 
@@ -583,7 +583,7 @@ struct ScenarioContractPackageArtifact {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct BackendReplayableRegressionManifest {
+pub struct GeneratedBackendRegressionManifest {
     pub schema: &'static str,
     pub fixture_id: &'static str,
     pub status: &'static str,
@@ -591,27 +591,33 @@ pub struct BackendReplayableRegressionManifest {
     pub trace_path: String,
     pub source_trace_path: String,
     pub source_trace_sha256: String,
+    pub source_sqlite_replay_report_path: String,
+    pub source_sqlite_replay_report_sha256: String,
     pub required_boundary_kinds: Vec<&'static str>,
     pub semantic_oracles: Vec<&'static str>,
     pub replay_backends: Vec<&'static str>,
+    pub static_backend_replay_policy: &'static str,
+    pub backend_equivalence_contract: &'static str,
     pub regression_contract: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct BackendReplayableRegressionPackage {
+struct GeneratedBackendRegressionPackage {
     schema: &'static str,
     fixture_id: &'static str,
     status: &'static str,
     trace: &'static str,
     source_trace_path: String,
     source_trace_sha256: String,
+    source_sqlite_replay_report_path: String,
+    source_sqlite_replay_report_sha256: String,
     required_boundary_kinds: Vec<&'static str>,
     semantic_oracles: Vec<&'static str>,
     replay_backends: Vec<&'static str>,
+    static_backend_replay_policy: &'static str,
+    backend_equivalence_contract: &'static str,
     regression_contract: &'static str,
     replay_command: String,
-    sqlite_replay_command: String,
-    postgres_replay_command: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -659,7 +665,7 @@ pub struct GeneratedSimCounts {
     pub scenario_contract_mini_oracles: usize,
     pub scenario_contract_slices: usize,
     pub scenario_contract_packages: usize,
-    pub backend_replayable_regressions: usize,
+    pub generated_backend_regression_fixtures: usize,
     pub oracle_passes: usize,
     pub oracle_failures: usize,
     pub model_store_sessions: usize,
@@ -811,25 +817,25 @@ fn model_only_boundary_reviews() -> Vec<ModelOnlyBoundaryReview> {
             boundary_kind: "durable_effect",
             status: "runtime_effect_controller_backed_with_reviewed_host_history_ceiling",
             production_abstraction_used: "RuntimeEffectEnvelope, RuntimeEffectCommand::DurableStep, RuntimeEffectLocalExecutor::durable_step, SqliteRuntimeEffectController, and PostgresRuntimeEffectController",
-            model_only_scope: "workflow-host crash history outside store-backed effect replay remains excluded; generated, SQLite replay, and Postgres replay execute production runtime effect replay controllers, with Postgres history stored in lash_runtime_effect_replay",
+            model_only_scope: "workflow-host crash history outside store-backed effect replay remains excluded; generated memory runs and generated SQLite dynamic reruns execute production runtime effect replay controllers, while Postgres conformance/contention lanes cover native Postgres replay storage in lash_runtime_effect_replay",
             oracle_id: "sim.oracle.durable-effect-exactly-once.v1",
-            artifact_evidence: "durable-effect observations include runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, local_executor_called false on replay, first completion, replay for the same durable key, Postgres effect_history_replay.status=native_postgres_runtime_effect_controller, and backend divergence artifacts on mismatch",
+            artifact_evidence: "durable-effect observations include runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, local_executor_called false on replay, first completion, replay for the same durable key, Postgres effect_history_replay.status=native_postgres_runtime_effect_controller, and generated SQLite divergence artifacts on mismatch",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "worker",
             status: "runtime_persistence_lease_backed_with_reviewed_worker_task_ceiling",
             production_abstraction_used: "RuntimePersistence session execution lease claim/reclaim/renew/release, SessionExecutionLease, LeaseOwnerIdentity, and SessionExecutionLeaseCompletion",
-            model_only_scope: "DurableProcessWorker task body launch remains excluded; generated, SQLite, and Postgres replay validate stale completion rejection through real backend lease stores",
+            model_only_scope: "DurableProcessWorker task body launch remains excluded; generated memory runs, generated SQLite dynamic reruns, and Postgres backend contention validate stale completion rejection through real backend lease stores",
             oracle_id: "sim.oracle.worker-stale-completion-rejected.v1",
             artifact_evidence: "worker observed payload records runtime_active_lease, runtime_stale_completion, runtime_worker_store.session_execution_lease_reclaimed=true, and stale_completion_rejected=true",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "backend_failure",
             status: "production_store_error_classified_fault_injection_boundary",
-            production_abstraction_used: "lash_core::StoreError variants plus SQLite/Postgres replay divergence lanes",
-            model_only_scope: "connection corruption and live database fault injection remain excluded; generated/replay boundaries classify retryable and terminal backend faults as concrete StoreError variants and fail on replay divergence",
+            production_abstraction_used: "lash_core::StoreError variants plus generated SQLite divergence artifacts and Postgres backend contention lanes",
+            model_only_scope: "connection corruption and live database fault injection remain excluded; generated boundaries classify retryable and terminal backend faults as concrete StoreError variants and fail on generated SQLite dynamic rerun divergence",
             oracle_id: "sim.oracle.backend-failure-observed.v1",
-            artifact_evidence: "backend failure events include production_store_error.type=lash_core::StoreError, variant, message, retryable_class, retry attempt counts, and SQLite/Postgres divergence artifacts on mismatch",
+            artifact_evidence: "backend failure events include production_store_error.type=lash_core::StoreError, variant, message, retryable_class, retry attempt counts, and generated SQLite divergence artifacts on mismatch",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "provider_mutation",
@@ -843,23 +849,23 @@ fn model_only_boundary_reviews() -> Vec<ModelOnlyBoundaryReview> {
             boundary_kind: "tool",
             status: "runtime_effect_controller_backed_with_reviewed_tool_provider_ceiling",
             production_abstraction_used: "RuntimeEffectEnvelope, RuntimeEffectCommand::ToolAttempt, RuntimeEffectLocalExecutor, ToolAttemptLaunch, ToolCallRecord, and ToolCallOutput",
-            model_only_scope: "app-specific ToolProvider implementation bodies remain excluded; generated and backend replay execute the production runtime effect-controller boundary with scripted no-network tool outcomes",
+            model_only_scope: "app-specific ToolProvider implementation bodies remain excluded; generated memory runs and generated SQLite dynamic reruns execute the production runtime effect-controller boundary with scripted no-network tool outcomes",
             oracle_id: "sim.oracle.tool-boundary-observed.v1",
-            artifact_evidence: "tool events carry runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, runtime_tool_record, runtime_tool_output, and backend divergence artifacts on mismatch",
+            artifact_evidence: "tool events carry runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, runtime_tool_record, runtime_tool_output, and generated SQLite divergence artifacts on mismatch",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "exec_code",
             status: "runtime_effect_controller_backed_with_reviewed_shell_launch_ceiling",
             production_abstraction_used: "RuntimeEffectEnvelope, RuntimeEffectCommand::ExecCode, RuntimeEffectLocalExecutor, RuntimeEffectOutcome::ExecCode, and ExecResponse",
-            model_only_scope: "host shell/kernel process launch remains excluded; generated and backend replay execute the production runtime effect-controller boundary with scripted no-shell ExecResponse outcomes",
+            model_only_scope: "host shell/kernel process launch remains excluded; generated memory runs and generated SQLite dynamic reruns execute the production runtime effect-controller boundary with scripted no-shell ExecResponse outcomes",
             oracle_id: "sim.oracle.exec-code-observed.v1",
-            artifact_evidence: "exec-code events carry runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, runtime_effect_outcome, exit-code data, and backend divergence artifacts on mismatch",
+            artifact_evidence: "exec-code events carry runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, runtime_effect_outcome, exit-code data, and generated SQLite divergence artifacts on mismatch",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "process_wake",
             status: "runtime_persistence_queued_work_backed_with_reviewed_process_body_ceiling",
             production_abstraction_used: "process_wake_delivery, QueuedWorkBatchDraft, QueuedWorkPayload::process_wake, RuntimePersistence::enqueue_queued_work, and claim_ready_queued_work_by_batch_ids",
-            model_only_scope: "the eventual process body that consumes the wake remains excluded; generated, SQLite, and Postgres replay enqueue and claim the wake through real queued-work/session-lease backend paths",
+            model_only_scope: "the eventual process body that consumes the wake remains excluded; generated memory runs, generated SQLite dynamic reruns, and Postgres backend contention enqueue or claim wake-adjacent queued work through real queued-work/session-lease backend paths",
             oracle_id: "sim.oracle.process-wake-observed.v1",
             artifact_evidence: "process wake events include runtime_process_wake, runtime_queued_work claim evidence, claimed_once=true, and duplicate claimed_once=false dedupe evidence from real queued-work claims",
         },
@@ -1106,11 +1112,11 @@ struct BackendRegressionSpec {
     predicate: fn(&[&TraceEventLine]) -> bool,
 }
 
-fn write_backend_replayable_regression_fixtures(
+fn write_generated_backend_regression_fixtures(
     artifact_root: &Path,
     event_lines: &[TraceEventLine],
     replay_reports: &[GeneratedReplayArtifact],
-) -> Result<Vec<BackendReplayableRegressionManifest>, FixedScriptRunnerError> {
+) -> Result<Vec<GeneratedBackendRegressionManifest>, FixedScriptRunnerError> {
     let fixture_root = artifact_root.join(GENERATED_SIM_BACKEND_REGRESSION_FIXTURES);
     std::fs::create_dir_all(&fixture_root)?;
     let replay_lookup = replay_artifact_lookup(replay_reports);
@@ -1148,7 +1154,7 @@ fn write_backend_replayable_regression_fixtures(
                 "sim.oracle.state-machine-semantic-invariants.v1",
                 "sim.oracle.process-wake-observed.v1",
             ],
-            regression_contract: "duplicate process wake deliveries share a dedupe key, claim queued work once, and keep replay/idempotency evidence backend-replayable",
+            regression_contract: "duplicate process wake deliveries share a dedupe key, claim queued work once, and keep replay/idempotency evidence backed by generated dynamic replay",
             predicate: trace_has_duplicate_process_wake_idempotency,
         },
         BackendRegressionSpec {
@@ -1203,13 +1209,13 @@ fn write_backend_replayable_regression_fixtures(
             .find(|(_alias, lines)| (spec.predicate)(lines))
         else {
             return Err(FixedScriptRunnerError::Assertion(format!(
-                "backend-replayable regression fixture `{}` could not select a generated trace",
+                "generated backend regression fixture `{}` could not select a generated trace",
                 spec.fixture_id
             )));
         };
         let replay = replay_lookup.get(trace_alias).ok_or_else(|| {
             FixedScriptRunnerError::Assertion(format!(
-                "backend-replayable regression fixture `{}` selected trace `{trace_alias}` without replay artifact",
+                "generated backend regression fixture `{}` selected trace `{trace_alias}` without replay artifact",
                 spec.fixture_id
             ))
         })?;
@@ -1219,44 +1225,44 @@ fn write_backend_replayable_regression_fixtures(
         let fixture_trace_path = package_dir.join("trace.json");
         std::fs::copy(&source_trace_path, &fixture_trace_path)?;
         let package_path = package_dir.join("package.json");
-        let package = BackendReplayableRegressionPackage {
-            schema: "lash.sim.backend-replayable-regression-package.v1",
+        let static_backend_replay_policy = "not_claimed_for_generated_scheduler_traces";
+        let backend_equivalence_contract = "source seed passed the dynamic generated workload rerun against the serialized in-memory reference and lash-sqlite-store; static SQLite/Postgres replay is a different fixed-order trace contract and is not inferred from this generated trace";
+        let package = GeneratedBackendRegressionPackage {
+            schema: "lash.sim.generated-backend-regression-package.v1",
             fixture_id: spec.fixture_id,
-            status: "backend_replayable_valid_trace",
+            status: "generated_cross_backend_valid_trace",
             trace: "trace.json",
             source_trace_path: replay.trace_path.clone(),
             source_trace_sha256: replay.trace_sha256.clone(),
+            source_sqlite_replay_report_path: replay.sqlite_replay_report_path.clone(),
+            source_sqlite_replay_report_sha256: replay.sqlite_replay_report_sha256.clone(),
             required_boundary_kinds: spec.required_boundary_kinds.to_vec(),
             semantic_oracles: spec.semantic_oracles.to_vec(),
-            replay_backends: vec!["model", "sqlite", "postgres_when_available"],
+            replay_backends: vec!["model"],
+            static_backend_replay_policy,
+            backend_equivalence_contract,
             regression_contract: spec.regression_contract,
             replay_command: format!(
                 "cargo run -p lash-sim --locked -- replay {}",
                 fixture_trace_path.display()
             ),
-            sqlite_replay_command: format!(
-                "cargo run -p lash-sim --locked -- replay-sqlite {} --out {}",
-                fixture_trace_path.display(),
-                package_dir.display()
-            ),
-            postgres_replay_command: format!(
-                "LASH_POSTGRES_DATABASE_URL=postgres://... cargo run -p lash-sim --locked -- replay-postgres {} --out {}",
-                fixture_trace_path.display(),
-                package_dir.display()
-            ),
         };
         std::fs::write(&package_path, serde_json::to_vec_pretty(&package)?)?;
-        manifests.push(BackendReplayableRegressionManifest {
-            schema: "lash.sim.backend-replayable-regression-manifest.v1",
+        manifests.push(GeneratedBackendRegressionManifest {
+            schema: "lash.sim.generated-backend-regression-manifest.v1",
             fixture_id: spec.fixture_id,
-            status: "backend_replayable_valid_trace",
+            status: "generated_cross_backend_valid_trace",
             package_path: relative_path(artifact_root, &package_path),
             trace_path: relative_path(artifact_root, &fixture_trace_path),
             source_trace_path: replay.trace_path.clone(),
             source_trace_sha256: replay.trace_sha256.clone(),
+            source_sqlite_replay_report_path: replay.sqlite_replay_report_path.clone(),
+            source_sqlite_replay_report_sha256: replay.sqlite_replay_report_sha256.clone(),
             required_boundary_kinds: spec.required_boundary_kinds.to_vec(),
             semantic_oracles: spec.semantic_oracles.to_vec(),
-            replay_backends: vec!["model", "sqlite", "postgres_when_available"],
+            replay_backends: vec!["model"],
+            static_backend_replay_policy,
+            backend_equivalence_contract,
             regression_contract: spec.regression_contract,
         });
     }
@@ -1768,7 +1774,7 @@ fn scenario_generated_shape(
         semantic_oracle: contract.semantic_oracle,
         required_evidence,
         transition_facts: scenario_transition_facts(contract, selected_events)?,
-        backend_valid_regression: scenario_backend_regression_reference(contract),
+        generated_backend_regression: scenario_backend_regression_reference(contract),
         negative_fixture: scenario_negative_fixture_for_contract(contract, selected_evidence),
     })
 }
@@ -1910,7 +1916,7 @@ fn scenario_backend_regression_reference(
         ),
         "runtime.process_wake_claim" => (
             "duplicate-process-wake-idempotency",
-            "duplicate process wake deliveries share a dedupe key, claim queued work once, and keep replay/idempotency evidence backend-replayable",
+            "duplicate process wake deliveries share a dedupe key, claim queued work once, and keep replay/idempotency evidence backed by generated dynamic replay",
         ),
         "runtime.lease_release_rejects_commit" | "runtime.dead_lease_reclaim_rejects_stale" => (
             "worker-stale-completion-fenced",
@@ -1937,7 +1943,7 @@ fn scenario_backend_regression_reference(
     };
     Some(ScenarioBackendRegressionReference {
         fixture_id,
-        status: "backend_replayable_valid_trace",
+        status: "generated_cross_backend_valid_trace",
         regression_contract,
     })
 }
@@ -3818,9 +3824,9 @@ pub async fn run_generated_sim_profile_for_seeds(
         &replay_reports,
     )?;
     let scenario_contract_package_count = scenario_contract_packages.len();
-    let backend_replayable_regressions =
-        write_backend_replayable_regression_fixtures(artifact_root, &event_lines, &replay_reports)?;
-    let backend_replayable_regression_count = backend_replayable_regressions.len();
+    let generated_backend_regression_fixtures =
+        write_generated_backend_regression_fixtures(artifact_root, &event_lines, &replay_reports)?;
+    let generated_backend_regression_fixture_count = generated_backend_regression_fixtures.len();
     let generated_runtime_provider_matrix = generated_runtime_provider_matrix(&event_lines);
     let summary_path = artifact_root.join(GENERATED_SIM_SUMMARY);
     let report = GeneratedSimProfileReport {
@@ -3838,7 +3844,7 @@ pub async fn run_generated_sim_profile_for_seeds(
         scenario_contracts: scenario_contract_manifests(),
         scenario_contract_slices,
         scenario_contract_packages,
-        backend_replayable_regressions,
+        generated_backend_regression_fixtures,
         model_only_boundary_reviews: model_only_boundary_reviews(),
         provider_transport_exclusions: fixed_manifest.provider_transport_exclusions.clone(),
         counts: GeneratedSimCounts {
@@ -3856,7 +3862,7 @@ pub async fn run_generated_sim_profile_for_seeds(
             scenario_contract_mini_oracles,
             scenario_contract_slices: scenario_contract_slice_count,
             scenario_contract_packages: scenario_contract_package_count,
-            backend_replayable_regressions: backend_replayable_regression_count,
+            generated_backend_regression_fixtures: generated_backend_regression_fixture_count,
             oracle_passes,
             oracle_failures,
             model_store_sessions,
@@ -11976,10 +11982,10 @@ mod tests {
                 "scenario packages must not share identical generated transition fact graphs"
             );
         }
-        assert_eq!(report.backend_replayable_regressions.len(), 8);
-        assert_eq!(report.counts.backend_replayable_regressions, 8);
+        assert_eq!(report.generated_backend_regression_fixtures.len(), 8);
+        assert_eq!(report.counts.generated_backend_regression_fixtures, 8);
         let backend_regression_ids = report
-            .backend_replayable_regressions
+            .generated_backend_regression_fixtures
             .iter()
             .map(|fixture| fixture.fixture_id)
             .collect::<BTreeSet<_>>();
@@ -11995,15 +12001,23 @@ mod tests {
         ] {
             assert!(
                 backend_regression_ids.contains(fixture_id),
-                "missing backend-replayable regression fixture {fixture_id}"
+                "missing generated backend regression fixture {fixture_id}"
             );
         }
-        for fixture in &report.backend_replayable_regressions {
-            assert_eq!(fixture.status, "backend_replayable_valid_trace");
+        for fixture in &report.generated_backend_regression_fixtures {
+            assert_eq!(fixture.status, "generated_cross_backend_valid_trace");
             assert!(tmp.path().join(&fixture.trace_path).exists());
             assert!(tmp.path().join(&fixture.package_path).exists());
-            assert!(fixture.replay_backends.contains(&"sqlite"));
-            assert!(fixture.replay_backends.contains(&"postgres_when_available"));
+            assert_eq!(fixture.replay_backends, vec!["model"]);
+            assert_eq!(
+                fixture.static_backend_replay_policy,
+                "not_claimed_for_generated_scheduler_traces"
+            );
+            assert!(
+                tmp.path()
+                    .join(&fixture.source_sqlite_replay_report_path)
+                    .exists()
+            );
             assert!(
                 fixture
                     .semantic_oracles
@@ -12228,11 +12242,11 @@ mod tests {
         let backend_linked_contracts = report
             .scenario_contract_slices
             .iter()
-            .filter(|slice| slice.generated_shape.backend_valid_regression.is_some())
+            .filter(|slice| slice.generated_shape.generated_backend_regression.is_some())
             .count();
         assert!(
             backend_linked_contracts >= 8,
-            "high-risk scenario contracts should link to backend-valid regression fixtures"
+            "high-risk scenario contracts should link to generated backend regression fixtures"
         );
         assert!(
             report
@@ -12309,13 +12323,16 @@ mod tests {
             expected_contract_slices
         );
         assert_eq!(
-            summary["backend_replayable_regressions"]
+            summary["generated_backend_regression_fixtures"]
                 .as_array()
                 .unwrap()
                 .len(),
             8
         );
-        assert_eq!(summary["counts"]["backend_replayable_regressions"], 8);
+        assert_eq!(
+            summary["counts"]["generated_backend_regression_fixtures"],
+            8
+        );
         assert!(
             summary["model_only_boundary_reviews"]
                 .as_array()

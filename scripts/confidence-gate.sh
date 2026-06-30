@@ -42,8 +42,9 @@ Lanes:
            conformance, coverage blind-spot artifacts, and targeted
            cargo-mutants evidence.
   broad    bounded broad evidence: default + Postgres conformance when
-           available, all generated/minimized trace cross-backend replay,
-           and targeted mutation. This is not true full confidence.
+           available, static model replay evidence for generated/minimized
+           traces, backend contention evidence, and targeted mutation. This is
+           not true full confidence.
   full     true full confidence: broad semantics plus full cargo-mutants over
            critical crates. The full lane refuses non-full mutation scopes.
 
@@ -478,7 +479,7 @@ artifact = {
         "boundary_events": counts.get("boundary_events"),
         "oracle_passes": counts.get("oracle_passes"),
         "oracle_failures": counts.get("oracle_failures"),
-        "backend_replayable_regressions": counts.get("backend_replayable_regressions"),
+        "generated_backend_regression_fixtures": counts.get("generated_backend_regression_fixtures"),
         "scheduler_owned_runtime_completions": counts.get("scheduler_owned_runtime_completions"),
         "scenario_contract_packages": counts.get("scenario_contract_packages"),
         "interleaving_depth_max": counts.get("interleaving_depth_max"),
@@ -543,7 +544,7 @@ artifact = {
         "boundary_events": counts.get("boundary_events"),
         "oracle_passes": counts.get("oracle_passes"),
         "oracle_failures": counts.get("oracle_failures"),
-        "backend_replayable_regressions": counts.get("backend_replayable_regressions"),
+        "generated_backend_regression_fixtures": counts.get("generated_backend_regression_fixtures"),
         "scheduler_owned_runtime_completions": counts.get("scheduler_owned_runtime_completions"),
         "scenario_contract_packages": counts.get("scenario_contract_packages"),
         "interleaving_depth_max": counts.get("interleaving_depth_max"),
@@ -987,7 +988,7 @@ run_broad_postgres_evidence() {
   if [ "$lane" != "broad" ]; then
     return
   fi
-  step "Broad Postgres/cross-backend replay evidence"
+  step "Broad Postgres/static replay evidence"
   if [ -n "${LASH_POSTGRES_DATABASE_URL:-}" ]; then
     cargo test -p lash-postgres-store --locked --test conformance
     run_cross_backend_replay_suite "$LASH_POSTGRES_DATABASE_URL" "env"
@@ -1236,7 +1237,7 @@ run_cross_backend_command() {
 run_cross_backend_replay_suite() {
   local database_url="$1"
   local mode="$2"
-  step "Cross-backend replay matrix"
+  step "Static replay evidence matrix"
   local matrix_dir rows_file
   matrix_dir="${out_dir}/sim/cross-backend-replay"
   rows_file="${matrix_dir}/rows.jsonl"
@@ -1245,13 +1246,16 @@ run_cross_backend_replay_suite() {
   : >"$rows_file"
 
   local trace trace_id case_dir fixture_name
+  local generated_static_backend_skip_reason generated_backend_fixture_static_skip_reason
+  generated_static_backend_skip_reason="generated scheduler traces are model-replayed in this matrix; SQLite/Postgres static trace replay is not a claimed contract because generated provider exchange ordering is proven by dynamic per-seed backend rerun artifacts instead"
+  generated_backend_fixture_static_skip_reason="generated backend regression fixtures are selected from dynamic generated scheduler traces; model static replay is claimed here, while backend equivalence is inherited from the source seed dynamic backend rerun artifacts recorded in package.json"
   while IFS= read -r trace; do
     [ -n "$trace" ] || continue
     trace_id="$(basename "$trace" .trace.json)"
     case_dir="${matrix_dir}/generated/${trace_id}"
     run_cross_backend_command "generated" "$trace_id" "model" "$trace" "${case_dir}/model" "" "$rows_file"
-    run_cross_backend_command "generated" "$trace_id" "sqlite" "$trace" "${case_dir}/sqlite" "" "$rows_file"
-    run_cross_backend_command "generated" "$trace_id" "postgres" "$trace" "${case_dir}/postgres" "$database_url" "$rows_file"
+    run_cross_backend_command "generated" "$trace_id" "sqlite" "$trace" "${case_dir}/sqlite" "" "$rows_file" "$generated_static_backend_skip_reason"
+    run_cross_backend_command "generated" "$trace_id" "postgres" "$trace" "${case_dir}/postgres" "$database_url" "$rows_file" "$generated_static_backend_skip_reason"
   done < <(find "${out_dir}/sim/replays" -name '*.trace.json' -type f 2>/dev/null | sort)
 
   while IFS= read -r trace; do
@@ -1271,9 +1275,9 @@ run_cross_backend_replay_suite() {
     fixture_name="$(basename "$(dirname "$trace")")"
     trace_id="${fixture_name}"
     case_dir="${matrix_dir}/backend-regression/${trace_id}"
-    run_cross_backend_command "backend_replayable_regression" "$trace_id" "model" "$trace" "${case_dir}/model" "" "$rows_file"
-    run_cross_backend_command "backend_replayable_regression" "$trace_id" "sqlite" "$trace" "${case_dir}/sqlite" "" "$rows_file"
-    run_cross_backend_command "backend_replayable_regression" "$trace_id" "postgres" "$trace" "${case_dir}/postgres" "$database_url" "$rows_file"
+    run_cross_backend_command "generated_backend_regression_fixture" "$trace_id" "model" "$trace" "${case_dir}/model" "" "$rows_file"
+    run_cross_backend_command "generated_backend_regression_fixture" "$trace_id" "sqlite" "$trace" "${case_dir}/sqlite" "" "$rows_file" "$generated_backend_fixture_static_skip_reason"
+    run_cross_backend_command "generated_backend_regression_fixture" "$trace_id" "postgres" "$trace" "${case_dir}/postgres" "$database_url" "$rows_file" "$generated_backend_fixture_static_skip_reason"
   done < <(find "${out_dir}/sim/backend-regression-fixtures" -name 'trace.json' -type f 2>/dev/null | sort)
 
   python3 - "$rows_file" "${matrix_dir}/summary.json" "$mode" <<'PY'
@@ -1305,16 +1309,16 @@ for corpus in sorted({row["corpus"] for row in rows}):
 failures = [row for row in rows if row["status"] == "failed"]
 skips = [row for row in rows if row["status"] == "skipped"]
 generated = by_corpus.get("generated", {"trace_count": 0})
-backend_replayable = by_corpus.get("backend_replayable_regression", {"trace_count": 0})
+generated_backend_regression = by_corpus.get("generated_backend_regression_fixture", {"trace_count": 0})
 status = "passed"
-if generated["trace_count"] == 0 or backend_replayable["trace_count"] == 0 or failures:
+if generated["trace_count"] == 0 or generated_backend_regression["trace_count"] == 0 or failures:
     status = "failed"
 
 summary = {
-    "schema": "lash.confidence.cross-backend-replay-matrix.v1",
+    "schema": "lash.confidence.static-replay-evidence-matrix.v1",
     "status": status,
     "postgres_mode": mode,
-    "semantics": "Every generated trace and every backend-replayable regression trace is replayed through model, SQLite, and Postgres when a database URL or Docker bootstrap is available. Every minimized failing-regression trace is replayed through the model replay to prove deterministic oracle preservation; SQLite/Postgres rows are skipped with per-fixture reasons when the minimized trace intentionally removes scheduler or observed runtime evidence that backend recomputation must reject or repair.",
+    "semantics": "Generated scheduler traces and generated backend regression fixtures are model-replayed in this static matrix. SQLite/Postgres static rows for those dynamic traces are skipped with explicit reasons because backend equivalence is proved by per-seed generated workload rerun artifacts, not by fixed-order provider-event-gated replay. Minimized failing-regression traces are model-replayed to prove deterministic oracle preservation; SQLite/Postgres rows are skipped with per-fixture reasons when the minimized trace intentionally removes scheduler or observed runtime evidence that backend recomputation must reject or repair.",
     "row_count": len(rows),
     "corpora": by_corpus,
     "failures": failures,
@@ -1329,7 +1333,7 @@ PY
   local matrix_status
   matrix_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "${matrix_dir}/summary.json")"
   if [ "$matrix_status" != "passed" ]; then
-    echo "Cross-backend replay matrix failed; see ${matrix_dir}/summary.json" >&2
+    echo "Static replay evidence matrix failed; see ${matrix_dir}/summary.json" >&2
     exit 1
   fi
 }

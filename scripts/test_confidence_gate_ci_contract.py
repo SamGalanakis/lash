@@ -132,6 +132,26 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         for snippet in required_repro_snippets:
             self.assertIn(snippet, repro)
 
+    def test_static_replay_matrix_does_not_claim_generated_backend_static_replay(self) -> None:
+        gate = GATE.read_text(encoding="utf-8")
+
+        required_snippets = [
+            'step "Static replay evidence matrix"',
+            "generated_static_backend_skip_reason=",
+            "generated_backend_fixture_static_skip_reason=",
+            "generated_backend_regression_fixture",
+            '"schema": "lash.confidence.static-replay-evidence-matrix.v1"',
+            "backend equivalence is proved by per-seed generated workload rerun artifacts",
+        ]
+        for snippet in required_snippets:
+            self.assertIn(snippet, gate)
+
+        self.assertNotIn("backend_replayable_regression", gate)
+        self.assertNotIn(
+            "Every generated trace and every backend-replayable regression trace is replayed through model, SQLite, and Postgres",
+            gate,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
