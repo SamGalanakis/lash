@@ -4559,6 +4559,8 @@ struct StandardContractObserved {
     tool_calls: Vec<Value>,
     tool_results: Vec<Value>,
     checkpoints: Vec<&'static str>,
+    llm_response_full_texts: Vec<String>,
+    llm_response_parts: Vec<Vec<Value>>,
     llm_call_count: usize,
     text_deltas: Vec<String>,
     errors: Vec<String>,
@@ -4631,14 +4633,33 @@ fn run_standard_protocol_contract(
                         "{scenario_name} expected a pending LLM call"
                     ))
                 })?;
+                let expected_parts = parts.clone();
+                let expected_full_text = standard_full_text(&expected_parts);
+                let expected_part_summary = llm_output_parts_contract_summary(&expected_parts);
+                let response = llm_response_with_parts(expected_full_text.clone(), parts);
+                require(
+                    response.full_text == expected_full_text,
+                    format!(
+                        "{scenario_name} provider response full_text changed: expected {:?}, got {:?}",
+                        expected_full_text, response.full_text
+                    ),
+                )?;
+                let response_part_summary = llm_output_parts_contract_summary(&response.parts);
+                require(
+                    response_part_summary == expected_part_summary,
+                    format!(
+                        "{scenario_name} provider response parts changed: expected {:?}, got {:?}",
+                        expected_part_summary, response_part_summary
+                    ),
+                )?;
+                observed
+                    .llm_response_full_texts
+                    .push(response.full_text.clone());
+                observed.llm_response_parts.push(response_part_summary);
                 machine.handle_response(lash_core::sansio::Response::LlmComplete {
                     id: llm_id,
                     text_streamed,
-                    result: Ok(LlmResponse {
-                        full_text: standard_full_text(&parts),
-                        parts,
-                        ..LlmResponse::default()
-                    }),
+                    result: Ok(response),
                 });
             }
             StandardContractStep::LlmError(message) => {
@@ -4717,6 +4738,8 @@ fn run_standard_protocol_contract(
             .as_deref()
             .is_some_and(|request| request.contains(user_message)),
         "llm_call_count": observed.llm_call_count,
+        "llm_response_full_texts": observed.llm_response_full_texts,
+        "llm_response_parts": observed.llm_response_parts,
         "done": machine.is_done(),
         "tool_calls": observed.tool_calls,
         "tool_results": observed.tool_results,
@@ -4753,6 +4776,69 @@ fn standard_full_text(parts: &[LlmOutputPart]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn llm_response_with_parts(full_text: String, parts: Vec<LlmOutputPart>) -> LlmResponse {
+    let mut response = LlmResponse::default();
+    response.full_text = full_text;
+    response.parts = parts;
+    response
+}
+
+fn text_llm_response(text: impl Into<String>) -> LlmResponse {
+    let text = text.into();
+    llm_response_with_parts(
+        text.clone(),
+        vec![LlmOutputPart::Text {
+            text,
+            response_meta: None,
+        }],
+    )
+}
+
+fn tool_call_llm_response(call_id: &str, tool_name: &str, input_json: &str) -> LlmResponse {
+    let mut response = LlmResponse::default();
+    response.parts = vec![LlmOutputPart::ToolCall {
+        call_id: call_id.to_string(),
+        tool_name: tool_name.to_string(),
+        input_json: input_json.to_string(),
+        replay: None,
+    }];
+    response
+}
+
+fn llm_output_parts_contract_summary(parts: &[LlmOutputPart]) -> Vec<Value> {
+    parts
+        .iter()
+        .map(|part| match part {
+            LlmOutputPart::Text { text, .. } => json!({
+                "kind": "text",
+                "text": text,
+            }),
+            LlmOutputPart::Reasoning { text, .. } => json!({
+                "kind": "reasoning",
+                "text": text,
+            }),
+            LlmOutputPart::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                ..
+            } => json!({
+                "kind": "tool_call",
+                "call_id": call_id,
+                "tool_name": tool_name,
+                "input_json": input_json,
+            }),
+        })
+        .collect()
+}
+
+fn response_text_part(response: &LlmResponse) -> Option<&str> {
+    response.parts.iter().find_map(|part| match part {
+        LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    })
 }
 
 fn standard_llm_error(message: &str) -> lash_core::LlmCallError {
@@ -5297,6 +5383,9 @@ struct RlmContractObserved {
     initial_request_tools_empty: Option<bool>,
     exec_codes: Vec<String>,
     checkpoints: Vec<&'static str>,
+    llm_response_full_texts: Vec<String>,
+    llm_response_part_counts: Vec<usize>,
+    llm_response_parts: Vec<Vec<Value>>,
     llm_call_count: usize,
     turn_outcomes: Vec<lash_core::TurnOutcome>,
     final_message_event: bool,
@@ -5381,14 +5470,42 @@ fn run_rlm_protocol_contract(
                         "{scenario_name} expected a pending LLM call"
                     ))
                 })?;
+                let expected_parts = parts.clone();
+                let expected_full_text = rlm_full_text(&expected_parts);
+                let expected_part_summary = llm_output_parts_contract_summary(&expected_parts);
+                let response = llm_response_with_parts(expected_full_text.clone(), parts);
+                require(
+                    response.full_text == expected_full_text,
+                    format!(
+                        "{scenario_name} provider response full_text changed: expected {:?}, got {:?}",
+                        expected_full_text, response.full_text
+                    ),
+                )?;
+                require(
+                    response.parts.len() == expected_parts.len() && !response.parts.is_empty(),
+                    format!(
+                        "{scenario_name} provider response parts changed: expected {} parts, got {}",
+                        expected_parts.len(),
+                        response.parts.len()
+                    ),
+                )?;
+                let response_part_summary = llm_output_parts_contract_summary(&response.parts);
+                require(
+                    response_part_summary == expected_part_summary,
+                    format!(
+                        "{scenario_name} provider response parts changed: expected {:?}, got {:?}",
+                        expected_part_summary, response_part_summary
+                    ),
+                )?;
+                observed
+                    .llm_response_full_texts
+                    .push(response.full_text.clone());
+                observed.llm_response_part_counts.push(response.parts.len());
+                observed.llm_response_parts.push(response_part_summary);
                 machine.handle_response(lash_core::sansio::Response::LlmComplete {
                     id: llm_id,
                     text_streamed: false,
-                    result: Ok(LlmResponse {
-                        full_text: rlm_full_text(&parts),
-                        parts,
-                        ..LlmResponse::default()
-                    }),
+                    result: Ok(response),
                 });
             }
             RlmContractStep::Exec(result) => {
@@ -5438,6 +5555,9 @@ fn run_rlm_protocol_contract(
         "max_turns": max_turns,
         "initial_request_tools_empty": observed.initial_request_tools_empty,
         "llm_call_count": observed.llm_call_count,
+        "llm_response_full_texts": observed.llm_response_full_texts,
+        "llm_response_part_counts": observed.llm_response_part_counts,
+        "llm_response_parts": observed.llm_response_parts,
         "done": machine.is_done(),
         "checkpoints": observed.checkpoints,
         "exec_codes": observed.exec_codes,
@@ -7006,14 +7126,18 @@ fn fixed_texts_provider(kind: &'static str, responses: Vec<&'static str>) -> Pro
                         "{kind} provider exhausted its fixed response"
                     )));
                 };
-                Ok(LlmResponse {
-                    full_text: text.clone(),
-                    parts: vec![LlmOutputPart::Text {
-                        text,
-                        response_meta: None,
-                    }],
-                    ..LlmResponse::default()
-                })
+                let expected_text = text.clone();
+                let response = text_llm_response(text);
+                let response_part_text = response_text_part(&response);
+                if response.full_text != expected_text
+                    || response_part_text != Some(expected_text.as_str())
+                {
+                    return Err(LlmTransportError::new(format!(
+                        "{kind} fixed response shape changed: expected full_text and text part {:?}, got full_text {:?} parts {:?}",
+                        expected_text, response.full_text, response.parts
+                    )));
+                }
+                Ok(response)
             }
         })
         .build()
@@ -9771,14 +9895,15 @@ fn rlm_final_value_provider() -> ProviderHandle {
             for chunk in CHUNKS {
                 stream.send(LlmStreamEvent::Delta((*chunk).to_string()));
             }
-            Ok(LlmResponse {
-                full_text: RAW_FINAL.to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: RAW_FINAL.to_string(),
-                    response_meta: None,
-                }],
-                ..LlmResponse::default()
-            })
+            let response = text_llm_response(RAW_FINAL);
+            if response.full_text != RAW_FINAL || response_text_part(&response) != Some(RAW_FINAL)
+            {
+                return Err(LlmTransportError::new(format!(
+                    "rlm final-value fixed response shape changed: expected {:?}, got full_text {:?} parts {:?}",
+                    RAW_FINAL, response.full_text, response.parts
+                )));
+            }
+            Ok(response)
         })
         .build()
         .into_handle()
@@ -9837,23 +9962,8 @@ fn pending_tool_definition() -> lash_core::ToolDefinition {
 
 fn pending_tool_roundtrip_provider() -> ProviderHandle {
     let responses = Arc::new(tokio::sync::Mutex::new(VecDeque::from([
-        LlmResponse {
-            parts: vec![LlmOutputPart::ToolCall {
-                call_id: "call-1".to_string(),
-                tool_name: "app_lookup".to_string(),
-                input_json: "{}".to_string(),
-                replay: None,
-            }],
-            ..LlmResponse::default()
-        },
-        LlmResponse {
-            full_text: "done".to_string(),
-            parts: vec![LlmOutputPart::Text {
-                text: "done".to_string(),
-                response_meta: None,
-            }],
-            ..LlmResponse::default()
-        },
+        tool_call_llm_response("call-1", "app_lookup", "{}"),
+        text_llm_response("done"),
     ])));
     lash_core::testing::TestProvider::builder()
         .kind("lash-sim-pending-tool")
@@ -11140,6 +11250,200 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_completion_serialization_mutation_guard() {
+        let seed = generated_seed("full-random", 12);
+        let workload = generate_workload(seed, "full-random", 384).expect("workload");
+        let mut world = GeneratedRuntimeWorld::with_backend(
+            Arc::new(lash::persistence::InMemorySessionStoreFactory::new()),
+            RuntimeEffectReplayStore::Memory,
+            Arc::new(lash::persistence::InMemoryAttachmentStore::new()),
+            Arc::new(lash::persistence::InMemoryProcessExecutionEnvStore::new()),
+            true,
+        );
+
+        let (events, _summary) = drive_generated_workload(&mut world, &workload)
+            .await
+            .expect("serialized generated workload");
+        let provider_completions = events
+            .iter()
+            .filter(|event| event.kind == BoundaryKind::Provider)
+            .count();
+
+        assert!(
+            provider_completions > 1,
+            "serialization guard must exercise more than one provider turn"
+        );
+        assert_eq!(
+            world.peak_concurrent_live_turns, 1,
+            "serialized generated replay must initialize RuntimeCompletionState with serialize_provider_turns=true"
+        );
+        assert_eq!(
+            peak_concurrent_live_turns(&events),
+            1,
+            "delivered evidence must not show overlapping provider turns under serialized replay"
+        );
+    }
+
+    #[test]
+    fn standard_protocol_full_text_mutation_guard() {
+        let result = run_standard_protocol_contract(
+            "standard.full_text_mutation_guard",
+            "answer with two chunks",
+            None,
+            vec![
+                StandardContractStep::Llm {
+                    text_streamed: true,
+                    parts: vec![
+                        standard_text_part("first chunk"),
+                        standard_text_part("second chunk"),
+                    ],
+                },
+                StandardContractStep::Checkpoint,
+            ],
+        )
+        .expect("standard full-text contract");
+
+        assert_eq!(
+            result
+                .get("llm_response_full_texts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("first chunk\nsecond chunk")],
+            "fixed Standard execution must preserve LlmResponse.full_text, not only streamed parts"
+        );
+        assert_eq!(
+            result
+                .get("llm_response_parts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!([
+                {"kind": "text", "text": "first chunk"},
+                {"kind": "text", "text": "second chunk"},
+            ])],
+            "fixed Standard execution must preserve concrete response parts"
+        );
+        assert_eq!(
+            result.get("llm_call_count").and_then(Value::as_u64),
+            Some(1),
+            "the guard must drive a real Standard LLM turn"
+        );
+        assert_eq!(
+            result.get("done").and_then(Value::as_bool),
+            Some(true),
+            "the guarded Standard turn must still complete"
+        );
+    }
+
+    #[test]
+    fn rlm_protocol_response_shape_mutation_guard() {
+        let result = run_rlm_protocol_contract(
+            "rlm.response_shape_mutation_guard",
+            "answer naturally",
+            RlmTermination::Natural,
+            None,
+            None,
+            vec![
+                RlmContractStep::Llm(vec![rlm_text_part("RLM final prose")]),
+                RlmContractStep::Checkpoint,
+            ],
+        )
+        .expect("rlm response-shape contract");
+
+        assert_eq!(
+            result
+                .get("llm_response_full_texts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("RLM final prose")],
+            "fixed RLM execution must preserve LlmResponse.full_text"
+        );
+        assert_eq!(
+            result
+                .get("llm_response_part_counts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!(1)],
+            "fixed RLM execution must preserve concrete response parts"
+        );
+        assert_eq!(
+            result
+                .get("llm_response_parts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!([{"kind": "text", "text": "RLM final prose"}])],
+            "fixed RLM execution must preserve the concrete text part"
+        );
+        assert_eq!(
+            result.get("done").and_then(Value::as_bool),
+            Some(true),
+            "the guarded RLM turn must still complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn fixed_texts_provider_response_shape_mutation_guard() {
+        let mut provider =
+            fixed_texts_provider("lash-sim-fixed-text-guard", vec!["facade response text"]);
+        let response = provider
+            .complete(openai_compatible_request(false))
+            .await
+            .expect("fixed text provider response");
+
+        assert_eq!(response.full_text, "facade response text");
+        assert!(
+            matches!(
+                response.parts.as_slice(),
+                [LlmOutputPart::Text { text, .. }] if text == "facade response text"
+            ),
+            "fixed text provider must return a matching text part"
+        );
+    }
+
+    #[tokio::test]
+    async fn rlm_final_value_provider_response_shape_mutation_guard() {
+        let mut provider = rlm_final_value_provider();
+        let response = provider
+            .complete(openai_compatible_request(true))
+            .await
+            .expect("rlm final-value provider response");
+
+        assert!(response.full_text.contains("semantic-channel"));
+        assert!(
+            response_text_part(&response).is_some_and(|text| text.contains("semantic-channel")),
+            "rlm final-value provider must return the semantic text part"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_tool_roundtrip_provider_response_shape_mutation_guard() {
+        let mut provider = pending_tool_roundtrip_provider();
+        let tool_response = provider
+            .complete(openai_compatible_request(false))
+            .await
+            .expect("pending tool provider tool-call response");
+        assert!(
+            matches!(
+                tool_response.parts.as_slice(),
+                [LlmOutputPart::ToolCall { call_id, tool_name, input_json, .. }]
+                    if call_id == "call-1" && tool_name == "app_lookup" && input_json == "{}"
+            ),
+            "pending tool provider must start with the concrete tool-call part"
+        );
+
+        let final_response = provider
+            .complete(openai_compatible_request(false))
+            .await
+            .expect("pending tool provider final response");
+        assert_eq!(final_response.full_text, "done");
+        assert_eq!(response_text_part(&final_response), Some("done"));
+    }
+
+    #[tokio::test]
     async fn fixed_script_profile_writes_deterministic_manifest() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
@@ -12217,6 +12521,62 @@ mod tests {
                     .get("unit")
                     .and_then(Value::as_str)
                     .is_some_and(|name| name.contains("provider:"))))
+        );
+    }
+
+    #[test]
+    fn runtime_completion_backend_mutation_idle_session_mutation_guard() {
+        let backend_failure = BoundaryEvent::new(
+            "session-001:backend-failure:001",
+            "session-001",
+            BoundaryKind::BackendFailure,
+            4,
+            "backend.failure",
+            json!({}),
+        );
+        let provider_mutation = BoundaryEvent::new(
+            "session-001:provider-mutation:001",
+            "session-001",
+            BoundaryKind::ProviderMutation,
+            5,
+            "provider.mutation",
+            json!({}),
+        );
+        let mut state = RuntimeCompletionState::default();
+
+        assert!(
+            !runtime_completion_ready(&backend_failure, &state),
+            "backend failure must not run before the session opens"
+        );
+        assert!(
+            !runtime_completion_ready(&provider_mutation, &state),
+            "provider mutation must not run before the session opens"
+        );
+
+        state.observe(&test_delivered(
+            0,
+            "session-001:ingress",
+            "session-001",
+            BoundaryKind::Ingress,
+            json!({}),
+        ));
+        assert!(
+            runtime_completion_ready(&backend_failure, &state),
+            "backend failure is ready once its session is open and idle"
+        );
+        assert!(
+            runtime_completion_ready(&provider_mutation, &state),
+            "provider mutation is ready once its session is open and idle"
+        );
+
+        state.provider_started("session-001");
+        assert!(
+            !runtime_completion_ready(&backend_failure, &state),
+            "backend failure must not interleave with an active provider turn for the same session"
+        );
+        assert!(
+            !runtime_completion_ready(&provider_mutation, &state),
+            "provider mutation must not interleave with an active provider turn for the same session"
         );
     }
 
