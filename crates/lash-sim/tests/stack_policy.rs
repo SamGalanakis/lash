@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use lash_sim::runner::{
-    FIXED_AGENT_PRODUCT_CONTRACTS, PRODUCT_STACK_BUDGET_BYTES, SIM_HARNESS_STACK_LIMIT_BYTES,
-};
+use lash_sim::runner::FIXED_AGENT_PRODUCT_CONTRACTS;
+use lash_sim::stack_policy::{PRODUCT_STACK_BUDGET_BYTES, SIM_HARNESS_STACK_LIMIT_BYTES};
 
 #[test]
 fn stack_policy_agent_contract_product_probes_pass_at_2_mib() {
@@ -39,7 +38,7 @@ fn stack_policy_rejects_raw_stack_literals_and_global_stack_escape_hatches() {
     assert_eq!(SIM_HARNESS_STACK_LIMIT_BYTES, 8 * 1024 * 1024);
 
     let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let checked_files = ["runner.rs", "main.rs", "lib.rs"];
+    let checked_files = ["runner.rs", "main.rs", "lib.rs", "stack_policy.rs"];
     let mut stack_size_lines = Vec::new();
 
     for file in checked_files {
@@ -60,7 +59,7 @@ fn stack_policy_rejects_raw_stack_literals_and_global_stack_escape_hatches() {
     }
 
     assert!(
-        matches!(stack_size_lines.as_slice(), [line] if line.starts_with(&src_dir.join("runner.rs").display().to_string())
+        matches!(stack_size_lines.as_slice(), [line] if line.starts_with(&src_dir.join("stack_policy.rs").display().to_string())
             && line.ends_with(".stack_size(stack_bytes)")),
         "all lash-sim thread stacks must flow through the named stack policy helper; found {stack_size_lines:?}",
     );

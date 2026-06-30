@@ -1407,25 +1407,18 @@ mod tests {
     use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
     use serde_json::json;
 
-    const TOOL_CALL_SPLIT_STREAM_SCRIPT: &str = include_str!(
-        "../provider-scripts/canonical/openai-compatible.chat-tool-call-split-stream.json"
-    );
-    const RATE_LIMIT_SCRIPT: &str =
-        include_str!("../provider-scripts/canonical/openai-compatible.chat-rate-limit-429.json");
-    const VALIDATION_ERROR_SCRIPT: &str =
-        include_str!("../provider-scripts/canonical/openai-compatible.chat-validation-error.json");
-    const MID_STREAM_DISCONNECT_SCRIPT: &str = include_str!(
-        "../provider-scripts/canonical/openai-compatible.chat-mid-stream-disconnect.json"
-    );
-    const OPENAI_RESPONSES_TEXT_SCRIPT: &str =
-        include_str!("../provider-scripts/canonical/openai.responses-text-stream.json");
+    use crate::canonical_scripts::{
+        OPENAI_COMPAT_DISCONNECT, OPENAI_COMPAT_RATE_LIMIT, OPENAI_COMPAT_TOOL_CALL,
+        OPENAI_COMPAT_VALIDATION, OPENAI_RESPONSES_TEXT,
+    };
+
     const RATE_LIMIT_BODY: &str = "{\"error\":{\"message\":\"Rate limit reached for requests\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}}";
     const VALIDATION_BODY: &str = "{\"error\":{\"message\":\"Invalid request: tools[0].function.parameters is invalid\",\"type\":\"invalid_request_error\",\"code\":\"invalid_request_error\"}}";
 
     #[tokio::test]
     async fn provider_wire_script_openai_compatible_chat_stream_uses_real_provider_parser() {
         let (events, sender) = event_collector();
-        let mut provider = scripted_provider(TOOL_CALL_SPLIT_STREAM_SCRIPT);
+        let mut provider = scripted_provider(OPENAI_COMPAT_TOOL_CALL);
 
         let response = provider
             .complete(request(Some(sender)))
@@ -1457,7 +1450,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_wire_script_openai_compatible_rate_limit_error_preserves_envelope() {
-        let mut provider = scripted_provider(RATE_LIMIT_SCRIPT);
+        let mut provider = scripted_provider(OPENAI_COMPAT_RATE_LIMIT);
 
         let err = provider
             .complete(request(None))
@@ -1486,7 +1479,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_wire_script_openai_compatible_validation_error_preserves_envelope() {
-        let mut provider = scripted_provider(VALIDATION_ERROR_SCRIPT);
+        let mut provider = scripted_provider(OPENAI_COMPAT_VALIDATION);
 
         let err = provider
             .complete(request(None))
@@ -1516,7 +1509,7 @@ mod tests {
     #[tokio::test]
     async fn provider_wire_script_openai_compatible_mid_stream_disconnect_surfaces_stream_error() {
         let (events, sender) = event_collector();
-        let mut provider = scripted_provider(MID_STREAM_DISCONNECT_SCRIPT);
+        let mut provider = scripted_provider(OPENAI_COMPAT_DISCONNECT);
 
         let err = provider
             .complete(request(Some(sender)))
@@ -1531,9 +1524,8 @@ mod tests {
 
     #[tokio::test]
     async fn provider_wire_script_direct_openai_responses_uses_real_provider_parser() {
-        let transport = Arc::new(
-            ScriptedLlmHttpTransport::from_json_str(OPENAI_RESPONSES_TEXT_SCRIPT).unwrap(),
-        );
+        let transport =
+            Arc::new(ScriptedLlmHttpTransport::from_json_str(OPENAI_RESPONSES_TEXT).unwrap());
         let mut provider = OpenAiProvider::new("test-key").with_transport(transport);
 
         let response = provider
@@ -1551,7 +1543,7 @@ mod tests {
     async fn provider_wire_script_cancellation_before_response_start_commits_no_output() {
         let schedule = ScriptedTransportSchedule::new();
         let transport = Arc::new(
-            ScriptedLlmHttpTransport::from_json_str(TOOL_CALL_SPLIT_STREAM_SCRIPT)
+            ScriptedLlmHttpTransport::from_json_str(OPENAI_COMPAT_TOOL_CALL)
                 .unwrap()
                 .with_event_schedule(schedule.clone()),
         );
@@ -1575,7 +1567,7 @@ mod tests {
     async fn scripted_transport_response_start_gate_timeout_uses_production_timeout_envelope() {
         let schedule = ScriptedTransportSchedule::new();
         let transport = Arc::new(
-            ScriptedLlmHttpTransport::from_json_str(TOOL_CALL_SPLIT_STREAM_SCRIPT)
+            ScriptedLlmHttpTransport::from_json_str(OPENAI_COMPAT_TOOL_CALL)
                 .unwrap()
                 .with_event_schedule(schedule),
         );
@@ -1621,8 +1613,7 @@ mod tests {
     #[tokio::test]
     async fn scripted_transport_buffers_scheduler_releases_before_provider_parks() {
         let schedule = ScriptedTransportSchedule::new();
-        let script =
-            ProviderWireScript::from_json_str(TOOL_CALL_SPLIT_STREAM_SCRIPT).expect("script");
+        let script = ProviderWireScript::from_json_str(OPENAI_COMPAT_TOOL_CALL).expect("script");
         for (event_index, wire_event) in script.timeline.iter().enumerate() {
             let release =
                 schedule.release(0, event_index, wire_event.event_name(), wire_event.at());
