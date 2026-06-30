@@ -2894,6 +2894,7 @@ dependencies = [
  "reqwest 0.13.3",
  "serde",
  "serde_json",
+ "tokio",
  "tokio-tungstenite",
  "tracing",
  "uuid",
