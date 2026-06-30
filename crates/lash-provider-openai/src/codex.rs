@@ -1767,8 +1767,8 @@ impl ProviderFactory for CodexProviderFactory {
 mod tests {
     use super::*;
     use lash_core::llm::types::{
-        LlmJsonSchema, LlmMessage, LlmOutputPart, LlmRole, LlmTerminalReason, LlmToolChoice,
-        LlmToolSpec, ResponseTextMeta,
+        LlmJsonSchema, LlmMessage, LlmOutputPart, LlmProviderTraceSender, LlmRole,
+        LlmTerminalReason, LlmToolChoice, LlmToolSpec, ResponseTextMeta,
     };
     use lash_core::provider::{Provider, ProviderModelPolicy, RequestTimeout};
     use shared::ResponsesStreamState as CodexStreamState;
@@ -1816,6 +1816,34 @@ mod tests {
         }
     }
 
+    fn traced_request(messages: Vec<LlmMessage>, trace: Arc<Mutex<Vec<Value>>>) -> LlmRequest {
+        let mut req = request(messages);
+        req.provider_trace = Some(LlmProviderTraceSender::new(move |event| {
+            if let Ok(value) = serde_json::from_str::<Value>(&event.raw) {
+                trace
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(value);
+            }
+        }));
+        req
+    }
+
+    fn websocket_diagnostics(trace: &Arc<Mutex<Vec<Value>>>) -> Vec<Value> {
+        trace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|value| {
+                value
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind == "lash.codex.websocket_request")
+            })
+            .cloned()
+            .collect()
+    }
+
     fn websocket_test_provider(
         transport: CodexTransport,
         responses_url: String,
@@ -1843,6 +1871,22 @@ mod tests {
         })
     }
 
+    fn assistant_message_with_meta(message_id: &str, text: &str) -> LlmMessage {
+        LlmMessage::new(
+            LlmRole::Assistant,
+            vec![lash_core::llm::types::LlmContentBlock::Text {
+                text: text.into(),
+                response_meta: Some(ResponseTextMeta {
+                    id: Some(message_id.to_string()),
+                    status: Some("completed".to_string()),
+                    phase: Some("final_answer".to_string()),
+                    ..ResponseTextMeta::default()
+                }),
+                cache_breakpoint: false,
+            }],
+        )
+    }
+
     #[derive(Clone, Debug)]
     enum ScriptedWsAction {
         Complete {
@@ -1851,6 +1895,11 @@ mod tests {
             text: &'static str,
         },
         CompleteAndClose {
+            response_id: &'static str,
+            message_id: &'static str,
+            text: &'static str,
+        },
+        Incomplete {
             response_id: &'static str,
             message_id: &'static str,
             text: &'static str,
@@ -1980,6 +2029,14 @@ mod tests {
                                 let _ = ws.close(None).await;
                                 break;
                             }
+                            ScriptedWsAction::Incomplete {
+                                response_id,
+                                message_id,
+                                text,
+                            } => {
+                                send_incomplete_ws_response(&mut ws, response_id, message_id, text)
+                                    .await;
+                            }
                             ScriptedWsAction::Error { message } => {
                                 send_ws_json(
                                     &mut ws,
@@ -2068,6 +2125,25 @@ mod tests {
         send_ws_json(
             ws,
             json!({"type":"response.completed","response":{"id":response_id,"status":"completed","output":[assistant_item(message_id, text)],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
+        )
+        .await;
+    }
+
+    async fn send_incomplete_ws_response(
+        ws: &mut WebSocketStream<tokio::net::TcpStream>,
+        response_id: &str,
+        message_id: &str,
+        text: &str,
+    ) {
+        let item = assistant_item(message_id, text);
+        send_ws_json(
+            ws,
+            json!({"type":"response.output_item.done","output_index":0,"item":item}),
+        )
+        .await;
+        send_ws_json(
+            ws,
+            json!({"type":"response.completed","response":{"id":response_id,"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[assistant_item(message_id, text)],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
         )
         .await;
     }
@@ -2389,6 +2465,43 @@ mod tests {
     }
 
     #[test]
+    fn codex_websocket_cache_miss_reasons_are_explicit() {
+        let provider = CodexProvider::new("access", "refresh", 0)
+            .with_transport(CodexTransport::WebsocketCached);
+        let first = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        let first_body = provider.build_request_body(&first, true).unwrap();
+        let continuation = CodexProvider::continuation_from_response(
+            &first_body,
+            &json!({
+                "id": "resp_1",
+                "status": "completed",
+                "output": [assistant_item("msg_1", "answer")]
+            }),
+        )
+        .expect("completed continuation");
+
+        let mut fingerprint_mismatch_body = first_body.clone();
+        fingerprint_mismatch_body["model"] = json!("gpt-5-codex");
+        let fingerprint_plan =
+            provider.websocket_request_plan(&fingerprint_mismatch_body, Some(&continuation), true);
+        assert!(!fingerprint_plan.cached);
+        assert_eq!(
+            fingerprint_plan.cache_miss_reason,
+            Some("body_fingerprint_mismatch")
+        );
+
+        let prefix_mismatch = request(vec![
+            LlmMessage::text(LlmRole::User, "hello"),
+            LlmMessage::text(LlmRole::User, "next without prior assistant"),
+        ]);
+        let prefix_mismatch_body = provider.build_request_body(&prefix_mismatch, true).unwrap();
+        let prefix_plan =
+            provider.websocket_request_plan(&prefix_mismatch_body, Some(&continuation), true);
+        assert!(!prefix_plan.cached);
+        assert_eq!(prefix_plan.cache_miss_reason, Some("input_prefix_mismatch"));
+    }
+
+    #[test]
     fn codex_websocket_request_uses_response_create_event_shape() {
         let provider = CodexProvider::new("access", "refresh", 0);
         let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
@@ -2469,6 +2582,127 @@ mod tests {
             "session-{}",
             MAX_SESSION_WEBSOCKET_CACHE_ENTRIES + 2
         )));
+    }
+
+    async fn assert_trace_cached_delta_for_transport(transport: CodexTransport) {
+        let ws = spawn_scripted_websocket(vec![
+            ScriptedWsAction::Complete {
+                response_id: "resp_1",
+                message_id: "msg_1",
+                text: "answer",
+            },
+            ScriptedWsAction::Complete {
+                response_id: "resp_2",
+                message_id: "msg_2",
+                text: "done",
+            },
+        ])
+        .await;
+        let mut provider = websocket_test_provider(
+            transport,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+        let trace = Arc::new(Mutex::new(Vec::new()));
+
+        provider
+            .complete(traced_request(
+                vec![LlmMessage::text(LlmRole::User, "hello")],
+                Arc::clone(&trace),
+            ))
+            .await
+            .expect("first response");
+        let response = provider
+            .complete(traced_request(
+                vec![
+                    LlmMessage::text(LlmRole::User, "hello"),
+                    assistant_message_with_meta("msg_1", "answer"),
+                    LlmMessage::text(LlmRole::User, "next"),
+                ],
+                Arc::clone(&trace),
+            ))
+            .await
+            .expect("cached follow-up response");
+
+        assert_eq!(response.full_text, "done");
+        let diagnostics = websocket_diagnostics(&trace);
+        assert_eq!(diagnostics.len(), 2, "{transport:?}");
+        assert_eq!(diagnostics[0]["transport"], format!("{transport:?}"));
+        assert_eq!(diagnostics[0]["cached_request"], false);
+        assert_eq!(diagnostics[0]["cache_miss_reason"], "missing_continuation");
+        assert_eq!(diagnostics[1]["transport"], format!("{transport:?}"));
+        assert_eq!(diagnostics[1]["reused_connection"], true);
+        assert_eq!(diagnostics[1]["cached_request"], true);
+        assert_eq!(diagnostics[1]["previous_response_id"], "resp_1");
+        assert_eq!(diagnostics[1]["sent_input_items"], 1);
+        assert_eq!(diagnostics[1]["retry_after_stale_previous_response"], false);
+    }
+
+    async fn assert_trace_stale_retry_for_transport(transport: CodexTransport) {
+        let ws = spawn_scripted_websocket(vec![
+            ScriptedWsAction::Complete {
+                response_id: "resp_1",
+                message_id: "msg_1",
+                text: "answer",
+            },
+            ScriptedWsAction::Error {
+                message: "Previous response with id 'resp_1' not found",
+            },
+            ScriptedWsAction::Complete {
+                response_id: "resp_2",
+                message_id: "msg_2",
+                text: "recovered",
+            },
+        ])
+        .await;
+        let mut provider = websocket_test_provider(
+            transport,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+        let trace = Arc::new(Mutex::new(Vec::new()));
+
+        provider
+            .complete(traced_request(
+                vec![LlmMessage::text(LlmRole::User, "hello")],
+                Arc::clone(&trace),
+            ))
+            .await
+            .expect("first response");
+        let response = provider
+            .complete(traced_request(
+                vec![
+                    LlmMessage::text(LlmRole::User, "hello"),
+                    assistant_message_with_meta("msg_1", "answer"),
+                    LlmMessage::text(LlmRole::User, "next"),
+                ],
+                Arc::clone(&trace),
+            ))
+            .await
+            .expect("stale retry response");
+
+        assert_eq!(response.full_text, "recovered");
+        let diagnostics = websocket_diagnostics(&trace);
+        assert_eq!(diagnostics.len(), 3, "{transport:?}");
+        assert_eq!(diagnostics[1]["reused_connection"], true);
+        assert_eq!(diagnostics[1]["cached_request"], true);
+        assert_eq!(diagnostics[1]["previous_response_id"], "resp_1");
+        assert_eq!(diagnostics[2]["cached_request"], false);
+        assert_eq!(diagnostics[2]["cache_miss_reason"], "disabled");
+        assert_eq!(diagnostics[2]["retry_after_stale_previous_response"], true);
+        assert!(
+            diagnostics[2]
+                .get("previous_response_id")
+                .map_or(true, Value::is_null)
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_scripted_websocket_trace_diagnostics_cover_cached_delta_and_stale_retry() {
+        for transport in [CodexTransport::WebsocketCached, CodexTransport::Auto] {
+            assert_trace_cached_delta_for_transport(transport).await;
+            assert_trace_stale_retry_for_transport(transport).await;
+        }
     }
 
     #[tokio::test]
@@ -2694,6 +2928,106 @@ mod tests {
         assert!(captured[1].get("previous_response_id").is_none());
         assert_eq!(captured[1]["input"], full_body["input"]);
         assert_eq!(ws.handshakes().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn codex_scripted_websocket_incomplete_terminal_response_is_not_cached() {
+        let ws = spawn_scripted_websocket(vec![
+            ScriptedWsAction::Incomplete {
+                response_id: "resp_1",
+                message_id: "msg_1",
+                text: "partial",
+            },
+            ScriptedWsAction::Complete {
+                response_id: "resp_2",
+                message_id: "msg_2",
+                text: "fresh",
+            },
+        ])
+        .await;
+        let mut provider = websocket_test_provider(
+            CodexTransport::WebsocketCached,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+
+        provider
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .await
+            .expect("incomplete terminal response");
+        let second = request(vec![
+            LlmMessage::text(LlmRole::User, "hello"),
+            assistant_message_with_meta("msg_1", "partial"),
+            LlmMessage::text(LlmRole::User, "next"),
+        ]);
+        let full_body = provider.build_request_body(&second, true).unwrap();
+        let response = provider
+            .complete(second)
+            .await
+            .expect("fresh response after incomplete terminal");
+
+        assert_eq!(response.full_text, "fresh");
+        assert!(
+            response
+                .http_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cache_miss=missing_continuation")
+        );
+        let captured = ws.captured();
+        assert_eq!(captured.len(), 2);
+        assert!(captured[1].get("previous_response_id").is_none());
+        assert_eq!(captured[1]["input"], full_body["input"]);
+    }
+
+    #[tokio::test]
+    async fn codex_auto_without_session_id_uses_uncached_ephemeral_websockets() {
+        let ws = spawn_scripted_websocket(vec![
+            ScriptedWsAction::Complete {
+                response_id: "resp_1",
+                message_id: "msg_1",
+                text: "one",
+            },
+            ScriptedWsAction::Complete {
+                response_id: "resp_2",
+                message_id: "msg_2",
+                text: "two",
+            },
+        ])
+        .await;
+        let mut provider = websocket_test_provider(
+            CodexTransport::Auto,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+        let mut first = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        first.session_id = None;
+        let mut second = request(vec![LlmMessage::text(LlmRole::User, "next")]);
+        second.session_id = None;
+
+        let first_response = provider.complete(first).await.expect("first response");
+        let second_response = provider.complete(second).await.expect("second response");
+
+        assert_eq!(first_response.full_text, "one");
+        assert_eq!(second_response.full_text, "two");
+        assert!(
+            second_response
+                .http_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("reused=false")
+        );
+        assert_eq!(ws.captured().len(), 2);
+        let handshakes = ws.handshakes();
+        assert_eq!(handshakes.len(), 2);
+        for headers in handshakes {
+            assert!(!headers.iter().any(|(name, _)| name == "session-id"));
+            assert!(
+                !headers
+                    .iter()
+                    .any(|(name, _)| name == "x-client-request-id")
+            );
+        }
     }
 
     #[tokio::test]

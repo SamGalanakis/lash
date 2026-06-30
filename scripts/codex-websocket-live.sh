@@ -60,6 +60,7 @@ run_transport() {
   local out_file="$out_dir/${run_id}-${transport}.jsonl"
   local request_file="$out_dir/${run_id}-${transport}.requests.jsonl"
   local trace_copy="$out_dir/${run_id}-${transport}.trace.jsonl"
+  local summary_file="$out_dir/${run_id}-${transport}.summary.json"
   trap 'rm -rf "$tmp_home"' RETURN
 
   mkdir -p "$tmp_home"
@@ -102,7 +103,7 @@ PY
     cp "$trace_file" "$trace_copy"
   fi
 
-  python3 - "$out_file" "${trace_file:-}" "$transport" <<'PY'
+  python3 - "$out_file" "${trace_file:-}" "$transport" "$summary_file" "$request_file" "$trace_copy" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -110,6 +111,9 @@ from pathlib import Path
 out_path = Path(sys.argv[1])
 trace_arg = sys.argv[2]
 transport = sys.argv[3]
+summary_path = Path(sys.argv[4])
+request_path = Path(sys.argv[5])
+trace_copy_path = Path(sys.argv[6])
 
 turn_finish = {}
 responses = {}
@@ -137,55 +141,94 @@ for turn_id in ("turn1", "turn2"):
     if response is None or not response.get("ok"):
         raise SystemExit(f"{transport}: missing ok RPC response for {turn_id}: {response}")
 
-if trace_arg:
-    trace_path = Path(trace_arg)
-    diagnostics = []
-    for line in trace_path.read_text().splitlines():
-        if "lash.codex.websocket_request" not in line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        payload = record
-        stack = [payload]
-        while stack:
-            current = stack.pop()
-            if isinstance(current, dict):
-                if current.get("type") == "lash.codex.websocket_request":
-                    diagnostics.append(current)
-                stack.extend(current.values())
-            elif isinstance(current, list):
-                stack.extend(current)
-    if len(diagnostics) < 2:
-        raise SystemExit(f"{transport}: expected at least two websocket diagnostics in {trace_path}")
-    required_keys = {
-        "reused_connection",
-        "cached_request",
-        "retry_after_stale_previous_response",
-        "retry_after_dead_reused_connection",
-    }
-    for index, item in enumerate(diagnostics):
-        missing = sorted(required_keys.difference(item))
-        if missing:
-            raise SystemExit(f"{transport}: websocket diagnostic {index} missing keys: {missing}")
-    if transport in {"websocket_cached", "auto"}:
-        followups = diagnostics[1:]
-        if not any(item.get("reused_connection") is True for item in followups):
-            raise SystemExit(f"{transport}: second turn did not reuse the websocket connection")
-        if any(item.get("cached_request") is True for item in followups):
-            if not any(item.get("previous_response_id") for item in followups):
-                raise SystemExit(f"{transport}: cached websocket request did not expose previous_response_id")
-        else:
-            if not any(item.get("continuation_available") is True for item in followups):
-                raise SystemExit(f"{transport}: second turn had no continuation metadata")
-            reasons = sorted({str(item.get("cache_miss_reason")) for item in followups})
-            print(f"{transport}: websocket reused; delta not sent because {', '.join(reasons)}", file=sys.stderr)
-        if any(item.get("retry_after_stale_previous_response") is True for item in followups):
-            if not any(item.get("cached_request") is False for item in followups):
-                raise SystemExit(f"{transport}: stale retry did not produce a full-context follow-up")
+if not trace_arg:
+    raise SystemExit(f"{transport}: missing extended trace file")
+
+trace_path = Path(trace_arg)
+diagnostics = []
+for line in trace_path.read_text().splitlines():
+    if "lash.codex.websocket_request" not in line:
+        continue
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    payload = record
+    stack = [payload]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            if current.get("type") == "lash.codex.websocket_request":
+                diagnostics.append(current)
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+if len(diagnostics) < 2:
+    raise SystemExit(f"{transport}: expected at least two websocket diagnostics in {trace_path}")
+required_keys = {
+    "reused_connection",
+    "cached_request",
+    "retry_after_stale_previous_response",
+    "retry_after_dead_reused_connection",
+}
+for index, item in enumerate(diagnostics):
+    missing = sorted(required_keys.difference(item))
+    if missing:
+        raise SystemExit(f"{transport}: websocket diagnostic {index} missing keys: {missing}")
+
+followups = diagnostics[1:]
+if transport in {"websocket_cached", "auto"}:
+    if not any(item.get("reused_connection") is True for item in followups):
+        raise SystemExit(f"{transport}: second turn did not reuse the websocket connection")
+    if any(item.get("cached_request") is True for item in followups):
+        if not any(item.get("previous_response_id") for item in followups):
+            raise SystemExit(f"{transport}: cached websocket request did not expose previous_response_id")
+    else:
+        if not any(item.get("continuation_available") is True for item in followups):
+            raise SystemExit(f"{transport}: second turn had no continuation metadata")
+        reasons = sorted({str(item.get("cache_miss_reason")) for item in followups})
+        print(f"{transport}: websocket reused; delta not sent because {', '.join(reasons)}", file=sys.stderr)
+    if any(item.get("retry_after_stale_previous_response") is True for item in followups):
+        if not any(item.get("cached_request") is False for item in followups):
+            raise SystemExit(f"{transport}: stale retry did not produce a full-context follow-up")
+
+summary = {
+    "schema": "lash.codex.websocket_live_probe.v1",
+    "transport": transport,
+    "files": {
+        "rpc_output": str(out_path),
+        "requests": str(request_path),
+        "trace": str(trace_copy_path),
+    },
+    "turns": {
+        turn_id: {
+            "ok": bool(turn_finish[turn_id].get("ok")),
+            "assistant_text": (responses[turn_id].get("result") or {}).get("assistant_text"),
+            "usage": turn_finish[turn_id].get("usage"),
+        }
+        for turn_id in ("turn1", "turn2")
+    },
+    "diagnostics": {
+        "count": len(diagnostics),
+        "followup_reused_connection": any(item.get("reused_connection") is True for item in followups),
+        "followup_cached_request": any(item.get("cached_request") is True for item in followups),
+        "followup_cache_miss_reasons": sorted({
+            str(item.get("cache_miss_reason"))
+            for item in followups
+            if item.get("cache_miss_reason") is not None
+        }),
+        "stale_retry_observed": any(
+            item.get("retry_after_stale_previous_response") is True for item in followups
+        ),
+        "dead_reused_retry_observed": any(
+            item.get("retry_after_dead_reused_connection") is True for item in followups
+        ),
+    },
+}
+summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 PY
 
+  echo "Summary: $summary_file" >&2
   echo "Codex websocket live multi-turn probe passed for $transport." >&2
 }
 
