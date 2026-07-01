@@ -1,0 +1,38 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "codex.responses-rate-limit-429",
+  "provider_kind": "codex",
+  "endpoint": {
+    "method": "POST",
+    "path": "/backend-api/codex/responses"
+  },
+  "request_match": {
+    "body": {
+      "model": { "equals": "gpt-5.4-codex" },
+      "stream": { "equals": true },
+      "store": { "equals": false }
+    },
+    "headers": {
+      "authorization": { "present": true },
+      "content-type": { "contains": "application/json" }
+    }
+  },
+  "timeline": [
+    {
+      "at": 10,
+      "event": "http_error",
+      "status": 429,
+      "headers": [
+        { "name": "content-type", "value": "application/json" },
+        { "name": "retry-after", "value": "9" },
+        { "name": "x-request-id", "value": "req-codex-429-a" },
+        { "name": "x-request-id", "value": "req-codex-429-b" }
+      ],
+      "body": "{\"error\":{\"message\":\"You have hit your ChatGPT usage limit\",\"type\":\"usage_limit_reached\",\"code\":\"usage_limit_reached\",\"plan_type\":\"plus\"}}"
+    }
+  ],
+  "expected_provider": {
+    "status": 429,
+    "retryable_after_classification": true
+  }
+}

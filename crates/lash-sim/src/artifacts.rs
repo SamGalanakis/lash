@@ -493,13 +493,6 @@ pub(crate) struct FixedScriptLaneCounts {
 pub(crate) fn provider_transport_exclusions() -> Vec<ProviderTransportExclusion> {
     vec![
         ProviderTransportExclusion {
-            path: "crates/lash-provider-openai/src/codex.rs",
-            status: "reviewed_non_dst_exclusion",
-            reason: "Codex OAuth provider execution still owns a device/OAuth-specific reqwest client path and is not in the no-live-LLM LlmHttpTransport script matrix.",
-            replacement_lane: "future codex-oauth LlmHttpTransport scripted transcript lane; current confidence gate keeps OpenAI/OpenAI-compatible/Anthropic/Google provider execution in DST.",
-            review_owner: "lash-sim provider matrix",
-        },
-        ProviderTransportExclusion {
             path: "crates/lash-provider-openai/src/codex/oauth.rs",
             status: "reviewed_non_dst_exclusion",
             reason: "OAuth device-code polling and token exchange are auth flows, not LLM provider execution; they use reqwest directly and require separate OAuth script fixtures.",

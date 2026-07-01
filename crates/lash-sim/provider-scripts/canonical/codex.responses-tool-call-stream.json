@@ -1,0 +1,68 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "codex.responses-tool-call-stream",
+  "provider_kind": "codex",
+  "endpoint": {
+    "method": "POST",
+    "path": "/backend-api/codex/responses"
+  },
+  "request_match": {
+    "body": {
+      "model": { "equals": "gpt-5.4-codex" },
+      "stream": { "equals": true },
+      "store": { "equals": false },
+      "tools[0].name": { "equals": "lookup" }
+    },
+    "headers": {
+      "authorization": { "present": true },
+      "content-type": { "contains": "application/json" }
+    }
+  },
+  "timeline": [
+    {
+      "at": 10,
+      "event": "response_start",
+      "status": 200,
+      "headers": [
+        { "name": "content-type", "value": "text/event-stream; charset=utf-8" },
+        { "name": "x-request-id", "value": "req-codex-tool" }
+      ]
+    },
+    {
+      "at": 20,
+      "event": "sse",
+      "data": "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"lookup\"}}"
+    },
+    {
+      "at": 21,
+      "event": "sse",
+      "data": "{\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_1\",\"delta\":\"{\\\"q\\\":\"}"
+    },
+    {
+      "at": 22,
+      "event": "sse",
+      "data": "{\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_1\",\"delta\":\"\\\"x\\\"}\"}"
+    },
+    {
+      "at": 23,
+      "event": "sse",
+      "data": "{\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"item_id\":\"fc_1\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}"
+    },
+    {
+      "at": 24,
+      "event": "sse",
+      "data": "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}"
+    },
+    {
+      "at": 25,
+      "event": "sse",
+      "data": "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_codex_tool\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}],\"usage\":{\"input_tokens\":8,\"output_tokens\":5}}}"
+    },
+    { "at": 26, "event": "sse", "data": "[DONE]" },
+    { "at": 27, "event": "end" }
+  ],
+  "expected_provider": {
+    "terminal_reason": "tool_use",
+    "tool_names": ["lookup"]
+  }
+}

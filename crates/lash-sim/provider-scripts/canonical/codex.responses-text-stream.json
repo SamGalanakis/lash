@@ -1,0 +1,58 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "codex.responses-text-stream",
+  "provider_kind": "codex",
+  "endpoint": {
+    "method": "POST",
+    "path": "/backend-api/codex/responses"
+  },
+  "request_match": {
+    "body": {
+      "model": { "equals": "gpt-5.4-codex" },
+      "stream": { "equals": true },
+      "store": { "equals": false }
+    },
+    "headers": {
+      "authorization": { "present": true },
+      "content-type": { "contains": "application/json" },
+      "openai-beta": { "contains": "responses=experimental" }
+    }
+  },
+  "timeline": [
+    {
+      "at": 10,
+      "event": "response_start",
+      "status": 200,
+      "headers": [
+        { "name": "content-type", "value": "text/event-stream; charset=utf-8" },
+        { "name": "x-request-id", "value": "req-codex-text" }
+      ]
+    },
+    {
+      "at": 20,
+      "event": "sse",
+      "data": "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"phase\":\"final_answer\"}}"
+    },
+    {
+      "at": 21,
+      "event": "sse",
+      "data": "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"msg_1\",\"delta\":\"Codex direct answer.\"}"
+    },
+    {
+      "at": 22,
+      "event": "sse",
+      "data": "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"status\":\"completed\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Codex direct answer.\"}]}}"
+    },
+    {
+      "at": 23,
+      "event": "sse",
+      "data": "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_codex_1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"status\":\"completed\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Codex direct answer.\"}]}],\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}"
+    },
+    { "at": 24, "event": "sse", "data": "[DONE]" },
+    { "at": 25, "event": "end" }
+  ],
+  "expected_provider": {
+    "terminal_reason": "stop",
+    "text": "Codex direct answer."
+  }
+}

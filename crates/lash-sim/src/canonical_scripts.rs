@@ -1,3 +1,11 @@
+pub(crate) const CODEX_RESPONSES_TEXT: &str =
+    include_str!("../provider-scripts/canonical/codex.responses-text-stream.json");
+pub(crate) const CODEX_RESPONSES_RATE_LIMIT: &str =
+    include_str!("../provider-scripts/canonical/codex.responses-rate-limit-429.json");
+pub(crate) const CODEX_RESPONSES_DISCONNECT: &str =
+    include_str!("../provider-scripts/canonical/codex.responses-mid-stream-disconnect.json");
+pub(crate) const CODEX_RESPONSES_TOOL_CALL: &str =
+    include_str!("../provider-scripts/canonical/codex.responses-tool-call-stream.json");
 pub(crate) const OPENAI_COMPAT_TOOL_CALL: &str = include_str!(
     "../provider-scripts/canonical/openai-compatible.chat-tool-call-split-stream.json"
 );
@@ -33,6 +41,22 @@ pub(crate) const CANONICAL_SCRIPTS: &[CanonicalScript] = &[
     CanonicalScript {
         path: "provider-scripts/canonical/anthropic.messages-text-stream.json",
         content: ANTHROPIC_MESSAGES_TEXT,
+    },
+    CanonicalScript {
+        path: "provider-scripts/canonical/codex.responses-mid-stream-disconnect.json",
+        content: CODEX_RESPONSES_DISCONNECT,
+    },
+    CanonicalScript {
+        path: "provider-scripts/canonical/codex.responses-rate-limit-429.json",
+        content: CODEX_RESPONSES_RATE_LIMIT,
+    },
+    CanonicalScript {
+        path: "provider-scripts/canonical/codex.responses-text-stream.json",
+        content: CODEX_RESPONSES_TEXT,
+    },
+    CanonicalScript {
+        path: "provider-scripts/canonical/codex.responses-tool-call-stream.json",
+        content: CODEX_RESPONSES_TOOL_CALL,
     },
     CanonicalScript {
         path: "provider-scripts/canonical/google.generate-content-rate-limit-429.json",
