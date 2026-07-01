@@ -20,6 +20,8 @@ struct RecordingEffectHostController {
     records: Arc<Mutex<Vec<RecordingEffectHostRecord>>>,
 }
 
+impl crate::AwaitEventResolver for RecordingEffectHostController {}
+
 #[async_trait::async_trait]
 impl RuntimeEffectController for RecordingEffectHostController {
     async fn execute_effect(
@@ -96,6 +98,8 @@ impl RecordingEffectHost {
         )
     }
 }
+
+impl crate::AwaitEventResolver for RecordingEffectHost {}
 
 impl EffectHost for RecordingEffectHost {
     fn scoped<'run>(

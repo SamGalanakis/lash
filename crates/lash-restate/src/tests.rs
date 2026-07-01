@@ -1218,7 +1218,7 @@ async fn restate_controller_routes_sleep_only_through_timer() {
 async fn restate_handler_resolves_process_await_events_through_workflow_handler() {
     let context = Arc::new(RecordingContext::default());
     let host = RestateRuntimeEffectController::new(context.clone());
-    let key = RuntimeEffectController::await_event_key(
+    let key = AwaitEventResolver::await_event_key(
         &host,
         &ExecutionScope::process("process-await"),
         AwaitEventWaitIdentity::tool_completion("tool-call"),
@@ -1227,7 +1227,7 @@ async fn restate_handler_resolves_process_await_events_through_workflow_handler(
     .expect("await event key");
     let resolution = Resolution::Ok(serde_json::json!({ "done": true }));
 
-    let outcome = RuntimeEffectController::resolve_await_event(&host, &key, resolution.clone())
+    let outcome = AwaitEventResolver::resolve_await_event(&host, &key, resolution.clone())
         .await
         .expect("resolve await event");
 
@@ -1246,7 +1246,7 @@ async fn restate_handler_resolves_process_await_events_through_workflow_handler(
 async fn restate_handler_reports_non_process_await_event_resolution_unknown() {
     let context = Arc::new(RecordingContext::default());
     let host = RestateRuntimeEffectController::new(context.clone());
-    let key = RuntimeEffectController::await_event_key(
+    let key = AwaitEventResolver::await_event_key(
         &host,
         &ExecutionScope::turn("session", "turn"),
         AwaitEventWaitIdentity::tool_completion("tool-call"),
@@ -1254,7 +1254,7 @@ async fn restate_handler_reports_non_process_await_event_resolution_unknown() {
     .await
     .expect("await event key");
 
-    let outcome = RuntimeEffectController::resolve_await_event(
+    let outcome = AwaitEventResolver::resolve_await_event(
         &host,
         &key,
         Resolution::Ok(serde_json::json!({ "done": true })),

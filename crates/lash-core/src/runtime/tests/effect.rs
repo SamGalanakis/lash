@@ -79,6 +79,8 @@ fn runtime_host_config_with_durability(
     config
 }
 
+impl crate::AwaitEventResolver for RecordingEffectController {}
+
 #[async_trait::async_trait]
 impl RuntimeEffectController for RecordingEffectController {
     async fn execute_effect(
@@ -281,6 +283,8 @@ impl SerialOnlyEffectController {
     }
 }
 
+impl crate::AwaitEventResolver for SerialOnlyEffectController {}
+
 #[async_trait::async_trait]
 impl RuntimeEffectController for SerialOnlyEffectController {
     fn supports_concurrent_effects(&self) -> bool {
@@ -327,8 +331,7 @@ impl RuntimeEffectController for SerialOnlyEffectController {
 #[derive(Default)]
 struct DurableAttachmentRequiredController;
 
-#[async_trait::async_trait]
-impl RuntimeEffectController for DurableAttachmentRequiredController {
+impl crate::AwaitEventResolver for DurableAttachmentRequiredController {
     fn durability_tier(&self) -> crate::DurabilityTier {
         crate::DurabilityTier::Durable
     }
@@ -336,7 +339,10 @@ impl RuntimeEffectController for DurableAttachmentRequiredController {
     fn requires_durable_attachment_store(&self) -> bool {
         true
     }
+}
 
+#[async_trait::async_trait]
+impl RuntimeEffectController for DurableAttachmentRequiredController {
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,
@@ -422,6 +428,8 @@ fn done_once_provider() -> TestProvider {
 
 struct RejectingEffectController;
 
+impl crate::AwaitEventResolver for RejectingEffectController {}
+
 #[async_trait::async_trait]
 impl RuntimeEffectController for RejectingEffectController {
     async fn execute_effect(
@@ -437,6 +445,8 @@ impl RuntimeEffectController for RejectingEffectController {
 }
 
 struct WrongOutcomeEffectController;
+
+impl crate::AwaitEventResolver for WrongOutcomeEffectController {}
 
 #[async_trait::async_trait]
 impl RuntimeEffectController for WrongOutcomeEffectController {
@@ -1000,6 +1010,8 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
             self.tool_outcomes.lock().expect("tool outcomes").clone()
         }
     }
+
+    impl crate::AwaitEventResolver for CapturingToolReplayController {}
 
     #[async_trait::async_trait]
     impl RuntimeEffectController for CapturingToolReplayController {

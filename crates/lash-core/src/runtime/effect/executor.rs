@@ -517,9 +517,13 @@ impl<'run> ScopedEffectController<'run> {
     }
 }
 
-/// Deployment-level factory for scoped effect controllers.
+/// Shared durability and Durable Wait contract for effect boundaries.
+///
+/// Both the deployment-level [`EffectHost`] factory and the per-run
+/// [`RuntimeEffectController`] resolve Durable Waits and describe their
+/// durability; this supertrait is the single declaration of that contract.
 #[async_trait::async_trait]
-pub trait EffectHost: Send + Sync {
+pub trait AwaitEventResolver: Send + Sync {
     fn durability_tier(&self) -> crate::DurabilityTier {
         crate::DurabilityTier::Inline
     }
@@ -532,18 +536,6 @@ pub trait EffectHost: Send + Sync {
         false
     }
 
-    fn scoped<'run>(
-        &'run self,
-        scope: ExecutionScope,
-    ) -> Result<ScopedEffectController<'run>, RuntimeError>;
-
-    fn scoped_static(
-        &self,
-        _scope: ExecutionScope,
-    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
-        Ok(None)
-    }
-
     async fn await_event_key(
         &self,
         _scope: &ExecutionScope,
@@ -551,7 +543,7 @@ pub trait EffectHost: Send + Sync {
     ) -> Result<AwaitEventKey, RuntimeError> {
         Err(RuntimeError::new(
             "await_event_unsupported",
-            "this effect host does not support await-event keys",
+            "this effect boundary does not support await-event keys",
         ))
     }
 
@@ -571,7 +563,7 @@ pub trait EffectHost: Send + Sync {
     ) -> Result<Resolution, RuntimeError> {
         Err(RuntimeError::new(
             "await_event_unsupported",
-            "this effect host does not support await-event waits",
+            "this effect boundary does not support await-event waits",
         ))
     }
 
@@ -580,23 +572,25 @@ pub trait EffectHost: Send + Sync {
     }
 }
 
+/// Deployment-level factory for scoped effect controllers.
+#[async_trait::async_trait]
+pub trait EffectHost: AwaitEventResolver {
+    fn scoped<'run>(
+        &'run self,
+        scope: ExecutionScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError>;
+
+    fn scoped_static(
+        &self,
+        _scope: ExecutionScope,
+    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
+        Ok(None)
+    }
+}
+
 /// Boundary for nondeterministic runtime work.
 #[async_trait::async_trait]
-pub trait RuntimeEffectController: Send + Sync {
-    /// Durability tier this controller provides; defaults to
-    /// [`DurabilityTier::Inline`].
-    fn durability_tier(&self) -> crate::DurabilityTier {
-        crate::DurabilityTier::Inline
-    }
-
-    fn requires_durable_attachment_store(&self) -> bool {
-        false
-    }
-
-    fn supports_durable_effects(&self) -> bool {
-        false
-    }
-
+pub trait RuntimeEffectController: AwaitEventResolver {
     /// Whether this controller can safely accept overlapping `execute_effect`
     /// calls from one runtime coordinator.
     ///
@@ -615,41 +609,6 @@ pub trait RuntimeEffectController: Send + Sync {
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError>;
-
-    async fn await_event_key(
-        &self,
-        _scope: &ExecutionScope,
-        _wait: AwaitEventWaitIdentity,
-    ) -> Result<AwaitEventKey, RuntimeError> {
-        Err(RuntimeError::new(
-            "await_event_unsupported",
-            "this effect controller does not support await-event keys",
-        ))
-    }
-
-    async fn resolve_await_event(
-        &self,
-        _key: &AwaitEventKey,
-        _resolution: Resolution,
-    ) -> Result<ResolveOutcome, RuntimeError> {
-        Ok(ResolveOutcome::UnknownOrRevoked)
-    }
-
-    async fn await_await_event(
-        &self,
-        _key: &AwaitEventKey,
-        _cancel: CancellationToken,
-        _deadline: Option<Instant>,
-    ) -> Result<Resolution, RuntimeError> {
-        Err(RuntimeError::new(
-            "await_event_unsupported",
-            "this effect controller does not support await-event waits",
-        ))
-    }
-
-    async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
-        Ok(())
-    }
 }
 
 /// Runtime-internal handle for effect-controller references carried through
@@ -1331,43 +1290,9 @@ async fn sleep_with_cancellation(
 pub struct InlineRuntimeEffectController;
 
 #[async_trait::async_trait]
-impl RuntimeEffectController for InlineRuntimeEffectController {
+impl AwaitEventResolver for InlineRuntimeEffectController {
     fn supports_durable_effects(&self) -> bool {
         true
-    }
-
-    async fn execute_effect(
-        &self,
-        envelope: RuntimeEffectEnvelope,
-        local_executor: RuntimeEffectLocalExecutor<'_>,
-    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-        match envelope.command {
-            RuntimeEffectCommand::AwaitEvent { key } => {
-                let (cancellation, deadline, clock) = local_executor.into_await_event_options()?;
-                let resolution = inline_await_events()
-                    .await_resolution(&key, cancellation, deadline, clock.as_ref())
-                    .await
-                    .map_err(RuntimeEffectControllerError::from)?;
-                Ok(RuntimeEffectOutcome::AwaitEvent { resolution })
-            }
-            RuntimeEffectCommand::Process { command } => {
-                let execution = local_executor.into_process()?;
-                let registry = execution.registry;
-                let process_work_driver = execution.process_work_driver;
-                let result = tokio::task::spawn(async move {
-                    Self::execute_process_command(registry, process_work_driver, *command).await
-                })
-                .await
-                .map_err(|err| {
-                    RuntimeEffectControllerError::new(
-                        "runtime_effect_process_task_join",
-                        format!("inline process effect task failed: {err}"),
-                    )
-                })??;
-                Ok(RuntimeEffectOutcome::Process { result })
-            }
-            _ => local_executor.execute(envelope).await,
-        }
     }
 
     async fn await_event_key(
@@ -1402,6 +1327,43 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
     }
 }
 
+#[async_trait::async_trait]
+impl RuntimeEffectController for InlineRuntimeEffectController {
+    async fn execute_effect(
+        &self,
+        envelope: RuntimeEffectEnvelope,
+        local_executor: RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        match envelope.command {
+            RuntimeEffectCommand::AwaitEvent { key } => {
+                let (cancellation, deadline, clock) = local_executor.into_await_event_options()?;
+                let resolution = inline_await_events()
+                    .await_resolution(&key, cancellation, deadline, clock.as_ref())
+                    .await
+                    .map_err(RuntimeEffectControllerError::from)?;
+                Ok(RuntimeEffectOutcome::AwaitEvent { resolution })
+            }
+            RuntimeEffectCommand::Process { command } => {
+                let execution = local_executor.into_process()?;
+                let registry = execution.registry;
+                let process_work_driver = execution.process_work_driver;
+                let result = tokio::task::spawn(async move {
+                    Self::execute_process_command(registry, process_work_driver, *command).await
+                })
+                .await
+                .map_err(|err| {
+                    RuntimeEffectControllerError::new(
+                        "runtime_effect_process_task_join",
+                        format!("inline process effect task failed: {err}"),
+                    )
+                })??;
+                Ok(RuntimeEffectOutcome::Process { result })
+            }
+            _ => local_executor.execute(envelope).await,
+        }
+    }
+}
+
 /// In-process deployment effect host.
 #[derive(Clone)]
 pub struct InlineEffectHost {
@@ -1421,7 +1383,7 @@ impl Default for InlineEffectHost {
 }
 
 #[async_trait::async_trait]
-impl EffectHost for InlineEffectHost {
+impl AwaitEventResolver for InlineEffectHost {
     fn durability_tier(&self) -> crate::DurabilityTier {
         self.controller.durability_tier()
     }
@@ -1432,23 +1394,6 @@ impl EffectHost for InlineEffectHost {
 
     fn supports_durable_effects(&self) -> bool {
         self.controller.supports_durable_effects()
-    }
-
-    fn scoped<'run>(
-        &'run self,
-        scope: ExecutionScope,
-    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
-        ScopedEffectController::shared(Arc::clone(&self.controller), scope)
-    }
-
-    fn scoped_static(
-        &self,
-        scope: ExecutionScope,
-    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
-        Ok(Some(ScopedEffectController::shared(
-            Arc::clone(&self.controller),
-            scope,
-        )?))
     }
 
     async fn await_event_key(
@@ -1482,6 +1427,26 @@ impl EffectHost for InlineEffectHost {
         self.controller
             .revoke_await_events_for_session(session_id)
             .await
+    }
+}
+
+#[async_trait::async_trait]
+impl EffectHost for InlineEffectHost {
+    fn scoped<'run>(
+        &'run self,
+        scope: ExecutionScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
+        ScopedEffectController::shared(Arc::clone(&self.controller), scope)
+    }
+
+    fn scoped_static(
+        &self,
+        scope: ExecutionScope,
+    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
+        Ok(Some(ScopedEffectController::shared(
+            Arc::clone(&self.controller),
+            scope,
+        )?))
     }
 }
 

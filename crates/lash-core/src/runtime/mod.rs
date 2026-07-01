@@ -103,7 +103,8 @@ pub(crate) use causal::tool_retry_sleep_invocation;
 pub use clock::{Clock, SystemClock};
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
-    AwaitEventKey, AwaitEventWaitIdentity, CausalRef, EffectHost, ExecutionScope,
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, CausalRef, EffectHost,
+    ExecutionScope,
     ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController, LlmAttachmentSpec,
     LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, Resolution, ResolveOutcome,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,

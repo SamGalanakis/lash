@@ -9,7 +9,7 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    DirectJsonSchema, DirectRequest, Resolution, RuntimeEffectController, ToolContract,
+    AwaitEventResolver, DirectJsonSchema, DirectRequest, Resolution, ToolContract,
     ToolDefinition, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
     TriggerOccurrenceRequest, empty_trigger_source_key,
 };

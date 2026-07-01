@@ -950,12 +950,14 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
-    impl lash_core::RuntimeEffectController for CountingEffectController {
+    impl lash_core::AwaitEventResolver for CountingEffectController {
         fn durability_tier(&self) -> lash_core::DurabilityTier {
             lash_core::DurabilityTier::Durable
         }
+    }
 
+    #[async_trait::async_trait]
+    impl lash_core::RuntimeEffectController for CountingEffectController {
         async fn execute_effect(
             &self,
             envelope: lash_core::RuntimeEffectEnvelope,

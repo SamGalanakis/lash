@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use lash_core::{
-    DurabilityTier, EffectHost, ExecutionScope, PluginError, ProcessCommand, ProcessEffectOutcome,
+    AwaitEventResolver, DurabilityTier, EffectHost, ExecutionScope, PluginError, ProcessCommand,
+    ProcessEffectOutcome,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
     ScopedEffectController,
@@ -124,7 +125,7 @@ impl SqliteEffectHost {
     }
 }
 
-impl EffectHost for SqliteEffectHost {
+impl AwaitEventResolver for SqliteEffectHost {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -132,7 +133,9 @@ impl EffectHost for SqliteEffectHost {
     fn requires_durable_attachment_store(&self) -> bool {
         true
     }
+}
 
+impl EffectHost for SqliteEffectHost {
     fn scoped<'run>(
         &'run self,
         scope: ExecutionScope,
@@ -632,8 +635,7 @@ impl SqliteRuntimeEffectController {
     }
 }
 
-#[async_trait::async_trait]
-impl RuntimeEffectController for SqliteRuntimeEffectController {
+impl AwaitEventResolver for SqliteRuntimeEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -645,7 +647,10 @@ impl RuntimeEffectController for SqliteRuntimeEffectController {
     fn supports_durable_effects(&self) -> bool {
         true
     }
+}
 
+#[async_trait::async_trait]
+impl RuntimeEffectController for SqliteRuntimeEffectController {
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,

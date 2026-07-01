@@ -9,7 +9,8 @@ pub use envelope::{
     ToolBatchEffectOutcome, ToolCallLaunch,
 };
 pub use executor::{
-    AwaitEventKey, AwaitEventWaitIdentity, EffectHost, ExecutionScope, ExternalCompletionError,
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, EffectHost, ExecutionScope,
+    ExternalCompletionError,
     InlineEffectHost, InlineRuntimeEffectController, Resolution, ResolveOutcome,
     RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectLocalExecutor,
     ScopedEffectController,

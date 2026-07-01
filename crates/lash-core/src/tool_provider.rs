@@ -1263,11 +1263,13 @@ pub trait ToolProvider: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AwaitEventResolver;
     use crate::ProcessRegistry;
-    use crate::RuntimeEffectController;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct NoDurableEffectController;
+
+    impl crate::AwaitEventResolver for NoDurableEffectController {}
 
     #[async_trait::async_trait]
     impl crate::RuntimeEffectController for NoDurableEffectController {

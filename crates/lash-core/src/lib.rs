@@ -324,7 +324,8 @@ pub use provider::{
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;
 pub use runtime::{
-    AgentFrameRun, AssembledTurn, AssistantOutput, AwaitEventKey, AwaitEventWaitIdentity,
+    AgentFrameRun, AssembledTurn, AssistantOutput, AwaitEventKey, AwaitEventResolver,
+    AwaitEventWaitIdentity,
     CausalRef, Clock, CodeOutputRecord, DefaultProcessCancelAbility, DeliveryPolicy,
     DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig, DurableStoreFacet,
     EffectHost, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionScope,

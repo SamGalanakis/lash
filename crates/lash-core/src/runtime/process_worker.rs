@@ -679,12 +679,14 @@ mod boundary_tests {
     #[derive(Default)]
     struct DurableController;
 
-    #[async_trait::async_trait]
-    impl RuntimeEffectController for DurableController {
+    impl crate::AwaitEventResolver for DurableController {
         fn durability_tier(&self) -> DurabilityTier {
             DurabilityTier::Durable
         }
+    }
 
+    #[async_trait::async_trait]
+    impl RuntimeEffectController for DurableController {
         async fn execute_effect(
             &self,
             _envelope: crate::RuntimeEffectEnvelope,

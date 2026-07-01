@@ -24,8 +24,7 @@ impl RecordingDurableEffectController {
     }
 }
 
-#[async_trait]
-impl lash_core::RuntimeEffectController for RecordingDurableEffectController {
+impl lash_core::AwaitEventResolver for RecordingDurableEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -33,7 +32,10 @@ impl lash_core::RuntimeEffectController for RecordingDurableEffectController {
     fn requires_durable_attachment_store(&self) -> bool {
         true
     }
+}
 
+#[async_trait]
+impl lash_core::RuntimeEffectController for RecordingDurableEffectController {
     async fn execute_effect(
         &self,
         envelope: lash_core::RuntimeEffectEnvelope,
@@ -65,6 +67,8 @@ impl RecordingInlineEffectController {
             .clone()
     }
 }
+
+impl lash_core::AwaitEventResolver for RecordingInlineEffectController {}
 
 #[async_trait]
 impl lash_core::RuntimeEffectController for RecordingInlineEffectController {
@@ -116,11 +120,13 @@ impl lash_core::ProcessExecutionEnvStore for DurableInMemoryProcessEnvStore {
 #[derive(Default)]
 struct DurableNoopEffectHost;
 
-impl lash_core::EffectHost for DurableNoopEffectHost {
+impl lash_core::AwaitEventResolver for DurableNoopEffectHost {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
+}
 
+impl lash_core::EffectHost for DurableNoopEffectHost {
     fn scoped<'run>(
         &'run self,
         scope: lash_core::ExecutionScope,

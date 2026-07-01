@@ -85,7 +85,7 @@ impl PostgresEffectHost {
     }
 }
 
-impl EffectHost for PostgresEffectHost {
+impl AwaitEventResolver for PostgresEffectHost {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -97,7 +97,9 @@ impl EffectHost for PostgresEffectHost {
     fn supports_durable_effects(&self) -> bool {
         true
     }
+}
 
+impl EffectHost for PostgresEffectHost {
     fn scoped<'run>(
         &'run self,
         scope: ExecutionScope,
@@ -580,8 +582,7 @@ impl PostgresRuntimeEffectController {
     }
 }
 
-#[async_trait::async_trait]
-impl RuntimeEffectController for PostgresRuntimeEffectController {
+impl AwaitEventResolver for PostgresRuntimeEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -593,7 +594,10 @@ impl RuntimeEffectController for PostgresRuntimeEffectController {
     fn supports_durable_effects(&self) -> bool {
         true
     }
+}
 
+#[async_trait::async_trait]
+impl RuntimeEffectController for PostgresRuntimeEffectController {
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,

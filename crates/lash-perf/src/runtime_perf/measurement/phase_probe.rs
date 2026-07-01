@@ -19,6 +19,8 @@ struct RuntimePerfPhaseProbe {
 
 struct ScopedPerfEffectController;
 
+impl lash::runtime::AwaitEventResolver for ScopedPerfEffectController {}
+
 #[async_trait::async_trait]
 impl lash::runtime::RuntimeEffectController for ScopedPerfEffectController {
     async fn execute_effect(

@@ -287,7 +287,8 @@ pub mod durability {
 pub mod runtime {
     pub use crate::core::AdvancedLashCoreBuilder;
     pub use lash_core::runtime::{
-        AssembledTurn, DirectCompletionClient, EmbeddedRuntimeHost, EventSink, ExecutionScope,
+        AssembledTurn, AwaitEventResolver, DirectCompletionClient, EmbeddedRuntimeHost, EventSink,
+        ExecutionScope,
         InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
         NoopEventSink, NoopTurnActivitySink, ProcessCommand, ProcessEffectOutcome,
         QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest, RuntimeEffectCommand,

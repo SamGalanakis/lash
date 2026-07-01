@@ -22,8 +22,9 @@ use lash_core::store::{
     RuntimeCommitResult, SessionCheckpoint, SessionHeadMeta,
 };
 use lash_core::{
-    AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef,
-    DeliveryPolicy, DurabilityTier, EffectHost, ExecutionScope, GcReport, LeaseOwnerIdentity,
+    AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, AwaitEventResolver,
+    BlobRef, DeliveryPolicy, DurabilityTier, EffectHost, ExecutionScope, GcReport,
+    LeaseOwnerIdentity,
     LeaseOwnerLiveness, MergeKey, ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome,
     ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseCompletion,

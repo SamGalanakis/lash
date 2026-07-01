@@ -1304,6 +1304,8 @@ struct SleepRecordingEffectController {
     sleeps: Arc<std::sync::Mutex<Vec<crate::RuntimeInvocation>>>,
 }
 
+impl crate::AwaitEventResolver for SleepRecordingEffectController {}
+
 #[async_trait::async_trait]
 impl crate::RuntimeEffectController for SleepRecordingEffectController {
     async fn execute_effect(
@@ -1320,6 +1322,8 @@ impl crate::RuntimeEffectController for SleepRecordingEffectController {
 }
 
 struct FailingSleepEffectController;
+
+impl crate::AwaitEventResolver for FailingSleepEffectController {}
 
 #[async_trait::async_trait]
 impl crate::RuntimeEffectController for FailingSleepEffectController {

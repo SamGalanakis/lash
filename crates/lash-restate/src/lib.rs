@@ -64,8 +64,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    AwaitEventKey, AwaitEventWaitIdentity, DurabilityTier, DurableProcessWorker, EffectHost,
-    ExecutionScope, PluginError, ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome,
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, DurabilityTier,
+    DurableProcessWorker, EffectHost, ExecutionScope, PluginError, ProcessAwaitOutput,
+    ProcessCommand, ProcessEffectOutcome,
     ProcessExecutionContext, ProcessExternalRef, ProcessRecord, ProcessRegistration,
     ProcessRegistry, ProcessRunHandle, ProcessWorkDriver, Resolution, ResolveOutcome,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
@@ -669,7 +670,7 @@ impl RestateEffectHost {
 }
 
 #[async_trait::async_trait]
-impl EffectHost for RestateEffectHost {
+impl AwaitEventResolver for RestateEffectHost {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -680,23 +681,6 @@ impl EffectHost for RestateEffectHost {
 
     fn supports_durable_effects(&self) -> bool {
         true
-    }
-
-    fn scoped<'run>(
-        &'run self,
-        scope: ExecutionScope,
-    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
-        ScopedEffectController::shared(self.controller.clone(), scope)
-    }
-
-    fn scoped_static(
-        &self,
-        scope: ExecutionScope,
-    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
-        Ok(Some(ScopedEffectController::shared(
-            self.controller.clone(),
-            scope,
-        )?))
     }
 
     async fn await_event_key(
@@ -729,6 +713,25 @@ impl EffectHost for RestateEffectHost {
 
     async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
         Ok(())
+    }
+}
+
+impl EffectHost for RestateEffectHost {
+    fn scoped<'run>(
+        &'run self,
+        scope: ExecutionScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
+        ScopedEffectController::shared(self.controller.clone(), scope)
+    }
+
+    fn scoped_static(
+        &self,
+        scope: ExecutionScope,
+    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
+        Ok(Some(ScopedEffectController::shared(
+            self.controller.clone(),
+            scope,
+        )?))
     }
 }
 
@@ -784,7 +787,7 @@ struct RestateEffectHostController {
 }
 
 #[async_trait::async_trait]
-impl RuntimeEffectController for RestateEffectHostController {
+impl AwaitEventResolver for RestateEffectHostController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -793,6 +796,22 @@ impl RuntimeEffectController for RestateEffectHostController {
         true
     }
 
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        match &self.await_event_ingress {
+            Some(ingress) => {
+                resolve_restate_process_await_event_via_ingress(ingress, key, resolution).await
+            }
+            None => Ok(ResolveOutcome::UnknownOrRevoked),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectController for RestateEffectHostController {
     fn supports_concurrent_effects(&self) -> bool {
         false
     }
@@ -812,19 +831,6 @@ impl RuntimeEffectController for RestateEffectHostController {
                     .unwrap_or_else(|| envelope.command.kind().as_str())
             ),
         ))
-    }
-
-    async fn resolve_await_event(
-        &self,
-        key: &AwaitEventKey,
-        resolution: Resolution,
-    ) -> Result<ResolveOutcome, RuntimeError> {
-        match &self.await_event_ingress {
-            Some(ingress) => {
-                resolve_restate_process_await_event_via_ingress(ingress, key, resolution).await
-            }
-            None => Ok(ResolveOutcome::UnknownOrRevoked),
-        }
     }
 }
 
@@ -1523,9 +1529,9 @@ impl<C> fmt::Debug for RestateRuntimeEffectController<'_, C> {
 }
 
 #[async_trait::async_trait]
-impl<'ctx, C> EffectHost for RestateRuntimeEffectController<'ctx, C>
+impl<'ctx, C> AwaitEventResolver for RestateRuntimeEffectController<'ctx, C>
 where
-    C: RestateControllerContext<'ctx> + Sync,
+    C: RestateControllerContext<'ctx>,
 {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
@@ -1535,11 +1541,8 @@ where
         true
     }
 
-    fn scoped<'run>(
-        &'run self,
-        scope: ExecutionScope,
-    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
-        self.scoped_effect_controller(scope)
+    fn supports_durable_effects(&self) -> bool {
+        true
     }
 
     async fn await_event_key(
@@ -1575,23 +1578,23 @@ where
     }
 }
 
+impl<'ctx, C> EffectHost for RestateRuntimeEffectController<'ctx, C>
+where
+    C: RestateControllerContext<'ctx> + Sync,
+{
+    fn scoped<'run>(
+        &'run self,
+        scope: ExecutionScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
+        self.scoped_effect_controller(scope)
+    }
+}
+
 #[async_trait::async_trait]
 impl<'ctx, C> RuntimeEffectController for RestateRuntimeEffectController<'ctx, C>
 where
     C: RestateControllerContext<'ctx>,
 {
-    fn durability_tier(&self) -> DurabilityTier {
-        DurabilityTier::Durable
-    }
-
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
-    }
-
-    fn supports_durable_effects(&self) -> bool {
-        true
-    }
-
     fn supports_concurrent_effects(&self) -> bool {
         false
     }
@@ -1662,38 +1665,6 @@ where
                 validate_recorded_effect_hash(recorded, &current_hash)?
             }
         }
-    }
-
-    async fn await_event_key(
-        &self,
-        scope: &ExecutionScope,
-        wait: AwaitEventWaitIdentity,
-    ) -> Result<AwaitEventKey, RuntimeError> {
-        restate_await_event_key(scope, wait)
-    }
-
-    async fn resolve_await_event(
-        &self,
-        key: &AwaitEventKey,
-        resolution: Resolution,
-    ) -> Result<ResolveOutcome, RuntimeError> {
-        resolve_restate_process_await_event(&self.context, key, resolution).await
-    }
-
-    async fn await_await_event(
-        &self,
-        key: &AwaitEventKey,
-        _cancel: tokio_util::sync::CancellationToken,
-        _deadline: Option<std::time::Instant>,
-    ) -> Result<Resolution, RuntimeError> {
-        self.context
-            .await_event(key.promise_key())
-            .await
-            .map_err(|err| RuntimeError::new("restate_effect_controller", err.to_string()))
-    }
-
-    async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
-        Ok(())
     }
 }
 
