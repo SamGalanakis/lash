@@ -33,6 +33,7 @@
 - **Turn Activity**: App-facing live stream item for one active turn. It is live observation only, not committed transcript state.
 - **Turn Event**: Semantic payload carried by Turn Activity.
 - **AssistantOutput.safe_text**: Terminal or durable assistant output returned with an assembled turn: explicit `TurnOutcome` text/value rendering or assistant text recovered from committed state. It is not interrupted-preview salvage.
+- **Token Usage**: Provider usage normalized into explicit billing/context buckets. `input_tokens` is uncached ordinary input, `cache_read_input_tokens` is cached prompt input read from provider cache, `cache_write_input_tokens` is prompt input written to provider cache, `output_tokens` is total generated output, and `reasoning_output_tokens` is a subset of output rather than an additive total component. Usage totals add ordinary input, output, cache reads, and cache writes.
 - **Final Value**: Terminal value produced by an RLM foreground `finish <value>`; it ends the turn as durable runtime output. Hosts decide whether and how to render that value as user-facing transcript text. _Avoid_: Submitted Value.
 - **Suspended Turn**: Active session turn parked on a Durable Wait before it commits. It remains session-owned and observable, is not durable session history, and ends if the session is deleted. Avoid: Background Process, Degenerate Process.
 - **Session Event**: Runtime-internal turn/protocol machinery tolerated inside implementation boundaries. Avoid using Session Event as app-facing vocabulary.

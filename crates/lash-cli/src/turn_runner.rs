@@ -231,8 +231,9 @@ mod tests {
             usage: TokenUsage {
                 input_tokens: 42,
                 output_tokens: 11,
-                cached_input_tokens: 6,
-                reasoning_tokens: 8,
+                cache_read_input_tokens: 6,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 8,
             },
         }];
         let checkpoint_ref = store
@@ -242,8 +243,9 @@ mod tests {
                     token_usage: TokenUsage {
                         input_tokens: 30,
                         output_tokens: 7,
-                        cached_input_tokens: 5,
-                        reasoning_tokens: 6,
+                        cache_read_input_tokens: 5,
+                        cache_write_input_tokens: 0,
+                        reasoning_output_tokens: 6,
                     },
                     last_prompt_usage: None,
                     protocol_turn_options: Default::default(),
@@ -298,8 +300,8 @@ mod tests {
         assert_eq!(stale_state.token_ledger[0].model, "gpt-5.4-mini");
         assert_eq!(stale_state.token_ledger[0].usage.input_tokens, 42);
         assert_eq!(stale_state.token_ledger[0].usage.output_tokens, 11);
-        assert_eq!(stale_state.token_ledger[0].usage.cached_input_tokens, 6);
-        assert_eq!(stale_state.token_ledger[0].usage.reasoning_tokens, 8);
+        assert_eq!(stale_state.token_ledger[0].usage.cache_read_input_tokens, 6);
+        assert_eq!(stale_state.token_ledger[0].usage.reasoning_output_tokens, 8);
         assert_eq!(stale_state.token_usage.input_tokens, 30);
         assert_eq!(stale_state.token_usage.output_tokens, 7);
     }

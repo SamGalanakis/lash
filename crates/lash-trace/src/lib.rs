@@ -397,8 +397,9 @@ pub struct TraceRuntimeStreamEvent {
 pub struct TraceTokenUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub cached_input_tokens: i64,
-    pub reasoning_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_write_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

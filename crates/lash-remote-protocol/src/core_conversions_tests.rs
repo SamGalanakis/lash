@@ -155,8 +155,9 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         usage: core_llm::LlmUsage {
             input_tokens: 1,
             output_tokens: 2,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
         },
         terminal_reason: core_llm::LlmTerminalReason::Stop,
         terminal_diagnostic: Some("ok".to_string()),
@@ -579,8 +580,9 @@ fn remote_turn_result_maps_core_semantics() {
         token_usage: lash_core::TokenUsage {
             input_tokens: 1,
             output_tokens: 2,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
         },
         children_usage: vec![lash_core::TokenLedgerEntry {
             source: "subagent".to_string(),
@@ -588,8 +590,9 @@ fn remote_turn_result_maps_core_semantics() {
             usage: lash_core::TokenUsage {
                 input_tokens: 3,
                 output_tokens: 4,
-                cached_input_tokens: 0,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             },
         }],
         tool_calls: Vec::new(),
@@ -715,8 +718,9 @@ fn remote_session_observation_from_core_maps_snapshot_metadata() {
         token_usage: lash_core::TokenUsage {
             input_tokens: 10,
             output_tokens: 4,
-            cached_input_tokens: 2,
-            reasoning_tokens: 1,
+            cache_read_input_tokens: 2,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 1,
         },
         ..lash_core::SessionSnapshot::default()
     };

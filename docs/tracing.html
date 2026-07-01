@@ -250,7 +250,7 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Usage</h3>
-              <p><code>TokenUsage</code>: per-turn input/output/cached/reasoning deltas. Mirrors the session usage ledger.</p>
+              <p><code>TokenUsage</code>: per-turn uncached input, output, cache-read input, cache-write input, and reasoning-output deltas. Reasoning is an output subset, not an additive total bucket. Mirrors the session usage ledger.</p>
             </article>
             <article class="panel">
               <h3>Protocol steps</h3>

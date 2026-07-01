@@ -65,8 +65,9 @@ fn remote_llm_response_json_round_trips() {
         usage: RemoteUsage {
             input_tokens: 1,
             output_tokens: 2,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
         },
         terminal_reason: RemoteLlmTerminalReason::Stop,
         diagnostics: Vec::new(),
@@ -252,8 +253,9 @@ fn remote_session_observation_dtos_json_round_trip_typed_kinds() {
         usage: RemoteUsage {
             input_tokens: 10,
             output_tokens: 4,
-            cached_input_tokens: 2,
-            reasoning_tokens: 1,
+            cache_read_input_tokens: 2,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 1,
         },
     };
     observation.validate().expect("valid observation");

@@ -94,8 +94,9 @@ fn merge_token_ledger_entries(entries: Vec<TokenLedgerEntry>) -> Vec<TokenLedger
         {
             existing.usage.input_tokens += entry.usage.input_tokens;
             existing.usage.output_tokens += entry.usage.output_tokens;
-            existing.usage.cached_input_tokens += entry.usage.cached_input_tokens;
-            existing.usage.reasoning_tokens += entry.usage.reasoning_tokens;
+            existing.usage.cache_read_input_tokens += entry.usage.cache_read_input_tokens;
+            existing.usage.cache_write_input_tokens += entry.usage.cache_write_input_tokens;
+            existing.usage.reasoning_output_tokens += entry.usage.reasoning_output_tokens;
         } else {
             merged.push(entry);
         }

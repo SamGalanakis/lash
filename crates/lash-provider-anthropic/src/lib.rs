@@ -47,6 +47,30 @@ mod tests {
     }
 
     #[test]
+    fn usage_payload_maps_canonical_token_buckets() {
+        let usage = AnthropicProvider::parse_usage(&json!({
+            "input_tokens": 12,
+            "output_tokens": 13,
+            "cache_read_input_tokens": 5,
+            "cache_creation_input_tokens": 4,
+            "output_tokens_details": {
+                "thinking_tokens": 3
+            }
+        }));
+
+        assert_eq!(
+            usage,
+            LlmUsage {
+                input_tokens: 12,
+                output_tokens: 13,
+                cache_read_input_tokens: 5,
+                cache_write_input_tokens: 4,
+                reasoning_output_tokens: 3,
+            }
+        );
+    }
+
+    #[test]
     fn image_attachment_serializes_as_base64_image_block() {
         use base64::Engine;
         let provider = AnthropicProvider::new("key");
@@ -387,14 +411,12 @@ mod tests {
     /// streaming-first (no non-streaming `parts_from_value`), so each scenario's
     /// `body` carries the SSE event sequence as a JSON array of strings, and all
     /// three accessors replay it through `process_sse_event` + `finalize`.
-    /// Anthropic reports no separate reasoning-token count (`parse_usage`
-    /// hardcodes `reasoning_tokens: 0`), so it opts out of `UsageReasoning`.
     #[cfg(feature = "testing")]
     mod conformance {
         use super::*;
         use lash_llm_transport::conformance::{
-            CanonicalUsage as U, ProviderConformanceSpec, ProviderNormalizer, ProviderWire,
-            Scenario, StreamAssembly, provider_conformance,
+            CanonicalUsage as U, ProviderNormalizer, ProviderWire, Scenario, StreamAssembly,
+            provider_conformance,
         };
         use serde_json::Value;
 
@@ -442,13 +464,6 @@ mod tests {
         impl ProviderNormalizer for AnthropicNormalizer {
             fn name(&self) -> &str {
                 "anthropic"
-            }
-
-            fn conformance_spec(&self) -> ProviderConformanceSpec {
-                ProviderConformanceSpec::with_unsupported(&[(
-                    Scenario::UsageReasoning,
-                    "Anthropic usage does not expose separate reasoning-token counts",
-                )])
             }
 
             fn wire_for(&self, scenario: Scenario) -> Option<ProviderWire> {
@@ -506,8 +521,15 @@ mod tests {
                             "cache_read_input_tokens": U::CACHED_INPUT
                         }),
                     )),
-                    // Anthropic does not report a separate reasoning-token count.
-                    Scenario::UsageReasoning => return None,
+                    Scenario::UsageReasoning => ProviderWire::body(text_message(
+                        "end_turn",
+                        "ok",
+                        json!({
+                            "input_tokens": U::BASE_INPUT,
+                            "output_tokens": U::OUTPUT_WITH_REASONING,
+                            "output_tokens_details": { "thinking_tokens": U::REASONING }
+                        }),
+                    )),
                     Scenario::ReasoningExtraction => ProviderWire::body(json!([
                         json!({ "type": "message_start", "message": { "usage": { "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT } } }).to_string(),
                         json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking" } }).to_string(),

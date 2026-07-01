@@ -13,8 +13,9 @@ async fn standard_runtime_trace_records_stream_event_entries() {
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 10,
                 output_tokens: 2,
-                cached_input_tokens: 0,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             }),
         ],
         response: Ok(LlmResponse {
@@ -418,15 +419,15 @@ async fn standard_runtime_trace_records_failed_llm_calls() {
 }
 
 #[test]
-fn normalize_prompt_usage_uses_input_tokens_for_openai_compatible() {
+fn normalize_prompt_usage_uses_prompt_total() {
     let usage = TokenUsage {
         input_tokens: 80,
         output_tokens: 0,
-        cached_input_tokens: 20,
-        reasoning_tokens: 0,
+        cache_read_input_tokens: 20,
+        cache_write_input_tokens: 0,
+        reasoning_output_tokens: 0,
     };
-    let stub = mock_provider(Vec::new()).into_handle();
-    let prompt_usage = normalize_prompt_usage(&stub, &usage).expect("prompt usage");
-    assert_eq!(prompt_usage.prompt_context_tokens, 80);
-    assert_eq!(prompt_usage.context_budget_tokens, 80);
+    let prompt_usage = normalize_prompt_usage(&usage).expect("prompt usage");
+    assert_eq!(prompt_usage.prompt_context_tokens, 100);
+    assert_eq!(prompt_usage.context_budget_tokens, 100);
 }

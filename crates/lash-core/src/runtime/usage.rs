@@ -6,10 +6,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use lash_sansio::PromptUsage;
-
-use crate::provider::ProviderHandle;
 use crate::session_model::TokenUsage;
+use lash_sansio::PromptUsage;
 
 /// A single row in the token cost ledger. One per unique
 /// `(source, model)` pair — accumulated, not per-call.
@@ -31,9 +29,11 @@ pub struct TokenLedgerEntry {
 pub struct UsageTotals {
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub cached_input_tokens: i64,
+    pub cache_read_input_tokens: i64,
     #[serde(default)]
-    pub reasoning_tokens: i64,
+    pub cache_write_input_tokens: i64,
+    #[serde(default)]
+    pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
     pub context_total_tokens: i64,
 }
@@ -44,10 +44,11 @@ impl UsageTotals {
         Self {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
-            cached_input_tokens: usage.cached_input_tokens,
-            reasoning_tokens: usage.reasoning_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_write_input_tokens: usage.cache_write_input_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens,
             total_tokens,
-            context_total_tokens: total_tokens + usage.cached_input_tokens,
+            context_total_tokens: total_tokens,
         }
     }
 }
@@ -144,19 +145,24 @@ pub fn diff_token_ledger(
         let delta = TokenUsage {
             input_tokens: after_usage.input_tokens - before_usage.input_tokens,
             output_tokens: after_usage.output_tokens - before_usage.output_tokens,
-            cached_input_tokens: after_usage.cached_input_tokens - before_usage.cached_input_tokens,
-            reasoning_tokens: after_usage.reasoning_tokens - before_usage.reasoning_tokens,
+            cache_read_input_tokens: after_usage.cache_read_input_tokens
+                - before_usage.cache_read_input_tokens,
+            cache_write_input_tokens: after_usage.cache_write_input_tokens
+                - before_usage.cache_write_input_tokens,
+            reasoning_output_tokens: after_usage.reasoning_output_tokens
+                - before_usage.reasoning_output_tokens,
         };
         if delta.input_tokens < 0
             || delta.output_tokens < 0
-            || delta.cached_input_tokens < 0
-            || delta.reasoning_tokens < 0
+            || delta.cache_read_input_tokens < 0
+            || delta.cache_write_input_tokens < 0
+            || delta.reasoning_output_tokens < 0
         {
             return Err(format!(
                 "token ledger decreased for source/model ({source}, {model})"
             ));
         }
-        if delta.total() == 0 && delta.cached_input_tokens == 0 {
+        if delta.total() == 0 {
             continue;
         }
         out.push(TokenLedgerEntry {
@@ -181,8 +187,9 @@ pub fn diff_usage_reports(
             usage: TokenUsage {
                 input_tokens: row.usage.input_tokens,
                 output_tokens: row.usage.output_tokens,
-                cached_input_tokens: row.usage.cached_input_tokens,
-                reasoning_tokens: row.usage.reasoning_tokens,
+                cache_read_input_tokens: row.usage.cache_read_input_tokens,
+                cache_write_input_tokens: row.usage.cache_write_input_tokens,
+                reasoning_output_tokens: row.usage.reasoning_output_tokens,
             },
         })
         .collect::<Vec<_>>();
@@ -195,8 +202,9 @@ pub fn diff_usage_reports(
             usage: TokenUsage {
                 input_tokens: row.usage.input_tokens,
                 output_tokens: row.usage.output_tokens,
-                cached_input_tokens: row.usage.cached_input_tokens,
-                reasoning_tokens: row.usage.reasoning_tokens,
+                cache_read_input_tokens: row.usage.cache_read_input_tokens,
+                cache_write_input_tokens: row.usage.cache_write_input_tokens,
+                reasoning_output_tokens: row.usage.reasoning_output_tokens,
             },
         })
         .collect::<Vec<_>>();
@@ -204,7 +212,7 @@ pub fn diff_usage_reports(
 }
 
 pub(super) fn merge_ledger_entry(ledger: &mut Vec<TokenLedgerEntry>, entry: TokenLedgerEntry) {
-    if entry.usage.total() == 0 && entry.usage.cached_input_tokens == 0 {
+    if entry.usage.total() == 0 {
         return;
     }
     if let Some(existing) = ledger
@@ -213,8 +221,9 @@ pub(super) fn merge_ledger_entry(ledger: &mut Vec<TokenLedgerEntry>, entry: Toke
     {
         existing.usage.input_tokens += entry.usage.input_tokens;
         existing.usage.output_tokens += entry.usage.output_tokens;
-        existing.usage.cached_input_tokens += entry.usage.cached_input_tokens;
-        existing.usage.reasoning_tokens += entry.usage.reasoning_tokens;
+        existing.usage.cache_read_input_tokens += entry.usage.cache_read_input_tokens;
+        existing.usage.cache_write_input_tokens += entry.usage.cache_write_input_tokens;
+        existing.usage.reasoning_output_tokens += entry.usage.reasoning_output_tokens;
     } else {
         ledger.push(entry);
     }
@@ -228,35 +237,32 @@ pub(super) fn merge_usage_delta_entries(entries: Vec<TokenLedgerEntry>) -> Vec<T
     merged
 }
 
-pub(super) fn normalize_prompt_usage(
-    provider: &ProviderHandle,
-    usage: &TokenUsage,
-) -> Option<PromptUsage> {
+pub(super) fn normalize_prompt_usage(usage: &TokenUsage) -> Option<PromptUsage> {
     let input_tokens = usage.input_tokens.max(0) as usize;
     let output_tokens = usage.output_tokens.max(0) as usize;
-    let cached_input_tokens = usage.cached_input_tokens.max(0) as usize;
-    if input_tokens == 0 && cached_input_tokens == 0 && output_tokens == 0 {
+    let cache_read_input_tokens = usage.cache_read_input_tokens.max(0) as usize;
+    let cache_write_input_tokens = usage.cache_write_input_tokens.max(0) as usize;
+    if input_tokens == 0
+        && cache_read_input_tokens == 0
+        && cache_write_input_tokens == 0
+        && output_tokens == 0
+    {
         return None;
     }
 
-    let prompt_context_tokens = if provider.input_usage_excludes_cached_tokens() {
-        input_tokens.saturating_add(cached_input_tokens)
-    } else {
-        input_tokens
-    };
-    let adjusted_input_tokens = if provider.input_usage_excludes_cached_tokens() {
-        input_tokens
-    } else {
-        input_tokens.saturating_sub(cached_input_tokens)
-    };
-    let context_budget_tokens = adjusted_input_tokens
+    let prompt_context_tokens = input_tokens
+        .saturating_add(cache_read_input_tokens)
+        .saturating_add(cache_write_input_tokens);
+    let context_budget_tokens = input_tokens
         .saturating_add(output_tokens)
-        .saturating_add(cached_input_tokens);
+        .saturating_add(cache_read_input_tokens)
+        .saturating_add(cache_write_input_tokens);
 
     Some(PromptUsage {
         prompt_context_tokens,
         input_tokens,
-        cached_input_tokens,
+        cache_read_input_tokens,
+        cache_write_input_tokens,
         context_budget_tokens,
     })
 }

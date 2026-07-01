@@ -356,7 +356,7 @@ impl LashRuntime {
             let mut ledger = self.shared_token_ledger.lock().expect("token ledger lock");
             std::mem::take(&mut *ledger)
         };
-        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
+        if assembler.token_usage.total() > 0 {
             turn_usage_delta.push(TokenLedgerEntry {
                 source: "turn".to_string(),
                 model: policy.model.id.clone(),
@@ -366,13 +366,11 @@ impl LashRuntime {
         let turn_usage_delta = merge_usage_delta_entries(turn_usage_delta);
 
         turn_pipeline.finalize_turn_read_state(new_messages, cancel_state.is_cancelled());
-        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
+        if assembler.token_usage.total() > 0 {
             turn_pipeline.state_mut().token_usage = assembler.token_usage.clone();
         }
 
-        let last_prompt_usage = assembler
-            .last_llm_usage()
-            .and_then(|usage| normalize_prompt_usage(policy.provider(), usage));
+        let last_prompt_usage = assembler.last_llm_usage().and_then(normalize_prompt_usage);
         turn_pipeline.state_mut().last_prompt_usage = last_prompt_usage;
         let assembled_state = turn_pipeline.export_state_for_assembly();
         let assembled = assembler.finish(

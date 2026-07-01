@@ -40,8 +40,9 @@ pub enum Scenario {
     /// A turn stopped by the provider's content filter. Terminal reason:
     /// `ContentFilter`.
     ContentFilter,
-    /// Usage with a cache hit: some input tokens were served from cache.
-    /// `cached_input_tokens` must reflect the cached portion.
+    /// Usage with a cache hit: some prompt tokens were served from cache.
+    /// `input_tokens` must reflect uncached input and
+    /// `cache_read_input_tokens` must reflect the cached portion.
     UsageCacheHit,
     /// Usage with reasoning tokens reported separately.
     UsageReasoning,
@@ -77,10 +78,14 @@ pub struct CanonicalUsage;
 impl CanonicalUsage {
     pub const BASE_INPUT: i64 = 100;
     pub const BASE_OUTPUT: i64 = 20;
-    /// For `UsageCacheHit`: of `BASE_INPUT` input tokens, this many were cached.
+    /// For `UsageCacheHit`: of `BASE_INPUT` total prompt tokens, this many
+    /// were cache reads.
     pub const CACHED_INPUT: i64 = 40;
     /// For `UsageReasoning`: reasoning tokens reported alongside output.
     pub const REASONING: i64 = 15;
+    /// `output_tokens` includes reasoning tokens; reasoning is reported as a
+    /// subset, not as an extra additive bucket.
+    pub const OUTPUT_WITH_REASONING: i64 = Self::BASE_OUTPUT + Self::REASONING;
 }
 
 /// Explicit provider-specific unsupported scenario list.
@@ -291,6 +296,7 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
                 CanonicalUsage::BASE_OUTPUT,
                 0,
                 0,
+                0,
             );
         }
         Scenario::OutputCapped => {
@@ -406,9 +412,10 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
                 &wire,
                 who,
                 scenario,
-                CanonicalUsage::BASE_INPUT,
+                CanonicalUsage::BASE_INPUT - CanonicalUsage::CACHED_INPUT,
                 CanonicalUsage::BASE_OUTPUT,
                 CanonicalUsage::CACHED_INPUT,
+                0,
                 0,
             );
         }
@@ -419,7 +426,8 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
                 who,
                 scenario,
                 CanonicalUsage::BASE_INPUT,
-                CanonicalUsage::BASE_OUTPUT,
+                CanonicalUsage::OUTPUT_WITH_REASONING,
+                0,
                 0,
                 CanonicalUsage::REASONING,
             );
@@ -487,15 +495,17 @@ fn assert_usage(
     scenario: Scenario,
     input: i64,
     output: i64,
-    cached_input: i64,
+    cache_read: i64,
+    cache_write: i64,
     reasoning: i64,
 ) {
     let usage = n.usage_from_wire(&wire.body);
     let expected = LlmUsage {
         input_tokens: input,
         output_tokens: output,
-        cached_input_tokens: cached_input,
-        reasoning_tokens: reasoning,
+        cache_read_input_tokens: cache_read,
+        cache_write_input_tokens: cache_write,
+        reasoning_output_tokens: reasoning,
     };
     assert_eq!(
         usage, expected,

@@ -139,7 +139,7 @@ impl Store {
 
     pub(crate) fn load_usage_deltas_conn(conn: &Connection) -> Vec<lash_core::TokenLedgerEntry> {
         let mut stmt = match conn.prepare(
-            "SELECT source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+            "SELECT source, model, input_tokens, output_tokens, cache_read_input_tokens, cache_write_input_tokens, reasoning_output_tokens
              FROM usage_deltas ORDER BY seq ASC",
         ) {
             Ok(stmt) => stmt,
@@ -152,8 +152,9 @@ impl Store {
                 usage: lash_core::TokenUsage {
                     input_tokens: row.get(2)?,
                     output_tokens: row.get(3)?,
-                    cached_input_tokens: row.get(4)?,
-                    reasoning_tokens: row.get(5)?,
+                    cache_read_input_tokens: row.get(4)?,
+                    cache_write_input_tokens: row.get(5)?,
+                    reasoning_output_tokens: row.get(6)?,
                 },
             })
         }) {
@@ -268,8 +269,8 @@ impl Store {
             .write(move |tx| {
                 let mut stmt = tx.prepare(
                     "INSERT INTO usage_deltas (
-                        source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        source, model, input_tokens, output_tokens, cache_read_input_tokens, cache_write_input_tokens, reasoning_output_tokens
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 )?;
                 for entry in &entries {
                     stmt.execute(params![
@@ -277,8 +278,9 @@ impl Store {
                         entry.model,
                         entry.usage.input_tokens,
                         entry.usage.output_tokens,
-                        entry.usage.cached_input_tokens,
-                        entry.usage.reasoning_tokens,
+                        entry.usage.cache_read_input_tokens,
+                        entry.usage.cache_write_input_tokens,
+                        entry.usage.reasoning_output_tokens,
                     ])?;
                 }
                 Ok(())

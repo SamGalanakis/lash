@@ -148,7 +148,7 @@ flowchart LR
           </div>
           <div class="two-col">
             <article class="panel"><h3>Interactive TUI</h3><p><code>run_app</code> drives event handling. Completed turns reconcile with <code>finish_turn_from_read_view</code>: live markdown lanes are cleared, then the current turn is replaced from <code>SessionReadView</code>. The CLI does not consume a final assistant-message stream event.</p></article>
-            <article class="panel"><h3>Export and trace</h3><p><code>lash-export</code> reads store state plus the full provider trace JSONL when available, then renders chronological projections, prompt snapshots, context percentages, cached-token percentages, and usage bars. <code>lash-trace-viewer</code> reads JSONL traces and displays timeline, LLM calls, stream events, and raw records.</p></article>
+            <article class="panel"><h3>Export and trace</h3><p><code>lash-export</code> reads store state plus the full provider trace JSONL when available, then renders chronological projections, prompt snapshots, context percentages, cache-read percentages, cache-write counts, and usage bars. <code>lash-trace-viewer</code> reads JSONL traces and displays timeline, LLM calls, stream events, and raw records.</p></article>
           </div>
         </div>
   </main>

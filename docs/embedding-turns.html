@@ -270,7 +270,7 @@ if matches!(result.outcome, TurnOutcome::Stopped(TurnStop::Cancelled)) {
             <dt><code>session.usage_report()</code> → <code>SessionUsageReport</code></dt>
             <dd>Session aggregate by <code>source × model</code>. Dashboards and "session so far."</dd>
           </dl>
-          <p>Source-label constants and re-exports: <code>lash::usage</code>.</p>
+          <p>All usage surfaces use the same five canonical buckets: uncached <code>input_tokens</code>, total <code>output_tokens</code>, <code>cache_read_input_tokens</code>, <code>cache_write_input_tokens</code>, and <code>reasoning_output_tokens</code>. Reasoning is included in output. Source-label constants and re-exports: <code>lash::usage</code>.</p>
         </div>
 
         <div class="section" id="rlm-and-finish">

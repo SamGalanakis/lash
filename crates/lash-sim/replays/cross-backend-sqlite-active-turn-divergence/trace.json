@@ -998,50 +998,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 0,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
-                "reasoning_tokens": 0,
-                "total_tokens": 0
+                "reasoning_output_tokens": 0,
+                "total_tokens": 0,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -1867,50 +1872,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 7,
               "input_tokens": 5,
               "output_tokens": 2,
-              "reasoning_tokens": 0,
-              "total_tokens": 7
+              "reasoning_output_tokens": 0,
+              "total_tokens": 7,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 7,
               "input_tokens": 5,
               "output_tokens": 2,
-              "reasoning_tokens": 0,
-              "total_tokens": 7
+              "reasoning_output_tokens": 0,
+              "total_tokens": 7,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 7,
               "input_tokens": 5,
               "output_tokens": 2,
-              "reasoning_tokens": 0,
-              "total_tokens": 7
+              "reasoning_output_tokens": 0,
+              "total_tokens": 7,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 7,
                 "input_tokens": 5,
                 "output_tokens": 2,
-                "reasoning_tokens": 0,
-                "total_tokens": 7
+                "reasoning_output_tokens": 0,
+                "total_tokens": 7,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -2575,50 +2585,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 0,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
-                "reasoning_tokens": 0,
-                "total_tokens": 0
+                "reasoning_output_tokens": 0,
+                "total_tokens": 0,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -3177,50 +3192,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 11,
                 "input_tokens": 7,
                 "output_tokens": 4,
-                "reasoning_tokens": 0,
-                "total_tokens": 11
+                "reasoning_output_tokens": 0,
+                "total_tokens": 11,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -3591,50 +3611,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 10,
               "input_tokens": 6,
               "output_tokens": 3,
-              "reasoning_tokens": 1,
-              "total_tokens": 10
+              "reasoning_output_tokens": 1,
+              "total_tokens": 10,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 10,
               "input_tokens": 6,
               "output_tokens": 3,
-              "reasoning_tokens": 1,
-              "total_tokens": 10
+              "reasoning_output_tokens": 1,
+              "total_tokens": 10,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 10,
               "input_tokens": 6,
               "output_tokens": 3,
-              "reasoning_tokens": 1,
-              "total_tokens": 10
+              "reasoning_output_tokens": 1,
+              "total_tokens": 10,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 10,
                 "input_tokens": 6,
                 "output_tokens": 3,
-                "reasoning_tokens": 1,
-                "total_tokens": 10
+                "reasoning_output_tokens": 1,
+                "total_tokens": 10,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -4158,50 +4183,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 14,
               "input_tokens": 10,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 14
+              "reasoning_output_tokens": 0,
+              "total_tokens": 14,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 7,
               "input_tokens": 5,
               "output_tokens": 2,
-              "reasoning_tokens": 0,
-              "total_tokens": 7
+              "reasoning_output_tokens": 0,
+              "total_tokens": 7,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 7,
               "input_tokens": 5,
               "output_tokens": 2,
-              "reasoning_tokens": 0,
-              "total_tokens": 7
+              "reasoning_output_tokens": 0,
+              "total_tokens": 7,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 7,
                 "input_tokens": 5,
                 "output_tokens": 2,
-                "reasoning_tokens": 0,
-                "total_tokens": 7
+                "reasoning_output_tokens": 0,
+                "total_tokens": 7,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -4623,50 +4653,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 0,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
-                "reasoning_tokens": 0,
-                "total_tokens": 0
+                "reasoning_output_tokens": 0,
+                "total_tokens": 0,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -5478,50 +5513,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 22,
               "input_tokens": 14,
               "output_tokens": 8,
-              "reasoning_tokens": 0,
-              "total_tokens": 22
+              "reasoning_output_tokens": 0,
+              "total_tokens": 22,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 11,
                 "input_tokens": 7,
                 "output_tokens": 4,
-                "reasoning_tokens": 0,
-                "total_tokens": 11
+                "reasoning_output_tokens": 0,
+                "total_tokens": 11,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -5751,50 +5791,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 20,
               "input_tokens": 12,
               "output_tokens": 6,
-              "reasoning_tokens": 2,
-              "total_tokens": 20
+              "reasoning_output_tokens": 2,
+              "total_tokens": 20,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 10,
               "input_tokens": 6,
               "output_tokens": 3,
-              "reasoning_tokens": 1,
-              "total_tokens": 10
+              "reasoning_output_tokens": 1,
+              "total_tokens": 10,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 10,
               "input_tokens": 6,
               "output_tokens": 3,
-              "reasoning_tokens": 1,
-              "total_tokens": 10
+              "reasoning_output_tokens": 1,
+              "total_tokens": 10,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 10,
                 "input_tokens": 6,
                 "output_tokens": 3,
-                "reasoning_tokens": 1,
-                "total_tokens": 10
+                "reasoning_output_tokens": 1,
+                "total_tokens": 10,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -6639,50 +6684,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 21,
               "input_tokens": 15,
               "output_tokens": 6,
-              "reasoning_tokens": 0,
-              "total_tokens": 21
+              "reasoning_output_tokens": 0,
+              "total_tokens": 21,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 7,
               "input_tokens": 5,
               "output_tokens": 2,
-              "reasoning_tokens": 0,
-              "total_tokens": 7
+              "reasoning_output_tokens": 0,
+              "total_tokens": 7,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 7,
               "input_tokens": 5,
               "output_tokens": 2,
-              "reasoning_tokens": 0,
-              "total_tokens": 7
+              "reasoning_output_tokens": 0,
+              "total_tokens": 7,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 7,
                 "input_tokens": 5,
                 "output_tokens": 2,
-                "reasoning_tokens": 0,
-                "total_tokens": 7
+                "reasoning_output_tokens": 0,
+                "total_tokens": 7,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -8594,50 +8644,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 30,
               "input_tokens": 18,
               "output_tokens": 9,
-              "reasoning_tokens": 3,
-              "total_tokens": 30
+              "reasoning_output_tokens": 3,
+              "total_tokens": 30,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 10,
               "input_tokens": 6,
               "output_tokens": 3,
-              "reasoning_tokens": 1,
-              "total_tokens": 10
+              "reasoning_output_tokens": 1,
+              "total_tokens": 10,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 10,
               "input_tokens": 6,
               "output_tokens": 3,
-              "reasoning_tokens": 1,
-              "total_tokens": 10
+              "reasoning_output_tokens": 1,
+              "total_tokens": 10,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 10,
                 "input_tokens": 6,
                 "output_tokens": 3,
-                "reasoning_tokens": 1,
-                "total_tokens": 10
+                "reasoning_output_tokens": 1,
+                "total_tokens": 10,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -9336,50 +9391,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 33,
               "input_tokens": 21,
               "output_tokens": 12,
-              "reasoning_tokens": 0,
-              "total_tokens": 33
+              "reasoning_output_tokens": 0,
+              "total_tokens": 33,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 11,
                 "input_tokens": 7,
                 "output_tokens": 4,
-                "reasoning_tokens": 0,
-                "total_tokens": 11
+                "reasoning_output_tokens": 0,
+                "total_tokens": 11,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -10718,50 +10778,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 44,
               "input_tokens": 28,
               "output_tokens": 16,
-              "reasoning_tokens": 0,
-              "total_tokens": 44
+              "reasoning_output_tokens": 0,
+              "total_tokens": 44,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 11,
                 "input_tokens": 7,
                 "output_tokens": 4,
-                "reasoning_tokens": 0,
-                "total_tokens": 11
+                "reasoning_output_tokens": 0,
+                "total_tokens": 11,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -12403,50 +12468,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 55,
               "input_tokens": 35,
               "output_tokens": 20,
-              "reasoning_tokens": 0,
-              "total_tokens": 55
+              "reasoning_output_tokens": 0,
+              "total_tokens": 55,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 11,
                 "input_tokens": 7,
                 "output_tokens": 4,
-                "reasoning_tokens": 0,
-                "total_tokens": 11
+                "reasoning_output_tokens": 0,
+                "total_tokens": 11,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -14181,50 +14251,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 66,
               "input_tokens": 42,
               "output_tokens": 24,
-              "reasoning_tokens": 0,
-              "total_tokens": 66
+              "reasoning_output_tokens": 0,
+              "total_tokens": 66,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 11,
                 "input_tokens": 7,
                 "output_tokens": 4,
-                "reasoning_tokens": 0,
-                "total_tokens": 11
+                "reasoning_output_tokens": 0,
+                "total_tokens": 11,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true
@@ -16481,50 +16556,55 @@
           "usage": {
             "child_usage_entry_count": 0,
             "child_usage_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 0,
               "input_tokens": 0,
               "output_tokens": 0,
-              "reasoning_tokens": 0,
-              "total_tokens": 0
+              "reasoning_output_tokens": 0,
+              "total_tokens": 0,
+              "cache_write_input_tokens": 0
             },
             "negative_fields": [],
             "non_negative": true,
             "passed": true,
             "token_ledger_entry_count": 1,
             "token_ledger_total": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 77,
               "input_tokens": 49,
               "output_tokens": 28,
-              "reasoning_tokens": 0,
-              "total_tokens": 77
+              "reasoning_output_tokens": 0,
+              "total_tokens": 77,
+              "cache_write_input_tokens": 0
             },
             "total_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "turn_usage": {
-              "cached_input_tokens": 0,
+              "cache_read_input_tokens": 0,
               "context_total_tokens": 11,
               "input_tokens": 7,
               "output_tokens": 4,
-              "reasoning_tokens": 0,
-              "total_tokens": 11
+              "reasoning_output_tokens": 0,
+              "total_tokens": 11,
+              "cache_write_input_tokens": 0
             },
             "usage_event_count": 1,
             "usage_event_cumulative_totals": [
               {
-                "cached_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "context_total_tokens": 11,
                 "input_tokens": 7,
                 "output_tokens": 4,
-                "reasoning_tokens": 0,
-                "total_tokens": 11
+                "reasoning_output_tokens": 0,
+                "total_tokens": 11,
+                "cache_write_input_tokens": 0
               }
             ],
             "usage_events_monotonic": true

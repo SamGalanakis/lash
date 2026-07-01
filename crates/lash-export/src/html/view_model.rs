@@ -22,8 +22,8 @@ pub(crate) fn compact_usage_label(
 ) -> String {
     let context = context_percent_label(usage, context_window_tokens)
         .unwrap_or_else(|| "ctx n/a".to_string());
-    let cached = percent_of(usage.cached_input_tokens, usage.input_tokens)
-        .map(|pct| format!("{pct:.1}% cached"))
+    let cached = percent_of(usage.cache_read_input_tokens, prompt_total_tokens(usage))
+        .map(|pct| format!("{pct:.1}% cache read"))
         .unwrap_or_else(|| "cache n/a".to_string());
     format!("{context} · {cached}")
 }
@@ -48,19 +48,20 @@ pub(crate) fn usage_title(
     ) {
         (Some(pct), Some(window)) => format!(
             "context {pct:.3}% ({input} / {window})",
-            input = usage.input_tokens.max(0),
+            input = prompt_total_tokens(usage).max(0),
         ),
         _ => format!(
             "context n/a ({input} input)",
-            input = usage.input_tokens.max(0)
+            input = prompt_total_tokens(usage).max(0)
         ),
     };
-    let cached = percent_of(usage.cached_input_tokens, usage.input_tokens)
+    let prompt_total = prompt_total_tokens(usage);
+    let cached = percent_of(usage.cache_read_input_tokens, prompt_total)
         .map(|pct| {
             format!(
                 "cached {pct:.3}% ({cached} / {input})",
-                cached = usage.cached_input_tokens.max(0),
-                input = usage.input_tokens.max(0),
+                cached = usage.cache_read_input_tokens.max(0),
+                input = prompt_total.max(0),
             )
         })
         .unwrap_or_else(|| "cached n/a".to_string());
@@ -69,10 +70,11 @@ pub(crate) fn usage_title(
         .map(|ms| format!(" · duration {}", format_duration(ms)))
         .unwrap_or_default();
     format!(
-        "{context} · {cached} · input {input} · output {output} · reasoning {reasoning}{duration}",
+        "{context} · {cached} · input {input} · cache write {cache_write} · output {output} · reasoning {reasoning}{duration}",
         input = usage.input_tokens.max(0),
+        cache_write = usage.cache_write_input_tokens.max(0),
         output = usage.output_tokens.max(0),
-        reasoning = usage.reasoning_tokens.max(0),
+        reasoning = usage.reasoning_output_tokens.max(0),
     )
 }
 
@@ -84,7 +86,14 @@ pub(crate) fn context_percent(
     if window == 0 {
         return None;
     }
-    Some(usage.input_tokens.max(0) as f64 * 100.0 / window as f64)
+    Some(prompt_total_tokens(usage).max(0) as f64 * 100.0 / window as f64)
+}
+
+pub(crate) fn prompt_total_tokens(usage: &LlmCallUsage) -> i64 {
+    usage
+        .input_tokens
+        .saturating_add(usage.cache_read_input_tokens)
+        .saturating_add(usage.cache_write_input_tokens)
 }
 
 pub(crate) fn percent_of(numerator: i64, denominator: i64) -> Option<f64> {

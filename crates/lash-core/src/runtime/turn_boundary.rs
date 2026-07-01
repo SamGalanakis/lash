@@ -776,8 +776,9 @@ mod tests {
             usage: TokenUsage {
                 input_tokens,
                 output_tokens: 2,
-                cached_input_tokens: 1,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 1,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             },
         }
     }

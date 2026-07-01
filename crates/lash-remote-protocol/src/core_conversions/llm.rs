@@ -694,14 +694,16 @@ impl From<core_llm::LlmUsage> for RemoteUsage {
         let core_llm::LlmUsage {
             input_tokens,
             output_tokens,
-            cached_input_tokens,
-            reasoning_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
+            reasoning_output_tokens,
         } = value;
         Self {
             input_tokens,
             output_tokens,
-            cached_input_tokens,
-            reasoning_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
+            reasoning_output_tokens,
         }
     }
 }
@@ -711,14 +713,16 @@ impl From<RemoteUsage> for core_llm::LlmUsage {
         let RemoteUsage {
             input_tokens,
             output_tokens,
-            cached_input_tokens,
-            reasoning_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
+            reasoning_output_tokens,
         } = value;
         Self {
             input_tokens,
             output_tokens,
-            cached_input_tokens,
-            reasoning_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
+            reasoning_output_tokens,
         }
     }
 }
@@ -728,14 +732,16 @@ impl From<lash_core::TokenUsage> for RemoteUsage {
         let lash_core::TokenUsage {
             input_tokens,
             output_tokens,
-            cached_input_tokens,
-            reasoning_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
+            reasoning_output_tokens,
         } = value;
         Self {
             input_tokens,
             output_tokens,
-            cached_input_tokens,
-            reasoning_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
+            reasoning_output_tokens,
         }
     }
 }
@@ -745,14 +751,16 @@ impl From<RemoteUsage> for lash_core::TokenUsage {
         let RemoteUsage {
             input_tokens,
             output_tokens,
-            cached_input_tokens,
-            reasoning_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
+            reasoning_output_tokens,
         } = value;
         Self {
             input_tokens,
             output_tokens,
-            cached_input_tokens,
-            reasoning_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
+            reasoning_output_tokens,
         }
     }
 }

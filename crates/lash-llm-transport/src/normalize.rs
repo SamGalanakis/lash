@@ -31,11 +31,14 @@ pub fn merge_usage(dst: &mut LlmUsage, next: &LlmUsage) {
     if next.output_tokens > 0 {
         dst.output_tokens = next.output_tokens;
     }
-    if next.cached_input_tokens > 0 {
-        dst.cached_input_tokens = next.cached_input_tokens;
+    if next.cache_read_input_tokens > 0 {
+        dst.cache_read_input_tokens = next.cache_read_input_tokens;
     }
-    if next.reasoning_tokens > 0 {
-        dst.reasoning_tokens = next.reasoning_tokens;
+    if next.cache_write_input_tokens > 0 {
+        dst.cache_write_input_tokens = next.cache_write_input_tokens;
+    }
+    if next.reasoning_output_tokens > 0 {
+        dst.reasoning_output_tokens = next.reasoning_output_tokens;
     }
 }
 
@@ -60,9 +63,9 @@ pub fn openai_usage_from_response_value(value: &Value) -> LlmUsage {
     openai_usage_from_usage_value(value.get("usage").unwrap_or(&Value::Null))
 }
 
-/// Parse token usage from an OpenAI-compatible `usage` object. Cache-write
-/// tokens are excluded from cached-input totals to match provider billing
-/// semantics used by the rest of lash.
+/// Parse token usage from an OpenAI-compatible `usage` object. OpenAI reports
+/// prompt/input tokens as a total; Lash stores uncached input, cache-read, and
+/// cache-write as separate buckets.
 pub fn openai_usage_from_usage_value(usage: &Value) -> LlmUsage {
     let cached_tokens = parse_i64(
         usage
@@ -73,7 +76,6 @@ pub fn openai_usage_from_usage_value(usage: &Value) -> LlmUsage {
                     .get("prompt_tokens_details")
                     .and_then(|d| d.get("cached_tokens"))
             })
-            .or_else(|| usage.get("cached_input_tokens"))
             .or_else(|| usage.get("cached_tokens"))
             .or_else(|| usage.get("prompt_cache_hit_tokens")),
     );
@@ -85,25 +87,27 @@ pub fn openai_usage_from_usage_value(usage: &Value) -> LlmUsage {
                 usage
                     .get("prompt_tokens_details")
                     .and_then(|d| d.get("cache_write_tokens"))
-            }),
+            })
+            .or_else(|| usage.get("cache_write_tokens")),
+    );
+    let prompt_tokens = parse_i64(
+        usage
+            .get("input_tokens")
+            .or_else(|| usage.get("prompt_tokens")),
     );
     LlmUsage {
-        input_tokens: parse_i64(
-            usage
-                .get("input_tokens")
-                .or_else(|| usage.get("prompt_tokens")),
-        ),
+        input_tokens: prompt_tokens
+            .saturating_sub(cached_tokens)
+            .saturating_sub(cache_write_tokens)
+            .max(0),
         output_tokens: parse_i64(
             usage
                 .get("output_tokens")
                 .or_else(|| usage.get("completion_tokens")),
         ),
-        cached_input_tokens: if cache_write_tokens > 0 {
-            cached_tokens.saturating_sub(cache_write_tokens).max(0)
-        } else {
-            cached_tokens
-        },
-        reasoning_tokens: parse_i64(
+        cache_read_input_tokens: cached_tokens,
+        cache_write_input_tokens: cache_write_tokens,
+        reasoning_output_tokens: parse_i64(
             usage
                 .get("reasoning_tokens")
                 .or_else(|| {
@@ -273,11 +277,13 @@ mod tests {
             &mut dst,
             &LlmUsage {
                 output_tokens: 20,
+                cache_write_input_tokens: 7,
                 ..LlmUsage::default()
             },
         );
         assert_eq!(dst.input_tokens, 100);
         assert_eq!(dst.output_tokens, 20);
+        assert_eq!(dst.cache_write_input_tokens, 7);
     }
 
     #[test]
@@ -316,10 +322,11 @@ mod tests {
                 "output_tokens_details": {"reasoning_tokens": 5}
             }
         }));
-        assert_eq!(responses_usage.input_tokens, 11);
+        assert_eq!(responses_usage.input_tokens, 4);
         assert_eq!(responses_usage.output_tokens, 7);
-        assert_eq!(responses_usage.cached_input_tokens, 3);
-        assert_eq!(responses_usage.reasoning_tokens, 5);
+        assert_eq!(responses_usage.cache_read_input_tokens, 5);
+        assert_eq!(responses_usage.cache_write_input_tokens, 2);
+        assert_eq!(responses_usage.reasoning_output_tokens, 5);
 
         let chat_usage = openai_usage_from_response_value(&serde_json::json!({
             "usage": {
@@ -329,10 +336,11 @@ mod tests {
                 "completion_tokens_details": {"reasoning_tokens": 4}
             }
         }));
-        assert_eq!(chat_usage.input_tokens, 13);
+        assert_eq!(chat_usage.input_tokens, 3);
         assert_eq!(chat_usage.output_tokens, 17);
-        assert_eq!(chat_usage.cached_input_tokens, 2);
-        assert_eq!(chat_usage.reasoning_tokens, 4);
+        assert_eq!(chat_usage.cache_read_input_tokens, 6);
+        assert_eq!(chat_usage.cache_write_input_tokens, 4);
+        assert_eq!(chat_usage.reasoning_output_tokens, 4);
     }
 
     #[test]

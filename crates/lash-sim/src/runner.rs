@@ -10129,8 +10129,10 @@ async fn prove_google_stream_generate_text() -> Result<ProofRun, FixedScriptRunn
     )?;
     require(
         response.usage.input_tokens == 6
-            && response.usage.output_tokens == 3
-            && response.usage.reasoning_tokens == 1,
+            && response.usage.output_tokens == 4
+            && response.usage.cache_read_input_tokens == 0
+            && response.usage.cache_write_input_tokens == 0
+            && response.usage.reasoning_output_tokens == 1,
         "Google streamGenerateContent did not normalize usage metadata",
     )?;
     proof(
@@ -10165,9 +10167,11 @@ async fn prove_google_generate_text() -> Result<ProofRun, FixedScriptRunnerError
         "Google generateContent did not produce expected text",
     )?;
     require(
-        response.usage.input_tokens == 6
+        response.usage.input_tokens == 4
             && response.usage.output_tokens == 3
-            && response.usage.cached_input_tokens == 2,
+            && response.usage.cache_read_input_tokens == 2
+            && response.usage.cache_write_input_tokens == 0
+            && response.usage.reasoning_output_tokens == 0,
         "Google generateContent did not normalize buffered usage metadata",
     )?;
     proof(

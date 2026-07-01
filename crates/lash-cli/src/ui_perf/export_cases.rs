@@ -84,8 +84,9 @@ fn export_prompt_snapshots(turn_count: usize) -> Vec<LlmPromptSnapshot> {
                 usage: Some(LlmCallUsage {
                     input_tokens: 3_000 + index as i64 * 25,
                     output_tokens: 150,
-                    cached_input_tokens: if index % 2 == 0 { 1_200 } else { 0 },
-                    reasoning_tokens: 48,
+                    cache_read_input_tokens: if index % 2 == 0 { 1_200 } else { 0 },
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 48,
                     duration_ms: Some(250 + index as u64),
                 }),
             }

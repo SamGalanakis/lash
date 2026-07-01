@@ -9,7 +9,8 @@ use crate::transcript::{format_count, format_tokens, lashlang_transcript_step_fr
 
 use super::escaping::{escape, escape_attr};
 use super::view_model::{
-    RenderCtx, compact_usage_label, context_percent, context_percent_label, percent_of, usage_title,
+    RenderCtx, compact_usage_label, context_percent, context_percent_label, percent_of,
+    prompt_total_tokens, usage_title,
 };
 
 #[derive(Clone)]
@@ -477,12 +478,12 @@ pub(crate) fn render_system_prompt(
     // reasoning but didn't return reasoning content, surface the absence
     // explicitly instead of letting the user infer it from token math.
     if let Some(usage) = prompt.usage.as_ref()
-        && usage.reasoning_tokens > 0
+        && usage.reasoning_output_tokens > 0
     {
         let _ = writeln!(
             out,
-            "        <div class=\"reasoning-missing\" title=\"the provider returned a reasoning_tokens count but no reasoning content blocks\"><span class=\"reasoning-missing-tokens\">≈{} reasoning tokens</span> · content not returned by provider</div>",
-            format_tokens(usage.reasoning_tokens),
+            "        <div class=\"reasoning-missing\" title=\"the provider returned a reasoning_output_tokens count but no reasoning content blocks\"><span class=\"reasoning-missing-tokens\">≈{} reasoning tokens</span> · content not returned by provider</div>",
+            format_tokens(usage.reasoning_output_tokens),
         );
     }
 
@@ -532,7 +533,7 @@ pub(crate) fn write_usage_chart_bar(
     };
 
     let context_pct = context_percent(usage, context_window_tokens);
-    let cached_pct = percent_of(usage.cached_input_tokens, usage.input_tokens);
+    let cached_pct = percent_of(usage.cache_read_input_tokens, prompt_total_tokens(usage));
     let width = context_pct
         .map(|pct| {
             let clamped = pct.clamp(0.0, 100.0);

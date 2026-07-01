@@ -75,8 +75,9 @@ pub struct RuntimeUsageInvariantFacts {
 pub struct RuntimeUsageTotals {
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub cached_input_tokens: i64,
-    pub reasoning_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_write_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
     pub context_total_tokens: i64,
 }
@@ -447,10 +448,11 @@ impl RuntimeUsageTotals {
         Self {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
-            cached_input_tokens: usage.cached_input_tokens,
-            reasoning_tokens: usage.reasoning_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_write_input_tokens: usage.cache_write_input_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens,
             total_tokens,
-            context_total_tokens: total_tokens + usage.cached_input_tokens,
+            context_total_tokens: total_tokens,
         }
     }
 
@@ -465,8 +467,9 @@ impl RuntimeUsageTotals {
     pub fn is_non_negative(&self) -> bool {
         self.input_tokens >= 0
             && self.output_tokens >= 0
-            && self.cached_input_tokens >= 0
-            && self.reasoning_tokens >= 0
+            && self.cache_read_input_tokens >= 0
+            && self.cache_write_input_tokens >= 0
+            && self.reasoning_output_tokens >= 0
             && self.total_tokens >= 0
             && self.context_total_tokens >= 0
     }
@@ -480,8 +483,9 @@ fn collect_negative_usage_fields(
     for (field, value) in [
         ("input_tokens", totals.input_tokens),
         ("output_tokens", totals.output_tokens),
-        ("cached_input_tokens", totals.cached_input_tokens),
-        ("reasoning_tokens", totals.reasoning_tokens),
+        ("cache_read_input_tokens", totals.cache_read_input_tokens),
+        ("cache_write_input_tokens", totals.cache_write_input_tokens),
+        ("reasoning_output_tokens", totals.reasoning_output_tokens),
         ("total_tokens", totals.total_tokens),
         ("context_total_tokens", totals.context_total_tokens),
     ] {
@@ -577,8 +581,9 @@ mod tests {
         let totals = RuntimeUsageTotals::from_usage(&lash_core::TokenUsage {
             input_tokens: -1,
             output_tokens: 0,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
         });
         assert!(!totals.is_non_negative());
     }

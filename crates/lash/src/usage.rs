@@ -17,6 +17,14 @@
 //!   across the whole session, broken down by `source` × `model`. Right for
 //!   dashboards and "session so far."
 //!
+//! Usage buckets are provider-normalized before they reach these surfaces:
+//! `input_tokens` is uncached ordinary input, `cache_read_input_tokens` is
+//! cached prompt input read from the provider cache, `cache_write_input_tokens`
+//! is prompt input written to the provider cache, and `output_tokens` is total
+//! generated output. `reasoning_output_tokens` is a subset of output tokens,
+//! not an extra total component. `TokenUsage::total()` therefore sums ordinary
+//! input, output, cache reads, and cache writes.
+//!
 //! [`TurnEvent::Usage`]: lash_core::TurnEvent::Usage
 //! [`TurnEvent::ChildUsage`]: lash_core::TurnEvent::ChildUsage
 //! [`TurnResult::usage`]: crate::TurnResult::usage

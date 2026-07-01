@@ -125,8 +125,9 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
             usage: LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
-                cached_input_tokens: 1,
-                reasoning_tokens: 2,
+                cache_read_input_tokens: 1,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 2,
             },
             ..LlmResponse::default()
         }),
@@ -227,8 +228,9 @@ async fn completed_turns_are_persisted_in_session_graph() {
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
-                cached_input_tokens: 1,
-                reasoning_tokens: 2,
+                cache_read_input_tokens: 1,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 2,
             }),
         ],
         response: Ok(LlmResponse {
@@ -240,8 +242,9 @@ async fn completed_turns_are_persisted_in_session_graph() {
             usage: LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
-                cached_input_tokens: 1,
-                reasoning_tokens: 2,
+                cache_read_input_tokens: 1,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 2,
             },
             ..LlmResponse::default()
         }),
@@ -306,6 +309,6 @@ async fn completed_turns_are_persisted_in_session_graph() {
     assert_eq!(ledger[0].model, standard_test_policy().model.id);
     assert_eq!(ledger[0].usage.input_tokens, 12);
     assert_eq!(ledger[0].usage.output_tokens, 4);
-    assert_eq!(ledger[0].usage.cached_input_tokens, 1);
-    assert_eq!(ledger[0].usage.reasoning_tokens, 2);
+    assert_eq!(ledger[0].usage.cache_read_input_tokens, 1);
+    assert_eq!(ledger[0].usage.reasoning_output_tokens, 2);
 }

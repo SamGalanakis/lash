@@ -161,10 +161,15 @@ fn compute_chain_stats(chain: &[&LoadedSessionNode]) -> SessionStats {
         s.llm_calls_with_usage += part.llm_calls_with_usage;
         s.input_tokens = s.input_tokens.saturating_add(part.input_tokens);
         s.output_tokens = s.output_tokens.saturating_add(part.output_tokens);
-        s.cached_input_tokens = s
-            .cached_input_tokens
-            .saturating_add(part.cached_input_tokens);
-        s.reasoning_tokens = s.reasoning_tokens.saturating_add(part.reasoning_tokens);
+        s.cache_read_input_tokens = s
+            .cache_read_input_tokens
+            .saturating_add(part.cache_read_input_tokens);
+        s.cache_write_input_tokens = s
+            .cache_write_input_tokens
+            .saturating_add(part.cache_write_input_tokens);
+        s.reasoning_output_tokens = s
+            .reasoning_output_tokens
+            .saturating_add(part.reasoning_output_tokens);
         for (name, count) in part.tool_freq {
             *tool_counts.entry(name).or_insert(0) += count;
         }

@@ -349,8 +349,9 @@ pub(crate) fn build_benchmark_app(turn_count: usize) -> App {
     app.usage.token_usage = TokenUsage {
         input_tokens: 208_000,
         output_tokens: 11_500,
-        cached_input_tokens: 0,
-        reasoning_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        reasoning_output_tokens: 0,
     };
     app.usage.context_window = Some(1_100_000);
     app.model_variant = Some("high".to_string());

@@ -571,8 +571,9 @@ mod tests {
                     TokenUsage {
                         input_tokens: 12,
                         output_tokens: 7,
-                        cached_input_tokens: 2,
-                        reasoning_tokens: 1,
+                        cache_read_input_tokens: 2,
+                        cache_write_input_tokens: 0,
+                        reasoning_output_tokens: 1,
                     },
                 )
                 .await;

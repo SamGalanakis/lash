@@ -907,14 +907,19 @@ pub(crate) fn mean_token_usage<'a>(usages: impl IntoIterator<Item = &'a TokenUsa
     TokenUsage {
         input_tokens: usages.iter().map(|usage| usage.input_tokens).sum::<i64>() / count,
         output_tokens: usages.iter().map(|usage| usage.output_tokens).sum::<i64>() / count,
-        cached_input_tokens: usages
+        cache_read_input_tokens: usages
             .iter()
-            .map(|usage| usage.cached_input_tokens)
+            .map(|usage| usage.cache_read_input_tokens)
             .sum::<i64>()
             / count,
-        reasoning_tokens: usages
+        cache_write_input_tokens: usages
             .iter()
-            .map(|usage| usage.reasoning_tokens)
+            .map(|usage| usage.cache_write_input_tokens)
+            .sum::<i64>()
+            / count,
+        reasoning_output_tokens: usages
+            .iter()
+            .map(|usage| usage.reasoning_output_tokens)
             .sum::<i64>()
             / count,
     }
@@ -924,8 +929,9 @@ fn token_usage_from_llm_usage(usage: &LlmUsage) -> TokenUsage {
     TokenUsage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
-        cached_input_tokens: usage.cached_input_tokens,
-        reasoning_tokens: usage.reasoning_tokens,
+        cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
+        reasoning_output_tokens: usage.reasoning_output_tokens,
     }
 }
 

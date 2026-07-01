@@ -47,6 +47,31 @@ mod tests {
     }
 
     #[test]
+    fn usage_payload_maps_canonical_token_buckets() {
+        let usage = GoogleOAuthProvider::usage_from_event(&json!({
+            "response": {
+                "usageMetadata": {
+                    "promptTokenCount": 21,
+                    "cachedContentTokenCount": 5,
+                    "candidatesTokenCount": 10,
+                    "thoughtsTokenCount": 3
+                }
+            }
+        }));
+
+        assert_eq!(
+            usage,
+            LlmUsage {
+                input_tokens: 16,
+                output_tokens: 13,
+                cache_read_input_tokens: 5,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 3,
+            }
+        );
+    }
+
+    #[test]
     fn google_image_attachment_serializes_as_inline_data_part() {
         let png_bytes = vec![0x89, 0x50, 0x4E, 0x47];
         let attachment =

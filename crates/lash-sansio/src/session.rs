@@ -47,8 +47,8 @@ pub struct ExecResponse {
 pub struct PromptUsage {
     pub prompt_context_tokens: usize,
     pub input_tokens: usize,
-    pub cached_input_tokens: usize,
-    #[serde(default)]
+    pub cache_read_input_tokens: usize,
+    pub cache_write_input_tokens: usize,
     pub context_budget_tokens: usize,
 }
 
@@ -108,13 +108,15 @@ mod tests {
                 token_usage: crate::TokenUsage {
                     input_tokens: 10,
                     output_tokens: 3,
-                    cached_input_tokens: 1,
-                    reasoning_tokens: 2,
+                    cache_read_input_tokens: 1,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 2,
                 },
                 last_prompt_usage: Some(PromptUsage {
                     prompt_context_tokens: 7,
                     input_tokens: 6,
-                    cached_input_tokens: 1,
+                    cache_read_input_tokens: 1,
+                    cache_write_input_tokens: 0,
                     context_budget_tokens: 100,
                 }),
                 ..CompletedTurn::default()

@@ -144,11 +144,11 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">turn result</div>
-        <div class="listing__body"><p><code>RemoteTurnResult</code> carries status, <code>RemoteTurnOutcome</code>, safe/raw assistant output, usage, execution summary, tool-call summaries, issues, collected activities, and metadata.</p></div>
+        <div class="listing__body"><p><code>RemoteTurnResult</code> carries status, <code>RemoteTurnOutcome</code>, safe/raw assistant output, complete <code>RemoteUsage</code> buckets, execution summary, tool-call summaries, issues, collected activities, and metadata.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">llm transport</div>
-        <div class="listing__body"><p><code>RemoteLlmRequest</code> and <code>RemoteLlmResponse</code> mirror the provider-facing request/response shape: messages, attachments, tools, tool choice, output spec, generation options, request metadata, usage, diagnostics, terminal reason, and provider metadata.</p></div>
+        <div class="listing__body"><p><code>RemoteLlmRequest</code> and <code>RemoteLlmResponse</code> mirror the provider-facing request/response shape: messages, attachments, tools, tool choice, output spec, generation options, request metadata, complete usage buckets, diagnostics, terminal reason, and provider metadata.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">activity stream</div>
@@ -227,7 +227,7 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">llm</div>
-        <div class="listing__body"><p><code>RemoteLlmRequest::from_core(...)</code>, request conversion, and response conversion preserve messages, attachments, tools, output specs, terminal reasons, usage, replay metadata, and provider metadata where the core types carry them.</p></div>
+        <div class="listing__body"><p><code>RemoteLlmRequest::from_core(...)</code>, request conversion, and response conversion preserve messages, attachments, tools, output specs, terminal reasons, all usage buckets, replay metadata, and provider metadata where the core types carry them.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">streaming</div>

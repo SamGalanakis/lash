@@ -74,13 +74,20 @@ impl AnthropicProvider {
             .get("cache_creation_input_tokens")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
+        let reasoning = usage
+            .get("output_tokens_details")
+            .and_then(|details| details.get("thinking_tokens"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         LlmUsage {
-            // Anthropic's `input_tokens` is net of cache reads; add them so
-            // lash-side accounting mirrors what the model was shown.
-            input_tokens: input + cache_read + cache_write,
+            // Anthropic reports ordinary input, cache reads, and cache
+            // creation separately. Lash keeps those billing/context buckets
+            // separate too.
+            input_tokens: input,
             output_tokens: output,
-            cached_input_tokens: cache_read,
-            reasoning_tokens: 0,
+            cache_read_input_tokens: cache_read,
+            cache_write_input_tokens: cache_write,
+            reasoning_output_tokens: reasoning,
         }
     }
 

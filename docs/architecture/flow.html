@@ -159,7 +159,7 @@ flowchart TD
   Usage --> Deltas["usage deltas<br/>host reports"]
   Runtime --> Trace["provider JSONL trace<br/>LLM started/completed"]
   Runtime --> Store["session store<br/>SQLite or Postgres"]
-  Trace --> Export["lash-export prompt snapshots<br/>context %, cached %, token bars"]
+  Trace --> Export["lash-export prompt snapshots<br/>context %, cache-read %, token bars"]
   Store --> Export
             </div>
           </div>

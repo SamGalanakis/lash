@@ -452,19 +452,21 @@ fn token_usage_resets_live_token_estimate() {
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
-            cached_input_tokens: 0,
-            reasoning_tokens: 2,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 2,
         },
         cumulative: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
-            cached_input_tokens: 0,
-            reasoning_tokens: 2,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 2,
         },
     });
     assert_eq!(app.usage.live_output_tokens_estimate, 0);
     assert_eq!(app.usage.last_response_usage.input_tokens, 10);
-    assert_eq!(app.usage.last_response_usage.reasoning_tokens, 2);
+    assert_eq!(app.usage.last_response_usage.reasoning_output_tokens, 2);
 }
 
 #[test]
@@ -480,14 +482,16 @@ fn input_only_streamed_usage_keeps_live_output_estimate() {
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 0,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
         },
         cumulative: TokenUsage {
             input_tokens: 10,
             output_tokens: 0,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
         },
     });
     assert_eq!(app.usage.live_output_tokens_estimate, live_estimate);
