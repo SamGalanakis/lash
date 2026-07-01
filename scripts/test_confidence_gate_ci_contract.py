@@ -11,7 +11,14 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 CONFIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "confidence.yml"
 GATE = ROOT / "scripts" / "confidence-gate.sh"
 FOCUSED_SQLITE_REPRO = ROOT / "scripts" / "lash-sim-focused-sqlite-repro.sh"
-FAST_STEP_NAME = "Confidence gate fast lane"
+FAST_SHARDS = [
+    "scenario-harnesses",
+    "fault-matrix",
+    "sim-unit",
+    "sim-generated",
+    "minimizer-fixtures",
+    "perf-guards",
+]
 OLD_BROAD_CI_STEP_NAME = "Run bounded broad " + "replay/backend confidence"
 OLD_BROAD_CI_JOB_ID = "bounded-" + "broad-replay-backend"
 OLD_BROAD_CI_ARTIFACT = "bounded-" + "broad-replay-backend-confidence"
@@ -25,22 +32,23 @@ def shell_int_constant(script: str, name: str) -> int:
     return int(match.group(1))
 
 
-def step_block(workflow: str, step_name: str) -> str:
-    marker = f"- name: {step_name}"
-    try:
-        section = workflow.split(marker, 1)[1]
-    except IndexError as exc:
-        raise AssertionError(f"missing workflow step {step_name!r}") from exc
-    return section.split("\n      - name:", 1)[0]
-
-
 class ConfidenceGateCiContractTest(unittest.TestCase):
-    def test_ci_runs_only_fast_confidence_not_broad_replay_backend(self) -> None:
+    def test_ci_shards_fast_confidence_not_broad_replay_backend(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         gate = GATE.read_text(encoding="utf-8")
-        fast_step = step_block(workflow, FAST_STEP_NAME)
 
-        self.assertIn("bash scripts/confidence-gate.sh fast", fast_step)
+        self.assertIn("confidence-fast:", workflow)
+        self.assertIn("confidence-fast-summary:", workflow)
+        self.assertIn('bash scripts/confidence-gate.sh "fast:${{ matrix.shard }}"', workflow)
+        self.assertIn("bash scripts/confidence-gate.sh fast:summary", workflow)
+        self.assertIn("pattern: confidence-fast-*", workflow)
+        self.assertIn("name: confidence-fast-summary", workflow)
+        self.assertIn("- confidence-fast-summary", workflow)
+        self.assertNotIn("Confidence gate fast lane", workflow)
+        self.assertNotIn("bash scripts/confidence-gate.sh fast\n", workflow)
+        for shard in FAST_SHARDS:
+            self.assertIn(f"- {shard}", workflow)
+            self.assertIn(shard, gate)
         self.assertNotIn(OLD_BROAD_CI_JOB_ID, workflow)
         self.assertNotIn("Bounded Broad " + "Replay/Backend", workflow)
         self.assertNotIn(OLD_BROAD_CI_STEP_NAME, workflow)
@@ -51,6 +59,35 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         min_boundaries = shell_int_constant(gate, "BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES")
         self.assertGreaterEqual(min_seeds, 4)
         self.assertGreaterEqual(min_boundaries, 256)
+
+    def test_fast_gate_has_first_class_shards_and_parallel_minimizers(self) -> None:
+        gate = GATE.read_text(encoding="utf-8")
+
+        required_snippets = [
+            "fast_shards=(",
+            "run_fast_shard()",
+            "run_fast_aggregate()",
+            "write_fast_matrix_summary()",
+            "write_fast_shard_summary()",
+            "run_cargo_tests()",
+            "cargo nextest run",
+            "run_sim_unit_suite()",
+            "run_sim_generated_lane()",
+            "run_minimizer_fixture_suite()",
+            "--skip generated_sim_profile_writes_trace_replay_and_provider_artifacts",
+            "--skip minimizer_preserves",
+            "--skip minimizer_writes_replayable_regression_package",
+            "cargo build -p lash-sim --locked --bin lash-sim",
+            "LASH_MINIMIZER_FIXTURE_JOBS",
+            'xargs -n 1 -P "$fixture_jobs"',
+            '"schema": "lash.confidence.fast-shard-summary.v1"',
+            '"sharded": True',
+        ]
+        for snippet in required_snippets:
+            self.assertIn(snippet, gate)
+
+        for shard in FAST_SHARDS:
+            self.assertIn(f"fast:{shard}", gate)
 
     def test_broad_lane_is_manual_or_scheduled_confidence_not_ci_cd(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

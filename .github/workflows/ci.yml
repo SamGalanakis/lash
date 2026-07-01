@@ -109,14 +109,100 @@ jobs:
           # shellcheck disable=SC2086
           cargo nextest run --workspace --locked ${LASH_CI_FEATURES}
 
-      - name: Confidence gate fast lane
-        run: bash scripts/confidence-gate.sh fast
-
       # nextest does not run doctests; keep them covered.
       - name: Test workspace doctests
         run: |
           # shellcheck disable=SC2086
           cargo test --doc --workspace --locked ${LASH_CI_FEATURES}
+
+  confidence-fast:
+    name: Confidence fast (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - scenario-harnesses
+          - fault-matrix
+          - sim-unit
+          - sim-generated
+          - minimizer-fixtures
+          - perf-guards
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig
+        uses: ./.github/actions/setup-ci-zig
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          shared-key: linux-debug
+          save-if: false
+
+      - name: Install protoc and nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc,nextest
+
+      - name: Run confidence fast shard
+        run: bash scripts/confidence-gate.sh "fast:${{ matrix.shard }}"
+
+      - name: Upload confidence fast shard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: confidence-fast-${{ matrix.shard }}
+          path: target/confidence/fast/${{ matrix.shard }}
+          if-no-files-found: warn
+
+  confidence-fast-summary:
+    name: Confidence fast summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - confidence-fast
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
+
+      - name: Download confidence fast shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: confidence-fast-*
+          path: target/confidence/fast-download
+          merge-multiple: false
+
+      - name: Assemble confidence fast shard tree
+        run: |
+          rm -rf target/confidence/fast
+          mkdir -p target/confidence/fast
+          for shard in scenario-harnesses fault-matrix sim-unit sim-generated minimizer-fixtures perf-guards; do
+            cp -a "target/confidence/fast-download/confidence-fast-${shard}" "target/confidence/fast/${shard}"
+          done
+
+      - name: Validate confidence fast summary
+        run: bash scripts/confidence-gate.sh fast:summary
+
+      - name: Upload confidence fast summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: confidence-fast-summary
+          path: target/confidence/fast
+          if-no-files-found: error
 
   postgres-store:
     name: Test Postgres store
@@ -376,6 +462,7 @@ jobs:
       !contains(github.event.head_commit.message, '[skip release]')
     needs:
       - test
+      - confidence-fast-summary
       - postgres-store
       - stack-budget
       - cross-check

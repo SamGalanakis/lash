@@ -48,9 +48,11 @@ the existing architecture.
 - Existing scenarios and conformance suites remain authoritative. Shared
   simulation oracles are extracted narrowly instead of importing test modules
   wholesale.
-- Confidence lanes extend `scripts/confidence-gate.sh`: fast gets a tiny fixed
-  replay/generator corpus; default adds local conformance, backend contention,
-  coverage, and targeted mutation; broad adds bounded full-profile simulation,
+- Confidence lanes extend `scripts/confidence-gate.sh`: fast aggregates
+  first-class shards for scenario/property/fault-matrix evidence, a small
+  generated simulation/provider corpus, minimizer fixtures, and performance
+  guards; default adds local conformance, backend contention, coverage, and
+  targeted mutation; broad adds bounded full-profile simulation,
   scheduled-depth search, generated SQLite/Postgres dynamic backend reruns, and
   static model replay evidence without claiming full confidence; full means
   broad semantics plus full critical-crate mutation and the true DST

@@ -51,9 +51,10 @@ Current executable evidence in the implementation:
   manifest; minimization preserves the failing oracle id and semantic reason
   when the input is a failure. Failing negative fixtures live under
   `crates/lash-sim/failure-fixtures/`.
-- The confidence gate declares sim lane artifacts under
-  `target/confidence/<lane>/sim/`, including env-gated Postgres conformance
-  evidence when the lane is enabled.
+- The confidence gate declares sim lane artifacts under flat
+  `target/confidence/<lane>/sim/` roots for default/broad/full and sharded
+  `target/confidence/fast/<shard>/sim/` roots for the fast lane, including
+  env-gated Postgres conformance evidence when the lane is enabled.
 
 Implemented DST substance (each item below is landed and gated by
 `cargo test -p lash-sim`):
@@ -329,7 +330,8 @@ extend that contract instead of creating a second gate.
   exercised.
 
 The gate emits machine-readable summaries and reproduction commands under
-`target/confidence/<lane>/sim/`. Bounded broad artifacts report
+`target/confidence/<lane>/sim/` for default/broad/full and under
+`target/confidence/fast/<shard>/sim/` for fast shards. Bounded broad artifacts report
 `confidence_class=bounded_broad`; they are comparable across current
 implementation passes but are not labeled as full confidence. A green full lane
 means: for the contracts encoded as oracles and generator families, Lash is
@@ -633,8 +635,8 @@ Recommended storage:
   `crates/lash-sim/provider-scripts/canonical/`.
 - Generated/minimized scripts under `crates/lash-sim/replays/` only when they
   become intentional regression fixtures.
-- Failure artifacts under `target/confidence/<lane>/sim/failures/` or
-  `target/lash-sim/failures/`.
+- Failure artifacts under `target/confidence/<lane>/sim/failures/`,
+  `target/confidence/fast/<shard>/sim/failures/`, or `target/lash-sim/failures/`.
 
 Recommended format: stable JSON, because it is easy to hash, emit from the
 generator, minimize, diff, and consume from Rust without introducing a new
@@ -1081,18 +1083,18 @@ Purpose: PR confidence and local quick feedback.
 
 Runs:
 
-- Existing fast lane.
-- `lash-sim` fixed replay corpus.
-- Tiny generated corpus using model store only.
-- OpenAI-compatible provider script vertical slice.
+- Runtime, Standard Protocol, RLM Protocol, and Agent scenario shards.
+- Runtime state-machine, Lashlang property, durable fault-matrix metadata, and
+  executable durable-fault evidence.
+- `lash-sim` unit/oracle tests.
+- Generated deterministic simulation/provider proof.
+- Failing minimizer fixture preservation and minimized artifact generation.
+- Performance guard identity checks.
 
-Initial budget:
-
-- Fixed replays: all `tiny-fixed` scripts.
-- Random seeds: 16 to 32.
-- Max boundaries per seed: 100 to 150.
-- Provider kinds: OpenAI-compatible only.
-- Storage: model store only.
+The local `scripts/confidence-gate.sh fast` command runs those shards
+sequentially and writes an aggregate summary. CI runs the same evidence through
+the first-class `fast:<shard>` commands in parallel, uploads each shard's
+artifact tree, and validates the downloaded trees with `fast:summary`.
 - Target wall time: keep the added sim budget near 60 to 120 seconds on CI
   after the vertical slice is mature.
 
@@ -1189,7 +1191,10 @@ LASH_CONFIDENCE_BOOTSTRAP=1 \
   scripts/confidence-gate.sh full
 ```
 
-All lanes write artifacts under `target/confidence/<lane>/sim/`.
+Default, broad, and full lanes write sim artifacts under
+`target/confidence/<lane>/sim/`. Fast CI writes equivalent evidence under
+`target/confidence/fast/<shard>/sim/` and validates the shard summaries with
+`scripts/confidence-gate.sh fast:summary`.
 
 ### Confidence Artifact And Environment Manifest
 
@@ -1198,7 +1203,7 @@ logs, local runs, and replay commands use one artifact vocabulary.
 
 | Lane | Artifact paths | Seed/shard env vars | Budget knobs | Failure root |
 | --- | --- | --- | --- | --- |
-| `fast` | `target/confidence/fast/sim/summary.json`, `events.jsonl`, `fixed-replay.json`, `provider-scripts.json`, `failures/` | `LASH_SIM_FAST_SEEDS` default `32`, `LASH_SIM_SEED`, `LASH_SIM_SHARD` default `1/1` | `LASH_SIM_FAST_MAX_BOUNDARIES` default `150`, `LASH_SIM_FAST_WALL_SECONDS` default `120` | `target/confidence/fast/sim/failures/<run-id>/` |
+| `fast` | `target/confidence/fast/sim-generated/sim/summary.json`, `events.jsonl`, `fixed-replay.json`, `provider-scripts.json`; `target/confidence/fast/minimizer-fixtures/sim/failing-minimizer-fixtures.json`; aggregate `target/confidence/fast/confidence-summary.json` | `LASH_SIM_SEEDS`, `LASH_SIM_MAX_BOUNDARIES`, `LASH_MINIMIZER_FIXTURE_JOBS` | `fast-random` profile defaults plus per-shard CI job timeout; minimizer fixtures default to up to 4 parallel workers | `target/confidence/fast/sim-generated/sim/failures/<run-id>/` |
 | `default` | `target/confidence/default/sim/summary.json`, `events.jsonl`, `sqlite-replay.json`, `coverage-tags.json`, `failures/` | `LASH_SIM_DEFAULT_SEEDS` default `256`, `LASH_SIM_SEED`, `LASH_SIM_SHARD` default `1/1` | `LASH_SIM_DEFAULT_MAX_BOUNDARIES` default `500`, `LASH_SIM_DEFAULT_WALL_SECONDS`, `LASH_SIM_SQLITE_REPLAY_LIMIT` | `target/confidence/default/sim/failures/<run-id>/` |
 | `full` | `target/confidence/full/sim/summary.json`, `events.jsonl`, `sqlite-replay.json`, `postgres-replay.json`, `provider-matrix.json`, `failures/` | `LASH_SIM_FULL_SEEDS` default `5000`, `LASH_SIM_SEED`, `LASH_SIM_SHARD`, CI matrix shard variables mapped into `LASH_SIM_SHARD` | `LASH_SIM_FULL_MAX_BOUNDARIES` default `2000`, `LASH_SIM_FULL_WALL_SECONDS`, `LASH_SIM_PROVIDER_MATRIX`, `LASH_SIM_POSTGRES_REPLAY_LIMIT` | `target/confidence/full/sim/failures/<run-id>/` |
 
@@ -1212,7 +1217,8 @@ Every lane summary must include:
 
 The runner also supports local non-gate output under
 `target/lash-sim/<profile>/`, but confidence-gate runs must always use the
-lane-specific `target/confidence/<lane>/sim/` roots.
+lane-specific `target/confidence/<lane>/sim/` roots for default/broad/full and
+`target/confidence/fast/<shard>/sim/` roots for sharded fast evidence.
 
 ## Implementation Phases
 
@@ -1235,7 +1241,7 @@ scheduler, and backend work into one hard-to-review change.
 | 9. Replay backends | Phases 5 and 8 plus replay artifact schema | Default SQLite replay and full Postgres replay | One minimized replay runs through model store and SQLite with matching oracle verdict | Replay/minimization acceptance rules and divergence artifacts are implemented |
 | 10. Provider matrix | Phase 1 repeated for each provider path | Full provider matrix and provider-specific script mutations | Direct OpenAI, Anthropic, or Google script runs through migrated real provider path and provider conformance | That provider's transport checklist and canonical scripts pass |
 | 11. Generator and minimization expansion | Phases 4, 5, 6, 8, and 9 | Long randomized runs and regression fixture promotion | A generated failing trace is minimized while preserving the oracle class | Minimizer rejects changed-failure shrinks and schema compatibility behavior is tested |
-| 12. Confidence gate integration | Phases required by each lane's commands | CI/local executable confidence contract | `scripts/confidence-gate.sh fast` writes the sim manifest and runs fixed plus tiny generated corpus | Artifact/env-var manifest is implemented and default/full commands have bounded knobs |
+| 12. Confidence gate integration | Phases required by each lane's commands | CI/local executable confidence contract | `scripts/confidence-gate.sh fast` runs the fast shards and writes an aggregate summary; CI runs the same `fast:<shard>` commands in parallel | Artifact/env-var manifest is implemented and default/full commands have bounded knobs |
 
 ### Phase 0: Plan And ADR
 
@@ -1473,8 +1479,10 @@ PR 11.3: Regression fixture promotion.
 
 PR 12.1: Fast lane.
 
-- Add fixed replays and tiny generated corpus to `scripts/confidence-gate.sh`.
-- Write artifacts under `target/confidence/fast/sim/`.
+- Add fixed replays, a small generated corpus, minimizer fixture evidence, and
+  performance guards to `scripts/confidence-gate.sh`.
+- Split the fast contract into first-class `fast:<shard>` commands and write
+  aggregate artifacts under `target/confidence/fast/`.
 
 PR 12.2: Default lane.
 
@@ -1571,7 +1579,9 @@ The Deterministic Simulation Harness reaches the v1 done-line when:
   mutation names have distinct executable behaviors, queued-ingress mode
   varies, and worker failover is generated as real failover.
 - `scripts/confidence-gate.sh fast`, `default`, and `full` include the
-  appropriate sim lanes and write artifacts under `target/confidence/<lane>/sim/`.
+  appropriate sim lanes. The fast lane writes sharded artifacts under
+  `target/confidence/fast/<shard>/`; default and full keep their lane-local
+  `target/confidence/<lane>/sim/` artifacts.
 - The plan's non-goals remain true: no live LLM calls, no custom async
   executor, no Restate-internals simulation, no fifth scenario family, and no
   provider mock as the primary path.
