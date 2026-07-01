@@ -1112,8 +1112,9 @@ fn mock_provider() -> ProviderHandle {
                 usage: lash_core::llm::types::LlmUsage {
                     input_tokens: user_text.split_whitespace().count() as i64,
                     output_tokens: 2,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 },
                 ..LlmResponse::default()
             })

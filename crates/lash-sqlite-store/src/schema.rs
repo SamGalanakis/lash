@@ -51,8 +51,9 @@ CREATE TABLE IF NOT EXISTS usage_deltas (
     model                TEXT NOT NULL,
     input_tokens         INTEGER NOT NULL,
     output_tokens        INTEGER NOT NULL,
-    cached_input_tokens  INTEGER NOT NULL,
-    reasoning_tokens     INTEGER NOT NULL
+    cache_read_input_tokens  INTEGER NOT NULL,
+    cache_write_input_tokens INTEGER NOT NULL,
+    reasoning_output_tokens     INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS session_meta (
@@ -172,7 +173,7 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// Canonical schema version. There is no migration chain — older databases
 /// must be deleted before opening. See the [`SCHEMA`] doc comment for the
 /// rationale.
-pub(crate) const SCHEMA_VERSION: i32 = 6;
+pub(crate) const SCHEMA_VERSION: i32 = 7;
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (

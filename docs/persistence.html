@@ -162,7 +162,7 @@ if let Some(process_report) = report.process {
         <div class="listing__row"><div class="listing__label">pending turn input</div><div class="listing__body"><p>User-visible model input awaiting an active checkpoint or the next idle turn. Active-turn input is anchored to a live turn id and checkpoint boundary; interrupt finalization completes accepted inputs and defers only unaccepted ones to the next turn.</p></div></div>
         <div class="listing__row"><div class="listing__label">queued work</div><div class="listing__body"><p>Durable ingress for <code>SessionCommand</code> mutations and non-user <code>TurnWork</code> such as process wakes, with leases and completed claim ids cleared by the consuming commit. Triggers are runtime-level occurrences, and timers are host-owned scheduling.</p></div></div>
         <div class="listing__row"><div class="listing__label">process envs</div><div class="listing__body"><p>Process execution environments are captured at start as content-addressed Lashlang artifacts. Persisted process and trigger rows reference those immutable environment blobs; this alpha cutover is not backward-compatible with pre-env-ref process rows.</p></div></div>
-        <div class="listing__row"><div class="listing__label">usage</div><div class="listing__body"><p>Per-turn token deltas that aggregate into <code>session.usage_report()</code>.</p></div></div>
+        <div class="listing__row"><div class="listing__label">usage</div><div class="listing__body"><p>Per-turn token deltas for uncached input, total output, cache-read input, cache-write input, and reasoning-output counts that aggregate into <code>session.usage_report()</code>.</p></div></div>
       </div>
     </div>
 

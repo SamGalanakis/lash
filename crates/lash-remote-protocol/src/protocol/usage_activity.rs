@@ -2,17 +2,18 @@
 pub struct RemoteUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub cached_input_tokens: i64,
-    #[serde(default)]
-    pub reasoning_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_write_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
 }
 
 impl RemoteUsage {
     pub fn add(&mut self, other: &Self) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
-        self.cached_input_tokens += other.cached_input_tokens;
-        self.reasoning_tokens += other.reasoning_tokens;
+        self.cache_read_input_tokens += other.cache_read_input_tokens;
+        self.cache_write_input_tokens += other.cache_write_input_tokens;
+        self.reasoning_output_tokens += other.reasoning_output_tokens;
     }
 }
 

@@ -2368,8 +2368,9 @@ async fn session_manager_can_run_child_session_turn() {
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 7,
                 output_tokens: 2,
-                cached_input_tokens: 0,
-                reasoning_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 1,
             }),
         ],
         response: Ok(LlmResponse {

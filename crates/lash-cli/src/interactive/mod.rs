@@ -110,7 +110,6 @@ pub(crate) async fn run_app(
     app.set_ui_extensions(Arc::clone(&ui_extensions));
     app.set_chrome_state(chrome_state);
     app.usage.context_window = Some(initial_context_window);
-    app.usage.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     let mut current_model_variant = initial_model_variant.or_else(|| {
         crate::provider_metadata::default_model_variant_for_provider(
             provider.kind(),

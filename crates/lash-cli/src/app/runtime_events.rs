@@ -361,8 +361,8 @@ impl App {
                 usage, cumulative, ..
             } => {
                 let should_clear_live_estimate = usage.output_tokens > 0
-                    || usage.reasoning_tokens > 0
-                    || usage.cached_input_tokens > 0;
+                    || usage.reasoning_output_tokens > 0
+                    || usage.cache_read_input_tokens > 0;
                 self.usage.last_response_usage = usage.clone();
                 self.usage.parent_session_cumulative = cumulative;
                 self.recompute_session_token_usage();

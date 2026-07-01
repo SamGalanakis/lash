@@ -64,7 +64,8 @@ mod tests {
         app.usage.last_prompt_usage = Some(PromptUsage {
             prompt_context_tokens: 0,
             input_tokens: 0,
-            cached_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
             context_budget_tokens: 7_000,
         });
 

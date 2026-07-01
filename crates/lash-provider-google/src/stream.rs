@@ -10,27 +10,32 @@ impl GoogleOAuthProvider {
             .get("response")
             .and_then(|r| r.get("usageMetadata"))
             .unwrap_or(&Value::Null);
+        let prompt_tokens = parse_i64(
+            meta.get("promptTokenCount")
+                .or_else(|| meta.get("inputTokenCount"))
+                .or_else(|| meta.get("inputTokens")),
+        );
+        let cache_read = parse_i64(
+            meta.get("cachedContentTokenCount")
+                .or_else(|| meta.get("cachedPromptTokenCount"))
+                .or_else(|| meta.get("cachedInputTokenCount")),
+        );
+        let candidate_tokens = parse_i64(
+            meta.get("candidatesTokenCount")
+                .or_else(|| meta.get("outputTokenCount"))
+                .or_else(|| meta.get("outputTokens")),
+        );
+        let reasoning = parse_i64(
+            meta.get("thoughtsTokenCount")
+                .or_else(|| meta.get("reasoningTokenCount"))
+                .or_else(|| meta.get("reasoningTokens")),
+        );
         LlmUsage {
-            input_tokens: parse_i64(
-                meta.get("promptTokenCount")
-                    .or_else(|| meta.get("inputTokenCount"))
-                    .or_else(|| meta.get("inputTokens")),
-            ),
-            output_tokens: parse_i64(
-                meta.get("candidatesTokenCount")
-                    .or_else(|| meta.get("outputTokenCount"))
-                    .or_else(|| meta.get("outputTokens")),
-            ),
-            cached_input_tokens: parse_i64(
-                meta.get("cachedContentTokenCount")
-                    .or_else(|| meta.get("cachedPromptTokenCount"))
-                    .or_else(|| meta.get("cachedInputTokenCount")),
-            ),
-            reasoning_tokens: parse_i64(
-                meta.get("thoughtsTokenCount")
-                    .or_else(|| meta.get("reasoningTokenCount"))
-                    .or_else(|| meta.get("reasoningTokens")),
-            ),
+            input_tokens: prompt_tokens.saturating_sub(cache_read).max(0),
+            output_tokens: candidate_tokens.saturating_add(reasoning),
+            cache_read_input_tokens: cache_read,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: reasoning,
         }
     }
 
@@ -190,8 +195,9 @@ impl GoogleOAuthProvider {
         let new_usage = Self::usage_from_event(&event);
         if new_usage.input_tokens > 0
             || new_usage.output_tokens > 0
-            || new_usage.cached_input_tokens > 0
-            || new_usage.reasoning_tokens > 0
+            || new_usage.cache_read_input_tokens > 0
+            || new_usage.cache_write_input_tokens > 0
+            || new_usage.reasoning_output_tokens > 0
         {
             *usage = new_usage;
         }

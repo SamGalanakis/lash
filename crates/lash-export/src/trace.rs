@@ -53,8 +53,9 @@ pub struct LlmPromptSnapshot {
 pub struct LlmCallUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub cached_input_tokens: i64,
-    pub reasoning_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_write_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
     pub duration_ms: Option<u64>,
 }
 
@@ -166,22 +167,17 @@ fn trace_causal_ref(value: &Value) -> Option<lash_core::CausalRef> {
 fn usage_from_completed_record(record: &Value) -> Option<LlmCallUsage> {
     let usage = record.get("usage")?;
     let parsed = LlmCallUsage {
-        input_tokens: usage
-            .get("input_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or_default(),
-        output_tokens: usage
-            .get("output_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or_default(),
-        cached_input_tokens: usage
-            .get("cached_input_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or_default(),
-        reasoning_tokens: usage
-            .get("reasoning_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or_default(),
+        input_tokens: usage.get("input_tokens").and_then(Value::as_i64)?,
+        output_tokens: usage.get("output_tokens").and_then(Value::as_i64)?,
+        cache_read_input_tokens: usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_i64)?,
+        cache_write_input_tokens: usage
+            .get("cache_write_input_tokens")
+            .and_then(Value::as_i64)?,
+        reasoning_output_tokens: usage
+            .get("reasoning_output_tokens")
+            .and_then(Value::as_i64)?,
         duration_ms: record
             .get("response")
             .and_then(|response| response.get("duration_ms"))
@@ -189,8 +185,9 @@ fn usage_from_completed_record(record: &Value) -> Option<LlmCallUsage> {
     };
     if parsed.input_tokens == 0
         && parsed.output_tokens == 0
-        && parsed.cached_input_tokens == 0
-        && parsed.reasoning_tokens == 0
+        && parsed.cache_read_input_tokens == 0
+        && parsed.cache_write_input_tokens == 0
+        && parsed.reasoning_output_tokens == 0
         && parsed.duration_ms.is_none()
     {
         None
@@ -308,7 +305,7 @@ mod tests {
         .unwrap();
         writeln!(
             tmp,
-            r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"protocol_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"response":{{"text":"ok","duration_ms":1234}},"usage":{{"input_tokens":100,"output_tokens":12,"cached_input_tokens":80,"reasoning_tokens":4}}}}"#
+            r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"protocol_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"response":{{"text":"ok","duration_ms":1234}},"usage":{{"input_tokens":100,"output_tokens":12,"cache_read_input_tokens":80,"cache_write_input_tokens":0,"reasoning_output_tokens":4}}}}"#
         )
         .unwrap();
         tmp.flush().unwrap();
@@ -334,8 +331,9 @@ mod tests {
         let usage = p.usage.as_ref().expect("usage");
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 12);
-        assert_eq!(usage.cached_input_tokens, 80);
-        assert_eq!(usage.reasoning_tokens, 4);
+        assert_eq!(usage.cache_read_input_tokens, 80);
+        assert_eq!(usage.cache_write_input_tokens, 0);
+        assert_eq!(usage.reasoning_output_tokens, 4);
         assert_eq!(usage.duration_ms, Some(1234));
     }
 
@@ -374,7 +372,7 @@ mod tests {
             .unwrap();
             writeln!(
                 tmp,
-                r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"protocol_iteration":0,"llm_call_id":"root:1:0:{input}"}},"response":{{"duration_ms":1,"text":"ok"}},"usage":{{"input_tokens":{input},"output_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0}}}}"#
+                r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"protocol_iteration":0,"llm_call_id":"root:1:0:{input}"}},"response":{{"duration_ms":1,"text":"ok"}},"usage":{{"input_tokens":{input},"output_tokens":1,"cache_read_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}}}"#
             )
             .unwrap();
         }

@@ -35,7 +35,8 @@ mod tests {
         lash_core::PromptUsage {
             prompt_context_tokens: context_budget_tokens,
             input_tokens: context_budget_tokens,
-            cached_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
             context_budget_tokens,
         }
     }

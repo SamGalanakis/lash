@@ -43,7 +43,7 @@ impl RuntimeTurnDriver<'_> {
                     {
                         self.turn_pipeline.state_mut().token_usage = cumulative.clone();
                         self.turn_pipeline.state_mut().last_prompt_usage =
-                            normalize_prompt_usage(self.policy.provider(), usage);
+                            normalize_prompt_usage(usage);
                     }
                     emit!(event)
                 }

@@ -115,12 +115,6 @@ impl ProviderHandle {
         ))
     }
 
-    pub fn input_usage_excludes_cached_tokens(&self) -> bool {
-        self.components
-            .model_policy
-            .input_usage_excludes_cached_tokens()
-    }
-
     pub fn options(&self) -> ProviderOptions {
         self.components.provider.options()
     }

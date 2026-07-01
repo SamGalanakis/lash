@@ -684,8 +684,9 @@ mod fork_tests {
                 token_usage: lash_core::TokenUsage {
                     input_tokens: 10,
                     output_tokens: 3,
-                    cached_input_tokens: 1,
-                    reasoning_tokens: 2,
+                    cache_read_input_tokens: 1,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 2,
                 },
                 last_prompt_usage: None,
                 protocol_turn_options: Default::default(),

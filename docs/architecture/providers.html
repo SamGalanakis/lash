@@ -137,13 +137,14 @@ let reliability = ProviderReliability::default()
         <div class="section">
           <div class="section-header">
             <h2>Usage And Cost Inputs</h2>
-            <p>Every provider returns a normalized <code>LlmUsage</code> to the runtime usage ledger after each completion. Chat-parsing handles both streaming and non-streaming usage chunks, including OpenRouter cache fields. Cache-write tokens are <strong>not</strong> counted as cached reads, so downstream cost/export code doesn't overstate cache hits.</p>
+            <p>Every provider returns a normalized <code>LlmUsage</code> to the runtime usage ledger after each completion. Chat-parsing handles both streaming and non-streaming usage chunks, including OpenRouter cache fields. Cache-write tokens are tracked separately from cached reads, and reasoning tokens are treated as an output subset rather than an additive total, so downstream cost/export code can price each bucket without double-counting.</p>
           </div>
           <pre><code>pub struct LlmUsage {
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cached_input_tokens: i64,  // Reads from cache
-    pub reasoning_tokens: i64,
+    pub input_tokens: i64,              // Uncached ordinary input
+    pub cache_read_input_tokens: i64,   // Prompt input read from cache
+    pub cache_write_input_tokens: i64,  // Prompt input written to cache
+    pub output_tokens: i64,             // Total generated output
+    pub reasoning_output_tokens: i64,   // Subset of output tokens
     // …provider-specific extras flow through the extended trace
 }</code></pre>
         </div>

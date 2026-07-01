@@ -215,8 +215,8 @@ impl TraceStats {
                 | lash_trace::TraceEvent::TokenUsage { usage, .. } => {
                     stats.total_tokens += usage.input_tokens
                         + usage.output_tokens
-                        + usage.cached_input_tokens
-                        + usage.reasoning_tokens;
+                        + usage.cache_read_input_tokens
+                        + usage.cache_write_input_tokens;
                 }
                 lash_trace::TraceEvent::LashlangExecution {
                     event:
@@ -724,10 +724,10 @@ function summarizeCompleted(record) {
 }
 
 function usageText(usage, cumulative = null) {
-  const total = (usage.input_tokens || 0) + (usage.output_tokens || 0) + (usage.cached_input_tokens || 0) + (usage.reasoning_tokens || 0);
-  let text = `tokens ${total} = in ${usage.input_tokens || 0}, out ${usage.output_tokens || 0}, cached ${usage.cached_input_tokens || 0}, reasoning ${usage.reasoning_tokens || 0}`;
+  const total = (usage.input_tokens || 0) + (usage.output_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_write_input_tokens || 0);
+  let text = `tokens ${total} = in ${usage.input_tokens || 0}, out ${usage.output_tokens || 0}, cache read ${usage.cache_read_input_tokens || 0}, cache write ${usage.cache_write_input_tokens || 0}, reasoning ${usage.reasoning_output_tokens || 0}`;
   if (cumulative) {
-    const ctotal = (cumulative.input_tokens || 0) + (cumulative.output_tokens || 0) + (cumulative.cached_input_tokens || 0) + (cumulative.reasoning_tokens || 0);
+    const ctotal = (cumulative.input_tokens || 0) + (cumulative.output_tokens || 0) + (cumulative.cache_read_input_tokens || 0) + (cumulative.cache_write_input_tokens || 0);
     text += `\ncumulative ${ctotal}`;
   }
   return text;

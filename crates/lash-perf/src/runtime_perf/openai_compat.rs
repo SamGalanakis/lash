@@ -100,7 +100,7 @@ pub(crate) fn openai_compat_sse_body(profile: &BenchmarkStreamProfile) -> Vec<u8
                     "cached_tokens": 512,
                 },
                 "completion_tokens_details": {
-                    "reasoning_tokens": 48,
+                    "reasoning_output_tokens": 48,
                 }
             },
         })

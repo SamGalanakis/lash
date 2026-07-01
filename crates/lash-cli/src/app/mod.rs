@@ -508,8 +508,6 @@ pub struct UsageState {
     pub child_session_cumulatives: HashMap<String, TokenUsage>,
     /// Context window size for the current model (from models.dev).
     pub context_window: Option<u64>,
-    /// Whether provider-reported input tokens exclude cached prompt tokens.
-    pub context_usage_excludes_cached_input: bool,
     /// Latest completed model usage for context accounting.
     pub last_response_usage: TokenUsage,
     /// Latest normalized prompt-budget usage for context accounting and

@@ -2,8 +2,9 @@ fn token_usage_from_llm_usage(usage: &crate::llm::types::LlmUsage) -> TokenUsage
     TokenUsage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
-        cached_input_tokens: usage.cached_input_tokens,
-        reasoning_tokens: usage.reasoning_tokens,
+        cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
+        reasoning_output_tokens: usage.reasoning_output_tokens,
     }
 }
 
@@ -27,11 +28,7 @@ fn refine_terminal_reason_for_context_window(
     let Some(max_context_tokens) = max_context_tokens.filter(|value| *value > 0) else {
         return;
     };
-    let prompt_tokens = response
-        .usage
-        .input_tokens
-        .saturating_add(response.usage.cached_input_tokens)
-        .max(0) as usize;
+    let prompt_tokens = response.usage.input_total().max(0) as usize;
     if prompt_tokens >= max_context_tokens.saturating_mul(95) / 100 {
         response.terminal_reason = LlmTerminalReason::ContextOverflow;
         response.terminal_diagnostic = Some(

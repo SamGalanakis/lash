@@ -796,9 +796,40 @@ fn non_streaming_chat_parser_captures_text_tool_and_usage() {
                 .and_then(|meta| meta.opaque.as_deref())
                 .is_some_and(|value| value.contains("encrypted"))
     ));
-    assert_eq!(usage.input_tokens, 13);
+    assert_eq!(usage.input_tokens, 11);
     assert_eq!(usage.output_tokens, 17);
-    assert_eq!(usage.cached_input_tokens, 2);
+    assert_eq!(usage.cache_read_input_tokens, 2);
+    assert_eq!(usage.cache_write_input_tokens, 0);
+}
+
+#[test]
+fn chat_usage_payload_maps_canonical_token_buckets() {
+    let value = json!({
+        "usage": {
+            "prompt_tokens": 21,
+            "completion_tokens": 13,
+            "prompt_tokens_details": {
+                "cached_tokens": 5,
+                "cache_write_tokens": 4
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 3
+            }
+        }
+    });
+
+    let usage = lash_llm_transport::openai_usage_from_response_value(&value);
+
+    assert_eq!(
+        usage,
+        lash_core::llm::types::LlmUsage {
+            input_tokens: 12,
+            output_tokens: 13,
+            cache_read_input_tokens: 5,
+            cache_write_input_tokens: 4,
+            reasoning_output_tokens: 3,
+        }
+    );
 }
 
 #[test]
@@ -857,9 +888,10 @@ fn chat_stream_parser_captures_text_tool_done_and_usage() {
                 .and_then(|meta| meta.opaque.as_deref())
                 .is_some_and(|value| value.contains("encrypted"))
     ));
-    assert_eq!(state.usage.input_tokens, 11);
+    assert_eq!(state.usage.input_tokens, 5);
     assert_eq!(state.usage.output_tokens, 5);
-    assert_eq!(state.usage.cached_input_tokens, 2);
+    assert_eq!(state.usage.cache_read_input_tokens, 4);
+    assert_eq!(state.usage.cache_write_input_tokens, 2);
 }
 
 #[test]
@@ -1106,7 +1138,7 @@ mod conformance {
                     }],
                     "usage": {
                         "prompt_tokens": U::BASE_INPUT,
-                        "completion_tokens": U::BASE_OUTPUT,
+                        "completion_tokens": U::OUTPUT_WITH_REASONING,
                         "completion_tokens_details": { "reasoning_tokens": U::REASONING }
                     }
                 })),

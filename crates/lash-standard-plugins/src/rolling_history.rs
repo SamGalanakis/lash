@@ -608,7 +608,8 @@ mod tests {
             Some(PromptUsage {
                 prompt_context_tokens: 130_000,
                 input_tokens: 130_000,
-                cached_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 context_budget_tokens: 130_000,
             }),
             Some(200_000),
@@ -645,7 +646,8 @@ mod tests {
             Some(PromptUsage {
                 prompt_context_tokens: 90_000,
                 input_tokens: 90_000,
-                cached_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 context_budget_tokens: 90_000,
             }),
             Some(100_000),

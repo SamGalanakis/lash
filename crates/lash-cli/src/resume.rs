@@ -111,7 +111,6 @@ async fn restore_model_from_graph_config(
     let restored_context_window = config.model.context_window_tokens() as u64;
     app.model = restored_model.to_string();
     app.usage.context_window = Some(restored_context_window);
-    app.usage.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     if let Some(rt) = runtime.as_mut() {
         let _ = rt
             .admin()
@@ -437,13 +436,15 @@ mod tests {
             TokenUsage {
                 input_tokens: 1200,
                 output_tokens: 340,
-                cached_input_tokens: 80,
-                reasoning_tokens: 55,
+                cache_read_input_tokens: 80,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 55,
             },
             Some(PromptUsage {
                 prompt_context_tokens: 4096,
                 input_tokens: 3900,
-                cached_input_tokens: 196,
+                cache_read_input_tokens: 196,
+                cache_write_input_tokens: 0,
                 context_budget_tokens: 0,
             }),
         );
@@ -489,8 +490,8 @@ mod tests {
         assert_eq!(execution_mode, ExecutionMode::Standard);
         assert_eq!(app.usage.token_usage.input_tokens, 1200);
         assert_eq!(app.usage.token_usage.output_tokens, 340);
-        assert_eq!(app.usage.token_usage.cached_input_tokens, 80);
-        assert_eq!(app.usage.token_usage.reasoning_tokens, 55);
+        assert_eq!(app.usage.token_usage.cache_read_input_tokens, 80);
+        assert_eq!(app.usage.token_usage.reasoning_output_tokens, 55);
         let app_prompt_usage = app.usage.last_prompt_usage.expect("app prompt usage");
         assert_eq!(app_prompt_usage.prompt_context_tokens, 4096);
         assert_eq!(app_prompt_usage.context_budget_tokens, 4096);

@@ -1168,11 +1168,12 @@
             "parent_session_id": "root",
             "task": "In the temp directory /tmp/tmp.m4yJpzPolc, briefly report what files currently exist and one sentence on whether the workspace looks healthy. Do not modify anything.",
             "token_usage": {
-              "cached_input_tokens": 3072,
+              "cache_read_input_tokens": 3072,
               "input_tokens": 6654,
               "output_tokens": 179,
-              "reasoning_tokens": 12,
-              "total_tokens": 6845
+              "reasoning_output_tokens": 12,
+              "total_tokens": 6845,
+              "cache_write_input_tokens": 0
             },
             "tool_call_details": [
               {

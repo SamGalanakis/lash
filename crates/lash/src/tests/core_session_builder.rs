@@ -1360,8 +1360,9 @@ fn turn_result_total_usage_sums_parent_and_children() {
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
-            cached_input_tokens: 2,
-            reasoning_tokens: 1,
+            cache_read_input_tokens: 2,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 1,
         },
         children_usage: vec![
             TokenLedgerEntry {
@@ -1370,8 +1371,9 @@ fn turn_result_total_usage_sums_parent_and_children() {
                 usage: TokenUsage {
                     input_tokens: 7,
                     output_tokens: 3,
-                    cached_input_tokens: 4,
-                    reasoning_tokens: 0,
+                    cache_read_input_tokens: 4,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 },
             },
             TokenLedgerEntry {
@@ -1380,8 +1382,9 @@ fn turn_result_total_usage_sums_parent_and_children() {
                 usage: TokenUsage {
                     input_tokens: 1,
                     output_tokens: 0,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 },
             },
         ],
@@ -1396,8 +1399,8 @@ fn turn_result_total_usage_sums_parent_and_children() {
     let total = result.total_usage();
     assert_eq!(total.input_tokens, 10 + 7 + 1);
     assert_eq!(total.output_tokens, 5 + 3);
-    assert_eq!(total.cached_input_tokens, 2 + 4);
-    assert_eq!(total.reasoning_tokens, 1);
+    assert_eq!(total.cache_read_input_tokens, 2 + 4);
+    assert_eq!(total.reasoning_output_tokens, 1);
     // Parent's own usage is unchanged.
     assert_eq!(result.usage.input_tokens, 10);
 }

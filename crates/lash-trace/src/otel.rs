@@ -828,12 +828,16 @@ fn usage_attributes(attrs: &mut Vec<KeyValue>, prefix: &str, usage: &TraceTokenU
         usage.output_tokens,
     ));
     attrs.push(KeyValue::new(
-        format!("{prefix}.cached_input_tokens"),
-        usage.cached_input_tokens,
+        format!("{prefix}.cache_read_input_tokens"),
+        usage.cache_read_input_tokens,
     ));
     attrs.push(KeyValue::new(
-        format!("{prefix}.reasoning_tokens"),
-        usage.reasoning_tokens,
+        format!("{prefix}.cache_write_input_tokens"),
+        usage.cache_write_input_tokens,
+    ));
+    attrs.push(KeyValue::new(
+        format!("{prefix}.reasoning_output_tokens"),
+        usage.reasoning_output_tokens,
     ));
 }
 

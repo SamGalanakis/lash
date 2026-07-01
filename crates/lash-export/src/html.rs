@@ -269,8 +269,9 @@ mod tests {
                 usage: Some(LlmCallUsage {
                     input_tokens: 10_000,
                     output_tokens: 250,
-                    cached_input_tokens: 7_500,
-                    reasoning_tokens: 125,
+                    cache_read_input_tokens: 7_500,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 125,
                     duration_ms: Some(3000),
                 }),
                 ..prompt_snapshot(0, "hi")
@@ -282,7 +283,7 @@ mod tests {
         assert!(rendered.contains("data-kind=\"system_prompt\""));
         assert!(rendered.contains(">llm call</button>"));
         assert!(rendered.contains("usage-chart"));
-        assert!(rendered.contains("ctx 10.0%"));
-        assert!(rendered.contains("75.000%"));
+        assert!(rendered.contains("ctx 17.5%"));
+        assert!(rendered.contains("42.857%"));
     }
 }

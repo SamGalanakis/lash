@@ -26,8 +26,9 @@ async fn standard_runtime_assembles_stream_only_text_response() {
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 11,
                 output_tokens: 4,
-                cached_input_tokens: 0,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             }),
         ],
         response: Ok(LlmResponse {
@@ -218,8 +219,9 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
                 LlmStreamEvent::Usage(LlmUsage {
                     input_tokens: 10,
                     output_tokens: 1,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 }),
             ],
             response: Ok(LlmResponse::default()),
@@ -484,8 +486,9 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
                 LlmStreamEvent::Usage(LlmUsage {
                     input_tokens: 12,
                     output_tokens: 3,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 }),
             ],
             response: Ok(LlmResponse::default()),
@@ -601,8 +604,9 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 9,
                 output_tokens: 3,
-                cached_input_tokens: 2,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 2,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             }),
         ],
         response: Ok(LlmResponse {
@@ -637,7 +641,7 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
 
     assert_eq!(turn.token_usage.input_tokens, 9);
     assert_eq!(turn.token_usage.output_tokens, 3);
-    assert_eq!(turn.token_usage.cached_input_tokens, 2);
+    assert_eq!(turn.token_usage.cache_read_input_tokens, 2);
 }
 
 #[tokio::test]
@@ -648,8 +652,9 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
             LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 9,
                 output_tokens: 3,
-                cached_input_tokens: 2,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 2,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             }),
         ],
         response: Ok(LlmResponse {
@@ -661,8 +666,9 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
             usage: LlmUsage {
                 input_tokens: 12,
                 output_tokens: 4,
-                cached_input_tokens: 1,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 1,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             },
             ..LlmResponse::default()
         }),
@@ -689,5 +695,5 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
 
     assert_eq!(turn.token_usage.input_tokens, 12);
     assert_eq!(turn.token_usage.output_tokens, 4);
-    assert_eq!(turn.token_usage.cached_input_tokens, 1);
+    assert_eq!(turn.token_usage.cache_read_input_tokens, 1);
 }

@@ -132,8 +132,9 @@ impl UsageCapability {
 fn usage_has_any_tokens(usage: &TokenUsage) -> bool {
     usage.input_tokens != 0
         || usage.output_tokens != 0
-        || usage.cached_input_tokens != 0
-        || usage.reasoning_tokens != 0
+        || usage.cache_read_input_tokens != 0
+        || usage.cache_write_input_tokens != 0
+        || usage.reasoning_output_tokens != 0
 }
 
 pub(in crate::runtime::session_manager) fn record_token_usage_shared(
@@ -152,8 +153,9 @@ pub(in crate::runtime::session_manager) fn record_token_usage_shared(
     {
         entry.usage.input_tokens += usage.input_tokens;
         entry.usage.output_tokens += usage.output_tokens;
-        entry.usage.cached_input_tokens += usage.cached_input_tokens;
-        entry.usage.reasoning_tokens += usage.reasoning_tokens;
+        entry.usage.cache_read_input_tokens += usage.cache_read_input_tokens;
+        entry.usage.cache_write_input_tokens += usage.cache_write_input_tokens;
+        entry.usage.reasoning_output_tokens += usage.reasoning_output_tokens;
     } else {
         ledger.push(TokenLedgerEntry {
             source: source.to_string(),
@@ -174,12 +176,15 @@ pub(in crate::runtime::session_manager) fn subtract_usage(
         output_tokens: final_total
             .output_tokens
             .saturating_sub(reported_total.output_tokens),
-        cached_input_tokens: final_total
-            .cached_input_tokens
-            .saturating_sub(reported_total.cached_input_tokens),
-        reasoning_tokens: final_total
-            .reasoning_tokens
-            .saturating_sub(reported_total.reasoning_tokens),
+        cache_read_input_tokens: final_total
+            .cache_read_input_tokens
+            .saturating_sub(reported_total.cache_read_input_tokens),
+        cache_write_input_tokens: final_total
+            .cache_write_input_tokens
+            .saturating_sub(reported_total.cache_write_input_tokens),
+        reasoning_output_tokens: final_total
+            .reasoning_output_tokens
+            .saturating_sub(reported_total.reasoning_output_tokens),
     };
     usage_has_any_tokens(&delta).then_some(delta)
 }

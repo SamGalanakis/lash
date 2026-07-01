@@ -225,8 +225,12 @@ fn write_session_bar(out: &mut String, _session: &LoadedSession, stats: &Session
         stats.chronological,
     );
     if stats.llm_calls_with_usage > 0 {
-        let cached_pct = percent_of(stats.cached_input_tokens, stats.input_tokens)
-            .map(|pct| format!("{pct:.1}% cached"))
+        let prompt_tokens = stats
+            .input_tokens
+            .saturating_add(stats.cache_read_input_tokens)
+            .saturating_add(stats.cache_write_input_tokens);
+        let cached_pct = percent_of(stats.cache_read_input_tokens, prompt_tokens)
+            .map(|pct| format!("{pct:.1}% cache read"))
             .unwrap_or_else(|| "cache n/a".to_string());
         let context_label = stats
             .max_context_percent

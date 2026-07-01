@@ -424,8 +424,9 @@ async fn load_hydrates_checkpoint_and_usage(store: Arc<dyn RuntimePersistence>) 
         usage: TokenUsage {
             input_tokens: 11,
             output_tokens: 7,
-            cached_input_tokens: 3,
-            reasoning_tokens: 5,
+            cache_read_input_tokens: 3,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 5,
         },
     };
 

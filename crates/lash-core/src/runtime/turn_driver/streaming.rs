@@ -949,8 +949,9 @@ impl Drop for AbortOnDrop {
 fn response_usage_is_empty(usage: &LlmUsage) -> bool {
     usage.input_tokens == 0
         && usage.output_tokens == 0
-        && usage.cached_input_tokens == 0
-        && usage.reasoning_tokens == 0
+        && usage.cache_read_input_tokens == 0
+        && usage.cache_write_input_tokens == 0
+        && usage.reasoning_output_tokens == 0
 }
 
 fn provider_item_id(value: &serde_json::Value) -> Option<String> {

@@ -146,8 +146,9 @@ impl RuntimeEffectController for RecordingEffectController {
                         usage: LlmUsage {
                             input_tokens: 1,
                             output_tokens: 1,
-                            cached_input_tokens: 0,
-                            reasoning_tokens: 0,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
+                            reasoning_output_tokens: 0,
                         },
                         ..LlmResponse::default()
                     }),
@@ -229,8 +230,9 @@ impl RuntimeEffectController for RecordingEffectController {
                         LlmUsage {
                             input_tokens: 4,
                             output_tokens: 6,
-                            cached_input_tokens: 0,
-                            reasoning_tokens: 1,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
+                            reasoning_output_tokens: 1,
                         },
                     )
                 } else {
@@ -239,8 +241,9 @@ impl RuntimeEffectController for RecordingEffectController {
                         LlmUsage {
                             input_tokens: 7,
                             output_tokens: 5,
-                            cached_input_tokens: 1,
-                            reasoning_tokens: 2,
+                            cache_read_input_tokens: 1,
+                            cache_write_input_tokens: 0,
+                            reasoning_output_tokens: 2,
                         },
                     )
                 };
@@ -468,8 +471,9 @@ async fn standard_turn_llm_and_checkpoint_effects_cross_controller_once() {
             usage: LlmUsage {
                 input_tokens: 3,
                 output_tokens: 2,
-                cached_input_tokens: 0,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             },
             ..LlmResponse::default()
         }),
@@ -525,8 +529,9 @@ async fn turn_effect_envelope_does_not_carry_checkpoint_payload() {
             usage: LlmUsage {
                 input_tokens: 3,
                 output_tokens: 2,
-                cached_input_tokens: 0,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             },
             ..LlmResponse::default()
         }),
@@ -1058,8 +1063,9 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
                             usage: LlmUsage {
                                 input_tokens: 1,
                                 output_tokens: 1,
-                                cached_input_tokens: 0,
-                                reasoning_tokens: 0,
+                                cache_read_input_tokens: 0,
+                                cache_write_input_tokens: 0,
+                                reasoning_output_tokens: 0,
                             },
                             ..LlmResponse::default()
                         }),
@@ -1600,8 +1606,9 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
             usage: LlmUsage {
                 input_tokens: 7,
                 output_tokens: 5,
-                cached_input_tokens: 1,
-                reasoning_tokens: 2,
+                cache_read_input_tokens: 1,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 2,
             },
             ..LlmResponse::default()
         }),
@@ -1663,8 +1670,9 @@ async fn in_turn_direct_completion_uses_effect_controller_without_out_of_band_co
             usage: LlmUsage {
                 input_tokens: 7,
                 output_tokens: 5,
-                cached_input_tokens: 0,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             },
             ..LlmResponse::default()
         }),
@@ -1778,8 +1786,9 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
             usage: LlmUsage {
                 input_tokens: 4,
                 output_tokens: 6,
-                cached_input_tokens: 0,
-                reasoning_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 1,
             },
             ..LlmResponse::default()
         }),

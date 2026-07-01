@@ -197,8 +197,9 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 LlmStreamEvent::Usage(LlmUsage {
                     input_tokens: 11,
                     output_tokens: 3,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 }),
             ],
             response: Ok(LlmResponse::default()),
@@ -207,8 +208,9 @@ async fn parent_turn_receives_live_child_token_usage_events() {
             stream_events: vec![LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 7,
                 output_tokens: 2,
-                cached_input_tokens: 4,
-                reasoning_tokens: 1,
+                cache_read_input_tokens: 4,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 1,
             })],
             response: Ok(LlmResponse {
                 full_text: "child session".to_string(),
@@ -283,9 +285,9 @@ async fn parent_turn_receives_live_child_token_usage_events() {
     assert_eq!(child_usage_event.2, "mock-model");
     assert_eq!(child_usage_event.3.input_tokens, 7);
     assert_eq!(child_usage_event.3.output_tokens, 2);
-    assert_eq!(child_usage_event.3.cached_input_tokens, 4);
-    assert_eq!(child_usage_event.3.reasoning_tokens, 1);
-    assert_eq!(child_usage_event.4.cached_input_tokens, 4);
+    assert_eq!(child_usage_event.3.cache_read_input_tokens, 4);
+    assert_eq!(child_usage_event.3.reasoning_output_tokens, 1);
+    assert_eq!(child_usage_event.4.cache_read_input_tokens, 4);
 
     // The session-event projection should also surface a TurnEvent::ChildUsage
     // on the embed-facing TurnActivity stream.
@@ -314,7 +316,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
     assert_eq!(projected.1, "subagent");
     assert_eq!(projected.2, "mock-model");
     assert_eq!(projected.3.input_tokens, 7);
-    assert_eq!(projected.4.cached_input_tokens, 4);
+    assert_eq!(projected.4.cache_read_input_tokens, 4);
 
     // AssembledTurn carries per-(source, model) child entries so embed
     // consumers can compute per-turn breakdowns without diffing reports.
@@ -325,14 +327,14 @@ async fn parent_turn_receives_live_child_token_usage_events() {
         .unwrap_or_else(|| panic!("missing subagent ledger entry: {:?}", turn.children_usage));
     assert_eq!(child_entry.usage.input_tokens, 7);
     assert_eq!(child_entry.usage.output_tokens, 2);
-    assert_eq!(child_entry.usage.cached_input_tokens, 4);
-    assert_eq!(child_entry.usage.reasoning_tokens, 1);
+    assert_eq!(child_entry.usage.cache_read_input_tokens, 4);
+    assert_eq!(child_entry.usage.reasoning_output_tokens, 1);
 
     let usage = runtime.usage_report();
     assert_eq!(usage.by_source["subagent"].input_tokens, 7);
     assert_eq!(usage.by_source["subagent"].output_tokens, 2);
-    assert_eq!(usage.by_source["subagent"].cached_input_tokens, 4);
-    assert_eq!(usage.by_source["subagent"].reasoning_tokens, 1);
+    assert_eq!(usage.by_source["subagent"].cache_read_input_tokens, 4);
+    assert_eq!(usage.by_source["subagent"].reasoning_output_tokens, 1);
 }
 
 #[tokio::test]
@@ -349,8 +351,9 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 LlmStreamEvent::Usage(LlmUsage {
                     input_tokens: 5,
                     output_tokens: 1,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 }),
             ],
             response: Ok(LlmResponse::default()),
@@ -359,8 +362,9 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
             stream_events: vec![LlmStreamEvent::Usage(LlmUsage {
                 input_tokens: 0,
                 output_tokens: 0,
-                cached_input_tokens: 9,
-                reasoning_tokens: 0,
+                cache_read_input_tokens: 9,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 0,
             })],
             response: Ok(LlmResponse {
                 full_text: "cached child".to_string(),
@@ -421,13 +425,13 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
         .unwrap_or_else(|| panic!("child token usage event missing from {events:?}"));
     assert_eq!(child_usage_event.0.input_tokens, 0);
     assert_eq!(child_usage_event.0.output_tokens, 0);
-    assert_eq!(child_usage_event.0.cached_input_tokens, 9);
-    assert_eq!(child_usage_event.0.reasoning_tokens, 0);
-    assert_eq!(child_usage_event.1.cached_input_tokens, 9);
+    assert_eq!(child_usage_event.0.cache_read_input_tokens, 9);
+    assert_eq!(child_usage_event.0.reasoning_output_tokens, 0);
+    assert_eq!(child_usage_event.1.cache_read_input_tokens, 9);
 
     let usage = runtime.usage_report();
     assert_eq!(usage.by_source["subagent"].input_tokens, 0);
     assert_eq!(usage.by_source["subagent"].output_tokens, 0);
-    assert_eq!(usage.by_source["subagent"].cached_input_tokens, 9);
-    assert_eq!(usage.by_source["subagent"].reasoning_tokens, 0);
+    assert_eq!(usage.by_source["subagent"].cache_read_input_tokens, 9);
+    assert_eq!(usage.by_source["subagent"].reasoning_output_tokens, 0);
 }

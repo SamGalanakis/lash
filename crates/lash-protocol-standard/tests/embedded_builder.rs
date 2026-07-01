@@ -42,8 +42,9 @@ async fn embedded_runtime_builder_loads_state_from_store() {
                 token_usage: TokenUsage {
                     input_tokens: 20,
                     output_tokens: 5,
-                    cached_input_tokens: 2,
-                    reasoning_tokens: 1,
+                    cache_read_input_tokens: 2,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 1,
                 },
                 last_prompt_usage: None,
                 protocol_turn_options: Default::default(),

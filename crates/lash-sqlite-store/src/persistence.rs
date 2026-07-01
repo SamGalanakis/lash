@@ -223,8 +223,8 @@ impl RuntimePersistence for Store {
                         let mut stmt = tx
                             .prepare(
                                 "INSERT INTO usage_deltas (
-                                    source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-                                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                    source, model, input_tokens, output_tokens, cache_read_input_tokens, cache_write_input_tokens, reasoning_output_tokens
+                                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                             )
                             .map_err(sqlite_error)?;
                         for entry in &commit.usage_deltas {
@@ -233,8 +233,9 @@ impl RuntimePersistence for Store {
                                 entry.model,
                                 entry.usage.input_tokens,
                                 entry.usage.output_tokens,
-                                entry.usage.cached_input_tokens,
-                                entry.usage.reasoning_tokens,
+                                entry.usage.cache_read_input_tokens,
+                                entry.usage.cache_write_input_tokens,
+                                entry.usage.reasoning_output_tokens,
                             ])
                             .map_err(sqlite_error)?;
                         }

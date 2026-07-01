@@ -3496,7 +3496,7 @@ mod tests {
                         }],
                         "usage": {
                             "input_tokens": U::BASE_INPUT,
-                            "output_tokens": U::BASE_OUTPUT,
+                            "output_tokens": U::OUTPUT_WITH_REASONING,
                             "output_tokens_details": { "reasoning_tokens": U::REASONING }
                         }
                     })),

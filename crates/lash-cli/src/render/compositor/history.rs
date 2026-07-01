@@ -308,19 +308,16 @@ fn current_context_budget_tokens(app: &App) -> Option<i64> {
         return None;
     }
     let input = app.usage.last_response_usage.input_tokens.max(0);
-    let cached = app.usage.last_response_usage.cached_input_tokens.max(0);
+    let cache_read = app.usage.last_response_usage.cache_read_input_tokens.max(0);
+    let cache_write = app.usage.last_response_usage.cache_write_input_tokens.max(0);
     // Suppress until input accounting from a completed response has landed.
     // Showing only the streaming output token estimate against the full
     // context window otherwise reads as `36 · 0%` on the first turn.
-    if input == 0 && cached == 0 {
+    if input == 0 && cache_read == 0 && cache_write == 0 {
         return None;
     }
     let output = (app.usage.last_response_usage.output_tokens
         + app.usage.live_output_tokens_estimate)
         .max(0);
-    Some(if app.usage.context_usage_excludes_cached_input {
-        input + output + cached
-    } else {
-        (input - cached).max(0) + output + cached
-    })
+    Some(input + output + cache_read + cache_write)
 }

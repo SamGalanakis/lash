@@ -631,7 +631,7 @@ fn openai_responses_sse_payload(turn_index: usize) -> String {
                         "cached_tokens": 512
                     },
                     "output_tokens_details": {
-                        "reasoning_tokens": 48
+                        "reasoning_output_tokens": 48
                     }
                 }
             }

@@ -42,8 +42,9 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
             let usage = LlmUsage {
                 input_tokens: 1_024,
                 output_tokens: 64,
-                cached_input_tokens: 512,
-                reasoning_tokens: 48,
+                cache_read_input_tokens: 512,
+                cache_write_input_tokens: 0,
+                reasoning_output_tokens: 48,
             };
             if let Some(tx) = req.stream_events.as_ref() {
                 if profile.deltas.is_empty() {

@@ -459,16 +459,15 @@ pub(crate) async fn run_autonomous(
                     %err,
                     "failed to diff token ledger for autonomous turn; falling back to assembled turn usage"
                 );
-                let fallback =
-                    if done.result.usage.total() > 0 || done.result.usage.cached_input_tokens > 0 {
-                        vec![TokenLedgerEntry {
-                            source: "turn".to_string(),
-                            model: done.result.state.policy.model.id.clone(),
-                            usage: done.result.usage.clone(),
-                        }]
-                    } else {
-                        Vec::new()
-                    };
+                let fallback = if done.result.usage.total() > 0 {
+                    vec![TokenLedgerEntry {
+                        source: "turn".to_string(),
+                        model: done.result.state.policy.model.id.clone(),
+                        usage: done.result.usage.clone(),
+                    }]
+                } else {
+                    Vec::new()
+                };
                 (fallback, Some(err), true)
             }
         };
