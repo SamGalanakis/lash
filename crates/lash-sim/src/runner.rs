@@ -41,7 +41,7 @@ use crate::canonical_scripts::{
     OPENAI_RESPONSES_TEXT,
 };
 use crate::generator::{
-    GENERATOR_VERSION, GeneratedWorkload, WorkloadProfileError, generate_workload,
+    GENERATOR_VERSION, GeneratedWorkload, SimShard, WorkloadProfileError, generate_workload,
     validate_workload_profile,
 };
 use crate::minimize::{MinimizeError, minimize_trace};
@@ -2926,16 +2926,106 @@ fn assert_generated_class_coverage(
     Ok(())
 }
 
+/// How a count-based generated run treats per-seed artifacts.
+///
+/// `Evidence` writes the full per-seed artifact set (trace, replay report,
+/// minimize package, cross-backend SQLite re-run) for every seed. `Search`
+/// runs every seed live with the full oracle set plus an in-memory
+/// determinism replay, persists a complete reproducibility package under
+/// `failures/seed-<hex>/` only when a seed fails, and fails the run with the
+/// exact replay command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimRunMode {
+    Evidence,
+    Search,
+}
+
+#[derive(Clone, Debug)]
+pub struct SimRunModeError(String);
+
+impl fmt::Display for SimRunModeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid sim run mode `{}`: expected `evidence` or `search`",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for SimRunModeError {}
+
+impl SimRunMode {
+    pub fn parse(raw: &str) -> Result<Self, SimRunModeError> {
+        match raw {
+            "evidence" => Ok(Self::Evidence),
+            "search" => Ok(Self::Search),
+            other => Err(SimRunModeError(other.to_string())),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Evidence => "evidence",
+            Self::Search => "search",
+        }
+    }
+}
+
+/// Run identity recorded in the profile summary: which shard of which
+/// configured seed count ran, in which mode.
+struct GeneratedRunLabels {
+    shard: String,
+    configured_seeds: usize,
+    mode: SimRunMode,
+}
+
 pub async fn run_generated_sim_profile(
     artifact_root: impl AsRef<Path>,
     profile: &str,
     seeds: usize,
     max_boundaries: usize,
+    shard: SimShard,
+    mode: SimRunMode,
 ) -> Result<GeneratedSimProfileReport, FixedScriptRunnerError> {
-    let seed_values = (0..seeds.max(1))
+    let configured_seeds = seeds.max(1);
+    let seed_values = (0..configured_seeds)
+        .filter(|seed_index| shard.selects(*seed_index))
         .map(|seed_index| generated_seed(profile, seed_index))
         .collect::<Vec<_>>();
-    run_generated_sim_profile_for_seeds(artifact_root, profile, &seed_values, max_boundaries).await
+    if seed_values.is_empty() {
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "shard {} selects no seeds from a configured count of {configured_seeds}",
+            shard.label()
+        )));
+    }
+    let labels = GeneratedRunLabels {
+        shard: shard.label(),
+        configured_seeds,
+        mode,
+    };
+    match mode {
+        SimRunMode::Evidence => {
+            run_generated_evidence_profile(
+                artifact_root.as_ref(),
+                profile,
+                &seed_values,
+                max_boundaries,
+                labels,
+            )
+            .await
+        }
+        SimRunMode::Search => {
+            run_generated_search_profile(
+                artifact_root.as_ref(),
+                profile,
+                &seed_values,
+                max_boundaries,
+                labels,
+            )
+            .await
+        }
+    }
 }
 
 pub async fn run_generated_sim_profile_for_seeds(
@@ -2944,13 +3034,34 @@ pub async fn run_generated_sim_profile_for_seeds(
     seed_values: &[u64],
     max_boundaries: usize,
 ) -> Result<GeneratedSimProfileReport, FixedScriptRunnerError> {
+    let labels = GeneratedRunLabels {
+        shard: SimShard::FULL.label(),
+        configured_seeds: seed_values.len(),
+        mode: SimRunMode::Evidence,
+    };
+    run_generated_evidence_profile(
+        artifact_root.as_ref(),
+        profile,
+        seed_values,
+        max_boundaries,
+        labels,
+    )
+    .await
+}
+
+async fn run_generated_evidence_profile(
+    artifact_root: &Path,
+    profile: &str,
+    seed_values: &[u64],
+    max_boundaries: usize,
+    labels: GeneratedRunLabels,
+) -> Result<GeneratedSimProfileReport, FixedScriptRunnerError> {
     validate_workload_profile(profile)?;
     if seed_values.is_empty() {
         return Err(FixedScriptRunnerError::Assertion(
             "generated simulation requires at least one seed".to_string(),
         ));
     }
-    let artifact_root = artifact_root.as_ref();
     std::fs::create_dir_all(artifact_root)?;
 
     let provider_dir = artifact_root.join("provider-corpus");
@@ -2975,9 +3086,18 @@ pub async fn run_generated_sim_profile_for_seeds(
     for seed in seed_values.iter().copied() {
         let workload = generate_workload(seed, profile, boundary_limit)?;
         let trace_path = replay_dir.join(format!("seed-{seed:016x}.trace.json"));
-        let trace =
-            run_generated_workload(workload, &fixed_manifest.script_bundle_hash, &trace_path)
-                .await?;
+        let trace = run_generated_workload(
+            workload,
+            &fixed_manifest.script_bundle_hash,
+            &labels.shard,
+            &trace_path,
+        )
+        .await?;
+        if !trace.oracle.is_passed() {
+            return Err(FixedScriptRunnerError::Assertion(
+                trace.oracle.message.clone(),
+            ));
+        }
         boundary_events += trace.events.len();
         runtime_turn_proofs += trace
             .events
@@ -3168,13 +3288,16 @@ pub async fn run_generated_sim_profile_for_seeds(
     let report = GeneratedSimProfileReport {
         schema: "lash.sim.profile-summary.v1",
         profile: profile.to_string(),
+        shard: labels.shard,
+        configured_seeds: labels.configured_seeds,
+        mode: labels.mode.as_str(),
         generator_version: GENERATOR_VERSION,
         script_bundle_hash: fixed_manifest.script_bundle_hash.clone(),
         provider_manifest_path: GENERATED_SIM_PROVIDER_MANIFEST,
         provider_matrix: fixed_manifest.provider_matrix.clone(),
         generated_runtime_provider_matrix,
-        events_path: GENERATED_SIM_EVENTS,
-        events_sha256,
+        events_path: Some(GENERATED_SIM_EVENTS),
+        events_sha256: Some(events_sha256),
         replay_reports,
         runtime_proof,
         scenario_contracts: scenario_contract_manifests(),
@@ -3217,11 +3340,295 @@ pub async fn run_generated_sim_profile_for_seeds(
     Ok(report)
 }
 
+/// High-volume seed search over the generated DST world. Every seed runs live
+/// with the full oracle set plus an in-memory determinism replay; passing
+/// seeds retain no per-seed artifacts, and the first failing seed persists a
+/// complete reproducibility package under `failures/seed-<hex>/` (trace,
+/// replay evidence, failing oracles, final summary, minimized regression
+/// package) before failing the run with the exact replay command. Per-seed
+/// evidence artifacts (events log, replay reports, cross-backend re-runs,
+/// scenario slices/packages) stay in the bounded evidence lane.
+async fn run_generated_search_profile(
+    artifact_root: &Path,
+    profile: &str,
+    seed_values: &[u64],
+    max_boundaries: usize,
+    labels: GeneratedRunLabels,
+) -> Result<GeneratedSimProfileReport, FixedScriptRunnerError> {
+    validate_workload_profile(profile)?;
+    std::fs::create_dir_all(artifact_root)?;
+
+    let provider_dir = artifact_root.join("provider-corpus");
+    let fixed_manifest = run_fixed_script_profile(&provider_dir).await?;
+    write_provider_script_manifest(artifact_root, &fixed_manifest)?;
+
+    let runtime_proof = prove_runtime_facade_turn().await?;
+    let boundary_limit = max_boundaries.max(1);
+    let failures_dir = artifact_root.join("failures");
+
+    // Search keeps the summary lean: the verdicts retained are the runtime
+    // facade proof plus any failing seed verdicts; passing per-seed verdicts
+    // are counted but not recorded.
+    let mut recorded_verdicts: Vec<OracleVerdict> = vec![
+        runtime_proof.runtime_invariant.clone(),
+        runtime_proof.provider_output_invariant.clone(),
+        runtime_proof
+            .pending_tool_completion
+            .turn_suspension_invariant
+            .clone(),
+        runtime_proof
+            .pending_tool_completion
+            .scheduler_resolution_invariant
+            .clone(),
+        runtime_proof
+            .pending_tool_completion
+            .final_result_invariant
+            .clone(),
+        runtime_proof
+            .final_value_semantic_channel
+            .semantic_channel_invariant
+            .clone(),
+    ];
+    let mut oracle_passes = recorded_verdicts
+        .iter()
+        .filter(|verdict| verdict.status == OracleStatus::Passed)
+        .count();
+    let mut oracle_failures = recorded_verdicts.len() - oracle_passes;
+
+    let mut provider_matrix_by_kind: BTreeMap<String, GeneratedRuntimeProviderMatrixRow> =
+        BTreeMap::new();
+    let mut boundary_events = 0usize;
+    let mut runtime_turn_proofs = 0usize;
+    let mut scheduler_controlled_boundaries = 0usize;
+    let mut scheduler_owned_runtime_completions = 0usize;
+    let mut scenario_contract_oracles = 0usize;
+    let mut scenario_contract_mini_oracles = 0usize;
+    let mut model_store_sessions = 0usize;
+    let mut interleaving_depth_max = 0usize;
+    let mut interleaving_depth_min = usize::MAX;
+
+    for seed in seed_values.iter().copied() {
+        let workload = generate_workload(seed, profile, boundary_limit)?;
+        let seed_dir = failures_dir.join(format!("seed-{seed:016x}"));
+        let trace_path = seed_dir.join("trace.json");
+        let trace = run_generated_workload(
+            workload,
+            &fixed_manifest.script_bundle_hash,
+            &labels.shard,
+            &trace_path,
+        )
+        .await?;
+
+        boundary_events += trace.events.len();
+        runtime_turn_proofs += trace
+            .events
+            .iter()
+            .filter(|event| event.kind == BoundaryKind::Provider)
+            .count();
+        scheduler_controlled_boundaries += trace
+            .events
+            .iter()
+            .filter(|event| event.scheduler.scheduler_controlled)
+            .count();
+        scheduler_owned_runtime_completions += trace
+            .events
+            .iter()
+            .filter(|event| event.payload.get("runtime_completion").is_some())
+            .count();
+        observe_runtime_provider_matrix(&mut provider_matrix_by_kind, trace.events.iter());
+        let seed_interleaving_depth = peak_concurrent_live_turns(&trace.events);
+        interleaving_depth_max = interleaving_depth_max.max(seed_interleaving_depth);
+        interleaving_depth_min = interleaving_depth_min.min(seed_interleaving_depth);
+        model_store_sessions += trace.final_summary.session_count;
+        for verdict in &trace.oracles {
+            if verdict.oracle_id.starts_with("sim.oracle.scenario-mini.") {
+                scenario_contract_mini_oracles += 1;
+            } else if verdict.oracle_id.starts_with("sim.oracle.scenario.") {
+                scenario_contract_oracles += 1;
+            }
+            if verdict.status == OracleStatus::Passed {
+                oracle_passes += 1;
+            } else {
+                oracle_failures += 1;
+                recorded_verdicts.push(verdict.clone());
+            }
+        }
+
+        // In-memory determinism replay for every search seed.
+        let replay_outcome = replay_trace(&trace_path, &trace);
+        match &replay_outcome {
+            Ok(_) => oracle_passes += 1,
+            Err(_) => oracle_failures += 1,
+        }
+        if trace.oracle.is_passed() && replay_outcome.is_ok() {
+            continue;
+        }
+
+        // Failing seed: persist the complete reproducibility package, then
+        // fail the run with the exact replay command.
+        std::fs::create_dir_all(&seed_dir)?;
+        write_trace(&trace_path, &trace)?;
+        match &replay_outcome {
+            Ok(replay) => {
+                write_replay_report(&seed_dir.join("replay.json"), replay)?;
+            }
+            Err(err) => {
+                let divergence = json!({
+                    "schema": "lash.sim.search-replay-divergence.v1",
+                    "seed": seed,
+                    "profile": profile,
+                    "shard": labels.shard,
+                    "error": err.to_string(),
+                });
+                std::fs::write(
+                    seed_dir.join("replay-divergence.json"),
+                    serde_json::to_vec_pretty(&divergence)?,
+                )?;
+            }
+        }
+        let failing_oracles = trace
+            .oracles
+            .iter()
+            .filter(|verdict| verdict.status != OracleStatus::Passed)
+            .collect::<Vec<_>>();
+        std::fs::write(
+            seed_dir.join("failing-oracles.json"),
+            serde_json::to_vec_pretty(&failing_oracles)?,
+        )?;
+        std::fs::write(
+            seed_dir.join("final-summary.json"),
+            serde_json::to_vec_pretty(&trace.final_summary)?,
+        )?;
+        // Oracle-preserving minimization targets the combined trace oracle; a
+        // replay-only divergence has no failing oracle to preserve.
+        let minimize_summary = if trace.oracle.is_passed() {
+            json!({
+                "skipped":
+                    "in-memory determinism replay diverged; minimization targets a failing oracle"
+            })
+        } else {
+            let minimize_dir = seed_dir.join("minimize");
+            match minimize_trace(&trace_path, &trace, &minimize_dir) {
+                Ok(minimize) => {
+                    let minimize_report_path = minimize_dir.join("minimize.json");
+                    std::fs::write(&minimize_report_path, serde_json::to_vec_pretty(&minimize)?)?;
+                    json!({
+                        "minimize_report_path": relative_path(artifact_root, &minimize_report_path),
+                        "minimized_trace_path":
+                            relative_path(artifact_root, &minimize.minimized_trace_path),
+                        "failure_package_path":
+                            relative_path(artifact_root, &minimize.failure_package_path),
+                    })
+                }
+                Err(err) => json!({ "error": err.to_string() }),
+            }
+        };
+        let failure_reason = if trace.oracle.is_passed() {
+            match &replay_outcome {
+                Err(err) => err.to_string(),
+                Ok(_) => unreachable!("failing search seed with passing oracle and passing replay"),
+            }
+        } else {
+            trace.oracle.message.clone()
+        };
+        let package = json!({
+            "schema": "lash.sim.search-failure-package.v1",
+            "seed": seed,
+            "profile": profile,
+            "shard": labels.shard,
+            "mode": labels.mode.as_str(),
+            "reason": failure_reason,
+            "replay_command": trace.replay_command,
+            "minimize": minimize_summary,
+        });
+        std::fs::write(
+            seed_dir.join("package.json"),
+            serde_json::to_vec_pretty(&package)?,
+        )?;
+        return Err(FixedScriptRunnerError::Assertion(format!(
+            "search seed seed-{seed:016x} ({profile}, shard {}) failed: {failure_reason}; \
+             reproducibility package at {}; reproduce with: {}",
+            labels.shard,
+            seed_dir.display(),
+            trace.replay_command
+        )));
+    }
+
+    write_failure_artifact_shape(artifact_root)?;
+    let generated_runtime_provider_matrix = finish_runtime_provider_matrix(provider_matrix_by_kind);
+    let summary_path = artifact_root.join(GENERATED_SIM_SUMMARY);
+    let report = GeneratedSimProfileReport {
+        schema: "lash.sim.profile-summary.v1",
+        profile: profile.to_string(),
+        shard: labels.shard,
+        configured_seeds: labels.configured_seeds,
+        mode: labels.mode.as_str(),
+        generator_version: GENERATOR_VERSION,
+        script_bundle_hash: fixed_manifest.script_bundle_hash.clone(),
+        provider_manifest_path: GENERATED_SIM_PROVIDER_MANIFEST,
+        provider_matrix: fixed_manifest.provider_matrix.clone(),
+        generated_runtime_provider_matrix,
+        events_path: None,
+        events_sha256: None,
+        replay_reports: Vec::new(),
+        runtime_proof,
+        scenario_contracts: scenario_contract_manifests(),
+        scenario_contract_slices: Vec::new(),
+        scenario_contract_packages: Vec::new(),
+        generated_backend_regression_fixtures: Vec::new(),
+        model_only_boundary_reviews: model_only_boundary_reviews(),
+        provider_transport_exclusions: fixed_manifest.provider_transport_exclusions.clone(),
+        counts: GeneratedSimCounts {
+            generated_seeds: seed_values.len(),
+            boundary_events,
+            scheduler_controlled_boundaries,
+            runtime_completion_registrations: scheduler_owned_runtime_completions,
+            scheduler_owned_runtime_completions,
+            fixed_provider_proofs: fixed_manifest.summary.total_proofs,
+            runtime_proofs: runtime_turn_proofs + 3,
+            replay_reports: 0,
+            minimized_replays: 0,
+            backend_replays: 0,
+            scenario_contract_oracles,
+            scenario_contract_mini_oracles,
+            scenario_contract_slices: 0,
+            scenario_contract_packages: 0,
+            generated_backend_regression_fixtures: 0,
+            oracle_passes,
+            oracle_failures,
+            model_store_sessions,
+            interleaving_depth_max,
+            interleaving_depth_min: if interleaving_depth_min == usize::MAX {
+                0
+            } else {
+                interleaving_depth_min
+            },
+        },
+        oracle_verdicts: recorded_verdicts,
+        failure_artifact_shape: GENERATED_SIM_FAILURE_SHAPE,
+        summary_path: summary_path.clone(),
+    };
+    std::fs::write(&summary_path, serde_json::to_vec_pretty(&report)?)?;
+    Ok(report)
+}
+
 pub(crate) async fn run_generated_workload_for_fixture(
     workload: GeneratedWorkload,
     script_bundle_hash: &str,
 ) -> Result<SimulationTrace, FixedScriptRunnerError> {
-    run_generated_workload(workload, script_bundle_hash, Path::new("trace.json")).await
+    let trace = run_generated_workload(
+        workload,
+        script_bundle_hash,
+        &SimShard::FULL.label(),
+        Path::new("trace.json"),
+    )
+    .await?;
+    if !trace.oracle.is_passed() {
+        return Err(FixedScriptRunnerError::Assertion(
+            trace.oracle.message.clone(),
+        ));
+    }
+    Ok(trace)
 }
 
 /// Drive a generated workload through the scheduler-driven, concurrency-faithful
@@ -7108,6 +7515,7 @@ pub async fn run_generated_postgres_replay_for_seeds(
 async fn run_generated_workload(
     workload: GeneratedWorkload,
     script_bundle_hash: &str,
+    shard_label: &str,
     trace_path: &Path,
 ) -> Result<SimulationTrace, FixedScriptRunnerError> {
     let mut world = GeneratedRuntimeWorld::new();
@@ -7150,15 +7558,15 @@ async fn run_generated_workload(
     ];
     oracles.extend(scenario_contract_mini_oracles(&events, &final_summary));
     oracles.extend(scenario_contract_oracles(&events, &final_summary));
+    // The combined oracle rides the trace; callers decide whether a failing
+    // oracle aborts the run (evidence/fixture paths) or becomes a persisted
+    // failure package (search mode).
     let oracle = combine_oracles(&oracles);
-    if !oracle.is_passed() {
-        return Err(FixedScriptRunnerError::Assertion(oracle.message.clone()));
-    }
     Ok(SimulationTrace::new(
         workload.seed,
         workload.generator_version,
         workload.profile,
-        "0/1",
+        shard_label,
         workload.workload_family,
         workload.workload_id,
         script_bundle_hash,
@@ -9695,23 +10103,19 @@ fn provider_matrix(
         .collect()
 }
 
-fn generated_runtime_provider_matrix(
-    event_lines: &[TraceEventLine],
-) -> Vec<GeneratedRuntimeProviderMatrixRow> {
-    let mut by_provider: BTreeMap<String, GeneratedRuntimeProviderMatrixRow> = BTreeMap::new();
-    for line in event_lines {
-        match line.event.kind {
+fn observe_runtime_provider_matrix<'a>(
+    by_provider: &mut BTreeMap<String, GeneratedRuntimeProviderMatrixRow>,
+    events: impl Iterator<Item = &'a crate::scheduler::DeliveredBoundary>,
+) {
+    for event in events {
+        match event.kind {
             BoundaryKind::Ingress => {
-                let Some(provider_kind) = line
-                    .event
-                    .payload
-                    .get("provider_kind")
-                    .and_then(Value::as_str)
+                let Some(provider_kind) =
+                    event.payload.get("provider_kind").and_then(Value::as_str)
                 else {
                     continue;
                 };
-                let script = line
-                    .event
+                let script = event
                     .payload
                     .get("provider_script")
                     .and_then(Value::as_str)
@@ -9729,16 +10133,12 @@ fn generated_runtime_provider_matrix(
                 row.script_names.push(script);
             }
             BoundaryKind::Provider => {
-                let Some(provider_kind) = line
-                    .event
-                    .payload
-                    .get("provider_kind")
-                    .and_then(Value::as_str)
+                let Some(provider_kind) =
+                    event.payload.get("provider_kind").and_then(Value::as_str)
                 else {
                     continue;
                 };
-                let script = line
-                    .event
+                let script = event
                     .payload
                     .get("script")
                     .and_then(Value::as_str)
@@ -9758,6 +10158,11 @@ fn generated_runtime_provider_matrix(
             _ => {}
         }
     }
+}
+
+fn finish_runtime_provider_matrix(
+    by_provider: BTreeMap<String, GeneratedRuntimeProviderMatrixRow>,
+) -> Vec<GeneratedRuntimeProviderMatrixRow> {
     by_provider
         .into_values()
         .map(|mut row| {
@@ -9766,6 +10171,14 @@ fn generated_runtime_provider_matrix(
             row
         })
         .collect()
+}
+
+fn generated_runtime_provider_matrix(
+    event_lines: &[TraceEventLine],
+) -> Vec<GeneratedRuntimeProviderMatrixRow> {
+    let mut by_provider: BTreeMap<String, GeneratedRuntimeProviderMatrixRow> = BTreeMap::new();
+    observe_runtime_provider_matrix(&mut by_provider, event_lines.iter().map(|line| &line.event));
+    finish_runtime_provider_matrix(by_provider)
 }
 
 fn script_hash_manifest() -> Result<Vec<ScriptHashManifest>, FixedScriptRunnerError> {
@@ -11607,6 +12020,73 @@ mod tests {
     }
 
     #[test]
+    fn generated_sim_search_mode_keeps_summary_lean_and_labels_shards() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let artifact_root = tmp.path().to_path_buf();
+        let report = run_on_sim_harness_stack(
+            "generated-sim-search-test",
+            SIM_HARNESS_STACK_LIMIT_BYTES,
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(FixedScriptRunnerError::Io)?;
+                runtime.block_on(run_generated_sim_profile(
+                    artifact_root,
+                    "fast-random",
+                    4,
+                    24,
+                    SimShard::new(1, 2).expect("shard"),
+                    SimRunMode::Search,
+                ))
+            },
+        )
+        .expect("generated sim search");
+
+        assert_eq!(report.mode, "search");
+        assert_eq!(report.shard, "1/2");
+        assert_eq!(report.configured_seeds, 4);
+        // Shard 1/2 of 4 configured seeds owns seed indices 0 and 2.
+        assert_eq!(report.counts.generated_seeds, 2);
+        assert_eq!(report.events_path, None);
+        assert_eq!(report.events_sha256, None);
+        assert!(report.replay_reports.is_empty());
+        assert_eq!(report.counts.replay_reports, 0);
+        assert_eq!(report.counts.minimized_replays, 0);
+        assert_eq!(report.counts.backend_replays, 0);
+        assert_eq!(report.counts.oracle_failures, 0);
+        assert!(report.counts.oracle_passes > 0);
+        assert!(report.counts.boundary_events >= 4);
+        assert!(report.scenario_contract_slices.is_empty());
+        assert!(report.scenario_contract_packages.is_empty());
+        assert!(report.generated_backend_regression_fixtures.is_empty());
+        assert!(!report.generated_runtime_provider_matrix.is_empty());
+        // A fully passing search run persists no per-seed failure packages;
+        // the failures directory holds only the `_shape.json` descriptor.
+        let failures_dir = tmp.path().join("failures");
+        let seed_packages = std::fs::read_dir(&failures_dir)
+            .expect("failures dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("seed-")
+            })
+            .count();
+        assert_eq!(
+            seed_packages, 0,
+            "passing search run must not persist failure packages"
+        );
+        assert!(tmp.path().join(GENERATED_SIM_SUMMARY).exists());
+        assert!(
+            !tmp.path().join(GENERATED_SIM_EVENTS).exists(),
+            "search mode must not retain the delivered-boundary log"
+        );
+    }
+
+    #[test]
     fn generated_sim_profile_writes_trace_replay_and_provider_artifacts() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
@@ -11624,6 +12104,8 @@ mod tests {
                     "fast-random",
                     2,
                     24,
+                    SimShard::FULL,
+                    SimRunMode::Evidence,
                 ))
             },
         )
