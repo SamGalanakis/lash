@@ -9,6 +9,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 CONFIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "confidence.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 GATE = ROOT / "scripts" / "confidence-gate.sh"
 FOCUSED_SQLITE_REPRO = ROOT / "scripts" / "lash-sim-focused-sqlite-repro.sh"
 FAST_SHARDS = [
@@ -30,6 +31,15 @@ def shell_int_constant(script: str, name: str) -> int:
     if match is None:
         raise AssertionError(f"missing shell constant {name}")
     return int(match.group(1))
+
+
+def workflow_job_block(workflow: str, job_id: str) -> str:
+    marker = f"  {job_id}:\n"
+    start = workflow.index(marker)
+    next_job = re.search(r"^  [A-Za-z0-9_-]+:\n", workflow[start + len(marker) :], re.MULTILINE)
+    if next_job is None:
+        return workflow[start:]
+    return workflow[start : start + len(marker) + next_job.start()]
 
 
 class ConfidenceGateCiContractTest(unittest.TestCase):
@@ -103,6 +113,20 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, workflow)
+
+    def test_release_asset_builds_overlap_full_perf_guard(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        perf_guard = workflow_job_block(workflow, "perf-guard-full")
+        build_assets = workflow_job_block(workflow, "build-release-assets")
+        publish = workflow_job_block(workflow, "publish")
+        publish_crates = workflow_job_block(workflow, "publish-crates")
+
+        self.assertIn("needs: validate-release-ref", perf_guard)
+        self.assertIn("needs: validate-release-ref", build_assets)
+        self.assertNotIn("perf-guard-full", build_assets)
+        self.assertIn("needs: [build-release-assets, perf-guard-full]", publish)
+        self.assertIn("needs: [validate-release-ref, perf-guard-full]", publish_crates)
 
     def test_broad_lane_is_manual_or_scheduled_confidence_not_ci_cd(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

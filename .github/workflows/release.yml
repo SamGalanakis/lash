@@ -135,7 +135,7 @@ jobs:
   build-release-assets:
     name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
-    needs: [validate-release-ref, perf-guard-full]
+    needs: validate-release-ref
 
     strategy:
       fail-fast: false
@@ -218,7 +218,7 @@ jobs:
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-latest
-    needs: build-release-assets
+    needs: [build-release-assets, perf-guard-full]
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
