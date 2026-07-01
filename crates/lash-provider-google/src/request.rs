@@ -182,11 +182,18 @@ impl GoogleOAuthProvider {
         out
     }
 
-    fn uses_legacy_tool_parameters(model: &str) -> bool {
+    /// Claude models served through the Google/Vertex gateway take their tool
+    /// schema under the `parameters` field (with JSON-Schema meta keys stripped)
+    /// instead of the Gemini-native `parametersJsonSchema`. This is a live,
+    /// always-on special case for `claude-*` on Vertex, not deprecated behavior.
+    fn uses_claude_on_vertex_tool_parameters(model: &str) -> bool {
         model.starts_with("claude-")
     }
 
-    fn sanitized_legacy_schema(schema: &Value) -> Value {
+    /// Strip the JSON-Schema meta keys the Vertex `parameters` field rejects for
+    /// `claude-*` models (`$schema`, `$defs`, `$id`, `definitions`), recursing
+    /// through nested objects and arrays.
+    fn sanitized_claude_on_vertex_schema(schema: &Value) -> Value {
         match schema {
             Value::Object(map) => {
                 let mut out = serde_json::Map::new();
@@ -194,14 +201,14 @@ impl GoogleOAuthProvider {
                     if matches!(key.as_str(), "$schema" | "$defs" | "$id" | "definitions") {
                         continue;
                     }
-                    out.insert(key.clone(), Self::sanitized_legacy_schema(value));
+                    out.insert(key.clone(), Self::sanitized_claude_on_vertex_schema(value));
                 }
                 Value::Object(out)
             }
             Value::Array(items) => Value::Array(
                 items
                     .iter()
-                    .map(Self::sanitized_legacy_schema)
+                    .map(Self::sanitized_claude_on_vertex_schema)
                     .collect::<Vec<_>>(),
             ),
             other => other.clone(),
@@ -289,7 +296,8 @@ impl GoogleOAuthProvider {
             }
         }
         if !req.tools.is_empty() {
-            let use_legacy_parameters = Self::uses_legacy_tool_parameters(&req.model);
+            let use_claude_on_vertex_parameters =
+                Self::uses_claude_on_vertex_tool_parameters(&req.model);
             request["request"]["tools"] = json!([{
                 "functionDeclarations": req
                     .tools
@@ -299,9 +307,9 @@ impl GoogleOAuthProvider {
                             "name": tool.name.clone(),
                             "description": tool.description.clone(),
                         });
-                        if use_legacy_parameters {
+                        if use_claude_on_vertex_parameters {
                             declaration["parameters"] =
-                                Self::sanitized_legacy_schema(tool.input_schema.canonical());
+                                Self::sanitized_claude_on_vertex_schema(tool.input_schema.canonical());
                         } else {
                             declaration["parametersJsonSchema"] =
                                 tool.input_schema.canonical().clone();

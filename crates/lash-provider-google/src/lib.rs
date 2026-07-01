@@ -325,11 +325,11 @@ mod tests {
     }
 
     #[test]
-    fn google_legacy_tool_parameters_strip_json_schema_meta_declarations() {
+    fn google_claude_on_vertex_tool_parameters_strip_json_schema_meta_declarations() {
         let provider = GoogleOAuthProvider::new("access", "refresh", 0);
-        let mut legacy = request(None);
-        legacy.model = "claude-sonnet-4-6".to_string();
-        legacy.tools = Arc::new(vec![LlmToolSpec {
+        let mut claude_on_vertex = request(None);
+        claude_on_vertex.model = "claude-sonnet-4-6".to_string();
+        claude_on_vertex.tools = Arc::new(vec![LlmToolSpec {
             name: "lookup".to_string(),
             description: "Lookup".to_string(),
             input_schema: json!({
@@ -349,26 +349,26 @@ mod tests {
             .into(),
             output_schema: json!({}).into(),
         }]);
-        let legacy_body = GoogleOAuthProvider::build_request(&provider, &legacy, Vec::new(), None);
+        let claude_on_vertex_body = GoogleOAuthProvider::build_request(&provider, &claude_on_vertex, Vec::new(), None);
         let parameters =
-            &legacy_body["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
+            &claude_on_vertex_body["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
         assert!(parameters.get("$schema").is_none());
         assert!(parameters.get("$id").is_none());
         assert!(parameters.get("$defs").is_none());
         assert!(parameters.get("definitions").is_none());
         assert!(parameters["properties"]["nested"].get("$id").is_none());
         assert!(
-            legacy_body["request"]["tools"][0]["functionDeclarations"][0]
+            claude_on_vertex_body["request"]["tools"][0]["functionDeclarations"][0]
                 .get("parametersJsonSchema")
                 .is_none()
         );
 
-        let mut current = legacy;
-        current.model = "gemini-3.1-pro-preview".to_string();
-        let current_body =
-            GoogleOAuthProvider::build_request(&provider, &current, Vec::new(), None);
+        let mut gemini = claude_on_vertex;
+        gemini.model = "gemini-3.1-pro-preview".to_string();
+        let gemini_body =
+            GoogleOAuthProvider::build_request(&provider, &gemini, Vec::new(), None);
         assert!(
-            current_body["request"]["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]
+            gemini_body["request"]["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]
                 .get("$schema")
                 .is_some()
         );

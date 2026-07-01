@@ -45,7 +45,7 @@ impl SessionProcessAdminPluginFactory {
         let spec =
             PluginSpec::new().with_tool_provider(Arc::new(provider) as Arc<dyn ToolProvider>);
         Self {
-            inner: StaticPluginFactory::new("processess", spec),
+            inner: StaticPluginFactory::new("processes", spec),
         }
     }
 }

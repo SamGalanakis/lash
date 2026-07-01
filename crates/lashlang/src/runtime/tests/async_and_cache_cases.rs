@@ -215,7 +215,7 @@ async fn receiver_module_operation_errors_are_sanitized() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn processess_emit_events_and_terminal_outcomes() {
+async fn processes_emit_events_and_terminal_outcomes() {
     let host = RecordingProcessHost::default();
     let program = Program::block(vec![
         Expr::Yield(Box::new(Expr::String("checkpoint".into()))),
@@ -360,7 +360,7 @@ async fn process_mode_falling_off_end_finishes_null() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn foreground_rejects_programmatic_processess() {
+async fn foreground_rejects_programmatic_processes() {
     // `signal_run` (sending) is intentionally NOT in this list: it is allowed
     // from the foreground turn, like `await` / `cancel`. Only the receiving
     // side, `wait_signal`, plus yield/wake/fail are process-only. `finish`

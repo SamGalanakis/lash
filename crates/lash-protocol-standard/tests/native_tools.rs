@@ -12,7 +12,7 @@ fn tool_names(session: &lash_core::PluginSession) -> Vec<String> {
 }
 
 #[test]
-fn standard_protocol_owns_batch_not_processess() {
+fn standard_protocol_owns_batch_not_processes() {
     let session = PluginHost::new(vec![Arc::new(
         lash_protocol_standard::StandardProtocolPluginFactory,
     )])
@@ -26,7 +26,7 @@ fn standard_protocol_owns_batch_not_processess() {
 }
 
 #[test]
-fn processess_are_composed_with_standard_protocol() {
+fn processes_are_composed_with_standard_protocol() {
     let session = PluginHost::new(vec![
         Arc::new(lash_plugin_process_controls::SessionProcessAdminPluginFactory::new()),
         Arc::new(lash_tools::shell::StandardShellPluginFactory::new()),

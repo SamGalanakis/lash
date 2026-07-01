@@ -96,12 +96,12 @@ fn push_standard_context_tools(
 }
 
 fn push_local_runtime_tools(stack: &mut PluginStack, include_cancel_process: bool) {
-    let processess = if include_cancel_process {
+    let processes = if include_cancel_process {
         SessionProcessAdminPluginFactory::new()
     } else {
         SessionProcessAdminPluginFactory::without_cancel_process()
     };
-    stack.push(Arc::new(processess));
+    stack.push(Arc::new(processes));
     stack.push(Arc::new(StandardShellPluginFactory::new()));
     stack.push(Arc::new(StaticPluginFactory::new(
         "edit",
