@@ -6,123 +6,10 @@ Planning target for Lash's Deterministic Simulation Harness. This document
 states the true wholehog DST end-state first; phase gates and v1 slices are
 only the path toward that end-state, not the target itself.
 
-Current executable evidence in the implementation:
-
-- OpenAI-compatible, direct OpenAI Responses, Anthropic, and Google Provider
-  Wire Scripts run through real provider crates via the production
-  `LlmHttpTransport` seam and are included in the canonical provider matrix;
-  Codex/OAuth/auth-flow exclusions are manifest-reviewed instead of accidental.
-- Selected generated traces replay through real Lash SQLite session
-  persistence via `SqliteSessionStoreFactory`, with durable peer stores and
-  reopened-session evidence in the replay report.
-- Full-lane Postgres trace replay is implemented as `lash-sim replay-postgres
-  <trace> --out <artifact-root>`, gated by `LASH_POSTGRES_DATABASE_URL` or the
-  confidence gate's Docker bootstrap, and writes replay/divergence artifacts.
-- Generated traces are produced by `lash-sim.generated-workload.v8`, a
-  deterministic state-machine generator over sessions, provider scripts,
-  queued ingress, cancellation, triggers, observer reconnects, backend
-  failure choices, provider mutations, tools, exec-code, durable effects,
-  process wakes, worker lease/failover, retries, and duplicates.
-- Generated traces include scheduler/completion evidence, a named
-  `sim.oracle.operational-coverage.v1` oracle for the operational case set,
-  and scenario contract oracles for Runtime, Standard, RLM, and Agent coverage
-  without importing scenario test modules. Combined with the interleaved live
-  turns, suspend/resume, live failure-turn, invariant floor, and real worker
-  failover described under "Implemented DST substance", this is now true DST and
-  not only operation-level conformance/replay.
-- Runtime, Standard, RLM, and Agent scenario contract metadata is now exported
-  from production/test-independent modules and serialized into `lash-sim`
-  summaries alongside the generated oracle verdicts.
-- Each exported Runtime, Standard, RLM, and Agent scenario contract must also
-  have a generated trace-slice artifact under
-  `scenario-contract-slices/<suite>/<test>.json`; the slice ties the contract's
-  semantic oracle to concrete generated boundary events, a contract-specific
-  generated transition shape, required evidence assertions, a family negative
-  fixture, and matching verdicts.
-- Generated summaries include explicit model-only boundary reviews for the
-  remaining partially modeled durable-effect, worker, backend-failure,
-  provider-mutation, tool, exec-code, and process-wake boundaries, each with a
-  named oracle and artifact evidence.
-- Provider manifests include reviewed non-DST exclusions for remaining
-  Codex/OAuth/direct provider paths so direct reqwest/OAuth seams are named
-  instead of accidental.
-- `lash-sim minimize <trace>` writes a minimized package containing the
-  minimized trace, replay verdict, oracle verdict, final summary, and package
-  manifest; minimization preserves the failing oracle id and semantic reason
-  when the input is a failure. Failing negative fixtures live under
-  `crates/lash-sim/failure-fixtures/`.
-- The confidence gate declares sim lane artifacts under flat
-  `target/confidence/<lane>/sim/` roots for default/broad/full and sharded
-  `target/confidence/fast/<shard>/sim/` roots for the fast lane, including
-  env-gated Postgres conformance evidence when the lane is enabled.
-
-Implemented DST substance (each item below is landed and gated by
-`cargo test -p lash-sim`):
-
-- The scheduler actually interleaves work: provider turns are spawned as live
-  futures whose scripted-transport SSE chunks are released by scheduler-delivered
-  `ProviderEvent` boundaries in seeded order, and the generated lane asserts a
-  peak of at least two concurrent live turns
-  (`sim.oracle.provider-turn-interleaving-depth.v1`).
-- Tool, durable-effect, and exec-code coverage pass through real turns that
-  SUSPEND and RESUME: a generated suspend session runs a real
-  `session.turn().run()` over the real `ScriptedLlmHttpTransport`, parks on a
-  tool/durable/exec await key, and is resumed only by a scheduler-delivered
-  completion boundary (`sim.oracle.generated-suspend-resume.v1`). Both the
-  tool-call exchange that suspends the turn and the post-resume exchange exercise
-  real provider wire parsing.
-- A non-retryable provider FAILURE is driven through a LIVE turn: a malformed
-  mid-stream SSE chunk is delivered to a parked turn via the scripted-transport
-  gating, and `sim.oracle.live-provider-failure-terminalizes.v1` asserts the turn
-  terminalizes with a terminal failure and commits no provider output (no leaked
-  partial assistant prose, no Final Value).
-- The invariant floor is enforced: graph acyclicity, exactly one active Agent
-  Frame, monotonic usage accounting, and Final Value as a semantic outcome
-  distinct from transcript/prose, each as a named failing-capable oracle and
-  re-verified from recorded facts on replay. The Runtime, Standard, RLM, and
-  Agent suites each emit distinct per-contract generated semantic oracles, with
-  package guards preventing protocol/agent contracts from sharing the same
-  backing verdict or high-risk selected evidence while still retaining the 13
-  real per-behavior mini-oracles.
-- Two regression fixtures are promoted under `crates/lash-sim/replays/`, and the
-  promotion metadata is explicit that neither is a discovered product bug. The
-  `queued-active-turn-cancel-race` fixture is a generated fast-random DST trace
-  promoted as a deterministic regression GUARD that pins the active-turn
-  queued-input/cancel contract; its package manifest records
-  `historical_production_regression: false`, so it guards against future
-  regressions rather than recording one found in production. Separately, the
-  broad/full lane's cross-backend comparison surfaced a behavioral divergence on
-  the active-turn-cancel shape which, on investigation, was a replay-FIDELITY gap
-  in the harness's own SQLite re-drive — NOT a product bug (see Known
-  limitations). It is retained as the
-  `cross-backend-sqlite-active-turn-divergence` regression fixture. No product
-  regression has been discovered by this lane to date.
-- Generator substance is real: the fast profile is genuinely seed-random,
-  provider mutations have distinct executable behaviors, queued-ingress mode
-  varies, and worker failover is generated as REAL failover — a second worker
-  incarnation reclaims the crashed owner's session-execution lease at a strictly
-  higher fencing token and CONTINUES the queued work the dead owner could not,
-  rejecting its stale completion (`sim.oracle.worker-failover-continues-work.v1`).
-  The abstract model no longer fabricates worker fencing: it carries the real
-  reclaim/fence facts produced by the live lease store, re-verified by the
-  SQLite/Postgres backend replays.
-
-Known limitations (documented, not silently skipped):
-
-- The cross-backend SQLite comparison once appeared to diverge on the
-  active-turn-cancel shape. Investigation (the backend-equivalence test
-  `crates/lash-sim/tests/cross_backend_active_turn_divergence.rs`, which drives
-  two real cores — in-memory vs lash-sqlite-store — over an un-gated transport)
-  showed the real stores commit IDENTICAL output across the active-turn enqueue /
-  cancel / claim / complete orderings. The apparent divergence was a replay-
-  FIDELITY gap in the harness's OWN cross-backend re-drive: the old path re-drove
-  a recorded trace in fixed order with provider exchanges gated to the original
-  in-memory run's recorded exchange counts, which deadlocked on the active-turn
-  enqueue and could surface an extra exchange / empty output. The lane no longer
-  runs that separate gated re-drive; it re-runs the SAME workload through the SAME
-  scheduler-driven driver, parameterized only by the store factory
-  (`replay_workload_on_sqlite`), comparing observable Lash state. No product fix
-  was needed — there was no product bug.
+Current implementation status — executable evidence, implemented DST
+substance, the search fleet, and known limitations — is maintained in
+`crates/lash-sim/README.md` so this plan stays the end-state contract rather
+than a status ledger.
 
 ## Related Documents
 
@@ -635,8 +522,9 @@ Recommended storage:
   `crates/lash-sim/provider-scripts/canonical/`.
 - Generated/minimized scripts under `crates/lash-sim/replays/` only when they
   become intentional regression fixtures.
-- Failure artifacts under `target/confidence/<lane>/sim/failures/`,
-  `target/confidence/fast/<shard>/sim/failures/`, or `target/lash-sim/failures/`.
+- Failure artifacts under `failures/seed-<hex>/` inside the run's `--out`
+  root, e.g. `target/confidence/<lane>/sim/failures/seed-<hex>/` or
+  `target/confidence/<lane>/sim-search/failures/seed-<hex>/`.
 
 Recommended format: stable JSON, because it is easy to hash, emit from the
 generator, minimize, diff, and consume from Rust without introducing a new
@@ -823,6 +711,20 @@ Profiles constrain the generator without changing semantics:
 | `full-random` | Long randomized run with provider matrix, SQLite replay, and Postgres replay where configured. |
 | `minimized-replay` | A Simulation Replay Script promoted to a stable regression fixture. |
 
+### Run Modes
+
+Orthogonal to profiles, `lash-sim run` executes a seed set in one of two
+modes:
+
+| Mode | Purpose |
+| --- | --- |
+| `evidence` (default) | Every seed writes trace/replay/minimize artifacts and re-runs through the serialized in-memory reference and real SQLite backend. Bounded budgets; this is where per-seed artifacts and cross-backend equivalence come from. |
+| `search` | Every seed runs live with the full oracle set plus an in-memory determinism replay; passing seeds persist nothing. A failing seed writes a complete reproducibility package under `failures/seed-<hex>/` and aborts the run with the exact replay command. This is the high-volume randomized-search mode the model store exists for. |
+
+Count-based runs shard deterministically with `--shard <i>/<n>` over seed
+indices (`index % n == i - 1`), so `n` shards cover the configured seed space
+exactly once with no overlap.
+
 ## Simulated Worker Topology
 
 v1 topology is bounded and in-process:
@@ -957,8 +859,8 @@ A failure writes:
 Replay commands:
 
 ```sh
-cargo run -p lash-sim -- replay target/lash-sim/failures/<id>/trace.json
-cargo run -p lash-sim -- minimize target/lash-sim/failures/<id>/trace.json
+cargo run -p lash-sim -- replay target/confidence/full/sim-search/failures/seed-<hex>/trace.json
+cargo run -p lash-sim -- minimize target/confidence/full/sim-search/failures/seed-<hex>/trace.json --out <artifact-root>
 ```
 
 Minimization should reduce:
@@ -1101,9 +1003,12 @@ artifact tree, and validates the downloaded trees with `fast:summary`.
 Example command shape:
 
 ```sh
-cargo test -p lash-sim --locked fixed_replay
-cargo run -p lash-sim -- run --profile fast-random --seeds 32 --max-boundaries 150
+scripts/confidence-gate.sh fast:sim-generated
+cargo run -p lash-sim -- run --out target/lash-sim/fast --profile fast-random
 ```
+
+The fast lane is the release gate: its generated sim run keeps the binary's
+`fast-random` defaults and never runs the search lane.
 
 ### Default Lane
 
@@ -1112,24 +1017,22 @@ Purpose: stronger local/CI confidence without external services.
 Runs:
 
 - Existing default lane.
-- Broader generated corpus with model store.
-- Selected SQLite replay corpus.
+- Bounded evidence run (`default-random`, binary defaults, `LASH_SIM_SEEDS` /
+  `LASH_SIM_MAX_BOUNDARIES` overrides) with per-seed trace/replay/minimize
+  artifacts and the SQLite cross-backend re-run for every seed.
+- Search lane: `LASH_SIM_DEFAULT_SEEDS` (default `256`) seeds at
+  `LASH_SIM_DEFAULT_MAX_BOUNDARIES` (default `500`) max boundaries in
+  `--mode search`, shardable with `LASH_SIM_SHARD`.
 - Provider script mutations for OpenAI-compatible and any migrated provider
   whose transport seam is complete.
-
-Initial budget:
-
-- Random seeds: 256 to 512.
-- Max boundaries per seed: 500.
-- SQLite replays: all minimized storage/provider failures tagged
-  `default-safe`, plus a rotating sample of fresh generated seeds.
-- Target wall time: bounded by environment variables, defaulting to a budget
-  that is reasonable for pre-merge CI.
 
 Example command shape:
 
 ```sh
-cargo run -p lash-sim -- run --profile default-random --seeds "${LASH_SIM_DEFAULT_SEEDS:-256}"
+scripts/confidence-gate.sh default
+cargo run -p lash-sim -- run --out target/confidence/default/sim-search \
+  --profile default-random --seeds "${LASH_SIM_DEFAULT_SEEDS:-256}" \
+  --max-boundaries "${LASH_SIM_DEFAULT_MAX_BOUNDARIES:-500}" --mode search
 cargo run -p lash-sim -- replay-sqlite target/confidence/default/sim/replays/<trace>.trace.json --out target/confidence/default/sim/replays/<trace>.sqlite
 ```
 
@@ -1140,11 +1043,15 @@ mutation.
 
 Runs:
 
-- Full-profile generated simulation under explicit broad-lane seed and boundary
-  budgets.
-- Cross-backend replay matrix for every generated trace and every minimized
-  failing-regression trace through the model replay, SQLite, and Postgres when
-  `LASH_POSTGRES_DATABASE_URL` or Docker bootstrap is available.
+- Bounded full-profile evidence run under explicit broad-lane seed and
+  boundary budgets (`LASH_BROAD_SIM_SEEDS` default `2`,
+  `LASH_BROAD_SIM_MAX_BOUNDARIES` default `128`).
+- Search lane: `LASH_SIM_BROAD_SEEDS` (default `512`) seeds at
+  `LASH_SIM_BROAD_MAX_BOUNDARIES` (default `512`) max boundaries in
+  `--mode search`, validated by the `sim/search.json` artifact.
+- Cross-backend replay matrix for every generated evidence trace and every
+  minimized failing-regression trace through the model replay, SQLite, and
+  Postgres when `LASH_POSTGRES_DATABASE_URL` or Docker bootstrap is available.
 - Scenario-contract slice artifacts with per-contract `generated_shape`,
   `transition_kind`, required evidence map, and a family negative fixture.
 - Targeted mutation evidence for high-risk direct/model, scheduler, runner, and
@@ -1158,13 +1065,18 @@ LASH_CONFIDENCE_OUT_DIR=target/confidence scripts/confidence-gate.sh broad
 
 ### Full Lane
 
-Purpose: nightly/manual confidence over long schedules and real backend
+Purpose: weekly/manual confidence over long schedules and real backend
 permutations.
 
 Runs:
 
 - Existing broad lane semantics.
-- Long randomized simulation.
+- Search lane: `LASH_SIM_FULL_SEEDS` (default `5000`) seeds at
+  `LASH_SIM_FULL_MAX_BOUNDARIES` (default `2000`) max boundaries in
+  `--mode search`. The weekly Confidence workflow partitions that seed space
+  as `LASH_SIM_SHARD=1/9` on the main full job plus eight
+  `sim-search:<i>/9` matrix jobs, covering every configured seed exactly once
+  per week.
 - Full provider matrix for migrated providers.
 - SQLite replay corpus.
 - Postgres replay corpus when configured or bootstrapped by the confidence
@@ -1173,15 +1085,6 @@ Runs:
   non-full mutation scopes.
 - Longer worker topology and lease-contention workloads.
 
-Initial budget:
-
-- Random seeds: 5,000 to 20,000, sharded by CI worker.
-- Max boundaries per seed: 2,000 or profile-specific.
-- Provider matrix: OpenAI-compatible, direct OpenAI Responses, Anthropic, and
-  Google as each provider migrates to the transport seam.
-- Storage: model store for search, SQLite for replay, Postgres for selected
-  and rotating generated replay.
-
 Example command shape:
 
 ```sh
@@ -1189,36 +1092,40 @@ LASH_CONFIDENCE_BOOTSTRAP=1 \
   LASH_CONFIDENCE_OUT_DIR=target/confidence \
   LASH_CONFIDENCE_MUTATION_SCOPE=full \
   scripts/confidence-gate.sh full
+scripts/confidence-gate.sh sim-search:2/9
 ```
 
 Default, broad, and full lanes write sim artifacts under
 `target/confidence/<lane>/sim/`. Fast CI writes equivalent evidence under
 `target/confidence/fast/<shard>/sim/` and validates the shard summaries with
-`scripts/confidence-gate.sh fast:summary`.
+`scripts/confidence-gate.sh fast:summary`. Standalone search shards write
+under `target/confidence/sim-search/<i>-of-<n>/`.
 
 ### Confidence Artifact And Environment Manifest
 
-`scripts/confidence-gate.sh` should pass these paths and knobs explicitly so CI
+`scripts/confidence-gate.sh` passes these paths and knobs explicitly so CI
 logs, local runs, and replay commands use one artifact vocabulary.
 
 | Lane | Artifact paths | Seed/shard env vars | Budget knobs | Failure root |
 | --- | --- | --- | --- | --- |
-| `fast` | `target/confidence/fast/sim-generated/sim/summary.json`, `events.jsonl`, `fixed-replay.json`, `provider-scripts.json`; `target/confidence/fast/minimizer-fixtures/sim/failing-minimizer-fixtures.json`; aggregate `target/confidence/fast/confidence-summary.json` | `LASH_SIM_SEEDS`, `LASH_SIM_MAX_BOUNDARIES`, `LASH_MINIMIZER_FIXTURE_JOBS` | `fast-random` profile defaults plus per-shard CI job timeout; minimizer fixtures default to up to 4 parallel workers | `target/confidence/fast/sim-generated/sim/failures/<run-id>/` |
-| `default` | `target/confidence/default/sim/summary.json`, `events.jsonl`, `sqlite-replay.json`, `coverage-tags.json`, `failures/` | `LASH_SIM_DEFAULT_SEEDS` default `256`, `LASH_SIM_SEED`, `LASH_SIM_SHARD` default `1/1` | `LASH_SIM_DEFAULT_MAX_BOUNDARIES` default `500`, `LASH_SIM_DEFAULT_WALL_SECONDS`, `LASH_SIM_SQLITE_REPLAY_LIMIT` | `target/confidence/default/sim/failures/<run-id>/` |
-| `full` | `target/confidence/full/sim/summary.json`, `events.jsonl`, `sqlite-replay.json`, `postgres-replay.json`, `provider-matrix.json`, `failures/` | `LASH_SIM_FULL_SEEDS` default `5000`, `LASH_SIM_SEED`, `LASH_SIM_SHARD`, CI matrix shard variables mapped into `LASH_SIM_SHARD` | `LASH_SIM_FULL_MAX_BOUNDARIES` default `2000`, `LASH_SIM_FULL_WALL_SECONDS`, `LASH_SIM_PROVIDER_MATRIX`, `LASH_SIM_POSTGRES_REPLAY_LIMIT` | `target/confidence/full/sim/failures/<run-id>/` |
+| `fast` | `target/confidence/fast/sim-generated/sim/summary.json`, `events.jsonl`, `provider-script-manifest.json`; `target/confidence/fast/minimizer-fixtures/sim/failing-minimizer-fixtures.json`; aggregate `target/confidence/fast/confidence-summary.json` | `LASH_SIM_SEEDS`, `LASH_SIM_MAX_BOUNDARIES`, `LASH_SIM_PROFILE`, `LASH_MINIMIZER_FIXTURE_JOBS` | `fast-random` binary defaults plus per-shard CI job timeout; minimizer fixtures default to up to 4 parallel workers | `target/confidence/fast/sim-generated/sim/failures/seed-<hex>/` |
+| `default` | `target/confidence/default/sim/summary.json`, `events.jsonl`, `sim/search.json`, `sim-search/summary.json`, per-seed `sim/replays/` artifacts | `LASH_SIM_DEFAULT_SEEDS` default `256`, `LASH_SIM_SHARD` default `1/1` | `LASH_SIM_DEFAULT_MAX_BOUNDARIES` default `500`, `LASH_SIM_SEARCH_PROFILE` default `default-random` | `target/confidence/default/sim-search/failures/seed-<hex>/` |
+| `broad` | `target/confidence/broad/sim/summary.json`, `sim/search.json`, `sim-search/summary.json`, cross-backend and scenario-contract artifacts | `LASH_SIM_BROAD_SEEDS` default `512`, `LASH_BROAD_SIM_SEEDS` default `2`, `LASH_SIM_SHARD` default `1/1` | `LASH_SIM_BROAD_MAX_BOUNDARIES` default `512`, `LASH_BROAD_SIM_MAX_BOUNDARIES` default `128`, `LASH_SIM_SEARCH_PROFILE` default `full-random` | `target/confidence/broad/sim-search/failures/seed-<hex>/` |
+| `full` | `target/confidence/full/sim/summary.json`, `events.jsonl`, `sim/search.json`, `sim-search/summary.json`, `sim/postgres-*` artifacts | `LASH_SIM_FULL_SEEDS` default `5000`, `LASH_SIM_SHARD` (weekly CI: `1/9` main job + `sim-search:<i>/9` matrix) | `LASH_SIM_FULL_MAX_BOUNDARIES` default `2000`, `LASH_SIM_SEARCH_PROFILE` default `full-random` | `target/confidence/full/sim-search/failures/seed-<hex>/` |
+| `sim-search:<i>/<n>` | `target/confidence/sim-search/<i>-of-<n>/sim/search.json`, `sim-search/summary.json` | shard from the command; full-lane seed vars apply | full-lane budget knobs apply | `target/confidence/sim-search/<i>-of-<n>/sim-search/failures/seed-<hex>/` |
 
-Every lane summary must include:
+Every generated summary records the generator version, profile, mode, shard,
+configured seed count, script bundle hash, and oracle/boundary counts. A
+failing seed persists a complete reproducibility package — trace, replay
+report, failing oracle, final summary, and minimized regression package —
+under `failures/seed-<hex>/` with the exact replay command in the run error.
 
-- generator version, replay schema version, git commit when available, feature
-  flags, seed range, shard, provider set, backend set, and script bundle hash.
-- counts for generated seeds, fixed replays, minimized replays, backend
-  replays, boundary events, oracle passes, oracle failures, and divergences.
-- absolute replay commands for each failure artifact.
-
-The runner also supports local non-gate output under
-`target/lash-sim/<profile>/`, but confidence-gate runs must always use the
-lane-specific `target/confidence/<lane>/sim/` roots for default/broad/full and
-`target/confidence/fast/<shard>/sim/` roots for sharded fast evidence.
+The runner writes to whatever `--out` root a local run chooses (for example
+`target/lash-sim/<name>/`), but confidence-gate runs always use the
+lane-specific `target/confidence/<lane>/sim/` roots for default/broad/full,
+`target/confidence/fast/<shard>/sim/` roots for sharded fast evidence, and
+`target/confidence/sim-search/<i>-of-<n>/` roots for standalone search
+shards.
 
 ## Implementation Phases
 

@@ -195,7 +195,7 @@ fn read_failing_trace_fixture(path: &Path) -> Result<FailingTraceFixture, Minimi
     Ok(fixture)
 }
 
-async fn materialize_failing_fixture_trace(
+pub(crate) async fn materialize_failing_fixture_trace(
     fixture: &FailingTraceFixture,
 ) -> Result<SimulationTrace, MinimizeError> {
     let workload = generate_workload(fixture.seed, &fixture.profile, fixture.max_boundaries)

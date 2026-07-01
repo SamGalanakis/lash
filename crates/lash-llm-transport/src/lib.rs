@@ -2,6 +2,8 @@
 pub mod conformance;
 pub mod http;
 pub mod normalize;
+#[cfg(feature = "proptest-support")]
+pub mod proptest_support;
 pub mod streaming;
 pub mod timeouts;
 pub mod util;

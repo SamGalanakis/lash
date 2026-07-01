@@ -51,11 +51,12 @@ the existing architecture.
 - Confidence lanes extend `scripts/confidence-gate.sh`: fast aggregates
   first-class shards for scenario/property/fault-matrix evidence, a small
   generated simulation/provider corpus, minimizer fixtures, and performance
-  guards; default adds local conformance, backend contention, coverage, and
-  targeted mutation; broad adds bounded full-profile simulation,
-  scheduled-depth search, generated SQLite/Postgres dynamic backend reruns, and
-  static model replay evidence without claiming full confidence; full means
-  broad semantics plus full critical-crate mutation and the true DST
+  guards; default adds local conformance, backend contention, coverage,
+  targeted mutation, and a search-mode seed lane; broad adds bounded
+  full-profile simulation, a deeper search lane, generated SQLite/Postgres
+  dynamic backend reruns, and static model replay evidence without claiming
+  full confidence; full means broad semantics plus full critical-crate
+  mutation, a sharded high-volume search fleet, and the true DST
   interleaving/effect/oracle/replay/generator criteria above.
 - Broad confidence is honest bounded evidence. Full confidence is reserved for
   lanes that exercise the true DST criteria, including replayed promoted

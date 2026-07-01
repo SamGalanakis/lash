@@ -9,12 +9,19 @@ export PATH="$HOME/.cargo/bin:$PATH"
 requested_lane="${1:-default}"
 lane="$requested_lane"
 fast_shard="all"
+sim_search_shard=""
 if [[ "$requested_lane" == fast:* ]]; then
   lane="fast"
   fast_shard="${requested_lane#fast:}"
 fi
+if [[ "$requested_lane" == sim-search:* ]]; then
+  lane="full"
+  sim_search_shard="${requested_lane#sim-search:}"
+fi
 out_root="${LASH_CONFIDENCE_OUT_DIR:-$repo/target/confidence}"
-if [ "$lane" = "fast" ] && [ "$fast_shard" != "all" ]; then
+if [ -n "$sim_search_shard" ]; then
+  out_dir="${out_root}/sim-search/${sim_search_shard//\//-of-}"
+elif [ "$lane" = "fast" ] && [ "$fast_shard" != "all" ]; then
   if [ "$fast_shard" = "summary" ]; then
     out_dir="${out_root}/fast"
   else
@@ -33,8 +40,8 @@ fast_shards=(
   minimizer-fixtures
   perf-guards
 )
-BROAD_SCHEDULED_DEPTH_MIN_SEEDS=4
-BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES=256
+SIM_SEARCH_MIN_SEEDS=4
+SIM_SEARCH_MIN_MAX_BOUNDARIES=256
 case "$lane" in
   fast) default_mutation_scope="none" ;;
   default) default_mutation_scope="targeted" ;;
@@ -72,7 +79,7 @@ trap finish_current_step EXIT
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/confidence-gate.sh [fast|default|broad|full|fast:<shard>]
+Usage: scripts/confidence-gate.sh [fast|default|broad|full|fast:<shard>|sim-search:<i>/<n>]
 
 Lanes:
   fast     deterministic scenario harnesses, state-machine/property checks,
@@ -111,6 +118,14 @@ Fast shards:
   `fast` runs all fast shards sequentially and then runs fast:summary. CI runs
   these shards as independent jobs and then runs fast:summary after downloading
   the shard artifacts.
+
+Sim search shards:
+  sim-search:<i>/<n> runs only the deterministic simulation search lane at
+  full-lane budgets for one seed-index shard, writing artifacts under
+  target/confidence/sim-search/<i>-of-<n>/. The weekly Confidence workflow
+  partitions the full search seed space as shard 1/<n> on the main full job
+  plus matrix jobs for the remaining shards, so the union covers every seed
+  exactly once.
 USAGE
 }
 
@@ -439,7 +454,7 @@ run_sim_generated_lane() {
   fi
   "${cmd[@]}"
 
-  run_scheduled_depth_sim_artifact
+  run_sim_search_lane
 }
 
 minimizer_fixture_names() {
@@ -559,37 +574,56 @@ run_sim_provider_scripts() {
   run_minimizer_fixture_suite
 }
 
-run_scheduled_depth_sim_artifact() {
+run_sim_search_lane() {
+  if [ "$lane" = "fast" ]; then
+    return
+  fi
   mkdir -p "${out_dir}/sim"
-  if [ "$lane" = "broad" ]; then
-    step "Deterministic simulation scheduled-depth generated lane"
-    local scheduled_profile="${LASH_SCHEDULED_SIM_PROFILE:-full-random}"
-    local scheduled_seeds="${LASH_SCHEDULED_SIM_SEEDS:-8}"
-    local scheduled_max_boundaries="${LASH_SCHEDULED_SIM_MAX_BOUNDARIES:-384}"
-    local scheduled_min_seeds="${BROAD_SCHEDULED_DEPTH_MIN_SEEDS}"
-    local scheduled_min_max_boundaries="${BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES}"
-    local scheduled_dir="${out_dir}/sim-scheduled-depth"
-    cargo run -p lash-sim --locked -- run \
-      --out "$scheduled_dir" \
-      --profile "$scheduled_profile" \
-      --seeds "$scheduled_seeds" \
-      --max-boundaries "$scheduled_max_boundaries"
-    python3 - "${scheduled_dir}/summary.json" "${out_dir}/sim/scheduled-depth.json" "$scheduled_profile" "$scheduled_seeds" "$scheduled_max_boundaries" "$scheduled_min_seeds" "$scheduled_min_max_boundaries" <<'PY'
+  local search_profile search_seeds search_max_boundaries
+  case "$lane" in
+    default)
+      search_profile="${LASH_SIM_SEARCH_PROFILE:-default-random}"
+      search_seeds="${LASH_SIM_DEFAULT_SEEDS:-256}"
+      search_max_boundaries="${LASH_SIM_DEFAULT_MAX_BOUNDARIES:-500}"
+      ;;
+    broad)
+      search_profile="${LASH_SIM_SEARCH_PROFILE:-full-random}"
+      search_seeds="${LASH_SIM_BROAD_SEEDS:-512}"
+      search_max_boundaries="${LASH_SIM_BROAD_MAX_BOUNDARIES:-512}"
+      ;;
+    full)
+      search_profile="${LASH_SIM_SEARCH_PROFILE:-full-random}"
+      search_seeds="${LASH_SIM_FULL_SEEDS:-5000}"
+      search_max_boundaries="${LASH_SIM_FULL_MAX_BOUNDARIES:-2000}"
+      ;;
+  esac
+  local search_shard="${LASH_SIM_SHARD:-1/1}"
+  step "Deterministic simulation search lane (${search_seeds} seeds @ ${search_max_boundaries} max boundaries, shard ${search_shard})"
+  local search_dir="${out_dir}/sim-search"
+  cargo run -p lash-sim --locked -- run \
+    --out "$search_dir" \
+    --profile "$search_profile" \
+    --seeds "$search_seeds" \
+    --max-boundaries "$search_max_boundaries" \
+    --shard "$search_shard" \
+    --mode search
+  python3 - "${search_dir}/summary.json" "${out_dir}/sim/search.json" "$search_max_boundaries" "$SIM_SEARCH_MIN_SEEDS" "$SIM_SEARCH_MIN_MAX_BOUNDARIES" <<'PY'
 import json
 import sys
 
-summary_path, output_path, profile, seeds, max_boundaries, min_seeds, min_max_boundaries = sys.argv[1:8]
+summary_path, output_path, max_boundaries, min_seeds, min_max_boundaries = sys.argv[1:6]
 with open(summary_path, "r", encoding="utf-8") as handle:
     summary = json.load(handle)
 counts = summary.get("counts") or {}
 min_seeds = int(min_seeds)
 min_max_boundaries = int(min_max_boundaries)
 artifact = {
-    "schema": "lash.confidence.scheduled-depth-generated-run.v1",
+    "schema": "lash.confidence.sim-search-run.v1",
     "status": "passed",
-    "source": "separate_broad_scheduled_depth_run",
-    "profile": profile,
-    "configured_seeds": int(seeds),
+    "mode": summary.get("mode"),
+    "profile": summary.get("profile"),
+    "shard": summary.get("shard"),
+    "configured_seeds": summary.get("configured_seeds"),
     "configured_max_boundaries": int(max_boundaries),
     "required_min_seeds": min_seeds,
     "required_min_max_boundaries": min_max_boundaries,
@@ -599,27 +633,27 @@ artifact = {
         "boundary_events": counts.get("boundary_events"),
         "oracle_passes": counts.get("oracle_passes"),
         "oracle_failures": counts.get("oracle_failures"),
-        "generated_backend_regression_fixtures": counts.get("generated_backend_regression_fixtures"),
         "scheduler_owned_runtime_completions": counts.get("scheduler_owned_runtime_completions"),
-        "scenario_contract_packages": counts.get("scenario_contract_packages"),
         "interleaving_depth_max": counts.get("interleaving_depth_max"),
         "interleaving_depth_min": counts.get("interleaving_depth_min"),
     },
-    "semantics": "larger scheduled generated DST run used for schedule/fault search depth; it is separate from the bounded broad primary sim run and does not replace true full mutation evidence",
+    "semantics": "high-volume seed search over the generated DST world in search mode: every seed runs live with the full oracle set plus an in-memory determinism replay, and failures persist complete reproducibility packages under sim-search/failures/; per-seed evidence artifacts stay in the bounded evidence lane",
 }
 required_interleaving_depth = 2
 errors = []
+if summary.get("mode") != "search":
+    errors.append("sim search lane must run in search mode")
 if counts.get("generated_seeds", 0) < min_seeds:
-    errors.append(f"scheduled-depth run must use at least {min_seeds} generated seeds")
+    errors.append(f"sim search run must execute at least {min_seeds} generated seeds in this shard")
 if int(max_boundaries) < min_max_boundaries:
-    errors.append(f"scheduled-depth run must configure at least {min_max_boundaries} max boundaries")
+    errors.append(f"sim search run must configure at least {min_max_boundaries} max boundaries")
 if counts.get("boundary_events", 0) < 512:
-    errors.append("scheduled-depth run produced fewer than 512 boundary events")
+    errors.append("sim search run produced fewer than 512 boundary events")
 if counts.get("oracle_failures", 1) != 0:
-    errors.append("scheduled-depth run had oracle failures")
+    errors.append("sim search run had oracle failures")
 if counts.get("interleaving_depth_max", 0) < required_interleaving_depth:
     errors.append(
-        "scheduled-depth run never interleaved >= "
+        "sim search run never interleaved >= "
         f"{required_interleaving_depth} live provider turns "
         f"(peak {counts.get('interleaving_depth_max', 0)}); the scheduler is not exercising concurrency"
     )
@@ -634,55 +668,6 @@ if errors:
         print(error, file=sys.stderr)
     sys.exit(1)
 PY
-  elif [ "$lane" = "full" ]; then
-    python3 - "${out_dir}/sim/summary.json" "${out_dir}/sim/scheduled-depth.json" <<'PY'
-import json
-import sys
-
-summary_path, output_path = sys.argv[1:3]
-with open(summary_path, "r", encoding="utf-8") as handle:
-    summary = json.load(handle)
-counts = summary.get("counts") or {}
-required_interleaving_depth = 2
-errors = []
-if counts.get("oracle_failures", 1) != 0:
-    errors.append("full generated lane had oracle failures")
-if counts.get("interleaving_depth_max", 0) < required_interleaving_depth:
-    errors.append(
-        "full generated lane never interleaved >= "
-        f"{required_interleaving_depth} live provider turns "
-        f"(peak {counts.get('interleaving_depth_max', 0)}); the scheduler is not exercising concurrency"
-    )
-artifact = {
-    "schema": "lash.confidence.scheduled-depth-generated-run.v1",
-    "status": "passed" if not errors else "failed",
-    "source": "main_full_generated_lane",
-    "profile": summary.get("profile"),
-    "summary_path": summary_path,
-    "counts": {
-        "generated_seeds": counts.get("generated_seeds"),
-        "boundary_events": counts.get("boundary_events"),
-        "oracle_passes": counts.get("oracle_passes"),
-        "oracle_failures": counts.get("oracle_failures"),
-        "generated_backend_regression_fixtures": counts.get("generated_backend_regression_fixtures"),
-        "scheduler_owned_runtime_completions": counts.get("scheduler_owned_runtime_completions"),
-        "scenario_contract_packages": counts.get("scenario_contract_packages"),
-        "interleaving_depth_max": counts.get("interleaving_depth_max"),
-        "interleaving_depth_min": counts.get("interleaving_depth_min"),
-    },
-    "semantics": "the full lane generated DST run is already full-random at generator defaults, so the scheduled-depth artifact points at the primary full sim summary rather than duplicating it",
-}
-if errors:
-    artifact["errors"] = errors
-with open(output_path, "w", encoding="utf-8") as handle:
-    json.dump(artifact, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-if errors:
-    for error in errors:
-        print(error, file=sys.stderr)
-    sys.exit(1)
-PY
-  fi
 }
 
 run_focused_sqlite_seed_tail_repro() {
@@ -847,7 +832,7 @@ write_sim_lane_declarations() {
   "operational_cases": "queueing_inputs,triggers,cancellation,observer_reconnects,provider_failures_mutations,process_wakes,tool_exec,durable_effects,worker_lease_failover,backend_choices,retries,duplicates",
   "scenario_contract_manifests": "included_in_lash_sim_summary",
   "scenario_contract_slices": "included_in_lash_sim_summary_with_generated_shape_transition_kind_and_negative_fixture",
-  "scheduled_depth_generated_run": "$([ -f "${out_dir}/sim/scheduled-depth.json" ] && echo "sim/scheduled-depth.json" || echo "not_in_${lane}_lane")",
+  "sim_search_run": "$([ -f "${out_dir}/sim/search.json" ] && echo "sim/search.json" || echo "not_in_${lane}_lane")",
   "focused_sqlite_seed_tail_repro": "$([ -f "${out_dir}/sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" ] && echo "sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" || echo "not_written")",
   "generated_postgres_dynamic_replay": "$([[ "$lane" = "broad" || "$lane" = "full" ]] && echo "sim/postgres-generated-rerun/summary.json" || echo "not_in_${lane}_lane")",
   "model_only_boundary_reviews": "included_in_lash_sim_summary",
@@ -1892,7 +1877,7 @@ write_confidence_summary() {
   "coverage_summary": "$([ -f "${out_dir}/coverage/summary.json" ] && echo "coverage/summary.json" || echo "not_run")",
   "coverage_scope": "${coverage_scope}",
   "coverage_evidence_status": "$(coverage_evidence_status)",
-  "scheduled_depth_generated_run": "$([ -f "${out_dir}/sim/scheduled-depth.json" ] && echo "sim/scheduled-depth.json" || echo "not_run")",
+  "sim_search_run": "$([ -f "${out_dir}/sim/search.json" ] && echo "sim/search.json" || echo "not_run")",
   "focused_sqlite_seed_tail_repro": "$([ -f "${out_dir}/sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" ] && echo "sim/focused-sqlite-seed-tail/focused-sqlite-seed-tail.json" || echo "not_run")",
   "mutation_evidence": "$(mutation_evidence_path)",
   "mutation_evidence_status": "$(mutation_evidence_status)",
@@ -2074,6 +2059,13 @@ run_fast_aggregate() {
 }
 
 bootstrap_tools
+
+if [ -n "$sim_search_shard" ]; then
+  LASH_SIM_SHARD="$sim_search_shard" run_sim_search_lane
+  step "Confidence gate 'sim-search:${sim_search_shard}' passed"
+  printf 'Artifacts: %s\n' "$out_dir"
+  exit 0
+fi
 
 if [ "$lane" = "fast" ]; then
   case "$fast_shard" in

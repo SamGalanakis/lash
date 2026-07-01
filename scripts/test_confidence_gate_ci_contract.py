@@ -65,10 +65,55 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         self.assertNotIn(OLD_BROAD_CI_ARTIFACT, workflow)
         self.assertNotIn(OLD_BROAD_CI_OUT_ROOT, workflow)
 
-        min_seeds = shell_int_constant(gate, "BROAD_SCHEDULED_DEPTH_MIN_SEEDS")
-        min_boundaries = shell_int_constant(gate, "BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES")
+        min_seeds = shell_int_constant(gate, "SIM_SEARCH_MIN_SEEDS")
+        min_boundaries = shell_int_constant(gate, "SIM_SEARCH_MIN_MAX_BOUNDARIES")
         self.assertGreaterEqual(min_seeds, 4)
         self.assertGreaterEqual(min_boundaries, 256)
+
+    def test_sim_search_lane_is_sharded_and_budgeted_at_plan_targets(self) -> None:
+        gate = GATE.read_text(encoding="utf-8")
+        confidence_workflow = CONFIDENCE_WORKFLOW.read_text(encoding="utf-8")
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        required_gate_snippets = [
+            "run_sim_search_lane()",
+            'sim_search_shard="${requested_lane#sim-search:}"',
+            '"schema": "lash.confidence.sim-search-run.v1"',
+            'search_seeds="${LASH_SIM_DEFAULT_SEEDS:-256}"',
+            'search_max_boundaries="${LASH_SIM_DEFAULT_MAX_BOUNDARIES:-500}"',
+            'search_seeds="${LASH_SIM_FULL_SEEDS:-5000}"',
+            'search_max_boundaries="${LASH_SIM_FULL_MAX_BOUNDARIES:-2000}"',
+            'local search_shard="${LASH_SIM_SHARD:-1/1}"',
+            "--mode search",
+            '--shard "$search_shard"',
+            "sim search lane must run in search mode",
+        ]
+        for snippet in required_gate_snippets:
+            self.assertIn(snippet, gate)
+
+        # The fast lane is the release gate: its generated sim lane keeps the
+        # binary's fast-random defaults and never runs the search lane.
+        self.assertIn('if [ "$lane" = "fast" ]; then\n    return\n  fi', gate)
+        self.assertNotIn("scheduled-depth", gate)
+        self.assertNotIn("BROAD_SCHEDULED_DEPTH", gate)
+
+        # Weekly full confidence partitions one search seed space: shard 1/9 on
+        # the main job, shards 2/9..9/9 as matrix jobs.
+        required_confidence_snippets = [
+            "sim-search:",
+            'bash scripts/confidence-gate.sh "sim-search:${{ matrix.shard }}/9"',
+            "shard: [2, 3, 4, 5, 6, 7, 8, 9]",
+            "LASH_SIM_SHARD",
+            "'1/9'",
+        ]
+        for snippet in required_confidence_snippets:
+            self.assertIn(snippet, confidence_workflow)
+
+        # The per-merge CI workflow (the release gate) must not run search
+        # shards or override sim budgets.
+        self.assertNotIn("sim-search", workflow)
+        self.assertNotIn("LASH_SIM_SHARD", workflow)
+        self.assertNotIn("LASH_SIM_FULL_SEEDS", workflow)
 
     def test_fast_gate_has_first_class_shards_and_parallel_minimizers(self) -> None:
         gate = GATE.read_text(encoding="utf-8")

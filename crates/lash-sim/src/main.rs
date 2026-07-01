@@ -40,6 +40,8 @@ async fn run() -> Result<(), String> {
             let mut seeds = None;
             let mut explicit_seeds = Vec::new();
             let mut max_boundaries = None;
+            let mut shard = None;
+            let mut mode = lash_sim::runner::SimRunMode::Evidence;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--out" => out = args.next().map(PathBuf::from),
@@ -66,6 +68,22 @@ async fn run() -> Result<(), String> {
                         })?;
                         max_boundaries = Some(parse_usize("--max-boundaries", &raw)?);
                     }
+                    "--shard" => {
+                        let raw = args
+                            .next()
+                            .ok_or_else(|| format!("missing --shard value\n\n{}", usage()))?;
+                        shard = Some(
+                            lash_sim::generator::SimShard::parse(&raw)
+                                .map_err(|err| format!("{err}\n\n{}", usage()))?,
+                        );
+                    }
+                    "--mode" => {
+                        let raw = args
+                            .next()
+                            .ok_or_else(|| format!("missing --mode value\n\n{}", usage()))?;
+                        mode = lash_sim::runner::SimRunMode::parse(&raw)
+                            .map_err(|err| format!("{err}\n\n{}", usage()))?;
+                    }
                     "-h" | "--help" => return Err(usage()),
                     other => return Err(format!("unknown argument `{other}`\n\n{}", usage())),
                 }
@@ -76,6 +94,18 @@ async fn run() -> Result<(), String> {
             if !explicit_seeds.is_empty() && seeds.is_some() {
                 return Err(format!(
                     "--seed and --seeds are mutually exclusive\n\n{}",
+                    usage()
+                ));
+            }
+            if !explicit_seeds.is_empty() && shard.is_some() {
+                return Err(format!(
+                    "--shard partitions a --seeds count and cannot combine with explicit --seed values\n\n{}",
+                    usage()
+                ));
+            }
+            if !explicit_seeds.is_empty() && mode == lash_sim::runner::SimRunMode::Search {
+                return Err(format!(
+                    "--mode search applies to a --seeds count; explicit --seed runs always produce full evidence\n\n{}",
                     usage()
                 ));
             }
@@ -90,9 +120,16 @@ async fn run() -> Result<(), String> {
                     .map_err(|err| err.to_string())?,
             };
             let report = if explicit_seeds.is_empty() {
-                lash_sim::run_generated_sim_profile(out.as_path(), &profile, seeds, max_boundaries)
-                    .await
-                    .map_err(|err| err.to_string())?
+                lash_sim::run_generated_sim_profile(
+                    out.as_path(),
+                    &profile,
+                    seeds,
+                    max_boundaries,
+                    shard.unwrap_or(lash_sim::generator::SimShard::FULL),
+                    mode,
+                )
+                .await
+                .map_err(|err| err.to_string())?
             } else {
                 lash_sim::run_generated_sim_profile_for_seeds(
                     out.as_path(),
@@ -356,7 +393,7 @@ fn parse_u64(name: &str, raw: &str) -> Result<u64, String> {
 fn usage() -> String {
     "Usage:
   lash-sim fixed-scripts --out <artifact-root>
-  lash-sim run --out <artifact-root> [--profile fast-random] [--seeds N | --seed U64 ...] [--max-boundaries N]
+  lash-sim run --out <artifact-root> [--profile fast-random] [--seeds N | --seed U64 ...] [--max-boundaries N] [--shard I/N] [--mode evidence|search]
   lash-sim run-postgres --out <artifact-root> [--profile fast-random] --seed U64 ... [--max-boundaries N]
   lash-sim replay <trace> [--out <artifact-root>]
   lash-sim replay-sqlite <trace> --out <artifact-root>

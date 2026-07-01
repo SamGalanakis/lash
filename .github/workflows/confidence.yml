@@ -35,6 +35,12 @@ jobs:
     name: Confidence ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      # The full lane's sim search seed space is partitioned across this job
+      # (shard 1/9) and the eight sim-search matrix jobs (shards 2/9..9/9), so
+      # the weekly fleet covers every configured seed exactly once. Non-full
+      # lanes run their search lane unsharded.
+      LASH_SIM_SHARD: ${{ (github.event_name != 'workflow_dispatch' || inputs.lane == 'full') && '1/9' || '1/1' }}
 
     steps:
       - name: Check out repository
@@ -66,3 +72,44 @@ jobs:
         with:
           name: confidence-artifacts
           path: target/confidence/**
+
+  sim-search:
+    name: Sim search shard ${{ matrix.shard }}/9
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [2, 3, 4, 5, 6, 7, 8, 9]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig
+        uses: ./.github/actions/setup-ci-zig
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: true
+          shared-key: confidence
+
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
+
+      - name: Run sim search shard
+        run: bash scripts/confidence-gate.sh "sim-search:${{ matrix.shard }}/9"
+
+      - name: Upload sim search artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: confidence-sim-search-${{ matrix.shard }}
+          path: target/confidence/sim-search/**

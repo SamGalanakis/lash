@@ -17,6 +17,9 @@ categories = ["asynchronous", "network-programming"]
 # Exposes the cross-provider response-normalization conformance suite
 # (`conformance`). Provider crates enable it as a dev-dependency feature.
 testing = []
+# Exposes reusable proptest strategies and scripted stream fakes
+# (`proptest_support`). Provider crates enable it as a dev-dependency feature.
+proptest-support = ["dep:proptest"]
 
 [dependencies]
 lash-core = { workspace = true }
@@ -26,3 +29,8 @@ tokio = { workspace = true, features = ["macros", "rt", "time"] }
 reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 bytes = { workspace = true }
 serde_json = { workspace = true }
+proptest = { version = "1", optional = true }
+
+[dev-dependencies]
+lash-llm-transport = { path = ".", features = ["proptest-support"] }
+proptest = "1"

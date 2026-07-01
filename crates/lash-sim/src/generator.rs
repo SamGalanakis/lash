@@ -131,6 +131,73 @@ pub fn default_max_boundaries(profile: &str) -> Result<usize, WorkloadProfileErr
     })
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SimShardError {
+    shard: String,
+    reason: String,
+}
+
+impl std::fmt::Display for SimShardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid sim shard `{}`: {}", self.shard, self.reason)
+    }
+}
+
+impl std::error::Error for SimShardError {}
+
+/// One shard of a count-based generated run: shard `i/n` owns every seed index
+/// where `index % n == i - 1`, so the union of all `n` shards is exactly the
+/// unsharded seed set and no seed is run twice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SimShard {
+    index: usize,
+    total: usize,
+}
+
+impl SimShard {
+    pub const FULL: SimShard = SimShard { index: 1, total: 1 };
+
+    pub fn new(index: usize, total: usize) -> Result<Self, SimShardError> {
+        if total == 0 {
+            return Err(SimShardError {
+                shard: format!("{index}/{total}"),
+                reason: "total shard count must be at least 1".to_string(),
+            });
+        }
+        if index == 0 || index > total {
+            return Err(SimShardError {
+                shard: format!("{index}/{total}"),
+                reason: format!("shard index must be between 1 and {total}"),
+            });
+        }
+        Ok(Self { index, total })
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, SimShardError> {
+        let Some((index, total)) = raw.split_once('/') else {
+            return Err(SimShardError {
+                shard: raw.to_string(),
+                reason: "expected `<index>/<total>`, e.g. `1/8`".to_string(),
+            });
+        };
+        let parse_part = |part: &str, name: &str| {
+            part.parse::<usize>().map_err(|err| SimShardError {
+                shard: raw.to_string(),
+                reason: format!("invalid {name} `{part}`: {err}"),
+            })
+        };
+        Self::new(parse_part(index, "shard index")?, parse_part(total, "shard total")?)
+    }
+
+    pub fn selects(&self, seed_index: usize) -> bool {
+        seed_index % self.total == self.index - 1
+    }
+
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.index, self.total)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkloadProfile {
     Fast,
@@ -1234,6 +1301,41 @@ mod tests {
             modes.contains("active_turn") && modes.contains("next_turn"),
             "expected both active_turn and next_turn queued ingress modes, got {modes:?}"
         );
+    }
+
+    #[test]
+    fn sim_shards_partition_the_seed_index_space_exactly() {
+        let total = 4;
+        let seed_count = 26;
+        let mut selected = Vec::new();
+        for index in 1..=total {
+            let shard = SimShard::new(index, total).expect("shard");
+            selected.extend((0..seed_count).filter(|seed_index| shard.selects(*seed_index)));
+        }
+        selected.sort_unstable();
+
+        assert_eq!(selected, (0..seed_count).collect::<Vec<_>>());
+        assert_eq!(SimShard::parse("3/8").expect("parse").label(), "3/8");
+        assert_eq!(SimShard::FULL.label(), "1/1");
+        assert!((0..seed_count).all(|seed_index| SimShard::FULL.selects(seed_index)));
+    }
+
+    #[test]
+    fn sim_shard_rejects_malformed_specs() {
+        assert_eq!(
+            SimShard::parse("0/4").expect_err("index").to_string(),
+            "invalid sim shard `0/4`: shard index must be between 1 and 4"
+        );
+        assert_eq!(
+            SimShard::parse("5/4").expect_err("range").to_string(),
+            "invalid sim shard `5/4`: shard index must be between 1 and 4"
+        );
+        assert_eq!(
+            SimShard::parse("1/0").expect_err("total").to_string(),
+            "invalid sim shard `1/0`: total shard count must be at least 1"
+        );
+        assert!(SimShard::parse("18").is_err());
+        assert!(SimShard::parse("a/b").is_err());
     }
 
     #[test]

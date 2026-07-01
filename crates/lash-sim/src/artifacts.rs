@@ -80,13 +80,25 @@ pub struct FixedScriptSummary {
 pub struct GeneratedSimProfileReport {
     pub schema: &'static str,
     pub profile: String,
+    /// `<index>/<total>` seed-index shard this summary covers; `1/1` when unsharded.
+    pub shard: String,
+    /// Seed count configured before shard filtering; equals the executed seed
+    /// count for unsharded and explicit-seed runs.
+    pub configured_seeds: usize,
+    /// `evidence` for full per-seed artifact runs, `search` for high-volume
+    /// runs that only persist failure packages.
+    pub mode: &'static str,
     pub generator_version: &'static str,
     pub script_bundle_hash: String,
     pub provider_manifest_path: &'static str,
     pub provider_matrix: Vec<ProviderMatrixRow>,
     pub generated_runtime_provider_matrix: Vec<GeneratedRuntimeProviderMatrixRow>,
-    pub events_path: &'static str,
-    pub events_sha256: String,
+    /// `None` in search mode: high-volume runs do not retain the full
+    /// delivered-boundary log; failure packages carry their own traces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events_path: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events_sha256: Option<String>,
     pub replay_reports: Vec<GeneratedReplayArtifact>,
     pub runtime_proof: RuntimeFacadeProof,
     pub scenario_contracts: Vec<ScenarioContractManifest>,
