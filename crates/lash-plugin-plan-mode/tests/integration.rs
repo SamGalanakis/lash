@@ -21,8 +21,9 @@ use lash_core::{
 };
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
-use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
-use lash_tool_support::{StaticToolExecute, StaticToolProvider};
+use lash_tool_support::{
+    LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
+};
 
 fn unavailable_processes() -> Arc<dyn lash_core::ProcessService> {
     Arc::new(lash_core::UnavailableProcessService)

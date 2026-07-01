@@ -45,7 +45,7 @@ lash-standard-plugins = { workspace = true, features = ["lashlang"] }
 lash-protocol-rlm = { workspace = true }
 lash-protocol-standard = { workspace = true }
 lash-rlm-types = { workspace = true }
-lash-plugin-plan-mode = { workspace = true }
+lash-plugin-plan-mode = { workspace = true, features = ["lashlang"] }
 lash-provider-anthropic = { workspace = true }
 lash-provider-auth = { workspace = true }
 lash-provider-google = { workspace = true }

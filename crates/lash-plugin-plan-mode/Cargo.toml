@@ -13,9 +13,12 @@ description = "Plan-mode plugin for the lash agent runtime."
 keywords = ["lash", "agent", "plan", "plugin", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
+[features]
+default = []
+lashlang = ["lash-tool-support/lashlang"]
+
 [dependencies]
 lash-core = { workspace = true }
-lash-lashlang-runtime = { workspace = true }
 lash-tool-support = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

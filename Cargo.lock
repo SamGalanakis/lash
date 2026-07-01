@@ -2752,7 +2752,6 @@ version = "0.1.0-alpha.79"
 dependencies = [
  "async-trait",
  "lash-core",
- "lash-lashlang-runtime",
  "lash-tool-support",
  "schemars",
  "serde",

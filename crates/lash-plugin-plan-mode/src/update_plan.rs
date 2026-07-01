@@ -26,8 +26,9 @@ use lash_core::plugin::{
     SessionPlugin,
 };
 use lash_core::{PromptContribution, ToolCall, ToolDefinition, ToolResult, ToolScheduling};
-use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
-use lash_tool_support::{StaticToolExecute, StaticToolProvider};
+use lash_tool_support::{
+    LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
+};
 
 const PLUGIN_ID: &str = "update_plan";
 const UPDATE_PLAN_SNAPSHOT_EVENT: &str = "update_plan.snapshot";

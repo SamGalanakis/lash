@@ -15,8 +15,10 @@ use lash_core::{
     JsonSchema, PluginMessage, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolResult,
     ToolScheduling,
 };
-use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
-use lash_tool_support::{StaticToolExecute, StaticToolProvider, resolve_under};
+use lash_tool_support::{
+    LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
+    resolve_under,
+};
 
 mod prompt;
 mod state;
