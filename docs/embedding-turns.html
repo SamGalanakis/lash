@@ -232,7 +232,7 @@ impl TurnActivitySink for ChannelSink {
           </div>
           <p>Two tiers. <code>TurnBuilder::cancel(token)</code> attaches a caller-owned <code>CancellationToken</code> (re-exported at the crate root, no <code>tokio-util</code> dependency needed) to one turn. <code>LashSession::cancel_running_turns()</code> cancels everything currently executing through that opened session and its clones: the affordance behind a UI stop button, with no token threading. It returns how many turns were signalled; a handle opened separately for the same session id is not reached.</p>
           <pre data-lang="rust" data-snippet="embedding_turns#cancel-turn"><code>use lash::CancellationToken;
-use lash::runtime::{TurnOutcome, TurnStop};
+use lash::{TurnOutcome, TurnStop};
 
 // Per-turn token: hand it to whatever can decide to stop the turn
 // (an HTTP handler, a keybinding, a timeout task).

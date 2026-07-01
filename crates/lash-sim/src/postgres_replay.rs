@@ -900,17 +900,17 @@ impl PostgresRuntimeReplayWorld {
             .await
             .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?;
         let (cancelled, cancel_outcome) = match &outcome {
-            lash::persistence::PendingTurnInputCancelOutcome::Cancelled(_) => (true, "cancelled"),
-            lash::persistence::PendingTurnInputCancelOutcome::AlreadyClaimed { .. } => {
+            lash::PendingTurnInputCancelOutcome::Cancelled(_) => (true, "cancelled"),
+            lash::PendingTurnInputCancelOutcome::AlreadyClaimed { .. } => {
                 (false, "already_claimed")
             }
-            lash::persistence::PendingTurnInputCancelOutcome::AlreadyCompleted(_) => {
+            lash::PendingTurnInputCancelOutcome::AlreadyCompleted(_) => {
                 (false, "already_completed")
             }
-            lash::persistence::PendingTurnInputCancelOutcome::AlreadyCancelled(_) => {
+            lash::PendingTurnInputCancelOutcome::AlreadyCancelled(_) => {
                 (false, "already_cancelled")
             }
-            lash::persistence::PendingTurnInputCancelOutcome::NotFound => (false, "not_found"),
+            lash::PendingTurnInputCancelOutcome::NotFound => (false, "not_found"),
         };
         Ok(json!({
             "session": event.actor_alias,

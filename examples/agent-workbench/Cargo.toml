@@ -39,7 +39,6 @@ tokio-stream = "0.1"
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash-core = { workspace = true, features = ["testing"] }
 lash-lashlang-runtime = { workspace = true }
 lash = { workspace = true, features = ["rlm", "testing"] }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }

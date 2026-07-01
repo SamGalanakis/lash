@@ -521,14 +521,14 @@ mod tests {
 
     #[tokio::test]
     async fn graph_index_resolves_subagent_bridge_to_child_session_effect_graph() {
-        let registry = Arc::new(lash_core::TestLocalProcessRegistry::default())
+        let registry = Arc::new(lash::testing::TestLocalProcessRegistry::default())
             as Arc<dyn lash::process::ProcessRegistry>;
         let observer = test_process_observer(Arc::clone(&registry));
         let child_session_id = "child-session";
-        let create_request = lash_core::SessionCreateRequest::child_session(
+        let create_request = lash::SessionCreateRequest::child_session(
             "root",
-            lash_core::SessionStartPoint::Empty,
-            lash_core::PluginOptions::default(),
+            lash::SessionStartPoint::Empty,
+            lash::plugins::PluginOptions::default(),
         )
         .with_session_id(child_session_id);
         registry
@@ -539,7 +539,7 @@ mod tests {
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
                 },
-                lash_core::ProcessProvenance::session(lash::process::SessionScope::new("root")),
+                lash::process::ProcessProvenance::session(lash::process::SessionScope::new("root")),
             ))
             .await
             .expect("register subagent process");
@@ -620,16 +620,16 @@ mod tests {
 
     #[tokio::test]
     async fn graph_index_filters_to_current_session_and_reachable_children() {
-        let registry = Arc::new(lash_core::TestLocalProcessRegistry::default())
+        let registry = Arc::new(lash::testing::TestLocalProcessRegistry::default())
             as Arc<dyn lash::process::ProcessRegistry>;
         let observer = test_process_observer(Arc::clone(&registry));
         let current_session_id = "current-session";
         let child_session_id = "child-session";
         let old_session_id = "old-session";
-        let create_request = lash_core::SessionCreateRequest::child_session(
+        let create_request = lash::SessionCreateRequest::child_session(
             current_session_id,
-            lash_core::SessionStartPoint::Empty,
-            lash_core::PluginOptions::default(),
+            lash::SessionStartPoint::Empty,
+            lash::plugins::PluginOptions::default(),
         )
         .with_session_id(child_session_id);
         registry
@@ -640,7 +640,7 @@ mod tests {
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
                 },
-                lash_core::ProcessProvenance::session(lash::process::SessionScope::new(
+                lash::process::ProcessProvenance::session(lash::process::SessionScope::new(
                     current_session_id,
                 )),
             ))
@@ -660,7 +660,7 @@ mod tests {
                 RuntimeInput::External {
                     metadata: json!({ "old": true }),
                 },
-                lash_core::ProcessProvenance::host(),
+                lash::process::ProcessProvenance::host(),
             ))
             .await
             .expect("register old process");

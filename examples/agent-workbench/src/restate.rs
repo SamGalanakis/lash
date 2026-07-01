@@ -895,7 +895,7 @@ fn record_turn_output(
     );
     if matches!(
         output.outcome,
-        lash::runtime::TurnOutcome::Stopped(lash::runtime::TurnStop::Cancelled)
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
     ) {
         state.push_message("event", "turn cancelled");
     } else {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::LashConfig;
-use lash::admin::SessionConfigPatch;
+use lash::SessionConfigPatch;
 use lash::{LashSession, provider::ProviderHandle};
 use lash_tui::Terminal;
 

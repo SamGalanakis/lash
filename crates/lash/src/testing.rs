@@ -1,6 +1,7 @@
 //! Test helpers for embedders. Enable with `lash = { ..., features = ["testing"] }`
 //! to script model responses in integration tests without a live provider.
 
+pub use lash_core::TestLocalProcessRegistry;
 pub use lash_core::testing::{TestProvider, TestProviderBuilder};
 
 /// Backend-agnostic conformance suites: validate a custom backend implementation

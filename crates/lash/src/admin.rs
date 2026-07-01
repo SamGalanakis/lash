@@ -1,4 +1,4 @@
-pub use crate::session::SessionConfigPatch;
+pub(crate) use crate::session::SessionConfigPatch;
 use crate::support::*;
 pub use lash_core::{AcceptedInjectedTurnInput, PluginCommand, PluginQuery, PluginTask};
 
@@ -966,17 +966,6 @@ pub struct SessionConfigAdmin {
 impl SessionConfigAdmin {
     pub async fn update(&self, patch: SessionConfigPatch) -> Result<()> {
         self.control.update_config(patch).await
-    }
-
-    pub async fn update_session_config(
-        &self,
-        provider: Option<ProviderHandle>,
-        model: Option<lash_core::ModelSpec>,
-        prompt: Option<PromptLayer>,
-    ) -> Result<()> {
-        self.control
-            .update_session_config(provider, model, prompt)
-            .await
     }
 
     pub async fn set_prompt_template(&self, template: PromptTemplate) -> Result<()> {

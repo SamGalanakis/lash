@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lash::direct::{
     DirectLlmClient, DirectLlmError, DirectRequest, LlmAttachment, LlmEventSender, LlmOutputPart,
-    LlmResponse, LlmUsage, TokenUsage,
+    LlmResponse, LlmUsage,
 };
 use lash::durability::RuntimeHostConfig;
 use lash::messages::MessageRole;
@@ -12,9 +12,10 @@ use lash::persistence::{
     RuntimeCommitResult, RuntimePersistence, RuntimeSessionState, RuntimeTurnCommitStamp,
     SessionCheckpoint, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
     SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionMeta, SessionNodeRecord,
-    SessionReadScope, StoreError, TokenLedgerEntry, VacuumReport, load_persisted_session_state,
+    SessionReadScope, StoreError, VacuumReport, load_persisted_session_state,
     load_persisted_session_state_active_path,
 };
+use lash::usage::{TokenLedgerEntry, TokenUsage};
 use lash::plugins::{
     AfterToolCallHook, BeforeToolCallHook, CompactionContext, ContextCompaction, ContextCompactor,
     ContextError, PluginDirective, PluginHost, PluginSpec, PluginSpecBuilder, PluginSpecFactory,
@@ -313,6 +314,42 @@ async fn persistence_load_helpers_are_nameable(
     load_persisted_session_state(store).await
 }
 
+// Types that appear in facade public signatures must have a reachable facade
+// home (no bare `lash_core::` leak). See lib.rs contract: "Every public name
+// has exactly one home."
+#[allow(clippy::too_many_arguments)]
+fn leaked_signature_types_are_homed(
+    execution: lash::ExecutionSummary,
+    message: lash::messages::Message,
+    tool_id: lash::tools::ToolId,
+    create_request: lash::SessionCreateRequest,
+    start_point: lash::SessionStartPoint,
+    plugin_options: lash::plugins::PluginOptions,
+    provenance: lash::process::ProcessProvenance,
+    outcome: lash::TurnOutcome,
+    finish: lash::TurnFinish,
+    stop: lash::TurnStop,
+    cause: lash::TurnCause,
+    subscription: lash::triggers::TriggerSubscriptionRecord,
+    replay_store: lash::observe::InMemoryLiveReplayStore,
+) {
+    let _ = (
+        execution,
+        message,
+        tool_id,
+        create_request,
+        start_point,
+        plugin_options,
+        provenance,
+        outcome,
+        finish,
+        stop,
+        cause,
+        subscription,
+        replay_store,
+    );
+}
+
 fn assert_store_object(_: Arc<dyn RuntimePersistence>) {}
 
 fn main() {
@@ -338,4 +375,5 @@ fn main() {
     let _ = cancellation_token_is_at_root;
     let _ = queued_work_wait_is_nameable;
     let _ = pending_turn_input_cancel_facade_is_nameable;
+    let _ = leaked_signature_types_are_homed;
 }

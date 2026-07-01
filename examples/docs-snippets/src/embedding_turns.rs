@@ -1,6 +1,6 @@
 //! Compiled sources for the Rust snippets on `docs/embedding-turns.html`.
 
-use lash::runtime::{TurnFinish, TurnOutcome, TurnStop};
+use lash::{TurnFinish, TurnOutcome, TurnStop};
 use lash::{LashCore, LashSession, TurnInput, TurnResult};
 
 fn persist_terminal(_finish: TurnFinish) -> anyhow::Result<()> {
@@ -218,7 +218,7 @@ async fn rlm_terminal_contracts(
 async fn cancel_turn(session: &LashSession) -> anyhow::Result<()> {
     // docs:start:cancel-turn
     use lash::CancellationToken;
-    use lash::runtime::{TurnOutcome, TurnStop};
+    use lash::{TurnOutcome, TurnStop};
 
     // Per-turn token: hand it to whatever can decide to stop the turn
     // (an HTTP handler, a keybinding, a timeout task).

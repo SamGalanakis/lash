@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use lash::LashSession;
-use lash::admin::SessionConfigPatch;
+use lash::SessionConfigPatch;
 use lash_core::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, fresh_message_id,
 };
