@@ -8,7 +8,9 @@ use lash_core::{
     ProcessExecutionEnvStore, ProcessRegistry, RuntimePersistence, SessionPolicy,
     SessionStoreFactory, TriggerStore,
 };
-use lash_postgres_store::PostgresStorage;
+use lash_postgres_store::{
+    PostgresEffectReplayOptions, PostgresRuntimeEffectController, PostgresStorage,
+};
 
 /// All backend suites share one database and `reset()` truncates every `lash_*`
 /// table between cases, so they must not touch it concurrently. This guard
@@ -203,6 +205,85 @@ async fn postgres_runtime_effect_controller_satisfies_conformance_when_configure
         || controller.start_replay(),
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_effect_controller_satisfies_lease_fencing_conformance_when_configured() {
+    let _db_guard = DB_GUARD.lock().await;
+    let Some(storage) = storage().await else {
+        eprintln!(
+            "skipping Postgres effect lease-fencing conformance: LASH_POSTGRES_DATABASE_URL is not set"
+        );
+        return;
+    };
+    reset(&storage).await;
+
+    let make_storage = storage.clone();
+    let steal_pool = storage.pool().clone();
+    let expire_pool = storage.pool().clone();
+    lash_core::testing::conformance::effect_controller_lease_fencing(
+        lash_core::testing::conformance::EffectLeaseFencingBackend {
+            make_controller: Box::new(move |ttl| {
+                let storage = make_storage.clone();
+                Box::pin(async move {
+                    let controller = PostgresRuntimeEffectController::with_options(
+                        &storage,
+                        ExecutionScope::turn("session", "turn"),
+                        PostgresEffectReplayOptions { lease_ttl: ttl },
+                    );
+                    let for_replay = controller.clone();
+                    lash_core::testing::conformance::LeaseFencingController {
+                        controller: Arc::new(controller),
+                        start_replay: Box::new(move || for_replay.start_replay()),
+                    }
+                })
+            }),
+            steal_lease: Box::new(move |replay_key| {
+                let pool = steal_pool.clone();
+                Box::pin(async move {
+                    let stolen_until = epoch_ms_for_test().saturating_add(10_000) as i64;
+                    let changed = sqlx::query(
+                        "UPDATE lash_runtime_effect_replay
+                         SET lease_owner_id = 'stolen-owner',
+                             lease_token = 'stolen-token',
+                             lease_expires_at_ms = $1
+                         WHERE replay_key = $2",
+                    )
+                    .bind(stolen_until)
+                    .bind(&replay_key)
+                    .execute(&pool)
+                    .await
+                    .expect("steal lease row")
+                    .rows_affected();
+                    assert_eq!(changed, 1);
+                })
+            }),
+            expire_lease: Box::new(move |replay_key| {
+                let pool = expire_pool.clone();
+                Box::pin(async move {
+                    let changed = sqlx::query(
+                        "UPDATE lash_runtime_effect_replay
+                         SET lease_expires_at_ms = 0
+                         WHERE replay_key = $1",
+                    )
+                    .bind(&replay_key)
+                    .execute(&pool)
+                    .await
+                    .expect("expire lease row")
+                    .rows_affected();
+                    assert_eq!(changed, 1);
+                })
+            }),
+        },
+    )
+    .await;
+}
+
+fn epoch_ms_for_test() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as u64
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

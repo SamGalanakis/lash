@@ -777,6 +777,230 @@ fn durable_step_conformance_failing_executor(
     })
 }
 
+/// One controller bound to a shared durable effect-replay store, paired with a
+/// `start_replay` toggle. The toggle exists because `start_replay` is a concrete
+/// controller affordance, not a [`RuntimeEffectController`] trait method.
+#[cfg(any(test, feature = "testing"))]
+pub struct LeaseFencingController {
+    pub controller: Arc<dyn RuntimeEffectController>,
+    pub start_replay: Box<dyn Fn() + Send + Sync>,
+}
+
+/// A raw mutation applied to the effect-replay row for a given `replay_key`.
+/// Backends implement it with a direct row update (SQLite `rusqlite`, Postgres
+/// `sqlx`); it is async so Postgres can issue a pooled query.
+#[cfg(any(test, feature = "testing"))]
+pub type EffectLeaseMutator = Box<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
+/// Backend adapter for the effect-replay lease-fencing conformance suite.
+///
+/// `make_controller` returns a fresh controller bound to one shared durable
+/// store with the requested lease TTL. `steal_lease` overwrites the lease
+/// owner/token for a `replay_key` (another worker reclaimed the row);
+/// `expire_lease` forces the lease already-expired. Both mutate the same store
+/// the controllers share.
+#[cfg(any(test, feature = "testing"))]
+pub struct EffectLeaseFencingBackend {
+    pub make_controller: Box<
+        dyn Fn(
+                std::time::Duration,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = LeaseFencingController> + Send>>
+            + Send
+            + Sync,
+    >,
+    pub steal_lease: EffectLeaseMutator,
+    pub expire_lease: EffectLeaseMutator,
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn lease_fencing_envelope(replay_key: &str) -> RuntimeEffectEnvelope {
+    RuntimeEffectEnvelope::new(
+        RuntimeInvocation::effect(
+            RuntimeScope::for_turn("effect-lease-session", "effect-lease-turn", 1, 0),
+            replay_key,
+            RuntimeEffectKind::ExecCode,
+            replay_key,
+        ),
+        RuntimeEffectCommand::ExecCode {
+            language: "code".to_string(),
+            code: "emit".to_string(),
+        },
+    )
+}
+
+/// Run the durable effect-replay lease-fencing conformance suite. Every durable
+/// effect-replay controller (SQLite, Postgres, ...) must satisfy the same
+/// fencing contract, so the row-level renewal/steal/expiry behavior lives here
+/// once instead of in store-specific raw-row tests:
+///
+/// - a renewed in-progress lease keeps a competing claimant out, then replays;
+/// - a stolen lease aborts the original owner with a lease-lost error;
+/// - a lease that expires before finalize is rejected with a lease-lost error.
+#[cfg(any(test, feature = "testing"))]
+pub async fn effect_controller_lease_fencing(backend: EffectLeaseFencingBackend) {
+    let run = uuid::Uuid::new_v4().to_string();
+    lease_fencing_renews_long_running_lease(&backend, &run).await;
+    lease_fencing_reports_lease_lost_when_stolen(&backend, &run).await;
+    lease_fencing_rejects_finalize_after_expiry(&backend, &run).await;
+}
+
+#[cfg(any(test, feature = "testing"))]
+async fn lease_fencing_renews_long_running_lease(backend: &EffectLeaseFencingBackend, run: &str) {
+    let ttl = std::time::Duration::from_millis(40);
+    let replay_key = format!("lease-renewal-{run}");
+    let first = (backend.make_controller)(ttl).await;
+    let second = (backend.make_controller)(ttl).await;
+    let envelope = lease_fencing_envelope(&replay_key);
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let first_controller = Arc::clone(&first.controller);
+    let first_envelope = envelope.clone();
+    let first_release = Arc::clone(&release);
+    let first_task = tokio::spawn(async move {
+        first_controller
+            .execute_effect(
+                first_envelope,
+                RuntimeEffectLocalExecutor::testing(move |_| async move {
+                    let _ = entered_tx.send(());
+                    first_release.notified().await;
+                    Ok(replay_conformance_exec_outcome("renewed-owner"))
+                }),
+            )
+            .await
+    });
+    entered_rx.await.expect("first executor entered");
+
+    // Let several lease TTLs lapse; the renewal task must keep the lease alive.
+    tokio::time::sleep(ttl * 3).await;
+    let competing = tokio::time::timeout(
+        ttl * 2,
+        second.controller.execute_effect(
+            envelope.clone(),
+            RuntimeEffectLocalExecutor::testing(move |_| async move {
+                Ok(replay_conformance_exec_outcome("stolen-owner"))
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        competing.is_err(),
+        "renewed in-progress lease should keep a competing claimant busy",
+    );
+
+    release.notify_waiters();
+    let first_outcome = first_task
+        .await
+        .expect("first task joins")
+        .expect("renewed owner finalizes");
+    assert_replay_conformance_exec_marker(first_outcome, "renewed-owner");
+
+    (second.start_replay)();
+    let replayed = second
+        .controller
+        .execute_effect(
+            envelope,
+            replay_conformance_failing_executor(Arc::new(Mutex::new(Vec::new()))),
+        )
+        .await
+        .expect("replayed renewed outcome");
+    assert_replay_conformance_exec_marker(replayed, "renewed-owner");
+}
+
+#[cfg(any(test, feature = "testing"))]
+async fn lease_fencing_reports_lease_lost_when_stolen(
+    backend: &EffectLeaseFencingBackend,
+    run: &str,
+) {
+    let ttl = std::time::Duration::from_millis(40);
+    let replay_key = format!("lease-stolen-{run}");
+    let controller = (backend.make_controller)(ttl).await;
+    let envelope = lease_fencing_envelope(&replay_key);
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let never_release = Arc::new(tokio::sync::Notify::new());
+    let owner = Arc::clone(&controller.controller);
+    let owner_envelope = envelope.clone();
+    let owner_release = Arc::clone(&never_release);
+    let owner_task = tokio::spawn(async move {
+        owner
+            .execute_effect(
+                owner_envelope,
+                RuntimeEffectLocalExecutor::testing(move |_| async move {
+                    let _ = entered_tx.send(());
+                    owner_release.notified().await;
+                    Ok(replay_conformance_exec_outcome("should-not-finalize"))
+                }),
+            )
+            .await
+    });
+    entered_rx.await.expect("owner executor entered");
+
+    (backend.steal_lease)(replay_key.clone()).await;
+
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), owner_task)
+        .await
+        .expect("renewal should notice the stolen lease")
+        .expect("owner task joins")
+        .expect_err("stolen lease must fail the original owner");
+    assert!(
+        err.code.ends_with("_effect_replay_lease_lost"),
+        "expected an effect-replay lease-lost error, got code `{}`: {}",
+        err.code,
+        err.message,
+    );
+    let _keep_notify_alive = never_release;
+}
+
+#[cfg(any(test, feature = "testing"))]
+async fn lease_fencing_rejects_finalize_after_expiry(
+    backend: &EffectLeaseFencingBackend,
+    run: &str,
+) {
+    // A long TTL keeps the renewal task idle during the brief block so the
+    // finalize path (not renewal) is the one that observes the expired lease.
+    let ttl = std::time::Duration::from_secs(30);
+    let replay_key = format!("lease-expiry-{run}");
+    let controller = (backend.make_controller)(ttl).await;
+    let envelope = lease_fencing_envelope(&replay_key);
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let owner = Arc::clone(&controller.controller);
+    let owner_envelope = envelope.clone();
+    let owner_release = Arc::clone(&release);
+    let owner_task = tokio::spawn(async move {
+        owner
+            .execute_effect(
+                owner_envelope,
+                RuntimeEffectLocalExecutor::testing(move |_| async move {
+                    let _ = entered_tx.send(());
+                    owner_release.notified().await;
+                    Ok(replay_conformance_exec_outcome("expired-owner"))
+                }),
+            )
+            .await
+    });
+    entered_rx.await.expect("owner executor entered");
+
+    (backend.expire_lease)(replay_key.clone()).await;
+    release.notify_waiters();
+
+    let err = owner_task
+        .await
+        .expect("owner task joins")
+        .expect_err("expired lease must not finalize");
+    assert!(
+        err.code.ends_with("_effect_replay_lease_lost"),
+        "expected an effect-replay lease-lost error, got code `{}`: {}",
+        err.code,
+        err.message,
+    );
+}
+
 #[cfg(any(test, feature = "testing"))]
 fn replay_conformance_exec_envelope(effect_id: &'static str) -> RuntimeEffectEnvelope {
     RuntimeEffectEnvelope::new(
