@@ -27,7 +27,7 @@ tokio-stream = "0.1"
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash-core = { workspace = true, features = ["testing"] }
+lash = { workspace = true, features = ["rlm", "testing"] }
 tempfile = { workspace = true }
 
 [features]

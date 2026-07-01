@@ -548,10 +548,10 @@ finish "gap source"
             .provider(provider)
             .model(model.clone())
             .store_factory(Arc::clone(&store_factory))
-            .live_replay_store(Arc::new(lash_core::InMemoryLiveReplayStore::new(
-                lash_core::InMemoryLiveReplayStoreConfig {
+            .live_replay_store(Arc::new(lash::observe::InMemoryLiveReplayStore::new(
+                lash::observe::InMemoryLiveReplayStoreConfig {
                     max_events_per_session: 1,
-                    ..lash_core::InMemoryLiveReplayStoreConfig::default()
+                    ..lash::observe::InMemoryLiveReplayStoreConfig::default()
                 },
             )))
             .build()
@@ -973,7 +973,7 @@ finish initial
             .await
             .expect("reopen session after account removal");
         let tool_state = reopened.tools().state().await.expect("tool state");
-        let send_tool_id = lash_core::ToolId::from("tool:inbox__late_account__send");
+        let send_tool_id = lash::tools::ToolId::from("tool:inbox__late_account__send");
         let send_entry = tool_state
             .get(&send_tool_id)
             .expect("removed account tool is kept as an orphan");
@@ -2226,23 +2226,23 @@ finish initial
     async fn assert_remote_trigger_subscription_records_round_trip(
         data_dir: &std::path::Path,
         session_id: &str,
-    ) -> Vec<lash_core::TriggerSubscriptionRecord> {
+    ) -> Vec<lash::triggers::TriggerSubscriptionRecord> {
         let store = lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
             .await
             .expect("open trigger store for remote DTO round trip");
-        let filter = lash_core::TriggerSubscriptionFilter::for_session(session_id);
+        let filter = lash::triggers::TriggerSubscriptionFilter::for_session(session_id);
         let remote_filter = lash_remote_protocol::RemoteTriggerSubscriptionFilter::from(
             filter.clone(),
         );
         remote_filter
             .validate()
             .expect("remote trigger subscription filter should validate");
-        let round_trip_filter: lash_core::TriggerSubscriptionFilter = remote_filter
+        let round_trip_filter: lash::triggers::TriggerSubscriptionFilter = remote_filter
             .try_into()
             .expect("remote trigger subscription filter should convert back");
         assert_eq!(round_trip_filter, filter);
 
-        let records = lash_core::TriggerStore::list_subscriptions(&store, filter)
+        let records = lash::triggers::TriggerStore::list_subscriptions(&store, filter)
             .await
             .expect("list persisted trigger subscriptions for remote DTO round trip");
         let remote_list =
@@ -2251,7 +2251,7 @@ finish initial
         remote_list
             .validate()
             .expect("remote trigger subscription list should validate");
-        let round_trip_records: Vec<lash_core::TriggerSubscriptionRecord> = remote_list
+        let round_trip_records: Vec<lash::triggers::TriggerSubscriptionRecord> = remote_list
             .try_into()
             .expect("remote trigger subscription list should convert back");
         assert_eq!(round_trip_records, records);
@@ -2263,7 +2263,7 @@ finish initial
             remote_record
                 .validate("WorkbenchTriggerSubscription")
                 .expect("remote trigger subscription record should validate");
-            let round_trip_record: lash_core::TriggerSubscriptionRecord = remote_record
+            let round_trip_record: lash::triggers::TriggerSubscriptionRecord = remote_record
                 .try_into()
                 .expect("remote trigger subscription record should convert back");
             assert_eq!(&round_trip_record, record);
@@ -2276,7 +2276,7 @@ finish initial
             remote_result
                 .validate()
                 .expect("remote trigger register result should validate");
-            let round_trip_result: lash_core::TriggerSubscriptionRecord = remote_result
+            let round_trip_result: lash::triggers::TriggerSubscriptionRecord = remote_result
                 .try_into()
                 .expect("remote trigger register result should convert back");
             assert_eq!(&round_trip_result, record);
@@ -2292,7 +2292,7 @@ finish initial
         remote
             .validate()
             .expect("remote trigger emit report should validate");
-        let round_trip: lash_core::TriggerEmitReport = remote
+        let round_trip: lash::triggers::TriggerEmitReport = remote
             .try_into()
             .expect("remote trigger emit report should convert back");
         assert_eq!(&round_trip, report);
@@ -2304,9 +2304,9 @@ finish initial
         session_id: &str,
         process_ids: &[String],
     ) {
-        let filter = lash_core::ProcessListFilter {
+        let filter = lash::process::ProcessListFilter {
             definition: None,
-            status: lash_core::ProcessStatusFilter::Any,
+            status: lash::process::ProcessStatusFilter::Any,
             waiting: None,
         };
         let observed = core
@@ -2320,7 +2320,7 @@ finish initial
         remote_list
             .validate()
             .expect("remote process list should validate");
-        let round_trip_observed: Vec<lash_core::ObservedProcess> = remote_list
+        let round_trip_observed: Vec<lash::process::ObservedProcess> = remote_list
             .try_into()
             .expect("remote process list should convert back");
         for process_id in process_ids {
@@ -2343,7 +2343,7 @@ finish initial
         remote_snapshot
             .validate()
             .expect("remote process work snapshot should validate");
-        let round_trip_snapshot: lash_core::ProcessWorkSnapshot = remote_snapshot
+        let round_trip_snapshot: lash::process::ProcessWorkSnapshot = remote_snapshot
             .try_into()
             .expect("remote process work snapshot should convert back");
         assert_eq!(round_trip_snapshot.session_id, session_id);
@@ -2358,7 +2358,7 @@ finish initial
             remote_record
                 .validate("WorkbenchStartedProcessRecord")
                 .expect("remote started process record should validate");
-            let round_trip_record: lash_core::ProcessRecord = remote_record
+            let round_trip_record: lash::process::ProcessRecord = remote_record
                 .try_into()
                 .expect("remote started process record should convert back");
             assert_eq!(&round_trip_record.id, process_id);
@@ -2380,7 +2380,7 @@ finish initial
                 .expect("remote started process event tail should validate");
             let (round_trip_process_id, round_trip_events): (
                 String,
-                Vec<lash_core::ProcessEvent>,
+                Vec<lash::process::ProcessEvent>,
             ) = remote_events
                 .try_into()
                 .expect("remote started process event tail should convert back");

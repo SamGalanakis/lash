@@ -315,9 +315,8 @@ lash-core    = { version = "=0.1.0-alpha.79", features = ["otel-trace"] }</code>
 
 use lash::{
     LashCore,
-    tracing::{TraceLevel, TraceSink},
+    tracing::{OtelTraceSink, TraceLevel, TraceSink},
 };
-use lash_core::OtelTraceSink;
 
 // Exporter/provider setup stays with the host; this reads the
 // process-global OpenTelemetry tracer provider.

@@ -22,14 +22,14 @@ use lash_core::provider::{
     ProviderReliability, resolve_generation_policy,
 };
 use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
+use crate::common::DEFAULT_HTTP_TRANSPORT;
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
-use lash_llm_transport::timeouts::{
-    build_http_client, header_pairs, read_response_text, request_body_snapshot,
-    response_start_timeout, send_request,
-};
+use lash_llm_transport::timeouts::response_start_timeout;
 use lash_llm_transport::util::emit_provider_trace;
 use lash_llm_transport::{
-    LlmHttpBody, openai_terminal_reason_from_response_value, openai_usage_from_response_value,
+    LlmHttpMethod, LlmHttpRequest, LlmHttpTransport, first_header_value, header_contains,
+    openai_terminal_reason_from_response_value, openai_usage_from_response_value,
+    read_http_body_text,
 };
 
 pub mod oauth;
@@ -47,9 +47,15 @@ const SESSION_WEBSOCKET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const SESSION_WEBSOCKET_FALLBACK_TTL: Duration = Duration::from_secs(60);
 const MAX_SESSION_WEBSOCKET_CACHE_ENTRIES: usize = 32;
 
+/// Transport-selection knob for Codex. Production always runs `Auto` (try the
+/// WebSocket transport, fall back to SSE). The non-`Auto` variants force a
+/// specific path and are a crate-internal test seam; hosts that must pin the
+/// HTTP/SSE path (e.g. the deterministic-simulation harness driving Provider
+/// Wire Scripts through an injected transport) use
+/// [`CodexProvider::force_sse_transport`] rather than naming these variants.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CodexTransport {
+pub(crate) enum CodexTransport {
     #[default]
     Auto,
     Sse,
@@ -177,11 +183,11 @@ pub struct CodexProvider {
     pub expires_at: u64,
     pub account_id: Option<String>,
     pub options: ProviderOptions,
-    pub transport: CodexTransport,
+    pub(crate) transport: CodexTransport,
     websocket_sessions: CodexWebsocketSessionCache,
     responses_url: String,
     websocket_url: String,
-    client: reqwest::Client,
+    http_transport: Arc<dyn LlmHttpTransport>,
 }
 
 #[derive(Clone, Debug)]
@@ -211,7 +217,7 @@ impl CodexProvider {
             websocket_sessions: CodexWebsocketSessionCache::default(),
             responses_url: Self::CODEX_RESPONSES_URL.to_string(),
             websocket_url: Self::CODEX_RESPONSES_WS_URL.to_string(),
-            client: build_http_client(),
+            http_transport: DEFAULT_HTTP_TRANSPORT.clone(),
         }
     }
 
@@ -225,8 +231,19 @@ impl CodexProvider {
         self
     }
 
-    pub fn with_transport(mut self, transport: CodexTransport) -> Self {
+    #[cfg(test)]
+    fn with_transport(mut self, transport: CodexTransport) -> Self {
         self.transport = transport;
+        self
+    }
+
+    /// Pin Codex to the HTTP/SSE transport, skipping the WebSocket path. This
+    /// is the only public transport-selection seam; it lets a host (notably the
+    /// deterministic-simulation harness) drive Codex's HTTP/SSE path through an
+    /// injected [`LlmHttpTransport`] without exposing the internal
+    /// [`CodexTransport`] variants.
+    pub fn force_sse_transport(mut self) -> Self {
+        self.transport = CodexTransport::Sse;
         self
     }
 
@@ -241,8 +258,11 @@ impl CodexProvider {
         self
     }
 
-    pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
-        self.client = (*client).clone();
+    /// Inject the HTTP/SSE transport seam. Production uses the shared reqwest
+    /// transport; the deterministic-simulation harness and tests inject a
+    /// scripted [`LlmHttpTransport`] to drive Provider Wire Scripts.
+    pub fn with_http_transport(mut self, transport: Arc<dyn LlmHttpTransport>) -> Self {
+        self.http_transport = transport;
         self
     }
 
@@ -1471,53 +1491,66 @@ impl Provider for CodexProvider {
         let body = self.build_request_body(&req, stream_events.is_some())?;
 
         let request_body = serde_json::to_string(&body).ok();
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| {
+            LlmTransportError::new(format!("Failed to serialize Codex request: {e}"))
+        })?;
 
-        let mut http = self
-            .client
-            .post(&self.responses_url)
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("originator", Self::CODEX_ORIGINATOR)
-            .header("User-Agent", Self::codex_user_agent())
-            .json(&body);
-        http = http
-            .header("session-id", &req.scope.session_id)
-            .header("x-client-request-id", &req.scope.request_id);
-        if let Some(id) = account_id.as_deref() {
-            http = http.header("ChatGPT-Account-ID", id);
-        }
-        let resp = send_request(
-            http,
-            request_body.clone().map(request_body_snapshot),
-            response_start_timeout(
-                timeouts.request_timeout,
-                timeouts.chunk_timeout,
-                stream_events.is_some(),
+        let mut headers = vec![
+            (
+                "Authorization".to_string(),
+                format!("Bearer {access_token}"),
             ),
-            "Codex response start timed out",
-        )
-        .await?;
-        let status = resp.status();
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let headers = resp.headers().clone();
-        if !status.is_success() {
-            let text = read_response_text(
-                resp,
-                timeouts.request_timeout,
-                "Codex response body timed out",
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("Accept".to_string(), "text/event-stream".to_string()),
+            (
+                "OpenAI-Beta".to_string(),
+                "responses=experimental".to_string(),
+            ),
+            ("originator".to_string(), Self::CODEX_ORIGINATOR.to_string()),
+            ("User-Agent".to_string(), Self::codex_user_agent()),
+            ("session-id".to_string(), req.scope.session_id.clone()),
+            (
+                "x-client-request-id".to_string(),
+                req.scope.request_id.clone(),
+            ),
+        ];
+        if let Some(id) = account_id.as_deref() {
+            headers.push(("ChatGPT-Account-ID".to_string(), id.to_string()));
+        }
+        let http_request = LlmHttpRequest {
+            method: LlmHttpMethod::Post,
+            url: self.responses_url.clone(),
+            headers,
+            body: bytes::Bytes::from(body_bytes),
+            body_for_error: request_body.clone(),
+            response_start_timeout_message: Some("Codex response start timed out".to_string()),
+        };
+        let resp = self
+            .http_transport
+            .send(
+                http_request,
+                response_start_timeout(
+                    timeouts.request_timeout,
+                    timeouts.chunk_timeout,
+                    stream_events.is_some(),
+                ),
             )
-            .await
-            .unwrap_or_default();
-            let message = Self::codex_error_summary(status.as_u16(), &text).unwrap_or_else(|| {
+            .await?;
+        let status = resp.status;
+        let content_type = first_header_value(&resp.headers, "content-type").map(str::to_string);
+        let response_headers = resp.headers.clone();
+        let is_sse = header_contains(&resp.headers, "content-type", "text/event-stream");
+        let success = resp.is_success();
+        let body = resp.body;
+        if !success {
+            let text =
+                read_http_body_text(body, timeouts.request_timeout, "Codex response body timed out")
+                    .await
+                    .unwrap_or_default();
+            let message = Self::codex_error_summary(status, &text).unwrap_or_else(|| {
                 format!(
                     "Codex request failed with {}{}",
-                    status.as_u16(),
+                    status,
                     content_type
                         .as_deref()
                         .map(|ct| format!(" ({ct})"))
@@ -1528,8 +1561,8 @@ impl Provider for CodexProvider {
             // from the attached HTTP status; no inline override here.
             let mut err = LlmTransportError::new(message)
                 .with_kind(ProviderFailureKind::Http)
-                .with_status(status.as_u16())
-                .with_headers(header_pairs(&headers))
+                .with_status(status)
+                .with_headers(response_headers)
                 .with_raw(text);
             if let Some(request_body) = request_body.clone() {
                 err = err.with_request_body(request_body);
@@ -1537,23 +1570,16 @@ impl Provider for CodexProvider {
             return Err(err);
         }
 
-        let is_sse = content_type
-            .as_deref()
-            .map(|ct| ct.contains("text/event-stream"))
-            .unwrap_or(false);
         let parse_stream =
             Self::should_parse_stream(stream_events.is_some(), content_type.as_deref());
 
         if !parse_stream {
-            let text = read_response_text(
-                resp,
-                timeouts.request_timeout,
-                "Codex response body timed out",
-            )
-            .await
-            .map_err(|err| {
-                Self::non_sse_body_read_error(status.as_u16(), content_type.as_deref(), err)
-            })?;
+            let text =
+                read_http_body_text(body, timeouts.request_timeout, "Codex response body timed out")
+                    .await
+                    .map_err(|err| {
+                        Self::non_sse_body_read_error(status, content_type.as_deref(), err)
+                    })?;
             emit_provider_trace(provider_trace.as_ref(), "codex", &text);
             if Self::looks_like_sse_payload(&text) {
                 let mut state = shared::ResponsesStreamState::default();
@@ -1627,7 +1653,7 @@ impl Provider for CodexProvider {
         if stream_events.is_some() && !is_sse {
             tracing::debug!(
                 target: "lash_core::llm::codex_oauth",
-                status = status.as_u16(),
+                status,
                 content_type = content_type.as_deref().unwrap_or("<missing>"),
                 "Codex streaming response did not advertise SSE; parsing as stream because stream=true was requested"
             );
@@ -1636,7 +1662,7 @@ impl Provider for CodexProvider {
         let mut state = shared::ResponsesStreamState::default();
         let expose_thinking = self.options.expose_thinking;
         drive_sse_response(
-            LlmHttpBody::from_reqwest_response(resp),
+            body,
             timeouts.chunk_timeout,
             "Codex stream chunk timed out",
             |raw| {
@@ -1676,7 +1702,7 @@ impl Provider for CodexProvider {
         {
             return Err(LlmTransportError::new(format!(
                 "Codex stream ended without SSE events (HTTP {}{})",
-                status.as_u16(),
+                status,
                 content_type
                     .as_deref()
                     .map(|ct| format!(", content-type {ct}"))
@@ -1739,7 +1765,7 @@ impl ProviderFactory for CodexProviderFactory {
             websocket_sessions: CodexWebsocketSessionCache::default(),
             responses_url: CodexProvider::CODEX_RESPONSES_URL.to_string(),
             websocket_url: CodexProvider::CODEX_RESPONSES_WS_URL.to_string(),
-            client: build_http_client(),
+            http_transport: DEFAULT_HTTP_TRANSPORT.clone(),
         }
         .into_components())
     }

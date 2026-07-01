@@ -14,7 +14,6 @@ fn model_selection_requires_model_and_variant_together() {
     t.compile_fail("tests/ui/taxonomy_types_are_not_root.rs");
     t.compile_fail("tests/ui/process_start_requires_scope.rs");
     t.compile_fail("tests/ui/children_start_turn_is_not_public.rs");
-    t.pass("tests/ui/session_config_admin_update_session_config_returns_result.rs");
     t.pass("tests/ui/facade_boundary_types_are_public.rs");
     t.pass("tests/ui/prompt_types_are_public.rs");
     t.pass("tests/ui/remote_protocol_types_are_public.rs");

@@ -6,8 +6,6 @@ use lash_core::{LlmTransportError, ProviderFailureKind};
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_CHUNK_TIMEOUT_MS: u64 = 120_000;
 
-pub type RequestBodySnapshot = bytes::Bytes;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LlmTimeouts {
     pub request_timeout: Option<Duration>,
@@ -27,14 +25,6 @@ pub fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .build()
         .expect("failed to build reqwest client for llm transport")
-}
-
-pub fn request_body_snapshot(body: String) -> RequestBodySnapshot {
-    bytes::Bytes::from(body)
-}
-
-pub fn request_body_snapshot_bytes(body: Vec<u8>) -> RequestBodySnapshot {
-    bytes::Bytes::from(body)
 }
 
 pub fn header_pairs(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
@@ -84,56 +74,6 @@ where
         })?,
         None => future.await,
     }
-}
-
-pub async fn send_request(
-    request: reqwest::RequestBuilder,
-    request_body: Option<RequestBodySnapshot>,
-    timeout: Option<Duration>,
-    timeout_message: &str,
-) -> Result<reqwest::Response, LlmTransportError> {
-    // Compatibility-only helper for provider paths that have not yet migrated
-    // to `LlmHttpTransport`. New provider execution should build
-    // `LlmHttpRequest` and use the production transport seam instead.
-    run_with_timeout(
-        async move {
-            request.send().await.map_err(|e| {
-                let error = LlmTransportError::new(format!("HTTP request failed: {e}"))
-                    .with_kind(ProviderFailureKind::Transport)
-                    .retryable(reqwest_error_is_retryable(&e));
-                if let Some(request_body) = request_body {
-                    error.with_request_body(String::from_utf8_lossy(&request_body).into_owned())
-                } else {
-                    error
-                }
-            })
-        },
-        timeout,
-        timeout_message,
-    )
-    .await
-}
-
-pub async fn read_response_text(
-    response: reqwest::Response,
-    timeout: Option<Duration>,
-    timeout_message: &str,
-) -> Result<String, LlmTransportError> {
-    // Compatibility-only helper for provider paths that still receive a
-    // concrete reqwest response. New provider parsing should consume
-    // `LlmHttpBody` via `read_http_body_text`.
-    run_with_timeout(
-        async move {
-            response.text().await.map_err(|e| {
-                LlmTransportError::new(format!("HTTP response read failed: {e}"))
-                    .with_kind(ProviderFailureKind::Transport)
-                    .retryable(reqwest_error_is_retryable(&e))
-            })
-        },
-        timeout,
-        timeout_message,
-    )
-    .await
 }
 
 #[cfg(test)]

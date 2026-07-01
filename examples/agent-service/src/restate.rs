@@ -337,8 +337,8 @@ mod restate_tests {
     use crate::state::AgentServiceDurability;
     use lash::PluginBinding;
     use lash::RlmCore;
-    use lash_core::LlmOutputPart;
-    use lash_core::llm::types::LlmResponse;
+    use lash::direct::LlmOutputPart;
+    use lash::direct::LlmResponse;
     use lash_restate::LashProcessWorkflow;
 
     const STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
@@ -489,7 +489,7 @@ mod restate_tests {
 
     struct LiveRestateTestHarness {
         state: AppStateData,
-        process_worker: lash_core::DurableProcessWorker,
+        process_worker: lash::durability::DurableProcessWorker,
         process_deployment: lash_restate::RestateProcessDeployment,
     }
 
@@ -504,8 +504,8 @@ mod restate_tests {
             lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .await
                 .expect("open process registry"),
-        ) as Arc<dyn lash_core::ProcessRegistry>;
-        let provider = lash_core::testing::TestProvider::builder()
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let provider = lash::testing::TestProvider::builder()
             .kind("mock-provider")
             .complete(|_request| async {
                 let text = r#"<lashlang>
@@ -573,7 +573,7 @@ finish "done via Restate E2E"
         let demo_factory = DemoPlugin::factory(&DemoPluginConfig {
             db: Arc::clone(&app_db),
         });
-        let process_worker = lash_core::DurableProcessWorker::new(
+        let process_worker = lash::durability::DurableProcessWorker::new(
             core.durable_process_worker_config_with_plugins([demo_factory])
                 .expect("process worker config"),
         );

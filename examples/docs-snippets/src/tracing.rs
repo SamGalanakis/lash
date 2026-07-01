@@ -106,9 +106,8 @@ async fn otel_trace_core() -> anyhow::Result<()> {
 
     use lash::{
         LashCore,
-        tracing::{TraceLevel, TraceSink},
+        tracing::{OtelTraceSink, TraceLevel, TraceSink},
     };
-    use lash_core::OtelTraceSink;
 
     // Exporter/provider setup stays with the host; this reads the
     // process-global OpenTelemetry tracer provider.

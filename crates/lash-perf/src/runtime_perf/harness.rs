@@ -1,14 +1,14 @@
 use std::{fmt::Write as _, path::PathBuf, sync::Arc};
 
 use lash::{
-    LashCore,
+    LashCore, TurnOutcome,
     messages::MessageRole,
     plugins::{
-        PluginError, PluginExtensionContribution, PluginFactory, PluginRegistrar,
+        PluginError, PluginExtensionContribution, PluginFactory, PluginMessage, PluginRegistrar,
         PluginSessionContext, PluginSpec, SessionPlugin, StaticPluginFactory,
     },
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
-    runtime::{PluginMessage, SessionSnapshot, TurnOutcome},
+    runtime::SessionSnapshot,
 };
 use lash_core::SessionEventRecord;
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -288,7 +288,7 @@ pub(crate) fn validate_runtime_perf_turn(
     if scenario.execution_mode().is_rlm()
         && matches!(
             turn.outcome,
-            TurnOutcome::Finished(lash::runtime::TurnFinish::AssistantMessage { .. })
+            TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. })
         )
     {
         anyhow::bail!(
@@ -299,7 +299,7 @@ pub(crate) fn validate_runtime_perf_turn(
         );
     }
     match &turn.outcome {
-        TurnOutcome::Finished(lash::runtime::TurnFinish::AssistantMessage { text }) => {
+        TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { text }) => {
             let valid = if matches!(scenario, RuntimePerfScenario::OpenAiCompatStream) {
                 text.contains(expected) || turn.assistant_output.safe_text.contains(expected)
             } else {
@@ -315,7 +315,7 @@ pub(crate) fn validate_runtime_perf_turn(
                 text
             );
         }
-        TurnOutcome::Finished(lash::runtime::TurnFinish::FinalValue { value }) => {
+        TurnOutcome::Finished(lash::TurnFinish::FinalValue { value }) => {
             if value.as_str() == Some(expected) {
                 return Ok(());
             }
@@ -326,7 +326,7 @@ pub(crate) fn validate_runtime_perf_turn(
                 value
             );
         }
-        TurnOutcome::Finished(lash::runtime::TurnFinish::ToolValue { tool_name, value }) => {
+        TurnOutcome::Finished(lash::TurnFinish::ToolValue { tool_name, value }) => {
             anyhow::bail!(
                 "runtime perf scenario {} turn {} finished with tool value from {}: {}",
                 scenario.name(),

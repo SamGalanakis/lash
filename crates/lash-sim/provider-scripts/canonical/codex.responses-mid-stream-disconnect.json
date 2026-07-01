@@ -1,0 +1,46 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "codex.responses-mid-stream-disconnect",
+  "provider_kind": "codex",
+  "endpoint": {
+    "method": "POST",
+    "path": "/backend-api/codex/responses"
+  },
+  "request_match": {
+    "body": {
+      "model": { "equals": "gpt-5.4-codex" },
+      "stream": { "equals": true },
+      "store": { "equals": false }
+    },
+    "headers": {
+      "authorization": { "present": true },
+      "content-type": { "contains": "application/json" }
+    }
+  },
+  "timeline": [
+    {
+      "at": 10,
+      "event": "response_start",
+      "status": 200,
+      "headers": [
+        { "name": "content-type", "value": "text/event-stream; charset=utf-8" },
+        { "name": "x-request-id", "value": "req-codex-disconnect" }
+      ]
+    },
+    {
+      "at": 20,
+      "event": "sse",
+      "data": "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"phase\":\"final_answer\"}}"
+    },
+    {
+      "at": 21,
+      "event": "sse",
+      "data": "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"msg_1\",\"delta\":\"Codex partial\"}"
+    },
+    { "at": 30, "event": "disconnect" }
+  ],
+  "expected_provider": {
+    "stream_failure": true,
+    "retryable_after_classification": true
+  }
+}

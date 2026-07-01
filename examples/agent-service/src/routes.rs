@@ -712,8 +712,8 @@ mod tests {
 
     use axum::body::to_bytes;
     use lash::RlmCore;
-    use lash_core::LlmOutputPart;
-    use lash_core::llm::types::LlmResponse;
+    use lash::direct::LlmOutputPart;
+    use lash::direct::LlmResponse;
 
     use super::*;
     use crate::db::AppDb;
@@ -723,7 +723,7 @@ mod tests {
     async fn message_route_streams_session_observations_with_mock_provider() {
         let temp = tempfile::tempdir().expect("tempdir");
         let data_dir = temp.path();
-        let provider = lash_core::testing::TestProvider::builder()
+        let provider = lash::testing::TestProvider::builder()
             .kind("agent-service-route-mock")
             .complete(|_request| async {
                 let text = r#"<lashlang>

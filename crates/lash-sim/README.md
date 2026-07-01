@@ -3,10 +3,8 @@
 Deterministic Simulation Harness for Lash: an unpublished workspace crate that
 drives real Lash runtime, protocol, provider, tool, process, and persistence
 contracts inside a deterministic simulated world. The architecture is recorded
-in `docs/adr/0009-deterministic-simulation-harness.md`; the target end-state
-and phase plan live in `docs/deterministic-simulation-harness-plan.md`. This
-README is the current-status ledger for what is actually implemented and
-gated.
+in `docs/adr/0009-deterministic-simulation-harness.md`. This README is the
+current-status ledger for what is actually implemented and gated.
 
 ## Run modes
 

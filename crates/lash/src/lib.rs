@@ -45,11 +45,12 @@ pub use crate::turn::{
     message_role, message_text,
 };
 pub use lash_core::{
-    AwaitEventKey, AwaitEventWaitIdentity, ExternalCompletionError, InputItem, ModelLimits,
-    ModelSpec, PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
-    PendingTurnInputCancelTarget, PendingTurnInputSuffixCancelOutcome, PluginStack, Resolution,
-    ResolveOutcome, SessionCommand, SessionCommandReceipt, SessionSpec, TurnActivity,
-    TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
+    AwaitEventKey, AwaitEventWaitIdentity, ExecutionSummary, ExternalCompletionError, InputItem,
+    ModelLimits, ModelSpec, PendingTurnInput, PendingTurnInputCancelOutcome,
+    PendingTurnInputCancelResult, PendingTurnInputCancelTarget, PendingTurnInputSuffixCancelOutcome,
+    PluginStack, Resolution, ResolveOutcome, SessionCommand, SessionCommandReceipt,
+    SessionCreateRequest, SessionSpec, SessionStartPoint, TurnActivity, TurnActivityId,
+    TurnActivitySink, TurnCause, TurnEvent, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 /// Cooperative cancellation handle accepted by
 /// [`TurnBuilder::cancel`](crate::TurnBuilder::cancel); re-exported so
@@ -61,14 +62,15 @@ pub use tokio_util::sync::CancellationToken;
 /// modules.
 pub mod prelude {
     pub use crate::{
-        AdvancedToolAdmin, CoreTriggerAdmin, EmbedError, EnqueueTurnBuilder, InputItem, LashCore,
-        LashCoreBuilder, LashSession, ModelLimits, ModelSpec, ObservableSession,
-        PendingTurnInputCancelOutcome, PluginBinding, PluginOperations, PluginStack,
-        PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder, SessionCommand,
-        SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch, SessionDeleteReport,
-        SessionSpec, SessionTriggerAdmin, StandardCore, StandardCoreBuilder, ToolAdmin,
-        TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink, TurnBuilder, TurnEvent,
-        TurnInput, TurnOutput, TurnResult, TurnStream, message_role, message_text,
+        AdvancedToolAdmin, CoreTriggerAdmin, EmbedError, EnqueueTurnBuilder, ExecutionSummary,
+        InputItem, LashCore, LashCoreBuilder, LashSession, ModelLimits, ModelSpec,
+        ObservableSession, PendingTurnInputCancelOutcome, PluginBinding, PluginOperations,
+        PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder, SessionCommand,
+        SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch, SessionCreateRequest,
+        SessionDeleteReport, SessionSpec, SessionStartPoint, SessionTriggerAdmin, StandardCore,
+        StandardCoreBuilder, ToolAdmin, TurnActivity, TurnActivityFanout, TurnActivityId,
+        TurnActivitySink, TurnBuilder, TurnCause, TurnEvent, TurnFinish, TurnInput, TurnOutcome,
+        TurnOutput, TurnResult, TurnStop, TurnStream, message_role, message_text,
     };
     #[cfg(feature = "rlm")]
     pub use crate::{RlmCore, RlmCoreBuilder};
@@ -84,9 +86,10 @@ pub mod observe {
         SessionObservationStream, SessionObservationStreamItem,
     };
     pub use lash_core::{
-        LiveReplayGap, LiveReplayGapReason, SessionCursor, SessionObservation,
-        SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
-        SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision,
+        InMemoryLiveReplayStore, InMemoryLiveReplayStoreConfig, LiveReplayGap, LiveReplayGapReason,
+        LiveReplayStore, SessionCursor, SessionObservation, SessionObservationEvent,
+        SessionObservationEventPayload, SessionObservationSubscription, SessionProcessEventKind,
+        SessionQueueEventKind, SessionResume, SessionRevision,
     };
 }
 
@@ -96,8 +99,8 @@ pub mod observe {
 pub mod triggers {
     pub use lash_core::{
         LashSchema, TriggerEmitReport, TriggerEvent, TriggerEventType, TriggerOccurrenceRequest,
-        TriggerRegistration, TriggerSubscriptionDraft, TriggerSubscriptionFilter,
-        TriggerTargetSummary, empty_trigger_source_key,
+        TriggerRegistration, TriggerStore, TriggerSubscriptionDraft, TriggerSubscriptionFilter,
+        TriggerSubscriptionRecord, TriggerTargetSummary, empty_trigger_source_key,
     };
 }
 
@@ -109,7 +112,9 @@ pub mod tools {
         ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
         ToolScheduling, ToolSourceHandle, ToolTriggerClient,
     };
-    pub use lash_core::{PLUGIN_TOOL_SOURCE_ID, ToolRestoreReport, ToolState, ToolStateEntry};
+    pub use lash_core::{
+        PLUGIN_TOOL_SOURCE_ID, ToolId, ToolRestoreReport, ToolState, ToolStateEntry,
+    };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
         CataloguePreviewEntry, CataloguePreviewOptions, DEFAULT_CATALOGUE_PREVIEW_CALL_NAME_LIMIT,
@@ -139,7 +144,6 @@ pub mod direct {
     pub use lash_core::{
         DirectCompletion, DirectJsonSchema, DirectLlmClient, DirectLlmCompletion, DirectLlmError,
         DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole, LlmResponse,
-        TokenUsage,
     };
 }
 
@@ -147,12 +151,10 @@ pub mod persistence {
     pub use lash_core::FileAttachmentStore;
     pub use lash_core::runtime::{
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
-        PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
-        PendingTurnInputCancelTarget, PendingTurnInputClaimDiagnostics, PendingTurnInputDraft,
-        PendingTurnInputSuffixCancelOutcome, QueuedWorkBatch, QueuedWorkBatchDraft,
-        QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkClass, QueuedWorkCompletion,
-        QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState, SessionStoreCreateRequest,
-        SessionStoreFactory, SlotPolicy,
+        PendingTurnInputClaimDiagnostics, PendingTurnInputDraft, QueuedWorkBatch,
+        QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkClass,
+        QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState,
+        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
     };
     pub use lash_core::store::queued_work;
     pub use lash_core::store::{
@@ -169,15 +171,15 @@ pub mod persistence {
         PersistedTurnState, ProtocolEvent, RuntimePersistence, SessionEventRecord,
         SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
         SessionExecutionLeaseFence, SessionGraph, SessionMeta, SessionNodeRecord, SessionReadScope,
-        SessionReadView, SessionRelation, StoreError, TokenLedgerEntry, VacuumReport,
+        SessionReadView, SessionRelation, StoreError, VacuumReport,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{InMemoryLashlangArtifactStore, LashlangArtifactStore};
 }
 
 pub mod plugins {
-    pub use crate::plugin_binding::PluginBinding;
     pub use lash_core::PluginDirective;
+    pub use lash_core::PluginOptions;
     pub use lash_core::plugin::{
         AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantResponseHookContext,
         AssistantResponseTransform, AssistantStreamHook, AssistantStreamHookContext,
@@ -198,7 +200,7 @@ pub mod plugins {
 }
 
 pub mod messages {
-    pub use lash_core::MessageRole;
+    pub use lash_core::{Message, MessageRole};
 }
 
 pub mod remote {
@@ -261,17 +263,17 @@ pub mod process {
         ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
         ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary,
         ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseCompletion,
-        ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessRecord,
-        ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessService,
-        ProcessSessionDeleteReport, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
-        ProcessStatusFilter, ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey,
-        ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver,
-        ProcessWorkSnapshot, SessionScope, SessionScopeId,
+        ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope,
+        ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
+        ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport, ProcessStartOptions,
+        ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessWake,
+        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
+        ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
-        LASHLANG_ENGINE_KIND, LASHLANG_TOOL_BINDING_KEY, LashlangProcessInput,
-        lashlang_process_event_types, lashlang_process_signal_event_types,
+        LASHLANG_ENGINE_KIND, LashlangProcessInput, lashlang_process_event_types,
+        lashlang_process_signal_event_types,
     };
 }
 
@@ -296,9 +298,8 @@ pub mod runtime {
         RuntimeTurnPhaseProbe, ScopedEffectController, TurnContext,
     };
     pub use lash_core::{
-        PersistentRuntimeServices, PluginMessage, ProtocolSessionExtensionHandle,
-        ProtocolTurnOptions, SessionHandle, SessionPolicy, SessionSnapshot, TurnCause, TurnFinish,
-        TurnOutcome, TurnStop, render_turn_causes_prompt,
+        PersistentRuntimeServices, ProtocolSessionExtensionHandle, ProtocolTurnOptions,
+        SessionHandle, SessionPolicy, SessionSnapshot, render_turn_causes_prompt,
     };
 }
 
@@ -324,6 +325,8 @@ pub mod tracing {
         TraceLashlangGraphEdge, TraceLashlangGraphNode, TraceLashlangGraphStore, TraceLashlangMap,
         TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangNodeStatus, TraceLashlangStatus,
     };
+    #[cfg(feature = "otel-trace")]
+    pub use lash_core::{OtelTraceOptions, OtelTraceSink};
     pub use lash_trace::{StderrTraceSink, TeeTraceSink, TraceContext, TraceLevel, TraceSink};
 }
 

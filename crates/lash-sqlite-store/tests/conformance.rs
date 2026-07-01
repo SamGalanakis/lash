@@ -580,179 +580,67 @@ async fn sqlite_effect_controller_rejects_envelope_hash_conflict() {
 }
 
 #[tokio::test]
-async fn sqlite_effect_controller_renews_long_running_effect_lease() {
+async fn sqlite_effect_controller_satisfies_lease_fencing_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
-    let path = fresh_db_path(&dirs, "effect-renewal.db");
-    let first_controller = SqliteRuntimeEffectController::open_with_options(
-        &path,
-        ExecutionScope::turn("session", "turn"),
-        SqliteEffectReplayOptions {
-            lease_ttl: std::time::Duration::from_millis(20),
+    let path = fresh_db_path(&dirs, "effect-lease-fencing.db");
+    let make_path = path.clone();
+    let steal_path = path.clone();
+    let expire_path = path.clone();
+    lash_core::testing::conformance::effect_controller_lease_fencing(
+        lash_core::testing::conformance::EffectLeaseFencingBackend {
+            make_controller: Box::new(move |ttl| {
+                let path = make_path.clone();
+                Box::pin(async move {
+                    let controller = SqliteRuntimeEffectController::open_with_options(
+                        &path,
+                        ExecutionScope::turn("session", "turn"),
+                        SqliteEffectReplayOptions { lease_ttl: ttl },
+                    )
+                    .await
+                    .expect("controller");
+                    let for_replay = controller.clone();
+                    lash_core::testing::conformance::LeaseFencingController {
+                        controller: Arc::new(controller),
+                        start_replay: Box::new(move || for_replay.start_replay()),
+                    }
+                })
+            }),
+            steal_lease: Box::new(move |replay_key| {
+                let path = steal_path.clone();
+                Box::pin(async move {
+                    let stolen_until = current_epoch_ms_for_test().saturating_add(10_000);
+                    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
+                    let changed = conn
+                        .execute(
+                            "UPDATE runtime_effect_replay
+                             SET lease_owner_id = 'stolen-owner',
+                                 lease_token = 'stolen-token',
+                                 lease_expires_at_ms = ?1
+                             WHERE replay_key = ?2",
+                            rusqlite::params![stolen_until as i64, replay_key],
+                        )
+                        .expect("steal lease row");
+                    assert_eq!(changed, 1);
+                })
+            }),
+            expire_lease: Box::new(move |replay_key| {
+                let path = expire_path.clone();
+                Box::pin(async move {
+                    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
+                    let changed = conn
+                        .execute(
+                            "UPDATE runtime_effect_replay
+                             SET lease_expires_at_ms = 0
+                             WHERE replay_key = ?1",
+                            rusqlite::params![replay_key],
+                        )
+                        .expect("expire lease row");
+                    assert_eq!(changed, 1);
+                })
+            }),
         },
-    )
-    .await
-    .expect("first controller");
-    let second_controller = SqliteRuntimeEffectController::open_with_options(
-        &path,
-        ExecutionScope::turn("session", "turn"),
-        SqliteEffectReplayOptions {
-            lease_ttl: std::time::Duration::from_millis(20),
-        },
-    )
-    .await
-    .expect("second controller");
-    let envelope = exec_envelope("renewed-lease", "work");
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let release = Arc::new(tokio::sync::Notify::new());
-    let first_envelope = envelope.clone();
-    let first_release = Arc::clone(&release);
-    let first = tokio::spawn(async move {
-        first_controller
-            .execute_effect(
-                first_envelope,
-                RuntimeEffectLocalExecutor::testing(move |_| async move {
-                    let _ = entered_tx.send(());
-                    first_release.notified().await;
-                    Ok(exec_outcome("stale-owner"))
-                }),
-            )
-            .await
-    });
-    entered_rx.await.expect("first executor entered");
-
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-    let competing = tokio::time::timeout(
-        std::time::Duration::from_millis(60),
-        second_controller.execute_effect(envelope.clone(), returning_executor("stolen-owner")),
     )
     .await;
-    assert!(
-        competing.is_err(),
-        "renewed in-progress lease should keep a competing claimant busy"
-    );
-
-    release.notify_waiters();
-    let first_outcome = first
-        .await
-        .expect("first task joins")
-        .expect("renewed owner finalizes");
-    assert_exec_marker(first_outcome, "stale-owner");
-
-    second_controller.start_replay();
-    let replayed = second_controller
-        .execute_effect(envelope, failing_executor())
-        .await
-        .expect("replayed renewed outcome");
-    assert_exec_marker(replayed, "stale-owner");
-}
-
-#[tokio::test]
-async fn sqlite_effect_controller_reports_lease_lost_when_row_is_stolen() {
-    let dirs = Arc::new(Mutex::new(Vec::new()));
-    let path = fresh_db_path(&dirs, "effect-stolen.db");
-    let controller = SqliteRuntimeEffectController::open_with_options(
-        &path,
-        ExecutionScope::turn("session", "turn"),
-        SqliteEffectReplayOptions {
-            lease_ttl: std::time::Duration::from_millis(30),
-        },
-    )
-    .await
-    .expect("controller");
-    let envelope = exec_envelope("stolen-lease", "work");
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let never_release = Arc::new(tokio::sync::Notify::new());
-    let first_release = Arc::clone(&never_release);
-    let first_controller = controller.clone();
-    let first_envelope = envelope.clone();
-    let first = tokio::spawn(async move {
-        first_controller
-            .execute_effect(
-                first_envelope,
-                RuntimeEffectLocalExecutor::testing(move |_| async move {
-                    let _ = entered_tx.send(());
-                    first_release.notified().await;
-                    Ok(exec_outcome("should-not-finalize"))
-                }),
-            )
-            .await
-    });
-    entered_rx.await.expect("executor entered");
-
-    let stolen_until = current_epoch_ms_for_test().saturating_add(10_000);
-    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
-    let changed = conn
-        .execute(
-            "UPDATE runtime_effect_replay
-             SET lease_owner_id = 'stolen-owner',
-                 lease_token = 'stolen-token',
-                 lease_expires_at_ms = ?1
-             WHERE replay_key = ?2",
-            rusqlite::params![stolen_until as i64, "stolen-lease"],
-        )
-        .expect("steal lease row");
-    assert_eq!(changed, 1);
-    drop(conn);
-
-    let err = tokio::time::timeout(std::time::Duration::from_millis(500), first)
-        .await
-        .expect("renewal should notice stolen lease")
-        .expect("task joins")
-        .expect_err("stolen lease must fail original owner");
-    assert_eq!(err.code, "sqlite_effect_replay_lease_lost");
-}
-
-#[tokio::test]
-async fn sqlite_effect_controller_rejects_finalize_after_lease_expiry() {
-    let dirs = Arc::new(Mutex::new(Vec::new()));
-    let path = fresh_db_path(&dirs, "effect-expired-finalize.db");
-    let controller = SqliteRuntimeEffectController::open_with_options(
-        &path,
-        ExecutionScope::turn("session", "turn"),
-        SqliteEffectReplayOptions {
-            lease_ttl: std::time::Duration::from_secs(30),
-        },
-    )
-    .await
-    .expect("controller");
-    let envelope = exec_envelope("expired-before-finalize", "work");
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let release = Arc::new(tokio::sync::Notify::new());
-    let first_release = Arc::clone(&release);
-    let first_controller = controller.clone();
-    let first_envelope = envelope.clone();
-    let first = tokio::spawn(async move {
-        first_controller
-            .execute_effect(
-                first_envelope,
-                RuntimeEffectLocalExecutor::testing(move |_| async move {
-                    let _ = entered_tx.send(());
-                    first_release.notified().await;
-                    Ok(exec_outcome("expired-owner"))
-                }),
-            )
-            .await
-    });
-    entered_rx.await.expect("executor entered");
-
-    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
-    let changed = conn
-        .execute(
-            "UPDATE runtime_effect_replay
-             SET lease_expires_at_ms = 0
-             WHERE replay_key = ?1",
-            rusqlite::params!["expired-before-finalize"],
-        )
-        .expect("expire lease row");
-    assert_eq!(changed, 1);
-    drop(conn);
-
-    release.notify_waiters();
-    let err = first
-        .await
-        .expect("task joins")
-        .expect_err("expired lease must not finalize");
-    assert_eq!(err.code, "sqlite_effect_replay_lease_lost");
 }
 
 #[tokio::test]

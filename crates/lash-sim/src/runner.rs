@@ -22,7 +22,7 @@ use lash_protocol_rlm::scenario_contracts::RLM_PROTOCOL_SCENARIO_CONTRACTS;
 use lash_protocol_standard::scenario_contracts::STANDARD_PROTOCOL_SCENARIO_CONTRACTS;
 use lash_provider_anthropic::AnthropicProvider;
 use lash_provider_google::GoogleOAuthProvider;
-use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
+use lash_provider_openai::{CodexProvider, OpenAiCompatibleProvider, OpenAiProvider};
 use lash_rlm_types::{RlmCreateExtras, RlmProtocolEvent, RlmTermination};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -33,10 +33,12 @@ use lash_lashlang_runtime::ToolDefinitionLashlangExt as _;
 
 use crate::artifacts::*;
 use crate::canonical_scripts::{
-    ANTHROPIC_MESSAGES_TEXT, CANONICAL_SCRIPTS, GOOGLE_GENERATE_RATE_LIMIT, GOOGLE_GENERATE_TEXT,
-    GOOGLE_STREAM_GENERATE_TEXT, OPENAI_COMPAT_DISCONNECT, OPENAI_COMPAT_RATE_LIMIT,
-    OPENAI_COMPAT_RESPONSE_START_TIMEOUT, OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT,
-    OPENAI_COMPAT_TOOL_CALL, OPENAI_COMPAT_VALIDATION, OPENAI_RESPONSES_TEXT,
+    ANTHROPIC_MESSAGES_TEXT, CANONICAL_SCRIPTS, CODEX_RESPONSES_DISCONNECT,
+    CODEX_RESPONSES_RATE_LIMIT, CODEX_RESPONSES_TEXT, CODEX_RESPONSES_TOOL_CALL,
+    GOOGLE_GENERATE_RATE_LIMIT, GOOGLE_GENERATE_TEXT, GOOGLE_STREAM_GENERATE_TEXT,
+    OPENAI_COMPAT_DISCONNECT, OPENAI_COMPAT_RATE_LIMIT, OPENAI_COMPAT_RESPONSE_START_TIMEOUT,
+    OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT, OPENAI_COMPAT_TOOL_CALL, OPENAI_COMPAT_VALIDATION,
+    OPENAI_RESPONSES_TEXT,
 };
 use crate::generator::{
     GENERATOR_VERSION, GeneratedWorkload, WorkloadProfileError, generate_workload,
@@ -2825,6 +2827,10 @@ pub async fn run_fixed_script_profile(
     let proof_runs = vec![
         prove_openai_compatible_tool_stream().await?,
         prove_openai_responses_text_stream().await?,
+        prove_codex_responses_text_stream().await?,
+        prove_codex_responses_tool_call_stream().await?,
+        prove_codex_responses_rate_limit().await?,
+        prove_codex_responses_disconnect().await?,
         prove_anthropic_messages_text_stream().await?,
         prove_openai_compatible_rate_limit().await?,
         prove_openai_compatible_validation().await?,
@@ -8147,17 +8153,17 @@ impl GeneratedRuntimeWorld {
             .await
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
         let (cancelled, cancel_outcome) = match &outcome {
-            lash::persistence::PendingTurnInputCancelOutcome::Cancelled(_) => (true, "cancelled"),
-            lash::persistence::PendingTurnInputCancelOutcome::AlreadyClaimed { .. } => {
+            lash::PendingTurnInputCancelOutcome::Cancelled(_) => (true, "cancelled"),
+            lash::PendingTurnInputCancelOutcome::AlreadyClaimed { .. } => {
                 (false, "already_claimed")
             }
-            lash::persistence::PendingTurnInputCancelOutcome::AlreadyCompleted(_) => {
+            lash::PendingTurnInputCancelOutcome::AlreadyCompleted(_) => {
                 (false, "already_completed")
             }
-            lash::persistence::PendingTurnInputCancelOutcome::AlreadyCancelled(_) => {
+            lash::PendingTurnInputCancelOutcome::AlreadyCancelled(_) => {
                 (false, "already_cancelled")
             }
-            lash::persistence::PendingTurnInputCancelOutcome::NotFound => (false, "not_found"),
+            lash::PendingTurnInputCancelOutcome::NotFound => (false, "not_found"),
         };
         Ok(json!({
             "session": event.actor_alias,
@@ -10080,6 +10086,165 @@ async fn prove_openai_responses_text_stream() -> Result<ProofRun, FixedScriptRun
     )
 }
 
+fn codex_provider(
+    script: &str,
+) -> Result<(CodexProvider, Arc<ScriptedLlmHttpTransport>), FixedScriptRunnerError> {
+    let transport = Arc::new(ScriptedLlmHttpTransport::from_json_str(script)?);
+    // Pin the HTTP/SSE path so the injected scripted transport serves the
+    // request; Codex's default Auto path would try the WebSocket transport.
+    let provider = CodexProvider::new("access-token", "refresh-token", 0)
+        .force_sse_transport()
+        .with_http_transport(provider_transport(&transport));
+    Ok((provider, transport))
+}
+
+fn codex_request(tools: bool, stream_events: Option<LlmEventSender>) -> LlmRequest {
+    let tool_specs = if tools {
+        vec![LlmToolSpec {
+            name: "lookup".to_string(),
+            description: "Lookup".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "q": { "type": "string" } }
+            })
+            .into(),
+            output_schema: json!({}).into(),
+        }]
+    } else {
+        Vec::new()
+    };
+    LlmRequest {
+        model: "gpt-5.4-codex".to_string(),
+        messages: vec![LlmMessage::text(LlmRole::User, "lookup x")],
+        attachments: Vec::new(),
+        tools: Arc::new(tool_specs),
+        tool_choice: LlmToolChoice::Auto,
+        model_variant: None,
+        generation: lash_core::GenerationOptions::default(),
+        scope: lash_core::LlmRequestScope::new(
+            "session-1",
+            "session-1:frame:sim",
+            "session-1:request:sim",
+        ),
+        output_spec: None,
+        stream_events: Some(stream_events.unwrap_or_else(|| LlmEventSender::new(|_event| {}))),
+        provider_trace: None,
+    }
+}
+
+async fn prove_codex_responses_text_stream() -> Result<ProofRun, FixedScriptRunnerError> {
+    let (mut provider, transport) = codex_provider(CODEX_RESPONSES_TEXT)?;
+    let response = provider.complete(codex_request(false, None)).await?;
+    require(
+        response.terminal_reason == LlmTerminalReason::Stop,
+        "Codex Responses stream terminal reason was not stop",
+    )?;
+    require(
+        response.full_text == "Codex direct answer.",
+        "Codex Responses stream did not produce expected text",
+    )?;
+    proof(
+        "codex.responses-text-stream",
+        "codex",
+        CODEX_RESPONSES_TEXT,
+        transport_exchanges(transport.as_ref())?,
+        success_terminal(&response),
+        json!({
+            "classification": "success",
+            "terminal_reason": response.terminal_reason.code(),
+            "full_text": response.full_text,
+            "usage": response.usage,
+        }),
+    )
+}
+
+async fn prove_codex_responses_tool_call_stream() -> Result<ProofRun, FixedScriptRunnerError> {
+    let (mut provider, transport) = codex_provider(CODEX_RESPONSES_TOOL_CALL)?;
+    let response = provider.complete(codex_request(true, None)).await?;
+    require(
+        response.terminal_reason == LlmTerminalReason::ToolUse,
+        "Codex Responses tool-call stream terminal reason was not tool_use",
+    )?;
+    require(
+        response.parts.iter().any(|part| {
+            matches!(
+                part,
+                LlmOutputPart::ToolCall {
+                    tool_name,
+                    input_json,
+                    ..
+                } if tool_name == "lookup" && input_json == "{\"q\":\"x\"}"
+            )
+        }),
+        "Codex Responses tool-call stream did not produce normalized lookup tool call",
+    )?;
+    proof(
+        "codex.responses-tool-call-stream",
+        "codex",
+        CODEX_RESPONSES_TOOL_CALL,
+        transport_exchanges(transport.as_ref())?,
+        success_terminal(&response),
+        json!({
+            "classification": "success",
+            "terminal_reason": response.terminal_reason.code(),
+        }),
+    )
+}
+
+async fn prove_codex_responses_rate_limit() -> Result<ProofRun, FixedScriptRunnerError> {
+    let (mut provider, transport) = codex_provider(CODEX_RESPONSES_RATE_LIMIT)?;
+    let err = provider
+        .complete(codex_request(false, None))
+        .await
+        .expect_err("codex rate-limit script should fail");
+    require(
+        err.status == Some(429),
+        "Codex rate limit script did not preserve 429 status",
+    )?;
+    let classified = DefaultProviderFailureClassifier.classify(err.clone());
+    proof(
+        "codex.responses-rate-limit-429",
+        "codex",
+        CODEX_RESPONSES_RATE_LIMIT,
+        transport_exchanges(transport.as_ref())?,
+        error_terminal(&err),
+        json!({
+            "status": err.status,
+            "headers": redacted_headers(&err.headers),
+            "raw_body_bytes": err.raw.as_ref().map(|body| body.len()),
+            "retry_after_ms": err.retry_after.map(|duration| duration.as_millis() as u64),
+            "request_body_snapshot": err.request_body.is_some(),
+            "provider_error_retryable": err.retryable,
+            "classification": failure_classification(&classified),
+        }),
+    )
+}
+
+async fn prove_codex_responses_disconnect() -> Result<ProofRun, FixedScriptRunnerError> {
+    let (mut provider, transport) = codex_provider(CODEX_RESPONSES_DISCONNECT)?;
+    let err = provider
+        .complete(codex_request(false, None))
+        .await
+        .expect_err("codex disconnect script should fail");
+    require(
+        err.kind == ProviderFailureKind::Stream && err.retryable,
+        "Codex disconnect script did not surface retryable stream failure",
+    )?;
+    let classified = DefaultProviderFailureClassifier.classify(err.clone());
+    proof(
+        "codex.responses-mid-stream-disconnect",
+        "codex",
+        CODEX_RESPONSES_DISCONNECT,
+        transport_exchanges(transport.as_ref())?,
+        error_terminal(&err),
+        json!({
+            "kind": format!("{:?}", err.kind),
+            "retryable": err.retryable,
+            "classification": failure_classification(&classified),
+        }),
+    )
+}
+
 async fn prove_anthropic_messages_text_stream() -> Result<ProofRun, FixedScriptRunnerError> {
     let transport = Arc::new(ScriptedLlmHttpTransport::from_json_str(
         ANTHROPIC_MESSAGES_TEXT,
@@ -11018,15 +11183,24 @@ mod tests {
             manifest.timeline_at_semantics,
             FIXED_SCRIPT_TIMELINE_AT_SEMANTICS
         );
-        assert_eq!(manifest.summary.total_scripts, 11);
-        assert_eq!(manifest.summary.total_proofs, 13);
-        assert_eq!(manifest.summary.total_events, 14);
-        assert_eq!(manifest.summary.passed, 13);
+        assert_eq!(manifest.summary.total_scripts, 15);
+        assert_eq!(manifest.summary.total_proofs, 17);
+        assert_eq!(manifest.summary.total_events, 18);
+        assert_eq!(manifest.summary.passed, 17);
+        // Codex provider execution now rides the injectable LlmHttpTransport and
+        // is in the scripted matrix, so it is no longer a transport exclusion;
+        // only the OAuth device-code auth flow stays out of the LLM DST.
         assert!(
             manifest
                 .provider_transport_exclusions
                 .iter()
-                .any(|exclusion| exclusion.path.contains("codex.rs"))
+                .any(|exclusion| exclusion.path.contains("codex/oauth.rs"))
+        );
+        assert!(
+            manifest
+                .provider_transport_exclusions
+                .iter()
+                .all(|exclusion| exclusion.path != "crates/lash-provider-openai/src/codex.rs")
         );
         assert!(manifest.manifest_path.ends_with(FIXED_SCRIPT_MANIFEST));
         assert!(manifest.summary_path.ends_with(FIXED_SCRIPT_SUMMARY));
@@ -11043,6 +11217,10 @@ mod tests {
         assert!(body.contains("google.stream-generate-content-text-stream"));
         assert!(body.contains("google.generate-content-text"));
         assert!(body.contains("google.generate-content-rate-limit-429"));
+        assert!(body.contains("codex.responses-text-stream"));
+        assert!(body.contains("codex.responses-tool-call-stream"));
+        assert!(body.contains("codex.responses-rate-limit-429"));
+        assert!(body.contains("codex.responses-mid-stream-disconnect"));
 
         let summary_body =
             std::fs::read_to_string(tmp.path().join(FIXED_SCRIPT_SUMMARY)).expect("summary");
@@ -11051,11 +11229,11 @@ mod tests {
         assert_eq!(summary["profile"], FIXED_SCRIPT_PROFILE);
         assert_eq!(summary["fixed_script_manifest"], FIXED_SCRIPT_MANIFEST);
         assert_eq!(summary["counts"]["generated_seeds"], 0);
-        assert_eq!(summary["counts"]["fixed_replays"], 13);
-        assert_eq!(summary["counts"]["oracle_passes"], 13);
+        assert_eq!(summary["counts"]["fixed_replays"], 17);
+        assert_eq!(summary["counts"]["oracle_passes"], 17);
         assert_eq!(
             summary["provider_set"],
-            json!(["anthropic", "google_oauth", "openai", "openai-compatible"])
+            json!(["anthropic", "codex", "google_oauth", "openai", "openai-compatible"])
         );
     }
 
@@ -11077,10 +11255,10 @@ mod tests {
         assert_eq!(
             manifest["summary"],
             json!({
-                "total_scripts": 11,
-                "total_proofs": 13,
-                "total_events": 14,
-                "passed": 13
+                "total_scripts": 15,
+                "total_proofs": 17,
+                "total_events": 18,
+                "passed": 17
             })
         );
         assert_eq!(
@@ -11095,6 +11273,10 @@ mod tests {
         let required = [
             "openai-compatible.chat-tool-call-split-stream",
             "openai.responses-text-stream",
+            "codex.responses-text-stream",
+            "codex.responses-tool-call-stream",
+            "codex.responses-rate-limit-429",
+            "codex.responses-mid-stream-disconnect",
             "anthropic.messages-text-stream",
             "openai-compatible.chat-rate-limit-429",
             "openai-compatible.chat-validation-error",
@@ -11252,6 +11434,13 @@ mod tests {
                 "/v1internal:streamGenerateContent"
             ])
         );
+        let codex = matrix
+            .iter()
+            .find(|row| row["provider_kind"] == "codex")
+            .expect("codex provider matrix row");
+        assert_eq!(codex["success_proofs"], 2);
+        assert_eq!(codex["error_proofs"], 2);
+        assert_eq!(codex["endpoints"], json!(["/backend-api/codex/responses"]));
     }
 
     #[tokio::test]
@@ -11780,7 +11969,13 @@ mod tests {
             report
                 .provider_transport_exclusions
                 .iter()
-                .any(|exclusion| exclusion.path.contains("codex.rs"))
+                .any(|exclusion| exclusion.path.contains("codex/oauth.rs"))
+        );
+        assert!(
+            report
+                .provider_transport_exclusions
+                .iter()
+                .all(|exclusion| exclusion.path != "crates/lash-provider-openai/src/codex.rs")
         );
         assert!(report.oracle_verdicts.iter().any(|verdict| {
             verdict.oracle_id == "sim.oracle.operational-coverage.v1"
@@ -11873,8 +12068,8 @@ mod tests {
         )];
         for relative in [
             "scripts/confidence-gate.sh",
-            "docs/deterministic-simulation-harness-plan.md",
             "docs/adr/0008-confidence-gate.md",
+            "docs/adr/0009-deterministic-simulation-harness.md",
             "CONTEXT.md",
         ] {
             corpus.push((
@@ -11915,9 +12110,7 @@ mod tests {
         let mut cursor = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             if cursor.join("scripts/confidence-gate.sh").is_file()
-                && cursor
-                    .join("docs/deterministic-simulation-harness-plan.md")
-                    .is_file()
+                && cursor.join("docs/adr/0008-confidence-gate.md").is_file()
             {
                 return cursor;
             }
