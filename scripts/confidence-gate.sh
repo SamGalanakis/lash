@@ -6,11 +6,33 @@ cd "$repo"
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
-lane="${1:-default}"
+requested_lane="${1:-default}"
+lane="$requested_lane"
+fast_shard="all"
+if [[ "$requested_lane" == fast:* ]]; then
+  lane="fast"
+  fast_shard="${requested_lane#fast:}"
+fi
 out_root="${LASH_CONFIDENCE_OUT_DIR:-$repo/target/confidence}"
-out_dir="${out_root}/${lane}"
+if [ "$lane" = "fast" ] && [ "$fast_shard" != "all" ]; then
+  if [ "$fast_shard" = "summary" ]; then
+    out_dir="${out_root}/fast"
+  else
+    out_dir="${out_root}/fast/${fast_shard}"
+  fi
+else
+  out_dir="${out_root}/${lane}"
+fi
 ci_features="${LASH_CI_FEATURES:--F lash-cli/fff-zlob -F lash-cli/bench}"
 critical_packages=(lash-core lashlang lash-protocol-rlm lash-protocol-standard)
+fast_shards=(
+  scenario-harnesses
+  fault-matrix
+  sim-unit
+  sim-generated
+  minimizer-fixtures
+  perf-guards
+)
 BROAD_SCHEDULED_DEPTH_MIN_SEEDS=4
 BROAD_SCHEDULED_DEPTH_MIN_MAX_BOUNDARIES=256
 case "$lane" in
@@ -23,16 +45,34 @@ esac
 mutation_scope="${LASH_CONFIDENCE_MUTATION_SCOPE:-$default_mutation_scope}"
 coverage_scope="${LASH_CONFIDENCE_COVERAGE_SCOPE:-run}"
 mutation_failures=0
+script_started_at="$SECONDS"
+current_step=""
+current_step_started_at=0
 
 mkdir -p "$out_dir"
 
 step() {
+  if [ -n "$current_step" ]; then
+    printf '    completed in %ss\n' "$((SECONDS - current_step_started_at))"
+  fi
+  current_step="$*"
+  current_step_started_at="$SECONDS"
   printf '\n==> %s\n' "$*"
+  printf '    started_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
+
+finish_current_step() {
+  if [ -n "$current_step" ]; then
+    printf '    completed in %ss\n' "$((SECONDS - current_step_started_at))"
+    current_step=""
+  fi
+}
+
+trap finish_current_step EXIT
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/confidence-gate.sh [fast|default|broad|full]
+Usage: scripts/confidence-gate.sh [fast|default|broad|full|fast:<shard>]
 
 Lanes:
   fast     deterministic scenario harnesses, state-machine/property checks,
@@ -58,6 +98,19 @@ Lanes:
   Set LASH_CONFIDENCE_BOOTSTRAP=1 to install pinned versions if missing.
   Missing required tools fail the lane; skipped coverage or mutation shards are
   recorded as not_run, never as passed.
+
+Fast shards:
+  fast:scenario-harnesses
+  fast:fault-matrix
+  fast:sim-unit
+  fast:sim-generated
+  fast:minimizer-fixtures
+  fast:perf-guards
+  fast:summary
+
+  `fast` runs all fast shards sequentially and then runs fast:summary. CI runs
+  these shards as independent jobs and then runs fast:summary after downloading
+  the shard artifacts.
 USAGE
 }
 
@@ -76,8 +129,8 @@ write_confidence_prerequisite_failure() {
   "prerequisite": "${prerequisite}",
   "detail": "${detail}",
   "install_command": "${install_command}",
-  "bootstrap_command": "LASH_CONFIDENCE_BOOTSTRAP=1 LASH_CONFIDENCE_OUT_DIR=${out_root} scripts/confidence-gate.sh ${lane}",
-  "exact_retry_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} scripts/confidence-gate.sh ${lane}"
+  "bootstrap_command": "LASH_CONFIDENCE_BOOTSTRAP=1 LASH_CONFIDENCE_OUT_DIR=${out_root} scripts/confidence-gate.sh ${requested_lane}",
+  "exact_retry_command": "LASH_CONFIDENCE_OUT_DIR=${out_root} scripts/confidence-gate.sh ${requested_lane}"
 }
 EOF
   cat >"${out_dir}/confidence-summary.json" <<EOF
@@ -107,6 +160,19 @@ case "$lane" in
     exit 2
     ;;
 esac
+
+if [ "$lane" = "fast" ]; then
+  case "$fast_shard" in
+    all|summary|scenario-harnesses|fault-matrix|sim-unit|sim-generated|minimizer-fixtures|perf-guards) ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+elif [ "$fast_shard" != "all" ]; then
+  usage >&2
+  exit 2
+fi
 
 case "$coverage_scope" in
   run|none) ;;
@@ -295,50 +361,63 @@ EOF
   exit 127
 }
 
+run_cargo_tests() {
+  if cargo nextest --version >/dev/null 2>&1; then
+    cargo nextest run "$@"
+  else
+    cargo test "$@"
+  fi
+}
+
 run_scenario_harnesses() {
   step "Runtime Scenario harness"
-  cargo test -p lash-core --locked runtime_scenario
+  run_cargo_tests -p lash-core --locked runtime_scenario
 
   step "Standard Protocol Scenario harness"
-  cargo test -p lash-protocol-standard --locked --test protocol_scenarios
-  cargo test -p lash-protocol-standard --locked standard_scenario_contract_metadata
+  run_cargo_tests -p lash-protocol-standard --locked --test protocol_scenarios
+  run_cargo_tests -p lash-protocol-standard --locked standard_scenario_contract_metadata
 
   step "RLM Protocol Scenario harness"
-  cargo test -p lash-protocol-rlm --locked --test protocol_drivers
-  cargo test -p lash-protocol-rlm --locked rlm_scenario_contract_metadata
+  run_cargo_tests -p lash-protocol-rlm --locked --test protocol_drivers
+  run_cargo_tests -p lash-protocol-rlm --locked rlm_scenario_contract_metadata
 
   step "Agent Scenario harness"
-  cargo test -p lash-runtime --locked --features rlm,testing agent_scenarios
-  cargo test -p lash-runtime --locked --features rlm,testing agent_scenario_contract_metadata
+  run_cargo_tests -p lash-runtime --locked --features rlm,testing agent_scenarios
+  run_cargo_tests -p lash-runtime --locked --features rlm,testing agent_scenario_contract_metadata
 }
 
 run_state_machine_and_fault_matrix() {
   step "Runtime state-machine property runner"
-  cargo test -p lash-core --locked runtime_state_machine_property
+  run_cargo_tests -p lash-core --locked runtime_state_machine_property
 
   step "Lashlang property suite"
-  cargo test -p lashlang --locked property
+  run_cargo_tests -p lashlang --locked --test property
 
   step "Durable fault matrix metadata"
-  cargo test -p lash-core --locked durable_fault_matrix
+  run_cargo_tests -p lash-core --locked durable_fault_matrix
 
   step "Durable fault matrix executable evidence"
   # durable-fault-matrix: crash-reopen-runtime-rebuild
-  cargo test -p lash-runtime --locked --features rlm,testing \
+  run_cargo_tests -p lash-runtime --locked --features rlm,testing \
     runtime_rebuild_and_worker_recovery_with_durable_stores
   # durable-fault-matrix: provider-retry-exhaustion
-  cargo test -p lash-core --locked retryable_llm_failures_exhaust_and_fail_turn
+  run_cargo_tests -p lash-core --locked retryable_llm_failures_exhaust_and_fail_turn
   # durable-fault-matrix: protocol-provider-failure
-  cargo test -p lash-protocol-standard --locked --test protocol_scenarios \
+  run_cargo_tests -p lash-protocol-standard --locked --test protocol_scenarios \
     standard_protocol_scenario_provider_error_stops_without_checkpoint
   # durable-fault-matrix: sqlite-backend-conformance
   cargo test -p lash-sqlite-store --locked --test conformance conformance
 }
 
-run_sim_provider_scripts() {
+run_sim_unit_suite() {
   step "Deterministic simulation unit/oracle suite"
-  cargo test -p lash-sim --locked
+  run_cargo_tests -p lash-sim --locked -- \
+    --skip generated_sim_profile_writes_trace_replay_and_provider_artifacts \
+    --skip minimizer_preserves \
+    --skip minimizer_writes_replayable_regression_package
+}
 
+run_sim_generated_lane() {
   step "Deterministic simulation generated lane"
   local sim_profile
   case "$lane" in
@@ -361,40 +440,75 @@ run_sim_provider_scripts() {
   "${cmd[@]}"
 
   run_scheduled_depth_sim_artifact
+}
 
+minimizer_fixture_names() {
+  cat <<'EOF'
+operational-coverage-missing-cancellation
+scheduler-owned-provider-completion-missing-evidence
+queued-input-operational-missing
+trigger-wakeup-operational-missing
+process-wake-operational-missing
+rlm-lashlang-cell-missing-exec-outcome
+agent-parallel-join-missing-wake-session
+standard-provider-error-missing-parser-matrix
+standard-max-turn-stop-missing
+rlm-typed-finish-terminal-event-missing
+rlm-empty-options-default-mode-broken
+agent-tuple-json-array-shape-broken
+agent-started-process-subagent-child-graph-missing
+agent-failed-child-task-fail-evidence-missing
+provider-mutation-runtime-completion-missing
+worker-failover-stale-rejection-missing
+backend-retry-runtime-completion-missing
+EOF
+}
+
+default_minimizer_fixture_jobs() {
+  python3 - <<'PY'
+import os
+
+cpu_count = os.cpu_count() or 2
+print(max(1, min(4, cpu_count)))
+PY
+}
+
+run_minimizer_fixture_suite() {
   step "Deterministic simulation failing minimizer fixture"
-  cargo test -p lash-sim --locked minimizer_preserves
+  run_cargo_tests -p lash-sim --locked minimizer
+
+  step "Build lash-sim minimizer binary"
+  cargo build -p lash-sim --locked --bin lash-sim
+
   mkdir -p "${out_dir}/sim"
   local fixture_root="${out_dir}/sim/failing-fixtures"
   mkdir -p "$fixture_root"
-  local fixture
-  for fixture in \
-    operational-coverage-missing-cancellation \
-    scheduler-owned-provider-completion-missing-evidence \
-    queued-input-operational-missing \
-    trigger-wakeup-operational-missing \
-    process-wake-operational-missing \
-    rlm-lashlang-cell-missing-exec-outcome \
-    agent-parallel-join-missing-wake-session \
-    standard-provider-error-missing-parser-matrix \
-    standard-max-turn-stop-missing \
-    rlm-typed-finish-terminal-event-missing \
-    rlm-empty-options-default-mode-broken \
-    agent-tuple-json-array-shape-broken \
-    agent-started-process-subagent-child-graph-missing \
-    agent-failed-child-task-fail-evidence-missing \
-    provider-mutation-runtime-completion-missing \
-    worker-failover-stale-rejection-missing \
-    backend-retry-runtime-completion-missing
-  do
-    cargo run -p lash-sim --locked -- minimize \
-      "crates/lash-sim/failure-fixtures/${fixture}.json" \
-      --out "${fixture_root}/${fixture}"
-  done
+  local fixture_jobs
+  fixture_jobs="${LASH_MINIMIZER_FIXTURE_JOBS:-$(default_minimizer_fixture_jobs)}"
+  local cargo_target_dir lash_sim_bin
+  cargo_target_dir="${CARGO_TARGET_DIR:-target}"
+  lash_sim_bin="${cargo_target_dir%/}/debug/lash-sim"
+  if [ ! -x "$lash_sim_bin" ]; then
+    echo "Expected lash-sim binary at ${lash_sim_bin}" >&2
+    exit 1
+  fi
+
+  step "Generate minimized failing fixture artifacts"
+  export LASH_SIM_BIN="$lash_sim_bin"
+  export LASH_MINIMIZER_FIXTURE_ROOT="$fixture_root"
+  minimizer_fixture_names \
+    | xargs -n 1 -P "$fixture_jobs" sh -c '
+        fixture="$1"
+        "$LASH_SIM_BIN" minimize \
+          "crates/lash-sim/failure-fixtures/${fixture}.json" \
+          --out "${LASH_MINIMIZER_FIXTURE_ROOT}/${fixture}"
+      ' sh
+
   cat >"${out_dir}/sim/failing-minimizer-fixtures.json" <<EOF
 {
   "schema": "lash.confidence.failing-minimizer-fixtures.v1",
   "status": "passed",
+  "parallel_jobs": ${fixture_jobs},
   "fixtures": [
     "crates/lash-sim/failure-fixtures/operational-coverage-missing-cancellation.json",
     "crates/lash-sim/failure-fixtures/scheduler-owned-provider-completion-missing-evidence.json",
@@ -414,7 +528,7 @@ run_sim_provider_scripts() {
     "crates/lash-sim/failure-fixtures/worker-failover-stale-rejection-missing.json",
     "crates/lash-sim/failure-fixtures/backend-retry-runtime-completion-missing.json"
   ],
-  "test_filter": "minimizer_preserves",
+  "test_filter": "minimizer",
   "preserves": "oracle_id,status,semantic_reason",
   "minimized_packages": {
     "operational_coverage_missing_cancellation": "failing-fixtures/operational-coverage-missing-cancellation/minimized-regression/package.json",
@@ -437,6 +551,12 @@ run_sim_provider_scripts() {
   }
 }
 EOF
+}
+
+run_sim_provider_scripts() {
+  run_sim_unit_suite
+  run_sim_generated_lane
+  run_minimizer_fixture_suite
 }
 
 run_scheduled_depth_sim_artifact() {
@@ -1824,7 +1944,158 @@ write_confidence_summary() {
 EOF
 }
 
+write_fast_shard_summary() {
+  local shard="$1"
+  mkdir -p "$out_dir"
+  cat >"${out_dir}/confidence-summary.json" <<EOF
+{
+  "schema": "lash.confidence.fast-shard-summary.v1",
+  "lane": "fast",
+  "shard": "${shard}",
+  "status": "passed",
+  "duration_seconds": $((SECONDS - script_started_at)),
+  "artifacts_root": "${out_dir}"
+}
+EOF
+}
+
+write_fast_matrix_summary() {
+  mkdir -p "$out_dir"
+  python3 - "$out_dir" "${fast_shards[@]}" <<'PY'
+import json
+import pathlib
+import sys
+
+out_dir = pathlib.Path(sys.argv[1])
+shards = sys.argv[2:]
+errors: list[str] = []
+summaries: dict[str, dict[str, object]] = {}
+
+for shard in shards:
+    path = out_dir / shard / "confidence-summary.json"
+    if not path.exists():
+        errors.append(f"missing shard summary: {path}")
+        continue
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - artifact validation should report exact file.
+        errors.append(f"invalid shard summary {path}: {exc}")
+        continue
+    summaries[shard] = summary
+    if summary.get("status") != "passed":
+        errors.append(f"shard {shard} status is {summary.get('status')!r}")
+    if summary.get("lane") != "fast":
+        errors.append(f"shard {shard} has lane {summary.get('lane')!r}")
+    if summary.get("shard") != shard:
+        errors.append(f"shard {shard} summary identifies shard {summary.get('shard')!r}")
+
+status = "failed" if errors else "passed"
+artifact = {
+    "schema": "lash.confidence.summary.v1",
+    "lane": "fast",
+    "status": status,
+    "confidence_class": "fast",
+    "sharded": True,
+    "required_shards": shards,
+    "shards": {
+        shard: {
+            "summary": f"{shard}/confidence-summary.json",
+            "status": summaries.get(shard, {}).get("status", "missing"),
+            "duration_seconds": summaries.get(shard, {}).get("duration_seconds"),
+        }
+        for shard in shards
+    },
+    "sim_summary": "sim-generated/sim/summary.json",
+    "env_gated_lanes": "sim-generated/sim/env-gated-lanes.json",
+    "full_lane_prerequisites": "sim-generated/sim/full-lane-prerequisites.json",
+    "failing_minimizer_fixtures": "minimizer-fixtures/sim/failing-minimizer-fixtures.json",
+    "provider_transport_exclusions": "sim-generated/sim/provider-transport-exclusions.json",
+    "mutation_testing": "not_in_fast_lane",
+    "artifacts_root": str(out_dir),
+    "errors": errors,
+}
+summary_path = out_dir / "confidence-summary.json"
+summary_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+run_fast_shard() {
+  case "$fast_shard" in
+    scenario-harnesses)
+      run_scenario_harnesses
+      write_fast_shard_summary "$fast_shard"
+      ;;
+    fault-matrix)
+      run_state_machine_and_fault_matrix
+      write_fast_shard_summary "$fast_shard"
+      ;;
+    sim-unit)
+      run_sim_unit_suite
+      write_fast_shard_summary "$fast_shard"
+      ;;
+    sim-generated)
+      run_sim_generated_lane
+      run_focused_sqlite_seed_tail_repro
+      write_provider_transport_exclusion_evidence
+      write_sim_lane_declarations
+      write_full_lane_prerequisites
+      write_postgres_effect_history_status
+      write_restate_postgres_workers_e2e_lane_status
+      write_fast_shard_summary "$fast_shard"
+      ;;
+    minimizer-fixtures)
+      run_minimizer_fixture_suite
+      write_fast_shard_summary "$fast_shard"
+      ;;
+    perf-guards)
+      run_perf_identity_checks
+      write_fast_shard_summary "$fast_shard"
+      ;;
+    summary)
+      write_fast_matrix_summary
+      ;;
+    *)
+      echo "unknown fast shard: ${fast_shard}" >&2
+      exit 2
+      ;;
+  esac
+}
+
+run_fast_aggregate() {
+  local shard
+  for shard in "${fast_shards[@]}"; do
+    LASH_CONFIDENCE_OUT_DIR="$out_root" "$0" "fast:${shard}"
+  done
+  LASH_CONFIDENCE_OUT_DIR="$out_root" "$0" fast:summary
+}
+
 bootstrap_tools
+
+if [ "$lane" = "fast" ]; then
+  case "$fast_shard" in
+    all)
+      run_fast_aggregate
+      ;;
+    summary)
+      run_fast_shard
+      ;;
+    *)
+      run_fast_shard
+      ;;
+  esac
+  if [ "$fast_shard" = "summary" ] || [ "$fast_shard" = "all" ]; then
+    step "Confidence gate 'fast' passed"
+    printf 'Artifacts: %s\n' "${out_root}/fast"
+  else
+    step "Confidence gate 'fast:${fast_shard}' passed"
+    printf 'Artifacts: %s\n' "$out_dir"
+  fi
+  exit 0
+fi
 
 run_scenario_harnesses
 run_state_machine_and_fault_matrix

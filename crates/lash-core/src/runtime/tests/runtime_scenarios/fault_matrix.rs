@@ -209,7 +209,7 @@ fn durable_fault_matrix_rows_have_executable_or_blocked_evidence() {
 #[test]
 fn durable_fault_matrix_fast_gate_executes_all_nonblocked_evidence() {
     assert!(
-        CONFIDENCE_GATE_SH.contains("cargo test -p lash-core --locked runtime_scenario"),
+        CONFIDENCE_GATE_SH.contains("run_cargo_tests -p lash-core --locked runtime_scenario"),
         "fast gate must execute RuntimeScenario evidence rows"
     );
 

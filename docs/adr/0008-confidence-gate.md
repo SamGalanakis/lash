@@ -10,8 +10,11 @@ Lash has one executable confidence contract: `scripts/confidence-gate.sh`.
 The gate has explicit lanes instead of an implicit pile of local commands:
 
 - `fast`: deterministic Runtime, Standard Protocol, RLM Protocol, and Agent
-  Scenario harnesses; runtime state-machine property checks; durable
-  fault-matrix metadata; and performance guard identity tests.
+  Scenario harnesses; runtime state-machine property checks; deterministic
+  simulation/provider proof shards; minimizer fixture evidence; durable
+  fault-matrix metadata; and performance guard identity tests. The local
+  `fast` command is an aggregate over first-class `fast:<shard>` commands so
+  CI can run the same evidence in parallel.
 - `default`: `fast` plus Sqlite backend conformance, production-backed backend
   contention evidence, coverage blind-spot artifacts, and targeted
   cargo-mutants evidence for high-risk direct/model and
@@ -45,8 +48,10 @@ CI and local development the same language for confidence.
 
 ## Consequences
 
-- PR CI runs the `fast` lane after workspace tests to prove the confidence
-  contract stays wired.
+- PR CI runs the `fast:<shard>` commands in parallel with workspace tests and
+  then validates a small aggregate `fast:summary` artifact. Local
+  `scripts/confidence-gate.sh fast` runs the same shards sequentially for a
+  single-machine check.
 - The `Confidence` workflow runs `full` on a weekly schedule and supports
   manual `default`/`broad`/`full` dispatch.
 - `just confidence`, `just confidence-fast`, `just confidence-broad`, and
