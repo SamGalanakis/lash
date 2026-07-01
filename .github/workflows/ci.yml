@@ -590,4 +590,48 @@ jobs:
             sleep 2
           done
           git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1
-          gh workflow run release.yml --ref main -f release_tag="${tag}"
+          release_sha="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" | awk '{print $1}')"
+
+          set +e
+          dispatch_output="$(gh workflow run release.yml --ref main -f release_tag="${tag}" 2>&1)"
+          dispatch_status=$?
+          set -e
+
+          if [ "$dispatch_status" -eq 0 ]; then
+            printf '%s\n' "$dispatch_output"
+            exit 0
+          fi
+
+          printf '%s\n' "$dispatch_output" >&2
+          echo "Release workflow dispatch failed; checking whether GitHub created the run anyway." >&2
+
+          runs_file="$(mktemp)"
+          if ! gh run list --workflow release.yml --event workflow_dispatch --branch main --limit 20 \
+            --json databaseId,status,headSha,createdAt > "$runs_file"; then
+            echo "Could not list release workflow runs after dispatch failure." >&2
+            exit "$dispatch_status"
+          fi
+
+          if python3 - "$release_sha" "$runs_file" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release_sha = sys.argv[1]
+          runs_file = pathlib.Path(sys.argv[2])
+          for run in json.loads(runs_file.read_text(encoding="utf-8")):
+              if run.get("headSha") == release_sha:
+                  print(
+                      "Found release workflow run "
+                      f"{run.get('databaseId')} for release SHA {release_sha} "
+                      f"({run.get('status')}, created {run.get('createdAt')})."
+                  )
+                  raise SystemExit(0)
+
+          raise SystemExit(1)
+          PY
+          then
+            exit 0
+          fi
+
+          exit "$dispatch_status"

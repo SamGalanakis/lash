@@ -89,6 +89,21 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         for shard in FAST_SHARDS:
             self.assertIn(f"fast:{shard}", gate)
 
+    def test_release_dispatch_recovers_when_github_creates_run_after_500(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        required_snippets = [
+            'release_sha="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" | awk',
+            'dispatch_output="$(gh workflow run release.yml --ref main -f release_tag="${tag}" 2>&1)"',
+            "Release workflow dispatch failed; checking whether GitHub created the run anyway.",
+            "gh run list --workflow release.yml --event workflow_dispatch --branch main --limit 20",
+            'if run.get("headSha") == release_sha:',
+            "Found release workflow run",
+            'exit "$dispatch_status"',
+        ]
+        for snippet in required_snippets:
+            self.assertIn(snippet, workflow)
+
     def test_broad_lane_is_manual_or_scheduled_confidence_not_ci_cd(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         confidence_workflow = CONFIDENCE_WORKFLOW.read_text(encoding="utf-8")
