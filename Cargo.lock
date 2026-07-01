@@ -2755,7 +2755,6 @@ dependencies = [
  "lash-core",
  "lash-lashlang-runtime",
  "lash-tool-support",
- "lash-tools",
  "schemars",
  "serde",
  "serde_json",

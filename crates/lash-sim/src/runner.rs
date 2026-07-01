@@ -11873,8 +11873,8 @@ mod tests {
         )];
         for relative in [
             "scripts/confidence-gate.sh",
-            "docs/deterministic-simulation-harness-plan.md",
             "docs/adr/0008-confidence-gate.md",
+            "docs/adr/0009-deterministic-simulation-harness.md",
             "CONTEXT.md",
         ] {
             corpus.push((
@@ -11915,9 +11915,7 @@ mod tests {
         let mut cursor = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             if cursor.join("scripts/confidence-gate.sh").is_file()
-                && cursor
-                    .join("docs/deterministic-simulation-harness-plan.md")
-                    .is_file()
+                && cursor.join("docs/adr/0008-confidence-gate.md").is_file()
             {
                 return cursor;
             }

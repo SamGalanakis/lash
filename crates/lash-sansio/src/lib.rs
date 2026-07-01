@@ -40,10 +40,7 @@ pub use schema_contract::{
     SchemaProjectionOverride, SchemaProjectionPolicy, SchemaPurpose, SchemaResolutionError,
     SchemaResolutionRequest, project_anthropic_bedrock_schema, project_for_dialect, resolve_schema,
 };
-pub use session::{
-    CompletedTurn, ExecImage, ExecResponse, PromptUsage, SansIoSessionState,
-    TextProjectionMetadata, apply_completed_turn,
-};
+pub use session::{ExecImage, ExecResponse, PromptUsage, TextProjectionMetadata};
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
     AcceptedInjectedTurnInput, BaseRenderCache, ConversationRecord, ErrorEnvelope,
