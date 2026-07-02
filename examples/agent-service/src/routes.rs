@@ -706,7 +706,7 @@ mod tests {
     use axum::body::to_bytes;
     use lash::LashCore;
     use lash::direct::LlmOutputPart;
-    use lash::direct::LlmResponse;
+    use lash::provider::LlmResponse;
 
     use super::*;
     use crate::db::AppDb;

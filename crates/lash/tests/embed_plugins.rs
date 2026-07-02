@@ -2,7 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lash::TurnInput;
-use lash::direct::{LlmOutputPart, LlmResponse};
+use lash::direct::LlmOutputPart;
+use lash::provider::LlmResponse;
 use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };

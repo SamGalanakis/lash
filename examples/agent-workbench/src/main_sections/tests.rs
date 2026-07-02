@@ -2180,18 +2180,18 @@ finish initial
             .expect("build core")
     }
 
-    fn text_response(text: &str) -> lash::direct::LlmResponse {
-        lash::direct::LlmResponse {
+    fn text_response(text: &str) -> lash::provider::LlmResponse {
+        lash::provider::LlmResponse {
             full_text: text.to_string(),
             parts: vec![lash::direct::LlmOutputPart::Text {
                 text: text.to_string(),
                 response_meta: None,
             }],
-            ..lash::direct::LlmResponse::default()
+            ..lash::provider::LlmResponse::default()
         }
     }
 
-    fn trigger_registration_response() -> lash::direct::LlmResponse {
+    fn trigger_registration_response() -> lash::provider::LlmResponse {
         text_response(&format!(
             "<lashlang>\n{}\n</lashlang>",
             test_button_trigger_source().trim()

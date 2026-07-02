@@ -338,7 +338,7 @@ mod restate_tests {
     use lash::LashCore;
     use lash::PluginBinding;
     use lash::direct::LlmOutputPart;
-    use lash::direct::LlmResponse;
+    use lash::provider::LlmResponse;
     use lash_restate::LashProcessWorkflow;
 
     const STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
