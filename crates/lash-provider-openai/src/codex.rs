@@ -28,8 +28,8 @@ use lash_llm_transport::timeouts::response_start_timeout;
 use lash_llm_transport::util::emit_provider_trace;
 use lash_llm_transport::{
     LlmHttpMethod, LlmHttpRequest, LlmHttpTransport, first_header_value, header_contains,
-    openai_terminal_reason_from_response_value, openai_usage_from_response_value,
-    read_http_body_text,
+    http_error_envelope, openai_terminal_reason_from_response_value,
+    openai_usage_from_response_value, read_http_body_text,
 };
 
 pub mod oauth;
@@ -1566,15 +1566,13 @@ impl Provider for CodexProvider {
             });
             // Retryability is decided centrally by `CodexFailureClassifier`
             // from the attached HTTP status; no inline override here.
-            let mut err = LlmTransportError::new(message)
-                .with_kind(ProviderFailureKind::Http)
-                .with_status(status)
-                .with_headers(response_headers)
-                .with_raw(text);
-            if let Some(request_body) = request_body.clone() {
-                err = err.with_request_body(request_body);
-            }
-            return Err(err);
+            return Err(http_error_envelope(
+                message,
+                status,
+                response_headers,
+                text,
+                request_body.clone(),
+            ));
         }
 
         let parse_stream =
@@ -1629,6 +1627,7 @@ impl Provider for CodexProvider {
                     .with_raw(text.clone())
             })?;
             let content = shared::extract_text(&value);
+            let provider_usage = value.get("usage").cloned();
             let usage = openai_usage_from_response_value(&value);
             let mut parts = shared::response_parts_from_value(&value);
             if parts.is_empty() && !content.is_empty() {
@@ -1652,7 +1651,7 @@ impl Provider for CodexProvider {
                 usage,
                 terminal_reason,
                 terminal_diagnostic: None,
-                provider_usage: None,
+                provider_usage,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", self.responses_url)),
             });
@@ -3257,6 +3256,29 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, ProviderFailureKind::Validation);
         assert!(err.message.contains("allOf"));
+    }
+
+    #[test]
+    fn codex_stream_response_carries_raw_usage_sidecar() {
+        let mut state = CodexStreamState::default();
+        process_event(
+            &mut state,
+            json!({"type":"response.completed","response":{
+                "id":"resp_usage",
+                "status":"completed",
+                "output":[assistant_item("msg_usage","hi")],
+                "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+            }}),
+        );
+
+        let response = response_from_state(state);
+
+        assert_eq!(
+            response.provider_usage,
+            Some(json!({"input_tokens":3,"output_tokens":2,"total_tokens":5}))
+        );
+        assert_eq!(response.usage.input_tokens, 3);
+        assert_eq!(response.usage.output_tokens, 2);
     }
 
     #[test]

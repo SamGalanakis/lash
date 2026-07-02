@@ -559,7 +559,7 @@ fn collect_tool_result_image_folds(
 
 /// Collapse a finished [`ResponsesStreamState`] into an [`LlmResponse`]. Used
 /// by Codex; the direct OpenAI driver inlines an equivalent assembly with its
-/// own provider-usage/streaming plumbing.
+/// own streaming plumbing.
 pub fn response_from_stream_state(
     state: ResponsesStreamState,
     request_body: Option<String>,
@@ -581,7 +581,7 @@ pub fn response_from_stream_state(
         usage: state.usage,
         terminal_reason,
         terminal_diagnostic: None,
-        provider_usage: None,
+        provider_usage: state.provider_usage,
         request_body,
         http_summary: Some(http_summary),
     }

@@ -23,7 +23,7 @@ pub(crate) use lash_core::{
     resolve_schema,
 };
 pub(crate) use lash_llm_transport::normalize::{
-    merge_usage, serialize_options_tail, terminal_reason_from_parts,
+    http_error_envelope, merge_usage, serialize_options_tail, terminal_reason_from_parts,
 };
 pub(crate) use lash_llm_transport::streaming::drive_sse_response;
 pub(crate) use lash_llm_transport::timeouts::response_start_timeout;
