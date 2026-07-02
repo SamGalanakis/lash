@@ -174,6 +174,17 @@ impl ProviderHandle {
         }
     }
 
+    /// Release the underlying provider's host-visible transport resources.
+    ///
+    /// This forwards to [`Provider::close`]. Hosts that want a graceful
+    /// transport shutdown (for example, sending WebSocket Close frames on
+    /// cached Codex sessions) retain a clone of the handle they hand to the
+    /// core and call this before process exit. Providers with no reusable
+    /// transport state close as a no-op.
+    pub async fn close(&self) -> Result<(), LlmTransportError> {
+        self.components.provider.close().await
+    }
+
     pub fn to_spec(&self) -> ProviderSpec {
         ProviderSpec {
             kind: self.kind().to_string(),

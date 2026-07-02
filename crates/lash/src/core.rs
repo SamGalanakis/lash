@@ -335,6 +335,68 @@ impl LashCore {
         }
     }
 
+    /// Rebuild a live session from a [`ParkedSession`](crate::ParkedSession)
+    /// handle produced by [`LashSession::park`](crate::LashSession::park).
+    ///
+    /// Resume reloads the flushed state from the parked store (honoring this
+    /// core's residency), reinstalls this core's plugin configuration and work
+    /// drivers, and returns a ready [`LashSession`]. The parked store instance
+    /// is reused directly, so the transcript the session flushed at park time is
+    /// visible again after resume.
+    ///
+    /// This restores the core-level plugin stack. Session-specific plugins added
+    /// per open via [`SessionBuilder::plugin`] are not re-applied here; parking
+    /// is the round-trip for the core's own configuration.
+    pub async fn resume(&self, parked: ParkedSession) -> Result<LashSession> {
+        // Build the per-session env exactly like `SessionBuilder::open_resolved`
+        // (minus builder-scoped plugins): a fresh plugin host with this core's
+        // factories, the shared work drivers, and the core provider resolver
+        // already carried on `self.env`.
+        let plugin_host = build_plugin_host(
+            self.protocol_factory.as_ref(),
+            self.plugin_factories.as_ref(),
+            Vec::new(),
+        )?;
+        let mut env = self.env.clone();
+        env.core = plugin_host.install_process_engine_contributions(
+            env.core.clone(),
+            self.process_lifecycle_available,
+        )?;
+        env.plugin_host = Some(Arc::new(plugin_host));
+        let effect_host = Arc::clone(&env.core.control.effect_host);
+        let drivers = self.work_driver.drivers().await;
+        env.process_work_driver = drivers.process.clone();
+        env.queued_work_driver = drivers.queued.clone();
+        let runtime = LashRuntime::resume(parked.inner, &env).await?;
+        let handle =
+            RuntimeHandle::with_live_replay_store(runtime, Arc::clone(&self.live_replay_store));
+        Ok(LashSession {
+            runtime: handle,
+            effect_host,
+            parent_session_id: None,
+            active_plugins: Vec::new(),
+            process_phase_probe_slot: self.work_driver.phase_probe_slot(),
+            turn_cancels: crate::turn::TurnCancelRegistry::default(),
+        })
+    }
+
+    /// Flush this core's configured trace sink, if any.
+    ///
+    /// Hosts that hand `lash` a trace sink via
+    /// [`LashCoreBuilder::trace_sink`] already hold their own `Arc` and can
+    /// flush it directly; this is the equivalent lever for hosts that did not
+    /// retain the handle. It flushes the core's copy — for a
+    /// [`JsonlTraceSink`](lash_trace::JsonlTraceSink) that fsyncs the file, and
+    /// for an OTel sink it is a no-op (the host still owns provider flush; see
+    /// the tracing docs). Call it before process exit alongside the host's own
+    /// exporter/provider shutdown.
+    pub fn flush_trace_sink(&self) -> Result<()> {
+        if let Some(sink) = self.env.core.tracing.trace_sink.as_ref() {
+            sink.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn triggers(&self) -> crate::admin::CoreTriggerAdmin {
         crate::admin::CoreTriggerAdmin { core: self.clone() }
     }

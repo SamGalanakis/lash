@@ -111,6 +111,7 @@ pub struct ScriptedWsServer {
     pub url: String,
     captured: Arc<Mutex<Vec<Value>>>,
     handshakes: CapturedHandshakes,
+    close_frames: Arc<Mutex<u32>>,
     task: JoinHandle<()>,
 }
 
@@ -130,6 +131,14 @@ impl ScriptedWsServer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    /// Number of WebSocket Close frames the server has received.
+    pub fn close_frame_count(&self) -> u32 {
+        *self
+            .close_frames
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl Drop for ScriptedWsServer {
@@ -146,9 +155,11 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
     let actions = Arc::new(Mutex::new(VecDeque::from(actions)));
     let captured = Arc::new(Mutex::new(Vec::new()));
     let handshakes = Arc::new(Mutex::new(Vec::new()));
+    let close_frames = Arc::new(Mutex::new(0u32));
     let task_actions = Arc::clone(&actions);
     let task_captured = Arc::clone(&captured);
     let task_handshakes = Arc::clone(&handshakes);
+    let task_close_frames = Arc::clone(&close_frames);
     let task = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -157,6 +168,7 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
             let actions = Arc::clone(&task_actions);
             let captured = Arc::clone(&task_captured);
             let handshakes = Arc::clone(&task_handshakes);
+            let close_frames = Arc::clone(&task_close_frames);
             tokio::spawn(async move {
                 let callback = move |request: &WsHandshakeRequest,
                                      response: WsHandshakeResponse| {
@@ -185,7 +197,12 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
                         WsMessage::Binary(bytes) => {
                             String::from_utf8(bytes.to_vec()).unwrap_or_default()
                         }
-                        WsMessage::Close(_) => break,
+                        WsMessage::Close(_) => {
+                            *close_frames
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                            break;
+                        }
                         WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_) => {
                             continue;
                         }
@@ -295,6 +312,7 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
         url: format!("ws://{addr}/codex/responses"),
         captured,
         handshakes,
+        close_frames,
         task,
     }
 }

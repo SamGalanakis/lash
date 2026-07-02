@@ -1,11 +1,22 @@
 # Codex WebSocket Notes
 
 The Codex provider owns a provider-local WebSocket session cache. The cache is
-bounded by `MAX_SESSION_WEBSOCKET_CACHE_ENTRIES`, pruned by idle TTL, and
-dropped synchronously (dropping a cached `WebSocketStream` closes the socket).
-Known limitation: the lash-core `Provider` contract has no shutdown/removal
-lifecycle hook, so there is no graceful close of cached sockets on runtime
-shutdown — fixing that is a core contract change, out of scope for this crate.
+bounded by `MAX_SESSION_WEBSOCKET_CACHE_ENTRIES` and pruned by idle TTL; the idle
+prune closes sockets by dropping the stream (a TCP-level close).
+
+## Shutdown Hook
+
+The `Provider` contract exposes `async fn close(&self)` (defaulting to a no-op),
+forwarded by `ProviderHandle::close`. `CodexProvider` implements it by draining
+the WebSocket session cache and sending a real WebSocket Close frame on every
+idle cached connection before dropping it, rather than relying on the bare TCP
+drop that a provider `Drop` would give. Busy entries leased to an in-flight
+`complete` call are not held in the cache, so `close` touches only idle reusable
+sessions; the lease closes or re-caches its own socket on release. The cache is
+shared across `CodexProvider`/`ProviderHandle` clones (an `Arc`), so a host that
+retained a clone can close it from its shutdown path to release the sockets the
+running handle cached. Hosts call this before process exit; it is the graceful
+counterpart to the idle-prune's synchronous drop.
 
 Known design concerns to keep explicit:
 

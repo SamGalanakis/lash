@@ -34,7 +34,8 @@ pub use crate::error::{EmbedError, Result};
 pub use crate::plugin_binding::PluginBinding;
 pub use crate::prompt_layer::PromptLayerSink;
 pub use crate::session::{
-    EnqueueTurnBuilder, LashSession, ObservableSession, SessionBuilder, SessionConfigPatch,
+    EnqueueTurnBuilder, LashSession, ObservableSession, ParkedSession, SessionBuilder,
+    SessionConfigPatch,
 };
 pub use crate::turn::{
     QueuedTurnBuilder, TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream,
@@ -61,13 +62,13 @@ pub mod prelude {
     pub use crate::{
         AdvancedToolAdmin, CoreTriggerAdmin, EmbedError, EnqueueTurnBuilder, ExecutionSummary,
         InputItem, LashCore, LashCoreBuilder, LashSession, ModelLimits, ModelSpec,
-        ObservableSession, PendingTurnInputCancelOutcome, PluginBinding, PluginOperations,
-        PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder, SessionCommand,
-        SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch, SessionCreateRequest,
-        SessionDeleteReport, SessionSpec, SessionStartPoint, SessionTriggerAdmin, ToolAdmin,
-        TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink, TurnBuilder, TurnCause,
-        TurnEvent, TurnFinish, TurnInput, TurnOutcome, TurnOutput, TurnResult, TurnStop,
-        TurnStream, message_role, message_text,
+        ObservableSession, ParkedSession, PendingTurnInputCancelOutcome, PluginBinding,
+        PluginOperations, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder,
+        SessionCommand, SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch,
+        SessionCreateRequest, SessionDeleteReport, SessionSpec, SessionStartPoint,
+        SessionTriggerAdmin, ToolAdmin, TurnActivity, TurnActivityFanout, TurnActivityId,
+        TurnActivitySink, TurnBuilder, TurnCause, TurnEvent, TurnFinish, TurnInput, TurnOutcome,
+        TurnOutput, TurnResult, TurnStop, TurnStream, message_role, message_text,
     };
 }
 

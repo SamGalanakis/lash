@@ -21,6 +21,20 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// Release any host-visible transport resources this provider holds —
+    /// cached connections, pooled sockets, background tasks — sending whatever
+    /// graceful close a clean shutdown requires.
+    ///
+    /// Hosts call this before process exit so protocol niceties (e.g. WebSocket
+    /// Close frames) are sent rather than skipped by an abrupt drop. It takes
+    /// `&self` because a provider's reusable transport state lives behind its
+    /// own synchronization; a shared clone can therefore be closed from the
+    /// shutdown path. The default is a no-op: providers that hold no reusable
+    /// transport state have nothing to release.
+    async fn close(&self) -> Result<(), LlmTransportError> {
+        Ok(())
+    }
+
     fn clone_boxed(&self) -> Box<dyn Provider>;
 }
 

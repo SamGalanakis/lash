@@ -678,6 +678,39 @@ impl CodexProvider {
         }
     }
 
+    /// Drain the WebSocket session cache, sending a proper Close frame on every
+    /// idle cached connection before dropping it.
+    ///
+    /// This is the shutdown counterpart to the synchronous idle prune: the prune
+    /// path drops streams (a TCP-level close), whereas a host-driven shutdown
+    /// wants the WebSocket closing handshake. Busy entries are leased out to an
+    /// in-flight `complete` call — their stream is not held in the cache — so
+    /// this closes only idle, reusable sessions; the lease closes or re-caches
+    /// its own connection on release. The cache lock is provider-local and
+    /// non-async, so connections are taken out under the lock and closed after
+    /// it is released.
+    async fn close_websocket_sessions(&self) {
+        let connections: Vec<CodexWsStream> = {
+            let mut sessions = self
+                .websocket_sessions
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let drained = sessions
+                .by_scope
+                .drain()
+                .filter_map(|(_, entry)| entry.connection)
+                .collect();
+            sessions.fallback_by_scope.clear();
+            drained
+        };
+        for mut websocket in connections {
+            // Best-effort: a peer that already vanished cannot receive the frame,
+            // and shutdown must not fail because one socket is already gone.
+            let _ = websocket.close(None).await;
+        }
+    }
+
     fn websocket_fallback_reason(&self, req: &LlmRequest) -> Option<String> {
         let scope_key = req.continuation_key();
         let mut sessions = self
@@ -1746,6 +1779,14 @@ impl Provider for CodexProvider {
         ))
     }
 
+    async fn close(&self) -> Result<(), LlmTransportError> {
+        // Drain the provider-local WebSocket session cache with real Close
+        // frames. The cache is shared across clones (Arc), so closing any handle
+        // a host retained releases the cached sockets for all of them.
+        self.close_websocket_sessions().await;
+        Ok(())
+    }
+
     fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
@@ -2560,6 +2601,56 @@ mod tests {
         assert_eq!(captured[1]["previous_response_id"], "resp_1");
         assert_eq!(captured[1]["input"].as_array().unwrap().len(), 1);
         assert_eq!(captured[1]["input"][0]["content"][0]["text"], "next");
+    }
+
+    #[tokio::test]
+    async fn codex_provider_close_sends_websocket_close_frame_for_cached_session() {
+        let ws = spawn_scripted_websocket(vec![ScriptedWsAction::Complete {
+            response_id: "resp_1",
+            message_id: "msg_1",
+            text: "answer",
+        }])
+        .await;
+        let provider = websocket_test_provider(
+            CodexTransport::WebsocketCached,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+
+        // A completed turn leaves a reusable WebSocket session cached.
+        let mut running = provider.clone();
+        running
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .await
+            .expect("first response");
+        assert_eq!(ws.close_frame_count(), 0, "no close before shutdown");
+
+        // The host-callable close drains the cache with a proper Close frame,
+        // not a bare TCP drop. The cache is shared across clones, so closing the
+        // retained clone releases the socket the running handle cached.
+        provider.close().await.expect("provider close");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ws.close_frame_count() == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            ws.close_frame_count(),
+            1,
+            "close() must send a WebSocket Close frame to the cached session"
+        );
+
+        // The cache is empty after close.
+        assert!(
+            provider
+                .websocket_sessions
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .by_scope
+                .is_empty(),
+            "close() drains the session cache"
+        );
     }
 
     #[tokio::test]

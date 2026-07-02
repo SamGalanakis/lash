@@ -45,6 +45,12 @@ pub enum EmbedError {
     #[error("missing required turn input for plugin `{plugin_id}`")]
     MissingPluginTurnInput { plugin_id: &'static str },
     #[error(
+        "session is still in use: park()/close() consume the session and require exclusive ownership; drop any cloned handles and finish or cancel in-flight turns first"
+    )]
+    SessionStillInUse,
+    #[error("failed to flush trace sink: {0}")]
+    TraceFlush(#[from] lash_trace::TraceSinkError),
+    #[error(
         "configured effect host for {operation} is durable and requires a handler context; use .effects(&controller) and provide .turn_id(...) for replayable foreground requests"
     )]
     DurableEffectHostRequiresHandlerContext { operation: &'static str },

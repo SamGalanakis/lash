@@ -623,6 +623,17 @@ pub enum TraceSinkError {
 
 pub trait TraceSink: Send + Sync {
     fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError>;
+
+    /// Force any buffered trace data this sink owns to durable storage.
+    ///
+    /// Hosts call this before process exit so records that a sink has not yet
+    /// committed are not lost. The default is a no-op: sinks that write each
+    /// record through on [`append`](Self::append) (or that delegate durability
+    /// to a host-owned exporter) have nothing of their own to flush. Sinks that
+    /// buffer — or that can force an `fsync` — override this.
+    fn flush(&self) -> Result<(), TraceSinkError> {
+        Ok(())
+    }
 }
 
 pub struct JsonlTraceSink {
@@ -668,6 +679,30 @@ impl TraceSink for JsonlTraceSink {
             source,
         })
     }
+
+    /// `fsync` the trace file to durable storage.
+    ///
+    /// Each [`append`](Self::append) opens, appends, and closes the file, so a
+    /// record's bytes already reach the OS as it is written — this sink holds no
+    /// in-process buffer. `flush` goes one step further and forces an `fsync` so
+    /// the OS page cache is pushed to disk, which is the honest guarantee a host
+    /// wants before exit. If no record has been written yet the file may not
+    /// exist; that is a no-op rather than an error (nothing to sync), and we do
+    /// not create an empty file just to sync it.
+    fn flush(&self) -> Result<(), TraceSinkError> {
+        let _guard = self.lock.lock().map_err(|_| TraceSinkError::LockPoisoned)?;
+        match OpenOptions::new().append(true).open(&self.path) {
+            Ok(file) => file.sync_all().map_err(|source| TraceSinkError::Write {
+                path: self.path.clone(),
+                source,
+            }),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(TraceSinkError::Open {
+                path: self.path.clone(),
+                source,
+            }),
+        }
+    }
 }
 
 /// Writes each trace record as one JSON line to stderr — handy for `cargo run`
@@ -704,6 +739,14 @@ impl TraceSink for TeeTraceSink {
     fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
         for sink in &self.sinks {
             sink.append(record)?;
+        }
+        Ok(())
+    }
+
+    /// Flush every wrapped sink, stopping at the first that errors.
+    fn flush(&self) -> Result<(), TraceSinkError> {
+        for sink in &self.sinks {
+            sink.flush()?;
         }
         Ok(())
     }
