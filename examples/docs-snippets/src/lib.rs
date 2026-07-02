@@ -17,6 +17,7 @@ mod example_agent_service;
 mod example_agent_workbench;
 mod execution_modes;
 mod index;
+mod operations;
 mod persistence;
 mod plugins;
 mod plugins_runtime;

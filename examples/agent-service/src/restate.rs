@@ -583,6 +583,7 @@ finish "done via Restate E2E"
         let state = AppStateData::from_shared_db(
             core,
             app_db,
+            lash::persistence::LeaseOwnerIdentity::opaque("agent-service-test", "test"),
             "mock-model".to_string(),
             None,
             AgentServiceDurability::Restate,

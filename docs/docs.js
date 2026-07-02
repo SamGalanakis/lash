@@ -175,6 +175,12 @@
           kind: "guide",
         },
         {
+          title: "Running in production",
+          href: "operations.html",
+          summary: "Compose the host-owned operational levers: deployment topologies, worker identity, lease timings, graceful drain, failure classification, backpressure, and monitoring.",
+          kind: "guide",
+        },
+        {
           title: "Remote protocol",
           href: "remote-protocol.html",
           summary: "Versioned DTOs for HTTP, queues, callbacks, workflow handlers, activity streams, triggers, and host-owned tool grants.",
