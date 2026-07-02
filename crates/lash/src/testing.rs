@@ -281,13 +281,13 @@ finish "registered"
                 } else {
                     lashlang_block(TRIGGER_SOURCE)
                 };
-                Ok(crate::direct::LlmResponse {
+                Ok(crate::provider::LlmResponse {
                     full_text: text.clone(),
                     parts: vec![crate::direct::LlmOutputPart::Text {
                         text,
                         response_meta: None,
                     }],
-                    ..crate::direct::LlmResponse::default()
+                    ..crate::provider::LlmResponse::default()
                 })
             })
             .build()

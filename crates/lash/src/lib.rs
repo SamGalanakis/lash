@@ -139,7 +139,7 @@ pub mod direct {
     };
     pub use lash_core::{
         DirectCompletion, DirectJsonSchema, DirectLlmClient, DirectLlmCompletion, DirectLlmError,
-        DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole, LlmResponse,
+        DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
     };
 }
 
