@@ -1,3 +1,49 @@
+/// Logical keyspaces multiplexed onto `lash_lashlang_artifacts`. Each namespace
+/// owns its own half of the `(namespace, artifact_ref)` composite primary key,
+/// so a key value that happens to collide across namespaces (a module ref that
+/// equals a process-execution-env ref, say) resolves to independent rows instead
+/// of silently clobbering one another under last-writer-wins.
+const MODULE_ARTIFACT_NAMESPACE: &str = "lashlang_module";
+const RAW_ARTIFACT_NAMESPACE: &str = "lashlang_artifact";
+const PROCESS_ENV_NAMESPACE: &str = "process_execution_env";
+
+impl PostgresLashlangArtifactStore {
+    async fn put_namespaced_bytes(
+        &self,
+        namespace: &str,
+        artifact_ref: &str,
+        bytes: &[u8],
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO lash_lashlang_artifacts (namespace, artifact_ref, artifact_bytes)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (namespace, artifact_ref)
+             DO UPDATE SET artifact_bytes = EXCLUDED.artifact_bytes",
+        )
+        .bind(namespace)
+        .bind(artifact_ref)
+        .bind(bytes)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+    }
+
+    async fn get_namespaced_bytes(
+        &self,
+        namespace: &str,
+        artifact_ref: &str,
+    ) -> Result<Option<Vec<u8>>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT artifact_bytes FROM lash_lashlang_artifacts
+             WHERE namespace = $1 AND artifact_ref = $2",
+        )
+        .bind(namespace)
+        .bind(artifact_ref)
+        .fetch_optional(&self.pool)
+        .await
+    }
+}
+
 #[async_trait::async_trait]
 impl lashlang::LashlangArtifactStore for PostgresLashlangArtifactStore {
     fn durability_tier(&self) -> lashlang::DurabilityTier {
@@ -11,30 +57,19 @@ impl lashlang::LashlangArtifactStore for PostgresLashlangArtifactStore {
         let bytes = artifact
             .to_store_bytes()
             .map_err(lashlang::ArtifactStoreError::from)?;
-        sqlx::query(
-            "INSERT INTO lash_lashlang_artifacts (module_ref, artifact_bytes)
-             VALUES ($1, $2)
-             ON CONFLICT (module_ref) DO UPDATE SET artifact_bytes = EXCLUDED.artifact_bytes",
-        )
-        .bind(artifact.module_ref.as_str())
-        .bind(bytes)
-        .execute(&self.pool)
-        .await
-        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
-        Ok(())
+        self.put_namespaced_bytes(MODULE_ARTIFACT_NAMESPACE, artifact.module_ref.as_str(), &bytes)
+            .await
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
     }
 
     async fn get_module_artifact(
         &self,
         module_ref: &lashlang::ModuleRef,
     ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
-        let bytes: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT artifact_bytes FROM lash_lashlang_artifacts WHERE module_ref = $1",
-        )
-        .bind(module_ref.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        let bytes = self
+            .get_namespaced_bytes(MODULE_ARTIFACT_NAMESPACE, module_ref.as_str())
+            .await
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
         bytes
             .map(|bytes| {
                 lashlang::ModuleArtifact::from_store_bytes(&bytes)
@@ -50,30 +85,18 @@ impl lashlang::LashlangArtifactStore for PostgresLashlangArtifactStore {
         _descriptor: &str,
         bytes: &[u8],
     ) -> Result<(), lashlang::ArtifactStoreError> {
-        sqlx::query(
-            "INSERT INTO lash_lashlang_artifacts (module_ref, artifact_bytes)
-             VALUES ($1, $2)
-             ON CONFLICT (module_ref) DO UPDATE SET artifact_bytes = EXCLUDED.artifact_bytes",
-        )
-        .bind(artifact_ref)
-        .bind(bytes)
-        .execute(&self.pool)
-        .await
-        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
-        Ok(())
+        self.put_namespaced_bytes(RAW_ARTIFACT_NAMESPACE, artifact_ref, bytes)
+            .await
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
     }
 
     async fn get_artifact_bytes(
         &self,
         artifact_ref: &str,
     ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
-        sqlx::query_scalar(
-            "SELECT artifact_bytes FROM lash_lashlang_artifacts WHERE module_ref = $1",
-        )
-        .bind(artifact_ref)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
+        self.get_namespaced_bytes(RAW_ARTIFACT_NAMESPACE, artifact_ref)
+            .await
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
     }
 }
 
@@ -88,29 +111,17 @@ impl lash_core::ProcessExecutionEnvStore for PostgresLashlangArtifactStore {
         env_ref: &lash_core::ProcessExecutionEnvRef,
         bytes: &[u8],
     ) -> Result<(), lash_core::PluginError> {
-        sqlx::query(
-            "INSERT INTO lash_lashlang_artifacts (module_ref, artifact_bytes)
-             VALUES ($1, $2)
-             ON CONFLICT (module_ref) DO UPDATE SET artifact_bytes = EXCLUDED.artifact_bytes",
-        )
-        .bind(env_ref.as_str())
-        .bind(bytes)
-        .execute(&self.pool)
-        .await
-        .map_err(|err| lash_core::PluginError::Session(err.to_string()))?;
-        Ok(())
+        self.put_namespaced_bytes(PROCESS_ENV_NAMESPACE, env_ref.as_str(), bytes)
+            .await
+            .map_err(|err| lash_core::PluginError::Session(err.to_string()))
     }
 
     async fn get_process_execution_env(
         &self,
         env_ref: &lash_core::ProcessExecutionEnvRef,
     ) -> Result<Option<Vec<u8>>, lash_core::PluginError> {
-        sqlx::query_scalar(
-            "SELECT artifact_bytes FROM lash_lashlang_artifacts WHERE module_ref = $1",
-        )
-        .bind(env_ref.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|err| lash_core::PluginError::Session(err.to_string()))
+        self.get_namespaced_bytes(PROCESS_ENV_NAMESPACE, env_ref.as_str())
+            .await
+            .map_err(|err| lash_core::PluginError::Session(err.to_string()))
     }
 }

@@ -10,6 +10,7 @@
 //! `#[tokio::test]`. Embedders with custom backends can run them via
 //! `lash::testing::conformance`.
 
+mod artifact_store;
 mod attachment_store;
 mod effect_host;
 mod helpers;
@@ -19,6 +20,7 @@ mod runtime_persistence;
 mod session_store_factory;
 mod trigger_store;
 
+pub use artifact_store::*;
 pub use attachment_store::*;
 pub use effect_host::*;
 pub use helpers::*;
@@ -67,6 +69,18 @@ mod tests {
         attachment_store(
             || Arc::new(crate::InMemoryAttachmentStore::new()) as Arc<dyn AttachmentStore>,
             AttachmentStorePersistence::Ephemeral,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_process_execution_env_store_satisfies_conformance() {
+        process_execution_env_store(
+            || {
+                Arc::new(crate::InMemoryProcessExecutionEnvStore::new())
+                    as Arc<dyn crate::ProcessExecutionEnvStore>
+            },
+            DurabilityTier::Inline,
         )
         .await;
     }

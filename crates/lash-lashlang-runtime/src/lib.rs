@@ -2,6 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "testing")]
+pub mod testing;
+
 pub use lash_trace::{
     TraceLashlangChildExecution, TraceLashlangEdgeSelection, TraceLashlangExecutionEvent,
     TraceLashlangExecutionIdentity, TraceLashlangGraph, TraceLashlangGraphChildLink,

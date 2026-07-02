@@ -395,8 +395,8 @@ async fn unsupported_schema_error_reports_real_versions() {
         "error must report the found version 99: {message}"
     );
     assert!(
-        message.contains("schema version 7") || message.contains("version 7"),
-        "error must report the real expected version 7: {message}"
+        message.contains("schema version 8") || message.contains("version 8"),
+        "error must report the real expected version 8: {message}"
     );
     assert!(
         !message.contains("version 1 only"),
@@ -432,5 +432,5 @@ fn concurrent_first_open_never_observes_version_zero_schema() {
     let user_version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 7);
+    assert_eq!(user_version, 8);
 }

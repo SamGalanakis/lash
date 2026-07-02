@@ -14,9 +14,21 @@
 
 use super::*;
 
+/// Logical keyspaces multiplexed onto the `artifact_refs` pointer table. Each
+/// namespace owns its own half of the `(namespace, artifact_ref)` composite
+/// primary key. The `blobs` table is content-addressed, but the `artifact_refs`
+/// pointer is *not*: without the namespace column, a module ref that collides
+/// with a process-execution-env ref would rewrite the same pointer row under
+/// `INSERT OR REPLACE`, so content-addressing alone does not keep the namespaces
+/// disjoint. The composite key does.
+pub(crate) const MODULE_ARTIFACT_NAMESPACE: &str = "lashlang_module";
+pub(crate) const RAW_ARTIFACT_NAMESPACE: &str = "lashlang_artifact";
+pub(crate) const PROCESS_ENV_NAMESPACE: &str = "process_execution_env";
+
 impl Store {
     async fn put_artifact_ref_blob(
         &self,
+        namespace: &'static str,
         artifact_ref: String,
         descriptor: BlobArtifactDescriptor,
         bytes: Vec<u8>,
@@ -27,8 +39,9 @@ impl Store {
                 let blob_ref =
                     Self::insert_artifact_blob_conn(tx, descriptor, &bytes, blob_profile)?;
                 tx.execute(
-                    "INSERT OR REPLACE INTO artifact_refs (artifact_ref, blob_ref) VALUES (?1, ?2)",
-                    params![artifact_ref, blob_ref.as_str()],
+                    "INSERT OR REPLACE INTO artifact_refs (namespace, artifact_ref, blob_ref)
+                     VALUES (?1, ?2, ?3)",
+                    params![namespace, artifact_ref, blob_ref.as_str()],
                 )?;
                 Ok(())
             })
@@ -38,6 +51,7 @@ impl Store {
 
     async fn get_artifact_ref_blob(
         &self,
+        namespace: &'static str,
         artifact_ref: String,
         missing_diagnostic: String,
     ) -> Result<Option<Vec<u8>>, StoreError> {
@@ -46,8 +60,9 @@ impl Store {
             .call(move |conn| {
                 let blob_ref: Option<String> = conn
                     .query_row(
-                        "SELECT blob_ref FROM artifact_refs WHERE artifact_ref = ?1",
-                        params![artifact_ref],
+                        "SELECT blob_ref FROM artifact_refs
+                         WHERE namespace = ?1 AND artifact_ref = ?2",
+                        params![namespace, artifact_ref],
                         |row| row.get::<_, String>(0),
                     )
                     .optional()?;
@@ -83,6 +98,7 @@ impl lashlang::LashlangArtifactStore for Store {
             .map_err(|err| lashlang::ArtifactStoreError::Encode(err.to_string()))?;
         let artifact_ref = artifact.module_ref.as_str().to_string();
         self.put_artifact_ref_blob(
+            MODULE_ARTIFACT_NAMESPACE,
             artifact_ref,
             BlobArtifactDescriptor::lashlang_module(),
             bytes,
@@ -117,6 +133,7 @@ impl lashlang::LashlangArtifactStore for Store {
         let artifact_ref = module_ref.as_str().to_string();
         let Some(bytes) = self
             .get_artifact_ref_blob(
+                MODULE_ARTIFACT_NAMESPACE,
                 artifact_ref,
                 format!("lashlang module artifact `{module_ref}`"),
             )
@@ -149,9 +166,14 @@ impl lashlang::LashlangArtifactStore for Store {
             "process_execution_env" => BlobArtifactDescriptor::process_execution_env(),
             _ => BlobArtifactDescriptor::new(PersistedArtifactKind::GenericBlob, Vec::new()),
         };
-        self.put_artifact_ref_blob(artifact_ref, descriptor, bytes.to_vec())
-            .await
-            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
+        self.put_artifact_ref_blob(
+            RAW_ARTIFACT_NAMESPACE,
+            artifact_ref,
+            descriptor,
+            bytes.to_vec(),
+        )
+        .await
+        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
     }
 
     async fn get_artifact_bytes(
@@ -159,9 +181,13 @@ impl lashlang::LashlangArtifactStore for Store {
         artifact_ref: &str,
     ) -> Result<Option<Vec<u8>>, lashlang::ArtifactStoreError> {
         let artifact_ref = artifact_ref.to_string();
-        self.get_artifact_ref_blob(artifact_ref.clone(), format!("artifact `{artifact_ref}`"))
-            .await
-            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
+        self.get_artifact_ref_blob(
+            RAW_ARTIFACT_NAMESPACE,
+            artifact_ref.clone(),
+            format!("artifact `{artifact_ref}`"),
+        )
+        .await
+        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))
     }
 }
 
@@ -178,6 +204,7 @@ impl lash_core::ProcessExecutionEnvStore for Store {
     ) -> Result<(), lash_core::PluginError> {
         let artifact_ref = env_ref.as_str().to_string();
         self.put_artifact_ref_blob(
+            PROCESS_ENV_NAMESPACE,
             artifact_ref,
             BlobArtifactDescriptor::process_execution_env(),
             bytes.to_vec(),
@@ -192,6 +219,7 @@ impl lash_core::ProcessExecutionEnvStore for Store {
     ) -> Result<Option<Vec<u8>>, lash_core::PluginError> {
         let artifact_ref = env_ref.as_str().to_string();
         self.get_artifact_ref_blob(
+            PROCESS_ENV_NAMESPACE,
             artifact_ref.clone(),
             format!("process execution env `{artifact_ref}`"),
         )

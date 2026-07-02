@@ -238,8 +238,10 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
         );
 
         CREATE TABLE IF NOT EXISTS lash_lashlang_artifacts (
-            module_ref TEXT PRIMARY KEY,
-            artifact_bytes BYTEA NOT NULL
+            namespace TEXT NOT NULL,
+            artifact_ref TEXT NOT NULL,
+            artifact_bytes BYTEA NOT NULL,
+            PRIMARY KEY (namespace, artifact_ref)
         );
         "#,
     )
