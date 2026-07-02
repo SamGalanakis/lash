@@ -10,6 +10,11 @@
 
 use super::*;
 
+/// Hex SHA-256 content address that keys every row in the `blobs` table.
+fn blob_content_hash(content: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(content))
+}
+
 impl Store {
     pub(crate) fn insert_artifact_blob_conn(
         conn: &Connection,
@@ -17,7 +22,7 @@ impl Store {
         content: &[u8],
         profile: BuiltinBlobProfile,
     ) -> rusqlite::Result<BlobRef> {
-        let hash = format!("{:x}", Sha256::digest(content));
+        let hash = blob_content_hash(content);
         let stored = encode_artifact_blob(&descriptor, profile, content);
         conn.execute(
             "INSERT OR IGNORE INTO blobs (hash, content) VALUES (?1, ?2)",
@@ -164,32 +169,9 @@ impl Store {
         rows.filter_map(Result::ok).collect()
     }
 
-    pub async fn put_blob(&self, content: &[u8]) -> BlobRef {
-        let hash = format!("{:x}", Sha256::digest(content));
-        let hash_for_row = hash.clone();
-        let content = content.to_vec();
-        let result = self
-            .conn
-            .call(move |conn| {
-                conn.execute(
-                    "INSERT OR IGNORE INTO blobs (hash, content) VALUES (?1, ?2)",
-                    params![hash_for_row, content],
-                )
-            })
-            .await;
-        if let Err(err) = result {
-            tracing::warn!(error = %err, hash, "failed to persist checkpoint blob");
-        }
-        BlobRef(hash)
-    }
-
-    pub async fn put_artifact_blob(
-        &self,
-        descriptor: BlobArtifactDescriptor,
-        content: &[u8],
-    ) -> BlobRef {
-        let hash = format!("{:x}", Sha256::digest(content));
-        let stored = encode_artifact_blob(&descriptor, self.options.blob_profile, content);
+    /// Persist `stored` bytes under `hash` in the `blobs` table, warning with
+    /// `warn_label` (and dropping the row) if the write fails.
+    async fn insert_blob_row(&self, hash: String, stored: Vec<u8>, warn_label: &str) -> BlobRef {
         let hash_for_row = hash.clone();
         let result = self
             .conn
@@ -201,9 +183,26 @@ impl Store {
             })
             .await;
         if let Err(err) = result {
-            tracing::warn!(error = %err, hash, "failed to persist artifact blob");
+            tracing::warn!(error = %err, hash, "{warn_label}");
         }
         BlobRef(hash)
+    }
+
+    pub async fn put_blob(&self, content: &[u8]) -> BlobRef {
+        let hash = blob_content_hash(content);
+        self.insert_blob_row(hash, content.to_vec(), "failed to persist checkpoint blob")
+            .await
+    }
+
+    pub async fn put_artifact_blob(
+        &self,
+        descriptor: BlobArtifactDescriptor,
+        content: &[u8],
+    ) -> BlobRef {
+        let hash = blob_content_hash(content);
+        let stored = encode_artifact_blob(&descriptor, self.options.blob_profile, content);
+        self.insert_blob_row(hash, stored, "failed to persist artifact blob")
+            .await
     }
 
     pub async fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>> {
