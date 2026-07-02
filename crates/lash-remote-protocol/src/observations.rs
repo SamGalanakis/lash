@@ -1,3 +1,13 @@
+//! Session observation: cursors, resumable observation events, and live
+//! replay gap envelopes.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::registry_errors::{RemoteProtocolError, require_non_empty};
+use crate::usage_activity::{RemoteTurnActivity, RemoteUsage};
+use crate::{REMOTE_PROTOCOL_VERSION, ensure_protocol_version};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteSessionCursor {
     pub protocol_version: u32,
@@ -131,24 +141,4 @@ impl RemoteLiveReplayGap {
 pub enum RemoteLiveReplayGapReason {
     Trimmed,
     Unavailable,
-}
-
-impl RemoteTurnResult {
-    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
-        ensure_protocol_version(self.protocol_version)?;
-        require_non_empty("RemoteTurnResult", "session_id", &self.session_id)?;
-        require_non_empty("RemoteTurnResult", "turn_id", &self.turn_id)?;
-        for activity in &self.activities {
-            if activity.protocol_version != self.protocol_version {
-                return Err(RemoteProtocolError::MismatchedNestedProtocolVersion {
-                    parent: "RemoteTurnResult",
-                    child: "activities",
-                    parent_version: self.protocol_version,
-                    child_version: activity.protocol_version,
-                });
-            }
-            activity.validate()?;
-        }
-        Ok(())
-    }
 }

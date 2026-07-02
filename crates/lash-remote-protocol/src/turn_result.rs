@@ -1,3 +1,59 @@
+//! Turn result envelopes: the turn result itself, outcomes, stops, assistant
+//! output, usage/execution summaries, tool-call summaries, issues, and causal
+//! references.
+
+use std::collections::HashMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::ensure_protocol_version;
+use crate::llm::{RemoteLlmTerminalReason, RemoteProviderFailureKind};
+use crate::registry_errors::{RemoteProtocolError, require_non_empty};
+use crate::usage_activity::{RemoteTokenLedgerEntry, RemoteTurnActivity, RemoteUsage};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteTurnResult {
+    pub protocol_version: u32,
+    pub session_id: String,
+    pub turn_id: String,
+    pub status: RemoteTurnStatus,
+    pub outcome: RemoteTurnOutcome,
+    pub assistant_output: RemoteAssistantOutput,
+    #[serde(default)]
+    pub usage: RemoteTurnUsageSummary,
+    #[serde(default)]
+    pub execution: RemoteExecutionSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<RemoteToolCallSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<RemoteTurnIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activities: Vec<RemoteTurnActivity>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+impl RemoteTurnResult {
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)?;
+        require_non_empty("RemoteTurnResult", "session_id", &self.session_id)?;
+        require_non_empty("RemoteTurnResult", "turn_id", &self.turn_id)?;
+        for activity in &self.activities {
+            if activity.protocol_version != self.protocol_version {
+                return Err(RemoteProtocolError::MismatchedNestedProtocolVersion {
+                    parent: "RemoteTurnResult",
+                    child: "activities",
+                    parent_version: self.protocol_version,
+                    child_version: activity.protocol_version,
+                });
+            }
+            activity.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RemoteCausalRef {

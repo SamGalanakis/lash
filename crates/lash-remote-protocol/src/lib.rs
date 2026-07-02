@@ -1,19 +1,47 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+//! Wire DTOs for driving a lash runtime across a process boundary.
+//!
+//! Each domain module carries one slice of the protocol vocabulary
+//! ([`llm`], [`turn_input`], [`turn_result`], [`processes`], [`triggers`],
+//! [`prompt`], [`tools`], [`observations`], [`usage_activity`],
+//! [`registry_errors`]); the crate root re-exports all of them, which is the
+//! established public API for direct consumers of this crate. The
+//! cross-cutting protocol handshake ([`REMOTE_PROTOCOL_VERSION`],
+//! [`ensure_protocol_version`]) lives at the root itself.
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+pub mod llm;
+pub mod observations;
+pub mod processes;
+pub mod prompt;
+pub mod registry_errors;
+pub mod tools;
+pub mod triggers;
+pub mod turn_input;
+pub mod turn_result;
+pub mod usage_activity;
 
-include!("protocol/version.rs");
-include!("protocol/llm.rs");
-include!("protocol/turn_input.rs");
-include!("protocol/observations.rs");
-include!("protocol/processes.rs");
-include!("protocol/triggers.rs");
-include!("protocol/turn_result.rs");
-include!("protocol/prompt.rs");
-include!("protocol/tools.rs");
-include!("protocol/usage_activity.rs");
-include!("protocol/registry_errors.rs");
+pub use llm::*;
+pub use observations::*;
+pub use processes::*;
+pub use prompt::*;
+pub use registry_errors::*;
+pub use tools::*;
+pub use triggers::*;
+pub use turn_input::*;
+pub use turn_result::*;
+pub use usage_activity::*;
+
+pub const REMOTE_PROTOCOL_VERSION: u32 = 6;
+
+pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
+    if actual == REMOTE_PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(RemoteProtocolError::UnsupportedProtocolVersion {
+            actual,
+            expected: REMOTE_PROTOCOL_VERSION,
+        })
+    }
+}
 
 #[cfg(feature = "core-conversions")]
 mod core_conversions;

@@ -1,3 +1,8 @@
+//! The protocol error type, plus the remote tool-registry contract and its
+//! reopen-stability assertion.
+
+use crate::tools::RemoteToolGrant;
+
 pub trait RemoteToolRegistry {
     fn grants(&self) -> Vec<RemoteToolGrant>;
 
@@ -39,7 +44,7 @@ fn remote_registry_call_paths(
     Ok(call_paths)
 }
 
-fn require_non_empty(
+pub(crate) fn require_non_empty(
     type_name: &'static str,
     field: &'static str,
     value: &str,
