@@ -62,10 +62,14 @@ pub struct RlmProtocolPluginFactory {
     deferred_tool_resolver: Option<SharedDeferredToolResolver>,
     artifact_store: Arc<dyn LashlangArtifactStore>,
     lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
-    /// Whether this deployment has process lifecycle available, learned when
-    /// core installs process-engine contributions (before any session is built)
-    /// and read back when building the per-session plugin surface so the prompt
-    /// advertises the same abilities the engine offers.
+    /// Whether this deployment has process lifecycle available. Recorded once —
+    /// by core installing process-engine contributions (before any session is
+    /// built), by [`Self::with_process_lifecycle`] for hosts that assemble a
+    /// plugin host directly, or by the compile path's explicit argument — and
+    /// read back when building the per-session plugin surface so the prompt
+    /// advertises the same abilities the engine offers. Building a session
+    /// before the value is recorded fails loudly instead of silently degrading
+    /// abilities; conflicting recordings fail loudly too.
     process_lifecycle: OnceLock<bool>,
 }
 
@@ -133,8 +137,50 @@ impl RlmProtocolPluginFactory {
         Arc::clone(&self.artifact_store)
     }
 
-    fn process_lifecycle(&self) -> bool {
-        self.process_lifecycle.get().copied().unwrap_or(false)
+    /// Declare process-lifecycle availability explicitly, for hosts that build
+    /// sessions from a hand-assembled [`PluginHost`] (or durable worker)
+    /// instead of a core that installs process-engine contributions — the
+    /// install path records this automatically.
+    ///
+    /// Panics if a conflicting value was already recorded: that is a wiring
+    /// bug, not a runtime condition.
+    pub fn with_process_lifecycle(self, process_lifecycle_available: bool) -> Self {
+        self.record_process_lifecycle(process_lifecycle_available)
+            .expect("conflicting process-lifecycle availability recorded on RLM protocol factory");
+        self
+    }
+
+    /// Record process-lifecycle availability: first recording wins, repeated
+    /// agreeing recordings are no-ops, and a conflicting recording is an error
+    /// (a silent flip would desynchronize the per-session plugin surface from
+    /// engines already handed out).
+    fn record_process_lifecycle(&self, process_lifecycle_available: bool) -> Result<(), String> {
+        if self
+            .process_lifecycle
+            .set(process_lifecycle_available)
+            .is_err()
+            && self.process_lifecycle.get() != Some(&process_lifecycle_available)
+        {
+            return Err(format!(
+                "RLM protocol factory already recorded process_lifecycle_available={}; \
+                 refusing conflicting recording of {}",
+                !process_lifecycle_available, process_lifecycle_available
+            ));
+        }
+        Ok(())
+    }
+
+    fn process_lifecycle(&self) -> Result<bool, PluginError> {
+        self.process_lifecycle.get().copied().ok_or_else(|| {
+            PluginError::Registration(
+                "RLM protocol factory built a session before learning whether process \
+                 lifecycle is available; abilities would silently degrade. Install the \
+                 factory through a core (which records this while installing \
+                 process-engine contributions) or declare it explicitly with \
+                 `with_process_lifecycle`."
+                    .to_string(),
+            )
+        })
     }
 
     /// Build the compile-time Lashlang surface over a host-built plugin host.
@@ -148,6 +194,12 @@ impl RlmProtocolPluginFactory {
         process_lifecycle_available: bool,
         request: LashlangCompileSurfaceRequest,
     ) -> Result<LashlangCompileSurface, PluginError> {
+        // The compile caller is the authority on process-lifecycle availability
+        // here; record it before building the throwaway catalog-resolution
+        // session below, which invokes this factory's `build` (the plugin host
+        // contains this factory) and reads the recorded value.
+        self.record_process_lifecycle(process_lifecycle_available)
+            .map_err(PluginError::Registration)?;
         let plugins = plugin_host.build_session_with_parent(
             &request.session_id,
             None,
@@ -230,7 +282,8 @@ impl PluginFactory for RlmProtocolPluginFactory {
         let process_lifecycle = ctx.process_lifecycle_available();
         // Record for the per-session plugin surface; install runs before any
         // session is built on this (shared) factory.
-        let _ = self.process_lifecycle.set(process_lifecycle);
+        self.record_process_lifecycle(process_lifecycle)
+            .map_err(PluginError::Registration)?;
         let config = rlm_protocol_config(self.config.clone(), process_lifecycle);
         let surface = rlm_lashlang_surface(&config, process_lifecycle)
             .with_plugin_extensions(ctx.extensions())
@@ -244,7 +297,7 @@ impl PluginFactory for RlmProtocolPluginFactory {
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        let config = rlm_protocol_config(self.config.clone(), self.process_lifecycle());
+        let config = rlm_protocol_config(self.config.clone(), self.process_lifecycle()?);
         let lashlang_surface = LashlangSurface::new(
             config.lashlang_abilities,
             config.lashlang_language_features,

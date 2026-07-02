@@ -62,9 +62,8 @@
       <h2>Minimal Examples</h2>
       <p>Wrap Lash's DTO in your host envelope. Service-specific fields belong in the wrapper or in <code>metadata</code>, not as local forks of Lash sub-objects.</p>
     </div>
-<pre data-lang="rust" data-snippet="remote_protocol#remote-turn-request"><code>use lash::remote::{
-    REMOTE_PROTOCOL_VERSION, RemoteInputItem, RemoteTurnInput, RemoteTurnRequest,
-};
+<pre data-lang="rust" data-snippet="remote_protocol#remote-turn-request"><code>use lash::remote::REMOTE_PROTOCOL_VERSION;
+use lash::remote::turn_input::{RemoteInputItem, RemoteTurnInput, RemoteTurnRequest};
 
 let request = RemoteTurnRequest {
     protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -90,10 +89,11 @@ request.validate()?;</code></pre>
     <p>Process starts use the same rule. The optional <code>env_spec</code> is a closed Lash DTO: plugin-owned options plus runtime policy. It is not a product metadata bag.</p>
 <pre data-lang="rust" data-snippet="remote_protocol#remote-process-start-request"><code>use std::collections::BTreeMap;
 
-use lash::remote::{
-    REMOTE_PROTOCOL_VERSION, RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy,
-    RemoteProcessInput, RemoteProcessModelLimits, RemoteProcessModelSpec,
-    RemoteProcessOriginator, RemoteProcessPluginOptions, RemoteProcessStartRequest,
+use lash::remote::REMOTE_PROTOCOL_VERSION;
+use lash::remote::processes::{
+    RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy, RemoteProcessInput,
+    RemoteProcessModelLimits, RemoteProcessModelSpec, RemoteProcessOriginator,
+    RemoteProcessPluginOptions, RemoteProcessStartRequest,
 };
 use serde_json::json;
 

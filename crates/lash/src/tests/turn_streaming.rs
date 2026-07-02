@@ -785,7 +785,7 @@ async fn session_observation_remote_subscription_replays_dto_events() -> Result<
         .await?;
     let crate::observe::RemoteSessionObservationSubscription::Subscribed(mut subscription) =
         session.observe().subscribe_from_remote_cursor(
-            &crate::remote::RemoteSessionCursor::new(observation.cursor.clone()),
+            &crate::remote::observations::RemoteSessionCursor::new(observation.cursor.clone()),
         )?
     else {
         panic!("recent remote cursor should subscribe without a gap");
@@ -831,12 +831,9 @@ async fn session_observation_remote_recovery_stream_yields_dto_gap() -> Result<(
         .turn(TurnInput::text("trimmed before remote subscribe"))
         .run()
         .await?;
-    let mut stream =
-        session
-            .observe()
-            .subscribe_and_recover_remote(crate::remote::RemoteSessionCursor::new(
-                observation.cursor,
-            ))?;
+    let mut stream = session.observe().subscribe_and_recover_remote(
+        crate::remote::observations::RemoteSessionCursor::new(observation.cursor),
+    )?;
     let item = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
         .await
         .expect("timed out waiting for remote gap stream item")
@@ -847,7 +844,7 @@ async fn session_observation_remote_recovery_stream_yields_dto_gap() -> Result<(
 
     assert_eq!(
         gap.reason,
-        crate::remote::RemoteLiveReplayGapReason::Trimmed
+        crate::remote::observations::RemoteLiveReplayGapReason::Trimmed
     );
     assert_eq!(gap.latest_cursor, observation.cursor);
     assert_eq!(observation.session_id, "session-observation-remote-gap");
@@ -903,15 +900,17 @@ fn observation_assistant_delta(event: &lash_core::SessionObservationEvent) -> Op
 }
 
 fn remote_observation_assistant_delta(
-    event: &crate::remote::RemoteSessionObservationEvent,
+    event: &crate::remote::observations::RemoteSessionObservationEvent,
 ) -> Option<String> {
     match &event.event {
-        crate::remote::RemoteSessionObservationEventPayload::TurnActivity { activity } => {
-            match &activity.event {
-                crate::remote::RemoteTurnEvent::AssistantProseDelta { text } => Some(text.clone()),
-                _ => None,
+        crate::remote::observations::RemoteSessionObservationEventPayload::TurnActivity {
+            activity,
+        } => match &activity.event {
+            crate::remote::usage::RemoteTurnEvent::AssistantProseDelta { text } => {
+                Some(text.clone())
             }
-        }
+            _ => None,
+        },
         _ => None,
     }
 }

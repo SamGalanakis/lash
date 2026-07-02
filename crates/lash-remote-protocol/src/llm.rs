@@ -1,3 +1,15 @@
+//! LLM request/response envelopes: messages, attachments, tool specs, output
+//! specs, provider metadata, and schema-projection contracts.
+
+use std::collections::HashMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::ensure_protocol_version;
+use crate::registry_errors::{RemoteProtocolError, require_non_empty};
+use crate::usage_activity::RemoteUsage;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteSchemaContract {
     pub canonical: serde_json::Value,
@@ -67,7 +79,7 @@ pub struct RemoteSchemaProjectionOverride {
     pub schema: serde_json::Value,
 }
 
-fn default_remote_input_schema() -> RemoteSchemaContract {
+pub(crate) fn default_remote_input_schema() -> RemoteSchemaContract {
     RemoteSchemaContract::new(serde_json::json!({
         "type": "object",
         "properties": {},
@@ -167,7 +179,7 @@ impl RemoteModelIntent {
         }
     }
 
-    fn validate(&self) -> Result<(), RemoteProtocolError> {
+    pub(crate) fn validate(&self) -> Result<(), RemoteProtocolError> {
         require_non_empty("RemoteModelIntent", "model", &self.model)
     }
 }
@@ -195,7 +207,7 @@ impl RemoteGenerationOptions {
             && self.provider_options.is_empty()
     }
 
-    fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
+    pub(crate) fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
         if self.output_token_cap == Some(0) {
             return Err(RemoteProtocolError::InvalidEnvelope {
                 type_name,
@@ -401,7 +413,7 @@ pub struct RemoteAttachmentRef {
 }
 
 impl RemoteAttachmentRef {
-    fn validate(&self) -> Result<(), RemoteProtocolError> {
+    pub(crate) fn validate(&self) -> Result<(), RemoteProtocolError> {
         require_non_empty("RemoteAttachmentRef", "id", &self.id)?;
         require_non_empty("RemoteAttachmentRef", "mime", &self.mime)
     }
@@ -419,7 +431,7 @@ pub struct RemoteLlmToolSpec {
 }
 
 impl RemoteLlmToolSpec {
-    fn validate(&self) -> Result<(), RemoteProtocolError> {
+    pub(crate) fn validate(&self) -> Result<(), RemoteProtocolError> {
         require_non_empty("RemoteLlmToolSpec", "name", &self.name)
     }
 }

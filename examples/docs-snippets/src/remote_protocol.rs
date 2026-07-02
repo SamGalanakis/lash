@@ -7,9 +7,8 @@ fn remote_turn_request(
     trace_turn_id: String,
 ) -> anyhow::Result<()> {
     // docs:start:remote-turn-request
-    use lash::remote::{
-        REMOTE_PROTOCOL_VERSION, RemoteInputItem, RemoteTurnInput, RemoteTurnRequest,
-    };
+    use lash::remote::REMOTE_PROTOCOL_VERSION;
+    use lash::remote::turn_input::{RemoteInputItem, RemoteTurnInput, RemoteTurnRequest};
 
     let request = RemoteTurnRequest {
         protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -40,10 +39,11 @@ fn remote_process_start_request() -> anyhow::Result<()> {
     // docs:start:remote-process-start-request
     use std::collections::BTreeMap;
 
-    use lash::remote::{
-        REMOTE_PROTOCOL_VERSION, RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy,
-        RemoteProcessInput, RemoteProcessModelLimits, RemoteProcessModelSpec,
-        RemoteProcessOriginator, RemoteProcessPluginOptions, RemoteProcessStartRequest,
+    use lash::remote::REMOTE_PROTOCOL_VERSION;
+    use lash::remote::processes::{
+        RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy, RemoteProcessInput,
+        RemoteProcessModelLimits, RemoteProcessModelSpec, RemoteProcessOriginator,
+        RemoteProcessPluginOptions, RemoteProcessStartRequest,
     };
     use serde_json::json;
 

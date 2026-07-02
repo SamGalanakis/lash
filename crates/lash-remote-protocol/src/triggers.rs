@@ -1,3 +1,17 @@
+//! Trigger envelopes: occurrence emission, subscriptions, and registrations.
+
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::processes::{
+    RemoteProcessDefinitionIdentity, RemoteProcessEventType, RemoteProcessExecutionEnvRef,
+    RemoteProcessIdentity, RemoteProcessInput, RemoteProcessOriginator, RemoteSessionScope,
+};
+use crate::registry_errors::{RemoteProtocolError, require_non_empty};
+use crate::{REMOTE_PROTOCOL_VERSION, ensure_protocol_version};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteTriggerOccurrenceRequest {
     pub protocol_version: u32,
@@ -378,9 +392,8 @@ fn validate_remote_trigger_target_label(
         (Some(target_label), Some(identity_label)) if target_label != identity_label => {
             Err(RemoteProtocolError::InvalidEnvelope {
                 type_name,
-                message:
-                    "target_label must match target_identity.label when both are present"
-                        .to_string(),
+                message: "target_label must match target_identity.label when both are present"
+                    .to_string(),
             })
         }
         _ => Ok(()),

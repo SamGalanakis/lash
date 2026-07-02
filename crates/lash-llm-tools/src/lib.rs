@@ -76,7 +76,7 @@ impl LlmToolsProvider {
     async fn llm_query(&self, args: &Value, context: &ToolContext<'_>) -> Result<Value, String> {
         let task = required_string(args, "task")?;
         let inputs = args.get("inputs").cloned().unwrap_or(Value::Null);
-        let output_schema = parse_output_schema(args.get("output"))?;
+        let output_schema = lash_lashlang_runtime::parse_output_schema(args.get("output"))?;
         let session_model = context
             .sessions()
             .model()
@@ -153,47 +153,6 @@ pub fn llm_query_tool_definition() -> ToolDefinition {
     )
     .with_lashlang_binding(LashlangToolBinding::new(["llm"], "query"))
     .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
-}
-
-pub fn parse_output_schema(value: Option<&Value>) -> Result<Option<Value>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let output = value.as_object().ok_or_else(|| {
-        "invalid `output`: expected a record describing the typed shape".to_string()
-    })?;
-    if output.is_empty() {
-        return Err("at least one output field is required".to_string());
-    }
-
-    #[cfg(feature = "lashlang")]
-    {
-        if output.len() == 1
-            && let Some(schema) = output.get(lash_lashlang_runtime::LASH_TYPE_KEY)
-        {
-            validate_schema(schema)?;
-            return Ok(Some(schema.clone()));
-        }
-    }
-
-    let mut properties = serde_json::Map::new();
-    let mut required = Vec::new();
-    for (name, descriptor) in output {
-        let type_str = descriptor
-            .as_str()
-            .ok_or_else(|| format!("field `{name}`: type descriptor must be a string"))?;
-        properties.insert(name.clone(), type_descriptor_to_json_schema(type_str)?);
-        required.push(Value::String(name.clone()));
-    }
-    Ok(Some(json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    })))
 }
 
 fn llm_query_input_schema() -> Value {
@@ -325,47 +284,6 @@ fn required_string(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required parameter: {key}"))
 }
 
-#[cfg(feature = "lashlang")]
-fn validate_schema(schema: &Value) -> Result<(), String> {
-    let object = schema
-        .as_object()
-        .ok_or_else(|| "Type schema must be a JSON object".to_string())?;
-    let kind = object
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Type schema missing `type` field".to_string())?;
-    match kind {
-        "object" | "array" | "string" | "integer" | "number" | "boolean" => Ok(()),
-        other => Err(format!("unsupported Type schema kind `{other}`")),
-    }
-}
-
-fn type_descriptor_to_json_schema(descriptor: &str) -> Result<Value, String> {
-    let scalar = |ty: &str| -> Result<Value, String> {
-        match ty {
-            "str" | "string" => Ok(json!({"type": "string"})),
-            "int" | "integer" => Ok(json!({"type": "integer"})),
-            "float" | "number" => Ok(json!({"type": "number"})),
-            "bool" | "boolean" => Ok(json!({"type": "boolean"})),
-            "record" | "dict" | "object" => {
-                Ok(json!({"type": "object", "additionalProperties": true}))
-            }
-            other => Err(format!("unknown scalar type `{other}`")),
-        }
-    };
-    let trimmed = descriptor.trim();
-    if let Some(inner) = trimmed
-        .strip_prefix("list[")
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        return Ok(json!({
-            "type": "array",
-            "items": scalar(inner.trim())?,
-        }));
-    }
-    scalar(trimmed)
-}
-
 fn finalise_tool_result(result: Result<Value, String>) -> ToolResult {
     match result {
         Ok(value) => ToolResult::ok(value),
@@ -472,69 +390,6 @@ mod tests {
                 .bindings
                 .contains_key(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY)
         );
-    }
-
-    #[test]
-    fn output_schema_supports_scalars_and_lists() {
-        let schema = parse_output_schema(Some(&json!({
-            "answer": "str",
-            "count": "int",
-            "items": "list[str]"
-        })))
-        .expect("schema")
-        .expect("present");
-        assert_eq!(schema["properties"]["answer"]["type"], json!("string"));
-        assert_eq!(schema["properties"]["count"]["type"], json!("integer"));
-        assert_eq!(schema["properties"]["items"]["type"], json!("array"));
-    }
-
-    #[cfg(feature = "lashlang")]
-    #[test]
-    fn output_schema_passes_through_lash_type_wrapper() {
-        use lash_lashlang_runtime::LASH_TYPE_KEY;
-
-        let inner_schema = json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string" },
-                "tags": { "type": "array", "items": { "type": "string" } },
-                "status": { "type": "string", "enum": ["ok", "err"] }
-            },
-            "required": ["name", "tags", "status"],
-            "additionalProperties": false
-        });
-        let wrapped = json!({ LASH_TYPE_KEY: inner_schema.clone() });
-        let schema = parse_output_schema(Some(&wrapped))
-            .expect("schema")
-            .expect("present");
-        assert_eq!(schema, inner_schema);
-    }
-
-    #[cfg(feature = "lashlang")]
-    #[test]
-    fn output_schema_rejects_lash_type_without_type_field() {
-        use lash_lashlang_runtime::LASH_TYPE_KEY;
-
-        let wrapped = json!({ LASH_TYPE_KEY: {"properties": {}} });
-        let err = parse_output_schema(Some(&wrapped)).expect_err("missing type");
-        assert!(err.contains("type"), "error: {err}");
-    }
-
-    #[cfg(feature = "lashlang")]
-    #[test]
-    fn output_schema_accepts_array_top_level_type() {
-        use lash_lashlang_runtime::LASH_TYPE_KEY;
-
-        let wrapped = json!({
-            LASH_TYPE_KEY: {
-                "type": "array",
-                "items": {"type": "string"}
-            }
-        });
-        let schema = parse_output_schema(Some(&wrapped))
-            .expect("schema")
-            .expect("present");
-        assert_eq!(schema["type"], json!("array"));
     }
 
     #[tokio::test]

@@ -104,7 +104,7 @@ impl RlmSubagentToolsProvider {
                 unknown_capability_message(&capability_name, &self.registry)
             )));
         }
-        let output_schema = lash_llm_tools::parse_output_schema(args.get("output"))
+        let output_schema = lash_lashlang_runtime::parse_output_schema(args.get("output"))
             .map_err(|err| ToolResult::err(serde_json::json!(err)))?;
         let seed = lash_protocol_rlm::RlmSeed::from_tool_args(args)
             .map_err(|err| ToolResult::err(serde_json::json!(err)))?;

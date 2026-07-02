@@ -314,7 +314,7 @@ impl LashCore {
     /// resolver, execution sink/jsonl path, and — required at construction — the
     /// Lashlang artifact store) before passing it in.
     #[cfg(feature = "rlm")]
-    pub fn rlm_builder(factory: lash_protocol_rlm::RlmProtocolPluginFactory) -> LashCoreBuilder {
+    pub fn rlm_builder(factory: crate::rlm::RlmProtocolPluginFactory) -> LashCoreBuilder {
         LashCore::builder()
             .protocol_plugin(Arc::new(factory))
             .plugins(default_runtime_stack())

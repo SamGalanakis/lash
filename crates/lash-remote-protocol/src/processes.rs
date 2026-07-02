@@ -1,3 +1,19 @@
+//! Process lifecycle envelopes: start/cancel/signal/await/list requests and
+//! results, process records and summaries, event semantics, execution
+//! environments, and runtime invocation provenance.
+
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::prompt::RemotePromptLayer;
+use crate::registry_errors::{RemoteProtocolError, require_non_empty};
+use crate::tools::RemoteToolOutputContract;
+use crate::turn_input::RemoteTurnInput;
+use crate::turn_result::RemoteCausalRef;
+use crate::{REMOTE_PROTOCOL_VERSION, ensure_protocol_version};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteSessionScope {
     pub session_id: String,
@@ -36,8 +52,7 @@ impl RemoteProcessExecutionEnvRef {
         } else {
             Err(RemoteProtocolError::InvalidEnvelope {
                 type_name: "RemoteProcessExecutionEnvRef",
-                message:
-                    "env_ref must match `process-env:sha256:<64 lowercase hex>`".to_string(),
+                message: "env_ref must match `process-env:sha256:<64 lowercase hex>`".to_string(),
             })
         }
     }
@@ -52,8 +67,7 @@ impl RemoteProcessExecutionEnvRef {
         } else {
             Err(RemoteProtocolError::InvalidEnvelope {
                 type_name,
-                message:
-                    "env_ref must match `process-env:sha256:<64 lowercase hex>`".to_string(),
+                message: "env_ref must match `process-env:sha256:<64 lowercase hex>`".to_string(),
             })
         }
     }
@@ -265,9 +279,15 @@ impl RemoteProcessLifecycleStatus {
 pub enum RemoteProcessStatus {
     #[default]
     Running,
-    Completed { await_output: RemoteProcessAwaitOutput },
-    Failed { await_output: RemoteProcessAwaitOutput },
-    Cancelled { await_output: RemoteProcessAwaitOutput },
+    Completed {
+        await_output: RemoteProcessAwaitOutput,
+    },
+    Failed {
+        await_output: RemoteProcessAwaitOutput,
+    },
+    Cancelled {
+        await_output: RemoteProcessAwaitOutput,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -472,7 +492,11 @@ impl RemoteProcessWorkSnapshot {
         ensure_protocol_version(self.protocol_version)?;
         require_non_empty("RemoteProcessWorkSnapshot", "session_id", &self.session_id)?;
         for process_id in &self.visible_process_ids {
-            require_non_empty("RemoteProcessWorkSnapshot", "visible_process_ids", process_id)?;
+            require_non_empty(
+                "RemoteProcessWorkSnapshot",
+                "visible_process_ids",
+                process_id,
+            )?;
         }
         for item in &self.items {
             item.validate("RemoteProcessWorkSnapshot")?;
@@ -945,7 +969,10 @@ pub struct RemoteProcessExecutionPolicy {
 pub struct RemoteProcessExecutionEnvSpec {
     #[serde(default, skip_serializing_if = "RemoteProcessPluginOptions::is_empty")]
     pub plugin_options: RemoteProcessPluginOptions,
-    #[serde(default, skip_serializing_if = "RemoteProcessExecutionPolicy::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "RemoteProcessExecutionPolicy::is_empty"
+    )]
     pub policy: RemoteProcessExecutionPolicy,
 }
 
@@ -970,8 +997,9 @@ impl RemoteProcessExecutionEnvSpec {
         if self.policy.model.limits.context_window_tokens == 0 {
             return Err(RemoteProtocolError::InvalidEnvelope {
                 type_name,
-                message: "env_spec.policy.model.limits.context_window_tokens must be greater than zero"
-                    .to_string(),
+                message:
+                    "env_spec.policy.model.limits.context_window_tokens must be greater than zero"
+                        .to_string(),
             });
         }
         if self
@@ -1156,11 +1184,7 @@ pub struct RemoteProcessCancelRequest {
 impl RemoteProcessCancelRequest {
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
-        require_non_empty(
-            "RemoteProcessCancelRequest",
-            "process_id",
-            &self.process_id,
-        )?;
+        require_non_empty("RemoteProcessCancelRequest", "process_id", &self.process_id)?;
         if let Some(reason) = &self.reason {
             require_non_empty("RemoteProcessCancelRequest", "reason", reason)?;
         }
@@ -1180,11 +1204,7 @@ pub struct RemoteProcessCancelResult {
 impl RemoteProcessCancelResult {
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
-        require_non_empty(
-            "RemoteProcessCancelResult",
-            "process_id",
-            &self.process_id,
-        )?;
+        require_non_empty("RemoteProcessCancelResult", "process_id", &self.process_id)?;
         if let Some(record) = &self.record {
             record.validate("RemoteProcessCancelResult")?;
         }
@@ -1209,21 +1229,13 @@ pub struct RemoteProcessSignalRequest {
 impl RemoteProcessSignalRequest {
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
-        require_non_empty(
-            "RemoteProcessSignalRequest",
-            "process_id",
-            &self.process_id,
-        )?;
+        require_non_empty("RemoteProcessSignalRequest", "process_id", &self.process_id)?;
         require_non_empty(
             "RemoteProcessSignalRequest",
             "signal_name",
             &self.signal_name,
         )?;
-        require_non_empty(
-            "RemoteProcessSignalRequest",
-            "signal_id",
-            &self.signal_id,
-        )?;
+        require_non_empty("RemoteProcessSignalRequest", "signal_id", &self.signal_id)?;
         if let Some(replay_key) = &self.replay_key {
             require_non_empty("RemoteProcessSignalRequest", "replay_key", replay_key)?;
         }
@@ -1256,11 +1268,7 @@ pub struct RemoteProcessAwaitRequest {
 impl RemoteProcessAwaitRequest {
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
-        require_non_empty(
-            "RemoteProcessAwaitRequest",
-            "process_id",
-            &self.process_id,
-        )
+        require_non_empty("RemoteProcessAwaitRequest", "process_id", &self.process_id)
     }
 }
 
@@ -1274,11 +1282,7 @@ pub struct RemoteProcessAwaitResult {
 impl RemoteProcessAwaitResult {
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
-        require_non_empty(
-            "RemoteProcessAwaitResult",
-            "process_id",
-            &self.process_id,
-        )?;
+        require_non_empty("RemoteProcessAwaitResult", "process_id", &self.process_id)?;
         self.output.validate("RemoteProcessAwaitResult")
     }
 }
@@ -1294,11 +1298,7 @@ pub struct RemoteProcessEventsRequest {
 impl RemoteProcessEventsRequest {
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
-        require_non_empty(
-            "RemoteProcessEventsRequest",
-            "process_id",
-            &self.process_id,
-        )
+        require_non_empty("RemoteProcessEventsRequest", "process_id", &self.process_id)
     }
 }
 

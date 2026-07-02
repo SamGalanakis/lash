@@ -775,7 +775,11 @@ async fn run_seed_probe_inner(
                     .with_lashlang_language_features(language_features),
                 Arc::clone(&artifact_store),
             )
-            .with_lashlang_execution_trace(execution_sink.clone(), trace_context.clone()),
+            .with_lashlang_execution_trace(execution_sink.clone(), trace_context.clone())
+            // This harness assembles the plugin host and process engine by hand
+            // (no core install step records lifecycle availability), so declare
+            // it explicitly: the worker below runs real processes.
+            .with_process_lifecycle(true),
         ),
         Arc::new(SubagentsPluginFactory::new(Arc::new(
             CapabilityRegistry::new().with(Arc::new(StaticCapability::new(

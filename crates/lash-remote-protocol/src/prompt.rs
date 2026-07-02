@@ -1,3 +1,10 @@
+//! Prompt-layer envelopes: templates, slots, and contributions.
+
+use std::collections::HashMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemotePromptLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]

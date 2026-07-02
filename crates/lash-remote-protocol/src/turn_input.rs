@@ -1,3 +1,17 @@
+//! Turn input envelopes: items, image blobs, per-turn protocol options, and
+//! the turn request.
+
+use std::collections::HashMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::llm::RemoteModelIntent;
+use crate::prompt::RemotePromptLayer;
+use crate::registry_errors::{RemoteProtocolError, require_non_empty};
+use crate::tools::RemoteToolGrant;
+use crate::{REMOTE_PROTOCOL_VERSION, ensure_protocol_version};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteProtocolTurnOptions {
     #[serde(default = "empty_protocol_turn_payload")]
@@ -119,26 +133,4 @@ impl RemoteTurnRequest {
         }
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteTurnResult {
-    pub protocol_version: u32,
-    pub session_id: String,
-    pub turn_id: String,
-    pub status: RemoteTurnStatus,
-    pub outcome: RemoteTurnOutcome,
-    pub assistant_output: RemoteAssistantOutput,
-    #[serde(default)]
-    pub usage: RemoteTurnUsageSummary,
-    #[serde(default)]
-    pub execution: RemoteExecutionSummary,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<RemoteToolCallSummary>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub issues: Vec<RemoteTurnIssue>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub activities: Vec<RemoteTurnActivity>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub metadata: HashMap<String, serde_json::Value>,
 }

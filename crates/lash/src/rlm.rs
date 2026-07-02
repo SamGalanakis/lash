@@ -67,6 +67,13 @@ pub use lash_protocol_rlm::{
     NamedDataType, RlmProtocolPluginConfig, RlmProtocolPluginFactory, TypeExpr, TypeField,
     format_type_expr,
 };
+/// Projection vocabulary: register lazy host projections on a
+/// [`ProjectionRegistry`], bind projected values session-wide via
+/// [`rlm_session_projection_extension`], or per turn via
+/// [`RlmTurnInputExt::rlm_project`].
+pub use lash_protocol_rlm::{
+    ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension,
+};
 pub use lash_rlm_types::RlmFinalAnswerFormat;
 
 /// The Lashlang compile APIs are operations over an

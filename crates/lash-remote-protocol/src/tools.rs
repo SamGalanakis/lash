@@ -1,3 +1,15 @@
+//! Tool grants: schemas, call-path bindings, activation, scheduling, and
+//! retry policies.
+
+use std::collections::{BTreeMap, HashSet};
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::ensure_protocol_version;
+use crate::llm::{RemoteSchemaContract, default_remote_input_schema};
+use crate::registry_errors::RemoteProtocolError;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteToolGrant {
     pub protocol_version: u32,
@@ -156,7 +168,11 @@ fn validate_call_path_binding(
             message: format!("tool binding `{binding_key}` requires an explicit module path"),
         });
     }
-    if binding.module_path.iter().any(|part| part.trim().is_empty()) {
+    if binding
+        .module_path
+        .iter()
+        .any(|part| part.trim().is_empty())
+    {
         return Err(RemoteProtocolError::InvalidToolGrant {
             tool_name: tool_name.to_string(),
             message: format!(
@@ -202,7 +218,7 @@ pub enum RemoteToolOutputContract {
 }
 
 impl RemoteToolOutputContract {
-    fn is_static(&self) -> bool {
+    pub(crate) fn is_static(&self) -> bool {
         matches!(self, Self::Static)
     }
 }

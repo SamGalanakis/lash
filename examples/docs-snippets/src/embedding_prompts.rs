@@ -46,9 +46,7 @@ struct Board {
 async fn projected_bindings(session: &LashSession, task: Task, board: Board) -> anyhow::Result<()> {
     // docs:start:projected-bindings
     use lash::TurnInput;
-    use lash_protocol_rlm::{
-        RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension,
-    };
+    use lash::rlm::{RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension};
 
     // Session-wide: applies to every turn the session runs.
     session
@@ -84,8 +82,8 @@ async fn lazy_projection() -> anyhow::Result<()> {
     // docs:start:lazy-projection
     use std::sync::Arc;
 
+    use lash::rlm::{ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt};
     use lash::{TurnInput, plugins::runtime_plugin_stack};
-    use lash_protocol_rlm::{ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt};
 
     let registry = Arc::new(ProjectionRegistry::new());
     let factory = lash::rlm::RlmProtocolPluginFactory::new(

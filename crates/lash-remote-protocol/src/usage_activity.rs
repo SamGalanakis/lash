@@ -1,3 +1,11 @@
+//! Token usage accounting and the streaming turn-activity event vocabulary.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::ensure_protocol_version;
+use crate::registry_errors::{RemoteProtocolError, require_non_empty};
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteUsage {
     pub input_tokens: i64,
