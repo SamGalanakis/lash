@@ -115,6 +115,113 @@ impl Provider for FailingProvider {
     }
 }
 
+/// Fails `fail_until` calls with an HTTP-status failure (plus optional
+/// `Retry-After`), leaving kind/retryability to the classifier — the shape
+/// every wire provider produces for 429/5xx responses.
+#[derive(Clone, Debug)]
+struct StatusFailingProvider {
+    options: ProviderOptions,
+    attempts: Arc<AtomicUsize>,
+    fail_until: usize,
+    status: u16,
+    retry_after: Option<Duration>,
+}
+
+impl StatusFailingProvider {
+    fn into_components(self) -> ProviderComponents {
+        ProviderComponents::new(Box::new(self), Arc::new(StaticModelPolicy::new()))
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for StatusFailingProvider {
+    fn kind(&self) -> &'static str {
+        "status-failing"
+    }
+
+    fn options(&self) -> ProviderOptions {
+        self.options.clone()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.options = options;
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        serde_json::Value::Object(Default::default())
+    }
+
+    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt <= self.fail_until {
+            let message = if self.status == 429 {
+                "throttled by provider"
+            } else {
+                "upstream unavailable"
+            };
+            let mut failure = LlmTransportError::new(message).with_status(self.status);
+            if let Some(retry_after) = self.retry_after {
+                failure = failure.with_retry_after(retry_after);
+            }
+            return Err(failure);
+        }
+        Ok(LlmResponse {
+            full_text: "ok".to_string(),
+            parts: Vec::new(),
+            usage: LlmUsage::default(),
+            terminal_reason: crate::LlmTerminalReason::Stop,
+            terminal_diagnostic: None,
+            provider_usage: None,
+            request_body: None,
+            http_summary: None,
+        })
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
+    }
+}
+
+/// Injected [`crate::Clock`] that resolves sleeps immediately while recording
+/// the total requested wait, so retry-ladder tests assert real durations
+/// without real waits.
+#[derive(Debug, Default)]
+struct RecordingClock {
+    slept_ms: std::sync::atomic::AtomicU64,
+}
+
+impl RecordingClock {
+    fn slept(&self) -> Duration {
+        Duration::from_millis(self.slept_ms.load(Ordering::SeqCst))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::Clock for RecordingClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn timestamp_ms(&self) -> u64 {
+        0
+    }
+
+    fn timestamp_rfc3339(&self) -> String {
+        self.timestamp_datetime().to_rfc3339()
+    }
+
+    fn timestamp_datetime(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH)
+    }
+
+    async fn sleep(&self, duration: Duration) {
+        self.slept_ms
+            .fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    async fn sleep_until(&self, _deadline: std::time::Instant) {}
+}
+
 #[derive(Debug)]
 struct MetricsTransport {
     inner: Box<dyn Provider>,
@@ -404,6 +511,157 @@ async fn provider_handle_set_options_affects_retry_behavior() {
         .expect("retry after set_options");
 
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn provider_handle_throttle_with_retry_after_does_not_consume_attempts() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::new(RecordingClock::default());
+    let provider = StatusFailingProvider {
+        options: ProviderOptions {
+            reliability: ProviderReliability::default()
+                .max_attempts(2)
+                .base_delay_ms(0)
+                .max_delay_ms(0),
+            ..ProviderOptions::default()
+        },
+        attempts: Arc::clone(&attempts),
+        // Three throttles in a row: more failures than the two-attempt
+        // budget could ever absorb if throttles consumed attempts.
+        fail_until: 3,
+        status: 429,
+        retry_after: Some(Duration::from_secs(5)),
+    };
+    let mut handle =
+        ProviderHandle::new(provider.into_components()).with_clock(Arc::clone(&clock) as _);
+
+    handle
+        .complete(empty_request())
+        .await
+        .expect("success after deferred throttle waits");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    // Each deference honored the provider-stated 5s Retry-After.
+    assert_eq!(clock.slept(), Duration::from_secs(15));
+}
+
+#[tokio::test]
+async fn provider_handle_throttle_budget_exhaustion_degrades_to_attempt_counting() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::new(RecordingClock::default());
+    let provider = StatusFailingProvider {
+        options: ProviderOptions {
+            reliability: ProviderReliability::default()
+                .max_attempts(2)
+                .base_delay_ms(0)
+                .max_delay_ms(0)
+                // Room for exactly two 4s deferences; the third throttle
+                // overflows the budget and counts as a normal failure.
+                .throttle_wait_budget_ms(10_000),
+            ..ProviderOptions::default()
+        },
+        attempts: Arc::clone(&attempts),
+        fail_until: 100,
+        status: 429,
+        retry_after: Some(Duration::from_secs(4)),
+    };
+    let mut handle =
+        ProviderHandle::new(provider.into_components()).with_clock(Arc::clone(&clock) as _);
+
+    let err = handle
+        .complete(empty_request())
+        .await
+        .expect_err("throttle storm outlives budget and attempts");
+
+    // Two free deferences, then the two-attempt ladder (one counted retry
+    // that still waits the provider-stated Retry-After before re-calling).
+    assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    assert_eq!(clock.slept(), Duration::from_secs(12));
+    assert!(err.retryable);
+    assert_eq!(err.kind, ProviderFailureKind::Quota);
+}
+
+#[tokio::test]
+async fn provider_handle_throttle_without_retry_after_consumes_attempts() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let provider = StatusFailingProvider {
+        options: ProviderOptions {
+            reliability: ProviderReliability::default()
+                .max_attempts(2)
+                .base_delay_ms(0)
+                .max_delay_ms(0),
+            ..ProviderOptions::default()
+        },
+        attempts: Arc::clone(&attempts),
+        fail_until: 100,
+        status: 429,
+        retry_after: None,
+    };
+    let mut handle = ProviderHandle::new(provider.into_components());
+
+    let err = handle
+        .complete(empty_request())
+        .await
+        .expect_err("no server-stated wait, so the normal ladder applies");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(err.kind, ProviderFailureKind::Quota);
+}
+
+#[tokio::test]
+async fn provider_handle_server_error_with_retry_after_still_consumes_attempts() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let provider = StatusFailingProvider {
+        options: ProviderOptions {
+            reliability: ProviderReliability::default()
+                .max_attempts(2)
+                .base_delay_ms(0)
+                .max_delay_ms(0),
+            ..ProviderOptions::default()
+        },
+        attempts: Arc::clone(&attempts),
+        fail_until: 100,
+        status: 503,
+        retry_after: Some(Duration::from_secs(1)),
+    };
+    let mut handle = ProviderHandle::new(provider.into_components())
+        .with_clock(Arc::new(RecordingClock::default()) as _);
+
+    let err = handle
+        .complete(empty_request())
+        .await
+        .expect_err("5xx is a failure, not a throttle");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert!(err.retryable);
+    assert_eq!(err.kind, ProviderFailureKind::Http);
+}
+
+#[test]
+fn default_failure_classifier_classifies_429_as_retryable_throttle() {
+    let classifier = DefaultProviderFailureClassifier;
+    let failure = classifier.classify(
+        ProviderFailure::new("Rate limit reached for requests")
+            .with_status(429)
+            .with_retry_after(Duration::from_secs(7)),
+    );
+    assert_eq!(failure.kind, ProviderFailureKind::Quota);
+    assert!(failure.retryable);
+    assert_eq!(failure.retry_after, Some(Duration::from_secs(7)));
+}
+
+#[test]
+fn default_failure_classifier_keeps_quota_exhaustion_non_retryable() {
+    let classifier = DefaultProviderFailureClassifier;
+    for message in [
+        "insufficient_quota",
+        "usage_limit_reached",
+        "usage_not_included in your plan",
+    ] {
+        let failure = classifier.classify(ProviderFailure::new(message).with_status(429));
+        assert_eq!(failure.kind, ProviderFailureKind::Quota);
+        assert!(!failure.retryable);
+    }
 }
 
 #[test]

@@ -120,6 +120,10 @@
               <div class="listing__body"><p><code>ProviderRetryPolicy</code> defaults to four attempts with exponential delay capped at 10 seconds and <code>Retry-After</code> capped at 60 seconds. <code>ProviderReliability::disabled()</code> turns retries off for hosts that already retry at a higher layer.</p></div>
             </div>
             <div class="listing__row">
+              <div class="listing__label">throttles</div>
+              <div class="listing__body"><p>A retryable quota failure carrying <code>Retry-After</code> (an HTTP 429) is a throttle, not a failure: the ladder waits as instructed without consuming a retry attempt. The deference is bounded by the cumulative <code>throttle_wait_budget_ms</code> (default 90 seconds per call; <code>0</code> disables it, and each deferred wait charges at least one second), after which throttles count as ordinary retryable failures. A 429 without <code>Retry-After</code> follows the normal backoff-and-count ladder.</p></div>
+            </div>
+            <div class="listing__row">
               <div class="listing__label">rate limits</div>
               <div class="listing__body"><p><code>ProviderRateLimitPolicy</code> can cap max concurrency, requests per window, and tokens per window before a provider request is admitted.</p></div>
             </div>
@@ -132,6 +136,105 @@ let reliability = ProviderReliability::default()
     .max_attempts(3)
     .max_concurrency(Some(8))
     .requests_per_window(Some(120), Some(60_000));</code></pre>
+        </div>
+
+        <div class="section" id="wrapping-providers">
+          <div class="section-header">
+            <h2>Wrapping Providers</h2>
+            <p>lash ships no admission-control machinery in the dispatch path (<code>docs/adr/0015-admission-control-lives-in-provider-decorators.md</code>). The <code>Provider</code> trait is deliberately dyn-compatible and decorator-friendly: hosts own admission — in-flight windows, priority lanes, circuit breakers, backpressure metrics — by wrapping the provider they install. A decorator's <code>complete()</code> sees every provider call, including each attempt of the retry ladder.</p>
+          </div>
+          <pre data-lang="rust" data-snippet="architecture_providers#admission-window"><code>/// Host-owned admission: bounded in-flight windows per traffic class,
+/// wrapped around the provider the host installs. Breakers, AIMD windows,
+/// and backpressure metrics slot into the same `complete()` seam.
+#[derive(Debug)]
+struct AdmissionGate {
+    inner: Box&lt;dyn Provider&gt;,
+    interactive_slots: Arc&lt;tokio::sync::Semaphore&gt;,
+    batch_slots: Arc&lt;tokio::sync::Semaphore&gt;,
+}
+
+impl Clone for AdmissionGate {
+    fn clone(&amp;self) -&gt; Self {
+        Self {
+            inner: self.inner.clone_boxed(),
+            // Shared handles: every clone admits through the same windows.
+            interactive_slots: Arc::clone(&amp;self.interactive_slots),
+            batch_slots: Arc::clone(&amp;self.batch_slots),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for AdmissionGate {
+    async fn complete(&amp;mut self, request: LlmRequest) -&gt; Result&lt;LlmResponse, LlmTransportError&gt; {
+        // Class traffic by the session identity the host already owns:
+        // deliberate ids for its own pipelines, and a default lane for ids
+        // it did not mint (lash-spawned child sessions).
+        let lane = if request.scope.session_id.starts_with("batch:") {
+            &amp;self.batch_slots
+        } else {
+            &amp;self.interactive_slots
+        };
+        // The permit drops on every exit path — success, failure, or a
+        // cancelled turn — so an aborted call never leaks a slot.
+        let _slot = lane.acquire().await.expect("admission gate closed");
+        self.inner.complete(request).await
+    }
+
+    // Forward `close()` explicitly: the default impl is a no-op and would
+    // silently skip the inner provider's transport shutdown.
+    async fn close(&amp;self) -&gt; Result&lt;(), LlmTransportError&gt; {
+        self.inner.close().await
+    }
+
+    fn kind(&amp;self) -&gt; &amp;'static str {
+        self.inner.kind()
+    }
+    fn options(&amp;self) -&gt; ProviderOptions {
+        self.inner.options()
+    }
+    fn set_options(&amp;mut self, options: ProviderOptions) {
+        self.inner.set_options(options);
+    }
+    fn serialize_config(&amp;self) -&gt; serde_json::Value {
+        self.inner.serialize_config()
+    }
+    fn requires_streaming(&amp;self) -&gt; bool {
+        self.inner.requires_streaming()
+    }
+    fn clone_boxed(&amp;self) -&gt; Box&lt;dyn Provider&gt; {
+        Box::new(self.clone())
+    }
+}</code></pre>
+          <p>Install the wrapper with <code>ProviderComponents::map_provider</code> wherever the handle is constructed:</p>
+          <pre data-lang="rust" data-snippet="architecture_providers#admission-wrap"><code>let interactive_slots = Arc::new(tokio::sync::Semaphore::new(8));
+let batch_slots = Arc::new(tokio::sync::Semaphore::new(2));
+let handle = ProviderHandle::new(components.map_provider(|inner| {
+    Box::new(AdmissionGate {
+        inner,
+        interactive_slots,
+        batch_slots,
+    })
+}));</code></pre>
+          <div class="listing">
+            <div class="listing__row">
+              <div class="listing__label">forward close()</div>
+              <div class="listing__body"><p>The trait's default <code>close()</code> is a no-op. A wrapper that omits the forward silently skips the inner provider's transport shutdown (Codex sends WebSocket Close frames on its cached sessions). Forward it explicitly.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">re-wrap on rebuild</div>
+              <div class="listing__body"><p><code>serialize_config</code> forwards to the inner provider, so a <code>ProviderSpec</code> round-trip rebuilds the bare provider — the wrapper does not survive persistence. Apply <code>map_provider</code> at every construction site (factory resolution, resume paths), not once at startup.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">cancellation-safe admission</div>
+              <div class="listing__body"><p>The runtime aborts the in-flight provider call when a turn is cancelled, dropping the <code>complete()</code> future at an await point. Anything acquired before the inner call must release on drop — semaphore permits do this naturally; a hand-rolled counter needs a drop guard.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">class by session id</div>
+              <div class="listing__body"><p><code>scope.session_id</code> is contractually present on every provider request. Mint deliberate ids for pipelines you want to class (direct completions accept a host-supplied session id and otherwise scope as <code>direct:{uuid}</code>), and give ids you did not mint — lash-spawned child sessions — a default lane rather than rejecting them.</p></div>
+            </div>
+          </div>
+          <p>The retry ladder wraps the decorator, so core stays honest about throttling on its own (see the throttles row above): an admission gate cannot compensate for a ladder that would turn a 429 storm into attempt exhaustion. The admission use-case pairs with the metrics guidance on <a href="../operations.html#monitoring">operations</a>.</p>
         </div>
 
         <div class="section">

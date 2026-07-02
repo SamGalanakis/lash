@@ -269,7 +269,16 @@ pub fn new_session_filename() -> String {
 }
 
 fn is_resumable_session_store(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some("db")
+    if path.extension().and_then(|ext| ext.to_str()) != Some("db") {
+        return false;
+    }
+    // Component sidecars live next to the session store as
+    // `<session>.db.<component>.db` (effects, processes, triggers,
+    // artifacts); anything with an interior `.db.` segment is a sidecar,
+    // not a resumable session store.
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| !name.contains(".db."))
 }
 
 async fn parse_session_info(
@@ -336,8 +345,15 @@ async fn filename_for_session_meta(
     mut matches: impl FnMut(&lash_core::SessionMeta) -> bool,
 ) -> Option<String> {
     for (path, filename, _) in candidates {
-        let store = Store::open_readonly(&path).await.ok()?;
-        let meta = store.load_session_meta().await?;
+        // A candidate that fails to open or carries no session meta (an
+        // unreadable file, or a store that has never committed) must not
+        // abort the whole search — skip it and keep looking.
+        let Ok(store) = Store::open_readonly(&path).await else {
+            continue;
+        };
+        let Some(meta) = store.load_session_meta().await else {
+            continue;
+        };
         if matches(&meta) {
             return Some(filename);
         }
@@ -1025,6 +1041,49 @@ mod tests {
                         .as_deref(),
                     Some("child.db")
                 );
+            });
+        });
+    }
+
+    #[test]
+    fn session_identifier_resolution_survives_sidecar_pollution() {
+        with_temp_lash_home("lash-session-sidecars", || {
+            block_on(async {
+                let parent = sessions_dir().join("parent.db");
+                let parent_store = Arc::new(Store::open(&parent).await.unwrap());
+                SessionLogger::new(
+                    Arc::clone(&parent_store),
+                    "parent.db".into(),
+                    "gpt-test",
+                    Some("parent-id".into()),
+                    "parent-name".into(),
+                )
+                .await
+                .unwrap();
+
+                // Component sidecars share the `.db` extension and, being
+                // written after the session store, sort first in the
+                // modified-time candidate order. An unreadable sidecar must
+                // not abort name/id resolution, and no sidecar may appear as
+                // a resumable session.
+                std::fs::write(sessions_dir().join("parent.db.effects.db"), b"not sqlite").unwrap();
+                std::fs::write(sessions_dir().join("parent.db.processes.db"), b"junk").unwrap();
+
+                assert_eq!(
+                    filename_for_session_identifier("parent-name")
+                        .await
+                        .as_deref(),
+                    Some("parent.db")
+                );
+                assert_eq!(
+                    filename_for_session_identifier("parent-id")
+                        .await
+                        .as_deref(),
+                    Some("parent.db")
+                );
+                let sessions = list_recent_sessions(10).await;
+                assert_eq!(sessions.len(), 1);
+                assert_eq!(sessions[0].filename, "parent.db");
             });
         });
     }

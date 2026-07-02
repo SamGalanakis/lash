@@ -9,6 +9,7 @@
 #![allow(dead_code, unused_variables, unused_imports)]
 
 mod architecture_execution;
+mod architecture_providers;
 mod embedding;
 mod embedding_advanced;
 mod embedding_prompts;

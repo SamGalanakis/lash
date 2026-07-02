@@ -62,7 +62,13 @@ impl ProviderFailureClassifier for DefaultProviderFailureClassifier {
                 failure.kind = ProviderFailureKind::Http;
             }
             failure.retryable = matches!(status, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504);
-            if matches!(status, 401 | 403) {
+            if status == 429 {
+                // Provider-side throttling. `Quota` + `retryable: true` is the
+                // combination `ProviderHandle`'s retry ladder defers to as a
+                // throttle; hard quota exhaustion (the text markers below)
+                // downgrades to `retryable: false`.
+                failure.kind = ProviderFailureKind::Quota;
+            } else if matches!(status, 401 | 403) {
                 failure.kind = ProviderFailureKind::Auth;
             } else if matches!(status, 400 | 413 | 422) {
                 failure.kind = ProviderFailureKind::Validation;

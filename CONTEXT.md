@@ -93,6 +93,7 @@ The `lash` facade owns app-facing vocabulary. Lower-level crates may expose inte
 
 ## Autonomous CLI Testing
 
+- Agent-driven e2e runbooks live in `e2e/` (start with `e2e/RULES.md`): scenario documents an agent executes through `scripts/lash-operator.py`, judging CLI semantics against this file's Operator UI contracts. Scripted harnesses (`e2e/restate-postgres-workers`) remain deterministic gate evidence; runbooks are the judged layer on top.
 - Run `cargo test -p lash-cli --features test-provider --test cli_e2e` to exercise the real `lash` binary without live provider credentials.
 - The PTY smoke test launches interactive mode with a deterministic `test` provider, types a prompt, waits for rendered output, exits with `/exit`, and validates the generated UI trace/snapshot.
 - Run `scripts/lash-operator.py --provider test` for an agent-operated PTY session. It builds/launches the real `lash` binary with an isolated deterministic provider, then accepts commands such as `expect 15 Idle`, `type hello`, `key enter`, `screen`, and `lash-exit`.
