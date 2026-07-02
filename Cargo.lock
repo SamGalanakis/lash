@@ -3113,7 +3113,6 @@ dependencies = [
  "jsonschema",
  "lash-core",
  "lash-lashlang-runtime",
- "lash-llm-tools",
  "lash-protocol-rlm",
  "lash-rlm-types",
  "lash-tool-support",
