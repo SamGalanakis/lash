@@ -108,17 +108,21 @@ def load_publishable_workspace_packages() -> dict[str, dict]:
     for package_id, package in package_by_id.items():
         workspace_dependencies = set()
         for dependency in package.get("dependencies", []):
-            # Dev-dependencies never gate publish ordering: cargo strips
-            # path-only dev-deps from the published package, and counting them
-            # deadlocks the planner on self-referential dev-deps (a crate
-            # enabling its own feature for integration tests) and on
-            # provider->transport test cycles.
-            if dependency.get("kind") == "dev":
+            # Version-less path dev-dependencies (req "*") are stripped from
+            # the published package, so they never gate publish ordering —
+            # counting them would deadlock the planner on self-referential
+            # dev-deps (a crate enabling its own feature for integration
+            # tests). Dev-dependencies that carry a version requirement
+            # survive into the published manifest and must resolve on the
+            # index when cargo packages the crate, so they ARE ordering edges.
+            if dependency.get("kind") == "dev" and dependency.get("req", "*") == "*":
                 continue
             dependency_path = dependency.get("path")
             if not dependency_path:
                 continue
             dependency_id = package_id_by_dir.get(Path(dependency_path).resolve())
+            if dependency_id == package_id:
+                continue
             if dependency_id in package_by_id:
                 workspace_dependencies.add(dependency_id)
         result[package_id] = {
