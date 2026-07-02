@@ -7,7 +7,6 @@ publish = false
 
 [dependencies]
 lash = { workspace = true }
-lash-plugin-plan-mode = { workspace = true, features = ["lashlang"] }
 lash-tui = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }

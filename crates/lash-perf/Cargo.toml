@@ -43,4 +43,3 @@ stats_alloc = "0.1"
 dhat = { version = "0.3", optional = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
-tracing = { workspace = true }

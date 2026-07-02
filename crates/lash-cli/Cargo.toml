@@ -37,7 +37,6 @@ lash-perf = { path = "../lash-perf", optional = true }
 lash-plugin-process-controls = { workspace = true, features = ["lashlang"] }
 lash-lashlang-runtime = { workspace = true }
 lash-tool-support = { workspace = true, features = ["lashlang"] }
-lash-remote-protocol = { workspace = true }
 lash-sqlite-store = { workspace = true }
 lash-llm-tools = { workspace = true, features = ["lashlang"] }
 lash-search-tools = { workspace = true, features = ["lashlang"] }

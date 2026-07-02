@@ -26,7 +26,6 @@ globset = "0.4"
 libc = "0.2"
 pdf-extract = "0.7"
 portable-pty = "0.9"
-regex = { workspace = true }
 reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

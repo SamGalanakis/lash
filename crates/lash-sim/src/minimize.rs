@@ -117,14 +117,6 @@ impl From<serde_json::Error> for MinimizeError {
     }
 }
 
-pub fn minimize_trace_file(
-    trace_path: &Path,
-    artifact_root: &Path,
-) -> Result<MinimizeReport, MinimizeError> {
-    let trace = read_trace(trace_path)?;
-    minimize_trace(trace_path, &trace, artifact_root)
-}
-
 pub async fn minimize_trace_or_fixture_file(
     input_path: &Path,
     artifact_root: &Path,

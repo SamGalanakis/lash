@@ -2525,7 +2525,6 @@ dependencies = [
  "lash-provider-auth",
  "lash-provider-google",
  "lash-provider-openai",
- "lash-remote-protocol",
  "lash-rlm-types",
  "lash-runtime",
  "lash-search-tools",
@@ -2716,7 +2715,6 @@ dependencies = [
  "stats_alloc",
  "tokio",
  "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -2939,7 +2937,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -3129,7 +3126,6 @@ name = "lash-tool-support"
 version = "0.1.0-alpha.79"
 dependencies = [
  "async-trait",
- "chrono",
  "ignore",
  "lash-core",
  "lash-lashlang-runtime",
@@ -3152,7 +3148,6 @@ dependencies = [
  "libc",
  "pdf-extract",
  "portable-pty",
- "regex",
  "reqwest 0.13.3",
  "schemars",
  "serde",
@@ -3200,7 +3195,6 @@ name = "lash-tui-extensions"
 version = "0.1.0-alpha.79"
 dependencies = [
  "async-trait",
- "lash-plugin-plan-mode",
  "lash-runtime",
  "lash-tui",
  "serde_json",

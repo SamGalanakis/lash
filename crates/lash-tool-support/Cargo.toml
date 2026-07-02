@@ -25,6 +25,5 @@ tokio = { workspace = true, features = ["rt"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 schemars = { workspace = true }
-chrono = { workspace = true }
 ignore = "0.4"
 similar = "2"

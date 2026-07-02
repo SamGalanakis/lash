@@ -342,19 +342,6 @@ impl BoundaryScheduler {
         Some(self.deliver_direct(index, observed))
     }
 
-    pub fn deliver_boundary_with(
-        &mut self,
-        boundary_id: &str,
-        observe: impl FnOnce(&BoundaryEvent) -> Value,
-    ) -> Option<DeliveredBoundary> {
-        let index = self
-            .pending
-            .iter()
-            .position(|event| event.boundary_id == boundary_id)?;
-        let observed = observe(&self.pending[index]);
-        Some(self.deliver_direct(index, observed))
-    }
-
     fn deliver_index(&mut self, decision: SchedulerDecision, observed: Value) -> DeliveredBoundary {
         let event = self.pending.remove(decision.index);
         let sequence = self.sequence;
