@@ -38,11 +38,23 @@ fn stack_policy_rejects_raw_stack_literals_and_global_stack_escape_hatches() {
     assert_eq!(SIM_HARNESS_STACK_LIMIT_BYTES, 8 * 1024 * 1024);
 
     let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let checked_files = ["runner.rs", "main.rs", "lib.rs", "stack_policy.rs"];
+    let checked_files = ["main.rs", "lib.rs", "stack_policy.rs"];
+    let mut checked_paths: Vec<PathBuf> = checked_files
+        .iter()
+        .map(|file| src_dir.join(file))
+        .collect();
+    let runner_dir = src_dir.join("runner");
+    let runner_entries = std::fs::read_dir(&runner_dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", runner_dir.display()));
+    for entry in runner_entries {
+        let path = entry.expect("runner dir entry").path();
+        if path.extension().is_some_and(|ext| ext == "rs") {
+            checked_paths.push(path);
+        }
+    }
     let mut stack_size_lines = Vec::new();
 
-    for file in checked_files {
-        let path = src_dir.join(file);
+    for path in checked_paths {
         let body = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
         assert!(
