@@ -408,6 +408,14 @@ run_state_machine_and_fault_matrix() {
   step "Lashlang property suite"
   run_cargo_tests -p lashlang --locked --test property
 
+  step "LLM transport SSE framing property suite"
+  run_cargo_tests -p lash-llm-transport --locked --test property
+  run_cargo_tests -p lash-provider-anthropic --locked --test property
+  run_cargo_tests -p lash-provider-google --locked --test property
+
+  step "Inline effect-host await-event session-cancel conformance"
+  run_cargo_tests -p lash-core --locked inline_effect_host_satisfies_conformance
+
   step "Durable fault matrix metadata"
   run_cargo_tests -p lash-core --locked durable_fault_matrix
 

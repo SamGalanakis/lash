@@ -318,6 +318,27 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         self.assertNotIn("LASH_POSTGRES_GENERATED_PROFILE", workflow)
         self.assertNotIn("LASH_POSTGRES_GENERATED_MAX_BOUNDARIES", workflow)
 
+    def test_property_and_await_cancel_evidence_pinned_in_fast_gate(self) -> None:
+        gate = GATE.read_text(encoding="utf-8")
+
+        # The SSE framing property suites (transport plus the Anthropic/Google
+        # provider parsers) are pinned as first-class fast-lane evidence in the
+        # fault-matrix shard, alongside the existing state-machine/lashlang
+        # property runners.
+        required_snippets = [
+            'step "LLM transport SSE framing property suite"',
+            "run_cargo_tests -p lash-llm-transport --locked --test property",
+            "run_cargo_tests -p lash-provider-anthropic --locked --test property",
+            "run_cargo_tests -p lash-provider-google --locked --test property",
+            # Durable-wait session-cancel evidence: the inline effect-host
+            # conformance test that exercises
+            # effect_host_await_event_session_cancel_resolves_outstanding_waits.
+            'step "Inline effect-host await-event session-cancel conformance"',
+            "run_cargo_tests -p lash-core --locked inline_effect_host_satisfies_conformance",
+        ]
+        for snippet in required_snippets:
+            self.assertIn(snippet, gate)
+
 
 if __name__ == "__main__":
     unittest.main()
