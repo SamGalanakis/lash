@@ -2892,6 +2892,7 @@ dependencies = [
  "lash-core",
  "lash-llm-transport",
  "lash-provider-auth",
+ "lash-runtime",
  "reqwest 0.13.3",
  "serde",
  "serde_json",
