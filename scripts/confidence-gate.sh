@@ -704,7 +704,7 @@ with open(summary_path, "r", encoding="utf-8") as handle:
     summary = json.load(handle)
 
 required_exclusions = {
-    "crates/lash-provider-openai/src/codex.rs": "future codex-oauth LlmHttpTransport scripted transcript lane",
+    "crates/lash-provider-openai/src/codex.rs": "codex websocket transport lane",
     "crates/lash-provider-openai/src/codex/oauth.rs": "auth-flow conformance lane",
     "crates/lash-provider-google/src/oauth.rs": "auth-flow conformance lane",
     "crates/lash-core/src/runtime/session_manager/direct.rs": "runtime direct-effect scenario contracts",

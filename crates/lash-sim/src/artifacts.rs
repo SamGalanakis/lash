@@ -505,6 +505,13 @@ pub(crate) struct FixedScriptLaneCounts {
 pub(crate) fn provider_transport_exclusions() -> Vec<ProviderTransportExclusion> {
     vec![
         ProviderTransportExclusion {
+            path: "crates/lash-provider-openai/src/codex.rs",
+            status: "reviewed_non_dst_exclusion",
+            reason: "Codex HTTP/SSE execution rides the injectable LlmHttpTransport and is in the scripted matrix; the provider-native websocket transport (session cache, reservation, and retry over tokio-tungstenite) cannot be driven by scripted HTTP transports and stays outside the LLM DST.",
+            replacement_lane: "codex websocket transport lane: provider-layer websocket tests plus the opt-in scripts/codex-websocket-live.sh check",
+            review_owner: "lash-sim provider matrix",
+        },
+        ProviderTransportExclusion {
             path: "crates/lash-provider-openai/src/codex/oauth.rs",
             status: "reviewed_non_dst_exclusion",
             reason: "OAuth device-code polling and token exchange are auth flows, not LLM provider execution; they use reqwest directly and require separate OAuth script fixtures.",

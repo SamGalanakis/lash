@@ -295,9 +295,10 @@ async fn fixed_script_profile_writes_deterministic_manifest() {
     assert_eq!(manifest.summary.total_proofs, 17);
     assert_eq!(manifest.summary.total_events, 18);
     assert_eq!(manifest.summary.passed, 17);
-    // Codex provider execution now rides the injectable LlmHttpTransport and
-    // is in the scripted matrix, so it is no longer a transport exclusion;
-    // only the OAuth device-code auth flow stays out of the LLM DST.
+    // Codex HTTP/SSE execution rides the injectable LlmHttpTransport and is
+    // in the scripted matrix; the exclusion that remains for codex.rs is
+    // scoped to the provider-native websocket transport, and the OAuth
+    // device-code auth flow stays out of the LLM DST.
     assert!(
         manifest
             .provider_transport_exclusions
@@ -308,7 +309,10 @@ async fn fixed_script_profile_writes_deterministic_manifest() {
         manifest
             .provider_transport_exclusions
             .iter()
-            .all(|exclusion| exclusion.path != "crates/lash-provider-openai/src/codex.rs")
+            .any(
+                |exclusion| exclusion.path == "crates/lash-provider-openai/src/codex.rs"
+                    && exclusion.replacement_lane.contains("websocket")
+            )
     );
     assert!(manifest.manifest_path.ends_with(FIXED_SCRIPT_MANIFEST));
     assert!(manifest.summary_path.ends_with(FIXED_SCRIPT_SUMMARY));
@@ -1147,7 +1151,10 @@ fn generated_sim_profile_writes_trace_replay_and_provider_artifacts() {
         report
             .provider_transport_exclusions
             .iter()
-            .all(|exclusion| exclusion.path != "crates/lash-provider-openai/src/codex.rs")
+            .any(
+                |exclusion| exclusion.path == "crates/lash-provider-openai/src/codex.rs"
+                    && exclusion.replacement_lane.contains("websocket")
+            )
     );
     assert!(report.oracle_verdicts.iter().any(|verdict| {
         verdict.oracle_id == "sim.oracle.operational-coverage.v1"
