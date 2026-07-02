@@ -274,6 +274,12 @@ impl<M: TurnProtocol> Effect<M> {
 pub struct LlmCallError {
     pub message: String,
     pub retryable: bool,
+    /// Typed transport classification of the failure. Defaults to
+    /// [`ProviderFailureKind::Unknown`] for wrappers that are not provider
+    /// failures (and when decoding effect journals written before the field
+    /// existed).
+    #[serde(default)]
+    pub kind: crate::llm::types::ProviderFailureKind,
     pub raw: Option<String>,
     pub code: Option<String>,
     pub terminal_reason: LlmTerminalReason,
@@ -573,6 +579,30 @@ pub struct TurnMachineConfig<M: TurnProtocol = UnitTurnProtocol> {
     pub emit_llm_trace: bool,
     pub termination: M::Termination,
     pub turn_limit_final_message: crate::TurnLimitFinalMessage,
+}
+
+#[cfg(test)]
+mod llm_call_error_tests {
+    use super::LlmCallError;
+    use crate::llm::types::ProviderFailureKind;
+
+    #[test]
+    fn llm_call_error_decodes_journal_entries_that_predate_kind() {
+        // `LlmCallError` is serialized inside durable effect journals
+        // (`RuntimeEffectOutcome::LlmCall`). Entries written before the typed
+        // `kind` field existed must decode with `Unknown`.
+        let legacy = r#"{
+            "message":"rate limited",
+            "retryable":true,
+            "raw":null,
+            "code":"429",
+            "terminal_reason":"provider_error",
+            "request_body":null
+        }"#;
+        let decoded: LlmCallError = serde_json::from_str(legacy).expect("legacy call error");
+        assert!(decoded.retryable);
+        assert_eq!(decoded.kind, ProviderFailureKind::Unknown);
+    }
 }
 
 // ─── Internal state ───

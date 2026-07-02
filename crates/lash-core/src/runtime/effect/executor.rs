@@ -1228,6 +1228,7 @@ impl LocalDirectEffectRunner {
         .map_err(|err| LlmCallError {
             message: err.to_string(),
             retryable: false,
+            kind: crate::ProviderFailureKind::Unknown,
             raw: None,
             code: Some("attachment_resolution_failed".to_string()),
             terminal_reason: crate::LlmTerminalReason::ProviderError,

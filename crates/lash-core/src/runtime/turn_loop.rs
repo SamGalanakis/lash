@@ -78,6 +78,38 @@ fn queued_work_batch_ids(claim: &crate::QueuedWorkClaim) -> Vec<String> {
         .collect()
 }
 
+/// Measures the whole host-visible turn.
+///
+/// Opened before the runtime claims the turn (session-execution lease and
+/// queued-work/turn-input claims) and stamped onto the assembled turn after
+/// the final commit and post-persist hooks complete, so
+/// [`ExecutionSummary`](crate::ExecutionSummary) timing covers
+/// claim → final commit. Reads only the injected [`Clock`](crate::Clock):
+/// `started_at_ms` comes from the wall-clock source and the duration from the
+/// monotonic source, so deterministic clocks produce deterministic timing.
+#[derive(Clone, Copy)]
+struct TurnStopwatch {
+    started: std::time::Instant,
+    started_at_ms: u64,
+}
+
+impl TurnStopwatch {
+    fn start(clock: &dyn crate::Clock) -> Self {
+        Self {
+            started: clock.now(),
+            started_at_ms: clock.timestamp_ms(),
+        }
+    }
+
+    fn stamp(&self, turn: &mut AssembledTurn, clock: &dyn crate::Clock) {
+        turn.execution.started_at_ms = self.started_at_ms;
+        turn.execution.duration_ms = clock
+            .now()
+            .saturating_duration_since(self.started)
+            .as_millis() as u64;
+    }
+}
+
 fn turn_phase_id(parent_turn_id: &str, phase: &str) -> String {
     format!("{parent_turn_id}:{phase}")
 }
@@ -588,6 +620,7 @@ impl LashRuntime {
         input: TurnInput,
         opts: TurnOptions<'_>,
     ) -> Result<AssembledTurn, RuntimeError> {
+        let stopwatch = TurnStopwatch::start(self.host.core.clock.as_ref());
         let cancel = opts.cancel.clone();
         let session_execution_lease = self
             .claim_session_execution_lease(cancel.clone(), true)
@@ -605,7 +638,11 @@ impl LashRuntime {
                 session_execution_lease.as_ref(),
                 SessionExecutionLeaseReleasePolicy::FinalCommit,
             )
-            .await;
+            .await
+            .map(|mut turn| {
+                stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
+                turn
+            });
         self.settle_session_execution_lease(session_execution_lease.as_ref(), result)
             .await
     }
@@ -630,6 +667,7 @@ impl LashRuntime {
         opts: TurnOptions<'_>,
         selected_batch_ids: Option<&[String]>,
     ) -> Result<Option<AssembledTurn>, RuntimeError> {
+        let stopwatch = TurnStopwatch::start(self.host.core.clock.as_ref());
         let cancel = opts.cancel.clone();
         let Some(session_execution_lease) = self
             .claim_session_execution_lease(cancel.clone(), false)
@@ -722,7 +760,10 @@ impl LashRuntime {
                         SessionExecutionLeaseReleasePolicy::FinalCommit,
                     )
                     .await
-                    .map(Some);
+                    .map(|mut turn| {
+                        stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
+                        Some(turn)
+                    });
                 if let Err(err) = &result {
                     self.abandon_turn_input_claims_after_lease_loss(
                         err,
@@ -816,7 +857,10 @@ impl LashRuntime {
                 SessionExecutionLeaseReleasePolicy::FinalCommit,
             )
             .await
-            .map(Some);
+            .map(|mut turn| {
+                stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
+                Some(turn)
+            });
         if let Err(err) = &result {
             self.abandon_queued_work_claims_after_lease_loss(
                 err,
@@ -992,6 +1036,7 @@ impl LashRuntime {
         input: TurnInput,
         opts: TurnOptions<'_>,
     ) -> Result<AgentFrameRun, RuntimeError> {
+        let stopwatch = TurnStopwatch::start(self.host.core.clock.as_ref());
         let cancel = opts.cancel.clone();
         let session_execution_lease = self
             .claim_session_execution_lease(cancel.clone(), true)
@@ -1005,12 +1050,14 @@ impl LashRuntime {
                 scoped_effect_controller,
                 cancel,
                 session_execution_lease.as_ref(),
+                stopwatch,
             )
             .await;
         self.settle_session_execution_lease(session_execution_lease.as_ref(), result)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn stream_turn_with_agent_frames_inner(
         &mut self,
         mut input: TurnInput,
@@ -1019,6 +1066,7 @@ impl LashRuntime {
         scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
+        stopwatch: TurnStopwatch,
     ) -> Result<AgentFrameRun, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && scoped_effect_controller
@@ -1055,7 +1103,15 @@ impl LashRuntime {
                     ExecutionScope::turn(&self.state.session_id, &turn_trace_turn_id),
                 )?
             };
-            let turn = self
+            // The first frame's window opened before the lease claim; each
+            // follow frame is timed from its own start so per-frame durations
+            // stay honest.
+            let frame_stopwatch = if turns.is_empty() {
+                stopwatch
+            } else {
+                TurnStopwatch::start(self.host.core.clock.as_ref())
+            };
+            let mut turn = self
                 .stream_turn_with_scoped_effect_controller_inner(
                     input,
                     events,
@@ -1068,6 +1124,7 @@ impl LashRuntime {
                     SessionExecutionLeaseReleasePolicy::KeepOnAgentFrameSwitch,
                 )
                 .await?;
+            frame_stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
             let switched_frame = match &turn.outcome {
                 TurnOutcome::AgentFrameSwitch { frame_id, task } => {
                     Some((frame_id.clone(), task.clone()))
@@ -1162,6 +1219,8 @@ impl LashRuntime {
                         terminal_reason: None,
                         user_message: e.clone(),
                         raw: None,
+                        retryable: Some(false),
+                        provider_failure_kind: None,
                     }),
                 };
                 assembler.push(&error_event);
@@ -1415,6 +1474,7 @@ impl LashRuntime {
         initial_queue_claim: Option<crate::QueuedWorkClaim>,
         initial_turn_input_claim: Option<crate::TurnInputClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
+        let stopwatch = TurnStopwatch::start(self.host.core.clock.as_ref());
         let session_execution_lease = self
             .claim_session_execution_lease(cancel.clone(), true)
             .await?;
@@ -1437,7 +1497,11 @@ impl LashRuntime {
                 session_execution_lease.as_ref(),
                 SessionExecutionLeaseReleasePolicy::FinalCommit,
             )
-            .await;
+            .await
+            .map(|mut turn| {
+                stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
+                turn
+            });
         self.settle_session_execution_lease(session_execution_lease.as_ref(), result)
             .await
     }
@@ -1571,6 +1635,8 @@ impl LashRuntime {
                 terminal_reason: None,
                 message: abort.message.clone(),
                 raw: None,
+                retryable: None,
+                provider_failure_kind: None,
             };
             let error_event = SessionEvent::Error {
                 message: abort.message,
@@ -1580,6 +1646,8 @@ impl LashRuntime {
                     terminal_reason: None,
                     user_message: issue.message.clone(),
                     raw: None,
+                    retryable: None,
+                    provider_failure_kind: None,
                 }),
             };
             assembler.push(&error_event);

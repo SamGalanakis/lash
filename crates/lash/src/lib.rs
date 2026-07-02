@@ -230,9 +230,9 @@ pub mod remote {
         RemotePromptContribution, RemotePromptContributionGate, RemotePromptLayer,
         RemotePromptSlot, RemotePromptSlotLayer, RemotePromptTemplate, RemotePromptTemplateEntry,
         RemotePromptTemplateSection, RemoteProtocolError, RemoteProtocolTurnOptions,
-        RemoteProviderMetadata, RemoteProviderReasoningReplay, RemoteProviderReplayMeta,
-        RemoteResponseTextMeta, RemoteRuntimeEffectKind, RemoteRuntimeInvocation,
-        RemoteRuntimeReplay, RemoteRuntimeScope, RemoteRuntimeSubject,
+        RemoteProviderFailureKind, RemoteProviderMetadata, RemoteProviderReasoningReplay,
+        RemoteProviderReplayMeta, RemoteResponseTextMeta, RemoteRuntimeEffectKind,
+        RemoteRuntimeInvocation, RemoteRuntimeReplay, RemoteRuntimeScope, RemoteRuntimeSubject,
         RemoteSchemaProjectionOverride, RemoteSessionCursor, RemoteSessionObservation,
         RemoteSessionObservationEvent, RemoteSessionObservationEventPayload,
         RemoteSessionProcessEventKind, RemoteSessionQueueEventKind, RemoteSessionScope,
@@ -335,6 +335,9 @@ pub mod tracing {
 pub mod testing;
 
 pub mod provider {
+    /// Typed provider-failure classification surfaced on
+    /// [`TurnIssue`](crate::turn::TurnIssue) and session error envelopes.
+    pub use lash_core::ProviderFailureKind;
     pub use lash_core::provider::{
         ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy,
     };

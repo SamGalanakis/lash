@@ -744,6 +744,8 @@ fn cancelled_error_renders_as_system_message() {
             terminal_reason: None,
             user_message: "LLM error: cancelled".into(),
             raw: None,
+            retryable: None,
+            provider_failure_kind: None,
         }),
     });
 
@@ -767,6 +769,8 @@ fn cancelled_error_without_manual_request_still_stops_immediately() {
             terminal_reason: None,
             user_message: "LLM error: cancelled".into(),
             raw: None,
+            retryable: None,
+            provider_failure_kind: None,
         }),
     });
 
@@ -790,6 +794,8 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
             terminal_reason: None,
             user_message: "LLM error: cancelled".into(),
             raw: None,
+            retryable: None,
+            provider_failure_kind: None,
         }),
     };
 

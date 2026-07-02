@@ -1,5 +1,10 @@
 //! Transport-level failure type shared by provider transport components.
 
+/// Canonical provider-failure classification. Defined in
+/// `lash-sansio::llm::types` (the session-model `ErrorEnvelope` carries it in
+/// durable snapshots) and re-exported here as the transport-facing home.
+pub use lash_sansio::llm::types::ProviderFailureKind;
+
 #[derive(Debug, thiserror::Error, Clone)]
 #[error("{message}")]
 pub struct ProviderFailure {
@@ -13,19 +18,6 @@ pub struct ProviderFailure {
     pub headers: Vec<(String, String)>,
     pub retry_after: Option<std::time::Duration>,
     pub request_body: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderFailureKind {
-    Transport,
-    Timeout,
-    Http,
-    Stream,
-    Auth,
-    Validation,
-    Quota,
-    Unsupported,
-    Unknown,
 }
 
 impl ProviderFailure {

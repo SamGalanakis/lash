@@ -685,15 +685,20 @@ impl<M: TurnProtocol> TurnMachine<M> {
             .terminal_diagnostic
             .clone()
             .unwrap_or_else(|| format!("Model call ended with terminal reason {reason:?}."));
+        let mut envelope = crate::session_model::make_error_envelope(
+            "llm_provider",
+            Some(reason.code()),
+            Some(reason),
+            diagnostic.clone(),
+            None,
+        );
+        // A terminal reason is a deterministic outcome of a completed call
+        // (overflow, filter, cancellation): replaying the identical request
+        // reproduces it, so the source knows it is not retryable.
+        envelope.retryable = Some(false);
         self.emit(SessionEvent::Error {
-            message: diagnostic.clone(),
-            envelope: Some(crate::session_model::make_error_envelope(
-                "llm_provider",
-                Some(reason.code()),
-                Some(reason),
-                diagnostic,
-                None,
-            )),
+            message: diagnostic,
+            envelope: Some(envelope),
         });
         self.finish(outcome);
         true
@@ -785,15 +790,22 @@ impl<M: TurnProtocol> TurnMachine<M> {
 
     fn emit_llm_error(&mut self, error: LlmCallError) {
         self.record_llm_error(&error);
+        let mut envelope = crate::session_model::make_error_envelope(
+            "llm_provider",
+            error.code.as_deref(),
+            Some(error.terminal_reason),
+            format!("LLM error: {}", error.message),
+            error.raw.clone(),
+        );
+        // Carry the transport's typed signals through to the envelope (and
+        // from there to `TurnIssue`): retryability is always classified, the
+        // failure kind only when the source knew it (`Unknown` stays absent).
+        envelope.retryable = Some(error.retryable);
+        envelope.provider_failure_kind =
+            (error.kind != crate::llm::types::ProviderFailureKind::Unknown).then_some(error.kind);
         self.emit(SessionEvent::Error {
             message: format!("LLM error: {}", error.message),
-            envelope: Some(crate::session_model::make_error_envelope(
-                "llm_provider",
-                error.code.as_deref(),
-                Some(error.terminal_reason),
-                format!("LLM error: {}", error.message),
-                error.raw,
-            )),
+            envelope: Some(envelope),
         });
         self.finish(TurnOutcome::Stopped(TurnStop::ProviderError));
     }

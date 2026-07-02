@@ -491,6 +491,23 @@ pub enum RemoteLlmTerminalReason {
     Unknown,
 }
 
+/// Wire mirror of the core `ProviderFailureKind` classification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteProviderFailureKind {
+    Transport,
+    Timeout,
+    Http,
+    Stream,
+    Auth,
+    Validation,
+    Quota,
+    Unsupported,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteProviderMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]

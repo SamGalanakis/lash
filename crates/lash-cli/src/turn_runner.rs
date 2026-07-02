@@ -169,10 +169,7 @@ async fn runtime_error_turn_result(session: &LashSession, message: String) -> la
         .unwrap_or_else(|_| RuntimeSessionState::default());
     let state = state.to_snapshot();
     lash::TurnResult {
-        execution: ExecutionSummary {
-            had_tool_calls: false,
-            had_code_execution: false,
-        },
+        execution: ExecutionSummary::default(),
         state,
         outcome: TurnOutcome::Stopped(TurnStop::RuntimeError),
         assistant_output: AssistantOutput {
@@ -189,6 +186,8 @@ async fn runtime_error_turn_result(session: &LashSession, message: String) -> la
             terminal_reason: None,
             message,
             raw: None,
+            retryable: None,
+            provider_failure_kind: None,
         }],
     }
 }
