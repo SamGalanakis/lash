@@ -368,12 +368,113 @@ pub struct SessionConfigPatch {
     pub prompt: Option<PromptLayer>,
 }
 
+/// Lightweight, consuming handle returned by [`LashSession::park`].
+///
+/// Parking flushes a session's dirty state to its store and drops the live
+/// in-memory runtime, keeping only enough to rebuild it: the session id, its
+/// policy, and the store reference. This is the webserver-embedder quiesce /
+/// handoff primitive — cache one of these per idle session at bounded memory
+/// cost regardless of transcript size, then rebuild with
+/// [`LashCore::resume`](crate::LashCore::resume).
+///
+/// The facade owns this vocabulary; it wraps the core parking handle so the
+/// resume path stays a facade capability rather than exposing `lash-core`
+/// environment plumbing to hosts.
+pub struct ParkedSession {
+    pub(crate) inner: lash_core::ParkedSession,
+}
+
+impl ParkedSession {
+    /// The parked session's id. Use it to key a per-session cache of parked
+    /// handles on the host.
+    pub fn session_id(&self) -> &str {
+        self.inner.session_id()
+    }
+}
+
 impl LashSession {
+    /// Durably close this session, then release its in-memory runtime.
+    ///
+    /// `close` is the honest teardown verb: a persistent session flushes its
+    /// dirty state (via a fresh-lease commit) so the store reflects the final
+    /// transcript, its in-memory plugin session is unregistered, and the live
+    /// runtime is dropped. A store-less (ephemeral) session has nothing to
+    /// persist, so closing it is exactly the plugin-session unregister plus
+    /// dropping the runtime.
+    ///
+    /// This consumes the session and requires exclusive ownership: any cloned
+    /// [`LashSession`] handle or in-flight turn keeps a live reference to the
+    /// same runtime, so `close` returns [`EmbedError::SessionStillInUse`] until
+    /// those are dropped or finished. Cancel running turns first with
+    /// [`cancel_running_turns`](Self::cancel_running_turns) if needed.
+    ///
+    /// To keep a handle for later resumption instead of discarding the session,
+    /// use [`park`](Self::park).
     pub async fn close(self) -> Result<()> {
-        let runtime = self.runtime.writer();
-        let runtime = runtime.lock().await;
+        // Persistence is decided before we consume `self`; the observation's
+        // queue store is the facade's canonical "is this session persistent"
+        // signal (the same source `park`'s commit uses).
+        let persistent = self.runtime.observe().queue_store.is_some();
+        let runtime = self.into_owned_runtime()?;
         runtime.unregister_plugin_session()?;
+        if persistent {
+            // Reuse the core parking primitive to flush + release the lease,
+            // discarding the returned handle: close does not resume.
+            runtime.park().await?;
+        }
+        // Ephemeral sessions: `runtime` drops here, releasing in-memory state.
         Ok(())
+    }
+
+    /// Quiesce this session for later resumption, returning a lightweight
+    /// [`ParkedSession`] handle.
+    ///
+    /// Parking flushes dirty state to the store (a fresh-lease commit), drops
+    /// the live runtime and its plugin session, and hands back a cheap handle
+    /// the host can cache and later rebuild with
+    /// [`LashCore::resume`](crate::LashCore::resume). This is the
+    /// quiesce/handoff lever for webserver embedders that hold many idle
+    /// sessions: it bounds resident memory per session without deleting durable
+    /// state.
+    ///
+    /// Contract:
+    /// - **Persistent runtime required.** Parking flushes to the store, so a
+    ///   store-less session cannot be parked and returns an error. Use
+    ///   [`close`](Self::close) to tear down an ephemeral session.
+    /// - **Exclusive ownership required.** `park` consumes the session and drops
+    ///   the in-memory runtime, so it needs the sole live reference. A cloned
+    ///   [`LashSession`] or an in-flight turn holds another reference and makes
+    ///   `park` return [`EmbedError::SessionStillInUse`]. Because an executing
+    ///   turn holds such a reference, parking is effectively an *idle-session*
+    ///   operation: finish or [`cancel_running_turns`](Self::cancel_running_turns)
+    ///   first. The store commit itself does not observe an active turn; the
+    ///   exclusive-ownership guard is what makes mid-turn parking an explicit
+    ///   error rather than a silent partial flush.
+    pub async fn park(self) -> Result<ParkedSession> {
+        let runtime = self.into_owned_runtime()?;
+        // We now own the runtime exclusively; release the in-memory plugin
+        // session registration before flushing and dropping it.
+        runtime.unregister_plugin_session()?;
+        let parked = runtime.park().await?;
+        Ok(ParkedSession { inner: parked })
+    }
+
+    /// Consume the session and take sole ownership of the underlying runtime.
+    ///
+    /// Fails with [`EmbedError::SessionStillInUse`] when another live handle
+    /// (a cloned session or an in-flight turn) shares the runtime, so
+    /// consuming operations never proceed on a still-shared runtime.
+    fn into_owned_runtime(self) -> Result<LashRuntime> {
+        let LashSession { runtime, .. } = self;
+        // `writer()` clones the shared `Arc<Mutex<LashRuntime>>`; dropping the
+        // handle then leaves this clone as the sole strong reference iff no
+        // other handle exists, so `try_unwrap` doubles as the exclusive-owner
+        // check.
+        let writer = runtime.writer();
+        drop(runtime);
+        Arc::try_unwrap(writer)
+            .map(|mutex| mutex.into_inner())
+            .map_err(|_| EmbedError::SessionStillInUse)
     }
 
     pub fn session_id(&self) -> String {

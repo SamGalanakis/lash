@@ -45,6 +45,10 @@ pub enum EmbedError {
     #[error("missing required turn input for plugin `{plugin_id}`")]
     MissingPluginTurnInput { plugin_id: &'static str },
     #[error(
+        "session is still in use: park()/close() consume the session and require exclusive ownership; drop any cloned handles and finish or cancel in-flight turns first"
+    )]
+    SessionStillInUse,
+    #[error(
         "configured effect host for {operation} is durable and requires a handler context; use .effects(&controller) and provide .turn_id(...) for replayable foreground requests"
     )]
     DurableEffectHostRequiresHandlerContext { operation: &'static str },
