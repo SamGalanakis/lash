@@ -406,36 +406,53 @@ mod tests {
         }
     }
 
+    // Pass-through wrapper: every persistence segment delegates to the inner
+    // in-memory store; only the attachment manifest is replaced with the
+    // recording double above.
     #[async_trait::async_trait]
-    impl crate::RuntimePersistence for RecordingRuntimePersistence {
+    impl crate::SessionCommitStore for RecordingRuntimePersistence {
         async fn load_session(
             &self,
             scope: crate::SessionReadScope,
         ) -> Result<Option<crate::PersistedSessionRead>, crate::StoreError> {
-            crate::RuntimePersistence::load_session(&self.inner, scope).await
+            crate::SessionCommitStore::load_session(&self.inner, scope).await
         }
 
         async fn load_node(
             &self,
             node_id: &str,
         ) -> Result<Option<crate::SessionNodeRecord>, crate::StoreError> {
-            crate::RuntimePersistence::load_node(&self.inner, node_id).await
+            crate::SessionCommitStore::load_node(&self.inner, node_id).await
         }
 
         async fn commit_runtime_state(
             &self,
             commit: crate::RuntimeCommit,
         ) -> Result<crate::RuntimeCommitResult, crate::StoreError> {
-            crate::RuntimePersistence::commit_runtime_state(&self.inner, commit).await
+            crate::SessionCommitStore::commit_runtime_state(&self.inner, commit).await
         }
 
+        async fn save_session_meta(
+            &self,
+            meta: crate::SessionMeta,
+        ) -> Result<(), crate::StoreError> {
+            crate::SessionCommitStore::save_session_meta(&self.inner, meta).await
+        }
+
+        async fn load_session_meta(&self) -> Result<Option<crate::SessionMeta>, crate::StoreError> {
+            crate::SessionCommitStore::load_session_meta(&self.inner).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::SessionExecutionLeaseStore for RecordingRuntimePersistence {
         async fn try_claim_session_execution_lease(
             &self,
             session_id: &str,
             owner: &crate::LeaseOwnerIdentity,
             lease_ttl_ms: u64,
         ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::StoreError> {
-            crate::RuntimePersistence::try_claim_session_execution_lease(
+            crate::SessionExecutionLeaseStore::try_claim_session_execution_lease(
                 &self.inner,
                 session_id,
                 owner,
@@ -451,7 +468,7 @@ mod tests {
             observed_holder: &crate::SessionExecutionLeaseFence,
             lease_ttl_ms: u64,
         ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::StoreError> {
-            crate::RuntimePersistence::reclaim_session_execution_lease(
+            crate::SessionExecutionLeaseStore::reclaim_session_execution_lease(
                 &self.inner,
                 session_id,
                 owner,
@@ -466,7 +483,7 @@ mod tests {
             fence: &crate::SessionExecutionLeaseFence,
             lease_ttl_ms: u64,
         ) -> Result<crate::SessionExecutionLease, crate::StoreError> {
-            crate::RuntimePersistence::renew_session_execution_lease(
+            crate::SessionExecutionLeaseStore::renew_session_execution_lease(
                 &self.inner,
                 fence,
                 lease_ttl_ms,
@@ -478,31 +495,196 @@ mod tests {
             &self,
             completion: &crate::SessionExecutionLeaseCompletion,
         ) -> Result<(), crate::StoreError> {
-            crate::RuntimePersistence::release_session_execution_lease(&self.inner, completion)
+            crate::SessionExecutionLeaseStore::release_session_execution_lease(
+                &self.inner,
+                completion,
+            )
+            .await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::TurnInputStore for RecordingRuntimePersistence {
+        async fn enqueue_pending_turn_input(
+            &self,
+            input: crate::PendingTurnInputDraft,
+        ) -> Result<crate::PendingTurnInput, crate::StoreError> {
+            crate::TurnInputStore::enqueue_pending_turn_input(&self.inner, input).await
+        }
+
+        async fn list_pending_turn_inputs(
+            &self,
+            session_id: &str,
+        ) -> Result<Vec<crate::PendingTurnInput>, crate::StoreError> {
+            crate::TurnInputStore::list_pending_turn_inputs(&self.inner, session_id).await
+        }
+
+        async fn cancel_pending_turn_inputs(
+            &self,
+            session_id: &str,
+            targets: &[crate::PendingTurnInputCancelTarget],
+        ) -> Result<Vec<crate::PendingTurnInputCancelResult>, crate::StoreError> {
+            crate::TurnInputStore::cancel_pending_turn_inputs(&self.inner, session_id, targets)
                 .await
         }
 
-        async fn save_session_meta(
+        async fn cancel_pending_turn_input_suffix(
             &self,
-            meta: crate::SessionMeta,
+            session_id: &str,
+            anchor: &crate::PendingTurnInputCancelTarget,
+        ) -> Result<crate::PendingTurnInputSuffixCancelOutcome, crate::StoreError> {
+            crate::TurnInputStore::cancel_pending_turn_input_suffix(&self.inner, session_id, anchor)
+                .await
+        }
+
+        async fn claim_active_turn_inputs(
+            &self,
+            session_id: &str,
+            session_execution_lease: &crate::SessionExecutionLeaseFence,
+            owner: &crate::LeaseOwnerIdentity,
+            turn_id: &str,
+            checkpoint: crate::CheckpointKind,
+            lease_ttl_ms: u64,
+            max_inputs: usize,
+        ) -> Result<Option<crate::TurnInputClaim>, crate::StoreError> {
+            crate::TurnInputStore::claim_active_turn_inputs(
+                &self.inner,
+                session_id,
+                session_execution_lease,
+                owner,
+                turn_id,
+                checkpoint,
+                lease_ttl_ms,
+                max_inputs,
+            )
+            .await
+        }
+
+        async fn claim_next_turn_inputs(
+            &self,
+            session_id: &str,
+            session_execution_lease: &crate::SessionExecutionLeaseFence,
+            owner: &crate::LeaseOwnerIdentity,
+            lease_ttl_ms: u64,
+            max_inputs: usize,
+        ) -> Result<Option<crate::TurnInputClaim>, crate::StoreError> {
+            crate::TurnInputStore::claim_next_turn_inputs(
+                &self.inner,
+                session_id,
+                session_execution_lease,
+                owner,
+                lease_ttl_ms,
+                max_inputs,
+            )
+            .await
+        }
+
+        async fn abandon_turn_input_claim(
+            &self,
+            claim: &crate::TurnInputClaim,
         ) -> Result<(), crate::StoreError> {
-            crate::RuntimePersistence::save_session_meta(&self.inner, meta).await
+            crate::TurnInputStore::abandon_turn_input_claim(&self.inner, claim).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::QueuedWorkStore for RecordingRuntimePersistence {
+        async fn enqueue_queued_work(
+            &self,
+            batch: crate::QueuedWorkBatchDraft,
+        ) -> Result<crate::QueuedWorkBatch, crate::StoreError> {
+            crate::QueuedWorkStore::enqueue_queued_work(&self.inner, batch).await
         }
 
-        async fn load_session_meta(&self) -> Result<Option<crate::SessionMeta>, crate::StoreError> {
-            crate::RuntimePersistence::load_session_meta(&self.inner).await
+        async fn claim_leading_ready_session_command(
+            &self,
+            session_id: &str,
+            session_execution_lease: &crate::SessionExecutionLeaseFence,
+            owner: &crate::LeaseOwnerIdentity,
+            lease_ttl_ms: u64,
+        ) -> Result<Option<crate::QueuedWorkClaim>, crate::StoreError> {
+            crate::QueuedWorkStore::claim_leading_ready_session_command(
+                &self.inner,
+                session_id,
+                session_execution_lease,
+                owner,
+                lease_ttl_ms,
+            )
+            .await
         }
 
+        async fn claim_ready_queued_work(
+            &self,
+            session_id: &str,
+            session_execution_lease: &crate::SessionExecutionLeaseFence,
+            owner: &crate::LeaseOwnerIdentity,
+            boundary: crate::QueuedWorkClaimBoundary,
+            lease_ttl_ms: u64,
+            max_batches: usize,
+        ) -> Result<Option<crate::QueuedWorkClaim>, crate::StoreError> {
+            crate::QueuedWorkStore::claim_ready_queued_work(
+                &self.inner,
+                session_id,
+                session_execution_lease,
+                owner,
+                boundary,
+                lease_ttl_ms,
+                max_batches,
+            )
+            .await
+        }
+
+        async fn renew_queued_work_claim(
+            &self,
+            claim: &crate::QueuedWorkClaim,
+            lease_ttl_ms: u64,
+        ) -> Result<crate::QueuedWorkClaim, crate::StoreError> {
+            crate::QueuedWorkStore::renew_queued_work_claim(&self.inner, claim, lease_ttl_ms).await
+        }
+
+        async fn abandon_queued_work_claim(
+            &self,
+            claim: &crate::QueuedWorkClaim,
+        ) -> Result<(), crate::StoreError> {
+            crate::QueuedWorkStore::abandon_queued_work_claim(&self.inner, claim).await
+        }
+
+        async fn cancel_queued_work_batch(
+            &self,
+            session_id: &str,
+            batch_id: &str,
+        ) -> Result<Option<crate::QueuedWorkBatch>, crate::StoreError> {
+            crate::QueuedWorkStore::cancel_queued_work_batch(&self.inner, session_id, batch_id)
+                .await
+        }
+
+        async fn list_queued_work(
+            &self,
+            session_id: &str,
+        ) -> Result<Vec<crate::QueuedWorkBatch>, crate::StoreError> {
+            crate::QueuedWorkStore::list_queued_work(&self.inner, session_id).await
+        }
+
+        async fn list_pending_queued_work(
+            &self,
+            session_id: &str,
+        ) -> Result<Vec<crate::QueuedWorkBatch>, crate::StoreError> {
+            crate::QueuedWorkStore::list_pending_queued_work(&self.inner, session_id).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::StoreMaintenance for RecordingRuntimePersistence {
         async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), crate::StoreError> {
-            crate::RuntimePersistence::tombstone_nodes(&self.inner, ids).await
+            crate::StoreMaintenance::tombstone_nodes(&self.inner, ids).await
         }
 
         async fn vacuum(&self) -> Result<crate::VacuumReport, crate::StoreError> {
-            crate::RuntimePersistence::vacuum(&self.inner).await
+            crate::StoreMaintenance::vacuum(&self.inner).await
         }
 
         async fn gc_unreachable(&self) -> Result<crate::GcReport, crate::StoreError> {
-            crate::RuntimePersistence::gc_unreachable(&self.inner).await
+            crate::StoreMaintenance::gc_unreachable(&self.inner).await
         }
     }
 

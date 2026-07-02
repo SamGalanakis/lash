@@ -1,5 +1,10 @@
-//! [`RuntimePersistence`] conformance: head CAS, checkpoint hydration,
-//! queued-work claim fencing, attachment manifest, and turn-commit stamps.
+//! [`RuntimePersistence`] conformance, organized by capability segment:
+//! [`SessionCommitStore`](crate::SessionCommitStore) (head CAS, checkpoint
+//! hydration, metadata, attachment manifest, turn-commit stamps),
+//! [`SessionExecutionLeaseStore`](crate::SessionExecutionLeaseStore),
+//! [`QueuedWorkStore`](crate::QueuedWorkStore) (claim fencing),
+//! [`TurnInputStore`](crate::TurnInputStore), and
+//! [`StoreMaintenance`](crate::StoreMaintenance).
 
 use super::*;
 
@@ -48,10 +53,16 @@ impl Default for RuntimePersistenceConformance {
 /// backend produced by `make`. `make` must return a fresh, empty,
 /// single-session store on each call.
 ///
-/// Covers the durability crown jewels owned by the store: optimistic head CAS,
-/// session binding, checkpoint/usage hydration, queued work claim fencing,
-/// attachment manifest intent/commit/GC reconciliation, session metadata,
-/// tombstone/GC behavior, and idempotent final turn commit stamps.
+/// Covers the durability crown jewels owned by the store, grouped by
+/// capability segment: optimistic head CAS, session binding, checkpoint/usage
+/// hydration, session metadata, attachment manifest intent/commit/GC
+/// reconciliation, and idempotent final turn commit stamps
+/// ([`SessionCommitStore`](crate::SessionCommitStore)); execution-lane fencing
+/// ([`SessionExecutionLeaseStore`](crate::SessionExecutionLeaseStore));
+/// queued-work ingress and claim fencing
+/// ([`QueuedWorkStore`](crate::QueuedWorkStore)); the pending turn-input
+/// lifecycle ([`TurnInputStore`](crate::TurnInputStore)); and tombstone/GC
+/// behavior ([`StoreMaintenance`](crate::StoreMaintenance)).
 /// Effect-host workflow history is deliberately outside this suite.
 pub async fn runtime_persistence<F>(make: F)
 where
@@ -85,13 +96,14 @@ pub async fn runtime_persistence_with_options<F>(make: F, options: RuntimePersis
 where
     F: Fn() -> Arc<dyn RuntimePersistence>,
 {
+    // [`SessionCommitStore`]: atomic head commits, reads, metadata, the
+    // attachment write-ahead manifest, and turn-commit idempotency.
     runtime_persistence_reports_declared_durability(make(), options.durability_tier).await;
     commit_increments_head_and_round_trips_agent_frames(make()).await;
     commit_rejects_a_different_session_id(make()).await;
     load_hydrates_checkpoint_and_usage(make()).await;
     active_path_read_scope_selects_only_requested_ancestry(make()).await;
-    session_execution_lease_contract(make()).await;
-    session_execution_lease_reclaim_contract(make()).await;
+    session_metadata_round_trips(make()).await;
     match options.attachment_manifest {
         AttachmentManifestConformance::Persistent => {
             attachment_manifest_records_intent_and_commit_stamps(make()).await;
@@ -100,6 +112,13 @@ where
             noop_attachment_manifest_is_explicit_and_empty(make()).await;
         }
     }
+    final_commit_stamp_is_idempotent_and_conflicts_on_changed_hash(make()).await;
+    // [`SessionExecutionLeaseStore`]: single-writer lane fencing.
+    session_execution_lease_contract(make()).await;
+    session_execution_lease_reclaim_contract(make()).await;
+    // [`QueuedWorkStore`]: durable queued-work ingress, ordering, and claim
+    // leases, plus the commit-side completion atomicity it shares with
+    // [`SessionCommitStore`].
     queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
     queued_work_cancel_removes_only_unclaimed_batches(make()).await;
     queued_work_exact_claim_uses_selected_batch_ids(make()).await;
@@ -110,14 +129,14 @@ where
     queued_work_completion_is_lease_guarded(make()).await;
     queued_wake_delivery_is_source_key_idempotent_and_claimed_once(make()).await;
     queue_completion_and_turn_commit_stamp_are_atomic(make()).await;
+    // [`TurnInputStore`]: pending turn-input lifecycle.
     pending_turn_inputs_source_keys_order_cancel_and_cross_session(make()).await;
     pending_turn_input_bulk_and_suffix_cancellation(make()).await;
     pending_turn_input_claims_reclaim_complete_and_fence(make()).await;
     pending_turn_input_cancel_covers_active_and_deferred_states(make()).await;
     pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(make()).await;
-    session_metadata_round_trips(make()).await;
+    // [`StoreMaintenance`]: tombstone/vacuum/GC retention.
     tombstone_vacuum_and_gc_are_minimally_consistent(make()).await;
-    final_commit_stamp_is_idempotent_and_conflicts_on_changed_hash(make()).await;
 }
 
 /// Build a queued process-wake draft for backend conformance tests.

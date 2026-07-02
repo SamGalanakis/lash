@@ -129,7 +129,7 @@ pub async fn run_backend_contention_report(
             passed,
             skipped,
             failed,
-            production_api: "RuntimePersistence session execution lease claim/reclaim/renew/release and commit_runtime_state through SessionStoreFactory handles",
+            production_api: "SessionExecutionLeaseStore claim/reclaim/renew/release and SessionCommitStore::commit_runtime_state through SessionStoreFactory handles",
             semantics: "Competing store handles must admit one lease owner, reject stale completion tokens, survive reopen handles, reject unfenced transaction commits, preserve idempotent retry, reject stale write conflicts, and allow dead-owner reclaim without clearing the live successor.",
         },
         report_path: report_path.clone(),
@@ -272,7 +272,7 @@ async fn competing_first_claim(
     Ok(BackendContentionOperation {
         operation_id: "runtime-persistence.competing-first-claim",
         status: "passed",
-        production_api: "RuntimePersistence::try_claim_session_execution_lease",
+        production_api: "SessionExecutionLeaseStore::try_claim_session_execution_lease",
         assertion: "two concurrently opened backend handles cannot both acquire the first session execution lease",
         evidence: json!({
             "left": claim_outcome_summary(&left),
@@ -319,7 +319,7 @@ async fn stale_completion_is_fenced(
     Ok(BackendContentionOperation {
         operation_id: "runtime-persistence.stale-completion-fenced",
         status: "passed",
-        production_api: "RuntimePersistence::release_session_execution_lease",
+        production_api: "SessionExecutionLeaseStore::release_session_execution_lease",
         assertion: "a stale completion token is idempotent and cannot clear a newer or live lease",
         evidence: json!({
             "live_lease": lease_summary(&lease),
@@ -372,7 +372,7 @@ async fn reopen_handle_preserves_live_lease(
     Ok(BackendContentionOperation {
         operation_id: "runtime-persistence.reopen-handle-preserves-lease",
         status: "passed",
-        production_api: "SessionStoreFactory::open_existing_store + RuntimePersistence lease methods",
+        production_api: "SessionStoreFactory::open_existing_store + SessionExecutionLeaseStore lease methods",
         assertion: "a reopened backend handle observes live lease state and can release by fenced completion",
         evidence: json!({
             "initial_lease": lease_summary(&lease),
@@ -465,7 +465,7 @@ async fn dead_owner_reclaim_preserves_live_successor(
     Ok(BackendContentionOperation {
         operation_id: "runtime-persistence.dead-owner-reclaim",
         status: "passed",
-        production_api: "RuntimePersistence::reclaim_session_execution_lease + renew_session_execution_lease",
+        production_api: "SessionExecutionLeaseStore::reclaim_session_execution_lease + renew_session_execution_lease",
         assertion: "dead-owner reclaim advances the lease and stale predecessor completion cannot clear the live successor",
         evidence: json!({
             "stale_lease": lease_summary(&stale_lease),
@@ -502,7 +502,7 @@ async fn transaction_without_live_lease_is_rejected(
     Ok(BackendContentionOperation {
         operation_id: "runtime-persistence.unfenced-transaction-rejected",
         status: "passed",
-        production_api: "RuntimePersistence::commit_runtime_state",
+        production_api: "SessionCommitStore::commit_runtime_state",
         assertion: "transaction loss or reconnect without a live session lease cannot publish session state",
         evidence: json!({
             "session_id": session_id,
@@ -580,7 +580,7 @@ async fn final_commit_retry_and_conflict_are_fenced(
     Ok(BackendContentionOperation {
         operation_id: "runtime-persistence.idempotent-retry-and-stale-write-conflict",
         status: "passed",
-        production_api: "RuntimePersistence::commit_runtime_state + RuntimeTurnCommitStamp",
+        production_api: "SessionCommitStore::commit_runtime_state + RuntimeTurnCommitStamp",
         assertion: "duplicate delivery of the same final commit is idempotent, while a stale changed commit with the same turn id is rejected",
         evidence: json!({
             "session_id": session_id,

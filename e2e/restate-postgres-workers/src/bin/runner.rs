@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use lash_core::AwaitEventResolver as _;
 use lash_core::{
-    AwaitEventKey, ExecutionScope, InlineRuntimeEffectController, RuntimePersistence,
-    ScopedEffectController,
+    AwaitEventKey, ExecutionScope, InlineRuntimeEffectController, ScopedEffectController,
+    SessionCommitStore,
 };
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{

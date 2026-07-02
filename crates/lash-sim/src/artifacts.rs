@@ -548,7 +548,7 @@ pub(crate) fn model_only_boundary_reviews() -> Vec<ModelOnlyBoundaryReview> {
         ModelOnlyBoundaryReview {
             boundary_kind: "worker",
             status: "runtime_persistence_lease_backed_with_reviewed_worker_task_ceiling",
-            production_abstraction_used: "RuntimePersistence session execution lease claim/reclaim/renew/release, SessionExecutionLease, LeaseOwnerIdentity, and SessionExecutionLeaseCompletion",
+            production_abstraction_used: "SessionExecutionLeaseStore claim/reclaim/renew/release, SessionExecutionLease, LeaseOwnerIdentity, and SessionExecutionLeaseCompletion",
             model_only_scope: "DurableProcessWorker task body launch remains excluded; generated memory runs, generated SQLite dynamic reruns, and Postgres backend contention validate stale completion rejection through real backend lease stores",
             oracle_id: "sim.oracle.worker-stale-completion-rejected.v1",
             artifact_evidence: "worker observed payload records runtime_active_lease, runtime_stale_completion, runtime_worker_store.session_execution_lease_reclaimed=true, and stale_completion_rejected=true",
@@ -588,7 +588,7 @@ pub(crate) fn model_only_boundary_reviews() -> Vec<ModelOnlyBoundaryReview> {
         ModelOnlyBoundaryReview {
             boundary_kind: "process_wake",
             status: "runtime_persistence_queued_work_backed_with_reviewed_process_body_ceiling",
-            production_abstraction_used: "process_wake_delivery, QueuedWorkBatchDraft, QueuedWorkPayload::process_wake, RuntimePersistence::enqueue_queued_work, and claim_ready_queued_work_by_batch_ids",
+            production_abstraction_used: "process_wake_delivery, QueuedWorkBatchDraft, QueuedWorkPayload::process_wake, QueuedWorkStore::enqueue_queued_work, and claim_ready_queued_work_by_batch_ids",
             model_only_scope: "the eventual process body that consumes the wake remains excluded; generated memory runs, generated SQLite dynamic reruns, and Postgres backend contention enqueue or claim wake-adjacent queued work through real queued-work/session-lease backend paths",
             oracle_id: "sim.oracle.process-wake-observed.v1",
             artifact_evidence: "process wake events include runtime_process_wake, runtime_queued_work claim evidence, claimed_once=true, and duplicate claimed_once=false dedupe evidence from real queued-work claims",

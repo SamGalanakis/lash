@@ -1,4 +1,6 @@
-//! The [`RuntimePersistence`] trait implementation for [`Store`].
+//! The [`RuntimePersistence`] capability-segment implementations for
+//! [`Store`]: [`SessionCommitStore`], [`SessionExecutionLeaseStore`],
+//! [`QueuedWorkStore`], [`TurnInputStore`], and [`StoreMaintenance`].
 //!
 //! This is the tokio-rusqlite port of the prior store's `persistence.rs`. The
 //! public surface is byte-for-byte the prior store async trait: identical method
@@ -24,7 +26,7 @@
 use super::*;
 
 #[async_trait::async_trait]
-impl RuntimePersistence for Store {
+impl SessionCommitStore for Store {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -460,6 +462,18 @@ impl RuntimePersistence for Store {
         Ok(result)
     }
 
+    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
+        Store::save_session_meta(self, meta).await;
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
+        Ok(Store::load_session_meta(self).await)
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionExecutionLeaseStore for Store {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
@@ -737,7 +751,10 @@ impl RuntimePersistence for Store {
             .await
             .map_err(sqlite_error)?
     }
+}
 
+#[async_trait::async_trait]
+impl QueuedWorkStore for Store {
     async fn enqueue_queued_work(
         &self,
         batch: QueuedWorkBatchDraft,
@@ -1319,7 +1336,10 @@ impl RuntimePersistence for Store {
             .await
             .map_err(sqlite_error)?
     }
+}
 
+#[async_trait::async_trait]
+impl TurnInputStore for Store {
     async fn enqueue_pending_turn_input(
         &self,
         draft: lash_core::PendingTurnInputDraft,
@@ -1455,22 +1475,6 @@ impl RuntimePersistence for Store {
             })
             .await
             .map_err(sqlite_error)?
-    }
-
-    async fn cancel_pending_turn_input(
-        &self,
-        session_id: &str,
-        input_id: &str,
-    ) -> Result<lash_core::PendingTurnInputCancelOutcome, StoreError> {
-        let target = lash_core::PendingTurnInputCancelTarget::input_id(input_id);
-        let targets = vec![target];
-        let mut outcomes = self
-            .cancel_pending_turn_inputs(session_id, &targets)
-            .await?;
-        Ok(outcomes
-            .pop()
-            .map(|result| result.outcome)
-            .unwrap_or(lash_core::PendingTurnInputCancelOutcome::NotFound))
     }
 
     async fn cancel_pending_turn_inputs(
@@ -1655,16 +1659,10 @@ impl RuntimePersistence for Store {
             .map_err(sqlite_error)?;
         Ok(())
     }
+}
 
-    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
-        Store::save_session_meta(self, meta).await;
-        Ok(())
-    }
-
-    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
-        Ok(Store::load_session_meta(self).await)
-    }
-
+#[async_trait::async_trait]
+impl StoreMaintenance for Store {
     async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), StoreError> {
         if ids.is_empty() {
             return Ok(());
