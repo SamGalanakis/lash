@@ -150,6 +150,7 @@ where
     effect_host_await_event_duplicate_resolution_is_terminal(make()).await;
     effect_host_await_event_cancel_and_timeout_are_terminal(make()).await;
     effect_host_await_event_revokes_session_scope(make()).await;
+    effect_host_await_event_session_cancel_resolves_outstanding_waits(make()).await;
     effect_host_await_event_rejects_tampered_keys(make()).await;
 }
 
@@ -485,6 +486,88 @@ async fn effect_host_await_event_revokes_session_scope(host: Arc<dyn EffectHost>
         .await
         .expect_err("revoked key must not await");
     assert_eq!(err.code.as_str(), "await_event_unknown_or_revoked");
+}
+
+/// The standalone wait-revocation lever: cancelling a session's durable waits
+/// resolves every *outstanding* wait with [`Resolution::Cancelled`] (waiters
+/// never hang; late resolves observe the terminal) while leaving the session
+/// usable — new waits registered afterwards resolve normally, unlike the
+/// tombstoning session revocation exercised above.
+async fn effect_host_await_event_session_cancel_resolves_outstanding_waits(
+    host: Arc<dyn EffectHost>,
+) {
+    let scope = ExecutionScope::turn("await-event-session-cancel-waits", "turn-cancel-waits");
+    let key = host
+        .await_event_key(
+            &scope,
+            AwaitEventWaitIdentity::tool_completion("call-cancel-waits"),
+        )
+        .await
+        .expect("await-event key");
+
+    let waiter_host = Arc::clone(&host);
+    let waiter_key = key.clone();
+    let waiter = tokio::spawn(async move {
+        waiter_host
+            .await_await_event(
+                &waiter_key,
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await
+    });
+    // The spawned waiter registers its wait asynchronously; cancel repeatedly
+    // (the lever is idempotent) until the waiter observes a terminal.
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            host.cancel_await_events_for_session("await-event-session-cancel-waits")
+                .await
+                .expect("cancel session waits");
+            if waiter.is_finished() {
+                return waiter.await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("outstanding wait must terminate after session cancel")
+    .expect("waiter task joins")
+    .expect("cancelled wait resolves rather than erroring");
+    assert_eq!(
+        waited,
+        Resolution::Cancelled,
+        "outstanding waits must resolve with the Cancelled terminal"
+    );
+    assert_eq!(
+        host.resolve_await_event(&key, Resolution::Ok(serde_json::json!("late")))
+            .await
+            .expect("late resolve after cancel"),
+        ResolveOutcome::AlreadyResolved {
+            terminal: Resolution::Cancelled
+        }
+    );
+
+    // The session is NOT tombstoned: a wait registered after the cancel still
+    // resolves normally.
+    let later_key = host
+        .await_event_key(
+            &scope,
+            AwaitEventWaitIdentity::tool_completion("call-after-cancel"),
+        )
+        .await
+        .expect("post-cancel await-event key");
+    assert_eq!(
+        host.resolve_await_event(&later_key, Resolution::Ok(serde_json::json!("still-works")))
+            .await
+            .expect("post-cancel resolve"),
+        ResolveOutcome::Accepted
+    );
+    assert_eq!(
+        host.await_await_event(&later_key, tokio_util::sync::CancellationToken::new(), None)
+            .await
+            .expect("post-cancel wait resolves"),
+        Resolution::Ok(serde_json::json!("still-works"))
+    );
 }
 
 async fn effect_host_await_event_rejects_tampered_keys(host: Arc<dyn EffectHost>) {

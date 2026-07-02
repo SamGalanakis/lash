@@ -35,6 +35,19 @@ pub struct DurableProcessWorkerConfig {
     /// instead of silently diverging from the live runtime by keeping the full
     /// graph resident.
     pub residency: crate::Residency,
+    /// Owner identity stem this worker derives per-recovery lease owners from.
+    ///
+    /// Each recovery attempt claims with a unique `(owner_id, incarnation_id)`
+    /// derived from this identity — a live lease held by an earlier attempt
+    /// must fence a later sweep pass rather than be re-entered as the same
+    /// incarnation — while the liveness metadata is inherited as-is. Defaults
+    /// to a fresh opaque identity per config. Hosts that run one worker per OS
+    /// process should wire a
+    /// [`LeaseOwnerIdentity::local_process`](crate::LeaseOwnerIdentity::local_process)
+    /// identity so peers on the same host can prove a crashed worker dead and
+    /// reclaim its process leases before the TTL — mirroring the session
+    /// execution lane's runtime lease owner.
+    pub lease_owner: crate::LeaseOwnerIdentity,
 }
 
 impl DurableProcessWorkerConfig {
@@ -56,6 +69,10 @@ impl DurableProcessWorkerConfig {
             queued_work_driver: None,
             turn_phase_probe_slot: crate::runtime::RuntimeTurnPhaseProbeSlot::default(),
             residency: crate::Residency::default(),
+            lease_owner: crate::LeaseOwnerIdentity::opaque(
+                format!("durable-process-worker:{}", uuid::Uuid::new_v4()),
+                uuid::Uuid::new_v4().to_string(),
+            ),
         }
     }
 
@@ -76,6 +93,13 @@ impl DurableProcessWorkerConfig {
 
     pub fn with_process_work_driver(mut self, driver: ProcessWorkDriver) -> Self {
         self.process_work_driver = Some(driver);
+        self
+    }
+
+    /// Set the owner identity this worker presents when claiming process
+    /// leases. See [`DurableProcessWorkerConfig::lease_owner`].
+    pub fn with_lease_owner(mut self, lease_owner: crate::LeaseOwnerIdentity) -> Self {
+        self.lease_owner = lease_owner;
         self
     }
 
@@ -238,8 +262,11 @@ impl DurableProcessWorker {
     /// 1. lists every non-terminal process ([`ProcessRegistry::list_non_terminal`]);
     /// 2. claims the durable single-owner [`ProcessLease`] over each — a process
     ///    already leased live by *another* owner is skipped (it is being run by
-    ///    that owner right now), so a non-terminal process is re-run by exactly
-    ///    one owner (lease fencing);
+    ///    that owner right now) unless persisted liveness metadata proves that
+    ///    owner definitely dead, in which case the lease is reclaimed with the
+    ///    fenced CAS discipline of
+    ///    [`ProcessRegistry::reclaim_process_lease`]; either way a non-terminal
+    ///    process is re-run by exactly one owner (lease fencing);
     /// 3. runs the claimed process on this worker's wired controller, renewing
     ///    the lease across the long-running execution so a healthy recovery is
     ///    not swept out from under itself;
@@ -268,19 +295,54 @@ impl DurableProcessWorker {
         Ok(())
     }
 
+    /// Unique lease owner for one recovery attempt.
+    ///
+    /// Derived from [`DurableProcessWorkerConfig::lease_owner`]: a fresh
+    /// `(owner_id, incarnation_id)` per attempt keeps sweeps idempotent (a
+    /// still-running attempt's live lease fences later passes instead of being
+    /// re-entered as "own lease"), while the configured liveness metadata is
+    /// inherited so peers can prove a crashed worker dead and reclaim.
+    fn recovery_lease_owner(&self) -> crate::LeaseOwnerIdentity {
+        let attempt = uuid::Uuid::new_v4();
+        crate::LeaseOwnerIdentity {
+            owner_id: format!("{}:recovery:{attempt}", self.config.lease_owner.owner_id),
+            incarnation_id: attempt.to_string(),
+            liveness: self.config.lease_owner.liveness.clone(),
+        }
+    }
+
     async fn recover_process(&self, record: ProcessRecord) {
-        let owner_id = format!("process-recovery-{}", uuid::Uuid::new_v4());
         let process_id = record.id.clone();
-        // Skip if held live by another owner: a claim conflict means a worker is
+        let lease_ttl_ms = self.lease_timings().ttl_ms();
+        let owner = &self.recovery_lease_owner();
+        // Skip if held live by another owner: a busy claim means a worker is
         // already running this process, so re-running here would violate the
-        // single-owner contract. Treat any claim failure as "leased elsewhere".
-        let Ok(lease) = self
+        // single-owner contract. A busy holder whose persisted local-process
+        // liveness proves it definitely dead is reclaimed with the fenced CAS
+        // discipline the session execution lane uses, so an orphaned process
+        // recovers without waiting out the full lease TTL. Treat claim errors
+        // as "leased elsewhere".
+        let lease = match self
             .config
             .process_registry
-            .claim_process_lease(&process_id, &owner_id, self.lease_timings().ttl_ms())
+            .claim_process_lease(&process_id, owner, lease_ttl_ms)
             .await
-        else {
-            return;
+        {
+            Ok(crate::ProcessLeaseClaimOutcome::Acquired(lease)) => lease,
+            Ok(crate::ProcessLeaseClaimOutcome::Busy { holder })
+                if holder.owner.is_definitely_dead_for_claimant(owner) =>
+            {
+                match self
+                    .config
+                    .process_registry
+                    .reclaim_process_lease(&process_id, owner, &holder, lease_ttl_ms)
+                    .await
+                {
+                    Ok(crate::ProcessLeaseClaimOutcome::Acquired(lease)) => lease,
+                    Ok(crate::ProcessLeaseClaimOutcome::Busy { .. }) | Err(_) => return,
+                }
+            }
+            Ok(crate::ProcessLeaseClaimOutcome::Busy { .. }) | Err(_) => return,
         };
         // The process may have reached a terminal state between the list and the
         // claim. Idempotent by process_id: do not re-execute a finished process.
@@ -646,6 +708,147 @@ impl DurableProcessWorker {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::{
+        DurabilityTier, LeaseOwnerIdentity, LeaseOwnerLiveness, ProcessInput, ProcessRegistration,
+    };
+
+    fn inline_worker(
+        registry: Arc<dyn ProcessRegistry>,
+        lease_owner: LeaseOwnerIdentity,
+    ) -> DurableProcessWorker {
+        struct InlineSessionStoreFactory;
+
+        #[async_trait::async_trait]
+        impl SessionStoreFactory for InlineSessionStoreFactory {
+            fn durability_tier(&self) -> DurabilityTier {
+                DurabilityTier::Inline
+            }
+
+            async fn create_store(
+                &self,
+                _request: &crate::SessionStoreCreateRequest,
+            ) -> Result<Arc<dyn crate::RuntimePersistence>, String> {
+                Ok(Arc::new(InMemorySessionStore::default()))
+            }
+
+            async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        DurableProcessWorker::new(
+            DurableProcessWorkerConfig::new(
+                Arc::new(PluginHost::new(Vec::new())),
+                RuntimeHostConfig::in_memory(),
+                Arc::new(InlineSessionStoreFactory),
+                registry,
+            )
+            .with_lease_owner(lease_owner),
+        )
+    }
+
+    fn external_registration(id: &str) -> ProcessRegistration {
+        ProcessRegistration::new(
+            id,
+            ProcessInput::External {
+                metadata: serde_json::json!({}),
+            },
+            crate::ProcessProvenance::host(),
+        )
+    }
+
+    fn local_owner(owner_id: &str, host_id: &str, process_start: &str) -> LeaseOwnerIdentity {
+        LeaseOwnerIdentity {
+            owner_id: owner_id.to_string(),
+            incarnation_id: format!("{owner_id}:incarnation"),
+            liveness: LeaseOwnerLiveness::local_process_for_test(
+                host_id,
+                "boot-a",
+                std::process::id(),
+                process_start,
+            ),
+        }
+    }
+
+    async fn await_terminal(registry: &Arc<dyn ProcessRegistry>, process_id: &str) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            registry.await_process(process_id),
+        )
+        .await
+        .expect("recovered process reaches terminal within the sweep")
+        .expect("recovered process terminal output");
+    }
+
+    /// The sweep reclaims a lease whose holder is provably dead (same
+    /// host/boot, process gone) instead of waiting out the full TTL.
+    #[tokio::test]
+    async fn sweep_reclaims_dead_holder_lease_and_recovers_the_process() {
+        let registry: Arc<dyn ProcessRegistry> =
+            Arc::new(crate::TestLocalProcessRegistry::default());
+        registry
+            .register_process(external_registration("proc-sweep-reclaim"))
+            .await
+            .expect("register");
+        let dead_holder = local_owner("dead-worker", "host-a", "not-the-current-process-start");
+        registry
+            .claim_process_lease("proc-sweep-reclaim", &dead_holder, 60_000)
+            .await
+            .expect("dead holder claims")
+            .acquired()
+            .expect("dead holder lease acquired");
+
+        let claimant = local_owner("live-worker", "host-a", "claimant-start");
+        let worker = inline_worker(Arc::clone(&registry), claimant);
+        worker
+            .drive_pending_processes()
+            .await
+            .expect("sweep dispatches");
+        await_terminal(&registry, "proc-sweep-reclaim").await;
+    }
+
+    /// A live-leased row whose holder is not provably dead is skipped.
+    #[tokio::test]
+    async fn sweep_skips_rows_whose_holder_is_not_provably_dead() {
+        let registry: Arc<dyn ProcessRegistry> =
+            Arc::new(crate::TestLocalProcessRegistry::default());
+        registry
+            .register_process(external_registration("proc-sweep-skip"))
+            .await
+            .expect("register");
+        // Opaque holders carry no liveness proof, so they are never reclaimed.
+        registry
+            .claim_process_lease(
+                "proc-sweep-skip",
+                &LeaseOwnerIdentity::opaque("other-worker", "other-incarnation"),
+                60_000,
+            )
+            .await
+            .expect("live holder claims")
+            .acquired()
+            .expect("live holder lease acquired");
+
+        let claimant = local_owner("live-worker", "host-a", "claimant-start");
+        let worker = inline_worker(Arc::clone(&registry), claimant);
+        worker
+            .drive_pending_processes()
+            .await
+            .expect("sweep dispatches");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let record = registry
+            .get_process("proc-sweep-skip")
+            .await
+            .expect("process exists");
+        assert!(
+            !record.is_terminal(),
+            "a live-leased process must not be re-run by the sweep"
+        );
     }
 }
 

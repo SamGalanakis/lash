@@ -1,3 +1,4 @@
+mod await_events;
 mod envelope;
 mod executor;
 mod outcome;

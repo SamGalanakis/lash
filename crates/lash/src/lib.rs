@@ -149,7 +149,7 @@ pub mod persistence {
         PendingTurnInputClaimDiagnostics, PendingTurnInputDraft, QueuedWorkBatch,
         QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkClass,
         QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState,
-        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
+        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, TurnInputClaim,
     };
     pub use lash_core::store::queued_work;
     pub use lash_core::store::{
@@ -257,13 +257,14 @@ pub mod process {
         ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
         ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
         ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary,
-        ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseCompletion,
-        ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope,
-        ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
-        ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport, ProcessStartOptions,
-        ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessWake,
-        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
-        ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
+        ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseClaimOutcome,
+        ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
+        ProcessOpScope, ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry,
+        ProcessRunHandle, ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport,
+        ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
+        ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery,
+        ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver, ProcessWorkSnapshot, SessionScope,
+        SessionScopeId,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{

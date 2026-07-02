@@ -1,11 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::AttachmentStore;
@@ -24,13 +23,9 @@ use super::envelope::{
 };
 use super::outcome::llm_call_error_from_transport;
 
-type HmacSha256 = Hmac<sha2::Sha256>;
 type AwaitEventOptions = (CancellationToken, Option<Instant>, Arc<dyn crate::Clock>);
 
-fn inline_await_events() -> &'static AwaitEventRegistry {
-    static REGISTRY: OnceLock<AwaitEventRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(AwaitEventRegistry::new)
-}
+use super::await_events::inline_await_events;
 
 // =============================================================================
 // Effect host + controller trait + scope + error
@@ -126,7 +121,7 @@ impl ExecutionScope {
         matches!(self, Self::Turn { .. })
     }
 
-    fn validate(&self) -> Result<(), RuntimeError> {
+    pub(super) fn validate(&self) -> Result<(), RuntimeError> {
         let missing = match self {
             Self::Turn {
                 session_id,
@@ -185,7 +180,7 @@ impl AwaitEventWaitIdentity {
         }
     }
 
-    fn validate(&self) -> Result<(), RuntimeError> {
+    pub(super) fn validate(&self) -> Result<(), RuntimeError> {
         let invalid = match self {
             Self::ToolCompletion { tool_call_id } => tool_call_id.trim().is_empty(),
             Self::ProcessSignal {
@@ -252,205 +247,6 @@ pub enum ResolveOutcome {
     Accepted,
     AlreadyResolved { terminal: Resolution },
     UnknownOrRevoked,
-}
-
-#[derive(Debug)]
-struct AwaitEventEntry {
-    terminal: Option<Resolution>,
-    notify: Arc<Notify>,
-}
-
-#[derive(Debug)]
-struct AwaitEventRegistryState {
-    entries: HashMap<String, AwaitEventEntry>,
-    revoked_key_ids: HashSet<String>,
-    revoked_session_ids: HashSet<String>,
-}
-
-#[derive(Debug)]
-struct AwaitEventRegistry {
-    secret: Vec<u8>,
-    state: std::sync::Mutex<AwaitEventRegistryState>,
-}
-
-impl AwaitEventRegistry {
-    fn new() -> Self {
-        Self {
-            secret: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            state: std::sync::Mutex::new(AwaitEventRegistryState {
-                entries: HashMap::new(),
-                revoked_key_ids: HashSet::new(),
-                revoked_session_ids: HashSet::new(),
-            }),
-        }
-    }
-
-    fn key_for(
-        &self,
-        scope: &ExecutionScope,
-        wait: AwaitEventWaitIdentity,
-    ) -> Result<AwaitEventKey, RuntimeError> {
-        scope.validate()?;
-        wait.validate()?;
-        let key_id =
-            crate::stable_hash::stable_json_sha256_hex(&(scope, &wait)).map_err(|err| {
-                RuntimeError::new(
-                    "await_event_key_hash",
-                    format!("failed to hash await-event identity: {err}"),
-                )
-            })?;
-        let signature = self.signature(scope, &wait, &key_id)?;
-        Ok(AwaitEventKey {
-            scope: scope.clone(),
-            wait,
-            key_id,
-            signature,
-        })
-    }
-
-    fn signature(
-        &self,
-        scope: &ExecutionScope,
-        wait: &AwaitEventWaitIdentity,
-        key_id: &str,
-    ) -> Result<String, RuntimeError> {
-        let mut mac = HmacSha256::new_from_slice(&self.secret).map_err(|err| {
-            RuntimeError::new(
-                "await_event_key_sign",
-                format!("failed to initialize await-event key signer: {err}"),
-            )
-        })?;
-        let canonical = serde_json::to_vec(&(scope, wait, key_id)).map_err(|err| {
-            RuntimeError::new(
-                "await_event_key_sign",
-                format!("failed to serialize await-event key identity: {err}"),
-            )
-        })?;
-        mac.update(&canonical);
-        Ok(format!("{:x}", mac.finalize().into_bytes()))
-    }
-
-    fn verify(&self, key: &AwaitEventKey) -> Result<bool, RuntimeError> {
-        let expected = self.signature(&key.scope, &key.wait, &key.key_id)?;
-        Ok(expected == key.signature)
-    }
-
-    fn resolve(
-        &self,
-        key: &AwaitEventKey,
-        resolution: Resolution,
-    ) -> Result<ResolveOutcome, RuntimeError> {
-        if !self.verify(key)? {
-            return Ok(ResolveOutcome::UnknownOrRevoked);
-        }
-        let mut state = self.state.lock().map_err(|_| {
-            RuntimeError::new(
-                "await_event_registry_poisoned",
-                "await-event registry lock poisoned",
-            )
-        })?;
-        if state.revoked_key_ids.contains(&key.key_id)
-            || key
-                .scope
-                .session_id()
-                .is_some_and(|session_id| state.revoked_session_ids.contains(session_id))
-        {
-            return Ok(ResolveOutcome::UnknownOrRevoked);
-        }
-        let entry = state
-            .entries
-            .entry(key.key_id.clone())
-            .or_insert_with(|| AwaitEventEntry {
-                terminal: None,
-                notify: Arc::new(Notify::new()),
-            });
-        if let Some(terminal) = &entry.terminal {
-            return Ok(ResolveOutcome::AlreadyResolved {
-                terminal: terminal.clone(),
-            });
-        }
-        entry.terminal = Some(resolution);
-        entry.notify.notify_waiters();
-        Ok(ResolveOutcome::Accepted)
-    }
-
-    async fn await_resolution(
-        &self,
-        key: &AwaitEventKey,
-        cancel: CancellationToken,
-        deadline: Option<Instant>,
-        clock: &dyn crate::Clock,
-    ) -> Result<Resolution, RuntimeError> {
-        if !self.verify(key)? {
-            return Err(RuntimeError::new(
-                "await_event_unknown_or_revoked",
-                "await-event key is invalid or revoked",
-            ));
-        }
-        loop {
-            let notify =
-                {
-                    let mut state = self.state.lock().map_err(|_| {
-                        RuntimeError::new(
-                            "await_event_registry_poisoned",
-                            "await-event registry lock poisoned",
-                        )
-                    })?;
-                    if state.revoked_key_ids.contains(&key.key_id)
-                        || key.scope.session_id().is_some_and(|session_id| {
-                            state.revoked_session_ids.contains(session_id)
-                        })
-                    {
-                        return Err(RuntimeError::new(
-                            "await_event_unknown_or_revoked",
-                            "await-event key is invalid or revoked",
-                        ));
-                    }
-                    let entry = state.entries.entry(key.key_id.clone()).or_insert_with(|| {
-                        AwaitEventEntry {
-                            terminal: None,
-                            notify: Arc::new(Notify::new()),
-                        }
-                    });
-                    if let Some(terminal) = entry.terminal.clone() {
-                        return Ok(terminal);
-                    }
-                    Arc::clone(&entry.notify)
-                };
-            if let Some(deadline) = deadline {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        let _ = self.resolve(key, Resolution::Cancelled)?;
-                    }
-                    _ = clock.sleep_until(deadline) => {
-                        let _ = self.resolve(key, Resolution::Timeout)?;
-                    }
-                    _ = notify.notified() => {}
-                }
-            } else {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        let _ = self.resolve(key, Resolution::Cancelled)?;
-                    }
-                    _ = notify.notified() => {}
-                }
-            }
-        }
-    }
-
-    fn revoke_session(&self, session_id: &str) -> Result<(), RuntimeError> {
-        let mut state = self.state.lock().map_err(|_| {
-            RuntimeError::new(
-                "await_event_registry_poisoned",
-                "await-event registry lock poisoned",
-            )
-        })?;
-        state.revoked_session_ids.insert(session_id.to_string());
-        for entry in state.entries.values() {
-            entry.notify.notify_waiters();
-        }
-        Ok(())
-    }
 }
 
 enum ScopedEffectControllerInner<'run> {
@@ -569,6 +365,23 @@ pub trait AwaitEventResolver: Send + Sync {
 
     async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
         Ok(())
+    }
+
+    /// Cancel every *outstanding* durable wait for `session_id` without
+    /// deleting the session: each waiter receives a terminal
+    /// [`Resolution::Cancelled`] instead of hanging, late resolves observe
+    /// that terminal, and waits registered afterwards behave normally — in
+    /// contrast to [`revoke_await_events_for_session`](Self::revoke_await_events_for_session),
+    /// which tombstones the session's waits forever.
+    ///
+    /// The default errors loudly: an effect boundary that tracks durable waits
+    /// must implement this to honor the host lever, and one that cannot must
+    /// not silently claim success.
+    async fn cancel_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
+        Err(RuntimeError::new(
+            "await_event_cancel_unsupported",
+            "this effect boundary does not support cancelling durable waits",
+        ))
     }
 }
 
@@ -1325,6 +1138,10 @@ impl AwaitEventResolver for InlineRuntimeEffectController {
     async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
         inline_await_events().revoke_session(session_id)
     }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        inline_await_events().cancel_session(session_id)
+    }
 }
 
 #[async_trait::async_trait]
@@ -1426,6 +1243,12 @@ impl AwaitEventResolver for InlineEffectHost {
     async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
         self.controller
             .revoke_await_events_for_session(session_id)
+            .await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.controller
+            .cancel_await_events_for_session(session_id)
             .await
     }
 }

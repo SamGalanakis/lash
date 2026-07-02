@@ -546,6 +546,67 @@ impl RuntimeHandle {
             })
     }
 
+    /// Release a held queued-work claim without completing it, returning its
+    /// batches to the pending queue immediately.
+    ///
+    /// This is the host lever behind stopping an external queued-work driver
+    /// mid-claim: instead of letting the claim age out over its lease TTL, the
+    /// host hands the claim back and the work becomes claimable again at once.
+    pub async fn abandon_queued_work_claim(
+        &self,
+        claim: &crate::QueuedWorkClaim,
+    ) -> Result<(), crate::RuntimeError> {
+        let observation = self.observe();
+        let store = observation
+            .queue_store
+            .clone()
+            .ok_or_else(super::session_api::queued_turn_input_store_required)?;
+        store
+            .abandon_queued_work_claim(claim)
+            .await
+            .map_err(|err| {
+                crate::RuntimeError::new(
+                    crate::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                )
+            })?;
+        self.record_queue_changed(
+            SessionQueueEventKind::Enqueued,
+            claim
+                .batches
+                .iter()
+                .map(|batch| batch.batch_id.clone())
+                .collect(),
+        );
+        Ok(())
+    }
+
+    /// Release a held pending-turn-input claim without completing it, returning
+    /// its inputs to the pending queue immediately. The turn-input counterpart
+    /// of [`abandon_queued_work_claim`](Self::abandon_queued_work_claim).
+    pub async fn abandon_turn_input_claim(
+        &self,
+        claim: &crate::TurnInputClaim,
+    ) -> Result<(), crate::RuntimeError> {
+        let observation = self.observe();
+        let store = observation
+            .queue_store
+            .clone()
+            .ok_or_else(super::session_api::queued_turn_input_store_required)?;
+        store.abandon_turn_input_claim(claim).await.map_err(|err| {
+            crate::RuntimeError::new(crate::RuntimeErrorCode::StoreCommitFailed, err.to_string())
+        })?;
+        self.record_queue_changed(
+            SessionQueueEventKind::Enqueued,
+            claim
+                .inputs
+                .iter()
+                .map(|input| input.input_id.clone())
+                .collect(),
+        );
+        Ok(())
+    }
+
     pub async fn cancel_queued_work_batch(
         &self,
         session_id: &str,

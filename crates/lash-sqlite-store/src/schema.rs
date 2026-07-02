@@ -230,6 +230,8 @@ CREATE INDEX IF NOT EXISTS idx_process_handle_grants_process
 CREATE TABLE IF NOT EXISTS process_leases (
     process_id       TEXT PRIMARY KEY,
     lease_owner_id   TEXT,
+    lease_owner_incarnation_id TEXT,
+    lease_owner_liveness_json TEXT,
     lease_token      TEXT,
     lease_fencing_token  INTEGER NOT NULL DEFAULT 0,
     lease_claimed_at_ms  INTEGER NOT NULL DEFAULT 0,
@@ -239,7 +241,7 @@ CREATE TABLE IF NOT EXISTS process_leases (
 
 ";
 
-pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 7;
+pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 8;
 
 pub(crate) const TRIGGER_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS trigger_subscription_seq (

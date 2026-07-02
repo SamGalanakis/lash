@@ -44,7 +44,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::{Executor, Row};
 
 const SCHEMA_COMPONENT: &str = "lash-postgres-store";
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]
