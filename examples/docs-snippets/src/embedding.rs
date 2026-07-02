@@ -76,8 +76,8 @@ async fn full_core(provider: ProviderHandle) -> anyhow::Result<()> {
     let artifact_store =
         Arc::new(lash_sqlite_store::Store::open(&data_dir.join("artifacts.db")).await?);
 
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         artifact_store,
     );
     let core = lash::LashCore::rlm_builder(factory)
@@ -124,8 +124,8 @@ async fn preset_core(provider: ProviderHandle) -> anyhow::Result<()> {
             .expect("valid model metadata"),
     );
 
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
     );
     let core = lash::LashCore::rlm_builder(factory)
@@ -150,8 +150,8 @@ async fn custom_stack(root_spec: SessionSpec) -> anyhow::Result<()> {
         plugins.push(Arc::new(AppPluginFactory) as Arc<dyn PluginFactory>);
     });
 
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
     );
     let core = lash::LashCore::rlm_builder(factory)

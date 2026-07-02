@@ -38,12 +38,12 @@ impl RlmTurnBuilderExt for TurnBuilder {
 /// same key.
 #[cfg(feature = "rlm")]
 pub trait RlmSessionBuilderExt: Sized {
-    fn final_answer_format(self, format: lash_rlm_types::RlmFinalAnswerFormat) -> Self;
+    fn final_answer_format(self, format: lash_rlm_types::RlmFinalAnswerFormat) -> Result<Self>;
 }
 
 #[cfg(feature = "rlm")]
 impl RlmSessionBuilderExt for SessionBuilder {
-    fn final_answer_format(mut self, format: lash_rlm_types::RlmFinalAnswerFormat) -> Self {
+    fn final_answer_format(mut self, format: lash_rlm_types::RlmFinalAnswerFormat) -> Result<Self> {
         let mut extras = self
             .plugin_options
             .decode::<lash_rlm_types::RlmCreateExtras>(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID)
@@ -51,37 +51,27 @@ impl RlmSessionBuilderExt for SessionBuilder {
             .flatten()
             .unwrap_or_default();
         extras.final_answer_format = Some(format);
-        // The value round-trips through the same typed encoder used elsewhere;
-        // `RlmCreateExtras` always serializes, so this cannot fail.
-        self = self
-            .plugin_option(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID, extras)
-            .expect("encode RLM create extras");
-        self
+        self = self.plugin_option(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID, extras)?;
+        Ok(self)
     }
 }
 
+// RLM-specific Lashlang host vocabulary. The catalogue-preview, tool-binding,
+// and process-input names are single-homed under `lash::tools` and
+// `lash::process`; they are not re-exported here.
 pub use lash_lashlang_runtime::{
-    CataloguePreviewEntry, CataloguePreviewOptions, DEFAULT_CATALOGUE_PREVIEW_CALL_NAME_LIMIT,
-    DEFAULT_CATALOGUE_PREVIEW_MODULE_LIMIT, LASHLANG_ENGINE_KIND, LASHLANG_SURFACE_EXTENSION_ID,
-    LASHLANG_TOOL_BINDING_KEY, LashlangAbilities, LashlangHostCatalog, LashlangHostEnvironment,
-    LashlangLanguageFeatures, LashlangProcessEngine, LashlangProcessInput, LashlangSurface,
-    LashlangSurfaceContribution, LashlangToolBinding, RemoteToolGrantLashlangExt,
-    ToolDefinitionLashlangExt, ToolManifestLashlangExt, catalogue_preview_contribution,
-    catalogue_preview_contribution_for_entries,
-    catalogue_preview_contribution_for_entries_with_options,
-    catalogue_preview_contribution_for_manifests, catalogue_preview_contribution_with_options,
-    catalogue_preview_entries_from_catalog_records, catalogue_preview_entries_from_manifests,
-    catalogue_preview_entry_from_catalog_record, catalogue_preview_entry_from_manifest,
-    lashlang_process_event_types, lashlang_process_signal_event_types,
+    LASHLANG_SURFACE_EXTENSION_ID, LashlangAbilities, LashlangHostCatalog, LashlangHostEnvironment,
+    LashlangLanguageFeatures, LashlangProcessEngine, LashlangSurface, LashlangSurfaceContribution,
 };
 pub use lash_protocol_rlm::{
-    NamedDataType, RlmProtocolPluginConfig, TypeExpr, TypeField, format_type_expr,
+    NamedDataType, RlmProtocolPluginConfig, RlmProtocolPluginFactory, TypeExpr, TypeField,
+    format_type_expr,
 };
 pub use lash_rlm_types::RlmFinalAnswerFormat;
 
 /// The Lashlang compile APIs are operations over an
-/// [`RlmProtocolPluginFactory`](lash_protocol_rlm::RlmProtocolPluginFactory) and
-/// a plugin host; they live in `lash-protocol-rlm` and are re-exported here.
+/// [`RlmProtocolPluginFactory`] and a plugin host; they live in
+/// `lash-protocol-rlm` and are re-exported here.
 #[cfg(feature = "rlm")]
 pub use lash_protocol_rlm::{
     LashlangCompileSurface, LashlangCompileSurfaceRequest, LashlangModuleCompileError,

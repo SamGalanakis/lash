@@ -4,10 +4,7 @@
 //! This test parses the crate's own public re-export map (`pub use` statements)
 //! and asserts no public name is re-exported from two module homes.
 //!
-//! Two exemptions, both intentional:
-//! - `prelude` mirrors the crate root exactly (the one intended exception).
-//! - The `rlm` module surfaces the RLM protocol facade vocabulary, which is
-//!   maintained under a separate redesign; it is not gated here.
+//! One exemption, intentional: `prelude` mirrors the crate root exactly.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -149,12 +146,10 @@ fn every_public_name_has_exactly_one_home() {
         Some("scenario_contracts"),
     ));
     pairs.extend(collect(&read("src/testing.rs"), Some("testing")));
+    pairs.extend(collect(&read("src/rlm.rs"), Some("rlm")));
 
     let mut homes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, module) in pairs {
-        if module == "rlm" {
-            continue; // RLM facade surface: maintained under a separate redesign.
-        }
         // The prelude mirrors the crate root exactly.
         let module = if module == "prelude" {
             "root".to_string()

@@ -24,8 +24,8 @@ async fn standard_mode(provider: ProviderHandle, model: ModelSpec) -> anyhow::Re
 async fn rlm_mode(provider: ProviderHandle, model: ModelSpec) -> anyhow::Result<()> {
     // docs:start:rlm-core
     // Build an RLM core for Lashlang-driven turns.
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
     );
     let core = lash::LashCore::rlm_builder(factory)

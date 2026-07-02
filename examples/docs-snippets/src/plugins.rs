@@ -35,8 +35,8 @@ async fn plugin_core(provider: ProviderHandle, model_id: &str) -> anyhow::Result
 
     use lash::plugins::PluginFactory;
 
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
     );
     let core = lash::LashCore::rlm_builder(factory)

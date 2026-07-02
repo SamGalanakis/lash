@@ -542,7 +542,7 @@ async fn rlm_root_session_final_answer_format_defaults_to_markdown_and_can_be_ra
 
     let raw = core
         .session("rlm-root-raw")
-        .final_answer_format(RlmFinalAnswerFormat::RawFinalValue)
+        .final_answer_format(RlmFinalAnswerFormat::RawFinalValue)?
         .open()
         .await?;
     raw.turn(TurnInput::text("hello"))
