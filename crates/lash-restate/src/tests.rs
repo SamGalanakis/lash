@@ -232,6 +232,13 @@ impl lash_core::AttachmentStore for DurableMemoryAttachmentStore {
     ) -> Result<lash_core::StoredAttachment, lash_core::AttachmentStoreError> {
         self.inner.get(id).await
     }
+
+    async fn delete(
+        &self,
+        id: &lash_core::AttachmentId,
+    ) -> Result<(), lash_core::AttachmentStoreError> {
+        self.inner.delete(id).await
+    }
 }
 
 #[derive(Default)]

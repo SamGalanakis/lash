@@ -89,6 +89,103 @@ pub trait AttachmentStore: Send + Sync {
     ) -> Result<AttachmentRef, AttachmentStoreError>;
 
     async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError>;
+
+    /// Unconditionally remove the content addressed by `id` (its payload bytes
+    /// and any metadata sidecar). Idempotent: deleting content that is already
+    /// absent returns `Ok(())`.
+    ///
+    /// # Sharing safety — read before calling
+    ///
+    /// This is a **content-addressed** delete, not a reference-aware one. The id
+    /// is a SHA-256 of the bytes, so *any* session that writes identical bytes
+    /// produces the same id and shares one stored object. Deleting by bare id
+    /// therefore removes the bytes for **every** session that references them.
+    /// The store holds no reference information — that lives in the write-ahead
+    /// [`AttachmentManifest`](crate::AttachmentManifest), which is likewise keyed
+    /// by content id, so at most one row exists per distinct content and a set
+    /// `committed_at` means *some* durable session state references it.
+    ///
+    /// Callers MUST establish that no session references the content before
+    /// deleting — for example, only delete ids returned by
+    /// [`AttachmentManifest::list_uncommitted`](crate::AttachmentManifest::list_uncommitted),
+    /// which are never committed by any session and are thus provably
+    /// unreferenced. [`reclaim_orphaned_attachments`] is the intended safe
+    /// caller; prefer it over calling `delete` directly.
+    async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError>;
+}
+
+/// Outcome of a host-invoked orphan-attachment reclamation sweep.
+///
+/// See [`reclaim_orphaned_attachments`] for the full contract. Returned so
+/// hosts can emit metrics the same way [`GcReport`](crate::GcReport) and
+/// [`VacuumReport`](crate::VacuumReport) do for the store-side levers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AttachmentReclamationReport {
+    /// Uncommitted manifest intents aged past the threshold that the sweep
+    /// examined.
+    pub scanned_intent_count: usize,
+    /// Orphans reclaimed: bytes deleted from the store and the manifest row
+    /// forgotten. Equal to `scanned_intent_count` unless a delete failed.
+    pub reclaimed_count: usize,
+}
+
+/// Reclaim attachment bytes left orphaned by a crash between `put` and the next
+/// durable commit — the host-invocable counterpart to
+/// [`StoreMaintenance::gc_unreachable`](crate::StoreMaintenance::gc_unreachable)
+/// for attachment payloads.
+///
+/// The sweep asks the write-ahead `manifest` for every intent aged past
+/// `older_than_epoch_ms` that was recorded but never committed
+/// ([`AttachmentManifest::list_uncommitted`](crate::AttachmentManifest::list_uncommitted)),
+/// deletes each one's bytes via [`AttachmentStore::delete`], then forgets the
+/// manifest row ([`AttachmentManifest::forget`](crate::AttachmentManifest::forget)).
+///
+/// # Sharing safety
+///
+/// This is the *safe* delete path. Because the manifest is keyed by content id,
+/// an uncommitted intent proves no durable session state references that
+/// content: shared/committed content carries a set `committed_at` and is
+/// excluded from `list_uncommitted`. Deleting an aged uncommitted intent's
+/// bytes is therefore safe under cross-session sharing by construction.
+///
+/// # Policy is the host's (ADR-0014)
+///
+/// This is a lever, not a scheduler: the host chooses `older_than_epoch_ms`
+/// (typically `now - grace_period`, where the grace period exceeds any live
+/// turn's duration so an in-flight `put` is never swept) and when to run it. It
+/// does no background work of its own.
+pub async fn reclaim_orphaned_attachments<M, S>(
+    manifest: &M,
+    store: &S,
+    older_than_epoch_ms: u64,
+) -> Result<AttachmentReclamationReport, AttachmentStoreError>
+where
+    M: AttachmentManifest + ?Sized,
+    S: AttachmentStore + ?Sized,
+{
+    let orphans = manifest
+        .list_uncommitted(older_than_epoch_ms)
+        .map_err(|err| {
+            AttachmentStoreError::Backend(format!(
+                "failed to list uncommitted attachment intents: {err}"
+            ))
+        })?;
+    let scanned_intent_count = orphans.len();
+    let mut reclaimed_count = 0;
+    for orphan in orphans {
+        store.delete(&orphan.attachment_id).await?;
+        manifest.forget(&orphan.attachment_id).map_err(|err| {
+            AttachmentStoreError::Backend(format!(
+                "failed to forget reclaimed attachment `{}`: {err}",
+                orphan.attachment_id
+            ))
+        })?;
+        reclaimed_count += 1;
+    }
+    Ok(AttachmentReclamationReport {
+        scanned_intent_count,
+        reclaimed_count,
+    })
 }
 
 #[derive(Default)]
@@ -126,6 +223,14 @@ impl AttachmentStore for InMemoryAttachmentStore {
             .get(id)
             .cloned()
             .ok_or_else(|| AttachmentStoreError::NotFound(id.clone()))
+    }
+
+    async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
+        self.attachments
+            .lock()
+            .expect("attachment store lock")
+            .remove(id);
+        Ok(())
     }
 }
 
@@ -239,6 +344,14 @@ impl AttachmentStore for SessionScopedAttachmentStore {
 
     async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
         self.inner.get(id).await
+    }
+
+    async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
+        // Content-addressed delete forwards straight to the backing store. The
+        // write-ahead manifest that this wrapper stamps is reconciled separately
+        // by `reclaim_orphaned_attachments`, which is the reference-safe caller
+        // of delete; the wrapper adds no reference bookkeeping of its own here.
+        self.inner.delete(id).await
     }
 }
 

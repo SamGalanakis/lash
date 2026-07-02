@@ -151,6 +151,22 @@ impl AttachmentStore for FileAttachmentStore {
         };
         Ok(StoredAttachment { meta, bytes })
     }
+
+    async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
+        // Remove the content file and its metadata sidecar. A missing file is
+        // not an error (idempotent delete); any other I/O failure surfaces.
+        let remove = |path: PathBuf| -> Result<(), AttachmentStoreError> {
+            match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(source) => Err(AttachmentStoreError::Io { path, source }),
+            }
+        };
+        remove(self.path_for_id(id))?;
+        remove(self.meta_path_for_id(id))?;
+        self.meta_cache().remove(id);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

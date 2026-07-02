@@ -908,6 +908,10 @@ mod boundary_tests {
         async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
             self.inner.get(id).await
         }
+
+        async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
+            self.inner.delete(id).await
+        }
     }
 
     /// Process env store reporting a durable tier over in-memory storage.
