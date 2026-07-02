@@ -276,6 +276,18 @@ where
         }
         Ok(())
     }
+
+    /// No-op: span export durability is host-owned.
+    ///
+    /// This sink only starts and ends spans on the host's OpenTelemetry tracer;
+    /// the buffering that risks span loss on exit lives in the host's
+    /// `BatchSpanProcessor` / exporter, not here. Flushing that buffer is the
+    /// host's duty — call `force_flush()` (or `shutdown()`) on your
+    /// `TracerProvider` before the process exits. Lash cannot do it for you
+    /// because it never owns the provider. See `docs/tracing.html`.
+    fn flush(&self) -> Result<(), TraceSinkError> {
+        Ok(())
+    }
 }
 
 fn common_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<KeyValue> {

@@ -380,6 +380,23 @@ impl LashCore {
         })
     }
 
+    /// Flush this core's configured trace sink, if any.
+    ///
+    /// Hosts that hand `lash` a trace sink via
+    /// [`LashCoreBuilder::trace_sink`] already hold their own `Arc` and can
+    /// flush it directly; this is the equivalent lever for hosts that did not
+    /// retain the handle. It flushes the core's copy — for a
+    /// [`JsonlTraceSink`](lash_trace::JsonlTraceSink) that fsyncs the file, and
+    /// for an OTel sink it is a no-op (the host still owns provider flush; see
+    /// the tracing docs). Call it before process exit alongside the host's own
+    /// exporter/provider shutdown.
+    pub fn flush_trace_sink(&self) -> Result<()> {
+        if let Some(sink) = self.env.core.tracing.trace_sink.as_ref() {
+            sink.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn triggers(&self) -> crate::admin::CoreTriggerAdmin {
         crate::admin::CoreTriggerAdmin { core: self.clone() }
     }
