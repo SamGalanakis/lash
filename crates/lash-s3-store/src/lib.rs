@@ -252,6 +252,24 @@ impl AttachmentStore for S3AttachmentStore {
 
         Ok(StoredAttachment { meta, bytes })
     }
+
+    async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
+        // Remove the content object and its metadata sidecar. A missing object
+        // is not an error (idempotent delete); any other backend failure
+        // surfaces.
+        for path in [self.content_path(id)?, self.metadata_path(id)?] {
+            match self.store.delete(&path).await {
+                Ok(()) => {}
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(err) => {
+                    return Err(AttachmentStoreError::Backend(format!(
+                        "failed to delete `{path}`: {err}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn map_object_store_get_error(
@@ -336,6 +354,42 @@ mod tests {
             .expect("first put");
         let second = store.put(vec![1, 2, 3], meta).await.expect("second put");
         assert_eq!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_content_and_is_idempotent_when_minio_configured() {
+        let Some(config) = minio_config_from_env() else {
+            eprintln!("skipping MinIO delete test: LASH_MINIO_ENDPOINT is not set");
+            return;
+        };
+        let store = S3AttachmentStore::from_config(config).expect("store");
+        let meta = AttachmentCreateMeta::new(
+            MediaType::Image(ImageMediaType::Png),
+            Some(1),
+            Some(1),
+            Some("pixel".to_string()),
+        );
+        let reference = store.put(vec![4, 5, 6, 7], meta).await.expect("put");
+        store
+            .get(&reference.id)
+            .await
+            .expect("present before delete");
+
+        store.delete(&reference.id).await.expect("delete content");
+        let err = store
+            .get(&reference.id)
+            .await
+            .expect_err("content must be gone after delete");
+        assert!(
+            matches!(err, AttachmentStoreError::NotFound(_)),
+            "deleted content must map to NotFound, got {err:?}"
+        );
+
+        // Idempotent: deleting already-absent content succeeds.
+        store
+            .delete(&reference.id)
+            .await
+            .expect("delete of absent content is a no-op");
     }
 
     fn minio_config_from_env() -> Option<S3AttachmentStoreConfig> {

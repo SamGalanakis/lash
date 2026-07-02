@@ -48,8 +48,9 @@ pub enum DurabilityTier {
 
 // Re-exports
 pub use attachments::{
-    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, FileAttachmentStore,
-    InMemoryAttachmentStore, SessionScopedAttachmentStore, StoredAttachment,
+    AttachmentReclamationReport, AttachmentStore, AttachmentStoreError, AttachmentStorePersistence,
+    FileAttachmentStore, InMemoryAttachmentStore, SessionScopedAttachmentStore, StoredAttachment,
+    reclaim_orphaned_attachments,
 };
 pub use chronological::{
     BorrowedChronologicalEntry, BorrowedChronologicalMessage, BorrowedChronologicalPayload,

@@ -161,8 +161,8 @@ pub mod persistence {
         SessionHeadMeta, load_persisted_session_state, load_persisted_session_state_active_path,
     };
     pub use lash_core::{
-        AttachmentStore, InMemoryAttachmentStore, InMemoryProcessExecutionEnvStore,
-        ProcessExecutionEnvStore,
+        AttachmentReclamationReport, AttachmentStore, InMemoryAttachmentStore,
+        InMemoryProcessExecutionEnvStore, ProcessExecutionEnvStore, reclaim_orphaned_attachments,
     };
     pub use lash_core::{
         BlobRef, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, PersistedSessionConfig,

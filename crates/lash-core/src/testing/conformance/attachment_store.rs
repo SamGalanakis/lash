@@ -13,6 +13,7 @@ where
     attachment_put_get_round_trips_bytes_and_meta(make()).await;
     attachment_is_content_addressed(make()).await;
     attachment_get_unknown_is_not_found(make()).await;
+    attachment_delete_removes_content_and_is_idempotent(make()).await;
     attachment_reports_declared_persistence(make(), expected_persistence);
 }
 
@@ -89,6 +90,38 @@ async fn attachment_get_unknown_is_not_found(store: Arc<dyn AttachmentStore>) {
         matches!(err, AttachmentStoreError::NotFound(_)),
         "unknown id must map to NotFound, got {err:?}"
     );
+}
+
+async fn attachment_delete_removes_content_and_is_idempotent(store: Arc<dyn AttachmentStore>) {
+    let reference = store
+        .put(vec![5u8, 6, 7, 8], attachment_meta())
+        .await
+        .expect("put attachment to delete");
+    // Present before delete.
+    store
+        .get(&reference.id)
+        .await
+        .expect("content present before delete");
+
+    store.delete(&reference.id).await.expect("delete content");
+    let err = store
+        .get(&reference.id)
+        .await
+        .expect_err("content must be gone after delete");
+    assert!(
+        matches!(err, AttachmentStoreError::NotFound(_)),
+        "deleted content must map to NotFound, got {err:?}"
+    );
+
+    // Idempotent: deleting absent content is not an error.
+    store
+        .delete(&reference.id)
+        .await
+        .expect("delete of already-absent content is a no-op");
+    store
+        .delete(&AttachmentId::new("sha256:never-existed"))
+        .await
+        .expect("delete of unknown id is a no-op");
 }
 
 fn attachment_reports_declared_persistence(

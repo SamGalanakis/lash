@@ -1539,8 +1539,96 @@ impl StoreMaintenance for PostgresSessionStore {
         })
     }
 
+    /// Checkpoint-rooted mark/sweep over `lash_blobs`, mirroring the SQLite
+    /// store's semantics ([`GcReport`] fields match). Postgres inlines the
+    /// tool/plugin/execution snapshots inside each checkpoint envelope, so
+    /// `lash_blobs` holds only checkpoint envelopes and the reachable set is the
+    /// set of live checkpoint refs (plus any child artifact ref an envelope
+    /// still names — usually none, but retained defensively). The three
+    /// Lashlang artifact namespaces live in a separate, upsert-in-place table
+    /// (`lash_lashlang_artifacts`) that never orphans, so GC does not touch it.
     async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
-        Ok(GcReport::default())
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        // Serialize against concurrent checkpoint-blob writers. Every commit
+        // INSERTs its new envelope into `lash_blobs` (holding a ROW EXCLUSIVE
+        // lock) inside the same transaction that repoints `lash_sessions`, so an
+        // EXCLUSIVE table lock makes the root read and the sweep atomic with
+        // respect to every committer: a commit racing GC either lands fully
+        // before the root read or blocks until GC releases. This is the fenced
+        // transactional discipline the store uses on its other write paths.
+        tx.execute("LOCK TABLE lash_blobs IN EXCLUSIVE MODE")
+            .await
+            .map_err(store_sqlx_error)?;
+        // Roots: every live session's checkpoint envelope, across ALL sessions.
+        // `lash_blobs` is a content-addressed table shared by the whole
+        // database, so a blob shared across sessions must stay reachable while
+        // ANY session references it — scoping roots to one session would delete
+        // another session's live checkpoint.
+        let root_refs = sqlx::query_scalar::<_, String>(
+            "SELECT checkpoint_ref FROM lash_sessions WHERE checkpoint_ref IS NOT NULL",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let root_count = root_refs.len();
+        let mut retained = std::collections::BTreeSet::<String>::new();
+        for checkpoint_hash in root_refs {
+            if !retained.insert(checkpoint_hash.clone()) {
+                continue;
+            }
+            // A rooted envelope is live. Decode it and retain any child artifact
+            // blob it still references. A present-yet-undecodable envelope is a
+            // hard error so GC aborts rather than dropping a live checkpoint's
+            // children; an absent one was already collected on a prior run.
+            let bytes: Option<Vec<u8>> =
+                sqlx::query_scalar("SELECT content FROM lash_blobs WHERE hash = $1")
+                    .bind(&checkpoint_hash)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(store_sqlx_error)?;
+            let Some(bytes) = bytes else {
+                continue;
+            };
+            let envelope: SessionCheckpointEnvelope = decode_versioned_msgpack_record(
+                &bytes,
+                "PostgresSessionCheckpointEnvelope",
+                POSTGRES_SESSION_CHECKPOINT_ENVELOPE_SCHEMA_VERSION,
+            )?;
+            for child in [
+                envelope.manifest.tool_state_ref,
+                envelope.manifest.plugin_snapshot_ref,
+                envelope.manifest.execution_state_ref,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                retained.insert(child.0);
+            }
+        }
+        let all_hashes = sqlx::query_scalar::<_, String>(
+            "SELECT hash FROM lash_blobs ORDER BY hash ASC",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let mut deleted_blob_count = 0usize;
+        for hash in &all_hashes {
+            if retained.contains(hash) {
+                continue;
+            }
+            sqlx::query("DELETE FROM lash_blobs WHERE hash = $1")
+                .bind(hash)
+                .execute(&mut *tx)
+                .await
+                .map_err(store_sqlx_error)?;
+            deleted_blob_count += 1;
+        }
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(GcReport {
+            root_count,
+            retained_blob_count: retained.len(),
+            deleted_blob_count,
+        })
     }
 }
 
