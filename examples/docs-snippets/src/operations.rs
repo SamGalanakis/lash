@@ -49,7 +49,7 @@ async fn open_with_stable_owner(core: &LashCore, chat_id: &str) -> lash::Result<
     // opaque, TTL-only reclaim.
     let owner = LeaseOwnerIdentity::local_process(
         std::env::var("WORKER_ID").unwrap_or_else(|_| "worker-1".to_string()),
-        std::env::var("WORKER_INCARNATION").unwrap_or_else(|_| boot_incarnation()),
+        std::env::var("AGENT_SERVICE_INCARNATION").unwrap_or_else(|_| boot_incarnation()),
         std::env::var("HOSTNAME").unwrap_or_else(|_| "host-1".to_string()),
     );
 
