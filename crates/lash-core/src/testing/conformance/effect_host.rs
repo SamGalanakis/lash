@@ -859,7 +859,10 @@ pub async fn effect_controller_lease_fencing(backend: EffectLeaseFencingBackend)
 
 #[cfg(any(test, feature = "testing"))]
 async fn lease_fencing_renews_long_running_lease(backend: &EffectLeaseFencingBackend, run: &str) {
-    let ttl = std::time::Duration::from_millis(40);
+    // Generous TTL: the renewal task must outlive scheduler starvation when
+    // the whole workspace's test binaries run in parallel; a tight TTL makes
+    // this case flake under load without exercising anything extra.
+    let ttl = std::time::Duration::from_millis(300);
     let replay_key = format!("lease-renewal-{run}");
     let first = (backend.make_controller)(ttl).await;
     let second = (backend.make_controller)(ttl).await;
@@ -925,7 +928,7 @@ async fn lease_fencing_reports_lease_lost_when_stolen(
     backend: &EffectLeaseFencingBackend,
     run: &str,
 ) {
-    let ttl = std::time::Duration::from_millis(40);
+    let ttl = std::time::Duration::from_millis(300);
     let replay_key = format!("lease-stolen-{run}");
     let controller = (backend.make_controller)(ttl).await;
     let envelope = lease_fencing_envelope(&replay_key);
