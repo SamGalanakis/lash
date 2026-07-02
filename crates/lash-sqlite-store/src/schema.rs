@@ -159,8 +159,10 @@ CREATE TABLE IF NOT EXISTS attachment_manifest (
 );
 
 CREATE TABLE IF NOT EXISTS artifact_refs (
-    artifact_ref TEXT PRIMARY KEY,
-    blob_ref     TEXT NOT NULL
+    namespace    TEXT NOT NULL,
+    artifact_ref TEXT NOT NULL,
+    blob_ref     TEXT NOT NULL,
+    PRIMARY KEY (namespace, artifact_ref)
 );
 
 CREATE INDEX IF NOT EXISTS idx_attachment_manifest_session
@@ -173,7 +175,7 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// Canonical schema version. There is no migration chain — older databases
 /// must be deleted before opening. See the [`SCHEMA`] doc comment for the
 /// rationale.
-pub(crate) const SCHEMA_VERSION: i32 = 7;
+pub(crate) const SCHEMA_VERSION: i32 = 8;
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (

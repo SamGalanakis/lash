@@ -2791,6 +2791,7 @@ version = "0.1.0-alpha.80"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-lashlang-runtime",
  "lashlang",
  "rmp-serde",
  "serde",
@@ -3076,6 +3077,7 @@ dependencies = [
  "flate2",
  "futures-executor",
  "lash-core",
+ "lash-lashlang-runtime",
  "lashlang",
  "rmp-serde",
  "rusqlite",

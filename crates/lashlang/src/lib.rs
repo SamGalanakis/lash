@@ -13,6 +13,9 @@ mod source;
 mod tracking;
 mod trigger;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 pub use artifact::{
     ArtifactStoreError, ContentHash, DurabilityTier, HostRequirements, HostRequirementsRef,
     InMemoryLashlangArtifactStore, LASHLANG_COMPILER_VERSION, LASHLANG_SEMANTIC_HASH_VERSION,
