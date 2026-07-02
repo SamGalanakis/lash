@@ -143,13 +143,15 @@ pub mod direct {
 }
 
 pub mod persistence {
+    pub use lash_core::CheckpointKind;
     pub use lash_core::FileAttachmentStore;
     pub use lash_core::runtime::{
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
         PendingTurnInputClaimDiagnostics, PendingTurnInputDraft, QueuedWorkBatch,
         QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkClass,
         QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState,
-        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
+        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, TurnInputClaim,
+        TurnInputCompletion,
     };
     pub use lash_core::store::queued_work;
     pub use lash_core::store::{
@@ -163,10 +165,11 @@ pub mod persistence {
     };
     pub use lash_core::{
         BlobRef, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, PersistedSessionConfig,
-        PersistedTurnState, ProtocolEvent, RuntimePersistence, SessionEventRecord,
-        SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
-        SessionExecutionLeaseFence, SessionGraph, SessionMeta, SessionNodeRecord, SessionReadScope,
-        SessionReadView, SessionRelation, StoreError, VacuumReport,
+        PersistedTurnState, ProtocolEvent, QueuedWorkStore, RuntimePersistence, SessionCommitStore,
+        SessionEventRecord, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
+        SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionExecutionLeaseStore,
+        SessionGraph, SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView,
+        SessionRelation, StoreError, StoreMaintenance, TurnInputStore, VacuumReport,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{InMemoryLashlangArtifactStore, LashlangArtifactStore};

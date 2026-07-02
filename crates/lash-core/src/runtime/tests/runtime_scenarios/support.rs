@@ -1,7 +1,9 @@
 use super::*;
 pub(crate) use std::collections::HashMap;
 
-pub(crate) use crate::store::RuntimePersistence;
+pub(crate) use crate::store::{
+    QueuedWorkStore, SessionCommitStore, SessionExecutionLeaseStore, TurnInputStore,
+};
 pub(crate) use crate::{
     LeaseOwnerIdentity, LeaseOwnerLiveness, PendingTurnInput, PendingTurnInputDraft, RuntimeCommit,
     SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionReadScope, StoreError,

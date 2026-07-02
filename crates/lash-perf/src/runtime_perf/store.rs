@@ -11,10 +11,12 @@ use lash_core::store::{
     GraphCommitDelta, PersistedSessionRead, RuntimeCommitResult, SessionCheckpoint, SessionHeadMeta,
 };
 use lash_core::{
-    BlobRef, GcReport, LeaseOwnerIdentity, RuntimeCommit, RuntimePersistence,
-    SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
-    SessionExecutionLeaseFence, SessionGraph, SessionNodeRecord, SessionReadScope,
-    SessionStoreCreateRequest, SessionStoreFactory, StoreError, VacuumReport, current_epoch_ms,
+    BlobRef, GcReport, LeaseOwnerIdentity, QueuedWorkStore, RuntimeCommit, RuntimePersistence,
+    SessionCommitStore, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
+    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionExecutionLeaseStore,
+    SessionGraph, SessionNodeRecord, SessionReadScope, SessionStoreCreateRequest,
+    SessionStoreFactory, StoreError, StoreMaintenance, TurnInputStore, VacuumReport,
+    current_epoch_ms,
 };
 
 #[derive(Clone)]
@@ -463,7 +465,7 @@ impl SessionStoreFactory for RuntimePerfStoreFactory {
 lash_core::impl_noop_attachment_manifest!(RuntimePerfStore);
 
 #[async_trait::async_trait]
-impl RuntimePersistence for RuntimePerfStore {
+impl SessionCommitStore for RuntimePerfStore {
     async fn load_session(
         &self,
         scope: SessionReadScope,
@@ -753,6 +755,22 @@ impl RuntimePersistence for RuntimePerfStore {
         Ok(result)
     }
 
+    async fn save_session_meta(&self, meta: store::SessionMeta) -> Result<(), store::StoreError> {
+        *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<store::SessionMeta>, store::StoreError> {
+        Ok(self
+            .session_meta
+            .lock()
+            .expect("lock perf session meta")
+            .clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionExecutionLeaseStore for RuntimePerfStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
@@ -904,7 +922,10 @@ impl RuntimePersistence for RuntimePerfStore {
         self.release_session_execution_lease_in_memory(completion);
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl TurnInputStore for RuntimePerfStore {
     async fn enqueue_pending_turn_input(
         &self,
         draft: lash_core::PendingTurnInputDraft,
@@ -993,22 +1014,6 @@ impl RuntimePersistence for RuntimePerfStore {
             .collect::<Vec<_>>();
         inputs.sort_by_key(|input| input.enqueue_seq);
         Ok(inputs)
-    }
-
-    async fn cancel_pending_turn_input(
-        &self,
-        session_id: &str,
-        input_id: &str,
-    ) -> Result<lash_core::PendingTurnInputCancelOutcome, StoreError> {
-        let target = lash_core::PendingTurnInputCancelTarget::input_id(input_id);
-        let targets = vec![target];
-        let mut outcomes = self
-            .cancel_pending_turn_inputs(session_id, &targets)
-            .await?;
-        Ok(outcomes
-            .pop()
-            .map(|result| result.outcome)
-            .unwrap_or(lash_core::PendingTurnInputCancelOutcome::NotFound))
     }
 
     async fn cancel_pending_turn_inputs(
@@ -1139,7 +1144,10 @@ impl RuntimePersistence for RuntimePerfStore {
         }
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl QueuedWorkStore for RuntimePerfStore {
     async fn enqueue_queued_work(
         &self,
         batch: QueuedWorkBatchDraft,
@@ -1321,20 +1329,10 @@ impl RuntimePersistence for RuntimePerfStore {
         batches.sort_by_key(|batch| batch.enqueue_seq);
         Ok(batches)
     }
+}
 
-    async fn save_session_meta(&self, meta: store::SessionMeta) -> Result<(), store::StoreError> {
-        *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
-        Ok(())
-    }
-
-    async fn load_session_meta(&self) -> Result<Option<store::SessionMeta>, store::StoreError> {
-        Ok(self
-            .session_meta
-            .lock()
-            .expect("lock perf session meta")
-            .clone())
-    }
-
+#[async_trait::async_trait]
+impl StoreMaintenance for RuntimePerfStore {
     async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), store::StoreError> {
         Ok(())
     }

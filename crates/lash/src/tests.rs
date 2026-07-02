@@ -123,7 +123,7 @@ impl SnapshotStore {
 lash_core::impl_noop_attachment_manifest!(SnapshotStore);
 
 #[async_trait]
-impl lash_core::RuntimePersistence for SnapshotStore {
+impl lash_core::SessionCommitStore for SnapshotStore {
     async fn load_session(
         &self,
         scope: lash_core::SessionReadScope,
@@ -266,6 +266,22 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         Ok(result)
     }
 
+    async fn save_session_meta(
+        &self,
+        _meta: lash_core::SessionMeta,
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> std::result::Result<Option<lash_core::SessionMeta>, lash_core::store::StoreError> {
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl lash_core::SessionExecutionLeaseStore for SnapshotStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
@@ -388,7 +404,10 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         }
         Ok(())
     }
+}
 
+#[async_trait]
+impl lash_core::QueuedWorkStore for SnapshotStore {
     async fn enqueue_queued_work(
         &self,
         _batch: lash_core::runtime::QueuedWorkBatchDraft,
@@ -465,19 +484,91 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         Ok(Vec::new())
     }
 
-    async fn save_session_meta(
+    async fn list_pending_queued_work(
         &self,
-        _meta: lash_core::SessionMeta,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        Ok(())
+        _session_id: &str,
+    ) -> std::result::Result<Vec<lash_core::runtime::QueuedWorkBatch>, lash_core::store::StoreError>
+    {
+        Ok(Vec::new())
+    }
+}
+
+// SnapshotStore serves no pending turn input: idle dispatch may probe the
+// (always empty) queue, but nothing in these tests enqueues or claims input.
+#[async_trait]
+impl lash_core::TurnInputStore for SnapshotStore {
+    async fn enqueue_pending_turn_input(
+        &self,
+        _input: lash_core::PendingTurnInputDraft,
+    ) -> std::result::Result<lash_core::PendingTurnInput, lash_core::store::StoreError> {
+        unreachable!("SnapshotStore does not serve pending turn input")
     }
 
-    async fn load_session_meta(
+    async fn list_pending_turn_inputs(
         &self,
-    ) -> std::result::Result<Option<lash_core::SessionMeta>, lash_core::store::StoreError> {
+        _session_id: &str,
+    ) -> std::result::Result<Vec<lash_core::PendingTurnInput>, lash_core::store::StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn cancel_pending_turn_inputs(
+        &self,
+        _session_id: &str,
+        _targets: &[lash_core::PendingTurnInputCancelTarget],
+    ) -> std::result::Result<
+        Vec<lash_core::PendingTurnInputCancelResult>,
+        lash_core::store::StoreError,
+    > {
+        unreachable!("SnapshotStore does not serve pending turn input")
+    }
+
+    async fn cancel_pending_turn_input_suffix(
+        &self,
+        _session_id: &str,
+        _anchor: &lash_core::PendingTurnInputCancelTarget,
+    ) -> std::result::Result<
+        lash_core::PendingTurnInputSuffixCancelOutcome,
+        lash_core::store::StoreError,
+    > {
+        unreachable!("SnapshotStore does not serve pending turn input")
+    }
+
+    // Turn checkpoints and idle dispatch probe the input queue on every
+    // turn; this store's queue is always empty, so claims find nothing.
+    async fn claim_active_turn_inputs(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _turn_id: &str,
+        _checkpoint: lash_core::CheckpointKind,
+        _lease_ttl_ms: u64,
+        _max_inputs: usize,
+    ) -> std::result::Result<Option<lash_core::TurnInputClaim>, lash_core::store::StoreError> {
         Ok(None)
     }
 
+    async fn claim_next_turn_inputs(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _lease_ttl_ms: u64,
+        _max_inputs: usize,
+    ) -> std::result::Result<Option<lash_core::TurnInputClaim>, lash_core::store::StoreError> {
+        Ok(None)
+    }
+
+    async fn abandon_turn_input_claim(
+        &self,
+        _claim: &lash_core::TurnInputClaim,
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl lash_core::StoreMaintenance for SnapshotStore {
     async fn tombstone_nodes(
         &self,
         _ids: &[String],
@@ -524,7 +615,7 @@ struct BoundSessionStore {
 lash_core::impl_noop_attachment_manifest!(BoundSessionStore);
 
 #[async_trait]
-impl lash_core::RuntimePersistence for BoundSessionStore {
+impl lash_core::SessionCommitStore for BoundSessionStore {
     async fn load_session(
         &self,
         _scope: lash_core::SessionReadScope,
@@ -551,6 +642,29 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
         unreachable!("test should fail before committing to the reused child store")
     }
 
+    async fn save_session_meta(
+        &self,
+        _meta: lash_core::SessionMeta,
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> std::result::Result<Option<lash_core::SessionMeta>, lash_core::store::StoreError> {
+        Ok(Some(lash_core::SessionMeta {
+            session_id: self.session_id.clone(),
+            session_name: self.session_id.clone(),
+            created_at: "test".to_string(),
+            model: "mock-model".to_string(),
+            cwd: None,
+            relation: lash_core::SessionRelation::Root,
+        }))
+    }
+}
+
+#[async_trait]
+impl lash_core::SessionExecutionLeaseStore for BoundSessionStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
@@ -599,27 +713,164 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
     ) -> std::result::Result<(), lash_core::store::StoreError> {
         Ok(())
     }
+}
 
-    async fn save_session_meta(
+// The reuse test fails before any turn runs, so this double serves neither
+// pending turn input nor queued work.
+#[async_trait]
+impl lash_core::TurnInputStore for BoundSessionStore {
+    async fn enqueue_pending_turn_input(
         &self,
-        _meta: lash_core::SessionMeta,
+        _input: lash_core::PendingTurnInputDraft,
+    ) -> std::result::Result<lash_core::PendingTurnInput, lash_core::store::StoreError> {
+        unreachable!("BoundSessionStore does not serve pending turn input")
+    }
+
+    async fn list_pending_turn_inputs(
+        &self,
+        _session_id: &str,
+    ) -> std::result::Result<Vec<lash_core::PendingTurnInput>, lash_core::store::StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn cancel_pending_turn_inputs(
+        &self,
+        _session_id: &str,
+        _targets: &[lash_core::PendingTurnInputCancelTarget],
+    ) -> std::result::Result<
+        Vec<lash_core::PendingTurnInputCancelResult>,
+        lash_core::store::StoreError,
+    > {
+        unreachable!("BoundSessionStore does not serve pending turn input")
+    }
+
+    async fn cancel_pending_turn_input_suffix(
+        &self,
+        _session_id: &str,
+        _anchor: &lash_core::PendingTurnInputCancelTarget,
+    ) -> std::result::Result<
+        lash_core::PendingTurnInputSuffixCancelOutcome,
+        lash_core::store::StoreError,
+    > {
+        unreachable!("BoundSessionStore does not serve pending turn input")
+    }
+
+    async fn claim_active_turn_inputs(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _turn_id: &str,
+        _checkpoint: lash_core::CheckpointKind,
+        _lease_ttl_ms: u64,
+        _max_inputs: usize,
+    ) -> std::result::Result<Option<lash_core::TurnInputClaim>, lash_core::store::StoreError> {
+        unreachable!("BoundSessionStore does not serve pending turn input")
+    }
+
+    async fn claim_next_turn_inputs(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _lease_ttl_ms: u64,
+        _max_inputs: usize,
+    ) -> std::result::Result<Option<lash_core::TurnInputClaim>, lash_core::store::StoreError> {
+        unreachable!("BoundSessionStore does not serve pending turn input")
+    }
+
+    async fn abandon_turn_input_claim(
+        &self,
+        _claim: &lash_core::TurnInputClaim,
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl lash_core::QueuedWorkStore for BoundSessionStore {
+    async fn enqueue_queued_work(
+        &self,
+        _batch: lash_core::runtime::QueuedWorkBatchDraft,
+    ) -> std::result::Result<lash_core::runtime::QueuedWorkBatch, lash_core::store::StoreError>
+    {
+        unreachable!("BoundSessionStore does not serve queued work")
+    }
+
+    async fn claim_leading_ready_session_command(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _lease_ttl_ms: u64,
+    ) -> std::result::Result<
+        Option<lash_core::runtime::QueuedWorkClaim>,
+        lash_core::store::StoreError,
+    > {
+        Ok(None)
+    }
+
+    async fn claim_ready_queued_work(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _boundary: lash_core::runtime::QueuedWorkClaimBoundary,
+        _lease_ttl_ms: u64,
+        _max_batches: usize,
+    ) -> std::result::Result<
+        Option<lash_core::runtime::QueuedWorkClaim>,
+        lash_core::store::StoreError,
+    > {
+        Ok(None)
+    }
+
+    async fn renew_queued_work_claim(
+        &self,
+        _claim: &lash_core::runtime::QueuedWorkClaim,
+        _lease_ttl_ms: u64,
+    ) -> std::result::Result<lash_core::runtime::QueuedWorkClaim, lash_core::store::StoreError>
+    {
+        unreachable!("BoundSessionStore does not serve queued work")
+    }
+
+    async fn abandon_queued_work_claim(
+        &self,
+        _claim: &lash_core::runtime::QueuedWorkClaim,
     ) -> std::result::Result<(), lash_core::store::StoreError> {
         Ok(())
     }
 
-    async fn load_session_meta(
+    async fn cancel_queued_work_batch(
         &self,
-    ) -> std::result::Result<Option<lash_core::SessionMeta>, lash_core::store::StoreError> {
-        Ok(Some(lash_core::SessionMeta {
-            session_id: self.session_id.clone(),
-            session_name: self.session_id.clone(),
-            created_at: "test".to_string(),
-            model: "mock-model".to_string(),
-            cwd: None,
-            relation: lash_core::SessionRelation::Root,
-        }))
+        _session_id: &str,
+        _batch_id: &str,
+    ) -> std::result::Result<
+        Option<lash_core::runtime::QueuedWorkBatch>,
+        lash_core::store::StoreError,
+    > {
+        Ok(None)
     }
 
+    async fn list_queued_work(
+        &self,
+        _session_id: &str,
+    ) -> std::result::Result<Vec<lash_core::runtime::QueuedWorkBatch>, lash_core::store::StoreError>
+    {
+        Ok(Vec::new())
+    }
+
+    async fn list_pending_queued_work(
+        &self,
+        _session_id: &str,
+    ) -> std::result::Result<Vec<lash_core::runtime::QueuedWorkBatch>, lash_core::store::StoreError>
+    {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl lash_core::StoreMaintenance for BoundSessionStore {
     async fn tombstone_nodes(
         &self,
         _ids: &[String],

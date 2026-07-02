@@ -8,11 +8,14 @@ use lash::direct::{
 use lash::durability::RuntimeHostConfig;
 use lash::messages::MessageRole;
 use lash::persistence::{
-    GcReport, GraphCommitDelta, LeaseOwnerIdentity, PersistedSessionRead, RuntimeCommit,
-    RuntimeCommitResult, RuntimePersistence, RuntimeSessionState, RuntimeTurnCommitStamp,
-    SessionCheckpoint, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
-    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionMeta, SessionNodeRecord,
-    SessionReadScope, StoreError, VacuumReport, load_persisted_session_state,
+    CheckpointKind, GcReport, GraphCommitDelta, LeaseOwnerIdentity, PersistedSessionRead,
+    PendingTurnInputDraft, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
+    QueuedWorkClaimBoundary, QueuedWorkStore, RuntimeCommit, RuntimeCommitResult,
+    RuntimePersistence, RuntimeSessionState, RuntimeTurnCommitStamp, SessionCheckpoint,
+    SessionCommitStore, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
+    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionExecutionLeaseStore,
+    SessionMeta, SessionNodeRecord, SessionReadScope, StoreError, StoreMaintenance, TurnInputClaim,
+    TurnInputStore, VacuumReport, load_persisted_session_state,
     load_persisted_session_state_active_path,
 };
 use lash::usage::{TokenLedgerEntry, TokenUsage};
@@ -32,7 +35,7 @@ struct FacadeStore;
 lash_core::impl_noop_attachment_manifest!(FacadeStore);
 
 #[async_trait]
-impl RuntimePersistence for FacadeStore {
+impl SessionCommitStore for FacadeStore {
     async fn load_session(
         &self,
         _scope: SessionReadScope,
@@ -62,6 +65,17 @@ impl RuntimePersistence for FacadeStore {
         })
     }
 
+    async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl SessionExecutionLeaseStore for FacadeStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
@@ -120,15 +134,136 @@ impl RuntimePersistence for FacadeStore {
     ) -> Result<(), StoreError> {
         Ok(())
     }
+}
 
-    async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
-        Ok(())
+// Compile-only store: these segments exist to prove every capability trait
+// (and its signature vocabulary) is nameable through the facade.
+#[async_trait]
+impl TurnInputStore for FacadeStore {
+    async fn enqueue_pending_turn_input(
+        &self,
+        _input: PendingTurnInputDraft,
+    ) -> Result<lash::PendingTurnInput, StoreError> {
+        unreachable!("compile-only facade store")
     }
 
-    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
+    async fn list_pending_turn_inputs(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<lash::PendingTurnInput>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn cancel_pending_turn_inputs(
+        &self,
+        _session_id: &str,
+        _targets: &[lash::PendingTurnInputCancelTarget],
+    ) -> Result<Vec<lash::PendingTurnInputCancelResult>, StoreError> {
+        unreachable!("compile-only facade store")
+    }
+
+    async fn cancel_pending_turn_input_suffix(
+        &self,
+        _session_id: &str,
+        _anchor: &lash::PendingTurnInputCancelTarget,
+    ) -> Result<lash::PendingTurnInputSuffixCancelOutcome, StoreError> {
+        unreachable!("compile-only facade store")
+    }
+
+    async fn claim_active_turn_inputs(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
+        _owner: &LeaseOwnerIdentity,
+        _turn_id: &str,
+        _checkpoint: CheckpointKind,
+        _lease_ttl_ms: u64,
+        _max_inputs: usize,
+    ) -> Result<Option<TurnInputClaim>, StoreError> {
         Ok(None)
     }
 
+    async fn claim_next_turn_inputs(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
+        _owner: &LeaseOwnerIdentity,
+        _lease_ttl_ms: u64,
+        _max_inputs: usize,
+    ) -> Result<Option<TurnInputClaim>, StoreError> {
+        Ok(None)
+    }
+
+    async fn abandon_turn_input_claim(&self, _claim: &TurnInputClaim) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl QueuedWorkStore for FacadeStore {
+    async fn enqueue_queued_work(
+        &self,
+        _batch: QueuedWorkBatchDraft,
+    ) -> Result<QueuedWorkBatch, StoreError> {
+        unreachable!("compile-only facade store")
+    }
+
+    async fn claim_leading_ready_session_command(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
+        _owner: &LeaseOwnerIdentity,
+        _lease_ttl_ms: u64,
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        Ok(None)
+    }
+
+    async fn claim_ready_queued_work(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
+        _owner: &LeaseOwnerIdentity,
+        _boundary: QueuedWorkClaimBoundary,
+        _lease_ttl_ms: u64,
+        _max_batches: usize,
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        Ok(None)
+    }
+
+    async fn renew_queued_work_claim(
+        &self,
+        _claim: &QueuedWorkClaim,
+        _lease_ttl_ms: u64,
+    ) -> Result<QueuedWorkClaim, StoreError> {
+        unreachable!("compile-only facade store")
+    }
+
+    async fn abandon_queued_work_claim(&self, _claim: &QueuedWorkClaim) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn cancel_queued_work_batch(
+        &self,
+        _session_id: &str,
+        _batch_id: &str,
+    ) -> Result<Option<QueuedWorkBatch>, StoreError> {
+        Ok(None)
+    }
+
+    async fn list_queued_work(&self, _session_id: &str) -> Result<Vec<QueuedWorkBatch>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_pending_queued_work(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<QueuedWorkBatch>, StoreError> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl StoreMaintenance for FacadeStore {
     async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), StoreError> {
         Ok(())
     }

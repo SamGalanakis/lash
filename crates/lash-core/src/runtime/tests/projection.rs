@@ -166,7 +166,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
         .await
         .expect("turn");
 
-    let read_model = crate::store::RuntimePersistence::load_session(
+    let read_model = crate::store::SessionCommitStore::load_session(
         store.as_ref(),
         crate::store::SessionReadScope::FullGraph,
     )
@@ -289,7 +289,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
         .await
         .expect("turn");
 
-    let read = crate::store::RuntimePersistence::load_session(
+    let read = crate::store::SessionCommitStore::load_session(
         store.as_ref(),
         crate::store::SessionReadScope::FullGraph,
     )

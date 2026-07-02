@@ -20,10 +20,11 @@ use lash_core::{
     DriverAction, DriverContextView, Effect, ExecResponse, HydratedSessionCheckpoint, InputItem,
     LiveReplayResult, LiveReplayStore, LiveReplaySubscribeResult, Message, MessageRole,
     ModelToolReturn, Part, PartKind, PersistedSessionConfig, ProtocolTurnOptions, PruneState,
-    Response, RuntimeCommit, RuntimePersistence, RuntimeSessionState, SessionExecutionLease,
-    SessionObservationEventPayload, SessionRevision, TokenUsage, ToolCallOutput, ToolCancellation,
-    ToolFailure, ToolFailureClass, TurnFinish, TurnInput, TurnMachine, TurnMachineConfig,
-    TurnOutcome, shared_parts,
+    QueuedWorkStore, Response, RuntimeCommit, RuntimeSessionState, SessionCommitStore,
+    SessionExecutionLease, SessionExecutionLeaseStore, SessionObservationEventPayload,
+    SessionRevision, TokenUsage, ToolCallOutput, ToolCancellation, ToolFailure, ToolFailureClass,
+    TurnFinish, TurnInput, TurnInputStore, TurnMachine, TurnMachineConfig, TurnOutcome,
+    shared_parts,
 };
 use lash_protocol_rlm::RlmTurnInputExt;
 use serde::Serialize;

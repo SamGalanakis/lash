@@ -1,5 +1,5 @@
 #[async_trait::async_trait]
-impl RuntimePersistence for PostgresSessionStore {
+impl SessionCommitStore for PostgresSessionStore {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -427,6 +427,42 @@ impl RuntimePersistence for PostgresSessionStore {
         Ok(result)
     }
 
+    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO lash_session_meta (session_id, meta_json)
+             VALUES ($1, $2)
+             ON CONFLICT (session_id) DO UPDATE SET meta_json = EXCLUDED.meta_json",
+        )
+        .bind(&meta.session_id)
+        .bind(encode_json(&meta))
+        .execute(&self.pool)
+        .await
+        .map_err(store_sqlx_error)?;
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
+        let json: Option<String> = if let Some(session_id) = &self.session_id {
+            sqlx::query_scalar("SELECT meta_json FROM lash_session_meta WHERE session_id = $1")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(store_sqlx_error)?
+        } else {
+            sqlx::query_scalar(
+                "SELECT meta_json FROM lash_session_meta ORDER BY session_id ASC LIMIT 1",
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(store_sqlx_error)?
+        };
+        json.map(|json| store_decode_json(&json, "session meta"))
+            .transpose()
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionExecutionLeaseStore for PostgresSessionStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
@@ -673,7 +709,10 @@ impl RuntimePersistence for PostgresSessionStore {
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl QueuedWorkStore for PostgresSessionStore {
     async fn enqueue_queued_work(
         &self,
         batch: QueuedWorkBatchDraft,
@@ -1157,7 +1196,10 @@ impl RuntimePersistence for PostgresSessionStore {
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(batches)
     }
+}
 
+#[async_trait::async_trait]
+impl TurnInputStore for PostgresSessionStore {
     async fn enqueue_pending_turn_input(
         &self,
         draft: lash_core::PendingTurnInputDraft,
@@ -1269,20 +1311,6 @@ impl RuntimePersistence for PostgresSessionStore {
             .collect::<Result<Vec<_>, StoreError>>()?;
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(inputs)
-    }
-
-    async fn cancel_pending_turn_input(
-        &self,
-        session_id: &str,
-        input_id: &str,
-    ) -> Result<lash_core::PendingTurnInputCancelOutcome, StoreError> {
-        let target = lash_core::PendingTurnInputCancelTarget::input_id(input_id);
-        let targets = vec![target];
-        let mut outcomes = self.cancel_pending_turn_inputs(session_id, &targets).await?;
-        Ok(outcomes
-            .pop()
-            .map(|result| result.outcome)
-            .unwrap_or(lash_core::PendingTurnInputCancelOutcome::NotFound))
     }
 
     async fn cancel_pending_turn_inputs(
@@ -1435,40 +1463,10 @@ impl RuntimePersistence for PostgresSessionStore {
         .map_err(store_sqlx_error)?;
         Ok(())
     }
+}
 
-    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO lash_session_meta (session_id, meta_json)
-             VALUES ($1, $2)
-             ON CONFLICT (session_id) DO UPDATE SET meta_json = EXCLUDED.meta_json",
-        )
-        .bind(&meta.session_id)
-        .bind(encode_json(&meta))
-        .execute(&self.pool)
-        .await
-        .map_err(store_sqlx_error)?;
-        Ok(())
-    }
-
-    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
-        let json: Option<String> = if let Some(session_id) = &self.session_id {
-            sqlx::query_scalar("SELECT meta_json FROM lash_session_meta WHERE session_id = $1")
-                .bind(session_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(store_sqlx_error)?
-        } else {
-            sqlx::query_scalar(
-                "SELECT meta_json FROM lash_session_meta ORDER BY session_id ASC LIMIT 1",
-            )
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(store_sqlx_error)?
-        };
-        json.map(|json| store_decode_json(&json, "session meta"))
-            .transpose()
-    }
-
+#[async_trait::async_trait]
+impl StoreMaintenance for PostgresSessionStore {
     async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), StoreError> {
         for id in ids {
             if let Some(session_id) = &self.session_id {
