@@ -38,6 +38,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # The full workspace test profile plus a restored cargo cache exceeds
+      # the hosted runner's free disk when a version bump invalidates every
+      # workspace fingerprint (observed: ld Bus error after ENOSPC). Reclaim
+      # the large preinstalled toolchains this job never uses.
+      - name: Reclaim runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Check out repository
         uses: actions/checkout@v4
         with:
