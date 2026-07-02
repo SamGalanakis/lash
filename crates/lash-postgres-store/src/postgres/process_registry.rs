@@ -682,9 +682,9 @@ impl ProcessRegistry for PostgresProcessRegistry {
     async fn claim_process_lease(
         &self,
         process_id: &str,
-        owner_id: &str,
+        owner: &LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<ProcessLease, PluginError> {
+    ) -> Result<lash_core::ProcessLeaseClaimOutcome, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
         if load_process_tx(&mut tx, process_id).await?.is_none() {
             return Err(PluginError::Session(format!(
@@ -695,54 +695,162 @@ impl ProcessRegistry for PostgresProcessRegistry {
         let current = load_process_lease_tx(&mut tx, process_id).await?;
         if let Some(current) = current.as_ref()
             && current.expires_at_epoch_ms > now
-            && current.owner_id != owner_id
         {
-            return Err(process_lease_conflict(process_id, current));
+            if current.owner.same_incarnation(owner) {
+                // Same incarnation re-enters its own live lease: extend the
+                // expiry, keep token and fencing token.
+                let expires_at = now.saturating_add(lease_ttl_ms);
+                sqlx::query(
+                    "UPDATE lash_process_leases
+                     SET lease_expires_at_ms = $2
+                     WHERE process_id = $1",
+                )
+                .bind(process_id)
+                .bind(expires_at as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?;
+                tx.commit().await.map_err(plugin_sqlx_error)?;
+                return Ok(lash_core::ProcessLeaseClaimOutcome::Acquired(
+                    ProcessLease {
+                        expires_at_epoch_ms: expires_at,
+                        ..current.clone()
+                    },
+                ));
+            }
+            let holder = current.clone();
+            tx.commit().await.map_err(plugin_sqlx_error)?;
+            return Ok(lash_core::ProcessLeaseClaimOutcome::Busy { holder });
         }
-        let existing_fence: Option<i64> = sqlx::query_scalar(
-            "SELECT lease_fencing_token FROM lash_process_leases WHERE process_id = $1 FOR UPDATE",
-        )
-        .bind(process_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
-        let fencing_token = existing_fence.unwrap_or(0) as u64 + 1;
-        let lease = ProcessLease {
-            schema_version: PROCESS_LEASE_SCHEMA_VERSION,
-            process_id: process_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: format!(
-                "{:x}",
-                Sha256::digest(format!("{process_id}:{owner_id}:{now}:{fencing_token}").as_bytes())
-            ),
-            fencing_token,
-            claimed_at_epoch_ms: now,
-            expires_at_epoch_ms: now.saturating_add(lease_ttl_ms),
-        };
-        sqlx::query(
-            "INSERT INTO lash_process_leases (
-                process_id, lease_owner_id, lease_token, lease_fencing_token,
-                lease_claimed_at_ms, lease_expires_at_ms
-             )
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (process_id) DO UPDATE SET
-                lease_owner_id = EXCLUDED.lease_owner_id,
-                lease_token = EXCLUDED.lease_token,
-                lease_fencing_token = EXCLUDED.lease_fencing_token,
-                lease_claimed_at_ms = EXCLUDED.lease_claimed_at_ms,
-                lease_expires_at_ms = EXCLUDED.lease_expires_at_ms",
-        )
-        .bind(&lease.process_id)
-        .bind(&lease.owner_id)
-        .bind(&lease.lease_token)
-        .bind(lease.fencing_token as i64)
-        .bind(lease.claimed_at_epoch_ms as i64)
-        .bind(lease.expires_at_epoch_ms as i64)
-        .execute(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
+        let fencing_token = retained_process_lease_fencing_token(&mut tx, process_id).await? + 1;
+        let lease =
+            acquire_process_lease_tx(&mut tx, process_id, owner, fencing_token, now, lease_ttl_ms)
+                .await?;
         tx.commit().await.map_err(plugin_sqlx_error)?;
-        Ok(lease)
+        Ok(lash_core::ProcessLeaseClaimOutcome::Acquired(lease))
+    }
+
+    async fn reclaim_process_lease(
+        &self,
+        process_id: &str,
+        owner: &LeaseOwnerIdentity,
+        observed_holder: &ProcessLease,
+        lease_ttl_ms: u64,
+    ) -> Result<lash_core::ProcessLeaseClaimOutcome, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        if load_process_tx(&mut tx, process_id).await?.is_none() {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let now = current_epoch_ms();
+        let current = load_process_lease_tx(&mut tx, process_id).await?;
+        let Some(current) = current else {
+            // Free (or released) lease: acquire on the retained fencing token
+            // like a plain claim would.
+            let fencing_token =
+                retained_process_lease_fencing_token(&mut tx, process_id).await? + 1;
+            let lease = acquire_process_lease_tx(
+                &mut tx,
+                process_id,
+                owner,
+                fencing_token,
+                now,
+                lease_ttl_ms,
+            )
+            .await?;
+            tx.commit().await.map_err(plugin_sqlx_error)?;
+            return Ok(lash_core::ProcessLeaseClaimOutcome::Acquired(lease));
+        };
+        if current.expires_at_epoch_ms <= now {
+            let lease = acquire_process_lease_tx(
+                &mut tx,
+                process_id,
+                owner,
+                current.fencing_token.saturating_add(1),
+                now,
+                lease_ttl_ms,
+            )
+            .await?;
+            tx.commit().await.map_err(plugin_sqlx_error)?;
+            return Ok(lash_core::ProcessLeaseClaimOutcome::Acquired(lease));
+        }
+        // Fenced CAS on the observed holder: identity, token, and fencing token
+        // must all still match, and the holder must be definitely dead for this
+        // claimant.
+        if observed_holder.process_id == process_id
+            && current.owner.same_incarnation(&observed_holder.owner)
+            && current.lease_token == observed_holder.lease_token
+            && current.fencing_token == observed_holder.fencing_token
+            && current.owner.is_definitely_dead_for_claimant(owner)
+        {
+            let fencing_token = current.fencing_token.saturating_add(1);
+            let lease_token = format!(
+                "{:x}",
+                Sha256::digest(
+                    format!(
+                        "{process_id}:{}:{}:{now}:{fencing_token}",
+                        owner.owner_id, owner.incarnation_id
+                    )
+                    .as_bytes()
+                )
+            );
+            let expires_at = now.saturating_add(lease_ttl_ms);
+            let changed = sqlx::query(
+                "UPDATE lash_process_leases
+                 SET lease_owner_id = $1,
+                     lease_owner_incarnation_id = $2,
+                     lease_owner_liveness_json = $3,
+                     lease_token = $4,
+                     lease_fencing_token = $5,
+                     lease_claimed_at_ms = $6,
+                     lease_expires_at_ms = $7
+                 WHERE process_id = $8
+                   AND lease_owner_id = $9
+                   AND lease_owner_incarnation_id = $10
+                   AND lease_token = $11
+                   AND lease_fencing_token = $12",
+            )
+            .bind(&owner.owner_id)
+            .bind(&owner.incarnation_id)
+            .bind(encode_process_lease_liveness(&owner.liveness)?)
+            .bind(&lease_token)
+            .bind(fencing_token as i64)
+            .bind(now as i64)
+            .bind(expires_at as i64)
+            .bind(process_id)
+            .bind(&observed_holder.owner.owner_id)
+            .bind(&observed_holder.owner.incarnation_id)
+            .bind(&observed_holder.lease_token)
+            .bind(observed_holder.fencing_token as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(plugin_sqlx_error)?
+            .rows_affected();
+            if changed == 1 {
+                let lease = ProcessLease {
+                    schema_version: PROCESS_LEASE_SCHEMA_VERSION,
+                    process_id: process_id.to_string(),
+                    owner: owner.clone(),
+                    lease_token,
+                    fencing_token,
+                    claimed_at_epoch_ms: now,
+                    expires_at_epoch_ms: expires_at,
+                };
+                tx.commit().await.map_err(plugin_sqlx_error)?;
+                return Ok(lash_core::ProcessLeaseClaimOutcome::Acquired(lease));
+            }
+            // Lost the CAS race: re-read and report the winner.
+            if let Some(current) = load_process_lease_tx(&mut tx, process_id).await?
+                && current.expires_at_epoch_ms > now
+            {
+                tx.commit().await.map_err(plugin_sqlx_error)?;
+                return Ok(lash_core::ProcessLeaseClaimOutcome::Busy { holder: current });
+            }
+            return Err(process_lease_expired(process_id));
+        }
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        Ok(lash_core::ProcessLeaseClaimOutcome::Busy { holder: current })
     }
 
     async fn renew_process_lease(
@@ -753,7 +861,12 @@ impl ProcessRegistry for PostgresProcessRegistry {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
         let now = current_epoch_ms();
         let current = load_process_lease_tx(&mut tx, &lease.process_id).await?;
-        if !guard_lease(current.as_ref(), &lease.lease_token, now) {
+        if !guard_lease(current.as_ref(), &lease.lease_token, now)
+            || !current.as_ref().is_some_and(|current| {
+                current.owner.same_incarnation(&lease.owner)
+                    && current.fencing_token == lease.fencing_token
+            })
+        {
             return Err(process_lease_expired(&lease.process_id));
         }
         let renewed = ProcessLease {

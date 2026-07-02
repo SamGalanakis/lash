@@ -13,9 +13,9 @@ use super::events::{
 };
 use super::model::{
     PROCESS_LEASE_SCHEMA_VERSION, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseCompletion, ProcessListFilter,
-    ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, SessionScope, SessionScopeId,
-    WaitState,
+    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion,
+    ProcessListFilter, ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport,
+    SessionScope, SessionScopeId, WaitState,
 };
 use super::registry::ProcessRegistry;
 use super::time::current_epoch_ms;
@@ -618,17 +618,24 @@ impl ProcessRegistry for TestLocalProcessRegistry {
     async fn claim_process_lease(
         &self,
         process_id: &str,
-        owner_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<ProcessLease, PluginError> {
+    ) -> Result<ProcessLeaseClaimOutcome, PluginError> {
         let mut leases = self.leases.lock().await;
         let now = current_epoch_ms();
-        if let Some(current) = leases.get(process_id)
-            && !current.owner_id.is_empty()
+        if let Some(current) = leases.get_mut(process_id)
+            && !current.lease_token.is_empty()
             && current.expires_at_epoch_ms > now
-            && current.owner_id != owner_id
         {
-            return Err(process_lease_conflict(process_id, current));
+            if current.owner.same_incarnation(owner) {
+                // Same incarnation re-enters its own live lease: extend the
+                // expiry without changing token or fencing token.
+                current.expires_at_epoch_ms = now.saturating_add(lease_ttl_ms);
+                return Ok(ProcessLeaseClaimOutcome::Acquired(current.clone()));
+            }
+            return Ok(ProcessLeaseClaimOutcome::Busy {
+                holder: current.clone(),
+            });
         }
         // The fencing token increases monotonically even across completion: a
         // released lease retains its `fencing_token` so a re-claim never reuses
@@ -637,17 +644,58 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             .get(process_id)
             .map_or(0, |current| current.fencing_token)
             .saturating_add(1);
-        let lease = ProcessLease {
-            schema_version: PROCESS_LEASE_SCHEMA_VERSION,
-            process_id: process_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: format!("{process_id}:{owner_id}:{now}:{fencing_token}"),
-            fencing_token,
-            claimed_at_epoch_ms: now,
-            expires_at_epoch_ms: now.saturating_add(lease_ttl_ms),
-        };
+        let lease = acquire_test_lease(process_id, owner, fencing_token, now, lease_ttl_ms);
         leases.insert(process_id.to_string(), lease.clone());
-        Ok(lease)
+        Ok(ProcessLeaseClaimOutcome::Acquired(lease))
+    }
+
+    async fn reclaim_process_lease(
+        &self,
+        process_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
+        observed_holder: &ProcessLease,
+        lease_ttl_ms: u64,
+    ) -> Result<ProcessLeaseClaimOutcome, PluginError> {
+        let mut leases = self.leases.lock().await;
+        let now = current_epoch_ms();
+        let Some(current) = leases.get(process_id) else {
+            let lease = acquire_test_lease(process_id, owner, 1, now, lease_ttl_ms);
+            leases.insert(process_id.to_string(), lease.clone());
+            return Ok(ProcessLeaseClaimOutcome::Acquired(lease));
+        };
+        if current.lease_token.is_empty() || current.expires_at_epoch_ms <= now {
+            let lease = acquire_test_lease(
+                process_id,
+                owner,
+                current.fencing_token.saturating_add(1),
+                now,
+                lease_ttl_ms,
+            );
+            leases.insert(process_id.to_string(), lease.clone());
+            return Ok(ProcessLeaseClaimOutcome::Acquired(lease));
+        }
+        // Fenced CAS on the observed holder: identity, token, and fencing token
+        // must all still match, and the holder must be definitely dead for this
+        // claimant, else the live lease stays untouched.
+        if observed_holder.process_id == process_id
+            && current.owner.same_incarnation(&observed_holder.owner)
+            && current.lease_token == observed_holder.lease_token
+            && current.fencing_token == observed_holder.fencing_token
+            && current.owner.is_definitely_dead_for_claimant(owner)
+        {
+            let lease = acquire_test_lease(
+                process_id,
+                owner,
+                current.fencing_token.saturating_add(1),
+                now,
+                lease_ttl_ms,
+            );
+            leases.insert(process_id.to_string(), lease.clone());
+            return Ok(ProcessLeaseClaimOutcome::Acquired(lease));
+        }
+        Ok(ProcessLeaseClaimOutcome::Busy {
+            holder: current.clone(),
+        })
     }
 
     async fn renew_process_lease(
@@ -658,8 +706,10 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         let mut leases = self.leases.lock().await;
         let now = current_epoch_ms();
         let live = leases.get(&lease.process_id).filter(|current| {
-            !current.owner_id.is_empty()
+            !current.lease_token.is_empty()
+                && current.owner.same_incarnation(&lease.owner)
                 && current.lease_token == lease.lease_token
+                && current.fencing_token == lease.fencing_token
                 && current.expires_at_epoch_ms > now
         });
         if live.is_none() {
@@ -684,7 +734,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         if let Some(current) = leases.get_mut(&completion.process_id)
             && current.lease_token == completion.lease_token
         {
-            current.owner_id = String::new();
+            current.owner = crate::LeaseOwnerIdentity::opaque("", "");
             current.lease_token = String::new();
             current.claimed_at_epoch_ms = 0;
             current.expires_at_epoch_ms = 0;
@@ -693,13 +743,25 @@ impl ProcessRegistry for TestLocalProcessRegistry {
     }
 }
 
-/// Loud, stable error for a fenced process-lease claim on the `PluginError`
-/// channel the [`ProcessRegistry`] trait returns.
-fn process_lease_conflict(process_id: &str, current: &ProcessLease) -> PluginError {
-    PluginError::Session(format!(
-        "process `{process_id}` is already leased by `{}` until {}",
-        current.owner_id, current.expires_at_epoch_ms
-    ))
+fn acquire_test_lease(
+    process_id: &str,
+    owner: &crate::LeaseOwnerIdentity,
+    fencing_token: u64,
+    now: u64,
+    lease_ttl_ms: u64,
+) -> ProcessLease {
+    ProcessLease {
+        schema_version: PROCESS_LEASE_SCHEMA_VERSION,
+        process_id: process_id.to_string(),
+        owner: owner.clone(),
+        lease_token: format!(
+            "{process_id}:{}:{}:{now}:{fencing_token}",
+            owner.owner_id, owner.incarnation_id
+        ),
+        fencing_token,
+        claimed_at_epoch_ms: now,
+        expires_at_epoch_ms: now.saturating_add(lease_ttl_ms),
+    }
 }
 
 /// Loud, stable error for a superseded or expired process lease.

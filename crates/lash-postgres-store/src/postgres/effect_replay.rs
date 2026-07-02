@@ -3,22 +3,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const POSTGRES_EFFECT_STATUS_IN_PROGRESS: &str = "in_progress";
 const POSTGRES_EFFECT_STATUS_COMPLETED: &str = "completed";
 const POSTGRES_EFFECT_STATUS_FAILED: &str = "failed";
-const POSTGRES_EFFECT_DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const POSTGRES_EFFECT_BUSY_POLL: Duration = Duration::from_millis(25);
 
 static POSTGRES_EFFECT_OWNER_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PostgresEffectReplayOptions {
-    pub lease_ttl: Duration,
-}
-
-impl Default for PostgresEffectReplayOptions {
-    fn default() -> Self {
-        Self {
-            lease_ttl: POSTGRES_EFFECT_DEFAULT_LEASE_TTL,
-        }
-    }
+    /// Effect-replay lease timing capability. Hosts share the same
+    /// [`LeaseTimings`] they configure on the runtime so effect leases expire
+    /// on the same failover window as session and process leases.
+    pub lease_timings: lash_core::LeaseTimings,
 }
 
 struct PostgresEffectReplayInner {
@@ -26,7 +20,7 @@ struct PostgresEffectReplayInner {
     owner_id: String,
     lease_counter: AtomicU64,
     replay_mode: AtomicBool,
-    lease_ttl_ms: u64,
+    lease_timings: lash_core::LeaseTimings,
 }
 
 #[derive(Clone)]
@@ -165,7 +159,7 @@ impl PostgresRuntimeEffectController {
         let now = current_epoch_ms();
         let lease_token = self.inner.next_lease_token();
         let due_at_ms = postgres_effect_sleep_due_at_ms(envelope, now);
-        let lease_expires_at_ms = now.saturating_add(self.inner.lease_ttl_ms);
+        let lease_expires_at_ms = now.saturating_add(self.inner.lease_timings.ttl_ms());
         let replay_mode = self.inner.replay_mode.load(Ordering::SeqCst);
         let owner_id = self.inner.owner_id.clone();
 
@@ -334,7 +328,7 @@ impl PostgresRuntimeEffectController {
                 .bind(&replay_key)
                 .bind(&owner_id)
                 .bind(&lease_token)
-                .bind(updated_at_ms.saturating_add(self.inner.lease_ttl_ms) as i64)
+                .bind(updated_at_ms.saturating_add(self.inner.lease_timings.ttl_ms()) as i64)
                 .bind(due_at_param)
                 .bind(updated_at_ms as i64)
                 .execute(&mut **tx)
@@ -421,7 +415,7 @@ impl PostgresRuntimeEffectController {
         claim: &PostgresClaimedEffect,
     ) -> Result<(), RuntimeEffectControllerError> {
         let now = current_epoch_ms();
-        let renewed_expires_at = now.saturating_add(self.inner.lease_ttl_ms);
+        let renewed_expires_at = now.saturating_add(self.inner.lease_timings.ttl_ms());
         let changed = sqlx::query(
             "UPDATE lash_runtime_effect_replay
              SET lease_expires_at_ms = $6,
@@ -464,7 +458,7 @@ impl PostgresRuntimeEffectController {
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-        let renew_every = Duration::from_millis((self.inner.lease_ttl_ms / 3).max(1));
+        let renew_every = self.inner.lease_timings.renew_interval();
         let effect = self.execute_claimed_effect(claim, envelope, local_executor);
         tokio::pin!(effect);
         let renew_sleep = tokio::time::sleep(renew_every);
@@ -652,7 +646,7 @@ impl PostgresEffectReplayInner {
             ),
             lease_counter: AtomicU64::new(1),
             replay_mode: AtomicBool::new(false),
-            lease_ttl_ms: postgres_effect_duration_ms(options.lease_ttl),
+            lease_timings: options.lease_timings,
         }
     }
 
@@ -689,15 +683,6 @@ fn postgres_effect_row(row: PgRow) -> PostgresEffectRow {
         error_json: row.get("error_json"),
         lease_expires_at_ms: row.get("lease_expires_at_ms"),
         due_at_ms: row.get("due_at_ms"),
-    }
-}
-
-fn postgres_effect_duration_ms(duration: Duration) -> u64 {
-    let millis = duration.as_millis();
-    if millis == 0 {
-        1
-    } else {
-        millis.min(u128::from(u64::MAX)) as u64
     }
 }
 

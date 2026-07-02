@@ -69,14 +69,6 @@ use turn_boundary::*;
 use turn_commit_draft::*;
 use turn_driver::*;
 
-pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 30 * 1000;
-pub(crate) const RUNTIME_TURN_LEASE_RENEW_MS: u64 = 10 * 1000;
-const _: () = {
-    assert!(RUNTIME_TURN_LEASE_TTL_MS == 30_000);
-    assert!(RUNTIME_TURN_LEASE_RENEW_MS == 10_000);
-    assert!(RUNTIME_TURN_LEASE_TTL_MS == RUNTIME_TURN_LEASE_RENEW_MS * 3);
-};
-
 pub(super) fn runtime_error_from_store_commit(err: crate::store::StoreError) -> RuntimeError {
     match err {
         crate::store::StoreError::SessionExecutionLeaseExpired { session_id } => RuntimeError::new(
@@ -136,17 +128,17 @@ pub use process::{
     ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
     ProcessExecutionEnvRef, ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary,
-    ProcessId, ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseCompletion,
-    ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessOriginator,
-    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessService,
-    ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions,
-    ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
-    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeDeliveryRequest, ProcessWakeSpec,
-    ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
-    UnavailableProcessService, WaitKind, WaitState, apply_process_status_projection,
-    current_epoch_ms, epoch_ms_from_system_time, load_process_execution_env,
-    materialize_process_event_semantics, persist_process_execution_env,
+    ProcessId, ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseClaimOutcome,
+    ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
+    ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessService, ProcessSessionDeleteReport, ProcessSpawnProvenance,
+    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
+    ProcessStatusFilter, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery,
+    ProcessWakeDeliveryRequest, ProcessWakeSpec, ProcessWorkObserver, ProcessWorkSnapshot,
+    SessionScope, SessionScopeId, UnavailableProcessService, WaitKind, WaitState,
+    apply_process_status_projection, current_epoch_ms, epoch_ms_from_system_time,
+    load_process_execution_env, materialize_process_event_semantics, persist_process_execution_env,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
     process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
@@ -166,16 +158,15 @@ use state::{
 pub use turn_input_ingress::{
     PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
     PendingTurnInputCancelTarget, PendingTurnInputClaimDiagnostics, PendingTurnInputDraft,
-    PendingTurnInputSuffixCancelOutcome, QueuedCheckpointTurnInput, TURN_INPUT_CLAIM_TTL_MS,
-    TurnInputCheckpointBoundary, TurnInputClaim, TurnInputClaimMode, TurnInputCompletion,
-    TurnInputIngress, TurnInputState,
+    PendingTurnInputSuffixCancelOutcome, QueuedCheckpointTurnInput, TurnInputCheckpointBoundary,
+    TurnInputClaim, TurnInputClaimMode, TurnInputCompletion, TurnInputIngress, TurnInputState,
 };
 pub use turn_loop::ensure_durable_effect_input;
 pub use turn_queue::{
-    DeliveryPolicy, MergeKey, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointWork, QueuedTurnWork,
-    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
-    QueuedWorkClass, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SessionCommand,
-    SessionCommandReceipt, SlotPolicy, process_wake_batch_draft,
+    DeliveryPolicy, MergeKey, QueuedCheckpointWork, QueuedTurnWork, QueuedWorkBatch,
+    QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkClass,
+    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SessionCommand, SessionCommandReceipt,
+    SlotPolicy, process_wake_batch_draft,
 };
 pub use usage::{
     SessionUsageReport, TokenLedgerEntry, UsageReportRow, UsageTotals, diff_token_ledger,

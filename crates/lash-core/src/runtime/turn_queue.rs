@@ -1,8 +1,6 @@
 use super::process::ProcessWakeDelivery;
 use crate::{PluginMessage, TurnCause, TurnInput};
 
-pub const QUEUED_WORK_CLAIM_TTL_MS: u64 = 30 * 1000;
-
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionCommand {

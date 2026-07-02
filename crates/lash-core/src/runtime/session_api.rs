@@ -519,7 +519,7 @@ impl LashRuntime {
                 &self.state.session_id,
                 session_execution_lease,
                 &self.runtime_lease_owner,
-                crate::QUEUED_WORK_CLAIM_TTL_MS,
+                self.host.core.control.lease_timings.ttl_ms(),
             )
             .await
             .map_err(super::runtime_error_from_store_commit)?;

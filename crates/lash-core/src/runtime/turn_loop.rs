@@ -225,6 +225,7 @@ impl LashRuntime {
             store,
             &self.state.session_id,
             &self.runtime_lease_owner,
+            self.host.core.control.lease_timings,
             Arc::clone(&self.host.core.clock),
             cancel,
         )
@@ -716,7 +717,7 @@ impl LashRuntime {
                     &self.state.session_id,
                     &session_execution_fence,
                     &self.runtime_lease_owner,
-                    crate::TURN_INPUT_CLAIM_TTL_MS,
+                    self.host.core.control.lease_timings.ttl_ms(),
                     64,
                 )
                 .await
@@ -783,7 +784,7 @@ impl LashRuntime {
                     &session_execution_fence,
                     &self.runtime_lease_owner,
                     crate::QueuedWorkClaimBoundary::Idle,
-                    crate::QUEUED_WORK_CLAIM_TTL_MS,
+                    self.host.core.control.lease_timings.ttl_ms(),
                     batch_ids,
                 )
                 .await
@@ -794,7 +795,7 @@ impl LashRuntime {
                     &session_execution_fence,
                     &self.runtime_lease_owner,
                     crate::QueuedWorkClaimBoundary::Idle,
-                    crate::QUEUED_WORK_CLAIM_TTL_MS,
+                    self.host.core.control.lease_timings.ttl_ms(),
                     64,
                 )
                 .await

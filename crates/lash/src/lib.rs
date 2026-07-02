@@ -261,13 +261,14 @@ pub mod process {
         ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
         ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
         ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary,
-        ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseCompletion,
-        ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope,
-        ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
-        ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport, ProcessStartOptions,
-        ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessWake,
-        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
-        ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
+        ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseClaimOutcome,
+        ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
+        ProcessOpScope, ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry,
+        ProcessRunHandle, ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport,
+        ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
+        ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery,
+        ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver, ProcessWorkSnapshot, SessionScope,
+        SessionScopeId,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
@@ -278,8 +279,9 @@ pub mod process {
 
 pub mod durability {
     pub use lash_core::{
-        DurableProcessWorker, DurableProcessWorkerConfig, EffectHost, InlineEffectHost, Residency,
-        RuntimeEnvironment, RuntimeHostConfig, TerminationPolicy,
+        DurableProcessWorker, DurableProcessWorkerConfig, EffectHost, InlineEffectHost,
+        LeaseTimings, LeaseTimingsError, Residency, RuntimeEnvironment, RuntimeHostConfig,
+        TerminationPolicy,
     };
 }
 

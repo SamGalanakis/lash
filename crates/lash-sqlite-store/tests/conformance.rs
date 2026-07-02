@@ -566,7 +566,10 @@ async fn sqlite_effect_controller_satisfies_lease_fencing_conformance() {
                     let controller = SqliteRuntimeEffectController::open_with_options(
                         &path,
                         ExecutionScope::turn("session", "turn"),
-                        SqliteEffectReplayOptions { lease_ttl: ttl },
+                        SqliteEffectReplayOptions {
+                            lease_timings: lash_core::LeaseTimings::from_ttl(ttl)
+                                .expect("conformance lease timings"),
+                        },
                     )
                     .await
                     .expect("controller");

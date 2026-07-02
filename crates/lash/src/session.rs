@@ -6,7 +6,7 @@ use futures_util::Stream;
 use lash_core::runtime::{
     PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
     PendingTurnInputCancelTarget, PendingTurnInputSuffixCancelOutcome, QueuedWorkBatch,
-    TurnInputIngress,
+    QueuedWorkClaim, TurnInputClaim, TurnInputIngress,
 };
 use lash_core::{LiveReplayGap, LiveReplayStoreError, SessionObservationEvent};
 use lash_remote_protocol::{
@@ -684,6 +684,46 @@ impl LashSession {
         let session_id = self.session_id();
         self.runtime
             .cancel_queued_work_batch(&session_id, batch_id)
+            .await
+            .map_err(EmbedError::Runtime)
+    }
+
+    /// Release a held queued-work claim without completing it, returning its
+    /// batches to the pending queue immediately.
+    ///
+    /// A host stopping an external queued-work driver mid-claim calls this
+    /// with the claims that driver still holds so the work becomes claimable
+    /// again at once instead of waiting out the claim's lease TTL.
+    pub async fn abandon_queued_work_claim(&self, claim: &QueuedWorkClaim) -> Result<()> {
+        self.runtime
+            .abandon_queued_work_claim(claim)
+            .await
+            .map_err(EmbedError::Runtime)
+    }
+
+    /// Release a held pending-turn-input claim without completing it, returning
+    /// its inputs to the pending queue immediately. The turn-input counterpart
+    /// of [`abandon_queued_work_claim`](Self::abandon_queued_work_claim).
+    pub async fn abandon_turn_input_claim(&self, claim: &TurnInputClaim) -> Result<()> {
+        self.runtime
+            .abandon_turn_input_claim(claim)
+            .await
+            .map_err(EmbedError::Runtime)
+    }
+
+    /// Cancel every outstanding durable wait for this session without deleting
+    /// the session.
+    ///
+    /// Each waiter receives a terminal [`Resolution::Cancelled`](crate::Resolution)
+    /// instead of hanging until an external completion arrives, and late
+    /// resolves observe that terminal. The session itself stays usable: new
+    /// durable waits registered afterwards behave normally, unlike the
+    /// tombstoning revocation [`LashCore::delete_session`](crate::LashCore::delete_session)
+    /// performs.
+    pub async fn revoke_durable_waits(&self) -> Result<()> {
+        let session_id = self.session_id();
+        self.effect_host
+            .cancel_await_events_for_session(&session_id)
             .await
             .map_err(EmbedError::Runtime)
     }

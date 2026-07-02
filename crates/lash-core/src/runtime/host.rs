@@ -46,6 +46,12 @@ pub struct RuntimeControlConfig {
     pub effect_host: Arc<dyn EffectHost>,
     pub process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
     pub termination: TerminationPolicy,
+    /// Lease/claim timing capability for every durable single-writer lane this
+    /// runtime claims: session execution leases, turn-input and queued-work
+    /// claims, and process leases. Effect-replay backends accept the same type
+    /// at construction. Defaults to [`LeaseTimings::default`] (30s TTL / 10s
+    /// renew).
+    pub lease_timings: crate::LeaseTimings,
 }
 
 #[derive(Clone)]
@@ -84,6 +90,7 @@ impl RuntimeHostConfig {
                 termination: TerminationPolicy::default(),
                 effect_host,
                 process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+                lease_timings: crate::LeaseTimings::default(),
             },
             tracing: RuntimeTracingConfig {
                 trace_sink: None,
@@ -133,6 +140,13 @@ impl RuntimeHostConfig {
 
     pub fn with_process_engine(mut self, engine: Arc<dyn crate::ProcessEngine>) -> Self {
         self.process_engines = self.process_engines.with_engine(engine);
+        self
+    }
+
+    /// Replace the lease timing capability governing every durable lease and
+    /// claim this runtime takes.
+    pub fn with_lease_timings(mut self, lease_timings: crate::LeaseTimings) -> Self {
+        self.control.lease_timings = lease_timings;
         self
     }
 }

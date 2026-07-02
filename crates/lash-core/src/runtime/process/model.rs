@@ -899,18 +899,26 @@ impl ProcessIdentity {
 /// Wire-format version stamped on every persisted [`ProcessLease`].
 ///
 /// Bump when the on-wire shape of `ProcessLease` changes in a way that older
-/// code cannot safely deserialize.
-pub const PROCESS_LEASE_SCHEMA_VERSION: u32 = 1;
+/// code cannot safely deserialize. Version 2 replaced the bare `owner_id`
+/// string with a full [`LeaseOwnerIdentity`](crate::LeaseOwnerIdentity)
+/// carrying incarnation and liveness metadata for fenced reclaim.
+pub const PROCESS_LEASE_SCHEMA_VERSION: u32 = 2;
 
 /// Durable lease over a non-terminal background process.
 ///
-/// The lease pair `(owner_id, lease_token)` plus `fencing_token` are how lash guarantees that
+/// The lease pair `(owner, lease_token)` plus `fencing_token` are how lash guarantees that
 /// one non-terminal process is re-executed by exactly one worker at a time —
 /// even after a crash, even across two workers that both sweep the same
 /// registry for recoverable work. The durable backend
 /// (`lash-sqlite-store`) uses these to serialize concurrent claims on the same
 /// `process_id`; future distributed durable backends use the *same* fields to
 /// coordinate workers that don't share a file system.
+///
+/// The owner is a full [`LeaseOwnerIdentity`](crate::LeaseOwnerIdentity):
+/// its persisted liveness metadata is what lets a sweeping worker prove a
+/// busy holder is *definitely dead* and reclaim the lease before the TTL
+/// through [`ProcessRegistry::reclaim_process_lease`](super::ProcessRegistry::reclaim_process_lease),
+/// mirroring the session execution lane.
 ///
 /// **This is not single-process theatre.** The owner / fencing-token /
 /// lease-token triple is the public contract that lets any backend detect and
@@ -919,11 +927,31 @@ pub const PROCESS_LEASE_SCHEMA_VERSION: u32 = 1;
 pub struct ProcessLease {
     pub schema_version: u32,
     pub process_id: ProcessId,
-    pub owner_id: String,
+    pub owner: crate::LeaseOwnerIdentity,
     pub lease_token: String,
     pub fencing_token: u64,
     pub claimed_at_epoch_ms: u64,
     pub expires_at_epoch_ms: u64,
+}
+
+/// Outcome of claiming (or reclaiming) a [`ProcessLease`].
+///
+/// Mirrors [`SessionExecutionLeaseClaimOutcome`](crate::SessionExecutionLeaseClaimOutcome):
+/// a busy outcome carries the observed holder so the claimant can assess its
+/// liveness and perform a fenced reclaim on exactly the lease it observed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ProcessLeaseClaimOutcome {
+    Acquired(ProcessLease),
+    Busy { holder: ProcessLease },
+}
+
+impl ProcessLeaseClaimOutcome {
+    pub fn acquired(self) -> Option<ProcessLease> {
+        match self {
+            Self::Acquired(lease) => Some(lease),
+            Self::Busy { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
