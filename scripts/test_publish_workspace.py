@@ -105,6 +105,51 @@ class PublishWorkspaceTest(unittest.TestCase):
             packages["provider-id"]["workspace_dependencies"], {"transport-id"}
         )
 
+    def test_versioned_dev_dependencies_gate_publish_ordering(self) -> None:
+        # A workspace-versioned dev-dependency survives into the published
+        # manifest and must resolve on the index when cargo packages the
+        # crate (this partially failed the v0.1.0-alpha.81 publish when
+        # lash-postgres-store's conformance dev-dep on lash-lashlang-runtime
+        # was packaged before that crate was visible). Versioned dev-deps are
+        # ordering edges; version-less path dev-deps stay excluded.
+        publish_workspace = load_publish_workspace_module()
+        runtime_dir = str(ROOT / "crates" / "lash-lashlang-runtime")
+        store_dir = str(ROOT / "crates" / "lash-postgres-store")
+        metadata = {
+            "workspace_members": ["runtime-id", "store-id"],
+            "packages": [
+                {
+                    "id": "runtime-id",
+                    "name": "lash-lashlang-runtime",
+                    "version": "0.0.1",
+                    "publish": None,
+                    "manifest_path": f"{runtime_dir}/Cargo.toml",
+                    "dependencies": [],
+                },
+                {
+                    "id": "store-id",
+                    "name": "lash-postgres-store",
+                    "version": "0.0.1",
+                    "publish": None,
+                    "manifest_path": f"{store_dir}/Cargo.toml",
+                    "dependencies": [
+                        {
+                            "name": "lash-lashlang-runtime",
+                            "path": runtime_dir,
+                            "kind": "dev",
+                            "req": "=0.0.1",
+                        },
+                    ],
+                },
+            ],
+        }
+        with mock.patch.object(publish_workspace, "run_json", return_value=metadata):
+            packages = publish_workspace.load_publishable_workspace_packages()
+
+        self.assertEqual(
+            packages["store-id"]["workspace_dependencies"], {"runtime-id"}
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
