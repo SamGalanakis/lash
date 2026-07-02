@@ -55,7 +55,6 @@ impl ToolStateEntry {
         self.manifest.clone()
     }
 
-    #[allow(dead_code)]
     fn stored_manifest(&self) -> &ToolManifest {
         &self.manifest
     }

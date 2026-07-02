@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use crate::common::DEFAULT_HTTP_TRANSPORT;
+use crate::common::{DEFAULT_HTTP_TRANSPORT, DEFAULT_MAX_OUTPUT_TOKENS};
 use crate::responses_shared as shared;
 use crate::schema::model_id;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
@@ -44,10 +44,13 @@ const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"
 const OPENAI_GPT55_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
 const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
-const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 const SESSION_WEBSOCKET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const SESSION_WEBSOCKET_FALLBACK_TTL: Duration = Duration::from_secs(60);
 const MAX_SESSION_WEBSOCKET_CACHE_ENTRIES: usize = 32;
+/// Per-socket bound on the closing handshake during shutdown drain. A half-dead
+/// peer that never returns its Close frame must not stall the remaining cached
+/// sockets, so each close is best-effort and abandoned after this elapses.
+const SESSION_WEBSOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Transport-selection knob for Codex. Production always runs `Auto` (try the
 /// WebSocket transport, fall back to SSE). The non-`Auto` variants force a
@@ -706,8 +709,11 @@ impl CodexProvider {
         };
         for mut websocket in connections {
             // Best-effort: a peer that already vanished cannot receive the frame,
-            // and shutdown must not fail because one socket is already gone.
-            let _ = websocket.close(None).await;
+            // and shutdown must not fail because one socket is already gone. Bound
+            // each close so a half-dead peer that never returns its Close frame
+            // cannot stall the drain of the sockets still queued behind it.
+            let _ =
+                tokio::time::timeout(SESSION_WEBSOCKET_CLOSE_TIMEOUT, websocket.close(None)).await;
         }
     }
 
@@ -2650,6 +2656,69 @@ mod tests {
                 .by_scope
                 .is_empty(),
             "close() drains the session cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_provider_close_drains_a_dead_cached_socket_within_bound() {
+        // A peer that closed its side leaves a dead socket in the cache. The
+        // bounded, best-effort per-socket close must tolerate it: close() returns
+        // promptly and still empties the cache, so a wedged socket can never fail
+        // the drain or stall the sockets queued behind it.
+        let ws = spawn_scripted_websocket(vec![ScriptedWsAction::CompleteAndClose {
+            response_id: "resp_1",
+            message_id: "msg_1",
+            text: "answer",
+        }])
+        .await;
+        let provider = websocket_test_provider(
+            CodexTransport::WebsocketCached,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+
+        let mut running = provider.clone();
+        running
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .await
+            .expect("first response");
+        // Let the peer's Close frame land so the cached socket is genuinely dead,
+        // without a reuse ever polling (and evicting) it first.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            provider
+                .websocket_sessions
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .by_scope
+                .len(),
+            1,
+            "the completed turn leaves a (now dead) socket cached for the drain"
+        );
+
+        // An unbounded close on a wedged socket could hang here; the per-socket
+        // timeout keeps the drain moving. The outer guard turns a regression into
+        // a failure instead of hanging the whole suite.
+        let started = Instant::now();
+        tokio::time::timeout(Duration::from_secs(20), provider.close())
+            .await
+            .expect("close() must not hang draining a dead cached socket")
+            .expect("provider close");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "each socket close is bounded, drain took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            provider
+                .websocket_sessions
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .by_scope
+                .is_empty(),
+            "close() drains the cache even when a cached socket is dead"
         );
     }
 
