@@ -327,23 +327,28 @@ def snippet_regions(errors: list[str]) -> dict[str, dict[str, str]]:
 
 
 def check_code_snippets(errors: list[str], fix: bool) -> None:
-    """Every `<pre>` on a published page declares what it is: `data-snippet`
-    blocks mirror a compiled region of the docs-snippets crate verbatim
-    (`cargo check -p docs-snippets` keeps them building); `data-lang` blocks
-    are display-only (shell transcripts, Lashlang, API-shape excerpts)."""
+    """Every `<pre>` on a published top-level page declares what it is:
+    `data-snippet` blocks mirror a compiled region of the docs-snippets crate
+    verbatim (`cargo check -p docs-snippets` keeps them building); `data-lang`
+    blocks are display-only (shell transcripts, Lashlang, API-shape excerpts).
+
+    `data-snippet` blocks are compiled-and-synced wherever they appear, including
+    the `architecture/` sub-pages; the "declare yourself" rule stays scoped to
+    top-level pages so hand-authored architecture prose blocks are left alone."""
     regions = snippet_regions(errors)
     referenced: set[str] = set()
-    for path in sorted(DOCS.glob("*.html")):
+    for path in sorted(DOCS.rglob("*.html")):
         rel = path.relative_to(ROOT).as_posix()
+        enforce_declaration = path.parent == DOCS
         text = path.read_text(encoding="utf-8")
         changed = False
 
-        def replace(m: re.Match[str]) -> str:
+        def replace(m: re.Match[str], enforce_declaration: bool = enforce_declaration) -> str:
             nonlocal changed
             attrs, body = m.group(1), m.group(2)
             snippet = re.search(r'data-snippet="([^"]+)"', attrs)
             if snippet is None:
-                if not re.search(r'data-lang="[^"]+"', attrs):
+                if enforce_declaration and not re.search(r'data-lang="[^"]+"', attrs):
                     errors.append(
                         f"{rel}: <pre> needs data-snippet (compiled, synced) or data-lang (display-only)"
                     )
