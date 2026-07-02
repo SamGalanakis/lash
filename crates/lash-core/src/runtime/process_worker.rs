@@ -1,14 +1,10 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
 use super::effect::ProcessRunner;
 use super::session_manager::RuntimeSessionServices;
-use super::{
-    EmbeddedRuntimeBuilder, ProcessWorkDriver, QueuedWorkDriver, RUNTIME_TURN_LEASE_TTL_MS,
-    RuntimeHostConfig,
-};
+use super::{EmbeddedRuntimeBuilder, ProcessWorkDriver, QueuedWorkDriver, RuntimeHostConfig};
 use crate::{
     InMemorySessionStore, LashRuntime, PluginError, PluginFactory, PluginHost, PluginStack,
     ProcessAwaitOutput, ProcessExecutionContext, ProcessInput, ProcessLease,
@@ -281,7 +277,7 @@ impl DurableProcessWorker {
         let Ok(lease) = self
             .config
             .process_registry
-            .claim_process_lease(&process_id, &owner_id, RUNTIME_TURN_LEASE_TTL_MS)
+            .claim_process_lease(&process_id, &owner_id, self.lease_timings().ttl_ms())
             .await
         else {
             return;
@@ -360,7 +356,7 @@ impl DurableProcessWorker {
         let fenced = match self
             .config
             .process_registry
-            .renew_process_lease(lease, RUNTIME_TURN_LEASE_TTL_MS)
+            .renew_process_lease(lease, self.lease_timings().ttl_ms())
             .await
         {
             Ok(renewed) => renewed,
@@ -435,11 +431,11 @@ impl DurableProcessWorker {
                     cancel_watcher.abort();
                     return outcome.map_err(RecoverFailure::Run);
                 }
-                _ = self.config.runtime_host.clock.sleep(process_lease_renew_interval()) => {
+                _ = self.config.runtime_host.clock.sleep(self.lease_timings().renew_interval()) => {
                     match self
                         .config
                         .process_registry
-                        .renew_process_lease(&lease, RUNTIME_TURN_LEASE_TTL_MS)
+                        .renew_process_lease(&lease, self.lease_timings().ttl_ms())
                         .await
                     {
                         Ok(renewed) => lease = renewed,
@@ -452,6 +448,10 @@ impl DurableProcessWorker {
                 }
             }
         }
+    }
+
+    fn lease_timings(&self) -> crate::LeaseTimings {
+        self.config.runtime_host.control.lease_timings
     }
 
     async fn release_process_lease(&self, lease: &ProcessLease) -> Result<(), PluginError> {
@@ -647,20 +647,6 @@ impl DurableProcessWorker {
         }
         Ok(())
     }
-}
-
-fn process_lease_renew_interval() -> Duration {
-    Duration::from_millis(process_lease_renew_interval_ms())
-}
-
-#[cfg(test)]
-fn process_lease_renew_interval_ms() -> u64 {
-    25
-}
-
-#[cfg(not(test))]
-fn process_lease_renew_interval_ms() -> u64 {
-    30_000
 }
 
 #[cfg(test)]

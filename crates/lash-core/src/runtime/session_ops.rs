@@ -102,6 +102,7 @@ impl LashRuntime {
                 store,
                 commit,
                 &self.runtime_lease_owner,
+                self.host.core.control.lease_timings,
                 Arc::clone(&self.host.core.clock),
             )
             .await
@@ -466,6 +467,7 @@ impl LashRuntime {
                 store,
                 commit,
                 &self.runtime_lease_owner,
+                self.host.core.control.lease_timings,
                 Arc::clone(&self.host.core.clock),
             )
             .await
@@ -494,6 +496,7 @@ impl LashRuntime {
             store,
             commit,
             &self.runtime_lease_owner,
+            self.host.core.control.lease_timings,
             Arc::clone(&self.host.core.clock),
         )
         .await

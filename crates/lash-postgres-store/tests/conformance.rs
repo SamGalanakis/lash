@@ -229,7 +229,10 @@ async fn postgres_effect_controller_satisfies_lease_fencing_conformance_when_con
                     let controller = PostgresRuntimeEffectController::with_options(
                         &storage,
                         ExecutionScope::turn("session", "turn"),
-                        PostgresEffectReplayOptions { lease_ttl: ttl },
+                        PostgresEffectReplayOptions {
+                            lease_timings: lash_core::LeaseTimings::from_ttl(ttl)
+                                .expect("conformance lease timings"),
+                        },
                     );
                     let for_replay = controller.clone();
                     lash_core::testing::conformance::LeaseFencingController {

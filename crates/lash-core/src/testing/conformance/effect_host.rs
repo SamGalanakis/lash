@@ -848,13 +848,16 @@ fn lease_fencing_envelope(replay_key: &str) -> RuntimeEffectEnvelope {
 ///
 /// - a renewed in-progress lease keeps a competing claimant out, then replays;
 /// - a stolen lease aborts the original owner with a lease-lost error;
-/// - a lease that expires before finalize is rejected with a lease-lost error.
+/// - a lease that expires before finalize is rejected with a lease-lost error;
+/// - a controller constructed with a non-default short TTL actually expires on
+///   that window (the configured TTL cannot be ignored).
 #[cfg(any(test, feature = "testing"))]
 pub async fn effect_controller_lease_fencing(backend: EffectLeaseFencingBackend) {
     let run = uuid::Uuid::new_v4().to_string();
     lease_fencing_renews_long_running_lease(&backend, &run).await;
     lease_fencing_reports_lease_lost_when_stolen(&backend, &run).await;
     lease_fencing_rejects_finalize_after_expiry(&backend, &run).await;
+    lease_fencing_honors_configured_short_ttl(&backend, &run).await;
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -1009,6 +1012,60 @@ async fn lease_fencing_rejects_finalize_after_expiry(
         err.code,
         err.message,
     );
+}
+
+/// A controller built with a non-default short TTL must honor it: a claim
+/// whose owner vanishes (no renewal, no finalize, no row mutation from the
+/// test) becomes reclaimable by a peer after roughly that TTL — not after the
+/// 30s default a backend might hardcode.
+#[cfg(any(test, feature = "testing"))]
+async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingBackend, run: &str) {
+    let ttl = std::time::Duration::from_millis(40);
+    let replay_key = format!("lease-short-ttl-{run}");
+    let vanished = (backend.make_controller)(ttl).await;
+    let successor = (backend.make_controller)(ttl).await;
+    let envelope = lease_fencing_envelope(&replay_key);
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let never_release = Arc::new(tokio::sync::Notify::new());
+    let owner = Arc::clone(&vanished.controller);
+    let owner_envelope = envelope.clone();
+    let owner_release = Arc::clone(&never_release);
+    let owner_task = tokio::spawn(async move {
+        owner
+            .execute_effect(
+                owner_envelope,
+                RuntimeEffectLocalExecutor::testing(move |_| async move {
+                    let _ = entered_tx.send(());
+                    owner_release.notified().await;
+                    Ok(replay_conformance_exec_outcome("vanished-owner"))
+                }),
+            )
+            .await
+    });
+    entered_rx.await.expect("vanished executor entered");
+    // Kill the first owner mid-claim: aborting the task stops its renewal
+    // loop, so the in-progress row is left to expire on the configured TTL.
+    owner_task.abort();
+    assert!(owner_task.await.is_err(), "vanished owner task aborts");
+
+    let reclaimed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        successor.controller.execute_effect(
+            envelope,
+            RuntimeEffectLocalExecutor::testing(move |_| async move {
+                Ok(replay_conformance_exec_outcome("successor-owner"))
+            }),
+        ),
+    )
+    .await
+    .expect(
+        "a successor must reclaim the abandoned row after the configured short TTL — \
+         a backend ignoring the TTL knob would stay busy for the 30s default",
+    )
+    .expect("successor executes the reclaimed effect");
+    assert_replay_conformance_exec_marker(reclaimed, "successor-owner");
+    let _keep_notify_alive = never_release;
 }
 
 #[cfg(any(test, feature = "testing"))]

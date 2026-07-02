@@ -99,7 +99,7 @@ impl crate::Clock for StepExpiryClock {
             self.epoch_ms
         } else {
             self.epoch_ms
-                .saturating_add(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS)
+                .saturating_add(crate::LeaseTimings::default().ttl_ms())
                 .saturating_add(1)
         }
     }
@@ -143,7 +143,7 @@ impl crate::runtime::RuntimeTurnPhaseProbe for ExpireLeaseAtFinalCommit {
             && !self.expired.swap(true, Ordering::SeqCst)
         {
             self.clock
-                .advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+                .advance_ms(crate::LeaseTimings::default().ttl_ms() + 1);
         }
     }
 
@@ -172,7 +172,7 @@ impl crate::runtime::RuntimeTurnPhaseProbe for ExpireLeaseAfterPromptBuild {
             && !self.expired.swap(true, Ordering::SeqCst)
         {
             self.clock
-                .advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+                .advance_ms(crate::LeaseTimings::default().ttl_ms() + 1);
         }
     }
 }
@@ -1823,7 +1823,7 @@ async fn session_command_claim_lease_expiry_surfaces_session_execution_lease_los
         store.as_ref(),
         "root",
         &owner,
-        crate::runtime::RUNTIME_TURN_LEASE_TTL_MS,
+        crate::LeaseTimings::default().ttl_ms(),
     )
     .await
     .expect("claim session execution lease")
@@ -1939,7 +1939,7 @@ async fn lease_loss_stops_foreground_turn_before_final_commit() {
         .expect("provider should start after session lease acquisition");
     let commits_before_lease_loss = *store.runtime_commit_count.lock().expect("commit count");
 
-    clock.advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+    clock.advance_ms(crate::LeaseTimings::default().ttl_ms() + 1);
     let owner = lease_owner("stealing-runtime");
     let stolen = crate::store::RuntimePersistence::try_claim_session_execution_lease(
         store.as_ref(),

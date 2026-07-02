@@ -1,6 +1,9 @@
 //! The runtime's settled-session persistence contract and shared store types.
 
+mod lease_timings;
 pub mod queued_work;
+
+pub use lease_timings::{LeaseTimings, LeaseTimingsError};
 
 const PROC_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 

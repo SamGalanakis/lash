@@ -102,7 +102,7 @@ impl RuntimeTurnDriver<'_> {
                     &self.runtime_lease_owner,
                     &self.turn_id,
                     checkpoint,
-                    crate::TURN_INPUT_CLAIM_TTL_MS,
+                    self.host.core.control.lease_timings.ttl_ms(),
                     64,
                 )
                 .await
@@ -150,7 +150,7 @@ impl RuntimeTurnDriver<'_> {
                     session_execution_lease,
                     &self.runtime_lease_owner,
                     crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
-                    crate::QUEUED_WORK_CLAIM_TTL_MS,
+                    self.host.core.control.lease_timings.ttl_ms(),
                     64,
                 )
                 .await

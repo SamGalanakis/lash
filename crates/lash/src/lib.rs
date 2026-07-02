@@ -274,8 +274,9 @@ pub mod process {
 
 pub mod durability {
     pub use lash_core::{
-        DurableProcessWorker, DurableProcessWorkerConfig, EffectHost, InlineEffectHost, Residency,
-        RuntimeEnvironment, RuntimeHostConfig, TerminationPolicy,
+        DurableProcessWorker, DurableProcessWorkerConfig, EffectHost, InlineEffectHost,
+        LeaseTimings, LeaseTimingsError, Residency, RuntimeEnvironment, RuntimeHostConfig,
+        TerminationPolicy,
     };
 }
 

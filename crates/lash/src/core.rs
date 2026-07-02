@@ -510,6 +510,7 @@ pub struct LashCoreBuilder {
     plugin_stack: PluginStack,
     plugin_host: Option<PluginHost>,
     residency: Option<Residency>,
+    lease_timings: Option<lash_core::LeaseTimings>,
     // Single source of truth for process lifecycle support and process-work
     // consumption.
     process_work_source: ProcessWorkSource,
@@ -640,6 +641,23 @@ impl LashCoreBuilder {
         self
     }
 
+    /// Configure the lease timing capability for every durable single-writer
+    /// lane this deployment claims: session execution leases, turn-input and
+    /// queued-work claims, and process leases.
+    ///
+    /// This is the failover-latency vs false-takeover-risk knob. Like
+    /// [`residency`](Self::residency) it is an operational deployment decision,
+    /// so it lives on the main builder tier rather than behind
+    /// [`advanced`](Self::advanced). Construct the value with
+    /// [`LeaseTimings::new`](lash_core::LeaseTimings::new), which enforces
+    /// `ttl >= 3 * renew_interval`. Effect hosts accept the same type at
+    /// construction (e.g. SQLite/Postgres effect-replay options), so a host can
+    /// share one timing decision across both boundaries.
+    pub fn lease_timings(mut self, lease_timings: lash_core::LeaseTimings) -> Self {
+        self.lease_timings = Some(lease_timings);
+        self
+    }
+
     /// Configure the bounded live replay buffer used by session observation
     /// cursors. This is best-effort reconnect recovery only; durable state
     /// still comes from the session store and [`SessionReadView`].
@@ -695,6 +713,9 @@ impl LashCoreBuilder {
         }
         if let Some(termination) = self.termination.take() {
             core.control.termination = termination;
+        }
+        if let Some(lease_timings) = self.lease_timings.take() {
+            core.control.lease_timings = lease_timings;
         }
         core
     }
