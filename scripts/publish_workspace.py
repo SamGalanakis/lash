@@ -108,6 +108,13 @@ def load_publishable_workspace_packages() -> dict[str, dict]:
     for package_id, package in package_by_id.items():
         workspace_dependencies = set()
         for dependency in package.get("dependencies", []):
+            # Dev-dependencies never gate publish ordering: cargo strips
+            # path-only dev-deps from the published package, and counting them
+            # deadlocks the planner on self-referential dev-deps (a crate
+            # enabling its own feature for integration tests) and on
+            # provider->transport test cycles.
+            if dependency.get("kind") == "dev":
+                continue
             dependency_path = dependency.get("path")
             if not dependency_path:
                 continue
