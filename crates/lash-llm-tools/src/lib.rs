@@ -382,13 +382,23 @@ mod tests {
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["llm_query"]);
-        #[cfg(not(feature = "lashlang"))]
-        assert!(manifests[0].bindings.is_empty());
-        #[cfg(feature = "lashlang")]
-        assert!(
-            manifests[0]
-                .bindings
-                .contains_key(lash_lashlang_runtime::LASHLANG_TOOL_BINDING_KEY)
+        // The lashlang binding surface is feature-unified across the
+        // workspace (`lash-tool-support/lashlang` may be enabled by any
+        // sibling crate in the build graph), so this crate's own `lashlang`
+        // feature cannot tell whether bindings are real or the no-op stub.
+        // Derive the expectation from what the binding ext actually produces
+        // in this build instead of guessing from cfg.
+        let probe = lash_core::ToolDefinition::raw(
+            "probe",
+            "probe",
+            "probe",
+            json!({ "type": "object" }),
+            json!({ "type": "string" }),
+        )
+        .with_lashlang_binding(LashlangToolBinding::new(["probe"], "probe"));
+        assert_eq!(
+            manifests[0].bindings.keys().collect::<Vec<_>>(),
+            probe.manifest().bindings.keys().collect::<Vec<_>>(),
         );
     }
 
