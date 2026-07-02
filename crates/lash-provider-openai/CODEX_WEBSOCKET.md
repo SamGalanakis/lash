@@ -1,9 +1,11 @@
 # Codex WebSocket Notes
 
 The Codex provider owns a provider-local WebSocket session cache. The cache is
-bounded by `MAX_SESSION_WEBSOCKET_CACHE_ENTRIES`, pruned by idle TTL, and dropped
-synchronously because the provider API does not currently expose a lifecycle hook
-for closing transport sessions on runtime shutdown or provider removal.
+bounded by `MAX_SESSION_WEBSOCKET_CACHE_ENTRIES`, pruned by idle TTL, and
+dropped synchronously (dropping a cached `WebSocketStream` closes the socket).
+Known limitation: the lash-core `Provider` contract has no shutdown/removal
+lifecycle hook, so there is no graceful close of cached sockets on runtime
+shutdown — fixing that is a core contract change, out of scope for this crate.
 
 Known design concerns to keep explicit:
 
@@ -40,9 +42,24 @@ the explicit cache miss reason, such as `input_prefix_mismatch`.
 
 ## Runtime Test Seam
 
-The CI-safe scripted WebSocket tests live at the provider layer because the
-normal Lash RPC/config path does not expose test URLs for the Codex Responses
-HTTP and WebSocket endpoints. Adding those URLs to public provider config would
-be a behavior surface change. A runtime-level RPC test should use a core test
-seam that can inject an in-process provider instance or endpoint override without
-serializing test-only fields into user config.
+Codex exposes two constructor-level injection seams, both in the same spirit
+as `CodexProvider::with_http_transport`: explicit builder calls on an
+in-process provider instance, never env vars, and never serialized into user
+config (`CodexProviderFactory` always rebuilds with the production endpoints
+and the default HTTP transport).
+
+- `CodexProvider::with_endpoint_urls(responses_url, websocket_url)` points the
+  provider at alternative Responses HTTP and WebSocket endpoints, e.g. local
+  scripted servers.
+- `CodexProvider::force_websocket_transport()` pins the WebSocket path
+  (the counterpart of `force_sse_transport`), so a test exercises it
+  deterministically instead of relying on `Auto`'s try-then-fall-back.
+
+The scripted WebSocket server harness lives in `codex::ws_testing` (compiled
+for unit tests and behind the default-on `testing` feature). The provider-layer
+unit tests in `src/codex.rs` drive `CodexProvider` against it directly; the
+runtime-level tests in `tests/codex_websocket_runtime.rs` build a normal
+facade (`LashCore::standard_builder()` + `ProviderHandle`) around a provider
+configured through the seams above and prove full turns over the WebSocket
+transport: streamed assistant text end-to-end, and a tool-call turn whose
+`function_call_output` round-trips on the follow-up request.

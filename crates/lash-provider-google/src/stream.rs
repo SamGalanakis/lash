@@ -165,12 +165,14 @@ impl GoogleOAuthProvider {
         tool_call_parts: Option<&mut Vec<LlmOutputPart>>,
         finish_event: &mut Option<Value>,
     ) -> Result<(), LlmTransportError> {
+        let mut provider_usage = None;
         Self::process_sse_event_with_text_parts(
             raw,
             SseTextPartSink {
                 full,
                 text_deltas,
                 usage,
+                provider_usage: &mut provider_usage,
                 tool_call_parts,
                 text_parts: None,
                 finish_event,
@@ -188,6 +190,7 @@ impl GoogleOAuthProvider {
             full,
             text_deltas,
             usage,
+            provider_usage,
             tool_call_parts,
             text_parts,
             finish_event,
@@ -205,6 +208,13 @@ impl GoogleOAuthProvider {
             || new_usage.reasoning_output_tokens > 0
         {
             *usage = new_usage;
+            // Keep the raw `usageMetadata` block alongside the normalized
+            // counters, under the same non-zero guard so a trailing empty
+            // block cannot clobber the captured sidecar.
+            *provider_usage = event
+                .get("response")
+                .and_then(|response| response.get("usageMetadata"))
+                .cloned();
         }
         let mut text_parts = text_parts;
         for (piece, signature) in Self::text_parts_from_event(&event) {

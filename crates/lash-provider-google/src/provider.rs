@@ -60,7 +60,7 @@ impl GoogleOAuthProvider {
             )
             .await
             .unwrap_or_default();
-            return Err(http_error_envelope_from_pairs(
+            return Err(http_error_envelope(
                 format!("Cloud Code request failed with {}", status),
                 status,
                 headers,
@@ -84,8 +84,9 @@ impl GoogleOAuthProvider {
             let origin_model = request.get("model").and_then(Value::as_str);
             let parts = Self::response_parts_from_value(&value, origin_model);
             let full_text = lash_core::visible_response_text_from_parts(&parts);
-            let usage = value
-                .get("usageMetadata")
+            let provider_usage = value.get("usageMetadata").cloned();
+            let usage = provider_usage
+                .as_ref()
                 .map(|meta| {
                     Self::usage_from_event(&json!({
                         "response": {
@@ -101,7 +102,7 @@ impl GoogleOAuthProvider {
                 usage,
                 terminal_reason,
                 terminal_diagnostic: None,
-                provider_usage: None,
+                provider_usage,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", url)),
             });
@@ -109,6 +110,7 @@ impl GoogleOAuthProvider {
 
         let mut full = String::new();
         let mut usage = LlmUsage::default();
+        let mut provider_usage: Option<Value> = None;
         let mut text_parts: Vec<LlmOutputPart> = Vec::new();
         let mut tool_call_parts: Vec<LlmOutputPart> = Vec::new();
         let mut finish_event: Option<Value> = None;
@@ -130,6 +132,7 @@ impl GoogleOAuthProvider {
                         full: &mut full,
                         text_deltas: &mut text_deltas,
                         usage: &mut usage,
+                        provider_usage: &mut provider_usage,
                         tool_call_parts: Some(&mut tool_call_parts),
                         text_parts: Some(&mut text_parts),
                         finish_event: &mut finish_event,
@@ -173,7 +176,7 @@ impl GoogleOAuthProvider {
             usage,
             terminal_reason,
             terminal_diagnostic: None,
-            provider_usage: None,
+            provider_usage,
             request_body,
             http_summary: Some(format!("HTTP POST {}", url)),
         })
@@ -226,7 +229,7 @@ impl GoogleOAuthProvider {
             )
             .await
             .unwrap_or_default();
-            return Err(http_error_envelope_from_pairs(
+            return Err(http_error_envelope(
                 format!("Cloud Code loadCodeAssist failed with {}", status),
                 status,
                 headers,
