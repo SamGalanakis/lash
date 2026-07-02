@@ -1199,7 +1199,6 @@ dependencies = [
  "futures-util",
  "lash-plugin-mcp",
  "lash-postgres-store",
- "lash-protocol-rlm",
  "lash-provider-openai",
  "lash-remote-protocol",
  "lash-runtime",
