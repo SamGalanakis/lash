@@ -1377,10 +1377,7 @@ fn turn_result_total_usage_sums_parent_and_children() {
             },
         ],
         tool_calls: Vec::new(),
-        execution: ExecutionSummary {
-            had_tool_calls: false,
-            had_code_execution: false,
-        },
+        execution: ExecutionSummary::default(),
         errors: Vec::new(),
     };
 

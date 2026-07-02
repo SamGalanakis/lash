@@ -68,4 +68,149 @@ pub enum EmbedError {
     Control(#[from] lash_core::PluginOperationInvokeError),
 }
 
+impl EmbedError {
+    /// True only when a typed signal says the failed operation is safe to
+    /// retry as-is; `false` means "no typed retryable signal", not "known
+    /// permanent" (see [`is_terminal`](Self::is_terminal) for that).
+    ///
+    /// The retryable set is enumerated deliberately from
+    /// [`RuntimeErrorCode`](lash_core::RuntimeErrorCode):
+    ///
+    /// - [`SessionExecutionBusy`](lash_core::RuntimeErrorCode::SessionExecutionBusy):
+    ///   another executor currently holds the session-execution lease; the
+    ///   turn was rejected before any state changed, so retrying after a
+    ///   backoff is safe.
+    /// - [`SessionExecutionLeaseLost`](lash_core::RuntimeErrorCode::SessionExecutionLeaseLost):
+    ///   the lease was fenced away mid-turn. The final commit is fenced on
+    ///   the same lease, so the failed attempt committed nothing and its
+    ///   queued-work/turn-input claims were released; a fresh attempt can
+    ///   re-claim safely.
+    ///
+    /// Everything else is `false`. Notably
+    /// [`StoreCommitFailed`](lash_core::RuntimeErrorCode::StoreCommitFailed)
+    /// stays `false`: the code does not distinguish transient store I/O from
+    /// conflicts, so there is no typed signal that a retry is safe.
+    ///
+    /// Provider failures never surface as `EmbedError` — a failed LLM call
+    /// finishes the turn with `TurnOutcome::Stopped(ProviderError)` — so
+    /// their typed retryability is carried on
+    /// [`TurnIssue::retryable`](crate::turn::TurnIssue) instead.
+    pub fn is_retryable(&self) -> bool {
+        use lash_core::RuntimeErrorCode;
+        match self {
+            Self::Runtime(err) => matches!(
+                err.code,
+                RuntimeErrorCode::SessionExecutionBusy
+                    | RuntimeErrorCode::SessionExecutionLeaseLost
+            ),
+            _ => false,
+        }
+    }
+
+    /// True only when a typed signal says retrying can never succeed without
+    /// host-side changes (wiring, configuration, or invariant violations that
+    /// a retry cannot repair). Errors that are neither
+    /// [`is_retryable`](Self::is_retryable) nor terminal are simply unknown.
+    ///
+    /// The terminal set:
+    ///
+    /// - builder/wiring variants of this enum (missing protocol plugin,
+    ///   model spec, effect host, stores, registries, handler context, and
+    ///   store/session mismatches) — the same call fails identically until
+    ///   the host changes its wiring;
+    /// - [`RuntimeErrorCode`](lash_core::RuntimeErrorCode) wiring codes:
+    ///   `MissingExecutionScopeId`, `ExecutionScopeTurnIdMismatch`,
+    ///   `MissingProcessExecutionId`, `DurableStoreRequired`,
+    ///   `DurableEffectLiveProtocolExtension`,
+    ///   `DurableEffectLivePluginInput`;
+    /// - session provider-configuration errors (`ProviderMismatch`,
+    ///   `ProviderUnconfigured`, `ProviderUnavailable`,
+    ///   `CodeExecutionUnavailable`).
+    pub fn is_terminal(&self) -> bool {
+        use lash_core::RuntimeErrorCode;
+        match self {
+            Self::MissingProtocolPlugin
+            | Self::MissingModelSpec
+            | Self::MissingEffectHost
+            | Self::MissingAttachmentStore
+            | Self::MissingProcessEnvStore
+            | Self::StoreSessionMismatch { .. }
+            | Self::MissingProcessWorkerStoreFactory
+            | Self::DurableStorePeerRequired { .. }
+            | Self::DurableProcessRegistryRequiresStoreFactory
+            | Self::ProcessRegistryRequiresStoreFactory
+            | Self::MissingProcessRegistry
+            | Self::MissingSessionStoreFactory
+            | Self::MissingPluginTurnInput { .. }
+            | Self::DurableEffectHostRequiresHandlerContext { .. }
+            | Self::StaticTurnStreamRequiresStaticEffectHost => true,
+            Self::Runtime(err) => matches!(
+                err.code,
+                RuntimeErrorCode::MissingExecutionScopeId
+                    | RuntimeErrorCode::ExecutionScopeTurnIdMismatch
+                    | RuntimeErrorCode::MissingProcessExecutionId
+                    | RuntimeErrorCode::DurableStoreRequired { .. }
+                    | RuntimeErrorCode::DurableEffectLiveProtocolExtension
+                    | RuntimeErrorCode::DurableEffectLivePluginInput
+            ),
+            Self::Session(err) => matches!(
+                err,
+                SessionError::ProviderMismatch { .. }
+                    | SessionError::ProviderUnconfigured { .. }
+                    | SessionError::ProviderUnavailable { .. }
+                    | SessionError::CodeExecutionUnavailable
+            ),
+            _ => false,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, EmbedError>;
+
+#[cfg(test)]
+mod tests {
+    use super::EmbedError;
+    use lash_core::{RuntimeError, RuntimeErrorCode};
+
+    fn runtime_error(code: RuntimeErrorCode) -> EmbedError {
+        EmbedError::Runtime(RuntimeError::new(code, "test"))
+    }
+
+    #[test]
+    fn lease_contention_codes_are_retryable_and_not_terminal() {
+        for code in [
+            RuntimeErrorCode::SessionExecutionBusy,
+            RuntimeErrorCode::SessionExecutionLeaseLost,
+        ] {
+            let err = runtime_error(code);
+            assert!(err.is_retryable(), "{err}");
+            assert!(!err.is_terminal(), "{err}");
+        }
+    }
+
+    #[test]
+    fn untyped_failures_are_neither_retryable_nor_terminal() {
+        for err in [
+            runtime_error(RuntimeErrorCode::StoreCommitFailed),
+            runtime_error(RuntimeErrorCode::Other("plugin_defined_abort".into())),
+        ] {
+            assert!(!err.is_retryable(), "{err}");
+            assert!(!err.is_terminal(), "{err}");
+        }
+    }
+
+    #[test]
+    fn wiring_errors_are_terminal_and_not_retryable() {
+        for err in [
+            EmbedError::MissingProtocolPlugin,
+            EmbedError::MissingEffectHost,
+            runtime_error(RuntimeErrorCode::DurableStoreRequired {
+                facet: lash_core::DurableStoreFacet::SessionStore,
+            }),
+            runtime_error(RuntimeErrorCode::MissingExecutionScopeId),
+        ] {
+            assert!(err.is_terminal(), "{err}");
+            assert!(!err.is_retryable(), "{err}");
+        }
+    }
+}

@@ -576,6 +576,8 @@ fn remote_turn_result_maps_core_semantics() {
         execution: lash_core::ExecutionSummary {
             had_tool_calls: true,
             had_code_execution: false,
+            started_at_ms: 1_700_000_000_000,
+            duration_ms: 42,
         },
         token_usage: lash_core::TokenUsage {
             input_tokens: 1,
@@ -604,6 +606,8 @@ fn remote_turn_result_maps_core_semantics() {
     assert_eq!(remote.status, RemoteTurnStatus::Completed);
     assert_eq!(remote.usage.total.input_tokens, 4);
     assert_eq!(remote.usage.total.output_tokens, 6);
+    assert_eq!(remote.execution.started_at_ms, 1_700_000_000_000);
+    assert_eq!(remote.execution.duration_ms, 42);
 }
 
 #[test]

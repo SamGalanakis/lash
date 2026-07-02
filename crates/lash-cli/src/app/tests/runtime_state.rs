@@ -189,6 +189,8 @@ fn non_manual_error_sets_transient_status() {
             terminal_reason: None,
             user_message: "LLM error: Claude request failed with 500".into(),
             raw: None,
+            retryable: None,
+            provider_failure_kind: None,
         }),
     });
     app.handle_session_event(SessionEvent::Done);

@@ -601,6 +601,98 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
             .iter()
             .any(|issue| issue.message.contains("provider unavailable"))
     );
+    // The transport's typed retryable signal survives into the host-facing
+    // issue instead of living only in trace records.
+    assert!(
+        turn.errors
+            .iter()
+            .any(|issue| issue.kind == "llm_provider" && issue.retryable == Some(true))
+    );
+}
+
+#[tokio::test]
+async fn provider_failure_surfaces_typed_kind_and_retryability_on_turn_issue() {
+    // A 400 classifies as a non-retryable Validation failure, so the turn
+    // fails on the first attempt with fully typed failure signals.
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Err(crate::llm::transport::LlmTransportError::new("bad request").with_code("400")),
+    }]);
+    let mut runtime = runtime_with_plugins(Vec::new(), transport).await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "typed-provider-failure-turn"),
+        )
+        .await
+        .expect("turn");
+
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Stopped(TurnStop::ProviderError)
+    ));
+    let issue = turn
+        .errors
+        .iter()
+        .find(|issue| issue.kind == "llm_provider")
+        .expect("llm_provider issue");
+    assert_eq!(issue.retryable, Some(false));
+    assert_eq!(
+        issue.provider_failure_kind,
+        Some(crate::ProviderFailureKind::Validation)
+    );
+    assert_eq!(issue.code.as_deref(), Some("400"));
+}
+
+#[tokio::test]
+async fn assembled_turn_reports_turn_timing_from_injected_clock() {
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "Done".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "Done".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let mut runtime = runtime_with_plugins(Vec::new(), transport).await;
+    runtime.host.core.clock = Arc::new(ManualClock::new(4_242));
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "turn-timing-turn"),
+        )
+        .await
+        .expect("turn");
+
+    // `started_at_ms` is read from the injected wall clock, so a
+    // deterministic clock yields a deterministic timestamp (the OS clock
+    // would report the current epoch here).
+    assert_eq!(turn.execution.started_at_ms, 4_242);
 }
 
 #[tokio::test]

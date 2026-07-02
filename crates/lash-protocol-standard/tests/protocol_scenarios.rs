@@ -565,6 +565,7 @@ fn llm_error(message: &str) -> LlmCallError {
     LlmCallError {
         message: message.to_string(),
         retryable: false,
+        kind: lash_core::ProviderFailureKind::Unknown,
         raw: None,
         code: Some("test_provider_error".to_string()),
         terminal_reason: LlmTerminalReason::ProviderError,

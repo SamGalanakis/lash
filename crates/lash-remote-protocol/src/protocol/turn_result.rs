@@ -128,6 +128,14 @@ pub struct RemoteExecutionSummary {
     pub had_tool_calls: bool,
     #[serde(default)]
     pub had_code_execution: bool,
+    /// Wall-clock turn start (epoch milliseconds), measured from turn claim.
+    /// `0` when the producer predates the field.
+    #[serde(default)]
+    pub started_at_ms: u64,
+    /// Whole-turn duration in milliseconds (claim → final commit). `0` when
+    /// the producer predates the field.
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -159,4 +167,11 @@ pub struct RemoteTurnIssue {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+    /// Typed retryability signal; `None` when the source did not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// Typed provider-failure classification, present only for classified
+    /// LLM provider/transport failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_failure_kind: Option<RemoteProviderFailureKind>,
 }

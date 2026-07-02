@@ -32,6 +32,50 @@ impl LlmTerminalReason {
     }
 }
 
+/// Classification of a provider/transport failure.
+///
+/// This is the single canonical failure-kind vocabulary: provider transports
+/// classify failures into it (`lash-core` re-exports it from
+/// `llm::transport`), the turn machine carries it on
+/// [`ErrorEnvelope`](crate::session_model::ErrorEnvelope), and hosts read it
+/// back from `TurnIssue`s without scraping traces.
+///
+/// `Unknown` doubles as the forward-compatibility catch-all: envelopes
+/// persisted by a newer runtime with a kind this build does not know decode
+/// as `Unknown` instead of failing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFailureKind {
+    Transport,
+    Timeout,
+    Http,
+    Stream,
+    Auth,
+    Validation,
+    Quota,
+    Unsupported,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl ProviderFailureKind {
+    /// Stable snake_case code, identical to the serde wire form.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Timeout => "timeout",
+            Self::Http => "http",
+            Self::Stream => "stream",
+            Self::Auth => "auth",
+            Self::Validation => "validation",
+            Self::Quota => "quota",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResponseTextMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]

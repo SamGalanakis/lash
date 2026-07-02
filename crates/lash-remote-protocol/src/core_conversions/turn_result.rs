@@ -168,10 +168,14 @@ impl From<lash_core::ExecutionSummary> for RemoteExecutionSummary {
         let lash_core::ExecutionSummary {
             had_tool_calls,
             had_code_execution,
+            started_at_ms,
+            duration_ms,
         } = value;
         Self {
             had_tool_calls,
             had_code_execution,
+            started_at_ms,
+            duration_ms,
         }
     }
 }
@@ -218,6 +222,8 @@ impl From<lash_core::TurnIssue> for RemoteTurnIssue {
             terminal_reason,
             message,
             raw,
+            retryable,
+            provider_failure_kind,
         } = value;
         Self {
             kind,
@@ -225,6 +231,8 @@ impl From<lash_core::TurnIssue> for RemoteTurnIssue {
             terminal_reason: terminal_reason.map(Into::into),
             message,
             raw,
+            retryable,
+            provider_failure_kind: provider_failure_kind.map(Into::into),
         }
     }
 }

@@ -689,6 +689,38 @@ impl From<RemoteLlmTerminalReason> for core_llm::LlmTerminalReason {
     }
 }
 
+impl From<lash_core::ProviderFailureKind> for RemoteProviderFailureKind {
+    fn from(value: lash_core::ProviderFailureKind) -> Self {
+        match value {
+            lash_core::ProviderFailureKind::Transport => Self::Transport,
+            lash_core::ProviderFailureKind::Timeout => Self::Timeout,
+            lash_core::ProviderFailureKind::Http => Self::Http,
+            lash_core::ProviderFailureKind::Stream => Self::Stream,
+            lash_core::ProviderFailureKind::Auth => Self::Auth,
+            lash_core::ProviderFailureKind::Validation => Self::Validation,
+            lash_core::ProviderFailureKind::Quota => Self::Quota,
+            lash_core::ProviderFailureKind::Unsupported => Self::Unsupported,
+            lash_core::ProviderFailureKind::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<RemoteProviderFailureKind> for lash_core::ProviderFailureKind {
+    fn from(value: RemoteProviderFailureKind) -> Self {
+        match value {
+            RemoteProviderFailureKind::Transport => Self::Transport,
+            RemoteProviderFailureKind::Timeout => Self::Timeout,
+            RemoteProviderFailureKind::Http => Self::Http,
+            RemoteProviderFailureKind::Stream => Self::Stream,
+            RemoteProviderFailureKind::Auth => Self::Auth,
+            RemoteProviderFailureKind::Validation => Self::Validation,
+            RemoteProviderFailureKind::Quota => Self::Quota,
+            RemoteProviderFailureKind::Unsupported => Self::Unsupported,
+            RemoteProviderFailureKind::Unknown => Self::Unknown,
+        }
+    }
+}
+
 impl From<core_llm::LlmUsage> for RemoteUsage {
     fn from(value: core_llm::LlmUsage) -> Self {
         let core_llm::LlmUsage {

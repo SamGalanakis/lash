@@ -597,6 +597,7 @@ fn standard_llm_error(message: &str) -> lash_core::LlmCallError {
     lash_core::LlmCallError {
         message: message.to_string(),
         retryable: false,
+        kind: lash_core::ProviderFailureKind::Unknown,
         raw: None,
         code: Some("test_provider_error".to_string()),
         terminal_reason: LlmTerminalReason::ProviderError,

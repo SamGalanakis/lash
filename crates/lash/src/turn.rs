@@ -936,6 +936,21 @@ impl TurnResult {
         total
     }
 
+    /// Wall-clock instant the runtime started this turn (claim of the
+    /// session-execution lease / queued-work claim), read from the runtime
+    /// clock. Backed by [`ExecutionSummary::started_at_ms`] on
+    /// [`execution`](Self::execution).
+    pub fn started_at(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.execution.started_at_ms)
+    }
+
+    /// Whole-turn duration — claim through final commit and post-persist
+    /// hooks — measured on the runtime clock's monotonic source. Backed by
+    /// [`ExecutionSummary::duration_ms`] on [`execution`](Self::execution).
+    pub fn duration(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.execution.duration_ms)
+    }
+
     pub fn assistant_message(&self) -> Option<&str> {
         match &self.outcome {
             TurnOutcome::Finished(lash_core::TurnFinish::AssistantMessage { text }) => Some(text),

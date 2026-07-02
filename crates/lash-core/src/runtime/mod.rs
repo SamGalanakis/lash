@@ -602,12 +602,24 @@ pub struct CodeOutputRecord {
 }
 
 /// High-level execution summary for a completed turn.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionSummary {
     #[serde(default)]
     pub had_tool_calls: bool,
     #[serde(default)]
     pub had_code_execution: bool,
+    /// Wall-clock turn start as epoch milliseconds, read from the runtime
+    /// [`Clock`]. The measurement window opens when the runtime starts
+    /// claiming the turn (session-execution lease / queued-work claim), so
+    /// it covers the whole host-visible turn. `0` when the turn predates
+    /// this field.
+    #[serde(default)]
+    pub started_at_ms: u64,
+    /// Whole-turn duration in milliseconds — claim through final commit and
+    /// post-persist hooks — measured on the runtime [`Clock`]'s monotonic
+    /// source. `0` when the turn predates this field.
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 /// Structured issue surfaced during turn execution.
@@ -621,6 +633,16 @@ pub struct TurnIssue {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+    /// Whether the failing operation is safe to retry, when the source
+    /// carried a typed signal (provider transports classify retryability;
+    /// terminal LLM responses are deterministic and report `Some(false)`).
+    /// `None` means the source did not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// Typed provider-failure classification, present only when the issue
+    /// came from a classified LLM provider/transport failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_failure_kind: Option<crate::ProviderFailureKind>,
 }
 
 /// Canonical high-level turn result returned to hosts.
