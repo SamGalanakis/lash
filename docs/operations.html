@@ -282,6 +282,10 @@ let _ = (usage.entry_count, usage.usage);</code></pre>
           <div class="listing__label">traces</div>
           <div class="listing__body"><p>Attach a trace sink and flush it before exit. JSONL flush fsyncs the file; for OTel, span-export durability stays the host's duty — flush your own <code>TracerProvider</code>. See <a href="./tracing.html">tracing</a>.</p></div>
         </div>
+        <div class="listing__row">
+          <div class="listing__label">admission</div>
+          <div class="listing__body"><p>lash ships no admission control in the dispatch path: in-flight windows, priority lanes, breakers, and backpressure metrics are host policy, installed by wrapping the provider. The pattern and its disciplines are on <a href="./architecture/providers.html#wrapping-providers">providers</a>.</p></div>
+        </div>
       </div>
     </div>
 
