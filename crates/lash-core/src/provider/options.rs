@@ -2,6 +2,16 @@ use super::support::*;
 
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_CHUNK_TIMEOUT_MS: u64 = 120_000;
+pub const DEFAULT_THROTTLE_WAIT_BUDGET_MS: u64 = 90_000;
+
+/// Minimum amount a single deferred throttle wait charges against
+/// [`ProviderRetryPolicy::throttle_wait_budget_ms`]. Charging at least this
+/// much per deference bounds the courtesy in count as well as time: a zero or
+/// near-zero `Retry-After` (or a zero [`retry_after_cap_ms`]) cannot spin the
+/// attempt-free retry loop more than `budget / charge` times.
+///
+/// [`retry_after_cap_ms`]: ProviderRetryPolicy::retry_after_cap_ms
+pub(crate) const MIN_THROTTLE_BUDGET_CHARGE: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LlmTimeouts {
@@ -191,6 +201,7 @@ impl ProviderReliability {
                 max_delay_ms: 4_000,
                 jitter_ms: 0,
                 retry_after_cap_ms: Some(60_000),
+                throttle_wait_budget_ms: DEFAULT_THROTTLE_WAIT_BUDGET_MS,
                 enabled: true,
             },
             ..Self::default()
@@ -250,6 +261,11 @@ impl ProviderReliability {
         self
     }
 
+    pub fn throttle_wait_budget_ms(mut self, budget_ms: u64) -> Self {
+        self.retry.throttle_wait_budget_ms = budget_ms;
+        self
+    }
+
     pub fn max_concurrency(mut self, value: Option<usize>) -> Self {
         self.rate_limits.max_concurrency = value;
         self
@@ -277,6 +293,26 @@ pub struct ProviderRetryPolicy {
     pub jitter_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_cap_ms: Option<u64>,
+    /// Cumulative time [`ProviderHandle::complete`] may spend honoring
+    /// provider throttle waits — a retryable [`ProviderFailureKind::Quota`]
+    /// failure carrying `Retry-After` — without consuming retry attempts.
+    /// Each deferred wait charges what it actually waits, with a one-second
+    /// floor per deference, so the courtesy is bounded in count as well as
+    /// time. Once the budget is spent, throttled failures consume attempts
+    /// like any other retryable failure. `0` disables the deference entirely.
+    #[serde(
+        default = "default_throttle_wait_budget_ms",
+        skip_serializing_if = "is_default_throttle_wait_budget_ms"
+    )]
+    pub throttle_wait_budget_ms: u64,
+}
+
+fn default_throttle_wait_budget_ms() -> u64 {
+    DEFAULT_THROTTLE_WAIT_BUDGET_MS
+}
+
+fn is_default_throttle_wait_budget_ms(budget_ms: &u64) -> bool {
+    *budget_ms == DEFAULT_THROTTLE_WAIT_BUDGET_MS
 }
 
 impl Default for ProviderRetryPolicy {
@@ -288,6 +324,7 @@ impl Default for ProviderRetryPolicy {
             max_delay_ms: 10_000,
             jitter_ms: 0,
             retry_after_cap_ms: Some(60_000),
+            throttle_wait_budget_ms: DEFAULT_THROTTLE_WAIT_BUDGET_MS,
         }
     }
 }
@@ -301,6 +338,7 @@ impl ProviderRetryPolicy {
             max_delay_ms: 0,
             jitter_ms: 0,
             retry_after_cap_ms: None,
+            throttle_wait_budget_ms: 0,
         }
     }
 
@@ -312,17 +350,22 @@ impl ProviderRetryPolicy {
         }
     }
 
+    /// A provider-stated `Retry-After`, bounded by
+    /// [`retry_after_cap_ms`](Self::retry_after_cap_ms) when one is set.
+    pub(crate) fn cap_retry_after(&self, retry_after: Duration) -> Duration {
+        self.retry_after_cap_ms
+            .map(Duration::from_millis)
+            .map(|cap| retry_after.min(cap))
+            .unwrap_or(retry_after)
+    }
+
     pub(crate) fn delay_for_attempt(
         &self,
         retry_index: u32,
         retry_after: Option<Duration>,
     ) -> Duration {
         if let Some(retry_after) = retry_after {
-            return self
-                .retry_after_cap_ms
-                .map(Duration::from_millis)
-                .map(|cap| retry_after.min(cap))
-                .unwrap_or(retry_after);
+            return self.cap_retry_after(retry_after);
         }
         let multiplier = 1u64.checked_shl(retry_index).unwrap_or(u64::MAX);
         let delay_ms = self

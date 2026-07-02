@@ -1472,7 +1472,7 @@ mod tests {
         assert!(!err.retryable);
 
         let classified = DefaultProviderFailureClassifier.classify(err);
-        assert_eq!(classified.kind, ProviderFailureKind::Http);
+        assert_eq!(classified.kind, ProviderFailureKind::Quota);
         assert!(classified.retryable);
         assert_eq!(classified.retry_after, Some(Duration::from_secs(7)));
     }

@@ -584,7 +584,10 @@ pub(super) async fn prove_openai_compatible_retry_exhaustion()
             .max_attempts(attempt_budget)
             .base_delay_ms(0)
             .max_delay_ms(0)
-            .retry_after_cap_ms(Some(0)),
+            .retry_after_cap_ms(Some(0))
+            // This proof measures attempt-budget exhaustion, so disable the
+            // ladder's throttle deference (attempt-free Retry-After waits).
+            .throttle_wait_budget_ms(0),
         ..ProviderOptions::default()
     };
     let provider = OpenAiCompatibleProvider::new("test-key", "https://provider.test")

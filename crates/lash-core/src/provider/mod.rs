@@ -25,9 +25,10 @@ pub use factory::ProviderFactory;
 pub use handle::{ProviderComponents, ProviderHandle, UnconfiguredProvider};
 pub use model_policy::StaticModelPolicy;
 pub use options::{
-    CacheRetention, DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts,
-    ProviderOptions, ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy,
-    RequestTimeout, ResolvedGenerationPolicy, resolve_generation_policy,
+    CacheRetention, DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS,
+    DEFAULT_THROTTLE_WAIT_BUDGET_MS, LlmTimeouts, ProviderOptions, ProviderRateLimitPolicy,
+    ProviderReliability, ProviderRetryPolicy, RequestTimeout, ResolvedGenerationPolicy,
+    resolve_generation_policy,
 };
 pub use rate_limit::{ProviderRateLimitPermit, ProviderRateLimiter};
 pub use resolver::{

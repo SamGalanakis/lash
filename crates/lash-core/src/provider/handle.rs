@@ -137,6 +137,10 @@ impl ProviderHandle {
         let reliability = self.options().reliability;
         let attempts = reliability.retry.attempts();
         let mut attempt = 0;
+        // Cumulative time already spent deferring to provider throttles
+        // without consuming attempts, bounded by the policy's budget.
+        let throttle_budget = Duration::from_millis(reliability.retry.throttle_wait_budget_ms);
+        let mut throttle_waited = Duration::ZERO;
         loop {
             let _permit = self.components.rate_limiter.admit(&request).await;
             let result = self.components.provider.complete(request.clone()).await;
@@ -144,6 +148,49 @@ impl ProviderHandle {
                 Ok(response) => return Ok(response),
                 Err(failure) => {
                     let failure = self.components.failure_classifier.classify(failure);
+                    // Throttle deference: when the provider signals a throttle
+                    // (retryable `Quota`) AND states how long to back off
+                    // (`Retry-After`), honor the wait without consuming a
+                    // retry attempt — the provider is asking us to come back,
+                    // not failing. The courtesy is bounded: each deferred wait
+                    // charges at least `MIN_THROTTLE_BUDGET_CHARGE` against
+                    // the cumulative `throttle_wait_budget_ms`, and once the
+                    // budget is spent a throttle counts as an ordinary
+                    // retryable failure. A throttle WITHOUT `Retry-After`
+                    // never defers: there is no server-stated wait to honor,
+                    // so the normal backoff-and-count ladder applies.
+                    if failure.retryable
+                        && failure.kind == ProviderFailureKind::Quota
+                        && let Some(retry_after) = failure.retry_after
+                    {
+                        let wait = reliability.retry.cap_retry_after(retry_after);
+                        let charge = wait.max(MIN_THROTTLE_BUDGET_CHARGE);
+                        // Saturating: an absurd uncapped `Retry-After` must
+                        // overflow the budget check, not panic the ladder.
+                        if throttle_waited.saturating_add(charge) <= throttle_budget {
+                            throttle_waited += charge;
+                            tracing::debug!(
+                                target: "lash_core::provider::reliability",
+                                provider = self.kind(),
+                                attempt = attempt + 1,
+                                max_attempts = attempts,
+                                wait_ms = wait.as_millis() as u64,
+                                throttle_waited_ms = throttle_waited.as_millis() as u64,
+                                err = %failure.message,
+                                "provider throttled with retry-after; waiting without consuming a retry attempt"
+                            );
+                            if let Some(events) = request.stream_events.as_ref() {
+                                events.send(crate::llm::types::LlmStreamEvent::RetryStatus {
+                                    wait_seconds: wait.as_secs(),
+                                    attempt: (attempt + 1) as usize,
+                                    max_attempts: attempts as usize,
+                                    reason: failure.message.clone(),
+                                });
+                            }
+                            self.components.rate_limiter.clock().sleep(wait).await;
+                            continue;
+                        }
+                    }
                     if attempt + 1 >= attempts || !failure.retryable {
                         return Err(failure);
                     }
