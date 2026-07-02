@@ -311,18 +311,28 @@ impl LashRuntime {
         })?;
         let session_id = self.state.session_id.clone();
         let policy = self.policy.clone();
-        // Flush any dirty resident state to the store before dropping.
-        let commit = crate::store::RuntimeCommit::persisted_state(&self.state, &[]);
-        let result = commit_runtime_state_with_fresh_session_execution_lease(
-            Arc::clone(&store),
-            commit,
-            &self.runtime_lease_owner,
-            self.host.core.control.lease_timings,
-            Arc::clone(&self.host.core.clock),
-        )
-        .await
-        .map_err(|err| SessionError::Protocol(format!("failed to persist runtime state: {err}")))?;
-        self.state.apply_persisted_commit_result(result);
+        // Under the settled-state contract every durable mutation commits at
+        // its own boundary (turn final commit, config updates, queued-work
+        // drains), so a runtime between boundaries already equals its last
+        // commit. Flushing is only needed when the state has never been
+        // persisted or requires a full graph replace; an unconditional commit
+        // here would bump the head revision on every park/close, disturbing
+        // host-side head-CAS expectations for what is durably a no-op.
+        if self.state.head_revision.is_none() || self.state.graph_replace_required {
+            let commit = crate::store::RuntimeCommit::persisted_state(&self.state, &[]);
+            let result = commit_runtime_state_with_fresh_session_execution_lease(
+                Arc::clone(&store),
+                commit,
+                &self.runtime_lease_owner,
+                self.host.core.control.lease_timings,
+                Arc::clone(&self.host.core.clock),
+            )
+            .await
+            .map_err(|err| {
+                SessionError::Protocol(format!("failed to persist runtime state: {err}"))
+            })?;
+            self.state.apply_persisted_commit_result(result);
+        }
         // Drain pending tombstones if any. Under KeepHistory this is a
         // no-op (tombstones never get added). Under DropOrphans, a future
         // orphan-trim path would populate the set for Phase 10's vacuum()
