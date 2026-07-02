@@ -248,9 +248,12 @@ mod tests {
 
     #[test]
     fn resolve_rlm_session_options_defaults_child_to_raw_final_value() {
-        let options =
-            resolve_rlm_session_options(&ProtocolTurnOptions::empty(), &PluginOptions::default(), false)
-                .expect("resolve options");
+        let options = resolve_rlm_session_options(
+            &ProtocolTurnOptions::empty(),
+            &PluginOptions::default(),
+            false,
+        )
+        .expect("resolve options");
         let extras: RlmCreateExtras = options.decode().expect("decode options");
         assert_eq!(
             extras.final_answer_format,
@@ -290,8 +293,9 @@ mod tests {
             RLM_PROTOCOL_PLUGIN_ID.to_string(),
             serde_json::json!({ "termination": { "kind": "unknown" } }),
         );
-        let err = resolve_rlm_session_options(&ProtocolTurnOptions::empty(), &plugin_options, false)
-            .expect_err("malformed extras should error");
+        let err =
+            resolve_rlm_session_options(&ProtocolTurnOptions::empty(), &plugin_options, false)
+                .expect_err("malformed extras should error");
         assert!(err.to_string().contains("invalid RLM create options"));
     }
 

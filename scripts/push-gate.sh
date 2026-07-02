@@ -153,6 +153,16 @@ configure_bindgen_headers
 step "Formatting"
 cargo fmt --all --check
 
+step "Clippy"
+# shellcheck disable=SC2086
+cargo clippy --workspace --all-targets --locked ${ci_features} -- -D warnings
+
+step "Core/UI boundary guard"
+bash scripts/check-core-ui-boundary.sh
+
+step "Production file-size budget guard"
+bash scripts/check-production-file-size.sh
+
 step "Docs lint"
 python3 scripts/lint_docs.py
 

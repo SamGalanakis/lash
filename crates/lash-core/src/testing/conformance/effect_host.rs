@@ -798,6 +798,19 @@ pub type EffectLeaseMutator = Box<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
 
+/// Factory that builds a fresh lease-fencing controller bound to one shared
+/// durable store with the requested lease TTL. Async so Postgres backends can
+/// issue pooled queries during setup.
+#[cfg(any(test, feature = "testing"))]
+pub type EffectLeaseControllerFactory = Box<
+    dyn Fn(
+            std::time::Duration,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = LeaseFencingController> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Backend adapter for the effect-replay lease-fencing conformance suite.
 ///
 /// `make_controller` returns a fresh controller bound to one shared durable
@@ -807,14 +820,7 @@ pub type EffectLeaseMutator = Box<
 /// the controllers share.
 #[cfg(any(test, feature = "testing"))]
 pub struct EffectLeaseFencingBackend {
-    pub make_controller: Box<
-        dyn Fn(
-                std::time::Duration,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = LeaseFencingController> + Send>>
-            + Send
-            + Sync,
-    >,
+    pub make_controller: EffectLeaseControllerFactory,
     pub steal_lease: EffectLeaseMutator,
     pub expire_lease: EffectLeaseMutator,
 }

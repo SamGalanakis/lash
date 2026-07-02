@@ -48,11 +48,14 @@ pub fn claim_scan_limit(max_batches: usize) -> i64 {
 /// claimed one batch at a time so the runtime applies each mutation and
 /// completion through its normal fenced commit path before moving to the next.
 pub fn select_leading_session_command(candidates: &[ClaimCandidate]) -> usize {
-    candidates
+    if candidates
         .first()
         .is_some_and(|candidate| candidate.work_class == QueuedWorkClass::SessionCommand)
-        .then_some(1)
-        .unwrap_or(0)
+    {
+        1
+    } else {
+        0
+    }
 }
 
 /// Select the prefix of turn-work `candidates` that a single claim may take.

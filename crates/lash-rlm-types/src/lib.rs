@@ -167,17 +167,14 @@ pub fn project_trajectory(
     RlmProjection::from_events(events).trajectory
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RlmTermination {
-    FinishRequired { schema: Option<serde_json::Value> },
+    FinishRequired {
+        schema: Option<serde_json::Value>,
+    },
+    #[default]
     Natural,
-}
-
-impl Default for RlmTermination {
-    fn default() -> Self {
-        Self::Natural
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

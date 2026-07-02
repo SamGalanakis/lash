@@ -766,8 +766,8 @@ mod tests {
         async fn resolve(&self, path: &str) -> lash_lashlang_runtime::Resolution {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if path == "web.fetch" {
-                lash_lashlang_runtime::Resolution::Resolved(lash_lashlang_runtime::ToolGrant::new(
-                    deferred_fetch_definition(),
+                lash_lashlang_runtime::Resolution::Resolved(Box::new(
+                    lash_lashlang_runtime::ToolGrant::new(deferred_fetch_definition()),
                 ))
             } else {
                 lash_lashlang_runtime::Resolution::NotAvailable
@@ -839,13 +839,13 @@ mod tests {
         async fn resolve(&self, path: &str) -> lash_lashlang_runtime::Resolution {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if path == "web.fetch" {
-                lash_lashlang_runtime::Resolution::Resolved(
+                lash_lashlang_runtime::Resolution::Resolved(Box::new(
                     lash_lashlang_runtime::ToolGrant::new(deferred_fetch_definition())
                         .with_execution_binding(serde_json::json!({
                             "kind": "test",
                             "route": "deferred"
                         })),
-                )
+                ))
             } else {
                 lash_lashlang_runtime::Resolution::NotAvailable
             }

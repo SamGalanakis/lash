@@ -94,8 +94,10 @@ impl PluginHost {
         );
         for factory in self.factories() {
             for engine in factory.process_engine_contributions(&ctx)? {
-                runtime_host.process_engines =
-                    runtime_host.process_engines.clone().try_with_engine(engine)?;
+                runtime_host.process_engines = runtime_host
+                    .process_engines
+                    .clone()
+                    .try_with_engine(engine)?;
             }
         }
         Ok(runtime_host)

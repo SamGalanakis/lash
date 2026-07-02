@@ -109,7 +109,8 @@ fn collect(src: &str, forced_module: Option<&str>) -> Vec<(String, String)> {
                 best = Some(r);
             }
         }
-        best.map(|b| b.0.clone()).unwrap_or_else(|| "root".to_string())
+        best.map(|b| b.0.clone())
+            .unwrap_or_else(|| "root".to_string())
     };
 
     let mut out = Vec::new();

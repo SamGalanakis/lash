@@ -2693,9 +2693,9 @@ fn tool_reentry_fact(
     )
 }
 
-fn tool_then_same_actor_provider<'a>(
-    events: &'a [DeliveredBoundary],
-) -> Option<(&'a DeliveredBoundary, &'a DeliveredBoundary)> {
+fn tool_then_same_actor_provider(
+    events: &[DeliveredBoundary],
+) -> Option<(&DeliveredBoundary, &DeliveredBoundary)> {
     events
         .iter()
         .filter(|event| {
@@ -6895,8 +6895,9 @@ mod tests {
             "agent.tuple_values_finish_as_json_arrays",
         ] {
             for (proxy_kind, proxy) in &proxy_cases {
-                let err = reject_named_contract_proxy_facts(semantic_oracle, &[proxy.clone()])
-                    .expect_err("critic-named contracts must reject generic proxy facts");
+                let err =
+                    reject_named_contract_proxy_facts(semantic_oracle, std::slice::from_ref(proxy))
+                        .expect_err("critic-named contracts must reject generic proxy facts");
                 assert!(
                     err.contains(proxy_kind),
                     "unexpected proxy rejection for {semantic_oracle}/{proxy_kind}: {err}"
@@ -8336,7 +8337,7 @@ mod tests {
     }
 
     fn contract_execution_fixture_event(sequence: usize, contract: &str) -> DeliveredBoundary {
-        let proof_id = contract.replace('.', "-").replace('_', "-");
+        let proof_id = contract.replace(['.', '_'], "-");
         let boundary_id = format!("session-001:contract-execution:{proof_id}");
         let source_key = format!("contract-execution/session-001/{proof_id}");
         let execution = replay_contract_execution_fixture(contract);

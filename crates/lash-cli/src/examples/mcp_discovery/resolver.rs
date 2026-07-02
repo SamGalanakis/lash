@@ -59,11 +59,11 @@ impl DeferredToolResolver for McpDeferredToolResolver {
                     "server": tool.server,
                     "tool_id": tool.definition.manifest.id.to_string(),
                 });
-                Resolution::Resolved(
+                Resolution::Resolved(Box::new(
                     ToolGrant::new(tool.definition.clone())
                         .with_source_id(lash::tools::PLUGIN_TOOL_SOURCE_ID)
                         .with_execution_binding(execution_binding),
-                )
+                ))
             }
             None => Resolution::NotAvailable,
         }

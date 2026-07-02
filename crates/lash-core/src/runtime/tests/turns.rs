@@ -1633,7 +1633,7 @@ async fn cancelled_provider_stream_does_not_commit_partial_output() {
                     let stream = request
                         .stream_events
                         .expect("streaming runtime should request provider stream events");
-                    let _ = stream.send(LlmStreamEvent::Delta("partial provider text".to_string()));
+                    stream.send(LlmStreamEvent::Delta("partial provider text".to_string()));
                     if let Some(tx) = delta_sent_tx.lock().expect("delta signal").take() {
                         let _ = tx.send(());
                     }

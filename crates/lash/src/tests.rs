@@ -1523,7 +1523,9 @@ fn session_delete_scope(session_id: &str) -> lash_core::ScopedEffectController<'
     inline_scope(lash_core::ExecutionScope::session_delete(session_id))
 }
 
-fn explicit_ephemeral_facets(builder: crate::core::LashCoreBuilder) -> crate::core::LashCoreBuilder {
+fn explicit_ephemeral_facets(
+    builder: crate::core::LashCoreBuilder,
+) -> crate::core::LashCoreBuilder {
     builder
         .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))

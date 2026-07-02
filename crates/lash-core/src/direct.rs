@@ -122,7 +122,7 @@ pub enum DirectLlmError {
     #[error("invalid response: {0}")]
     InvalidResponse(String),
     #[error("transport error: {0}")]
-    Transport(#[from] LlmTransportError),
+    Transport(#[from] Box<LlmTransportError>),
 }
 
 pub struct DirectLlmClient {
@@ -258,7 +258,7 @@ impl DirectLlmClient {
                         self.clock.as_ref(),
                     );
                 }
-                Err(DirectLlmError::from(error))
+                Err(DirectLlmError::from(Box::new(error)))
             }
         }
     }
@@ -431,9 +431,11 @@ mod tests {
             json!({"provider": "owned"})
         );
 
-        let mut options = ProviderOptions::default();
-        options.reliability = ProviderReliability::default().max_attempts(7);
-        options.max_output_tokens = Some(123);
+        let options = ProviderOptions {
+            reliability: ProviderReliability::default().max_attempts(7),
+            max_output_tokens: Some(123),
+            ..Default::default()
+        };
         client.provider_mut().set_options(options.clone());
 
         assert_eq!(client.provider().options(), options);

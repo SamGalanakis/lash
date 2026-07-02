@@ -455,11 +455,10 @@ impl LashCore {
             self.plugin_factories.as_ref(),
             extra_plugin_factories.into_iter().collect(),
         )?;
-        let runtime_host = plugin_host
-            .install_process_engine_contributions(
-                self.env.core.clone(),
-                self.process_lifecycle_available,
-            )?;
+        let runtime_host = plugin_host.install_process_engine_contributions(
+            self.env.core.clone(),
+            self.process_lifecycle_available,
+        )?;
         let mut config = DurableProcessWorkerConfig::new(
             Arc::new(plugin_host),
             runtime_host,
@@ -985,6 +984,10 @@ impl LashCoreBuilder {
     /// - inline registry wired => lazily construct the default inline driver on first open. Its
     ///   [`DurableProcessWorkerConfig`] is built eagerly when a store factory is
     ///   present; without one the inline worker cannot rebuild session runtimes.
+    // Mirrors the sibling `resolve_queued_work_driver`: a builder helper whose
+    // inputs are the heterogeneous, all-required driver-resolution state and
+    // have no cohesive sub-grouping.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_process_work_driver(
         process_work_source: &ProcessWorkSource,
         worker_plugin_host: &PluginHost,

@@ -58,8 +58,8 @@ pub use hooks::{
 };
 pub use protocol::{
     AssistantProseProjectorPlugin, CodeExecutorPlugin, PluginOptions, ProtocolBeforeLlmCallContext,
-    ProtocolDriverPlugin, ProtocolLlmCallAction, ProtocolRuntimeContext,
-    ProtocolSessionContext, ProtocolSessionMaterialization, ProtocolSessionPlugin,
+    ProtocolDriverPlugin, ProtocolLlmCallAction, ProtocolRuntimeContext, ProtocolSessionContext,
+    ProtocolSessionMaterialization, ProtocolSessionPlugin,
 };
 pub use registrar::{
     ContextRegistrations, ExecutionRegistrations, OutputRegistrations,
@@ -69,8 +69,8 @@ pub use registrar::{
 };
 pub(crate) use registrar::{PluginContributions, RegisteredHook};
 pub use registry::{
-    PluginExtensionContribution, PluginExtensions, PluginFactory, ProcessEngineContributionContext,
-    PluginSessionContext, PluginSpec, PluginSpecBuilder, PluginSpecFactory, SessionPlugin,
+    PluginExtensionContribution, PluginExtensions, PluginFactory, PluginSessionContext, PluginSpec,
+    PluginSpecBuilder, PluginSpecFactory, ProcessEngineContributionContext, SessionPlugin,
     SessionReadyContext, StaticPluginFactory,
 };
 pub use runtime_host::{

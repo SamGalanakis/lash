@@ -30,7 +30,7 @@ impl RuntimeScenarioContext {
             .await;
         }
         for alias in &phase.cancel_after_deferral {
-            self.cancel_turn_input(*alias, "deferred").await;
+            self.cancel_turn_input(alias, "deferred").await;
         }
         if phase.no_next_turn_input_claim_after_cancellations {
             let (owner, lease) = self.owner_and_lease();

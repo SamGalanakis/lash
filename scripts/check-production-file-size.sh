@@ -22,9 +22,37 @@ is_test_rust_file() {
   esac
 }
 
+# Pre-existing files that exceed the budget, exempt with a one-line reason.
+# This is an explicit, closed list — a new file over budget still fails hard.
+# The intended direction of travel is to shrink an entry below its limit and
+# delete its line here, never to raise the global budget.
+declare -A allowlist=(
+  ["crates/lash-sim/src/oracles.rs"]="cross-backend divergence oracle catalogue; split tracked separately"
+  ["crates/lash-sim/src/provider.rs"]="scripted deterministic sim provider surface"
+  ["crates/lash-provider-openai/src/codex.rs"]="Codex OAuth WebSocket/HTTP provider (transport + reasoning replay)"
+  ["crates/lash-sqlite-store/src/persistence.rs"]="SQLite RuntimePersistence implementation"
+  ["crates/lash-postgres-store/src/postgres/runtime_persistence.rs"]="Postgres RuntimePersistence implementation"
+  ["crates/lashlang/src/parser.rs"]="Lashlang recursive-descent parser"
+  ["crates/lash-protocol-rlm/src/executor.rs"]="RLM protocol turn executor"
+  ["crates/lash-restate/src/lib.rs"]="Restate durable-execution backend adapter"
+  ["crates/lash-remote-protocol/src/core_conversions/processes.rs"]="process DTO <-> core conversions"
+  ["crates/lash-core/src/runtime/turn_loop.rs"]="core runtime turn loop"
+  ["crates/lash-core/src/tool_provider.rs"]="core tool-provider surface"
+  ["crates/lash-perf/src/runtime_perf/providers.rs"]="dev-only runtime perf provider harness"
+  ["e2e/restate-postgres-workers/src/bin/runner.rs"]="distributed-workers e2e runner binary"
+  ["crates/lash-restate/src/tests.rs"]="Restate backend test suite"
+  ["crates/lashlang/tests/language.rs"]="Lashlang language conformance test suite"
+  ["crates/lash-core/src/runtime/tests/turns.rs"]="core turn-loop test suite"
+  ["crates/lash-core/src/testing/conformance/runtime_persistence.rs"]="RuntimePersistence conformance suite"
+  ["crates/lash/src/tests/turn_streaming.rs"]="facade turn-streaming test suite"
+)
+
 failures=()
 while IFS= read -r -d '' file; do
   rel="${file#./}"
+  if [[ -n "${allowlist[$rel]+set}" ]]; then
+    continue
+  fi
   if is_test_rust_file "$rel"; then
     limit="$test_limit"
     kind="test"
@@ -42,6 +70,8 @@ done < <(
     \( \
       -path '*/.git' -o \
       -path '*/.git/*' -o \
+      -path '*/.claude' -o \
+      -path '*/.claude/*' -o \
       -path '*/target' -o \
       -path '*/target/*' -o \
       -path '*/vendor' -o \

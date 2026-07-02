@@ -184,7 +184,7 @@ impl AgentScenarioSetup {
             Arc::clone(&prompt_captures),
         );
         let factory = rlm_factory().with_lashlang_execution_sink(
-            Arc::clone(&graph_store) as Arc<dyn crate::tracing::TraceSink>,
+            Arc::clone(&graph_store) as Arc<dyn crate::tracing::TraceSink>
         );
         let mut builder = explicit_ephemeral_facets(LashCore::rlm_builder(factory))
             .provider(provider)

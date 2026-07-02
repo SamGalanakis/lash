@@ -162,10 +162,7 @@ impl LlmHttpTransport for ScriptedSseTransport {
     ) -> Result<LlmHttpResponse, LlmTransportError> {
         Ok(LlmHttpResponse {
             status: 200,
-            headers: vec![(
-                "content-type".to_string(),
-                "text/event-stream".to_string(),
-            )],
+            headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
             body: LlmHttpBody::streamed(ScriptedByteStream::new(self.chunks.clone())),
         })
     }

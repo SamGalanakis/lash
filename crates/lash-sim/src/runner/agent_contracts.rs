@@ -700,6 +700,9 @@ async fn facade_agent_process_execution(
     .await
 }
 
+// Full specification of one facade agent-process contract scenario; the inputs
+// are distinct and all required, with no cohesive sub-grouping.
+#[allow(clippy::too_many_arguments)]
 async fn facade_agent_process_execution_with_options(
     provider_kind: &'static str,
     session_id: &'static str,
@@ -922,6 +925,9 @@ async fn wait_for_contract_durable_input_key(
     ))
 }
 
+// Assembles the contract proof from a completed turn; the runtime handles,
+// result, expectations, and projection flags are all required and distinct.
+#[allow(clippy::too_many_arguments)]
 async fn agent_process_execution_result(
     core: &lash::LashCore,
     graph_store: &lash::tracing::TraceLashlangGraphStore,

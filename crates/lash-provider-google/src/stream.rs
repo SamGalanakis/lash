@@ -167,26 +167,31 @@ impl GoogleOAuthProvider {
     ) -> Result<(), LlmTransportError> {
         Self::process_sse_event_with_text_parts(
             raw,
-            full,
-            text_deltas,
-            usage,
-            tool_call_parts,
+            SseTextPartSink {
+                full,
+                text_deltas,
+                usage,
+                tool_call_parts,
+                text_parts: None,
+                finish_event,
+            },
             None,
-            None,
-            finish_event,
         )
     }
 
     pub(crate) fn process_sse_event_with_text_parts(
         raw: &str,
-        full: &mut String,
-        text_deltas: &mut Vec<String>,
-        usage: &mut LlmUsage,
-        tool_call_parts: Option<&mut Vec<LlmOutputPart>>,
-        text_parts: Option<&mut Vec<LlmOutputPart>>,
+        sink: SseTextPartSink<'_>,
         origin_model: Option<&str>,
-        finish_event: &mut Option<Value>,
     ) -> Result<(), LlmTransportError> {
+        let SseTextPartSink {
+            full,
+            text_deltas,
+            usage,
+            tool_call_parts,
+            text_parts,
+            finish_event,
+        } = sink;
         if raw.trim().is_empty() || raw.trim() == "[DONE]" {
             return Ok(());
         }

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, bail};
 use lash::durability::EffectHost;
-use lash_core::AwaitEventResolver as _;
 use lash::persistence::{
     AttachmentStore, LashlangArtifactStore, ProcessExecutionEnvStore, SessionStoreFactory,
 };
@@ -18,6 +17,7 @@ use lash::tools::{
     LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolCall, ToolDefinition,
     ToolDefinitionLashlangExt, ToolProvider, ToolResult,
 };
+use lash_core::AwaitEventResolver as _;
 use lash_provider_openai::OpenAiCompatibleProvider;
 use lash_restate::RestateEffectHost;
 use lash_s3_store::{S3AttachmentStore, S3AttachmentStoreConfig};
@@ -591,8 +591,8 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
             fail_once: config.fail_once,
         }));
     if let Some(trace_dir) = config.trace_dir.as_ref() {
-        builder = builder
-            .trace_jsonl_path(trace_dir.join(format!("{}.trace.jsonl", config.worker_id)));
+        builder =
+            builder.trace_jsonl_path(trace_dir.join(format!("{}.trace.jsonl", config.worker_id)));
     }
     builder.build().context("build e2e LashCore")
 }

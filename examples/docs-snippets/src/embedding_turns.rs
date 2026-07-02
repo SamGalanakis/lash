@@ -1,7 +1,7 @@
 //! Compiled sources for the Rust snippets on `docs/embedding-turns.html`.
 
-use lash::{TurnFinish, TurnOutcome, TurnStop};
 use lash::{LashCore, LashSession, TurnInput, TurnResult};
+use lash::{TurnFinish, TurnOutcome, TurnStop};
 
 fn persist_terminal(_finish: TurnFinish) -> anyhow::Result<()> {
     Ok(())

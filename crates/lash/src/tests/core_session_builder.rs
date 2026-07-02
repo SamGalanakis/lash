@@ -451,7 +451,10 @@ async fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options
             "compile-core-tool",
             "compile_core_tool",
         )),
-        Arc::new(CompileSurfaceToolFactory::new("compile-extra-tool", "fallback")),
+        Arc::new(CompileSurfaceToolFactory::new(
+            "compile-extra-tool",
+            "fallback",
+        )),
     ]);
     // Process lifecycle available for the compile surface (parity with the old
     // core that wired a process registry).
@@ -1481,13 +1484,14 @@ async fn durable_trigger_store(dir: &std::path::Path) -> Arc<dyn lash_core::Trig
 #[tokio::test]
 async fn durable_session_store_rejects_ephemeral_attachment_store_at_build() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let result =
-        explicit_ephemeral_facets(peer_coherence_builder(durable_artifact_store(dir.path()).await))
-            .store_factory(durable_session_store_factory(dir.path()))
-            // Explicit ephemeral attachment store overrides the in-memory default
-            // so the coherence check reads its Inline tier.
-            .attachment_store(Arc::new(lash_core::InMemoryAttachmentStore::new()))
-            .build();
+    let result = explicit_ephemeral_facets(peer_coherence_builder(
+        durable_artifact_store(dir.path()).await,
+    ))
+    .store_factory(durable_session_store_factory(dir.path()))
+    // Explicit ephemeral attachment store overrides the in-memory default
+    // so the coherence check reads its Inline tier.
+    .attachment_store(Arc::new(lash_core::InMemoryAttachmentStore::new()))
+    .build();
     let err = expect_build_error(
         result,
         "durable session store + ephemeral attachment store must be rejected",
@@ -1518,11 +1522,12 @@ async fn builder_requires_explicit_process_env_store_at_build() {
 #[tokio::test]
 async fn durable_session_store_rejects_ephemeral_process_env_store_at_build() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let result =
-        explicit_ephemeral_facets(peer_coherence_builder(durable_artifact_store(dir.path()).await))
-            .store_factory(durable_session_store_factory(dir.path()))
-            .attachment_store(durable_attachment_store(dir.path()))
-            .build();
+    let result = explicit_ephemeral_facets(peer_coherence_builder(
+        durable_artifact_store(dir.path()).await,
+    ))
+    .store_factory(durable_session_store_factory(dir.path()))
+    .attachment_store(durable_attachment_store(dir.path()))
+    .build();
     let err = expect_build_error(
         result,
         "durable session store + ephemeral process env store must be rejected",
@@ -1542,12 +1547,11 @@ async fn durable_session_store_rejects_ephemeral_artifact_store_at_build() {
     // Explicit ephemeral (Inline) artifact store rides the RLM factory; the
     // durable attachment + process-env peers clear their facets first, so the
     // contributed Lashlang process engine's Inline tier is the one that fails.
-    let result =
-        explicit_ephemeral_facets(peer_coherence_builder(inline_artifact_store()))
-            .store_factory(durable_session_store_factory(dir.path()))
-            .attachment_store(durable_attachment_store(dir.path()))
-            .process_env_store(durable_process_env_store(dir.path()).await)
-            .build();
+    let result = explicit_ephemeral_facets(peer_coherence_builder(inline_artifact_store()))
+        .store_factory(durable_session_store_factory(dir.path()))
+        .attachment_store(durable_attachment_store(dir.path()))
+        .process_env_store(durable_process_env_store(dir.path()).await)
+        .build();
     let err = expect_build_error(
         result,
         "durable session store + ephemeral artifact store must be rejected",

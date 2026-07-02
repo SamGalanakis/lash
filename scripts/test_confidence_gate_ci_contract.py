@@ -70,6 +70,28 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         self.assertGreaterEqual(min_seeds, 4)
         self.assertGreaterEqual(min_boundaries, 256)
 
+    def test_lint_job_is_release_gate_and_runs_clippy_fmt_and_boundary_guards(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        # The server-side lint gate is a first-class CI job.
+        self.assertIn("  lint:\n", workflow)
+
+        # It must block the release: `prepare-release` depends on it, exactly
+        # like every other quality job.
+        prepare_release = workflow_job_block(workflow, "prepare-release")
+        self.assertIn("- lint\n", prepare_release)
+
+        # The lint job runs the same four checks the local push gate runs, so a
+        # green local gate implies a green CI lint job (and vice versa): fmt
+        # --check, the `-D warnings` all-targets clippy gate, and the two
+        # boundary guards that otherwise gate nothing.
+        lint = workflow_job_block(workflow, "lint")
+        self.assertIn("cargo fmt --all --check", lint)
+        self.assertIn("cargo clippy --workspace --all-targets --locked", lint)
+        self.assertIn("-- -D warnings", lint)
+        self.assertIn("bash scripts/check-core-ui-boundary.sh", lint)
+        self.assertIn("bash scripts/check-production-file-size.sh", lint)
+
     def test_sim_search_lane_is_sharded_and_budgeted_at_plan_targets(self) -> None:
         gate = GATE.read_text(encoding="utf-8")
         confidence_workflow = CONFIDENCE_WORKFLOW.read_text(encoding="utf-8")

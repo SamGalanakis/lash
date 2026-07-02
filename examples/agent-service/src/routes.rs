@@ -518,13 +518,6 @@ impl ChannelTurnEvents {
             if let Err(err) = result {
                 self.emit_error(err.message).await;
             }
-            return;
-        }
-        if matches!(
-            &event,
-            TurnEvent::FinalValue { .. } | TurnEvent::ToolValue { .. }
-        ) {
-            return;
         }
     }
 }

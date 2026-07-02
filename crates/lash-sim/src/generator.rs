@@ -186,7 +186,10 @@ impl SimShard {
                 reason: format!("invalid {name} `{part}`: {err}"),
             })
         };
-        Self::new(parse_part(index, "shard index")?, parse_part(total, "shard total")?)
+        Self::new(
+            parse_part(index, "shard index")?,
+            parse_part(total, "shard total")?,
+        )
     }
 
     pub fn selects(&self, seed_index: usize) -> bool {

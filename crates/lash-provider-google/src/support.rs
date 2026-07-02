@@ -30,6 +30,18 @@ pub(crate) use lash_llm_transport::{
 
 pub(crate) use crate::config::*;
 
+/// Mutable accumulators a single Cloud Code SSE event folds into: the running
+/// full text, the per-event text deltas, the usage snapshot, optional tool-call
+/// and text output-part sinks, and the last finish-bearing event.
+pub(crate) struct SseTextPartSink<'a> {
+    pub full: &'a mut String,
+    pub text_deltas: &'a mut Vec<String>,
+    pub usage: &'a mut LlmUsage,
+    pub tool_call_parts: Option<&'a mut Vec<LlmOutputPart>>,
+    pub text_parts: Option<&'a mut Vec<LlmOutputPart>>,
+    pub finish_event: &'a mut Option<Value>,
+}
+
 pub(crate) fn http_error_envelope_from_pairs(
     message: impl Into<String>,
     status: u16,

@@ -42,7 +42,7 @@ fn runtime_turn_lease_constants_are_contractual_windows() {
     assert_eq!(RUNTIME_TURN_LEASE_TTL_MS, 30_000);
     assert_eq!(RUNTIME_TURN_LEASE_RENEW_MS, 10_000);
     assert_eq!(RUNTIME_TURN_LEASE_TTL_MS, RUNTIME_TURN_LEASE_RENEW_MS * 3);
-    assert!(RUNTIME_TURN_LEASE_TTL_MS > RUNTIME_TURN_LEASE_RENEW_MS);
+    const { assert!(RUNTIME_TURN_LEASE_TTL_MS > RUNTIME_TURN_LEASE_RENEW_MS) };
 }
 
 #[test]

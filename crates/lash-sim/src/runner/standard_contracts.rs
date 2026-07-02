@@ -525,10 +525,11 @@ fn standard_full_text(parts: &[LlmOutputPart]) -> String {
 }
 
 pub(super) fn llm_response_with_parts(full_text: String, parts: Vec<LlmOutputPart>) -> LlmResponse {
-    let mut response = LlmResponse::default();
-    response.full_text = full_text;
-    response.parts = parts;
-    response
+    LlmResponse {
+        full_text,
+        parts,
+        ..Default::default()
+    }
 }
 
 pub(super) fn text_llm_response(text: impl Into<String>) -> LlmResponse {
@@ -547,14 +548,15 @@ pub(super) fn tool_call_llm_response(
     tool_name: &str,
     input_json: &str,
 ) -> LlmResponse {
-    let mut response = LlmResponse::default();
-    response.parts = vec![LlmOutputPart::ToolCall {
-        call_id: call_id.to_string(),
-        tool_name: tool_name.to_string(),
-        input_json: input_json.to_string(),
-        replay: None,
-    }];
-    response
+    LlmResponse {
+        parts: vec![LlmOutputPart::ToolCall {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            input_json: input_json.to_string(),
+            replay: None,
+        }],
+        ..Default::default()
+    }
 }
 
 pub(super) fn llm_output_parts_contract_summary(parts: &[LlmOutputPart]) -> Vec<Value> {

@@ -115,6 +115,56 @@ jobs:
           # shellcheck disable=SC2086
           cargo test --doc --workspace --locked ${LASH_CI_FEATURES}
 
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install Zig
+        uses: ./.github/actions/setup-ci-zig
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          # The Test job is the sole writer of the shared linux-debug cache; the
+          # lint job only reads it so clippy reuses the checked dependency graph.
+          shared-key: linux-debug
+          save-if: false
+
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
+
+      # `cargo fmt --all --check` and the same `--all-targets` clippy the local
+      # push gate runs, plus the two boundary guards that otherwise gate nothing.
+      # The clippy feature set mirrors the Test job's workspace check so the
+      # dependency graph resolves identically (fff-zlob + bench).
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy (workspace, all targets)
+        run: |
+          # shellcheck disable=SC2086
+          cargo clippy --workspace --all-targets --locked ${LASH_CI_FEATURES} -- -D warnings
+
+      - name: Check core/UI boundary
+        run: bash scripts/check-core-ui-boundary.sh
+
+      - name: Check production file-size budget
+        run: bash scripts/check-production-file-size.sh
+
   confidence-fast:
     name: Confidence fast (${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -462,6 +512,7 @@ jobs:
       !contains(github.event.head_commit.message, '[skip release]')
     needs:
       - test
+      - lint
       - confidence-fast-summary
       - postgres-store
       - stack-budget

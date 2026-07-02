@@ -126,13 +126,15 @@ impl GoogleOAuthProvider {
                 let prev_usage = usage.clone();
                 Self::process_sse_event_with_text_parts(
                     raw,
-                    &mut full,
-                    &mut text_deltas,
-                    &mut usage,
-                    Some(&mut tool_call_parts),
-                    Some(&mut text_parts),
+                    SseTextPartSink {
+                        full: &mut full,
+                        text_deltas: &mut text_deltas,
+                        usage: &mut usage,
+                        tool_call_parts: Some(&mut tool_call_parts),
+                        text_parts: Some(&mut text_parts),
+                        finish_event: &mut finish_event,
+                    },
                     origin_model.as_deref(),
-                    &mut finish_event,
                 )?;
                 emit_stream_progress(stream_events.as_ref(), text_deltas, &usage, &prev_usage);
                 Ok(())

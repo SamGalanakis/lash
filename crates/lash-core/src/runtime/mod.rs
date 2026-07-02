@@ -104,10 +104,9 @@ pub use clock::{Clock, SystemClock};
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, CausalRef, EffectHost,
-    ExecutionScope,
-    ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController, LlmAttachmentSpec,
-    LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, Resolution, ResolveOutcome,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    ExecutionScope, ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController,
+    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, Resolution,
+    ResolveOutcome, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
     RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
     ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome, ToolCallLaunch,

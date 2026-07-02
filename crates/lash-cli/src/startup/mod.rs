@@ -467,9 +467,11 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         crate::examples::mcp_discovery::mcp_cataloged_tools("mcp", &provider)
     };
     let has_deferred_mcp_catalog = execution_mode.is_rlm() && !mcp_cataloged_tools.is_empty();
-    let mcp_catalog_records = has_deferred_mcp_catalog
-        .then(|| crate::examples::mcp_discovery::mcp_catalog_records(&mcp_cataloged_tools))
-        .unwrap_or_default();
+    let mcp_catalog_records = if has_deferred_mcp_catalog {
+        crate::examples::mcp_discovery::mcp_catalog_records(&mcp_cataloged_tools)
+    } else {
+        Default::default()
+    };
     let mcp_deferred_resolver: Option<lash::tools::SharedDeferredToolResolver> =
         if has_deferred_mcp_catalog {
             Some(Arc::new(

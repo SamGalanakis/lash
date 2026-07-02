@@ -1189,6 +1189,12 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     }
 
     /// Claim active-turn input at a checkpoint for the live turn id.
+    // The parameters are the cohesive, all-required identity/lease inputs of a
+    // durable active-turn claim (session, execution-lease fence, owner, turn,
+    // checkpoint, lease TTL, batch size). They exceed the default threshold by
+    // one and have no non-artificial sub-grouping; the sibling
+    // `claim_next_turn_inputs` uses the same positional shape.
+    #[allow(clippy::too_many_arguments)]
     async fn claim_active_turn_inputs(
         &self,
         session_id: &str,

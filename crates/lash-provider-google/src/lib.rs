@@ -349,7 +349,8 @@ mod tests {
             .into(),
             output_schema: json!({}).into(),
         }]);
-        let claude_on_vertex_body = GoogleOAuthProvider::build_request(&provider, &claude_on_vertex, Vec::new(), None);
+        let claude_on_vertex_body =
+            GoogleOAuthProvider::build_request(&provider, &claude_on_vertex, Vec::new(), None);
         let parameters =
             &claude_on_vertex_body["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
         assert!(parameters.get("$schema").is_none());
@@ -365,8 +366,7 @@ mod tests {
 
         let mut gemini = claude_on_vertex;
         gemini.model = "gemini-3.1-pro-preview".to_string();
-        let gemini_body =
-            GoogleOAuthProvider::build_request(&provider, &gemini, Vec::new(), None);
+        let gemini_body = GoogleOAuthProvider::build_request(&provider, &gemini, Vec::new(), None);
         assert!(
             gemini_body["request"]["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]
                 .get("$schema")

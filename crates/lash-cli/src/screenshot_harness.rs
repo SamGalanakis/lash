@@ -121,15 +121,16 @@ pub(crate) fn diff_screen() -> Vec<Line<'static>> {
  # Shared benchmark helpers (provider config loading from ~/.lash/config.json).
  bench-common = { path = \"bench/common\" }";
 
-    let mut lines = Vec::new();
-    lines.push(Line::default());
-    lines.push(prompt_line("bump the workspace pins to 0.1.0-alpha.75"));
-    lines.push(Line::default());
-    lines.push(assistant_line(
-        "Updating the root workspace pins to 0.1.0-alpha.75, then refreshing the lockfile.",
-    ));
-    lines.push(Line::default());
-    lines.push(patch_summary_line("Edited", "Cargo.toml", 14, 14));
+    let mut lines = vec![
+        Line::default(),
+        prompt_line("bump the workspace pins to 0.1.0-alpha.75"),
+        Line::default(),
+        assistant_line(
+            "Updating the root workspace pins to 0.1.0-alpha.75, then refreshing the lockfile.",
+        ),
+        Line::default(),
+        patch_summary_line("Edited", "Cargo.toml", 14, 14),
+    ];
     render_inline_diff(&mut lines, diff, WIDTH as usize, "  │ ");
     lines.push(Line::default());
     lines.push(assistant_line(
@@ -163,12 +164,13 @@ fn bump(deps: &mut Manifest, version: &str) {
 
 That keeps the facade crate and its siblings in lockstep.";
 
-    let mut lines = Vec::new();
-    lines.push(Line::default());
-    lines.push(prompt_line("how do the workspace pins work?"));
-    lines.push(Line::default());
-    lines.push(assistant_line("Here's how the pinning is laid out."));
-    lines.push(Line::default());
+    let mut lines = vec![
+        Line::default(),
+        prompt_line("how do the workspace pins work?"),
+        Line::default(),
+        assistant_line("Here's how the pinning is laid out."),
+        Line::default(),
+    ];
     for line in render_markdown(markdown, (WIDTH as usize).saturating_sub(2)) {
         let mut spans = vec![Span::styled("  ".to_string(), theme::assistant_bar())];
         spans.extend(line.spans);

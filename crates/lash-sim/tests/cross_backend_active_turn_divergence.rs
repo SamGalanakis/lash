@@ -14,7 +14,7 @@ use lash::persistence::{
     AttachmentStore, FileAttachmentStore, InMemoryAttachmentStore,
     InMemoryProcessExecutionEnvStore, InMemorySessionStoreFactory, ProcessExecutionEnvStore,
 };
-use lash::{PendingTurnInputCancelOutcome, LashCore, TurnInput};
+use lash::{LashCore, PendingTurnInputCancelOutcome, TurnInput};
 use lash_core::{SessionStoreFactory, TurnInputCheckpointBoundary, TurnInputIngress};
 use lash_sim::ProviderWireScript;
 use lash_sim::ScriptedLlmHttpTransport;
@@ -61,10 +61,7 @@ async fn build_in_memory(n_scripts: usize) -> (LashCore, Arc<ScriptedLlmHttpTran
     .await
 }
 
-async fn build_sqlite(
-    dir: &Path,
-    n_scripts: usize,
-) -> (LashCore, Arc<ScriptedLlmHttpTransport>) {
+async fn build_sqlite(dir: &Path, n_scripts: usize) -> (LashCore, Arc<ScriptedLlmHttpTransport>) {
     std::fs::create_dir_all(dir).expect("create sqlite dir");
     let process_env_store: Arc<dyn ProcessExecutionEnvStore> = Arc::new(
         lash_sqlite_store::Store::open(&dir.join("process-env.sqlite"))

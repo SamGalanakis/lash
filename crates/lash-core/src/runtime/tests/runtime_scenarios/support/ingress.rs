@@ -25,7 +25,7 @@ impl RuntimeScenarioContext {
             self.enqueue_turn_input(ingress).await;
         }
         for alias in &phase.cancel_before_commit {
-            self.cancel_turn_input(*alias, "pending").await;
+            self.cancel_turn_input(alias, "pending").await;
         }
     }
 

@@ -66,7 +66,7 @@ impl ToolGrant {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Resolution {
     /// The call-path resolved to a host-authorized tool.
-    Resolved(ToolGrant),
+    Resolved(Box<ToolGrant>),
     /// No tool is available for the call-path; linking leaves the symbol
     /// unresolved so the model sees a clean link error.
     NotAvailable,
@@ -222,7 +222,7 @@ mod tests {
         async fn resolve(&self, path: &str) -> Resolution {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if path == "web.fetch" {
-                Resolution::Resolved(self.grant.clone())
+                Resolution::Resolved(Box::new(self.grant.clone()))
             } else {
                 Resolution::NotAvailable
             }
@@ -317,7 +317,7 @@ mod tests {
         )
         .await
         .expect_err("unavailable call-path must surface a link error");
-        assert!(format!("{err:?}").len() > 0);
+        assert!(!format!("{err:?}").is_empty());
         assert!(matches!(
             record.get("mystery.run"),
             Some(Resolution::NotAvailable)

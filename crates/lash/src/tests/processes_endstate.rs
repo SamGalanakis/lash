@@ -214,18 +214,18 @@ fn process_test_core(
             artifact_store,
         ),
     ))
-        .provider(mock_provider())
-        .model(mock_model_spec())
-        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .trigger_store(trigger_store)
-        .process_registry(registry)
-        .advanced()
-        .runtime_host_config({
-            let mut config = lash_core::RuntimeHostConfig::in_memory();
-            config.durability.process_env_store = process_env_store;
-            config
-        })
-        .build()
+    .provider(mock_provider())
+    .model(mock_model_spec())
+    .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+    .trigger_store(trigger_store)
+    .process_registry(registry)
+    .advanced()
+    .runtime_host_config({
+        let mut config = lash_core::RuntimeHostConfig::in_memory();
+        config.durability.process_env_store = process_env_store;
+        config
+    })
+    .build()
 }
 
 fn in_memory_process_env_store() -> Arc<dyn lash_core::ProcessExecutionEnvStore> {

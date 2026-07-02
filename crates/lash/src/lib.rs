@@ -43,10 +43,11 @@ pub use crate::turn::{
 pub use lash_core::{
     AwaitEventKey, AwaitEventWaitIdentity, ExecutionSummary, ExternalCompletionError, InputItem,
     ModelLimits, ModelSpec, PendingTurnInput, PendingTurnInputCancelOutcome,
-    PendingTurnInputCancelResult, PendingTurnInputCancelTarget, PendingTurnInputSuffixCancelOutcome,
-    PluginStack, Resolution, ResolveOutcome, SessionCommand, SessionCommandReceipt,
-    SessionCreateRequest, SessionSpec, SessionStartPoint, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnCause, TurnEvent, TurnFinish, TurnInput, TurnOutcome, TurnStop,
+    PendingTurnInputCancelResult, PendingTurnInputCancelTarget,
+    PendingTurnInputSuffixCancelOutcome, PluginStack, Resolution, ResolveOutcome, SessionCommand,
+    SessionCommandReceipt, SessionCreateRequest, SessionSpec, SessionStartPoint, TurnActivity,
+    TurnActivityId, TurnActivitySink, TurnCause, TurnEvent, TurnFinish, TurnInput, TurnOutcome,
+    TurnStop,
 };
 /// Cooperative cancellation handle accepted by
 /// [`TurnBuilder::cancel`](crate::TurnBuilder::cancel); re-exported so
@@ -65,8 +66,8 @@ pub mod prelude {
         SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch, SessionCreateRequest,
         SessionDeleteReport, SessionSpec, SessionStartPoint, SessionTriggerAdmin, ToolAdmin,
         TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink, TurnBuilder, TurnCause,
-        TurnEvent, TurnFinish, TurnInput, TurnOutcome, TurnOutput, TurnResult, TurnStop, TurnStream,
-        message_role, message_text,
+        TurnEvent, TurnFinish, TurnInput, TurnOutcome, TurnOutput, TurnResult, TurnStop,
+        TurnStream, message_role, message_text,
     };
 }
 
@@ -282,9 +283,8 @@ pub mod runtime {
     pub use crate::core::AdvancedLashCoreBuilder;
     pub use lash_core::runtime::{
         AssembledTurn, AwaitEventResolver, DirectCompletionClient, EmbeddedRuntimeHost, EventSink,
-        ExecutionScope,
-        InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
-        NoopEventSink, NoopTurnActivitySink, ProcessCommand, ProcessEffectOutcome,
+        ExecutionScope, InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec,
+        LlmRequestSpec, NoopEventSink, NoopTurnActivitySink, ProcessCommand, ProcessEffectOutcome,
         QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest, RuntimeEffectCommand,
         RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
         RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
@@ -313,6 +313,8 @@ pub mod tracing {
         TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceSinkError, TraceTokenUsage,
         TraceToolSpec,
     };
+    #[cfg(feature = "otel-trace")]
+    pub use lash_core::{OtelTraceOptions, OtelTraceSink};
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
         TraceLashlangChildExecution, TraceLashlangEdgeSelection, TraceLashlangExecutionEvent,
@@ -320,8 +322,6 @@ pub mod tracing {
         TraceLashlangGraphEdge, TraceLashlangGraphNode, TraceLashlangGraphStore, TraceLashlangMap,
         TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangNodeStatus, TraceLashlangStatus,
     };
-    #[cfg(feature = "otel-trace")]
-    pub use lash_core::{OtelTraceOptions, OtelTraceSink};
     pub use lash_trace::{StderrTraceSink, TeeTraceSink, TraceContext, TraceLevel, TraceSink};
 }
 

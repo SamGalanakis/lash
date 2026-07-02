@@ -18,6 +18,10 @@ impl ExecutionMode {
     }
 }
 
+// The shared `Scenario` suffix names the distinct perf harness kinds and reads
+// naturally at the ~50 macro-driven call sites; it is not redundant with the
+// `ScenarioHarnessKind` type name.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub(crate) enum ScenarioHarnessKind {
     RuntimeScenario,

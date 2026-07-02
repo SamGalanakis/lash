@@ -56,7 +56,7 @@ fn standard_protocol_execution_boundary(
         .get("contract")
         .and_then(Value::as_str)
         .unwrap_or("standard.protocol.contract");
-    let proof_id = contract.replace('.', "-").replace('_', "-");
+    let proof_id = contract.replace(['.', '_'], "-");
     match contract {
         "standard.initial_request_projection" | "standard.streamed_text_finalizes_once" => {
             let provider = first_successful_provider(events).ok_or_else(|| {
@@ -220,8 +220,7 @@ fn agent_contract_execution_boundary(
         .get("contract")
         .and_then(Value::as_str)
         .unwrap_or("agent.contract")
-        .replace('.', "-")
-        .replace('_', "-");
+        .replace(['.', '_'], "-");
     Ok(contract_execution_boundary(
         &provider.actor_alias,
         &proof_id,
@@ -245,8 +244,7 @@ fn rlm_protocol_execution_boundary(
         .get("contract")
         .and_then(Value::as_str)
         .unwrap_or("rlm.protocol.contract")
-        .replace('.', "-")
-        .replace('_', "-");
+        .replace(['.', '_'], "-");
     Ok(contract_execution_boundary(
         &provider.actor_alias,
         &proof_id,

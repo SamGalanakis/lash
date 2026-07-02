@@ -132,7 +132,7 @@ pub fn build_tools_with_capabilities(
             let parameters = projected_schema(
                 provider,
                 &tool.input_schema,
-                &capabilities,
+                capabilities,
                 SchemaPurpose::ToolInput,
             )?;
             Ok(json!({
@@ -1114,7 +1114,7 @@ impl ResponsesStreamState {
         self.streamed_item_content_received = true;
         let target_index = output_index
             .and_then(|output_index| self.reasoning_parts_by_output.get(&output_index).copied())
-            .or_else(|| self.current_reasoning_part)
+            .or(self.current_reasoning_part)
             .or_else(|| {
                 self.parts
                     .iter()
@@ -1196,10 +1196,10 @@ impl ResponsesStreamState {
         let item_id = item.get("id").and_then(|v| v.as_str());
         let slot = self.tool_call_slot(output_index, item_id)?;
         let tool_call = self.tool_calls.entry(slot).or_default();
-        if tool_call.item_id.is_empty() {
-            if let Some(item_id) = item_id {
-                tool_call.item_id = item_id.to_string();
-            }
+        if tool_call.item_id.is_empty()
+            && let Some(item_id) = item_id
+        {
+            tool_call.item_id = item_id.to_string();
         }
         if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
             tool_call.call_id = call_id.to_string();

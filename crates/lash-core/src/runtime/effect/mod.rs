@@ -10,10 +10,9 @@ pub use envelope::{
 };
 pub use executor::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, EffectHost, ExecutionScope,
-    ExternalCompletionError,
-    InlineEffectHost, InlineRuntimeEffectController, Resolution, ResolveOutcome,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectLocalExecutor,
-    ScopedEffectController,
+    ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController, Resolution,
+    ResolveOutcome, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectLocalExecutor, ScopedEffectController,
 };
 pub use lash_sansio::CausalRef;
 

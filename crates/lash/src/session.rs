@@ -784,6 +784,12 @@ impl ObservableSession {
     }
 }
 
+// A public streaming yield produced one item at a time by `Stream::poll_next`;
+// the variant-size spread is transient (never accumulated in a collection), so
+// boxing would only add a per-event heap allocation on the observation hot path
+// and force `*`-deref churn on every SDK consumer. The sibling
+// `RemoteSessionObservationStreamItem` keeps the same inline shape.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum SessionObservationStreamItem {
     /// A replayed or live session observation event.

@@ -434,9 +434,11 @@ impl RuntimeHandle {
         .inspect(|input| {
             self.record_queue_changed(
                 SessionQueueEventKind::Enqueued,
-                is_next_turn
-                    .then(|| vec![input.input_id.clone()])
-                    .unwrap_or_default(),
+                if is_next_turn {
+                    vec![input.input_id.clone()]
+                } else {
+                    Vec::new()
+                },
             );
         })
     }

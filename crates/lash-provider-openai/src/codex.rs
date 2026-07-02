@@ -12,6 +12,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use crate::common::DEFAULT_HTTP_TRANSPORT;
 use crate::responses_shared as shared;
 use crate::schema::model_id;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
@@ -22,7 +23,6 @@ use lash_core::provider::{
     ProviderReliability, resolve_generation_policy,
 };
 use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
-use crate::common::DEFAULT_HTTP_TRANSPORT;
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::response_start_timeout;
 use lash_llm_transport::util::emit_provider_trace;
@@ -160,6 +160,13 @@ struct CodexWebSocketAttemptError {
     events_seen: bool,
     output_started: bool,
     stale_previous_response: bool,
+}
+
+/// One-shot WebSocket retries already consumed by the current send loop.
+#[derive(Clone, Copy, Default)]
+struct CodexWebsocketRetryState {
+    after_stale_previous_response: bool,
+    after_dead_reused_connection: bool,
 }
 
 fn has_xhigh_suffix(model: &str) -> bool {
@@ -817,7 +824,7 @@ impl CodexProvider {
         let scope_key = req.continuation_key();
 
         enum AcquireDecision {
-            Reuse(CodexWebsocketLease),
+            Reuse(Box<CodexWebsocketLease>),
             ConnectReusable(String),
             ConnectEphemeral,
         }
@@ -836,13 +843,13 @@ impl CodexProvider {
                 } else if let Some(websocket) = entry.connection.take() {
                     entry.busy = true;
                     entry.last_used = Instant::now();
-                    AcquireDecision::Reuse(CodexWebsocketLease {
+                    AcquireDecision::Reuse(Box::new(CodexWebsocketLease {
                         websocket,
                         scope_key: Some(scope_key),
                         reusable: true,
                         reused: true,
                         continuation: entry.continuation.clone(),
-                    })
+                    }))
                 } else {
                     *entry = CodexWebsocketSessionEntry::reserved();
                     AcquireDecision::ConnectReusable(scope_key.clone())
@@ -856,7 +863,7 @@ impl CodexProvider {
         };
 
         match decision {
-            AcquireDecision::Reuse(lease) => Ok(lease),
+            AcquireDecision::Reuse(lease) => Ok(*lease),
             AcquireDecision::ConnectEphemeral => {
                 let websocket = self.connect_websocket(req, connect_timeout).await?;
                 Ok(CodexWebsocketLease {
@@ -953,8 +960,7 @@ impl CodexProvider {
         let connect_timeout =
             response_start_timeout(timeouts.request_timeout, timeouts.chunk_timeout, true)
                 .unwrap_or(timeouts.chunk_timeout);
-        let mut retry_after_stale_previous_response = false;
-        let mut retry_after_dead_reused_connection = false;
+        let mut retry_state = CodexWebsocketRetryState::default();
         let mut allow_cached_context = self.websocket_continuation_enabled();
         loop {
             let lease = self.acquire_websocket(&req, connect_timeout).await?;
@@ -971,8 +977,7 @@ impl CodexProvider {
                     &full_body,
                     lease,
                     plan,
-                    retry_after_stale_previous_response,
-                    retry_after_dead_reused_connection,
+                    retry_state,
                     timeouts.chunk_timeout,
                 )
                 .await
@@ -982,10 +987,10 @@ impl CodexProvider {
                     if cached_request
                         && err.stale_previous_response
                         && !err.output_started
-                        && !retry_after_stale_previous_response =>
+                        && !retry_state.after_stale_previous_response =>
                 {
                     self.clear_continuation(&req);
-                    retry_after_stale_previous_response = true;
+                    retry_state.after_stale_previous_response = true;
                     allow_cached_context = false;
                     tracing::debug!(
                         target: "lash_core::llm::codex_oauth",
@@ -996,9 +1001,9 @@ impl CodexProvider {
                 Err(err)
                     if reused_connection
                         && !err.events_seen
-                        && !retry_after_dead_reused_connection =>
+                        && !retry_state.after_dead_reused_connection =>
                 {
-                    retry_after_dead_reused_connection = true;
+                    retry_state.after_dead_reused_connection = true;
                     allow_cached_context = false;
                     tracing::debug!(
                         target: "lash_core::llm::codex_oauth",
@@ -1017,8 +1022,7 @@ impl CodexProvider {
         full_body: &Value,
         lease: CodexWebsocketLease,
         plan: CodexWebsocketRequestPlan,
-        retry_after_stale_previous_response: bool,
-        retry_after_dead_reused_connection: bool,
+        retry_state: CodexWebsocketRetryState,
         read_timeout: Duration,
     ) -> Result<LlmResponse, CodexWebSocketAttemptError> {
         let stream_events = req.stream_events.clone();
@@ -1048,8 +1052,8 @@ impl CodexProvider {
             full_input_items: plan.full_input_items,
             sent_input_items: plan.sent_input_items,
             request_bytes: request_body.len(),
-            retry_after_stale_previous_response,
-            retry_after_dead_reused_connection,
+            retry_after_stale_previous_response: retry_state.after_stale_previous_response,
+            retry_after_dead_reused_connection: retry_state.after_dead_reused_connection,
         };
         self.emit_websocket_attempt_trace(provider_trace.as_ref(), &diagnostics);
         let mut lease = Some(lease);
@@ -1543,10 +1547,13 @@ impl Provider for CodexProvider {
         let success = resp.is_success();
         let body = resp.body;
         if !success {
-            let text =
-                read_http_body_text(body, timeouts.request_timeout, "Codex response body timed out")
-                    .await
-                    .unwrap_or_default();
+            let text = read_http_body_text(
+                body,
+                timeouts.request_timeout,
+                "Codex response body timed out",
+            )
+            .await
+            .unwrap_or_default();
             let message = Self::codex_error_summary(status, &text).unwrap_or_else(|| {
                 format!(
                     "Codex request failed with {}{}",
@@ -1574,12 +1581,13 @@ impl Provider for CodexProvider {
             Self::should_parse_stream(stream_events.is_some(), content_type.as_deref());
 
         if !parse_stream {
-            let text =
-                read_http_body_text(body, timeouts.request_timeout, "Codex response body timed out")
-                    .await
-                    .map_err(|err| {
-                        Self::non_sse_body_read_error(status, content_type.as_deref(), err)
-                    })?;
+            let text = read_http_body_text(
+                body,
+                timeouts.request_timeout,
+                "Codex response body timed out",
+            )
+            .await
+            .map_err(|err| Self::non_sse_body_read_error(status, content_type.as_deref(), err))?;
             emit_provider_trace(provider_trace.as_ref(), "codex", &text);
             if Self::looks_like_sse_payload(&text) {
                 let mut state = shared::ResponsesStreamState::default();
@@ -1931,10 +1939,14 @@ mod tests {
         },
     }
 
+    /// Captured request headers, one inner vec of `(name, value)` pairs per
+    /// WebSocket handshake the scripted server accepted.
+    type CapturedHandshakes = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+
     struct ScriptedWsServer {
         url: String,
         captured: Arc<Mutex<Vec<Value>>>,
-        handshakes: Arc<Mutex<Vec<Vec<(String, String)>>>>,
+        handshakes: CapturedHandshakes,
         task: JoinHandle<()>,
     }
 
@@ -2702,7 +2714,7 @@ mod tests {
         assert!(
             diagnostics[2]
                 .get("previous_response_id")
-                .map_or(true, Value::is_null)
+                .is_none_or(Value::is_null)
         );
     }
 

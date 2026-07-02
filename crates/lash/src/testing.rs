@@ -444,7 +444,10 @@ finish "registered"
     /// must use for out-of-turn process starts.
     async fn reopen_restores_trigger_registry_state(backend: RuntimeRebuildBackend) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
+        let core = (backend.build_core)(base_builder(
+            Arc::clone(&registry),
+            Arc::clone(&backend.artifact_store),
+        ));
         open_mutate_and_restart(&core, None, &registry).await;
 
         let reopened = core
@@ -468,7 +471,10 @@ finish "registered"
         backend: RuntimeRebuildBackend,
     ) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
+        let core = (backend.build_core)(base_builder(
+            Arc::clone(&registry),
+            Arc::clone(&backend.artifact_store),
+        ));
         open_mutate_and_restart(&core, None, &registry).await;
 
         let session = core
@@ -493,7 +499,10 @@ finish "registered"
         backend: RuntimeRebuildBackend,
     ) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
+        let core = (backend.build_core)(base_builder(
+            Arc::clone(&registry),
+            Arc::clone(&backend.artifact_store),
+        ));
         open_mutate_and_restart_with_prompt(
             &core,
             "register rebuild button trigger",
@@ -590,7 +599,10 @@ finish "registered"
         backend: RuntimeRebuildBackend,
     ) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
+        let core = (backend.build_core)(base_builder(
+            Arc::clone(&registry),
+            Arc::clone(&backend.artifact_store),
+        ));
         let registration = worker_registration(
             lash_core::ProcessInput::ToolCall {
                 call: lash_core::PreparedToolCall::from_parts(
@@ -613,7 +625,10 @@ finish "registered"
         backend: RuntimeRebuildBackend,
     ) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
+        let core = (backend.build_core)(base_builder(
+            Arc::clone(&registry),
+            Arc::clone(&backend.artifact_store),
+        ));
         let child_policy = lash_core::SessionPolicy {
             model: rebuild_model(),
             ..lash_core::SessionPolicy::default()
