@@ -46,9 +46,7 @@ struct Board {
 async fn projected_bindings(session: &LashSession, task: Task, board: Board) -> anyhow::Result<()> {
     // docs:start:projected-bindings
     use lash::TurnInput;
-    use lash_protocol_rlm::{
-        RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension,
-    };
+    use lash::rlm::{RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension};
 
     // Session-wide: applies to every turn the session runs.
     session
@@ -84,12 +82,12 @@ async fn lazy_projection() -> anyhow::Result<()> {
     // docs:start:lazy-projection
     use std::sync::Arc;
 
+    use lash::rlm::{ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt};
     use lash::{TurnInput, plugins::runtime_plugin_stack};
-    use lash_protocol_rlm::{ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt};
 
     let registry = Arc::new(ProjectionRegistry::new());
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
     )
     .with_projection_resolver(registry.clone());
@@ -313,8 +311,8 @@ async fn tone_session(
     sink: lash::runtime::NoopTurnActivitySink,
 ) -> anyhow::Result<()> {
     // docs:start:tone-session
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         std::sync::Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
     );
     let core = lash::LashCore::rlm_builder(factory)

@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use crate::common::DEFAULT_HTTP_TRANSPORT;
+use crate::common::{DEFAULT_HTTP_TRANSPORT, DEFAULT_MAX_OUTPUT_TOKENS};
 use crate::responses_shared as shared;
 use crate::schema::model_id;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
@@ -28,11 +28,13 @@ use lash_llm_transport::timeouts::response_start_timeout;
 use lash_llm_transport::util::emit_provider_trace;
 use lash_llm_transport::{
     LlmHttpMethod, LlmHttpRequest, LlmHttpTransport, first_header_value, header_contains,
-    openai_terminal_reason_from_response_value, openai_usage_from_response_value,
-    read_http_body_text,
+    http_error_envelope, openai_terminal_reason_from_response_value,
+    openai_usage_from_response_value, read_http_body_text,
 };
 
 pub mod oauth;
+#[cfg(any(test, feature = "testing"))]
+pub mod ws_testing;
 
 /// Provider name used in shared-machinery error messages and trace events.
 const PROVIDER: &str = "Codex";
@@ -42,17 +44,22 @@ const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"
 const OPENAI_GPT55_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
 const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
-const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 const SESSION_WEBSOCKET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const SESSION_WEBSOCKET_FALLBACK_TTL: Duration = Duration::from_secs(60);
 const MAX_SESSION_WEBSOCKET_CACHE_ENTRIES: usize = 32;
+/// Per-socket bound on the closing handshake during shutdown drain. A half-dead
+/// peer that never returns its Close frame must not stall the remaining cached
+/// sockets, so each close is best-effort and abandoned after this elapses.
+const SESSION_WEBSOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Transport-selection knob for Codex. Production always runs `Auto` (try the
 /// WebSocket transport, fall back to SSE). The non-`Auto` variants force a
-/// specific path and are a crate-internal test seam; hosts that must pin the
-/// HTTP/SSE path (e.g. the deterministic-simulation harness driving Provider
-/// Wire Scripts through an injected transport) use
-/// [`CodexProvider::force_sse_transport`] rather than naming these variants.
+/// specific path; hosts that must pin a path use
+/// [`CodexProvider::force_sse_transport`] (e.g. the deterministic-simulation
+/// harness driving Provider Wire Scripts through an injected transport) or
+/// [`CodexProvider::force_websocket_transport`] (e.g. the runtime-level
+/// WebSocket test) rather than naming these variants; `WebsocketCached`
+/// remains a crate-internal test seam.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CodexTransport {
@@ -245,17 +252,33 @@ impl CodexProvider {
     }
 
     /// Pin Codex to the HTTP/SSE transport, skipping the WebSocket path. This
-    /// is the only public transport-selection seam; it lets a host (notably the
-    /// deterministic-simulation harness) drive Codex's HTTP/SSE path through an
-    /// injected [`LlmHttpTransport`] without exposing the internal
-    /// [`CodexTransport`] variants.
+    /// lets a host (notably the deterministic-simulation harness) drive Codex's
+    /// HTTP/SSE path through an injected [`LlmHttpTransport`] without exposing
+    /// the internal [`CodexTransport`] variants.
     pub fn force_sse_transport(mut self) -> Self {
         self.transport = CodexTransport::Sse;
         self
     }
 
-    #[cfg(test)]
-    fn with_test_urls(
+    /// Pin Codex to the WebSocket transport, skipping the SSE fallback. The
+    /// WebSocket counterpart of [`CodexProvider::force_sse_transport`]: a host
+    /// (notably the runtime-level WebSocket test, which points the provider at
+    /// a local scripted server via [`CodexProvider::with_endpoint_urls`]) uses
+    /// it to exercise the WebSocket path deterministically instead of relying
+    /// on `Auto`'s try-then-fall-back behavior.
+    pub fn force_websocket_transport(mut self) -> Self {
+        self.transport = CodexTransport::Websocket;
+        self
+    }
+
+    /// Override the Codex Responses HTTP and WebSocket endpoint URLs. This is
+    /// a constructor-level injection seam in the same spirit as
+    /// [`CodexProvider::with_http_transport`]: production always uses the
+    /// built-in `chatgpt.com` endpoints, and the override is never serialized
+    /// into provider config ([`CodexProviderFactory`] always rebuilds with the
+    /// production URLs), so tests can point a provider instance at local
+    /// scripted servers without adding a user-facing behavior surface.
+    pub fn with_endpoint_urls(
         mut self,
         responses_url: impl Into<String>,
         websocket_url: impl Into<String>,
@@ -655,6 +678,42 @@ impl CodexProvider {
         removable.sort_by_key(|(_, last_used)| *last_used);
         for (scope_key, _) in removable.into_iter().take(excess) {
             sessions.by_scope.remove(&scope_key);
+        }
+    }
+
+    /// Drain the WebSocket session cache, sending a proper Close frame on every
+    /// idle cached connection before dropping it.
+    ///
+    /// This is the shutdown counterpart to the synchronous idle prune: the prune
+    /// path drops streams (a TCP-level close), whereas a host-driven shutdown
+    /// wants the WebSocket closing handshake. Busy entries are leased out to an
+    /// in-flight `complete` call — their stream is not held in the cache — so
+    /// this closes only idle, reusable sessions; the lease closes or re-caches
+    /// its own connection on release. The cache lock is provider-local and
+    /// non-async, so connections are taken out under the lock and closed after
+    /// it is released.
+    async fn close_websocket_sessions(&self) {
+        let connections: Vec<CodexWsStream> = {
+            let mut sessions = self
+                .websocket_sessions
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let drained = sessions
+                .by_scope
+                .drain()
+                .filter_map(|(_, entry)| entry.connection)
+                .collect();
+            sessions.fallback_by_scope.clear();
+            drained
+        };
+        for mut websocket in connections {
+            // Best-effort: a peer that already vanished cannot receive the frame,
+            // and shutdown must not fail because one socket is already gone. Bound
+            // each close so a half-dead peer that never returns its Close frame
+            // cannot stall the drain of the sockets still queued behind it.
+            let _ =
+                tokio::time::timeout(SESSION_WEBSOCKET_CLOSE_TIMEOUT, websocket.close(None)).await;
         }
     }
 
@@ -1566,15 +1625,13 @@ impl Provider for CodexProvider {
             });
             // Retryability is decided centrally by `CodexFailureClassifier`
             // from the attached HTTP status; no inline override here.
-            let mut err = LlmTransportError::new(message)
-                .with_kind(ProviderFailureKind::Http)
-                .with_status(status)
-                .with_headers(response_headers)
-                .with_raw(text);
-            if let Some(request_body) = request_body.clone() {
-                err = err.with_request_body(request_body);
-            }
-            return Err(err);
+            return Err(http_error_envelope(
+                message,
+                status,
+                response_headers,
+                text,
+                request_body.clone(),
+            ));
         }
 
         let parse_stream =
@@ -1629,6 +1686,7 @@ impl Provider for CodexProvider {
                     .with_raw(text.clone())
             })?;
             let content = shared::extract_text(&value);
+            let provider_usage = value.get("usage").cloned();
             let usage = openai_usage_from_response_value(&value);
             let mut parts = shared::response_parts_from_value(&value);
             if parts.is_empty() && !content.is_empty() {
@@ -1652,7 +1710,7 @@ impl Provider for CodexProvider {
                 usage,
                 terminal_reason,
                 terminal_diagnostic: None,
-                provider_usage: None,
+                provider_usage,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", self.responses_url)),
             });
@@ -1727,6 +1785,14 @@ impl Provider for CodexProvider {
         ))
     }
 
+    async fn close(&self) -> Result<(), LlmTransportError> {
+        // Drain the provider-local WebSocket session cache with real Close
+        // frames. The cache is shared across clones (Arc), so closing any handle
+        // a host retained releases the cached sockets for all of them.
+        self.close_websocket_sessions().await;
+        Ok(())
+    }
+
     fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
@@ -1788,17 +1854,12 @@ mod tests {
     };
     use lash_core::provider::{Provider, ProviderModelPolicy, RequestTimeout};
     use shared::ResponsesStreamState as CodexStreamState;
-    use std::collections::VecDeque;
     use std::num::NonZeroUsize;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
-    use tokio_tungstenite::accept_hdr_async;
-    use tokio_tungstenite::tungstenite::handshake::server::{
-        Request as WsHandshakeRequest, Response as WsHandshakeResponse,
-    };
-    use tokio_tungstenite::tungstenite::protocol::Message as TestWsMessage;
+    use ws_testing::{ScriptedWsAction, assistant_item, spawn_scripted_websocket};
 
     fn process_event(state: &mut CodexStreamState, event: Value) {
         CodexProvider::process_sse_event(&event.to_string(), state, None).unwrap();
@@ -1877,18 +1938,7 @@ mod tests {
                     .stream_chunk_timeout_ms(Some(50)),
                 ..ProviderOptions::default()
             })
-            .with_test_urls(responses_url, websocket_url)
-    }
-
-    fn assistant_item(message_id: &str, text: &str) -> Value {
-        json!({
-            "type": "message",
-            "id": message_id,
-            "role": "assistant",
-            "status": "completed",
-            "phase": "final_answer",
-            "content": [{"type": "output_text", "text": text, "annotations": []}]
-        })
+            .with_endpoint_urls(responses_url, websocket_url)
     }
 
     fn assistant_message_with_meta(message_id: &str, text: &str) -> LlmMessage {
@@ -1905,271 +1955,6 @@ mod tests {
                 cache_breakpoint: false,
             }],
         )
-    }
-
-    #[derive(Clone, Debug)]
-    enum ScriptedWsAction {
-        Complete {
-            response_id: &'static str,
-            message_id: &'static str,
-            text: &'static str,
-        },
-        CompleteAndClose {
-            response_id: &'static str,
-            message_id: &'static str,
-            text: &'static str,
-        },
-        Incomplete {
-            response_id: &'static str,
-            message_id: &'static str,
-            text: &'static str,
-        },
-        Error {
-            message: &'static str,
-        },
-        MidStreamError {
-            message_id: &'static str,
-            text: &'static str,
-            message: &'static str,
-        },
-        IdleBeforeStart,
-        IdleAfterStart {
-            message_id: &'static str,
-            text: &'static str,
-        },
-    }
-
-    /// Captured request headers, one inner vec of `(name, value)` pairs per
-    /// WebSocket handshake the scripted server accepted.
-    type CapturedHandshakes = Arc<Mutex<Vec<Vec<(String, String)>>>>;
-
-    struct ScriptedWsServer {
-        url: String,
-        captured: Arc<Mutex<Vec<Value>>>,
-        handshakes: CapturedHandshakes,
-        task: JoinHandle<()>,
-    }
-
-    impl ScriptedWsServer {
-        fn captured(&self) -> Vec<Value> {
-            self.captured
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        }
-
-        fn handshakes(&self) -> Vec<Vec<(String, String)>> {
-            self.handshakes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        }
-    }
-
-    impl Drop for ScriptedWsServer {
-        fn drop(&mut self) {
-            self.task.abort();
-        }
-    }
-
-    async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> ScriptedWsServer {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind ws");
-        let addr = listener.local_addr().expect("ws addr");
-        let actions = Arc::new(Mutex::new(VecDeque::from(actions)));
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let handshakes = Arc::new(Mutex::new(Vec::new()));
-        let task_actions = Arc::clone(&actions);
-        let task_captured = Arc::clone(&captured);
-        let task_handshakes = Arc::clone(&handshakes);
-        let task = tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let actions = Arc::clone(&task_actions);
-                let captured = Arc::clone(&task_captured);
-                let handshakes = Arc::clone(&task_handshakes);
-                tokio::spawn(async move {
-                    let callback =
-                        move |request: &WsHandshakeRequest, response: WsHandshakeResponse| {
-                            let headers = request
-                                .headers()
-                                .iter()
-                                .filter_map(|(name, value)| {
-                                    value
-                                        .to_str()
-                                        .ok()
-                                        .map(|value| (name.as_str().to_string(), value.to_string()))
-                                })
-                                .collect::<Vec<_>>();
-                            handshakes
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .push(headers);
-                            Ok(response)
-                        };
-                    let Ok(mut ws) = accept_hdr_async(stream, callback).await else {
-                        return;
-                    };
-                    while let Some(Ok(message)) = ws.next().await {
-                        let text = match message {
-                            TestWsMessage::Text(text) => text.to_string(),
-                            TestWsMessage::Binary(bytes) => {
-                                String::from_utf8(bytes.to_vec()).unwrap_or_default()
-                            }
-                            TestWsMessage::Close(_) => break,
-                            TestWsMessage::Ping(_)
-                            | TestWsMessage::Pong(_)
-                            | TestWsMessage::Frame(_) => {
-                                continue;
-                            }
-                        };
-                        let request: Value = serde_json::from_str(&text).expect("ws request json");
-                        captured
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push(request);
-                        let action = actions
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .pop_front()
-                            .expect("scripted ws action");
-                        match action {
-                            ScriptedWsAction::Complete {
-                                response_id,
-                                message_id,
-                                text,
-                            } => {
-                                send_completed_ws_response(&mut ws, response_id, message_id, text)
-                                    .await;
-                            }
-                            ScriptedWsAction::CompleteAndClose {
-                                response_id,
-                                message_id,
-                                text,
-                            } => {
-                                send_completed_ws_response(&mut ws, response_id, message_id, text)
-                                    .await;
-                                let _ = ws.close(None).await;
-                                break;
-                            }
-                            ScriptedWsAction::Incomplete {
-                                response_id,
-                                message_id,
-                                text,
-                            } => {
-                                send_incomplete_ws_response(&mut ws, response_id, message_id, text)
-                                    .await;
-                            }
-                            ScriptedWsAction::Error { message } => {
-                                send_ws_json(
-                                    &mut ws,
-                                    json!({"type":"error","error":{"message": message}}),
-                                )
-                                .await;
-                            }
-                            ScriptedWsAction::MidStreamError {
-                                message_id,
-                                text,
-                                message,
-                            } => {
-                                send_ws_json(
-                                    &mut ws,
-                                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":message_id,"status":"in_progress","phase":"final_answer","content":[]}}),
-                                )
-                                .await;
-                                send_ws_json(
-                                    &mut ws,
-                                    json!({"type":"response.output_text.delta","output_index":0,"item_id":message_id,"delta":text}),
-                                )
-                                .await;
-                                send_ws_json(
-                                    &mut ws,
-                                    json!({"type":"error","error":{"message": message}}),
-                                )
-                                .await;
-                            }
-                            ScriptedWsAction::IdleBeforeStart => {
-                                tokio::time::sleep(Duration::from_secs(60)).await;
-                            }
-                            ScriptedWsAction::IdleAfterStart { message_id, text } => {
-                                send_ws_json(
-                                    &mut ws,
-                                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":message_id,"status":"in_progress","phase":"final_answer","content":[]}}),
-                                )
-                                .await;
-                                send_ws_json(
-                                    &mut ws,
-                                    json!({"type":"response.output_text.delta","output_index":0,"item_id":message_id,"delta":text}),
-                                )
-                                .await;
-                                tokio::time::sleep(Duration::from_secs(60)).await;
-                            }
-                        }
-                    }
-                });
-            }
-        });
-        ScriptedWsServer {
-            url: format!("ws://{addr}/codex/responses"),
-            captured,
-            handshakes,
-            task,
-        }
-    }
-
-    async fn send_ws_json(ws: &mut WebSocketStream<tokio::net::TcpStream>, value: Value) {
-        ws.send(TestWsMessage::Text(value.to_string().into()))
-            .await
-            .expect("send ws event");
-    }
-
-    async fn send_completed_ws_response(
-        ws: &mut WebSocketStream<tokio::net::TcpStream>,
-        response_id: &str,
-        message_id: &str,
-        text: &str,
-    ) {
-        let item = assistant_item(message_id, text);
-        send_ws_json(
-            ws,
-            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":message_id,"status":"in_progress","phase":"final_answer","content":[]}}),
-        )
-        .await;
-        send_ws_json(
-            ws,
-            json!({"type":"response.output_text.delta","output_index":0,"item_id":message_id,"delta":text}),
-        )
-        .await;
-        send_ws_json(
-            ws,
-            json!({"type":"response.output_item.done","output_index":0,"item":item}),
-        )
-        .await;
-        send_ws_json(
-            ws,
-            json!({"type":"response.completed","response":{"id":response_id,"status":"completed","output":[assistant_item(message_id, text)],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
-        )
-        .await;
-    }
-
-    async fn send_incomplete_ws_response(
-        ws: &mut WebSocketStream<tokio::net::TcpStream>,
-        response_id: &str,
-        message_id: &str,
-        text: &str,
-    ) {
-        let item = assistant_item(message_id, text);
-        send_ws_json(
-            ws,
-            json!({"type":"response.output_item.done","output_index":0,"item":item}),
-        )
-        .await;
-        send_ws_json(
-            ws,
-            json!({"type":"response.completed","response":{"id":response_id,"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[assistant_item(message_id, text)],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
-        )
-        .await;
     }
 
     struct HttpSseServer {
@@ -2825,6 +2610,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_provider_close_sends_websocket_close_frame_for_cached_session() {
+        let ws = spawn_scripted_websocket(vec![ScriptedWsAction::Complete {
+            response_id: "resp_1",
+            message_id: "msg_1",
+            text: "answer",
+        }])
+        .await;
+        let provider = websocket_test_provider(
+            CodexTransport::WebsocketCached,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+
+        // A completed turn leaves a reusable WebSocket session cached.
+        let mut running = provider.clone();
+        running
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .await
+            .expect("first response");
+        assert_eq!(ws.close_frame_count(), 0, "no close before shutdown");
+
+        // The host-callable close drains the cache with a proper Close frame,
+        // not a bare TCP drop. The cache is shared across clones, so closing the
+        // retained clone releases the socket the running handle cached.
+        provider.close().await.expect("provider close");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ws.close_frame_count() == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            ws.close_frame_count(),
+            1,
+            "close() must send a WebSocket Close frame to the cached session"
+        );
+
+        // The cache is empty after close.
+        assert!(
+            provider
+                .websocket_sessions
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .by_scope
+                .is_empty(),
+            "close() drains the session cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_provider_close_drains_a_dead_cached_socket_within_bound() {
+        // A peer that closed its side leaves a dead socket in the cache. The
+        // bounded, best-effort per-socket close must tolerate it: close() returns
+        // promptly and still empties the cache, so a wedged socket can never fail
+        // the drain or stall the sockets queued behind it.
+        let ws = spawn_scripted_websocket(vec![ScriptedWsAction::CompleteAndClose {
+            response_id: "resp_1",
+            message_id: "msg_1",
+            text: "answer",
+        }])
+        .await;
+        let provider = websocket_test_provider(
+            CodexTransport::WebsocketCached,
+            "http://127.0.0.1:9/unused".to_string(),
+            ws.url.clone(),
+        );
+
+        let mut running = provider.clone();
+        running
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .await
+            .expect("first response");
+        // Let the peer's Close frame land so the cached socket is genuinely dead,
+        // without a reuse ever polling (and evicting) it first.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            provider
+                .websocket_sessions
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .by_scope
+                .len(),
+            1,
+            "the completed turn leaves a (now dead) socket cached for the drain"
+        );
+
+        // An unbounded close on a wedged socket could hang here; the per-socket
+        // timeout keeps the drain moving. The outer guard turns a regression into
+        // a failure instead of hanging the whole suite.
+        let started = Instant::now();
+        tokio::time::timeout(Duration::from_secs(20), provider.close())
+            .await
+            .expect("close() must not hang draining a dead cached socket")
+            .expect("provider close");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "each socket close is bounded, drain took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            provider
+                .websocket_sessions
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .by_scope
+                .is_empty(),
+            "close() drains the cache even when a cached socket is dead"
+        );
+    }
+
+    #[tokio::test]
     async fn codex_scripted_websocket_same_session_different_frame_does_not_reuse_continuation() {
         let ws = spawn_scripted_websocket(vec![
             ScriptedWsAction::Complete {
@@ -3257,6 +3155,29 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, ProviderFailureKind::Validation);
         assert!(err.message.contains("allOf"));
+    }
+
+    #[test]
+    fn codex_stream_response_carries_raw_usage_sidecar() {
+        let mut state = CodexStreamState::default();
+        process_event(
+            &mut state,
+            json!({"type":"response.completed","response":{
+                "id":"resp_usage",
+                "status":"completed",
+                "output":[assistant_item("msg_usage","hi")],
+                "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+            }}),
+        );
+
+        let response = response_from_state(state);
+
+        assert_eq!(
+            response.provider_usage,
+            Some(json!({"input_tokens":3,"output_tokens":2,"total_tokens":5}))
+        );
+        assert_eq!(response.usage.input_tokens, 3);
+        assert_eq!(response.usage.output_tokens, 2);
     }
 
     #[test]

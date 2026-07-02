@@ -232,6 +232,13 @@ impl lash_core::AttachmentStore for DurableMemoryAttachmentStore {
     ) -> Result<lash_core::StoredAttachment, lash_core::AttachmentStoreError> {
         self.inner.get(id).await
     }
+
+    async fn delete(
+        &self,
+        id: &lash_core::AttachmentId,
+    ) -> Result<(), lash_core::AttachmentStoreError> {
+        self.inner.delete(id).await
+    }
 }
 
 #[derive(Default)]
@@ -270,8 +277,10 @@ struct CommitRetryStore {
 
 lash_core::impl_noop_attachment_manifest!(CommitRetryStore);
 
+// Pass-through wrapper over the shared in-memory recovery store; every
+// segment delegates to `inner`.
 #[async_trait::async_trait]
-impl lash_core::RuntimePersistence for CommitRetryStore {
+impl lash_core::SessionCommitStore for CommitRetryStore {
     fn durability_tier(&self) -> lash_core::DurabilityTier {
         lash_core::DurabilityTier::Durable
     }
@@ -297,6 +306,22 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
         self.inner.commit_runtime_state(commit).await
     }
 
+    async fn save_session_meta(
+        &self,
+        meta: lash_core::SessionMeta,
+    ) -> Result<(), lash_core::StoreError> {
+        self.inner.save_session_meta(meta).await
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> Result<Option<lash_core::SessionMeta>, lash_core::StoreError> {
+        self.inner.load_session_meta().await
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::SessionExecutionLeaseStore for CommitRetryStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
@@ -336,7 +361,10 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
     ) -> Result<(), lash_core::StoreError> {
         self.inner.release_session_execution_lease(completion).await
     }
+}
 
+#[async_trait::async_trait]
+impl lash_core::QueuedWorkStore for CommitRetryStore {
     async fn enqueue_queued_work(
         &self,
         batch: lash_core::runtime::QueuedWorkBatchDraft,
@@ -416,19 +444,102 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
         self.inner.list_queued_work(session_id).await
     }
 
-    async fn save_session_meta(
+    async fn list_pending_queued_work(
         &self,
-        meta: lash_core::SessionMeta,
+        session_id: &str,
+    ) -> Result<Vec<lash_core::runtime::QueuedWorkBatch>, lash_core::StoreError> {
+        self.inner.list_pending_queued_work(session_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::TurnInputStore for CommitRetryStore {
+    async fn enqueue_pending_turn_input(
+        &self,
+        input: lash_core::PendingTurnInputDraft,
+    ) -> Result<lash_core::PendingTurnInput, lash_core::StoreError> {
+        self.inner.enqueue_pending_turn_input(input).await
+    }
+
+    async fn list_pending_turn_inputs(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<lash_core::PendingTurnInput>, lash_core::StoreError> {
+        self.inner.list_pending_turn_inputs(session_id).await
+    }
+
+    async fn cancel_pending_turn_inputs(
+        &self,
+        session_id: &str,
+        targets: &[lash_core::PendingTurnInputCancelTarget],
+    ) -> Result<Vec<lash_core::PendingTurnInputCancelResult>, lash_core::StoreError> {
+        self.inner
+            .cancel_pending_turn_inputs(session_id, targets)
+            .await
+    }
+
+    async fn cancel_pending_turn_input_suffix(
+        &self,
+        session_id: &str,
+        anchor: &lash_core::PendingTurnInputCancelTarget,
+    ) -> Result<lash_core::PendingTurnInputSuffixCancelOutcome, lash_core::StoreError> {
+        self.inner
+            .cancel_pending_turn_input_suffix(session_id, anchor)
+            .await
+    }
+
+    async fn claim_active_turn_inputs(
+        &self,
+        session_id: &str,
+        session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        owner: &lash_core::LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: lash_core::CheckpointKind,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<lash_core::runtime::TurnInputClaim>, lash_core::StoreError> {
+        self.inner
+            .claim_active_turn_inputs(
+                session_id,
+                session_execution_lease,
+                owner,
+                turn_id,
+                checkpoint,
+                lease_ttl_ms,
+                max_inputs,
+            )
+            .await
+    }
+
+    async fn claim_next_turn_inputs(
+        &self,
+        session_id: &str,
+        session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        owner: &lash_core::LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<lash_core::runtime::TurnInputClaim>, lash_core::StoreError> {
+        self.inner
+            .claim_next_turn_inputs(
+                session_id,
+                session_execution_lease,
+                owner,
+                lease_ttl_ms,
+                max_inputs,
+            )
+            .await
+    }
+
+    async fn abandon_turn_input_claim(
+        &self,
+        claim: &lash_core::runtime::TurnInputClaim,
     ) -> Result<(), lash_core::StoreError> {
-        self.inner.save_session_meta(meta).await
+        self.inner.abandon_turn_input_claim(claim).await
     }
+}
 
-    async fn load_session_meta(
-        &self,
-    ) -> Result<Option<lash_core::SessionMeta>, lash_core::StoreError> {
-        self.inner.load_session_meta().await
-    }
-
+#[async_trait::async_trait]
+impl lash_core::StoreMaintenance for CommitRetryStore {
     async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), lash_core::StoreError> {
         self.inner.tombstone_nodes(ids).await
     }
@@ -1270,6 +1381,85 @@ async fn restate_handler_reports_non_process_await_event_resolution_unknown() {
             .expect("resolved events lock")
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn restate_handler_cancels_individual_wait_via_documented_workaround() {
+    // The per-wait workaround the session-wide lever points at: resolving a
+    // known key with `Resolution::Cancelled` is accepted and durably recorded
+    // by the process workflow handler under the exact promise key.
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let key = AwaitEventResolver::await_event_key(
+        &host,
+        &ExecutionScope::process("process-cancel-wait"),
+        AwaitEventWaitIdentity::tool_completion("tool-call-cancel"),
+    )
+    .await
+    .expect("await event key");
+
+    let outcome = AwaitEventResolver::resolve_await_event(&host, &key, Resolution::Cancelled)
+        .await
+        .expect("cancel individual wait");
+
+    assert_eq!(outcome, ResolveOutcome::Accepted);
+    let resolved = context
+        .resolved_events
+        .lock()
+        .expect("resolved events lock");
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].process_id, "process-cancel-wait");
+    assert_eq!(resolved[0].key, key.promise_key());
+    assert_eq!(resolved[0].resolution, Resolution::Cancelled);
+}
+
+#[tokio::test]
+async fn restate_handler_controller_rejects_cancel_by_session_with_documented_error() {
+    // Restate cannot enumerate a session's outstanding promises, so the
+    // session-wide lever fails loudly with a specific error naming the
+    // per-wait workaround instead of faking success.
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+
+    let err = AwaitEventResolver::cancel_await_events_for_session(&host, "restate-session")
+        .await
+        .expect_err("Restate must reject session-wide durable-wait cancellation");
+
+    assert_eq!(
+        err.code.as_str(),
+        "restate_await_event_cancel_by_session_unsupported"
+    );
+    assert!(
+        err.message.contains("resolve_await_event"),
+        "error must name the per-wait workaround: {}",
+        err.message
+    );
+    // Refusing must not resolve anything.
+    assert!(
+        context
+            .resolved_events
+            .lock()
+            .expect("resolved events lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn restate_effect_host_rejects_cancel_by_session_with_documented_error() {
+    // The deployment-level host delegates to its controller and surfaces the
+    // same documented refusal, so `LashSession::revoke_durable_waits` reports a
+    // specific limitation on Restate deployments.
+    let host = RestateEffectHost::new();
+
+    let err = AwaitEventResolver::cancel_await_events_for_session(&host, "restate-session")
+        .await
+        .expect_err("Restate effect host must reject session-wide cancellation");
+
+    assert_eq!(
+        err.code.as_str(),
+        "restate_await_event_cancel_by_session_unsupported"
+    );
+    assert!(err.message.contains("resolve_await_event"));
 }
 
 fn replay_test_policy(session_id: &str) -> lash_core::SessionPolicy {

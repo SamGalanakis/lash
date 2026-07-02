@@ -118,7 +118,7 @@ impl GoogleOAuthProvider {
             )
             .await
             .unwrap_or_default();
-            return Err(http_error_envelope_from_pairs(
+            return Err(http_error_envelope(
                 format!("Gemini Files upload start failed with {}", status),
                 status,
                 headers,
@@ -159,7 +159,7 @@ impl GoogleOAuthProvider {
             )
             .await
             .unwrap_or_default();
-            return Err(http_error_envelope_from_pairs(
+            return Err(http_error_envelope(
                 format!("Gemini Files upload finalize failed with {}", status),
                 status,
                 headers,

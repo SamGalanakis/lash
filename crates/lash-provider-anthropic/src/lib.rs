@@ -273,6 +273,44 @@ mod tests {
     }
 
     #[test]
+    fn stream_merges_raw_usage_sidecar_across_message_start_and_delta() {
+        let mut state = StreamState::default();
+        for event in [
+            json!({
+                "type": "message_start",
+                "message": {"usage": {
+                    "input_tokens": 25,
+                    "cache_read_input_tokens": 5,
+                    "cache_creation_input_tokens": 2,
+                    "output_tokens": 1
+                }}
+            }),
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 40}
+            }),
+        ] {
+            AnthropicProvider::process_sse_event(&event.to_string(), &mut state, None, true)
+                .expect("sse event");
+        }
+
+        // The raw sidecar overlays `message_delta`'s cumulative output count
+        // onto `message_start`'s input/cache buckets instead of last-wins.
+        assert_eq!(
+            state.provider_usage,
+            Some(json!({
+                "input_tokens": 25,
+                "cache_read_input_tokens": 5,
+                "cache_creation_input_tokens": 2,
+                "output_tokens": 40
+            }))
+        );
+        assert_eq!(state.usage.input_tokens, 25);
+        assert_eq!(state.usage.output_tokens, 40);
+    }
+
+    #[test]
     fn thinking_display_is_omitted_unless_provider_exposes_thinking() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "extract")]);
         req.model_variant = Some("medium".to_string());

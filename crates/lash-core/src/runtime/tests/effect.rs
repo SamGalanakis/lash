@@ -380,6 +380,13 @@ impl crate::AttachmentStore for DurableInMemoryAttachmentStore {
     ) -> Result<crate::StoredAttachment, crate::AttachmentStoreError> {
         self.inner.get(id).await
     }
+
+    async fn delete(
+        &self,
+        id: &lash_sansio::AttachmentId,
+    ) -> Result<(), crate::AttachmentStoreError> {
+        self.inner.delete(id).await
+    }
 }
 
 /// A process env store that reports a durable tier over in-memory storage.

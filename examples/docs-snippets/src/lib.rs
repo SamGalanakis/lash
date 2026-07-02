@@ -8,13 +8,16 @@
 //! stops compiling against the current API.
 #![allow(dead_code, unused_variables, unused_imports)]
 
+mod architecture_execution;
 mod embedding;
 mod embedding_advanced;
 mod embedding_prompts;
 mod embedding_turns;
 mod example_agent_service;
 mod example_agent_workbench;
+mod execution_modes;
 mod index;
+mod operations;
 mod persistence;
 mod plugins;
 mod plugins_runtime;

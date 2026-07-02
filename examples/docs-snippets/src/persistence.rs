@@ -18,8 +18,8 @@ async fn sqlite_core(provider: ProviderHandle, model: String) -> anyhow::Result<
     let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
     let artifact_store = Arc::new(Store::open(&data_dir.join("artifacts.db")).await?);
 
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         artifact_store,
     );
     let core = lash::LashCore::rlm_builder(factory)
@@ -69,8 +69,8 @@ async fn postgres_core(database_url: String) -> anyhow::Result<()> {
         .prefix("prod/lash")
         .build()?;
 
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         Arc::new(storage.lashlang_artifact_store()),
     );
     let core = lash::LashCore::rlm_builder(factory)
@@ -164,8 +164,8 @@ async fn shared_factory(
     let artifact_store =
         Arc::new(lash_sqlite_store::Store::open(&data_dir.join("lash-artifacts.db")).await?);
 
-    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    let factory = lash::rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default(),
         artifact_store,
     );
     let core = lash::LashCore::rlm_builder(factory)

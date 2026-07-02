@@ -18,7 +18,7 @@ pub(crate) use lash_core::provider::{
     resolve_generation_policy,
 };
 pub(crate) use lash_llm_transport::normalize::{
-    serialize_options_tail, terminal_reason_from_parts,
+    http_error_envelope, serialize_options_tail, terminal_reason_from_parts,
 };
 pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 pub(crate) use lash_llm_transport::timeouts::response_start_timeout;
@@ -31,30 +31,15 @@ pub(crate) use lash_llm_transport::{
 pub(crate) use crate::config::*;
 
 /// Mutable accumulators a single Cloud Code SSE event folds into: the running
-/// full text, the per-event text deltas, the usage snapshot, optional tool-call
-/// and text output-part sinks, and the last finish-bearing event.
+/// full text, the per-event text deltas, the usage snapshot (normalized plus
+/// the raw `usageMetadata` sidecar), optional tool-call and text output-part
+/// sinks, and the last finish-bearing event.
 pub(crate) struct SseTextPartSink<'a> {
     pub full: &'a mut String,
     pub text_deltas: &'a mut Vec<String>,
     pub usage: &'a mut LlmUsage,
+    pub provider_usage: &'a mut Option<Value>,
     pub tool_call_parts: Option<&'a mut Vec<LlmOutputPart>>,
     pub text_parts: Option<&'a mut Vec<LlmOutputPart>>,
     pub finish_event: &'a mut Option<Value>,
-}
-
-pub(crate) fn http_error_envelope_from_pairs(
-    message: impl Into<String>,
-    status: u16,
-    headers: Vec<(String, String)>,
-    raw_body: impl Into<String>,
-    request_body: Option<String>,
-) -> LlmTransportError {
-    let mut err = LlmTransportError::new(message)
-        .with_status(status)
-        .with_headers(headers)
-        .with_raw(raw_body);
-    if let Some(request_body) = request_body {
-        err = err.with_request_body(request_body);
-    }
-    err
 }

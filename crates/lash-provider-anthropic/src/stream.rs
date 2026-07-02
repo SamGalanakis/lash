@@ -37,7 +37,25 @@ pub(crate) enum BlockKind {
 pub(crate) struct StreamState {
     pub(crate) blocks: Vec<StreamBlock>,
     pub(crate) usage: LlmUsage,
+    /// Raw provider `usage` JSON sidecar. Anthropic splits it across the wire:
+    /// `message_start` carries the full input/cache buckets and `message_delta`
+    /// carries the cumulative output counters, so the raw blocks are
+    /// shallow-merged rather than last-wins.
+    pub(crate) provider_usage: Option<Value>,
     pub(crate) stop_reason: Option<String>,
+}
+
+/// Overlay the keys of `next` (a raw wire `usage` object) onto the captured
+/// sidecar, keeping earlier keys that a later event does not repeat.
+fn merge_raw_usage(provider_usage: &mut Option<Value>, next: &Value) {
+    match (provider_usage.as_mut().and_then(Value::as_object_mut), next) {
+        (Some(existing), Value::Object(next)) => {
+            for (key, value) in next {
+                existing.insert(key.clone(), value.clone());
+            }
+        }
+        _ => *provider_usage = Some(next.clone()),
+    }
 }
 
 fn parse_event(raw: &str) -> Option<Value> {
@@ -114,6 +132,7 @@ impl AnthropicProvider {
             "message_start" => {
                 if let Some(usage) = event.get("message").and_then(|m| m.get("usage")) {
                     state.usage = Self::parse_usage(usage);
+                    merge_raw_usage(&mut state.provider_usage, usage);
                     if let Some(tx) = stream_events
                         && state.usage != LlmUsage::default()
                     {
@@ -220,6 +239,7 @@ impl AnthropicProvider {
             }
             "message_delta" => {
                 if let Some(usage) = event.get("usage") {
+                    merge_raw_usage(&mut state.provider_usage, usage);
                     let new_usage = Self::parse_usage(usage);
                     let mut merged = state.usage.clone();
                     merge_usage(&mut merged, &new_usage);

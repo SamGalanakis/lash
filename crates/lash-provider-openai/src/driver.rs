@@ -147,11 +147,13 @@ pub(crate) async fn complete(
             .unwrap_or_else(|| format!("{} with {}", endpoint.request_failed_prefix(), status));
         // Retryability is decided centrally by the provider failure
         // classifier from the attached HTTP status; no inline override here.
-        return Err(LlmTransportError::new(message)
-            .with_status(status)
-            .with_headers(headers)
-            .with_raw(text)
-            .with_request_body(request_body_for_error));
+        return Err(http_error_envelope(
+            message,
+            status,
+            headers,
+            text,
+            Some(request_body_for_error),
+        ));
     }
 
     let is_sse = header_contains(&resp.headers, "content-type", "text/event-stream");

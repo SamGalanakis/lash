@@ -23,7 +23,7 @@ restate-sdk = { workspace = true, optional = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tokio-stream = "0.1"
 uuid = { workspace = true, features = ["v4"] }
 

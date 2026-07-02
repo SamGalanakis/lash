@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::persistence::RuntimePersistence;
+    use lash::persistence::QueuedWorkStore;
     use lash::rlm::RlmTurnBuilderExt;
     use lash::tracing::{
         TraceBranchSelection, TraceLashlangChildExecution, TraceLashlangEdgeSelection,

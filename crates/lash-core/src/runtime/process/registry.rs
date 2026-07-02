@@ -5,8 +5,8 @@ use super::events::{
 };
 use super::model::{
     ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessLease, ProcessLeaseCompletion, ProcessListFilter, ProcessRecord, ProcessRegistration,
-    ProcessSessionDeleteReport, SessionScope, WaitState,
+    ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessListFilter,
+    ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, SessionScope, WaitState,
 };
 
 /// Durability-neutral process registry.
@@ -192,17 +192,37 @@ pub trait ProcessRegistry: Send + Sync {
 
     /// Claim the durable single-owner lease over a non-terminal process.
     ///
-    /// An unexpired lease held by a *different* owner fences the claim (returns
-    /// an error); claiming a free, expired, or own lease succeeds and bumps the
-    /// `fencing_token`. The returned [`ProcessLease`]'s
-    /// `(owner_id, lease_token)` plus `fencing_token` are the contract a worker
-    /// presents on every subsequent renew/complete — a stale writer is rejected.
+    /// An unexpired lease held by a *different* owner returns
+    /// [`ProcessLeaseClaimOutcome::Busy`] carrying the observed holder;
+    /// claiming a free or expired lease succeeds and bumps the
+    /// `fencing_token`, and the same incarnation re-entering its own live
+    /// lease extends it without changing token or fence. The returned
+    /// [`ProcessLease`]'s `(owner, lease_token)` plus `fencing_token` are the
+    /// contract a worker presents on every subsequent renew/complete — a stale
+    /// writer is rejected.
     async fn claim_process_lease(
         &self,
         process_id: &str,
-        owner_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
         lease_ttl_ms: u64,
-    ) -> Result<ProcessLease, PluginError>;
+    ) -> Result<ProcessLeaseClaimOutcome, PluginError>;
+
+    /// Reclaim an unexpired process lease whose observed holder is definitely
+    /// dead according to persisted local-process liveness metadata.
+    ///
+    /// Mirrors
+    /// [`RuntimePersistence::reclaim_session_execution_lease`](crate::RuntimePersistence::reclaim_session_execution_lease):
+    /// backends must CAS on `observed_holder` (owner identity, lease token,
+    /// and fencing token) so a stale claimant cannot clear a newer live lease
+    /// that won the race after the busy observation, and a successful reclaim
+    /// must advance the fencing token monotonically.
+    async fn reclaim_process_lease(
+        &self,
+        process_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
+        observed_holder: &ProcessLease,
+        lease_ttl_ms: u64,
+    ) -> Result<ProcessLeaseClaimOutcome, PluginError>;
 
     /// Extend the expiry of a live lease the caller still owns.
     ///

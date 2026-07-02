@@ -46,6 +46,7 @@ fn validate_generation_options(
             capacity.get()
         ),
         retryable: false,
+        kind: crate::ProviderFailureKind::Validation,
         raw: None,
         code: Some("output_token_cap_exceeds_model_capacity".to_string()),
         terminal_reason: crate::LlmTerminalReason::ProviderError,
@@ -106,6 +107,7 @@ impl RuntimeTurnDriver<'_> {
             .map_err(|err| LlmCallError {
                 message: err.to_string(),
                 retryable: false,
+                kind: crate::ProviderFailureKind::Unknown,
                 raw: None,
                 code: Some("plugin_assistant_stream".to_string()),
                 terminal_reason: crate::LlmTerminalReason::ProviderError,
@@ -149,6 +151,7 @@ impl RuntimeTurnDriver<'_> {
             .map_err(|err| LlmCallError {
                 message: err.to_string(),
                 retryable: false,
+                kind: crate::ProviderFailureKind::Unknown,
                 raw: None,
                 code: Some("plugin_assistant_response".to_string()),
                 terminal_reason: crate::LlmTerminalReason::ProviderError,
@@ -187,6 +190,7 @@ impl RuntimeTurnDriver<'_> {
                     Err(LlmCallError {
                         message: err.to_string(),
                         retryable: false,
+                        kind: crate::ProviderFailureKind::Unknown,
                         raw: None,
                         code: Some("attachment_resolution_failed".to_string()),
                         terminal_reason: crate::LlmTerminalReason::ProviderError,
@@ -258,6 +262,7 @@ impl RuntimeTurnDriver<'_> {
                     break Err(LlmCallError {
                         message: "cancelled".to_string(),
                         retryable: false,
+                        kind: crate::ProviderFailureKind::Unknown,
                         raw: None,
                         code: Some("cancelled".to_string()),
                         terminal_reason: crate::LlmTerminalReason::Cancelled,
@@ -322,6 +327,7 @@ impl RuntimeTurnDriver<'_> {
                         Err(e) => break Err(LlmCallError {
                             message: format!("internal task failed: {e}"),
                             retryable: false,
+                            kind: crate::ProviderFailureKind::Unknown,
                             raw: None,
                             code: Some("task_join_failed".to_string()),
                             terminal_reason: crate::LlmTerminalReason::ProviderError,
@@ -336,6 +342,7 @@ impl RuntimeTurnDriver<'_> {
                         Err(err) => break Err(LlmCallError {
                             message: err.to_string(),
                             retryable: false,
+                            kind: crate::ProviderFailureKind::Unknown,
                             raw: None,
                             code: Some("provider_binding_mismatch".to_string()),
                             terminal_reason: crate::LlmTerminalReason::ProviderError,
@@ -363,6 +370,7 @@ impl RuntimeTurnDriver<'_> {
                         Err(e) => break Err(LlmCallError {
                             message: e.message,
                             retryable: e.retryable,
+                            kind: e.kind,
                             raw: e.raw,
                             code: e.code,
                             terminal_reason: e.terminal_reason,

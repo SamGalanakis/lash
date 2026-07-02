@@ -204,7 +204,7 @@ impl Store {
         let mut roots = Self::live_checkpoint_roots(tx)?;
         {
             let mut stmt = tx
-                .prepare("SELECT blob_ref FROM artifact_refs ORDER BY artifact_ref")
+                .prepare("SELECT blob_ref FROM artifact_refs ORDER BY namespace, artifact_ref")
                 .map_err(sqlite_error)?;
             let rows = stmt
                 .query_map([], |row| row.get::<_, String>(0))

@@ -99,11 +99,13 @@ impl Provider for AnthropicProvider {
             } else {
                 format!("Anthropic request failed with {}", status)
             };
-            return Err(LlmTransportError::new(message)
-                .with_status(status)
-                .with_headers(headers)
-                .with_raw(text)
-                .with_request_body(request_body.clone().unwrap_or_default()));
+            return Err(http_error_envelope(
+                message,
+                status,
+                headers,
+                text,
+                request_body.clone(),
+            ));
         }
 
         let mut state = StreamState::default();
@@ -119,6 +121,7 @@ impl Provider for AnthropicProvider {
         )
         .await?;
 
+        let provider_usage = state.provider_usage.take();
         let (parts, full_text, usage, terminal_reason) = Self::finalize(state);
         Ok(LlmResponse {
             full_text,
@@ -126,7 +129,7 @@ impl Provider for AnthropicProvider {
             usage,
             terminal_reason,
             terminal_diagnostic: None,
-            provider_usage: None,
+            provider_usage,
             request_body,
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
         })

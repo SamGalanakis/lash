@@ -30,6 +30,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
+lash-lashlang-runtime = { workspace = true, features = ["testing"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

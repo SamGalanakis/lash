@@ -8,7 +8,9 @@ anchors, registry entries, and asset versions should already be coherent.
 
 from __future__ import annotations
 
+import gzip
 import html
+import json
 import os
 import re
 import sys
@@ -20,6 +22,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 DOCS_JS = DOCS / "docs.js"
+PAGEFIND_FRAGMENTS = DOCS / "pagefind" / "fragment"
 
 MOVED_STUBS = {
     "architecture.html",
@@ -205,6 +208,46 @@ def check_registry(errors: list[str], pages: dict[Path, PageParser]) -> list[str
     return canonical
 
 
+def indexed_pages(errors: list[str]) -> set[str] | None:
+    """Docs pages present in the shipped Pagefind bundle.
+
+    Pagefind stores one gzip-compressed fragment per indexed page; each holds a
+    ``pagefind_dcd``-prefixed JSON blob whose ``url`` is the page path. Reading
+    those urls back is the only way to know which pages the checked-in index
+    actually covers — ``pagefind-entry.json`` records just a page count, and the
+    fragment/index filenames are content hashes. Returns ``None`` (after logging)
+    when the bundle is absent so callers skip coverage rather than crash."""
+    if not PAGEFIND_FRAGMENTS.is_dir():
+        rel = PAGEFIND_FRAGMENTS.relative_to(ROOT).as_posix()
+        errors.append(f"pagefind fragment directory missing: {rel}")
+        return None
+    covered: set[str] = set()
+    for fragment in PAGEFIND_FRAGMENTS.glob("*.pf_fragment"):
+        raw = gzip.decompress(fragment.read_bytes())
+        start = raw.find(b"{")
+        if start < 0:
+            continue
+        url = json.loads(raw[start:]).get("url")
+        if url:
+            covered.add(normalize_href(url))
+    return covered
+
+
+def check_pagefind_coverage(errors: list[str], canonical: list[str]) -> None:
+    """Every nav-registered page must ship in the Pagefind index, so a page can
+    never be linked in the docs nav yet be unsearchable. When this fails, the
+    index is stale: regenerate it per docs/PUBLISHING.md ("Docs search index")."""
+    covered = indexed_pages(errors)
+    if covered is None:
+        return
+    for href in canonical:
+        if href not in covered:
+            errors.append(
+                f"docs.js registry page missing from pagefind index "
+                f"(regenerate docs/pagefind — see docs/PUBLISHING.md): {href}"
+            )
+
+
 def check_links(errors: list[str], pages: dict[Path, PageParser]) -> None:
     ids_by_path = {path: parser.ids for path, parser in pages.items()}
     for source, parser in pages.items():
@@ -327,23 +370,28 @@ def snippet_regions(errors: list[str]) -> dict[str, dict[str, str]]:
 
 
 def check_code_snippets(errors: list[str], fix: bool) -> None:
-    """Every `<pre>` on a published page declares what it is: `data-snippet`
-    blocks mirror a compiled region of the docs-snippets crate verbatim
-    (`cargo check -p docs-snippets` keeps them building); `data-lang` blocks
-    are display-only (shell transcripts, Lashlang, API-shape excerpts)."""
+    """Every `<pre>` on a published top-level page declares what it is:
+    `data-snippet` blocks mirror a compiled region of the docs-snippets crate
+    verbatim (`cargo check -p docs-snippets` keeps them building); `data-lang`
+    blocks are display-only (shell transcripts, Lashlang, API-shape excerpts).
+
+    `data-snippet` blocks are compiled-and-synced wherever they appear, including
+    the `architecture/` sub-pages; the "declare yourself" rule stays scoped to
+    top-level pages so hand-authored architecture prose blocks are left alone."""
     regions = snippet_regions(errors)
     referenced: set[str] = set()
-    for path in sorted(DOCS.glob("*.html")):
+    for path in sorted(DOCS.rglob("*.html")):
         rel = path.relative_to(ROOT).as_posix()
+        enforce_declaration = path.parent == DOCS
         text = path.read_text(encoding="utf-8")
         changed = False
 
-        def replace(m: re.Match[str]) -> str:
+        def replace(m: re.Match[str], enforce_declaration: bool = enforce_declaration) -> str:
             nonlocal changed
             attrs, body = m.group(1), m.group(2)
             snippet = re.search(r'data-snippet="([^"]+)"', attrs)
             if snippet is None:
-                if not re.search(r'data-lang="[^"]+"', attrs):
+                if enforce_declaration and not re.search(r'data-lang="[^"]+"', attrs):
                     errors.append(
                         f"{rel}: <pre> needs data-snippet (compiled, synced) or data-lang (display-only)"
                     )
@@ -425,6 +473,7 @@ def main() -> int:
     errors: list[str] = []
     pages = parse_pages()
     canonical = check_registry(errors, pages)
+    check_pagefind_coverage(errors, canonical)
     check_links(errors, pages)
     check_asset_versions(errors, pages)
     check_pagers(errors, canonical, pages)

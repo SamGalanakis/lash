@@ -1,6 +1,9 @@
 //! The runtime's settled-session persistence contract and shared store types.
 
+mod lease_timings;
 pub mod queued_work;
+
+pub use lease_timings::{LeaseTimings, LeaseTimingsError};
 
 const PROC_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 
@@ -226,7 +229,7 @@ pub struct GcReport {
     pub deleted_blob_count: usize,
 }
 
-/// Result of a `RuntimePersistence::vacuum()` call.
+/// Result of a `StoreMaintenance::vacuum()` call.
 /// `removed_node_count` counts the tombstoned graph-node rows that were
 /// physically deleted from the store. `removed_pending_turn_input_tombstone_count`
 /// counts terminal pending-input evidence rows pruned by host-scheduled
@@ -630,7 +633,7 @@ impl SessionExecutionLeaseClaimOutcome {
 /// wrapper before each `put`, so the manifest is a durable record that
 /// "some bytes are about to land at this URI." When the turn that
 /// references the attachment commits successfully via
-/// [`RuntimePersistence::commit_runtime_state`], the same transaction
+/// [`SessionCommitStore::commit_runtime_state`], the same transaction
 /// stamps `committed_at_epoch_ms`. Periodic GC sweeps manifest rows
 /// whose intent has aged past a host-chosen threshold without ever
 /// being committed and deletes the corresponding bytes — that's how we
@@ -657,15 +660,15 @@ pub struct AttachmentManifestEntry {
     pub committed_at_epoch_ms: Option<u64>,
 }
 
-/// Trait alias for the synchronous attachment-manifest surface on
-/// [`RuntimePersistence`]. Used by
+/// The synchronous attachment-manifest surface required from every
+/// [`SessionCommitStore`]. Used by
 /// [`SessionScopedAttachmentStore`](crate::SessionScopedAttachmentStore)
 /// to record intent rows before `put` and by GC sweeps to reconcile
 /// orphans. See the [`AttachmentIntent`] doc comment for the full
 /// crash-safety story.
 ///
 /// Backends with no attachment story (in-memory tests, mock stores)
-/// inherit the default no-op impls on [`RuntimePersistence`] and
+/// paste no-op impls via [`impl_noop_attachment_manifest!`] and
 /// participate transparently — `record_intent` is a no-op, the
 /// scoped wrapper still works, and GC sweeps return empty.
 pub trait AttachmentManifest: Send + Sync {
@@ -698,7 +701,7 @@ pub trait AttachmentManifest: Send + Sync {
     fn forget(&self, attachment_id: &crate::AttachmentId) -> Result<(), StoreError>;
 }
 
-/// Mixin macro for [`RuntimePersistence`] implementors that have no
+/// Mixin macro for [`SessionCommitStore`] implementors that have no
 /// attachment-write story (mock backends, in-memory test stores,
 /// runtime-perf harnesses). Pastes no-op impls of every
 /// [`AttachmentManifest`] method.
@@ -1087,24 +1090,26 @@ impl Default for SessionHeadMeta {
     }
 }
 
-/// Exact settled-session persistence protocol required by the runtime.
+/// Settled-session commit/read capability: the runtime's atomic transaction
+/// facade for visible session state.
 ///
-/// This is the runtime's atomic transaction facade for visible session state:
-/// session graph/head commits, queued-work ingress and completion, final
-/// turn-commit idempotency, metadata, usage, and the attachment write-ahead
-/// manifest. In-flight nondeterministic work belongs to the active
+/// This segment owns session graph/head commits, checkpoint hydration and
+/// usage, final turn-commit idempotency, session metadata, and the attachment
+/// write-ahead manifest. Queued-work and turn-input *completions* also settle
+/// here — [`commit_runtime_state`](Self::commit_runtime_state) consumes claims
+/// granted by [`QueuedWorkStore`] and [`TurnInputStore`] in the same atomic
+/// commit. In-flight nondeterministic work belongs to the active
 /// [`EffectHost`](crate::EffectHost), not to the store contract.
 ///
 /// The [`AttachmentManifest`] supertrait is required so the runtime can wrap
 /// any persistence backend with a
 /// [`SessionScopedAttachmentStore`](crate::SessionScopedAttachmentStore)
 /// without dual-trait casting. Backends with no attachment-write story can
-/// implement the manifest methods as no-ops via
-/// [`NoopAttachmentManifest`]'s blanket helpers.
+/// paste no-op manifest impls via [`impl_noop_attachment_manifest!`].
 #[async_trait::async_trait]
-pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
+pub trait SessionCommitStore: AttachmentManifest + Send + Sync {
     /// Durability tier this session store provides; defaults to
-    /// [`DurabilityTier::Inline`].
+    /// [`DurabilityTier::Inline`](crate::DurabilityTier::Inline).
     fn durability_tier(&self) -> crate::DurabilityTier {
         crate::DurabilityTier::Inline
     }
@@ -1124,19 +1129,24 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError>;
 
+    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError>;
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError>;
+}
+
+/// Pending turn-input lifecycle capability: durable ingress for model-visible
+/// user input.
+///
+/// Active-turn ingress is claimed only by the matching live turn at a
+/// checkpoint. Next-turn ingress is claimed only by idle dispatch. User input
+/// must not be represented as generic queued work. Claims granted here are
+/// completed atomically by [`SessionCommitStore::commit_runtime_state`].
+#[async_trait::async_trait]
+pub trait TurnInputStore: Send + Sync {
     /// Persist model-visible user input into the pending turn-input lifecycle.
-    ///
-    /// Active-turn ingress is claimed only by the matching live turn at a
-    /// checkpoint. Next-turn ingress is claimed only by idle dispatch. User
-    /// input must not be represented as generic queued work.
     async fn enqueue_pending_turn_input(
         &self,
-        _input: crate::PendingTurnInputDraft,
-    ) -> Result<crate::PendingTurnInput, StoreError> {
-        Err(StoreError::Backend(
-            "pending turn input is not supported by this test store".to_string(),
-        ))
-    }
+        input: crate::PendingTurnInputDraft,
+    ) -> Result<crate::PendingTurnInput, StoreError>;
 
     /// List pending user inputs for UI reconciliation and queue preview.
     ///
@@ -1144,12 +1154,15 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     /// claim. Expired claims are visible again according to their state.
     async fn list_pending_turn_inputs(
         &self,
-        _session_id: &str,
-    ) -> Result<Vec<crate::PendingTurnInput>, StoreError> {
-        Ok(Vec::new())
-    }
+        session_id: &str,
+    ) -> Result<Vec<crate::PendingTurnInput>, StoreError>;
 
     /// Cancel an unclaimed pending user input by id.
+    ///
+    /// Provided convenience: the singular form is exactly
+    /// [`cancel_pending_turn_inputs`](Self::cancel_pending_turn_inputs) with a
+    /// one-element target list, so backends implement only the plural
+    /// primitive.
     async fn cancel_pending_turn_input(
         &self,
         session_id: &str,
@@ -1169,24 +1182,16 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     /// Atomically cancel a list of pending user inputs by input id or source key.
     async fn cancel_pending_turn_inputs(
         &self,
-        _session_id: &str,
-        _targets: &[crate::PendingTurnInputCancelTarget],
-    ) -> Result<Vec<crate::PendingTurnInputCancelResult>, StoreError> {
-        Err(StoreError::Backend(
-            "pending turn input is not supported by this test store".to_string(),
-        ))
-    }
+        session_id: &str,
+        targets: &[crate::PendingTurnInputCancelTarget],
+    ) -> Result<Vec<crate::PendingTurnInputCancelResult>, StoreError>;
 
     /// Atomically cancel the same-session runtime-admission suffix from an anchor.
     async fn cancel_pending_turn_input_suffix(
         &self,
-        _session_id: &str,
+        session_id: &str,
         anchor: &crate::PendingTurnInputCancelTarget,
-    ) -> Result<crate::PendingTurnInputSuffixCancelOutcome, StoreError> {
-        Err(StoreError::Backend(format!(
-            "pending turn input suffix cancellation is not supported by this test store for anchor `{anchor:?}`"
-        )))
-    }
+    ) -> Result<crate::PendingTurnInputSuffixCancelOutcome, StoreError>;
 
     /// Claim active-turn input at a checkpoint for the live turn id.
     // The parameters are the cohesive, all-required identity/lease inputs of a
@@ -1198,40 +1203,35 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     async fn claim_active_turn_inputs(
         &self,
         session_id: &str,
-        _session_execution_lease: &SessionExecutionLeaseFence,
-        _owner: &LeaseOwnerIdentity,
-        _turn_id: &str,
-        _checkpoint: crate::CheckpointKind,
-        _lease_ttl_ms: u64,
-        _max_inputs: usize,
-    ) -> Result<Option<crate::TurnInputClaim>, StoreError> {
-        Err(StoreError::Backend(format!(
-            "pending turn input is not supported for session `{session_id}` by this test store"
-        )))
-    }
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: crate::CheckpointKind,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<crate::TurnInputClaim>, StoreError>;
 
     /// Claim queued next-turn input at idle.
     async fn claim_next_turn_inputs(
         &self,
         session_id: &str,
-        _session_execution_lease: &SessionExecutionLeaseFence,
-        _owner: &LeaseOwnerIdentity,
-        _lease_ttl_ms: u64,
-        _max_inputs: usize,
-    ) -> Result<Option<crate::TurnInputClaim>, StoreError> {
-        Err(StoreError::Backend(format!(
-            "pending turn input is not supported for session `{session_id}` by this test store"
-        )))
-    }
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+        max_inputs: usize,
+    ) -> Result<Option<crate::TurnInputClaim>, StoreError>;
 
     /// Abandon a held pending-turn-input claim so it can be reclaimed.
     async fn abandon_turn_input_claim(
         &self,
-        _claim: &crate::TurnInputClaim,
-    ) -> Result<(), StoreError> {
-        Ok(())
-    }
+        claim: &crate::TurnInputClaim,
+    ) -> Result<(), StoreError>;
+}
 
+/// Durable single-writer execution-lane capability, fenced by monotonic
+/// fencing tokens.
+#[async_trait::async_trait]
+pub trait SessionExecutionLeaseStore: Send + Sync {
     /// Try to claim the durable single-writer execution lane for `session_id`.
     ///
     /// Returns [`SessionExecutionLeaseClaimOutcome::Busy`] when another owner
@@ -1275,20 +1275,20 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         &self,
         completion: &SessionExecutionLeaseCompletion,
     ) -> Result<(), StoreError>;
+}
 
+/// Durable queued-work capability: ingress, ordered claiming, and claim leases
+/// for non-input work (process wakes and session commands).
+///
+/// Claims granted here are completed atomically by
+/// [`SessionCommitStore::commit_runtime_state`].
+#[async_trait::async_trait]
+pub trait QueuedWorkStore: Send + Sync {
     /// Persist a queued-work batch for later claiming.
-    ///
-    /// The default implementation rejects the batch: backends that do not
-    /// support queued work inherit it and stay loud rather than silently
-    /// dropping work.
     async fn enqueue_queued_work(
         &self,
-        _batch: crate::QueuedWorkBatchDraft,
-    ) -> Result<crate::QueuedWorkBatch, StoreError> {
-        Err(StoreError::Backend(
-            "queued work is not supported by this test store".to_string(),
-        ))
-    }
+        batch: crate::QueuedWorkBatchDraft,
+    ) -> Result<crate::QueuedWorkBatch, StoreError>;
 
     /// Claim a leading ready session-command batch for `owner_id`.
     ///
@@ -1296,18 +1296,13 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     /// is classified as [`crate::runtime::QueuedWorkClass::SessionCommand`].
     /// Backends derive the class from queued payloads; no schema column is
     /// required.
-    /// The default implementation reports queued work as unsupported.
     async fn claim_leading_ready_session_command(
         &self,
         session_id: &str,
-        _session_execution_lease: &SessionExecutionLeaseFence,
-        _owner: &LeaseOwnerIdentity,
-        _lease_ttl_ms: u64,
-    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError> {
-        Err(StoreError::Backend(format!(
-            "queued work is not supported for session `{session_id}` by this test store"
-        )))
-    }
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
 
     /// Claim the next ready turn-work group for `owner_id`.
     ///
@@ -1315,30 +1310,27 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     /// batch is classified as [`crate::runtime::QueuedWorkClass::TurnWork`].
     /// Earlier ready session commands are not skipped and are never
     /// materialized as turn input.
-    ///
-    /// The default implementation reports queued work as unsupported.
     async fn claim_ready_queued_work(
         &self,
         session_id: &str,
-        _session_execution_lease: &SessionExecutionLeaseFence,
-        _owner: &LeaseOwnerIdentity,
-        _boundary: crate::QueuedWorkClaimBoundary,
-        _lease_ttl_ms: u64,
-        _max_batches: usize,
-    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError> {
-        Err(StoreError::Backend(format!(
-            "queued work is not supported for session `{session_id}` by this test store"
-        )))
-    }
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        boundary: crate::QueuedWorkClaimBoundary,
+        lease_ttl_ms: u64,
+        max_batches: usize,
+    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
 
     /// Claim a specific ready batch set selected from the durable queue.
     ///
-    /// This is the host-facing counterpart to [`claim_ready_queued_work`]:
-    /// callers that project queued work into a UI can claim the exact batch ids
-    /// they rendered instead of reconstructing authority from local draft state.
-    /// The default implementation preserves the ordered queue contract by
-    /// claiming the next ready group and returning it only when the durable ids
-    /// match exactly.
+    /// This is the host-facing counterpart to
+    /// [`claim_ready_queued_work`](Self::claim_ready_queued_work): callers that
+    /// project queued work into a UI can claim the exact batch ids they
+    /// rendered instead of reconstructing authority from local draft state.
+    ///
+    /// Provided derivation: preserves the ordered queue contract by claiming
+    /// the next ready group and returning it only when the durable ids match
+    /// exactly, abandoning the claim otherwise. Backends may override it with
+    /// a native query; none currently need to.
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         session_id: &str,
@@ -1377,30 +1369,17 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     }
 
     /// Extend the lease on a held queued-work claim.
-    ///
-    /// The default implementation reports the claim as expired, matching a
-    /// backend that never granted one.
     async fn renew_queued_work_claim(
         &self,
         claim: &crate::QueuedWorkClaim,
-        _lease_ttl_ms: u64,
-    ) -> Result<crate::QueuedWorkClaim, StoreError> {
-        Err(StoreError::QueuedWorkClaimExpired {
-            session_id: claim.session_id.clone(),
-            claim_id: claim.claim_id.clone(),
-        })
-    }
+        lease_ttl_ms: u64,
+    ) -> Result<crate::QueuedWorkClaim, StoreError>;
 
     /// Release a held queued-work claim without completing it.
-    ///
-    /// The default implementation is a no-op: with no queued work there is
-    /// nothing to release.
     async fn abandon_queued_work_claim(
         &self,
-        _claim: &crate::QueuedWorkClaim,
-    ) -> Result<(), StoreError> {
-        Ok(())
-    }
+        claim: &crate::QueuedWorkClaim,
+    ) -> Result<(), StoreError>;
 
     /// Remove an unclaimed queued-work batch from durable ingress.
     ///
@@ -1408,44 +1387,84 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     /// when the batch is missing or currently held by a live claim; callers must
     /// treat that as "already claimed or completed" and must not restore any
     /// stale local draft state.
-    ///
-    /// The default implementation reports `None` (nothing queued, nothing to
-    /// cancel).
     async fn cancel_queued_work_batch(
         &self,
-        _session_id: &str,
-        _batch_id: &str,
-    ) -> Result<Option<crate::QueuedWorkBatch>, StoreError> {
-        Ok(None)
-    }
+        session_id: &str,
+        batch_id: &str,
+    ) -> Result<Option<crate::QueuedWorkBatch>, StoreError>;
 
-    /// List all queued-work batches for a session.
-    ///
-    /// The default implementation reports an empty queue.
+    /// List all queued-work batches for a session, including batches held by a
+    /// live claim.
     async fn list_queued_work(
         &self,
-        _session_id: &str,
-    ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError> {
-        Ok(Vec::new())
-    }
+        session_id: &str,
+    ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError>;
 
     /// List queued-work batches that are still pending presentation/editing.
     ///
     /// This excludes batches currently held by a live claim. Expired claims are
     /// considered pending again because they can be reclaimed or cancelled.
+    ///
+    /// This is a distinct required query, not a derivation of
+    /// [`list_queued_work`](Self::list_queued_work): the two differ by
+    /// claim-state filter, and backends answer each with its own query over
+    /// claim rows rather than leaking claim state to callers for client-side
+    /// filtering.
     async fn list_pending_queued_work(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError> {
-        self.list_queued_work(session_id).await
-    }
+    ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError>;
+}
 
-    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError>;
-    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError>;
-
+/// Host-scheduled retention and garbage-collection capability over settled
+/// state.
+#[async_trait::async_trait]
+pub trait StoreMaintenance: Send + Sync {
+    /// Mark graph nodes as tombstoned so reads exclude them until
+    /// [`vacuum`](Self::vacuum) physically removes them.
     async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), StoreError>;
+
+    /// Physically delete tombstoned graph-node rows and prune terminal
+    /// pending-turn-input evidence rows. See [`VacuumReport`].
     async fn vacuum(&self) -> Result<VacuumReport, StoreError>;
+
+    /// Delete blobs no longer reachable from any retained root.
     async fn gc_unreachable(&self) -> Result<GcReport, StoreError>;
+}
+
+/// Exact settled-session persistence protocol required by the runtime.
+///
+/// `Arc<dyn RuntimePersistence>` is *the* runtime storage handle: one object
+/// implementing every persistence capability segment —
+/// [`SessionCommitStore`] (atomic graph/head commits, reads, metadata, and the
+/// attachment write-ahead manifest), [`TurnInputStore`] (pending turn-input
+/// lifecycle), [`QueuedWorkStore`] (queued-work ingress and claiming),
+/// [`SessionExecutionLeaseStore`] (single-writer execution lane), and
+/// [`StoreMaintenance`] (vacuum/GC). The segments share one transactional
+/// domain: claims granted by the input and queue segments settle atomically in
+/// [`SessionCommitStore::commit_runtime_state`]. In-flight nondeterministic
+/// work belongs to the active [`EffectHost`](crate::EffectHost), not to the
+/// store contract.
+///
+/// Blanket-implemented for every type that implements all five segments;
+/// backends implement the segment traits and never this trait directly.
+pub trait RuntimePersistence:
+    SessionCommitStore
+    + TurnInputStore
+    + SessionExecutionLeaseStore
+    + QueuedWorkStore
+    + StoreMaintenance
+{
+}
+
+impl<T> RuntimePersistence for T where
+    T: SessionCommitStore
+        + TurnInputStore
+        + SessionExecutionLeaseStore
+        + QueuedWorkStore
+        + StoreMaintenance
+        + ?Sized
+{
 }
 
 fn persisted_session_state_from_read(read: PersistedSessionRead) -> crate::RuntimeSessionState {

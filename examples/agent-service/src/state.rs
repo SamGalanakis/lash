@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use lash::persistence::LeaseOwnerIdentity;
 use lash::{LashCore, LashSession};
 use serde_json::json;
 
@@ -15,6 +16,10 @@ pub(crate) type AppResult<T> = Result<T, AppError>;
 pub(crate) struct AppStateData {
     core: LashCore,
     db: Arc<Mutex<AppDb>>,
+    // Stable owner id + per-boot incarnation for durable session-execution
+    // leases. Attached to every session open so a crashed boot's leases are
+    // reclaimable by the next boot (see `open_session`).
+    session_owner: LeaseOwnerIdentity,
     default_model: String,
     default_model_variant: Option<String>,
     #[cfg_attr(not(feature = "restate"), allow(dead_code))]
@@ -30,6 +35,7 @@ impl AppStateData {
     pub(crate) fn from_shared_db(
         core: LashCore,
         db: Arc<Mutex<AppDb>>,
+        session_owner: LeaseOwnerIdentity,
         default_model: String,
         default_model_variant: Option<String>,
         durability: AgentServiceDurability,
@@ -38,6 +44,7 @@ impl AppStateData {
         Self {
             core,
             db,
+            session_owner,
             default_model,
             default_model_variant,
             durability,
@@ -50,6 +57,7 @@ impl AppStateData {
     pub(crate) fn new(
         core: LashCore,
         db: AppDb,
+        session_owner: LeaseOwnerIdentity,
         default_model: String,
         default_model_variant: Option<String>,
         durability: AgentServiceDurability,
@@ -57,10 +65,16 @@ impl AppStateData {
         Self {
             core,
             db: Arc::new(Mutex::new(db)),
+            session_owner,
             default_model,
             default_model_variant,
             durability,
         }
+    }
+
+    /// The core, retained for the shutdown drain (trace flush).
+    pub(crate) fn core(&self) -> &LashCore {
+        &self.core
     }
 
     pub(crate) fn default_model(&self) -> &str {
@@ -93,6 +107,10 @@ impl AppStateData {
             .plugin::<DemoPlugin>(DemoPluginConfig {
                 db: Arc::clone(&self.db),
             })
+            // Explicit owner identity: this boot's stable owner + incarnation, so
+            // a same-host peer that finds this process crashed can reclaim the
+            // session lease before its TTL instead of waiting the window out.
+            .session_execution_owner(self.session_owner.clone())
             .open()
             .await?)
     }

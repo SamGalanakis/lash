@@ -275,7 +275,7 @@ async fn finish_schema(core: &lash::LashCore) -> anyhow::Result<()> {
 
     let session = core
         .session("analysis")
-        .final_answer_format(RlmFinalAnswerFormat::RawFinalValue)
+        .final_answer_format(RlmFinalAnswerFormat::RawFinalValue)?
         .open()
         .await?;
 

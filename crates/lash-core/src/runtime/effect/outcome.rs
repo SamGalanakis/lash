@@ -130,6 +130,7 @@ pub(crate) fn llm_call_error_from_transport(err: LlmTransportError) -> LlmCallEr
     LlmCallError {
         message: err.message,
         retryable: err.retryable,
+        kind: err.kind,
         raw: err.raw,
         code: err.code,
         terminal_reason: err.terminal_reason,

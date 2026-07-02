@@ -1,19 +1,19 @@
 fn main() {
-    let input = lash::remote::RemoteTurnInput::text("hello");
-    let request = lash::remote::RemoteTurnRequest {
+    let input = lash::remote::turn_input::RemoteTurnInput::text("hello");
+    let request = lash::remote::turn_input::RemoteTurnRequest {
         protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
         session_id: "session".to_string(),
         turn_id: "turn".to_string(),
         idempotency_key: Some("session:turn".to_string()),
         input,
         tool_grants: Vec::new(),
-        model_intent: Some(lash::remote::RemoteModelIntent::new("gpt-test")),
+        model_intent: Some(lash::remote::llm::RemoteModelIntent::new("gpt-test")),
         metadata: std::collections::HashMap::new(),
     };
 
     request.validate().unwrap();
 
-    let trigger = lash::remote::RemoteTriggerOccurrenceRequest::new(
+    let trigger = lash::remote::triggers::RemoteTriggerOccurrenceRequest::new(
         "ui.button.pressed",
         "source-key",
         serde_json::json!({ "button": "Blue" }),
@@ -21,64 +21,64 @@ fn main() {
     );
     trigger.validate().unwrap();
 
-    let filter = lash::remote::RemoteTriggerSubscriptionFilter::for_source_type(
+    let filter = lash::remote::triggers::RemoteTriggerSubscriptionFilter::for_source_type(
         "ui.button.pressed",
     );
     filter.validate().unwrap();
 
-    let report = lash::remote::RemoteTriggerEmitReport {
+    let report = lash::remote::triggers::RemoteTriggerEmitReport {
         protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
         occurrence_id: "occurrence:1".to_string(),
         started_process_ids: Vec::new(),
     };
     report.validate().unwrap();
 
-    let _cause = lash::remote::RemoteCausalRef::TriggerOccurrence {
+    let _cause = lash::remote::turn_result::RemoteCausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
     };
 
-    let _queue = lash::remote::RemoteSessionObservationEventPayload::QueueChanged {
-        kind: lash::remote::RemoteSessionQueueEventKind::Enqueued,
+    let _queue = lash::remote::observations::RemoteSessionObservationEventPayload::QueueChanged {
+        kind: lash::remote::observations::RemoteSessionQueueEventKind::Enqueued,
         batch_ids: vec!["batch".to_string()],
     };
-    let observation = lash::remote::RemoteSessionObservation {
+    let observation = lash::remote::observations::RemoteSessionObservation {
         protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
         session_id: "session".to_string(),
         cursor: "lashsc1:0:0:session".to_string(),
         turn_index: 0,
-        usage: lash::remote::RemoteUsage::default(),
+        usage: lash::remote::usage::RemoteUsage::default(),
     };
     observation.validate().unwrap();
     let _remote_stream_item = lash::observe::RemoteSessionObservationStreamItem::Gap {
         observation,
-        gap: lash::remote::RemoteLiveReplayGap {
+        gap: lash::remote::observations::RemoteLiveReplayGap {
             protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
             session_id: "session".to_string(),
             requested_cursor: "lashsc1:0:0:session".to_string(),
             latest_cursor: "lashsc1:0:0:session".to_string(),
             latest_revision: 0,
-            reason: lash::remote::RemoteLiveReplayGapReason::Unavailable,
+            reason: lash::remote::observations::RemoteLiveReplayGapReason::Unavailable,
         },
     };
-    let _process = lash::remote::RemoteSessionObservationEventPayload::ProcessChanged {
-        kind: lash::remote::RemoteSessionProcessEventKind::Started,
+    let _process = lash::remote::observations::RemoteSessionObservationEventPayload::ProcessChanged {
+        kind: lash::remote::observations::RemoteSessionProcessEventKind::Started,
         process_ids: vec!["process".to_string()],
     };
 
-    let process_start = lash::remote::RemoteProcessStartRequest {
+    let process_start = lash::remote::processes::RemoteProcessStartRequest {
         protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
         id: "process".to_string(),
-        input: lash::remote::RemoteProcessInput::External {
+        input: lash::remote::processes::RemoteProcessInput::External {
             metadata: serde_json::json!({}),
         },
-        env_spec: Some(lash::remote::RemoteProcessExecutionEnvSpec {
-            plugin_options: lash::remote::RemoteProcessPluginOptions::default(),
-            policy: lash::remote::RemoteProcessExecutionPolicy {
+        env_spec: Some(lash::remote::processes::RemoteProcessExecutionEnvSpec {
+            plugin_options: lash::remote::processes::RemoteProcessPluginOptions::default(),
+            policy: lash::remote::processes::RemoteProcessExecutionPolicy {
                 provider_id: "provider".to_string(),
-                model: lash::remote::RemoteProcessModelSpec {
+                model: lash::remote::processes::RemoteProcessModelSpec {
                     id: "model".to_string(),
                     variant: None,
-                    limits: lash::remote::RemoteProcessModelLimits {
+                    limits: lash::remote::processes::RemoteProcessModelLimits {
                         context_window_tokens: 10,
                         output_token_capacity: Some(1),
                     },
@@ -86,7 +86,7 @@ fn main() {
                 ..Default::default()
             },
         }),
-        originator: lash::remote::RemoteProcessOriginator::Host,
+        originator: lash::remote::processes::RemoteProcessOriginator::Host,
         wake_target: None,
         grant: None,
         event_types: Vec::new(),

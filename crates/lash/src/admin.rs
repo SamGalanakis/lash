@@ -381,19 +381,10 @@ impl SessionAdmin {
     }
 
     async fn update_config(&self, patch: SessionConfigPatch) -> Result<()> {
-        self.update_session_config(patch.provider, patch.model, patch.prompt)
-            .await?;
-        Ok(())
-    }
-
-    async fn update_session_config(
-        &self,
-        provider: Option<ProviderHandle>,
-        model: Option<lash_core::ModelSpec>,
-        prompt: Option<PromptLayer>,
-    ) -> Result<()> {
         self.with_writer(async |runtime: &mut LashRuntime| {
-            runtime.update_session_config(provider, model, prompt).await;
+            runtime
+                .update_session_config(patch.provider, patch.model, patch.prompt)
+                .await;
         })
         .await;
         Ok(())

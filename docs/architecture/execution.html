@@ -54,7 +54,7 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Protocol Execution</h2>
-            <p>Two typed host-facing cores: <code>StandardCore</code> and <code>RlmCore</code>. Each installs one protocol driver and preamble. Background work and AgentFrame switches are cross-cutting outcomes either protocol can coordinate.</p>
+            <p>Two builder entry points on <code>LashCore</code>: <code>standard_builder()</code> and <code>rlm_builder(factory)</code>. Each pre-seeds one protocol plugin and preamble. Background work and AgentFrame switches are cross-cutting outcomes either protocol can coordinate.</p>
           </div>
           <div class="two-col">
             <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p>The Standard protocol interprets provider output through <code>StandardDriver</code> and emits <code>DriverAction::StartTools</code>. The runtime dispatches registered native tools first, then tools contributed by registered <code>ToolProvider</code>s.</p></article>
@@ -73,7 +73,7 @@ flowchart TD
             <div class="mermaid">
 flowchart LR
   App["host app<br/>HTTP / DB / auth / UI"] --> Core["LashCore<br/>shared runtime environment"]
-  Core --> Builder["StandardCoreBuilder / RlmCoreBuilder<br/>provider, model, tools, plugins"]
+  Core --> Builder["LashCoreBuilder<br/>standard_builder() / rlm_builder(factory)<br/>provider, model, tools, plugins"]
   Builder --> Advanced["runtime_host_config<br/>plugin host / runtime config"]
   Advanced --> Env["runtime environment<br/>plugins + stores + tracing"]
   App --> Session["core.session(id)<br/>SessionBuilder"]
@@ -86,9 +86,9 @@ flowchart LR
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
-            <dd>Cloneable shared core: runtime env, default session policy, one protocol plugin, effect host, session store factory, attachment store, trace sink, residency, and termination policy. Use <code>StandardCore</code> or <code>RlmCore</code> for built-in protocols; use generic <code>LashCore</code> only with an explicit custom protocol plugin.</dd>
-            <dt><code>RlmCore</code></dt>
-            <dd>RLM-specific facade that installs the RLM protocol and Lashlang process engine. Configure it with <code>rlm_protocol_config(...)</code>, <code>projection_resolver(...)</code>, and a Lashlang artifact store.</dd>
+            <dd>Cloneable shared core: runtime env, default session policy, one protocol plugin, effect host, session store factory, attachment store, trace sink, residency, and termination policy. Use <code>LashCore::standard_builder()</code> or <code>LashCore::rlm_builder(factory)</code> for built-in protocols; use <code>LashCore::builder()</code> only with an explicit custom protocol plugin.</dd>
+            <dt><code>LashCore::rlm_builder(factory)</code></dt>
+            <dd>Sugar entry point that installs the RLM protocol and Lashlang process engine from a host-configured <code>RlmProtocolPluginFactory</code> (projection resolver, deferred tool resolver, and a required Lashlang artifact store), plus the default runtime plugin stack.</dd>
             <dt><code>LashSession</code></dt>
             <dd>One conversation. Parked/resumable handle exposing <code>run(...)</code>, <code>turn(...)</code>, <code>read_view()</code>, <code>observe()</code>, and <code>admin()</code>. Carries an optional parent session id.</dd>
             <dt><code>TurnBuilder</code></dt>
@@ -100,18 +100,25 @@ flowchart LR
             <dt><code>SessionObservation</code></dt>
             <dd>Current session read view plus opaque cursor. Recent session observation events can be replayed for reconnect; persistent hosts should use <code>subscribe_and_recover</code>, which yields recoverable live replay gaps and resubscribes from the latest cursor.</dd>
           </dl>
-          <pre><code>let core = StandardCore::builder()
+          <pre data-lang="rust" data-snippet="architecture_execution#facade-turn"><code>let core = lash::LashCore::standard_builder()
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None).expect("valid model metadata"))
+    .model(
+        lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
+            .expect("valid model metadata"),
+    )
     .store_factory(store_factory)
-    .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
-    .attachment_store(std::sync::Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
+    .effect_host(std::sync::Arc::new(
+        lash::durability::InlineEffectHost::default(),
+    ))
+    .attachment_store(std::sync::Arc::new(
+        lash::persistence::FileAttachmentStore::new(data_dir.join("attachments")),
+    ))
     .build()?;
 
 let session = core.session(chat_id).open().await?;
 let result = session
     .turn(TurnInput::text(user_text))
-    .stream_to(&events)
+    .stream_to(&amp;events)
     .await?;</code></pre>
           <div class="two-col">
             <article class="panel"><h3>Example shape</h3><p><code>examples/agent-service</code>: opens a session per chat id, runs turns through the facade, streams browser reconnect rows from session observation DTOs, and keeps product chat/board state in the app database beside <code>SessionStoreFactory</code>. Walkthrough: <a href="../embedding.html">Lash API</a>.</p></article>

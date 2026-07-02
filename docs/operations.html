@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
+<title>operations · lash docs</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css?v=11">
+<script src="./theme.js"></script>
+<script src="./docs.js?v=7" defer></script>
+<script src="./syntax.js" defer></script>
+</head>
+<body class="docs-page" data-cover-source="<code>crates/lash-core/src/store/lease_timings.rs</code>, <code>crates/lash/src/session.rs</code>, <code>crates/lash/src/core.rs</code>, <code>docs/adr/0014-operational-policy-stays-with-the-host.md</code>, <code>examples/agent-service</code>.">
+  <a class="skip-link" href="#content">skip to content</a>
+<section class="opener">
+    <h1 class="opener__title">operations<span class="slash">/</span>production</h1>
+    <p class="opener__lede">Running lash in production is host work. lash owns the turn; the host owns the process, its signals, and its operational policy: when to stop admitting work, how long to drain, when to fail over, and what to do with stragglers. This page composes lash's operational levers into the policies a host actually runs. It links out to the scaling and durability pages rather than repeating them.</p>
+  </section>
+
+  <main class="body" id="content">
+    <div class="section" id="what-this-is">
+      <div class="section-header">
+        <h2>What This Is</h2>
+        <p>The runtime state that operational policy acts on — session-execution leases, queued-work and turn-input claims, durable waits, cached provider transports, and trace buffers — lives inside lash. lash's obligation is that every reasonable host policy is implementable through explicit, lash-owned levers over that state.</p>
+      </div>
+      <aside class="contract">
+        <strong>Contract</strong>
+        <p>lash ships no shutdown, drain, health, or readiness orchestrator. Drain ordering and deadlines are policy, and the runtime absorbing them would start the framework slide without ever knowing the host's grace budget. The boundary is recorded in <code>docs/adr/0014-operational-policy-stays-with-the-host.md</code>: host owns policy, lash owns levers.</p>
+      </aside>
+    </div>
+
+    <div class="section" id="deployment-topologies">
+      <div class="section-header">
+        <h2>Deployment Topologies</h2>
+        <p>The same runtime runs in three shapes. Pick the smallest one that meets your durability and failover needs; the levers on this page apply to all three.</p>
+      </div>
+      <div class="listing">
+        <div class="listing__row">
+          <div class="listing__label">single process</div>
+          <div class="listing__body"><p>One host, embedded state. Use the local-file SQLite store for durable single-host runtimes, or omit a store for throwaway demos. Failover is process restart on the same box; local-process lease liveness makes it fast. Start at <a href="./persistence.html">persistence</a>.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">multi-worker + shared Postgres</div>
+          <div class="listing__body"><p>Identical stateless workers routed by <code>session_id</code>, sharing one <code>PostgresStorage</code> and S3-compatible attachment bytes. The session-execution lease enforces one mutating writer per session across the fleet. The full model is in <a href="./architecture/scaling.html">scaling</a>.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">Restate-backed durable tier</div>
+          <div class="listing__body"><p>Turns run under a workflow engine with <code>RestateRuntimeEffectController</code>, so a crash reruns the handler and replays effect outcomes before the final commit. Long turns and background processes survive worker loss. See <a href="./architecture/durability.html">durability and replay</a>.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section" id="worker-identity">
+      <div class="section-header">
+        <h2>Worker Identity</h2>
+        <p>By default every opened session gets a fresh owner id and incarnation id, so two workers on the same session resolve at the lease boundary. A host that wants sub-TTL reclaim of a crashed owner sets an explicit identity with <code>SessionBuilder::session_execution_owner</code>.</p>
+      </div>
+      <p>An identity is a stable <code>owner_id</code> (one per replica, stable across restarts) plus an <code>incarnation_id</code> the process bumps each boot. Reentry requires the same owner id <em>and</em> the same incarnation; a new incarnation must claim or reclaim through the fenced lease path rather than clearing the old owner. What differs between deployments is the liveness metadata that identity carries.</p>
+      <div class="table">
+        <table>
+          <thead><tr><th>Liveness</th><th>Construct with</th><th>What it buys</th></tr></thead>
+          <tbody>
+            <tr><td><code>LocalProcess</code></td><td><code>LeaseOwnerIdentity::local_process(owner_id, incarnation, host_id)</code></td><td>Attaches this host's kernel boot id, pid, and process-start time. A same-host peer can prove a crashed holder <em>definitely dead</em> and reclaim its lease before the TTL. Requires a matching host id and kernel boot id; a machine reboot changes the boot id and falls back to TTL. Reads <code>/proc</code>, so it degrades to opaque off Linux.</td></tr>
+            <tr><td><code>Opaque</code></td><td><code>LeaseOwnerIdentity::opaque(owner_id, incarnation)</code></td><td>No liveness proof. A crashed holder's lease is recovered only when its TTL expires. This is the correct choice for cross-host and distributed holders, where no peer can inspect another's process table.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <pre data-lang="rust" data-snippet="operations#worker-identity"><code>// A stable owner id per replica plus a per-boot incarnation. `local_process`
+// attaches this host's kernel boot id and pid, so a same-host peer can prove
+// a crashed holder dead and reclaim its lease before the TTL. On a non-Linux
+// host, or across a machine reboot (the boot id changes), it degrades to
+// opaque, TTL-only reclaim.
+let owner = LeaseOwnerIdentity::local_process(
+    std::env::var("WORKER_ID").unwrap_or_else(|_| "worker-1".to_string()),
+    std::env::var("AGENT_SERVICE_INCARNATION").unwrap_or_else(|_| boot_incarnation()),
+    std::env::var("HOSTNAME").unwrap_or_else(|_| "host-1".to_string()),
+);
+
+// Cross-host / opaque holders (the common distributed case) get TTL-only
+// reclaim; build them with `LeaseOwnerIdentity::opaque(owner_id, incarnation)`.
+let session = core
+    .session(chat_id)
+    .session_execution_owner(owner)
+    .open()
+    .await?;</code></pre>
+      <aside class="gotcha">
+        <strong>Gotcha</strong>
+        <p>An explicit identity is stable within a boot, so a durable retry of the same logical execution lane reenters its own lease instead of being rejected as busy. That is the point for a workflow engine that serializes one invocation. A host that does <em>not</em> serialize one logical lane per session should keep the default per-open identity, or a second concurrent turn on the same session will reenter rather than see <code>session_execution_busy</code>. The fenced head commit remains the last-resort single-writer backstop either way.</p>
+      </aside>
+    </div>
+
+    <div class="section" id="lease-timings">
+      <div class="section-header">
+        <h2>Lease Timings</h2>
+        <p>One host-configurable <code>LeaseTimings</code> on the core builder governs every durable single-writer lane. It is the failover-latency vs false-takeover-risk knob, moved out of lash and into host hands.</p>
+      </div>
+      <div class="table">
+        <table>
+          <thead><tr><th>Lane</th><th>What the timing governs</th></tr></thead>
+          <tbody>
+            <tr><td>session execution</td><td>How long a mutating session runner holds its single-writer lease and how often it renews.</td></tr>
+            <tr><td>effect replay</td><td>The durable effect-replay leases; effect hosts (SQLite/Postgres replay options) accept the same type, so one decision spans both boundaries.</td></tr>
+            <tr><td>queued work</td><td>The claim TTL for durable queued-work batches picked up by any lease-holding runner.</td></tr>
+            <tr><td>turn input</td><td>The claim TTL for pending turn-input dispatch.</td></tr>
+            <tr><td>process leases</td><td>How long a durable process worker holds a process lease and how often it renews.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The default is a 30 second TTL with a 10 second renew interval. The constructor enforces <code>ttl &gt;= 3 * renew_interval</code>, so a healthy owner can miss two consecutive renewals — a scheduler stall, a transient store error — before a peer may treat the lease as expired. A shorter TTL reclaims a crashed owner's work sooner but widens the window in which a slow-but-alive owner is falsely taken over; a longer TTL does the reverse. Choosing that number is the trade, and it is now a host decision instead of a constant baked into lash.</p>
+      <pre data-lang="rust" data-snippet="operations#lease-timings"><code>// One timing decision governs every durable single-writer lane lash claims:
+// session-execution leases, effect replay, queued-work and turn-input
+// claims, and process leases. `new` enforces `ttl &gt;= 3 * renew_interval`, so
+// a live owner can miss two renewals before a peer may treat the lease as
+// expired. A shorter TTL reclaims a crashed owner's work sooner; a longer
+// one tolerates slower renewal and lowers false-takeover risk.
+let lease_timings = LeaseTimings::new(
+    Duration::from_secs(15), // ttl
+    Duration::from_secs(5),  // renew_interval
+)
+.expect("ttl &gt;= 3 * renew_interval");
+
+let core = LashCore::rlm_builder(factory)
+    .provider(provider)
+    .model(
+        lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
+            .expect("valid model metadata"),
+    )
+    .store_factory(store_factory)
+    .effect_host(Arc::new(InlineEffectHost::default()))
+    .lease_timings(lease_timings) // omit to keep the 30s ttl / 10s renew default
+    .build()?;</code></pre>
+    </div>
+
+    <div class="section" id="graceful-drain">
+      <div class="section-header">
+        <h2>Graceful Drain</h2>
+        <p>There is no <code>LashCore::shutdown()</code>. A host composes its own drain from explicit levers, in host-owned order, with host-owned deadlines. Each numbered step below is a policy decision the host makes; the calls are the levers lash provides to carry it out.</p>
+      </div>
+      <pre data-lang="rust" data-snippet="operations#graceful-drain"><code>// lash ships no drain orchestrator (ADR-0014): each step is an explicit,
+// host-owned lever. The order below and every deadline are host policy.
+
+// 1. Stop admitting new turns. A host-layer decision — flip a readiness
+//    flag, drain the load balancer. lash cannot see your ingress.
+
+// 2. Finish or cancel in-flight turns. A live turn shares the session and
+//    makes park/close fail with `SessionStillInUse` until it ends.
+for session in &amp;idle_sessions {
+    session.cancel_running_turns();
+}
+
+// 3. Park resumable sessions (flush dirty state through a fresh-lease commit,
+//    release the lease, keep a cheap handle) or `close()` ephemeral ones.
+//    Both consume the session and need exclusive ownership.
+for session in idle_sessions {
+    let parked = session.park().await?;
+    // Cache `parked` keyed by `parked.session_id()` and rebuild it later
+    // with `LashCore::resume(parked)`; drop it instead to fully close.
+    let _ = parked.session_id();
+}
+
+// 4. If you stopped an external queued-work or turn-input driver mid-claim,
+//    hand its claims back so peers take the work now instead of waiting out
+//    the claim TTL — `session.abandon_queued_work_claim(&amp;claim)` and
+//    `session.abandon_turn_input_claim(&amp;claim)` — and resolve outstanding
+//    durable waits as `Cancelled` with `session.revoke_durable_waits()`.
+
+// 5. Release provider transports. The default `close()` is a no-op; the
+//    Codex provider sends WebSocket Close frames on its cached sessions.
+let _ = provider.close().await;
+
+// 6. Flush the trace sink (fsync for JSONL). OTel span-export durability is
+//    the host's duty: `force_flush()`/`shutdown()` your own TracerProvider.
+core.flush_trace_sink()?;
+
+// 7. Exit. Any lease this process still holds now expires on its TTL.
+Ok(())</code></pre>
+      <p>Steps 1 and 2 are pure policy: lash cannot see your ingress or your grace budget, so stopping admission and deciding whether to await or cancel in-flight turns stays with the host. Steps 3 through 6 are the levers — <code>park</code>/<code>close</code>, the claim and wait handbacks, provider <code>close</code>, trace <code>flush</code> — each an explicit call with no hidden ordering. Anything lash cannot expose as a lever without becoming an orchestrator (signal handling, drain deadlines, readiness endpoints) is host territory by design.</p>
+      <p>The <a href="./example-agent-service.html">agent service</a> example wires the subset a stateless request/response host owns: an axum graceful-shutdown signal stops admission, then the process closes its retained provider handle and flushes its trace sink before exit.</p>
+    </div>
+
+    <div class="section" id="failure-classification">
+      <div class="section-header">
+        <h2>Failure Classification</h2>
+        <p>Retry loops need to tell "try again" from "this will never work" from "unknown". lash carries typed signals for exactly that split, so a host never scrapes error strings.</p>
+      </div>
+      <pre data-lang="rust" data-snippet="operations#failure-classification"><code>loop {
+    match session.turn(TurnInput::text(text)).run().await {
+        Ok(output) =&gt; {
+            // A failed LLM call finishes the turn instead of erroring; read
+            // the typed provider signal off the turn's issues.
+            for issue in &amp;output.result.errors {
+                if issue.retryable == Some(true) {
+                    // Transient provider/transport failure — safe to re-run.
+                }
+                if let Some(kind) = issue.provider_failure_kind {
+                    let _ = kind; // Timeout, Http, Quota, Auth, Stream, ...
+                }
+            }
+            return Ok(output);
+        }
+        // SessionExecutionBusy / SessionExecutionLeaseLost: another owner
+        // holds or fenced the lease, so the attempt committed nothing.
+        Err(err) if err.is_retryable() =&gt; continue, // back off in real code
+        // Wiring/config a retry can never repair (missing facet, provider
+        // unconfigured). Surface it to an operator.
+        Err(err) if err.is_terminal() =&gt; return Err(err),
+        // Neither typed signal: unknown. Apply your own bounded policy.
+        Err(err) =&gt; return Err(err),
+    }
+}</code></pre>
+      <div class="listing">
+        <div class="listing__row">
+          <div class="listing__label">is_retryable</div>
+          <div class="listing__body"><p>True only for a typed retryable signal: <code>session_execution_busy</code> (another owner holds the lease; nothing changed) and <code>session_execution_lease_lost</code> (the lease was fenced away mid-turn; the fenced commit means the attempt committed nothing and its claims were released). Both are safe to re-run after a backoff.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">is_terminal</div>
+          <div class="listing__body"><p>True only when a retry can never succeed without host changes: builder and wiring errors (missing facet, handler context) and provider-configuration errors. The same call fails identically until the host changes its wiring.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">busy vs lease-lost</div>
+          <div class="listing__body"><p><code>Busy</code> means a live owner holds the lane; back off and retry the same session. <code>LeaseLost</code> means ownership moved; reopen the session before retrying. <code>store_commit_failed</code> is deliberately neither retryable nor terminal — the code cannot distinguish transient store I/O from a real conflict — so reload and apply your own bounded policy. The full conflict-retry shape is on <a href="./persistence.html#cas-conflicts">persistence</a>.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">provider failures</div>
+          <div class="listing__body"><p>A failed LLM call finishes the turn rather than erroring, so its typed retryability rides on <code>TurnIssue.retryable</code> and <code>TurnIssue.provider_failure_kind</code> (<code>Transport</code>, <code>Timeout</code>, <code>Http</code>, <code>Stream</code>, <code>Auth</code>, <code>Validation</code>, <code>Quota</code>, <code>Unsupported</code>, <code>Unknown</code>) — read them off the finished turn's issues, not off an <code>EmbedError</code>.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section" id="observation-backpressure">
+      <div class="section-header">
+        <h2>Observation And Backpressure</h2>
+        <p>Live observation is best-effort and bounded so a slow observer can never stall a turn or grow memory without limit. Know the numbers and the fallbacks.</p>
+      </div>
+      <div class="listing">
+        <div class="listing__row">
+          <div class="listing__label">live-replay bound</div>
+          <div class="listing__body"><p>The default in-memory live-replay buffer keeps at most 2048 events or 120 seconds per session. It is not durable history and is not required to survive process loss. Deployments that need a different window pass a custom store to <code>LashCoreBuilder::live_replay_store</code>.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">slow-observer gap</div>
+          <div class="listing__body"><p>A stale, trimmed, or unavailable cursor yields a recoverable gap rather than a guess: the observer discards missed assumptions, replaces state from the fresh observation's read view, stores <code>gap.latest_cursor</code>, and keeps folding. Live-replay append failures are logged and never fail a turn or a commit. Details on <a href="./streaming.html#gap-recovery">streaming</a>.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">turn-stream backpressure</div>
+          <div class="listing__body"><p><code>stream_to</code> awaits the sink's <code>emit()</code>. If a UI transport can block, push into a bounded channel and drain it from a separate task; the channel bound becomes your backpressure policy, keeping a slow client from holding the turn open.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section" id="monitoring">
+      <div class="section-header">
+        <h2>Monitoring</h2>
+        <p>Per-turn timing, cumulative token usage, and traces come off the runtime directly — wire them into whatever metrics and tracing stack the host already runs.</p>
+      </div>
+      <pre data-lang="rust" data-snippet="operations#monitoring"><code>// Per-turn timing, straight off the runtime clock.
+let started_at = output.result.started_at(); // SystemTime the turn was claimed
+let elapsed = output.result.duration(); // claim -&gt; commit + post-persist hooks
+let _ = (started_at, elapsed);
+
+// Cumulative token usage for the session, split by source and by model.
+let usage = session.usage_report();
+let _ = (usage.entry_count, usage.usage);</code></pre>
+      <div class="listing">
+        <div class="listing__row">
+          <div class="listing__label">timing</div>
+          <div class="listing__body"><p><code>TurnResult::started_at</code> is the wall-clock instant the runtime claimed the turn; <code>TurnResult::duration</code> is the whole-turn window — claim through final commit and post-persist hooks — on the runtime clock's monotonic source. Export both as request latency.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">usage</div>
+          <div class="listing__body"><p><code>session.usage_report()</code> aggregates per-turn token deltas into totals split by source and by model, including child sessions. Emit it as cost and rate-limit telemetry.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">traces</div>
+          <div class="listing__body"><p>Attach a trace sink and flush it before exit. JSONL flush fsyncs the file; for OTel, span-export durability stays the host's duty — flush your own <code>TracerProvider</code>. See <a href="./tracing.html">tracing</a>.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section" id="where-next">
+      <div class="section-header">
+        <h2>Where Next</h2>
+        <p>This page composes the levers into policy. The scaling and durability pages own the fleet and replay mechanics those levers act on.</p>
+      </div>
+      <div data-related="architecture/scaling.html architecture/durability.html persistence.html tracing.html streaming.html example-agent-service.html"></div>
+    </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+  </div>
+</section>
+</body>
+</html>

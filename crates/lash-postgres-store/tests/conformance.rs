@@ -4,8 +4,7 @@ use lash_core::testing::conformance::{
     ReopenableProcessRegistry, ReopenableRuntimePersistence, ReopenableTriggerStore,
 };
 use lash_core::{
-    DurabilityTier, ExecutionScope, PluginOptions, ProcessExecutionEnvSpec,
-    ProcessExecutionEnvStore, ProcessRegistry, RuntimePersistence, SessionPolicy,
+    DurabilityTier, ExecutionScope, ProcessExecutionEnvStore, ProcessRegistry, RuntimePersistence,
     SessionStoreFactory, TriggerStore,
 };
 use lash_postgres_store::{
@@ -45,36 +44,29 @@ async fn storage() -> Option<PostgresStorage> {
 
 async fn reset(storage: &PostgresStorage) {
     let pool = storage.pool();
-    sqlx::query(
-        r#"
-        TRUNCATE
-            lash_trigger_deliveries,
-            lash_trigger_occurrences,
-            lash_trigger_subscriptions,
-            lash_process_wake_acks,
-            lash_process_handle_grants,
-            lash_process_leases,
-            lash_runtime_effect_replay,
-            lash_process_events,
-            lash_processes,
-            lash_queued_work_items,
-            lash_queued_work_batches,
-            lash_pending_turn_inputs,
-            lash_runtime_turn_commits,
-            lash_session_execution_leases,
-            lash_session_meta,
-            lash_usage_deltas,
-            lash_graph_nodes,
-            lash_sessions,
-            lash_attachment_manifest,
-            lash_lashlang_artifacts,
-            lash_blobs
-        RESTART IDENTITY CASCADE
-        "#,
+    // Derive the truncate set from the live catalog rather than hand-maintaining
+    // a table list: a new `lash_*` table can no longer silently bleed state
+    // between conformance cases. `lash_schema_versions` is excluded — it holds
+    // the component schema version gate, not per-case fixture rows.
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename FROM pg_tables
+         WHERE schemaname = 'public'
+           AND tablename LIKE 'lash\\_%'
+           AND tablename <> 'lash_schema_versions'
+         ORDER BY tablename",
     )
-    .execute(pool)
+    .fetch_all(pool)
     .await
-    .expect("reset postgres conformance tables");
+    .expect("list lash_* conformance tables");
+    assert!(
+        !tables.is_empty(),
+        "expected the lash_* schema tables to exist before reset"
+    );
+    let truncate = format!("TRUNCATE {} RESTART IDENTITY CASCADE", tables.join(", "));
+    sqlx::query(&truncate)
+        .execute(pool)
+        .await
+        .expect("reset postgres conformance tables");
     // `lash_trigger_subscription_seq` is a standalone sequence (not owned by a
     // truncated table), so RESTART IDENTITY does not reset it. Reset it in a
     // separate statement — sqlx's prepared protocol rejects multiple commands in
@@ -106,41 +98,32 @@ async fn postgres_runtime_persistence_satisfies_conformance_when_configured() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn postgres_process_execution_env_store_round_trips_when_configured() {
+async fn postgres_artifact_store_satisfies_conformance_when_configured() {
     let _db_guard = DB_GUARD.lock().await;
     let Some(storage) = storage().await else {
         eprintln!(
-            "skipping Postgres process-env conformance: LASH_POSTGRES_DATABASE_URL is not set"
+            "skipping Postgres artifact-store conformance: LASH_POSTGRES_DATABASE_URL is not set"
         );
         return;
     };
-    reset(&storage).await;
-
-    let spec = ProcessExecutionEnvSpec::new(PluginOptions::default(), SessionPolicy::default());
-    let env_ref = spec.stable_ref().expect("stable env ref");
-    let bytes = spec.to_store_bytes().expect("encode env spec");
-    let store = Arc::new(storage.process_env_store()) as Arc<dyn ProcessExecutionEnvStore>;
-    assert_eq!(store.durability_tier(), DurabilityTier::Durable);
-    store
-        .put_process_execution_env(&env_ref, &bytes)
-        .await
-        .expect("put env");
-    assert_eq!(
-        store
-            .get_process_execution_env(&env_ref)
-            .await
-            .expect("get env"),
-        Some(bytes.clone())
-    );
-
-    let reopened = Arc::new(storage.process_env_store()) as Arc<dyn ProcessExecutionEnvStore>;
-    assert_eq!(
-        reopened
-            .get_process_execution_env(&env_ref)
-            .await
-            .expect("get reopened env"),
-        Some(bytes)
-    );
+    let storage = Arc::new(storage);
+    lash_lashlang_runtime::testing::conformance::artifact_store_reopenable(|| {
+        let storage = Arc::clone(&storage);
+        sync_await(async move {
+            reset(&storage).await;
+            let handles = || lash_lashlang_runtime::testing::conformance::ArtifactStoreHandles {
+                artifacts: Arc::new(storage.lashlang_artifact_store())
+                    as Arc<dyn lashlang::LashlangArtifactStore>,
+                process_env: Arc::new(storage.process_env_store())
+                    as Arc<dyn ProcessExecutionEnvStore>,
+            };
+            lash_lashlang_runtime::testing::conformance::ReopenableArtifactStore {
+                open: handles(),
+                reopen: handles(),
+            }
+        })
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -229,7 +212,10 @@ async fn postgres_effect_controller_satisfies_lease_fencing_conformance_when_con
                     let controller = PostgresRuntimeEffectController::with_options(
                         &storage,
                         ExecutionScope::turn("session", "turn"),
-                        PostgresEffectReplayOptions { lease_ttl: ttl },
+                        PostgresEffectReplayOptions {
+                            lease_timings: lash_core::LeaseTimings::from_ttl(ttl)
+                                .expect("conformance lease timings"),
+                        },
                     );
                     let for_replay = controller.clone();
                     lash_core::testing::conformance::LeaseFencingController {

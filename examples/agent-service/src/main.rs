@@ -99,6 +99,33 @@ async fn async_main() -> anyhow_like::Result<()> {
             })
             .into_components(),
     );
+    // Retain a clone for the shutdown drain: the core owns the working copy, but
+    // the host is what calls `close()` to release transports on the way out.
+    let drain_provider = provider.clone();
+
+    // Worker identity for durable session-execution leases. WORKER_ID is stable
+    // across restarts (set one per replica in a fleet); the incarnation is
+    // bumped every boot. Failover consequence: if this process crashes and a new
+    // boot (or a same-host peer) reopens a session whose lease this boot still
+    // holds, the local-process liveness metadata proves the dead pid gone and
+    // reclaims the lease before its TTL instead of waiting the full window. A
+    // machine reboot changes the kernel boot id, so that path falls back to the
+    // TTL backstop. The identity is stable within a boot, so keep at most one
+    // in-flight turn per chat; the fenced head commit is the last-resort
+    // single-writer backstop.
+    let worker_id = std::env::var("WORKER_ID").unwrap_or_else(|_| "agent-service-1".to_string());
+    let worker_host = std::env::var("HOSTNAME").unwrap_or_else(|_| worker_id.clone());
+    let worker_incarnation = std::env::var("AGENT_SERVICE_INCARNATION").unwrap_or_else(|_| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis().to_string())
+            .unwrap_or_else(|_| "0".to_string())
+    });
+    let session_owner = lash::persistence::LeaseOwnerIdentity::local_process(
+        worker_id,
+        worker_incarnation,
+        worker_host,
+    );
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         data_dir.join("lash-sessions"),
     ));
@@ -208,13 +235,21 @@ async fn async_main() -> anyhow_like::Result<()> {
     let state = AppStateData::from_shared_db(
         core,
         Arc::clone(&shared_db),
+        session_owner,
         model,
         Some(model_variant),
         durability,
         restate_ingress_url,
     );
     #[cfg(not(feature = "restate"))]
-    let state = AppStateData::new(core, app_db, model, Some(model_variant), durability);
+    let state = AppStateData::new(
+        core,
+        app_db,
+        session_owner,
+        model,
+        Some(model_variant),
+        durability,
+    );
 
     #[cfg(feature = "restate")]
     if durability == AgentServiceDurability::Restate {
@@ -240,6 +275,8 @@ async fn async_main() -> anyhow_like::Result<()> {
         println!("agent-service Restate endpoint listening on http://{restate_endpoint_addr}");
     }
 
+    // Keep a state clone for the drain; the router consumes the original.
+    let drain_state = state.clone();
     let app = Router::new()
         .route("/", get(index))
         .route("/api/settings", get(settings))
@@ -261,8 +298,61 @@ async fn async_main() -> anyhow_like::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|err| err.to_string())?;
+    // Step 1 of the drain (see docs/operations.html): stop admitting. Axum's
+    // graceful shutdown stops accepting connections and lets in-flight requests
+    // finish once a signal arrives.
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|err| err.to_string())?;
+    // Admission has stopped; run the teardown levers this process owns.
+    drain(&drain_state, &drain_provider).await;
     Ok(())
+}
+
+/// Resolve when the process receives Ctrl-C or SIGTERM — the host-owned signal
+/// that begins the drain. lash has no opinion on which signal means "drain".
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    println!("agent-service draining");
+}
+
+/// Host-composed teardown. lash ships no drain orchestrator (ADR-0014): each
+/// step is an explicit lever the host calls in its own order.
+///
+/// This service opens a fresh session per request and detaches the turn task,
+/// so it holds no long-lived sessions to `park()`/`close()` here and no external
+/// queued-work claims to hand back. A host that caches live sessions would, at
+/// this point, `cancel_running_turns()`, then `park()` (or `close()`) each one,
+/// and `abandon_queued_work_claim` / `revoke_durable_waits` for any driver it
+/// stopped mid-claim. See docs/operations.html for the full lever list.
+async fn drain(state: &AppStateData, provider: &ProviderHandle) {
+    // Release provider transports (the Codex provider sends WebSocket Close
+    // frames; the default provider close is a no-op).
+    if let Err(err) = provider.close().await {
+        eprintln!("agent-service: provider close failed: {err}");
+    }
+    // Flush the trace sink (fsync the JSONL). An OTel host would also flush its
+    // own TracerProvider here, which lash cannot do for it.
+    if let Err(err) = state.core().flush_trace_sink() {
+        eprintln!("agent-service: trace flush failed: {err}");
+    }
 }

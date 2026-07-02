@@ -177,6 +177,8 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
         CREATE TABLE IF NOT EXISTS lash_process_leases (
             process_id TEXT PRIMARY KEY REFERENCES lash_processes(process_id) ON DELETE CASCADE,
             lease_owner_id TEXT,
+            lease_owner_incarnation_id TEXT,
+            lease_owner_liveness_json TEXT,
             lease_token TEXT,
             lease_fencing_token BIGINT NOT NULL DEFAULT 0,
             lease_claimed_at_ms BIGINT NOT NULL DEFAULT 0,
@@ -238,8 +240,10 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
         );
 
         CREATE TABLE IF NOT EXISTS lash_lashlang_artifacts (
-            module_ref TEXT PRIMARY KEY,
-            artifact_bytes BYTEA NOT NULL
+            namespace TEXT NOT NULL,
+            artifact_ref TEXT NOT NULL,
+            artifact_bytes BYTEA NOT NULL,
+            PRIMARY KEY (namespace, artifact_ref)
         );
         "#,
     )

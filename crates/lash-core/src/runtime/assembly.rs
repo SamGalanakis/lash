@@ -604,23 +604,28 @@ impl TurnAssembler {
                 );
             }
             SessionEvent::Error { message, envelope } => {
-                let (kind, code, terminal_reason, raw) = if let Some(envelope) = envelope {
-                    (
-                        envelope.kind.clone(),
-                        envelope.code.clone(),
-                        envelope.terminal_reason,
-                        envelope.raw.clone(),
-                    )
+                let issue = if let Some(envelope) = envelope {
+                    TurnIssue {
+                        kind: envelope.kind.clone(),
+                        code: envelope.code.clone(),
+                        terminal_reason: envelope.terminal_reason,
+                        message: message.clone(),
+                        raw: envelope.raw.clone(),
+                        retryable: envelope.retryable,
+                        provider_failure_kind: envelope.provider_failure_kind,
+                    }
                 } else {
-                    ("runtime".to_string(), None, None, None)
+                    TurnIssue {
+                        kind: "runtime".to_string(),
+                        code: None,
+                        terminal_reason: None,
+                        message: message.clone(),
+                        raw: None,
+                        retryable: None,
+                        provider_failure_kind: None,
+                    }
                 };
-                self.issues.push(TurnIssue {
-                    kind,
-                    code,
-                    terminal_reason,
-                    message: message.clone(),
-                    raw,
-                });
+                self.issues.push(issue);
             }
             SessionEvent::Done => {
                 self.saw_done = true;
@@ -665,6 +670,8 @@ impl TurnAssembler {
                     terminal_reason: None,
                     message: "assistant output was recovered from persisted messages because no explicit assistant output was assembled".to_string(),
                     raw: None,
+                    retryable: None,
+                    provider_failure_kind: None,
                 });
             }
             recovered
@@ -689,6 +696,8 @@ impl TurnAssembler {
                 terminal_reason: None,
                 message: "turn stream ended without a Done event".to_string(),
                 raw: None,
+                retryable: None,
+                provider_failure_kind: None,
             });
             TurnOutcome::Stopped(TurnStop::RuntimeError)
         } else if has_blocking_turn_issue(&issues) {
@@ -712,6 +721,10 @@ impl TurnAssembler {
             execution: ExecutionSummary {
                 had_tool_calls: !self.tool_calls.is_empty(),
                 had_code_execution: false,
+                // Timing is stamped by the turn loop, which owns the
+                // claim → final-commit measurement window.
+                started_at_ms: 0,
+                duration_ms: 0,
             },
             state,
             outcome,

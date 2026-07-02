@@ -1,7 +1,5 @@
 use crate::{CheckpointKind, PluginMessage, TurnCause, TurnInput};
 
-pub const TURN_INPUT_CLAIM_TTL_MS: u64 = 30 * 1000;
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum TurnInputIngress {

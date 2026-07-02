@@ -716,12 +716,9 @@ mod tests {
             ("mid_stream_disconnect", "Stream", true, None),
             ("response_start_timeout", "Timeout", true, None),
             ("stream_chunk_timeout", "Timeout", true, None),
-            (
-                "retryable_server_error_sequence",
-                "Unknown",
-                true,
-                Some(503),
-            ),
+            // Non-2xx responses come back in the shared `http_error_envelope`,
+            // which pre-labels the raw failure `Http` before classification.
+            ("retryable_server_error_sequence", "Http", true, Some(503)),
         ];
         for (mutation, raw_kind, classified_retryable, status) in expectations {
             let matrix = execute_provider_mutation_matrix(mutation)

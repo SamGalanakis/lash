@@ -34,7 +34,8 @@ pub use crate::error::{EmbedError, Result};
 pub use crate::plugin_binding::PluginBinding;
 pub use crate::prompt_layer::PromptLayerSink;
 pub use crate::session::{
-    EnqueueTurnBuilder, LashSession, ObservableSession, SessionBuilder, SessionConfigPatch,
+    EnqueueTurnBuilder, LashSession, ObservableSession, ParkedSession, SessionBuilder,
+    SessionConfigPatch,
 };
 pub use crate::turn::{
     QueuedTurnBuilder, TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream,
@@ -61,13 +62,13 @@ pub mod prelude {
     pub use crate::{
         AdvancedToolAdmin, CoreTriggerAdmin, EmbedError, EnqueueTurnBuilder, ExecutionSummary,
         InputItem, LashCore, LashCoreBuilder, LashSession, ModelLimits, ModelSpec,
-        ObservableSession, PendingTurnInputCancelOutcome, PluginBinding, PluginOperations,
-        PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder, SessionCommand,
-        SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch, SessionCreateRequest,
-        SessionDeleteReport, SessionSpec, SessionStartPoint, SessionTriggerAdmin, ToolAdmin,
-        TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink, TurnBuilder, TurnCause,
-        TurnEvent, TurnFinish, TurnInput, TurnOutcome, TurnOutput, TurnResult, TurnStop,
-        TurnStream, message_role, message_text,
+        ObservableSession, ParkedSession, PendingTurnInputCancelOutcome, PluginBinding,
+        PluginOperations, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder,
+        SessionCommand, SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch,
+        SessionCreateRequest, SessionDeleteReport, SessionSpec, SessionStartPoint,
+        SessionTriggerAdmin, ToolAdmin, TurnActivity, TurnActivityFanout, TurnActivityId,
+        TurnActivitySink, TurnBuilder, TurnCause, TurnEvent, TurnFinish, TurnInput, TurnOutcome,
+        TurnOutput, TurnResult, TurnStop, TurnStream, message_role, message_text,
     };
 }
 
@@ -143,13 +144,15 @@ pub mod direct {
 }
 
 pub mod persistence {
+    pub use lash_core::CheckpointKind;
     pub use lash_core::FileAttachmentStore;
     pub use lash_core::runtime::{
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
         PendingTurnInputClaimDiagnostics, PendingTurnInputDraft, QueuedWorkBatch,
         QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkClass,
         QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState,
-        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
+        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, TurnInputClaim,
+        TurnInputCompletion,
     };
     pub use lash_core::store::queued_work;
     pub use lash_core::store::{
@@ -158,15 +161,16 @@ pub mod persistence {
         SessionHeadMeta, load_persisted_session_state, load_persisted_session_state_active_path,
     };
     pub use lash_core::{
-        AttachmentStore, InMemoryAttachmentStore, InMemoryProcessExecutionEnvStore,
-        ProcessExecutionEnvStore,
+        AttachmentReclamationReport, AttachmentStore, InMemoryAttachmentStore,
+        InMemoryProcessExecutionEnvStore, ProcessExecutionEnvStore, reclaim_orphaned_attachments,
     };
     pub use lash_core::{
         BlobRef, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, PersistedSessionConfig,
-        PersistedTurnState, ProtocolEvent, RuntimePersistence, SessionEventRecord,
-        SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
-        SessionExecutionLeaseFence, SessionGraph, SessionMeta, SessionNodeRecord, SessionReadScope,
-        SessionReadView, SessionRelation, StoreError, VacuumReport,
+        PersistedTurnState, ProtocolEvent, QueuedWorkStore, RuntimePersistence, SessionCommitStore,
+        SessionEventRecord, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
+        SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionExecutionLeaseStore,
+        SessionGraph, SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView,
+        SessionRelation, StoreError, StoreMaintenance, TurnInputStore, VacuumReport,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{InMemoryLashlangArtifactStore, LashlangArtifactStore};
@@ -198,55 +202,127 @@ pub mod messages {
     pub use lash_core::{Message, MessageRole};
 }
 
+/// Wire-format DTOs for driving lash across a process boundary, sub-namespaced
+/// by protocol domain. Only the cross-cutting handshake
+/// ([`REMOTE_PROTOCOL_VERSION`](remote::REMOTE_PROTOCOL_VERSION),
+/// [`ensure_protocol_version`](remote::ensure_protocol_version)) and the
+/// protocol error type live at this root; everything else has exactly one
+/// home in a domain sub-namespace.
 pub mod remote {
     pub use lash_remote_protocol::{
-        REMOTE_PROTOCOL_VERSION, RemoteAssistantOutput, RemoteAssistantOutputState,
-        RemoteAttachmentRef, RemoteCausalRef, RemoteDiagnostic, RemoteExecutionSummary,
-        RemoteGenerationOptions, RemoteInputItem, RemoteLiveReplayGap, RemoteLiveReplayGapReason,
-        RemoteLlmAttachment, RemoteLlmContentBlock, RemoteLlmMessage, RemoteLlmOutputPart,
-        RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestScope, RemoteLlmResponse,
-        RemoteLlmRole, RemoteLlmTerminalReason, RemoteLlmToolChoice, RemoteLlmToolSpec,
-        RemoteModelIntent, RemoteObservedProcess, RemoteObservedProcessEvent,
-        RemotePersistProcessEnvRequest, RemotePersistProcessEnvResult, RemoteProcessAwaitOutput,
-        RemoteProcessAwaitRequest, RemoteProcessAwaitResult, RemoteProcessCancelRequest,
-        RemoteProcessCancelResult, RemoteProcessDefinitionIdentity, RemoteProcessEvent,
-        RemoteProcessEventSemantics, RemoteProcessEventSemanticsSpec, RemoteProcessEventType,
-        RemoteProcessEventsRequest, RemoteProcessEventsResponse, RemoteProcessExecutionEnvRef,
-        RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy, RemoteProcessExternalRef,
-        RemoteProcessHandleDescriptor, RemoteProcessInput, RemoteProcessLifecycleStatus,
-        RemoteProcessListFilter, RemoteProcessListResponse, RemoteProcessModelLimits,
-        RemoteProcessModelSpec, RemoteProcessOriginator, RemoteProcessPluginOptions,
-        RemoteProcessProvenance, RemoteProcessSignalRequest, RemoteProcessSignalResult,
-        RemoteProcessStartGrant, RemoteProcessStartRequest, RemoteProcessStartResult,
-        RemoteProcessStatus, RemoteProcessStatusFilter, RemoteProcessSummary,
-        RemoteProcessTerminalSemantics, RemoteProcessTerminalSpec, RemoteProcessTerminalState,
-        RemoteProcessValueSelector, RemoteProcessWaitKind, RemoteProcessWaitState,
-        RemoteProcessWake, RemoteProcessWakeDedupeKey, RemoteProcessWakeSpec,
-        RemoteProcessWorkItem, RemoteProcessWorkSnapshot, RemotePromptBuiltin,
-        RemotePromptContribution, RemotePromptContributionGate, RemotePromptLayer,
-        RemotePromptSlot, RemotePromptSlotLayer, RemotePromptTemplate, RemotePromptTemplateEntry,
-        RemotePromptTemplateSection, RemoteProtocolError, RemoteProtocolTurnOptions,
-        RemoteProviderMetadata, RemoteProviderReasoningReplay, RemoteProviderReplayMeta,
-        RemoteResponseTextMeta, RemoteRuntimeEffectKind, RemoteRuntimeInvocation,
-        RemoteRuntimeReplay, RemoteRuntimeScope, RemoteRuntimeSubject,
-        RemoteSchemaProjectionOverride, RemoteSessionCursor, RemoteSessionObservation,
-        RemoteSessionObservationEvent, RemoteSessionObservationEventPayload,
-        RemoteSessionProcessEventKind, RemoteSessionQueueEventKind, RemoteSessionScope,
-        RemoteTokenLedgerEntry, RemoteToolActivation, RemoteToolArgumentProjectionPolicy,
-        RemoteToolCallOutcome, RemoteToolCallSummary, RemoteToolFailureClass, RemoteToolGrant,
-        RemoteToolOutputContract, RemoteToolRegistry, RemoteToolRetryPolicy, RemoteToolScheduling,
-        RemoteTriggerCancelSubscriptionRequest, RemoteTriggerCancelSubscriptionResult,
-        RemoteTriggerEmitReport, RemoteTriggerInputBinding, RemoteTriggerInputTemplate,
-        RemoteTriggerListSubscriptionsResponse, RemoteTriggerOccurrenceRecord,
-        RemoteTriggerOccurrenceRequest, RemoteTriggerRegisterSubscriptionRequest,
-        RemoteTriggerRegisterSubscriptionResult, RemoteTriggerRegistration,
-        RemoteTriggerSubscriptionDraft, RemoteTriggerSubscriptionFilter,
-        RemoteTriggerSubscriptionRecord, RemoteTriggerTargetSummary, RemoteTurnActivity,
-        RemoteTurnEvent, RemoteTurnFinish, RemoteTurnInput, RemoteTurnIssue, RemoteTurnOutcome,
-        RemoteTurnRequest, RemoteTurnResult, RemoteTurnStatus, RemoteTurnStop,
-        RemoteTurnUsageSummary, RemoteUsage, assert_remote_tool_registry_reopenable,
-        ensure_protocol_version,
+        REMOTE_PROTOCOL_VERSION, RemoteProtocolError, ensure_protocol_version,
     };
+
+    /// LLM request/response envelopes: messages, attachments, tool specs,
+    /// output specs, and provider metadata.
+    pub mod llm {
+        pub use lash_remote_protocol::llm::{
+            RemoteAttachmentRef, RemoteDiagnostic, RemoteGenerationOptions, RemoteLlmAttachment,
+            RemoteLlmContentBlock, RemoteLlmMessage, RemoteLlmOutputPart, RemoteLlmOutputSpec,
+            RemoteLlmRequest, RemoteLlmRequestScope, RemoteLlmResponse, RemoteLlmRole,
+            RemoteLlmTerminalReason, RemoteLlmToolChoice, RemoteLlmToolSpec, RemoteModelIntent,
+            RemoteProviderFailureKind, RemoteProviderMetadata, RemoteProviderReasoningReplay,
+            RemoteProviderReplayMeta, RemoteResponseTextMeta, RemoteSchemaProjectionOverride,
+        };
+    }
+
+    /// Session observation: cursors, resumable observation events, and live
+    /// replay gaps.
+    pub mod observations {
+        pub use lash_remote_protocol::observations::{
+            RemoteLiveReplayGap, RemoteLiveReplayGapReason, RemoteSessionCursor,
+            RemoteSessionObservation, RemoteSessionObservationEvent,
+            RemoteSessionObservationEventPayload, RemoteSessionProcessEventKind,
+            RemoteSessionQueueEventKind,
+        };
+    }
+
+    /// Process lifecycle envelopes: start/cancel/signal/await/list requests
+    /// and results, process records, event semantics, and execution
+    /// environments.
+    pub mod processes {
+        pub use lash_remote_protocol::processes::{
+            RemoteObservedProcess, RemoteObservedProcessEvent, RemotePersistProcessEnvRequest,
+            RemotePersistProcessEnvResult, RemoteProcessAwaitOutput, RemoteProcessAwaitRequest,
+            RemoteProcessAwaitResult, RemoteProcessCancelRequest, RemoteProcessCancelResult,
+            RemoteProcessDefinitionIdentity, RemoteProcessEvent, RemoteProcessEventSemantics,
+            RemoteProcessEventSemanticsSpec, RemoteProcessEventType, RemoteProcessEventsRequest,
+            RemoteProcessEventsResponse, RemoteProcessExecutionEnvRef,
+            RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy, RemoteProcessExternalRef,
+            RemoteProcessHandleDescriptor, RemoteProcessInput, RemoteProcessLifecycleStatus,
+            RemoteProcessListFilter, RemoteProcessListResponse, RemoteProcessModelLimits,
+            RemoteProcessModelSpec, RemoteProcessOriginator, RemoteProcessPluginOptions,
+            RemoteProcessProvenance, RemoteProcessSignalRequest, RemoteProcessSignalResult,
+            RemoteProcessStartGrant, RemoteProcessStartRequest, RemoteProcessStartResult,
+            RemoteProcessStatus, RemoteProcessStatusFilter, RemoteProcessSummary,
+            RemoteProcessTerminalSemantics, RemoteProcessTerminalSpec, RemoteProcessTerminalState,
+            RemoteProcessValueSelector, RemoteProcessWaitKind, RemoteProcessWaitState,
+            RemoteProcessWake, RemoteProcessWakeDedupeKey, RemoteProcessWakeSpec,
+            RemoteProcessWorkItem, RemoteProcessWorkSnapshot, RemoteRuntimeEffectKind,
+            RemoteRuntimeInvocation, RemoteRuntimeReplay, RemoteRuntimeScope, RemoteRuntimeSubject,
+            RemoteSessionScope, RemoteToolFailureClass,
+        };
+    }
+
+    /// Prompt-layer envelopes: templates, slots, and contributions.
+    pub mod prompt {
+        pub use lash_remote_protocol::prompt::{
+            RemotePromptBuiltin, RemotePromptContribution, RemotePromptContributionGate,
+            RemotePromptLayer, RemotePromptSlot, RemotePromptSlotLayer, RemotePromptTemplate,
+            RemotePromptTemplateEntry, RemotePromptTemplateSection,
+        };
+    }
+
+    /// Tool grants and the remote tool-registry contract.
+    pub mod tools {
+        pub use lash_remote_protocol::registry_errors::{
+            RemoteToolRegistry, assert_remote_tool_registry_reopenable,
+        };
+        pub use lash_remote_protocol::tools::{
+            RemoteToolActivation, RemoteToolArgumentProjectionPolicy, RemoteToolGrant,
+            RemoteToolOutputContract, RemoteToolRetryPolicy, RemoteToolScheduling,
+        };
+    }
+
+    /// Trigger envelopes: occurrence emission, subscriptions, and
+    /// registrations.
+    pub mod triggers {
+        pub use lash_remote_protocol::triggers::{
+            RemoteTriggerCancelSubscriptionRequest, RemoteTriggerCancelSubscriptionResult,
+            RemoteTriggerEmitReport, RemoteTriggerInputBinding, RemoteTriggerInputTemplate,
+            RemoteTriggerListSubscriptionsResponse, RemoteTriggerOccurrenceRecord,
+            RemoteTriggerOccurrenceRequest, RemoteTriggerRegisterSubscriptionRequest,
+            RemoteTriggerRegisterSubscriptionResult, RemoteTriggerRegistration,
+            RemoteTriggerSubscriptionDraft, RemoteTriggerSubscriptionFilter,
+            RemoteTriggerSubscriptionRecord, RemoteTriggerTargetSummary,
+        };
+    }
+
+    /// Turn input envelopes: items, per-turn protocol options, and the turn
+    /// request.
+    pub mod turn_input {
+        pub use lash_remote_protocol::turn_input::{
+            RemoteInputItem, RemoteProtocolTurnOptions, RemoteTurnInput, RemoteTurnRequest,
+        };
+    }
+
+    /// Turn result envelopes: outcomes, stops, assistant output, summaries,
+    /// issues, and causal references.
+    pub mod turn_result {
+        pub use lash_remote_protocol::turn_result::{
+            RemoteAssistantOutput, RemoteAssistantOutputState, RemoteCausalRef,
+            RemoteExecutionSummary, RemoteToolCallOutcome, RemoteToolCallSummary, RemoteTurnFinish,
+            RemoteTurnIssue, RemoteTurnOutcome, RemoteTurnResult, RemoteTurnStatus, RemoteTurnStop,
+            RemoteTurnUsageSummary,
+        };
+    }
+
+    /// Token usage accounting and the streaming turn-activity vocabulary.
+    pub mod usage {
+        pub use lash_remote_protocol::usage_activity::{
+            RemoteTokenLedgerEntry, RemoteTurnActivity, RemoteTurnEvent, RemoteUsage,
+        };
+    }
 }
 
 pub mod process {
@@ -257,13 +333,14 @@ pub mod process {
         ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
         ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
         ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary,
-        ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseCompletion,
-        ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope,
-        ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
-        ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport, ProcessStartOptions,
-        ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessWake,
-        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
-        ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
+        ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseClaimOutcome,
+        ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
+        ProcessOpScope, ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry,
+        ProcessRunHandle, ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport,
+        ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
+        ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery,
+        ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver, ProcessWorkSnapshot, SessionScope,
+        SessionScopeId,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
@@ -274,8 +351,9 @@ pub mod process {
 
 pub mod durability {
     pub use lash_core::{
-        DurableProcessWorker, DurableProcessWorkerConfig, EffectHost, InlineEffectHost, Residency,
-        RuntimeEnvironment, RuntimeHostConfig, TerminationPolicy,
+        DurableProcessWorker, DurableProcessWorkerConfig, EffectHost, InlineEffectHost,
+        LeaseTimings, LeaseTimingsError, Residency, RuntimeEnvironment, RuntimeHostConfig,
+        TerminationPolicy,
     };
 }
 
@@ -331,6 +409,9 @@ pub mod tracing {
 pub mod testing;
 
 pub mod provider {
+    /// Typed provider-failure classification surfaced on
+    /// [`TurnIssue`](crate::turn::TurnIssue) and session error envelopes.
+    pub use lash_core::ProviderFailureKind;
     pub use lash_core::provider::{
         ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy,
     };

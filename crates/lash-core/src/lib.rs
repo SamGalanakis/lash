@@ -48,8 +48,9 @@ pub enum DurabilityTier {
 
 // Re-exports
 pub use attachments::{
-    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, FileAttachmentStore,
-    InMemoryAttachmentStore, SessionScopedAttachmentStore, StoredAttachment,
+    AttachmentReclamationReport, AttachmentStore, AttachmentStoreError, AttachmentStorePersistence,
+    FileAttachmentStore, InMemoryAttachmentStore, SessionScopedAttachmentStore, StoredAttachment,
+    reclaim_orphaned_attachments,
 };
 pub use chronological::{
     BorrowedChronologicalEntry, BorrowedChronologicalMessage, BorrowedChronologicalPayload,
@@ -346,9 +347,9 @@ pub use runtime::{
     ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
     ProcessExecutionEnvStore, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
     ProcessHandleSummary, ProcessId, ProcessIdentity, ProcessInput, ProcessLease,
-    ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
-    ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessService,
+    ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
+    ProcessListMode, ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessService,
     ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions,
     ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
     ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
@@ -374,11 +375,11 @@ pub use runtime::{
 };
 #[allow(unused_imports)]
 pub(crate) use runtime::{
-    LlmAttachmentSpec, ProcessEventSemantics, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointTurnInput,
-    QueuedCheckpointWork, QueuedTurnWork, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
+    LlmAttachmentSpec, ProcessEventSemantics, QueuedCheckpointTurnInput, QueuedCheckpointWork,
+    QueuedTurnWork, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
     QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
-    RuntimeReplay, RuntimeScope, RuntimeSubject, TURN_INPUT_CLAIM_TTL_MS,
-    load_process_execution_env, materialize_process_event_semantics, persist_process_execution_env,
+    RuntimeReplay, RuntimeScope, RuntimeSubject, load_process_execution_env,
+    materialize_process_event_semantics, persist_process_execution_env,
     prepare_process_event_append, prepare_process_registration, process_event_invocation,
     process_event_payload_hash, process_wake_batch_draft, process_wake_input_from_event_payload,
     process_wake_turn_cause, process_wake_turn_text, require_event_replay,
@@ -411,9 +412,11 @@ pub use session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord};
 pub use session_model::{RuntimeSessionPolicy, SessionPolicy, SessionSpec};
 pub use store::{
     AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
-    LeaseOwnerIdentity, LeaseOwnerLiveness, RuntimePersistence, SessionExecutionLease,
+    LeaseOwnerIdentity, LeaseOwnerLiveness, LeaseTimings, LeaseTimingsError, QueuedWorkStore,
+    RuntimePersistence, SessionCommitStore, SessionExecutionLease,
     SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
-    SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
+    SessionExecutionLeaseStore, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError,
+    StoreMaintenance, TurnInputStore, VacuumReport,
 };
 #[allow(unused_imports)]
 pub(crate) use store::{

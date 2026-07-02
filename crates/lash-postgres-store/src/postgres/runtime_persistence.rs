@@ -1,5 +1,5 @@
 #[async_trait::async_trait]
-impl RuntimePersistence for PostgresSessionStore {
+impl SessionCommitStore for PostgresSessionStore {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -427,6 +427,42 @@ impl RuntimePersistence for PostgresSessionStore {
         Ok(result)
     }
 
+    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO lash_session_meta (session_id, meta_json)
+             VALUES ($1, $2)
+             ON CONFLICT (session_id) DO UPDATE SET meta_json = EXCLUDED.meta_json",
+        )
+        .bind(&meta.session_id)
+        .bind(encode_json(&meta))
+        .execute(&self.pool)
+        .await
+        .map_err(store_sqlx_error)?;
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
+        let json: Option<String> = if let Some(session_id) = &self.session_id {
+            sqlx::query_scalar("SELECT meta_json FROM lash_session_meta WHERE session_id = $1")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(store_sqlx_error)?
+        } else {
+            sqlx::query_scalar(
+                "SELECT meta_json FROM lash_session_meta ORDER BY session_id ASC LIMIT 1",
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(store_sqlx_error)?
+        };
+        json.map(|json| store_decode_json(&json, "session meta"))
+            .transpose()
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionExecutionLeaseStore for PostgresSessionStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
@@ -673,7 +709,10 @@ impl RuntimePersistence for PostgresSessionStore {
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl QueuedWorkStore for PostgresSessionStore {
     async fn enqueue_queued_work(
         &self,
         batch: QueuedWorkBatchDraft,
@@ -1157,7 +1196,10 @@ impl RuntimePersistence for PostgresSessionStore {
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(batches)
     }
+}
 
+#[async_trait::async_trait]
+impl TurnInputStore for PostgresSessionStore {
     async fn enqueue_pending_turn_input(
         &self,
         draft: lash_core::PendingTurnInputDraft,
@@ -1269,20 +1311,6 @@ impl RuntimePersistence for PostgresSessionStore {
             .collect::<Result<Vec<_>, StoreError>>()?;
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(inputs)
-    }
-
-    async fn cancel_pending_turn_input(
-        &self,
-        session_id: &str,
-        input_id: &str,
-    ) -> Result<lash_core::PendingTurnInputCancelOutcome, StoreError> {
-        let target = lash_core::PendingTurnInputCancelTarget::input_id(input_id);
-        let targets = vec![target];
-        let mut outcomes = self.cancel_pending_turn_inputs(session_id, &targets).await?;
-        Ok(outcomes
-            .pop()
-            .map(|result| result.outcome)
-            .unwrap_or(lash_core::PendingTurnInputCancelOutcome::NotFound))
     }
 
     async fn cancel_pending_turn_inputs(
@@ -1435,40 +1463,10 @@ impl RuntimePersistence for PostgresSessionStore {
         .map_err(store_sqlx_error)?;
         Ok(())
     }
+}
 
-    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO lash_session_meta (session_id, meta_json)
-             VALUES ($1, $2)
-             ON CONFLICT (session_id) DO UPDATE SET meta_json = EXCLUDED.meta_json",
-        )
-        .bind(&meta.session_id)
-        .bind(encode_json(&meta))
-        .execute(&self.pool)
-        .await
-        .map_err(store_sqlx_error)?;
-        Ok(())
-    }
-
-    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
-        let json: Option<String> = if let Some(session_id) = &self.session_id {
-            sqlx::query_scalar("SELECT meta_json FROM lash_session_meta WHERE session_id = $1")
-                .bind(session_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(store_sqlx_error)?
-        } else {
-            sqlx::query_scalar(
-                "SELECT meta_json FROM lash_session_meta ORDER BY session_id ASC LIMIT 1",
-            )
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(store_sqlx_error)?
-        };
-        json.map(|json| store_decode_json(&json, "session meta"))
-            .transpose()
-    }
-
+#[async_trait::async_trait]
+impl StoreMaintenance for PostgresSessionStore {
     async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), StoreError> {
         for id in ids {
             if let Some(session_id) = &self.session_id {
@@ -1541,8 +1539,96 @@ impl RuntimePersistence for PostgresSessionStore {
         })
     }
 
+    /// Checkpoint-rooted mark/sweep over `lash_blobs`, mirroring the SQLite
+    /// store's semantics ([`GcReport`] fields match). Postgres inlines the
+    /// tool/plugin/execution snapshots inside each checkpoint envelope, so
+    /// `lash_blobs` holds only checkpoint envelopes and the reachable set is the
+    /// set of live checkpoint refs (plus any child artifact ref an envelope
+    /// still names — usually none, but retained defensively). The three
+    /// Lashlang artifact namespaces live in a separate, upsert-in-place table
+    /// (`lash_lashlang_artifacts`) that never orphans, so GC does not touch it.
     async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
-        Ok(GcReport::default())
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        // Serialize against concurrent checkpoint-blob writers. Every commit
+        // INSERTs its new envelope into `lash_blobs` (holding a ROW EXCLUSIVE
+        // lock) inside the same transaction that repoints `lash_sessions`, so an
+        // EXCLUSIVE table lock makes the root read and the sweep atomic with
+        // respect to every committer: a commit racing GC either lands fully
+        // before the root read or blocks until GC releases. This is the fenced
+        // transactional discipline the store uses on its other write paths.
+        tx.execute("LOCK TABLE lash_blobs IN EXCLUSIVE MODE")
+            .await
+            .map_err(store_sqlx_error)?;
+        // Roots: every live session's checkpoint envelope, across ALL sessions.
+        // `lash_blobs` is a content-addressed table shared by the whole
+        // database, so a blob shared across sessions must stay reachable while
+        // ANY session references it — scoping roots to one session would delete
+        // another session's live checkpoint.
+        let root_refs = sqlx::query_scalar::<_, String>(
+            "SELECT checkpoint_ref FROM lash_sessions WHERE checkpoint_ref IS NOT NULL",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let root_count = root_refs.len();
+        let mut retained = std::collections::BTreeSet::<String>::new();
+        for checkpoint_hash in root_refs {
+            if !retained.insert(checkpoint_hash.clone()) {
+                continue;
+            }
+            // A rooted envelope is live. Decode it and retain any child artifact
+            // blob it still references. A present-yet-undecodable envelope is a
+            // hard error so GC aborts rather than dropping a live checkpoint's
+            // children; an absent one was already collected on a prior run.
+            let bytes: Option<Vec<u8>> =
+                sqlx::query_scalar("SELECT content FROM lash_blobs WHERE hash = $1")
+                    .bind(&checkpoint_hash)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(store_sqlx_error)?;
+            let Some(bytes) = bytes else {
+                continue;
+            };
+            let envelope: SessionCheckpointEnvelope = decode_versioned_msgpack_record(
+                &bytes,
+                "PostgresSessionCheckpointEnvelope",
+                POSTGRES_SESSION_CHECKPOINT_ENVELOPE_SCHEMA_VERSION,
+            )?;
+            for child in [
+                envelope.manifest.tool_state_ref,
+                envelope.manifest.plugin_snapshot_ref,
+                envelope.manifest.execution_state_ref,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                retained.insert(child.0);
+            }
+        }
+        let all_hashes = sqlx::query_scalar::<_, String>(
+            "SELECT hash FROM lash_blobs ORDER BY hash ASC",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let mut deleted_blob_count = 0usize;
+        for hash in &all_hashes {
+            if retained.contains(hash) {
+                continue;
+            }
+            sqlx::query("DELETE FROM lash_blobs WHERE hash = $1")
+                .bind(hash)
+                .execute(&mut *tx)
+                .await
+                .map_err(store_sqlx_error)?;
+            deleted_blob_count += 1;
+        }
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(GcReport {
+            root_count,
+            retained_blob_count: retained.len(),
+            deleted_blob_count,
+        })
     }
 }
 

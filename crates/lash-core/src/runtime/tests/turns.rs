@@ -99,7 +99,7 @@ impl crate::Clock for StepExpiryClock {
             self.epoch_ms
         } else {
             self.epoch_ms
-                .saturating_add(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS)
+                .saturating_add(crate::LeaseTimings::default().ttl_ms())
                 .saturating_add(1)
         }
     }
@@ -143,7 +143,7 @@ impl crate::runtime::RuntimeTurnPhaseProbe for ExpireLeaseAtFinalCommit {
             && !self.expired.swap(true, Ordering::SeqCst)
         {
             self.clock
-                .advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+                .advance_ms(crate::LeaseTimings::default().ttl_ms() + 1);
         }
     }
 
@@ -172,7 +172,7 @@ impl crate::runtime::RuntimeTurnPhaseProbe for ExpireLeaseAfterPromptBuild {
             && !self.expired.swap(true, Ordering::SeqCst)
         {
             self.clock
-                .advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+                .advance_ms(crate::LeaseTimings::default().ttl_ms() + 1);
         }
     }
 }
@@ -223,7 +223,7 @@ async fn append_process_wake_to_queue(
         .await
         .expect("append wake");
     let wake = appended.wake_delivery.expect("wake delivery");
-    crate::store::RuntimePersistence::enqueue_queued_work(
+    crate::store::QueuedWorkStore::enqueue_queued_work(
         store,
         crate::process_wake_batch_draft(wake.clone()),
     )
@@ -272,7 +272,7 @@ async fn enqueue_turn_input_for_checkpoint(
         input,
     );
     draft.source_key = source_key;
-    crate::store::RuntimePersistence::enqueue_pending_turn_input(store, draft)
+    crate::store::TurnInputStore::enqueue_pending_turn_input(store, draft)
         .await
         .expect("enqueue turn input")
 }
@@ -282,7 +282,7 @@ async fn enqueue_idle_turn_input(
     session_id: &str,
     text: &str,
 ) -> crate::PendingTurnInput {
-    crate::store::RuntimePersistence::enqueue_pending_turn_input(
+    crate::store::TurnInputStore::enqueue_pending_turn_input(
         store,
         crate::PendingTurnInputDraft::new(
             session_id.to_string(),
@@ -299,7 +299,7 @@ async fn enqueue_session_command(
     session_id: &str,
     reason: &str,
 ) -> crate::QueuedWorkBatch {
-    crate::store::RuntimePersistence::enqueue_queued_work(
+    crate::store::QueuedWorkStore::enqueue_queued_work(
         store,
         crate::QueuedWorkBatchDraft::new(
             session_id.to_string(),
@@ -601,6 +601,98 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
             .iter()
             .any(|issue| issue.message.contains("provider unavailable"))
     );
+    // The transport's typed retryable signal survives into the host-facing
+    // issue instead of living only in trace records.
+    assert!(
+        turn.errors
+            .iter()
+            .any(|issue| issue.kind == "llm_provider" && issue.retryable == Some(true))
+    );
+}
+
+#[tokio::test]
+async fn provider_failure_surfaces_typed_kind_and_retryability_on_turn_issue() {
+    // A 400 classifies as a non-retryable Validation failure, so the turn
+    // fails on the first attempt with fully typed failure signals.
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Err(crate::llm::transport::LlmTransportError::new("bad request").with_code("400")),
+    }]);
+    let mut runtime = runtime_with_plugins(Vec::new(), transport).await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "typed-provider-failure-turn"),
+        )
+        .await
+        .expect("turn");
+
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Stopped(TurnStop::ProviderError)
+    ));
+    let issue = turn
+        .errors
+        .iter()
+        .find(|issue| issue.kind == "llm_provider")
+        .expect("llm_provider issue");
+    assert_eq!(issue.retryable, Some(false));
+    assert_eq!(
+        issue.provider_failure_kind,
+        Some(crate::ProviderFailureKind::Validation)
+    );
+    assert_eq!(issue.code.as_deref(), Some("400"));
+}
+
+#[tokio::test]
+async fn assembled_turn_reports_turn_timing_from_injected_clock() {
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "Done".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "Done".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let mut runtime = runtime_with_plugins(Vec::new(), transport).await;
+    runtime.host.core.clock = Arc::new(ManualClock::new(4_242));
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "turn-timing-turn"),
+        )
+        .await
+        .expect("turn");
+
+    // `started_at_ms` is read from the injected wall clock, so a
+    // deterministic clock yields a deterministic timestamp (the OS clock
+    // would report the current epoch here).
+    assert_eq!(turn.execution.started_at_ms, 4_242);
 }
 
 #[tokio::test]
@@ -949,7 +1041,7 @@ async fn command_only_queued_work_drain_completes_without_turn() {
 
     assert!(drained.is_none());
     assert!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
             .await
             .expect("list queue after command-only drain")
             .is_empty(),
@@ -1054,7 +1146,7 @@ async fn next_turn_input_turn_claims_process_wake_at_active_checkpoint() {
         "wake checkpoint response"
     );
     assert!(
-        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
+        crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
             .await
             .expect("pending inputs after drain")
             .is_empty(),
@@ -1062,7 +1154,7 @@ async fn next_turn_input_turn_claims_process_wake_at_active_checkpoint() {
         queued_input.input_id
     );
     assert!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
             .await
             .expect("queued work after pending input drain")
             .is_empty(),
@@ -1129,7 +1221,7 @@ async fn selected_process_wake_drain_does_not_claim_pending_next_turn_input() {
         .with_wake_target_scope(target_scope),
     )
     .await;
-    let wake_batch = crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+    let wake_batch = crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
         .await
         .expect("queued work before selected drain")
         .into_iter()
@@ -1158,7 +1250,7 @@ async fn selected_process_wake_drain_does_not_claim_pending_next_turn_input() {
 
     assert_eq!(drained.assistant_output.safe_text, "selected wake response");
     let pending_inputs =
-        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
+        crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
             .await
             .expect("pending inputs after selected wake drain");
     assert_eq!(
@@ -1170,7 +1262,7 @@ async fn selected_process_wake_drain_does_not_claim_pending_next_turn_input() {
         "selected queued-work drains must not also claim pending user input"
     );
     assert!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
             .await
             .expect("queued work after selected wake drain")
             .is_empty(),
@@ -1287,7 +1379,7 @@ async fn process_wake_claimed_at_checkpoint_is_completed_when_turn_is_cancelled(
         TurnOutcome::Stopped(TurnStop::Cancelled)
     ));
     assert!(
-        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
+        crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
             .await
             .expect("pending inputs after cancellation")
             .is_empty(),
@@ -1295,7 +1387,7 @@ async fn process_wake_claimed_at_checkpoint_is_completed_when_turn_is_cancelled(
         queued_input.input_id
     );
     assert!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
             .await
             .expect("queued work after cancellation")
             .is_empty(),
@@ -1374,7 +1466,7 @@ async fn leading_session_command_drains_before_queued_turn() {
 
     assert_eq!(drained.assistant_output.safe_text, "queued answer");
     assert!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
             .await
             .expect("list queue after command plus turn")
             .is_empty(),
@@ -1416,7 +1508,7 @@ async fn later_session_command_does_not_jump_earlier_queued_turn() {
 
     assert_eq!(drained.assistant_output.safe_text, "first turn answer");
     assert_eq!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
             .await
             .expect("list queue after first turn")
             .iter()
@@ -1436,7 +1528,7 @@ async fn later_session_command_does_not_jump_earlier_queued_turn() {
         .expect("later command drain succeeds");
     assert!(command_only.is_none());
     assert!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
             .await
             .expect("list queue after later command")
             .is_empty()
@@ -1611,7 +1703,7 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
         "empty wake turns must not synthesize blank user history"
     );
     assert!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
             .await
             .expect("queued work after commit")
             .is_empty()
@@ -1703,7 +1795,7 @@ async fn foreground_turn_returns_session_execution_busy_when_lane_is_held() {
     let (mut runtime, store) =
         standard_runtime_with_transport_and_queue_store(mock_provider(Vec::new())).await;
     let owner = lease_owner("other-runtime");
-    let held_lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
+    let held_lease = crate::store::SessionExecutionLeaseStore::try_claim_session_execution_lease(
         store.as_ref(),
         "root",
         &owner,
@@ -1724,7 +1816,7 @@ async fn foreground_turn_returns_session_execution_busy_when_lane_is_held() {
         .expect_err("foreground turn should be rejected while lane is held");
 
     assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionBusy);
-    crate::store::RuntimePersistence::release_session_execution_lease(
+    crate::store::SessionExecutionLeaseStore::release_session_execution_lease(
         store.as_ref(),
         &held_lease.completion(),
     )
@@ -1748,7 +1840,7 @@ async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
     let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
     enqueue_idle_turn_input(store.as_ref(), "root", "queued while busy").await;
     let owner = lease_owner("foreground-runtime");
-    let held_lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
+    let held_lease = crate::store::SessionExecutionLeaseStore::try_claim_session_execution_lease(
         store.as_ref(),
         "root",
         &owner,
@@ -1772,7 +1864,7 @@ async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
         "idle queued drain must no-op while another owner holds the session lane"
     );
     assert_eq!(
-        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
+        crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
             .await
             .expect("queued turn input while busy")
             .len(),
@@ -1780,7 +1872,7 @@ async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
         "busy drain must not consume queued turn input"
     );
 
-    crate::store::RuntimePersistence::release_session_execution_lease(
+    crate::store::SessionExecutionLeaseStore::release_session_execution_lease(
         store.as_ref(),
         &held_lease.completion(),
     )
@@ -1797,7 +1889,7 @@ async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
 
     assert_eq!(drained.assistant_output.safe_text, "queued answer");
     assert!(
-        crate::store::RuntimePersistence::list_pending_turn_inputs(store.as_ref(), "root")
+        crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
             .await
             .expect("queued turn input after drain")
             .is_empty()
@@ -1819,11 +1911,11 @@ async fn session_command_claim_lease_expiry_surfaces_session_execution_lease_los
     )
     .await;
     let owner = lease_owner("session-command-drain-test");
-    let lease = crate::store::RuntimePersistence::try_claim_session_execution_lease(
+    let lease = crate::store::SessionExecutionLeaseStore::try_claim_session_execution_lease(
         store.as_ref(),
         "root",
         &owner,
-        crate::runtime::RUNTIME_TURN_LEASE_TTL_MS,
+        crate::LeaseTimings::default().ttl_ms(),
     )
     .await
     .expect("claim session execution lease")
@@ -1939,9 +2031,9 @@ async fn lease_loss_stops_foreground_turn_before_final_commit() {
         .expect("provider should start after session lease acquisition");
     let commits_before_lease_loss = *store.runtime_commit_count.lock().expect("commit count");
 
-    clock.advance_ms(crate::runtime::RUNTIME_TURN_LEASE_TTL_MS + 1);
+    clock.advance_ms(crate::LeaseTimings::default().ttl_ms() + 1);
     let owner = lease_owner("stealing-runtime");
-    let stolen = crate::store::RuntimePersistence::try_claim_session_execution_lease(
+    let stolen = crate::store::SessionExecutionLeaseStore::try_claim_session_execution_lease(
         store.as_ref(),
         "root",
         &owner,
@@ -1965,7 +2057,7 @@ async fn lease_loss_stops_foreground_turn_before_final_commit() {
         commits_before_lease_loss,
         "a turn that lost the session execution lease must not commit again after the lease is lost"
     );
-    crate::store::RuntimePersistence::release_session_execution_lease(
+    crate::store::SessionExecutionLeaseStore::release_session_execution_lease(
         store.as_ref(),
         &stolen.completion(),
     )
@@ -2197,7 +2289,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
         "durable wake events must not be bridged as injected plugin messages"
     );
     assert!(
-        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
             .await
             .expect("queued work after commit")
             .is_empty()
@@ -2478,13 +2570,13 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     assert_eq!(handle.session_id, "child-store");
     let stores = factory.stores();
     assert_eq!(stores.len(), 1);
-    let meta = crate::store::RuntimePersistence::load_session_meta(stores[0].as_ref())
+    let meta = crate::store::SessionCommitStore::load_session_meta(stores[0].as_ref())
         .await
         .expect("load session meta")
         .expect("session meta");
     assert_eq!(meta.session_id, "child-store");
     assert_eq!(meta.parent_session_id(), Some("root"));
-    let read = crate::store::RuntimePersistence::load_session(
+    let read = crate::store::SessionCommitStore::load_session(
         stores[0].as_ref(),
         crate::store::SessionReadScope::FullGraph,
     )

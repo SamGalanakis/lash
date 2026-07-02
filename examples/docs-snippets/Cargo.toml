@@ -17,7 +17,6 @@ lash = { workspace = true, features = ["rlm", "otel-trace"] }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
 lash-plugin-mcp = { workspace = true, features = ["lashlang"] }
 lash-postgres-store = { workspace = true }
-lash-protocol-rlm = { workspace = true }
 lash-provider-openai = { workspace = true }
 lash-s3-store = { workspace = true }
 lash-sqlite-store = { workspace = true }

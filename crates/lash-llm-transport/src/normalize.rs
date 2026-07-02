@@ -10,8 +10,8 @@
 //! contract, so there is no normalizer trait here — providers wire their own
 //! wire-format parsing to these primitives directly.
 
-use lash_core::LlmTransportError;
 use lash_core::provider::ProviderOptions;
+use lash_core::{LlmTransportError, ProviderFailureKind};
 use lash_sansio::llm::types::{LlmOutputPart, LlmTerminalReason, LlmUsage};
 use serde_json::Value;
 
@@ -231,16 +231,24 @@ where
 /// `message` is the provider-specific human-readable summary (e.g.
 /// `"Anthropic request failed with 429: rate limited"`); retryability is left
 /// to the central provider failure classifier, which reads the attached status.
+///
+/// The envelope is pre-labelled [`ProviderFailureKind::Http`] so it is
+/// self-describing even before classification. This matches what
+/// `DefaultProviderFailureClassifier` derives anyway (it upgrades `Unknown` to
+/// `Http` whenever a status is attached), and the classifier's status/text
+/// reclassifications (`Auth`, `Validation`, `Quota`, `Unsupported`) are
+/// unconditional, so the pre-set kind can never mask them.
 pub fn http_error_envelope(
     message: impl Into<String>,
     status: u16,
-    headers: &reqwest::header::HeaderMap,
+    headers: Vec<(String, String)>,
     raw_body: impl Into<String>,
     request_body: Option<String>,
 ) -> LlmTransportError {
     let mut err = LlmTransportError::new(message)
+        .with_kind(ProviderFailureKind::Http)
         .with_status(status)
-        .with_headers(crate::timeouts::header_pairs(headers))
+        .with_headers(headers)
         .with_raw(raw_body);
     if let Some(request_body) = request_body {
         err = err.with_request_body(request_body);
@@ -372,6 +380,30 @@ mod tests {
             ),
             LlmTerminalReason::ContentFilter
         );
+    }
+
+    #[test]
+    fn http_error_envelope_carries_http_kind_status_headers_raw_and_request_body() {
+        let err = http_error_envelope(
+            "Provider request failed with 429",
+            429,
+            vec![("retry-after".to_string(), "7".to_string())],
+            r#"{"error":"rate limited"}"#,
+            Some(r#"{"model":"m"}"#.to_string()),
+        );
+        assert_eq!(err.kind, ProviderFailureKind::Http);
+        assert_eq!(err.status, Some(429));
+        assert_eq!(err.code.as_deref(), Some("429"));
+        assert_eq!(err.raw.as_deref(), Some(r#"{"error":"rate limited"}"#));
+        assert_eq!(err.request_body.as_deref(), Some(r#"{"model":"m"}"#));
+        assert_eq!(
+            err.retry_after,
+            Some(std::time::Duration::from_secs(7)),
+            "with_headers must derive retry-after from the header pairs"
+        );
+
+        let without_request_body = http_error_envelope("failed", 500, Vec::new(), "boom", None);
+        assert_eq!(without_request_body.request_body, None);
     }
 
     #[test]

@@ -2,6 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "testing")]
+pub mod testing;
+
 pub use lash_trace::{
     TraceLashlangChildExecution, TraceLashlangEdgeSelection, TraceLashlangExecutionEvent,
     TraceLashlangExecutionIdentity, TraceLashlangGraph, TraceLashlangGraphChildLink,
@@ -841,6 +844,7 @@ mod bridge;
 mod catalogue_preview;
 mod deferred;
 mod process;
+mod typed_output;
 
 pub use bridge::{
     lashlang_value_to_json, process_event_payload, protocol_tool_output_to_lashlang_value,
@@ -862,6 +866,7 @@ pub use deferred::{
 pub use process::{
     lashlang_process_event_types, lashlang_process_signal_event_types, lashlang_type_expr_schema,
 };
+pub use typed_output::parse_output_schema;
 
 #[cfg(test)]
 mod tests {

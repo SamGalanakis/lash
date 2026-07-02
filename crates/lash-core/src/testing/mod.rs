@@ -423,10 +423,7 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
             raw_text: summary.to_string(),
             state: OutputState::Usable,
         },
-        execution: ExecutionSummary {
-            had_tool_calls: false,
-            had_code_execution: false,
-        },
+        execution: ExecutionSummary::default(),
         token_usage: TokenUsage::default(),
         children_usage: Vec::new(),
         tool_calls: Vec::new(),

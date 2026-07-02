@@ -772,6 +772,7 @@ finish "done through route"
         let state = AppStateData::from_shared_db(
             core,
             Arc::clone(&db),
+            lash::persistence::LeaseOwnerIdentity::opaque("agent-service-test", "test"),
             "mock-model".to_string(),
             None,
             AgentServiceDurability::Local,

@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use super::{Clock, RUNTIME_TURN_LEASE_RENEW_MS, RUNTIME_TURN_LEASE_TTL_MS};
+use super::Clock;
+use crate::LeaseTimings;
 use crate::store::{
     RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionExecutionLease,
     SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
@@ -17,6 +17,7 @@ pub(super) struct SessionExecutionLeaseGuard {
     lease: Arc<StdMutex<SessionExecutionLease>>,
     released: Arc<AtomicBool>,
     lost: Arc<AtomicBool>,
+    timings: LeaseTimings,
     renew_task: tokio::task::JoinHandle<()>,
 }
 
@@ -25,11 +26,12 @@ impl SessionExecutionLeaseGuard {
         store: Arc<dyn RuntimePersistence>,
         session_id: &str,
         owner: &crate::LeaseOwnerIdentity,
+        timings: LeaseTimings,
         clock: Arc<dyn Clock>,
         cancel: CancellationToken,
     ) -> Result<Option<Self>, StoreError> {
         let lease = match store
-            .try_claim_session_execution_lease(session_id, owner, RUNTIME_TURN_LEASE_TTL_MS)
+            .try_claim_session_execution_lease(session_id, owner, timings.ttl_ms())
             .await?
         {
             SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
@@ -41,7 +43,7 @@ impl SessionExecutionLeaseGuard {
                         session_id,
                         owner,
                         &holder.fence(),
-                        RUNTIME_TURN_LEASE_TTL_MS,
+                        timings.ttl_ms(),
                     )
                     .await?
                 {
@@ -73,6 +75,7 @@ impl SessionExecutionLeaseGuard {
             Arc::clone(&lease),
             Arc::clone(&released),
             Arc::clone(&lost),
+            timings,
             clock,
             cancel,
         );
@@ -81,6 +84,7 @@ impl SessionExecutionLeaseGuard {
             lease,
             released,
             lost,
+            timings,
             renew_task,
         }))
     }
@@ -123,7 +127,7 @@ impl SessionExecutionLeaseGuard {
         let fence = self.fence();
         match self
             .store
-            .renew_session_execution_lease(&fence, RUNTIME_TURN_LEASE_TTL_MS)
+            .renew_session_execution_lease(&fence, self.timings.ttl_ms())
             .await
         {
             Ok(renewed) => {
@@ -183,6 +187,7 @@ pub(super) async fn commit_runtime_state_with_fresh_session_execution_lease(
     store: Arc<dyn RuntimePersistence>,
     commit: RuntimeCommit,
     owner: &crate::LeaseOwnerIdentity,
+    timings: LeaseTimings,
     clock: Arc<dyn Clock>,
 ) -> Result<RuntimeCommitResult, StoreError> {
     let session_id = commit.session_id.clone();
@@ -190,6 +195,7 @@ pub(super) async fn commit_runtime_state_with_fresh_session_execution_lease(
         Arc::clone(&store),
         &session_id,
         owner,
+        timings,
         clock,
         CancellationToken::new(),
     )
@@ -218,10 +224,11 @@ fn spawn_renewal_task(
     lease: Arc<StdMutex<SessionExecutionLease>>,
     released: Arc<AtomicBool>,
     lost: Arc<AtomicBool>,
+    timings: LeaseTimings,
     clock: Arc<dyn Clock>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let renew_every = Duration::from_millis(RUNTIME_TURN_LEASE_RENEW_MS.max(1));
+    let renew_every = timings.renew_interval();
     tokio::spawn(async move {
         loop {
             clock.sleep(renew_every).await;
@@ -230,7 +237,7 @@ fn spawn_renewal_task(
             }
             let fence = lease.lock().expect("session lease lock").fence();
             match store
-                .renew_session_execution_lease(&fence, RUNTIME_TURN_LEASE_TTL_MS)
+                .renew_session_execution_lease(&fence, timings.ttl_ms())
                 .await
             {
                 Ok(renewed) => {

@@ -38,11 +38,21 @@ impl RuntimeTurnPhaseProbe for RecordingPhaseProbe {
 }
 
 #[test]
-fn runtime_turn_lease_constants_are_contractual_windows() {
-    assert_eq!(RUNTIME_TURN_LEASE_TTL_MS, 30_000);
-    assert_eq!(RUNTIME_TURN_LEASE_RENEW_MS, 10_000);
-    assert_eq!(RUNTIME_TURN_LEASE_TTL_MS, RUNTIME_TURN_LEASE_RENEW_MS * 3);
-    const { assert!(RUNTIME_TURN_LEASE_TTL_MS > RUNTIME_TURN_LEASE_RENEW_MS) };
+fn default_lease_timings_are_contractual_windows() {
+    let timings = crate::LeaseTimings::default();
+    assert_eq!(timings.ttl_ms(), 30_000);
+    assert_eq!(timings.renew_interval_ms(), 10_000);
+    assert_eq!(timings.ttl_ms(), timings.renew_interval_ms() * 3);
+    assert!(
+        crate::LeaseTimings::new(
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(1)
+        )
+        .is_err(),
+        "a ttl below three renew intervals must be rejected"
+    );
+    let host = crate::RuntimeHostConfig::in_memory();
+    assert_eq!(host.control.lease_timings, timings);
 }
 
 #[test]

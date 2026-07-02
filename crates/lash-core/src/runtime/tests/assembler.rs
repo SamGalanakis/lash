@@ -486,6 +486,8 @@ fn output_state_recovered_from_error() {
         terminal_reason: None,
         message: "something failed".to_string(),
         raw: None,
+        retryable: None,
+        provider_failure_kind: None,
     }];
     assert_eq!(
         classify_output_state("raw", "usable", &issues),

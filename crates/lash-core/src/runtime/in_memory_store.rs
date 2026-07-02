@@ -480,7 +480,7 @@ impl Default for InMemorySessionStore {
 crate::impl_noop_attachment_manifest!(InMemorySessionStore);
 
 #[async_trait::async_trait]
-impl crate::store::RuntimePersistence for InMemorySessionStore {
+impl crate::store::SessionCommitStore for InMemorySessionStore {
     async fn load_session(
         &self,
         scope: crate::store::SessionReadScope,
@@ -759,6 +759,23 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         Ok(result)
     }
 
+    async fn save_session_meta(
+        &self,
+        meta: crate::store::SessionMeta,
+    ) -> Result<(), crate::store::StoreError> {
+        *self.session_meta.lock().expect("lock session meta") = Some(meta);
+        Ok(())
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> Result<Option<crate::store::SessionMeta>, crate::store::StoreError> {
+        Ok(self.session_meta.lock().expect("lock session meta").clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::store::SessionExecutionLeaseStore for InMemorySessionStore {
     async fn try_claim_session_execution_lease(
         &self,
         session_id: &str,
@@ -886,7 +903,10 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         self.release_session_execution_lease_in_memory(completion);
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl crate::store::TurnInputStore for InMemorySessionStore {
     async fn enqueue_pending_turn_input(
         &self,
         draft: crate::PendingTurnInputDraft,
@@ -977,22 +997,6 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             .collect::<Vec<_>>();
         inputs.sort_by_key(|input| input.enqueue_seq);
         Ok(inputs)
-    }
-
-    async fn cancel_pending_turn_input(
-        &self,
-        session_id: &str,
-        input_id: &str,
-    ) -> Result<crate::PendingTurnInputCancelOutcome, crate::store::StoreError> {
-        let target = crate::PendingTurnInputCancelTarget::input_id(input_id);
-        let targets = vec![target];
-        let mut outcomes = self
-            .cancel_pending_turn_inputs(session_id, &targets)
-            .await?;
-        Ok(outcomes
-            .pop()
-            .map(|result| result.outcome)
-            .unwrap_or(crate::PendingTurnInputCancelOutcome::NotFound))
     }
 
     async fn cancel_pending_turn_inputs(
@@ -1121,7 +1125,10 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         }
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl crate::store::QueuedWorkStore for InMemorySessionStore {
     async fn enqueue_queued_work(
         &self,
         batch: crate::QueuedWorkBatchDraft,
@@ -1313,21 +1320,10 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         batches.sort_by_key(|batch| batch.enqueue_seq);
         Ok(batches)
     }
+}
 
-    async fn save_session_meta(
-        &self,
-        meta: crate::store::SessionMeta,
-    ) -> Result<(), crate::store::StoreError> {
-        *self.session_meta.lock().expect("lock session meta") = Some(meta);
-        Ok(())
-    }
-
-    async fn load_session_meta(
-        &self,
-    ) -> Result<Option<crate::store::SessionMeta>, crate::store::StoreError> {
-        Ok(self.session_meta.lock().expect("lock session meta").clone())
-    }
-
+#[async_trait::async_trait]
+impl crate::store::StoreMaintenance for InMemorySessionStore {
     async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), crate::store::StoreError> {
         self.tombstoned_node_ids
             .lock()

@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use lash_core::{
-    AwaitEventResolver, DurabilityTier, EffectHost, ExecutionScope, PluginError, ProcessCommand,
-    ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectController,
+    AwaitEventResolver, DurabilityTier, EffectHost, ExecutionScope, LeaseTimings, PluginError,
+    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectLocalExecutor,
     RuntimeEffectOutcome, RuntimeError, ScopedEffectController,
 };
@@ -27,23 +27,17 @@ use super::*;
 const STATUS_IN_PROGRESS: &str = "in_progress";
 const STATUS_COMPLETED: &str = "completed";
 const STATUS_FAILED: &str = "failed";
-const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const BUSY_POLL: Duration = Duration::from_millis(25);
 
 static EFFECT_OWNER_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Options for SQLite-backed runtime effect replay.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SqliteEffectReplayOptions {
-    pub lease_ttl: Duration,
-}
-
-impl Default for SqliteEffectReplayOptions {
-    fn default() -> Self {
-        Self {
-            lease_ttl: DEFAULT_LEASE_TTL,
-        }
-    }
+    /// Effect-replay lease timing capability. Hosts share the same
+    /// [`LeaseTimings`] they configure on the runtime so effect leases expire
+    /// on the same failover window as session and process leases.
+    pub lease_timings: LeaseTimings,
 }
 
 struct SqliteEffectReplayInner {
@@ -51,7 +45,7 @@ struct SqliteEffectReplayInner {
     owner_id: String,
     lease_counter: AtomicU64,
     replay_mode: AtomicBool,
-    lease_ttl_ms: u64,
+    lease_timings: LeaseTimings,
 }
 
 /// Deployment-level SQLite effect host.
@@ -216,10 +210,10 @@ impl SqliteRuntimeEffectController {
         let now = current_epoch_ms();
         let lease_token = self.inner.next_lease_token();
         let due_at_ms = sleep_due_at_ms(envelope, now);
-        let lease_expires_at_ms = now.saturating_add(self.inner.lease_ttl_ms);
+        let lease_ttl_ms = self.inner.lease_timings.ttl_ms();
+        let lease_expires_at_ms = now.saturating_add(lease_ttl_ms);
         let replay_mode = self.inner.replay_mode.load(Ordering::SeqCst);
         let owner_id = self.inner.owner_id.clone();
-        let lease_ttl_ms = self.inner.lease_ttl_ms;
 
         // The `BEGIN IMMEDIATE` transaction is run on the connection thread via
         // `conn.write`. The closure returns a `rusqlite::Result` carrying our
@@ -462,7 +456,7 @@ impl SqliteRuntimeEffectController {
         claim: &ClaimedEffect,
     ) -> Result<(), RuntimeEffectControllerError> {
         let now = current_epoch_ms();
-        let renewed_expires_at = now.saturating_add(self.inner.lease_ttl_ms);
+        let renewed_expires_at = now.saturating_add(self.inner.lease_timings.ttl_ms());
         let scope_id = claim.scope_id.clone();
         let replay_key = claim.replay_key.clone();
         let envelope_hash = claim.envelope_hash.clone();
@@ -516,7 +510,7 @@ impl SqliteRuntimeEffectController {
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-        let renew_every = Duration::from_millis((self.inner.lease_ttl_ms / 3).max(1));
+        let renew_every = self.inner.lease_timings.renew_interval();
         let effect = self.execute_claimed_effect(claim, envelope, local_executor);
         tokio::pin!(effect);
         let renew_sleep = tokio::time::sleep(renew_every);
@@ -713,22 +707,13 @@ impl SqliteEffectReplayInner {
             ),
             lease_counter: AtomicU64::new(1),
             replay_mode: AtomicBool::new(false),
-            lease_ttl_ms: duration_ms(options.lease_ttl),
+            lease_timings: options.lease_timings,
         }
     }
 
     fn next_lease_token(&self) -> String {
         let sequence = self.lease_counter.fetch_add(1, Ordering::SeqCst);
         format!("{}:{sequence}", self.owner_id)
-    }
-}
-
-fn duration_ms(duration: Duration) -> u64 {
-    let millis = duration.as_millis();
-    if millis == 0 {
-        1
-    } else {
-        millis.min(u128::from(u64::MAX)) as u64
     }
 }
 

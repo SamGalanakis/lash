@@ -4,10 +4,7 @@
 //! This test parses the crate's own public re-export map (`pub use` statements)
 //! and asserts no public name is re-exported from two module homes.
 //!
-//! Two exemptions, both intentional:
-//! - `prelude` mirrors the crate root exactly (the one intended exception).
-//! - The `rlm` module surfaces the RLM protocol facade vocabulary, which is
-//!   maintained under a separate redesign; it is not gated here.
+//! One exemption, intentional: `prelude` mirrors the crate root exactly.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -58,7 +55,9 @@ fn leaves_of(body: &str) -> Vec<String> {
 ///
 /// `forced_module` names the home for a file module whose whole body is one
 /// module (`usage`, `admin`, ...). For `lib.rs` (`forced_module == None`) the
-/// home is the innermost enclosing inline `pub mod`, or `root` at file scope.
+/// home is the full path of enclosing inline `pub mod`s joined with `::`
+/// (so nested sub-namespaces like `remote::llm` are distinct homes from a
+/// top-level `llm`), or `root` at file scope.
 fn collect(src: &str, forced_module: Option<&str>) -> Vec<(String, String)> {
     let bytes = src.as_bytes();
 
@@ -103,14 +102,20 @@ fn collect(src: &str, forced_module: Option<&str>) -> Vec<(String, String)> {
         if let Some(m) = forced_module {
             return m.to_string();
         }
-        let mut best: Option<&(String, usize, usize)> = None;
-        for r in &ranges {
-            if r.1 <= pos && pos <= r.2 && best.map(|b| r.1 > b.1).unwrap_or(true) {
-                best = Some(r);
-            }
+        // Every inline module enclosing `pos`, outermost first (ranges are
+        // discovered in source order, so enclosing modules sort by start).
+        let mut chain: Vec<&(String, usize, usize)> =
+            ranges.iter().filter(|r| r.1 <= pos && pos <= r.2).collect();
+        chain.sort_by_key(|r| r.1);
+        if chain.is_empty() {
+            "root".to_string()
+        } else {
+            chain
+                .iter()
+                .map(|r| r.0.as_str())
+                .collect::<Vec<_>>()
+                .join("::")
         }
-        best.map(|b| b.0.clone())
-            .unwrap_or_else(|| "root".to_string())
     };
 
     let mut out = Vec::new();
@@ -149,12 +154,10 @@ fn every_public_name_has_exactly_one_home() {
         Some("scenario_contracts"),
     ));
     pairs.extend(collect(&read("src/testing.rs"), Some("testing")));
+    pairs.extend(collect(&read("src/rlm.rs"), Some("rlm")));
 
     let mut homes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, module) in pairs {
-        if module == "rlm" {
-            continue; // RLM facade surface: maintained under a separate redesign.
-        }
         // The prelude mirrors the crate root exactly.
         let module = if module == "prelude" {
             "root".to_string()

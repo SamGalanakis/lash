@@ -542,7 +542,7 @@ async fn rlm_root_session_final_answer_format_defaults_to_markdown_and_can_be_ra
 
     let raw = core
         .session("rlm-root-raw")
-        .final_answer_format(RlmFinalAnswerFormat::RawFinalValue)
+        .final_answer_format(RlmFinalAnswerFormat::RawFinalValue)?
         .open()
         .await?;
     raw.turn(TurnInput::text("hello"))
@@ -665,6 +665,80 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
     let messages = reopened.read_view().messages().to_vec();
     assert_eq!(messages.len(), 1);
     assert_eq!(message_text(&messages[0]), "already stored");
+    Ok(())
+}
+
+#[tokio::test]
+async fn park_then_resume_preserves_session_transcript() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard_builder())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()?;
+
+    let session = core.session("parked").open().await?;
+    session.turn(TurnInput::text("hello")).run().await?;
+    let before = session
+        .read_view()
+        .messages()
+        .iter()
+        .map(message_text)
+        .collect::<Vec<_>>();
+    assert!(
+        before.contains(&"hello".to_string()),
+        "the pre-park transcript records the turn"
+    );
+
+    // Park flushes and drops the live runtime, returning a cheap handle.
+    let parked = session.park().await?;
+    assert_eq!(parked.session_id(), "parked");
+
+    // Resume rebuilds a live session; the flushed transcript is visible again.
+    let resumed = core.resume(parked).await?;
+    let after = resumed
+        .read_view()
+        .messages()
+        .iter()
+        .map(message_text)
+        .collect::<Vec<_>>();
+    assert_eq!(after, before, "resume must restore the parked transcript");
+    // The resumed session is live and can take another turn on top of the
+    // restored transcript.
+    resumed.turn(TurnInput::text("again")).run().await?;
+    assert!(
+        resumed
+            .read_view()
+            .messages()
+            .iter()
+            .map(message_text)
+            .any(|text| text == "again")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn park_with_a_live_handle_reports_session_still_in_use() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard_builder())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()?;
+
+    let session = core.session("busy").open().await?;
+    // A live clone shares the underlying runtime handle, exactly as an in-flight
+    // turn would: parking must refuse rather than silently flush a session that
+    // something else is still driving.
+    let live_clone = session.clone();
+    let err = match session.park().await {
+        Ok(_) => panic!("park must not proceed while another handle is live"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, EmbedError::SessionStillInUse));
+
+    // Once the other handle is gone, the sole remaining handle parks cleanly.
+    drop(live_clone);
+    let parked = core.session("busy").open().await?.park().await?;
+    assert_eq!(parked.session_id(), "busy");
     Ok(())
 }
 
@@ -1377,10 +1451,7 @@ fn turn_result_total_usage_sums_parent_and_children() {
             },
         ],
         tool_calls: Vec::new(),
-        execution: ExecutionSummary {
-            had_tool_calls: false,
-            had_code_execution: false,
-        },
+        execution: ExecutionSummary::default(),
         errors: Vec::new(),
     };
 

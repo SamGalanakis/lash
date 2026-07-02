@@ -12,12 +12,12 @@ use lash_core::testing::conformance::{
     ReopenableProcessRegistry, ReopenableRuntimePersistence, ReopenableTriggerStore,
 };
 use lash_core::{
-    DurabilityTier, EffectHost, ExecutionScope, PluginOptions, ProcessExecutionEnvRef,
-    ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessOriginator, ProcessRegistry,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimePersistence, SessionPolicy, SessionScope, SessionStoreFactory,
-    TriggerOccurrenceRequest, TriggerStore, TriggerSubscriptionDraft, TriggerSubscriptionFilter,
+    DurabilityTier, EffectHost, ExecutionScope, ProcessExecutionEnvRef, ProcessExecutionEnvStore,
+    ProcessOriginator, ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimePersistence,
+    SessionScope, SessionStoreFactory, TriggerOccurrenceRequest, TriggerStore,
+    TriggerSubscriptionDraft, TriggerSubscriptionFilter,
 };
 use lash_sqlite_store::{
     SqliteEffectHost, SqliteEffectReplayOptions, SqliteProcessRegistry,
@@ -64,11 +64,17 @@ fn open_store(path: &Path) -> Arc<dyn RuntimePersistence> {
     })) as Arc<dyn RuntimePersistence>
 }
 
-fn open_process_env_store(path: &Path) -> Arc<dyn ProcessExecutionEnvStore> {
+fn artifact_store_handles(
+    path: &Path,
+) -> lash_lashlang_runtime::testing::conformance::ArtifactStoreHandles {
     let path = path.to_path_buf();
-    Arc::new(sync_await(async move {
-        Store::open(&path).await.expect("file process env store")
-    })) as Arc<dyn ProcessExecutionEnvStore>
+    let store = Arc::new(sync_await(async move {
+        Store::open(&path).await.expect("file artifact store")
+    }));
+    lash_lashlang_runtime::testing::conformance::ArtifactStoreHandles {
+        artifacts: Arc::clone(&store) as Arc<dyn lashlang::LashlangArtifactStore>,
+        process_env: store as Arc<dyn ProcessExecutionEnvStore>,
+    }
 }
 
 fn open_trigger_store(path: &Path) -> Arc<dyn TriggerStore> {
@@ -80,51 +86,17 @@ fn open_trigger_store(path: &Path) -> Arc<dyn TriggerStore> {
     })) as Arc<dyn TriggerStore>
 }
 
-#[test]
-fn sqlite_process_execution_env_store_round_trips_and_survives_reopen() {
+#[tokio::test]
+async fn sqlite_artifact_store_satisfies_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
-    let path = fresh_db_path(&dirs, "process-env.db");
-    let spec = ProcessExecutionEnvSpec::new(PluginOptions::default(), SessionPolicy::default());
-    let env_ref = spec.stable_ref().expect("stable env ref");
-    let bytes = spec.to_store_bytes().expect("encode env spec");
-
-    let store = open_process_env_store(&path);
-    assert_eq!(store.durability_tier(), DurabilityTier::Durable);
-    sync_await({
-        let store = Arc::clone(&store);
-        let env_ref = env_ref.clone();
-        let bytes = bytes.clone();
-        async move {
-            store
-                .put_process_execution_env(&env_ref, &bytes)
-                .await
-                .expect("put env");
-            assert_eq!(
-                store
-                    .get_process_execution_env(&env_ref)
-                    .await
-                    .expect("get env"),
-                Some(bytes)
-            );
+    lash_lashlang_runtime::testing::conformance::artifact_store_reopenable(|| {
+        let path = fresh_db_path(&dirs, "artifacts.db");
+        lash_lashlang_runtime::testing::conformance::ReopenableArtifactStore {
+            open: artifact_store_handles(&path),
+            reopen: artifact_store_handles(&path),
         }
-    });
-    drop(store);
-
-    let reopened = open_process_env_store(&path);
-    sync_await({
-        let reopened = Arc::clone(&reopened);
-        let env_ref = env_ref.clone();
-        let bytes = bytes.clone();
-        async move {
-            assert_eq!(
-                reopened
-                    .get_process_execution_env(&env_ref)
-                    .await
-                    .expect("get reopened env"),
-                Some(bytes)
-            );
-        }
-    });
+    })
+    .await;
 }
 
 fn trigger_subscription_draft(
@@ -594,7 +566,10 @@ async fn sqlite_effect_controller_satisfies_lease_fencing_conformance() {
                     let controller = SqliteRuntimeEffectController::open_with_options(
                         &path,
                         ExecutionScope::turn("session", "turn"),
-                        SqliteEffectReplayOptions { lease_ttl: ttl },
+                        SqliteEffectReplayOptions {
+                            lease_timings: lash_core::LeaseTimings::from_ttl(ttl)
+                                .expect("conformance lease timings"),
+                        },
                     )
                     .await
                     .expect("controller");

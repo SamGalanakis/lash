@@ -37,4 +37,7 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+# The runtime facade, so the Codex WebSocket path is proven end-to-end through
+# a normal `LashCore` turn in `tests/codex_websocket_runtime.rs`.
+lash = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

@@ -314,7 +314,7 @@ impl LashCore {
     /// resolver, execution sink/jsonl path, and — required at construction — the
     /// Lashlang artifact store) before passing it in.
     #[cfg(feature = "rlm")]
-    pub fn rlm_builder(factory: lash_protocol_rlm::RlmProtocolPluginFactory) -> LashCoreBuilder {
+    pub fn rlm_builder(factory: crate::rlm::RlmProtocolPluginFactory) -> LashCoreBuilder {
         LashCore::builder()
             .protocol_plugin(Arc::new(factory))
             .plugins(default_runtime_stack())
@@ -333,6 +333,68 @@ impl LashCore {
             plugin_factories: Vec::new(),
             plugin_options: PluginOptions::default(),
         }
+    }
+
+    /// Rebuild a live session from a [`ParkedSession`](crate::ParkedSession)
+    /// handle produced by [`LashSession::park`](crate::LashSession::park).
+    ///
+    /// Resume reloads the flushed state from the parked store (honoring this
+    /// core's residency), reinstalls this core's plugin configuration and work
+    /// drivers, and returns a ready [`LashSession`]. The parked store instance
+    /// is reused directly, so the transcript the session flushed at park time is
+    /// visible again after resume.
+    ///
+    /// This restores the core-level plugin stack. Session-specific plugins added
+    /// per open via [`SessionBuilder::plugin`] are not re-applied here; parking
+    /// is the round-trip for the core's own configuration.
+    pub async fn resume(&self, parked: ParkedSession) -> Result<LashSession> {
+        // Build the per-session env exactly like `SessionBuilder::open_resolved`
+        // (minus builder-scoped plugins): a fresh plugin host with this core's
+        // factories, the shared work drivers, and the core provider resolver
+        // already carried on `self.env`.
+        let plugin_host = build_plugin_host(
+            self.protocol_factory.as_ref(),
+            self.plugin_factories.as_ref(),
+            Vec::new(),
+        )?;
+        let mut env = self.env.clone();
+        env.core = plugin_host.install_process_engine_contributions(
+            env.core.clone(),
+            self.process_lifecycle_available,
+        )?;
+        env.plugin_host = Some(Arc::new(plugin_host));
+        let effect_host = Arc::clone(&env.core.control.effect_host);
+        let drivers = self.work_driver.drivers().await;
+        env.process_work_driver = drivers.process.clone();
+        env.queued_work_driver = drivers.queued.clone();
+        let runtime = LashRuntime::resume(parked.inner, &env).await?;
+        let handle =
+            RuntimeHandle::with_live_replay_store(runtime, Arc::clone(&self.live_replay_store));
+        Ok(LashSession {
+            runtime: handle,
+            effect_host,
+            parent_session_id: None,
+            active_plugins: Vec::new(),
+            process_phase_probe_slot: self.work_driver.phase_probe_slot(),
+            turn_cancels: crate::turn::TurnCancelRegistry::default(),
+        })
+    }
+
+    /// Flush this core's configured trace sink, if any.
+    ///
+    /// Hosts that hand `lash` a trace sink via
+    /// [`LashCoreBuilder::trace_sink`] already hold their own `Arc` and can
+    /// flush it directly; this is the equivalent lever for hosts that did not
+    /// retain the handle. It flushes the core's copy — for a
+    /// [`JsonlTraceSink`](lash_trace::JsonlTraceSink) that fsyncs the file, and
+    /// for an OTel sink it is a no-op (the host still owns provider flush; see
+    /// the tracing docs). Call it before process exit alongside the host's own
+    /// exporter/provider shutdown.
+    pub fn flush_trace_sink(&self) -> Result<()> {
+        if let Some(sink) = self.env.core.tracing.trace_sink.as_ref() {
+            sink.flush()?;
+        }
+        Ok(())
     }
 
     pub fn triggers(&self) -> crate::admin::CoreTriggerAdmin {
@@ -510,6 +572,7 @@ pub struct LashCoreBuilder {
     plugin_stack: PluginStack,
     plugin_host: Option<PluginHost>,
     residency: Option<Residency>,
+    lease_timings: Option<lash_core::LeaseTimings>,
     // Single source of truth for process lifecycle support and process-work
     // consumption.
     process_work_source: ProcessWorkSource,
@@ -640,6 +703,23 @@ impl LashCoreBuilder {
         self
     }
 
+    /// Configure the lease timing capability for every durable single-writer
+    /// lane this deployment claims: session execution leases, turn-input and
+    /// queued-work claims, and process leases.
+    ///
+    /// This is the failover-latency vs false-takeover-risk knob. Like
+    /// [`residency`](Self::residency) it is an operational deployment decision,
+    /// so it lives on the main builder tier rather than behind
+    /// [`advanced`](Self::advanced). Construct the value with
+    /// [`LeaseTimings::new`](lash_core::LeaseTimings::new), which enforces
+    /// `ttl >= 3 * renew_interval`. Effect hosts accept the same type at
+    /// construction (e.g. SQLite/Postgres effect-replay options), so a host can
+    /// share one timing decision across both boundaries.
+    pub fn lease_timings(mut self, lease_timings: lash_core::LeaseTimings) -> Self {
+        self.lease_timings = Some(lease_timings);
+        self
+    }
+
     /// Configure the bounded live replay buffer used by session observation
     /// cursors. This is best-effort reconnect recovery only; durable state
     /// still comes from the session store and [`SessionReadView`].
@@ -695,6 +775,9 @@ impl LashCoreBuilder {
         }
         if let Some(termination) = self.termination.take() {
             core.control.termination = termination;
+        }
+        if let Some(lease_timings) = self.lease_timings.take() {
+            core.control.lease_timings = lease_timings;
         }
         core
     }

@@ -1,5 +1,10 @@
-//! [`RuntimePersistence`] conformance: head CAS, checkpoint hydration,
-//! queued-work claim fencing, attachment manifest, and turn-commit stamps.
+//! [`RuntimePersistence`] conformance, organized by capability segment:
+//! [`SessionCommitStore`](crate::SessionCommitStore) (head CAS, checkpoint
+//! hydration, metadata, attachment manifest, turn-commit stamps),
+//! [`SessionExecutionLeaseStore`](crate::SessionExecutionLeaseStore),
+//! [`QueuedWorkStore`](crate::QueuedWorkStore) (claim fencing),
+//! [`TurnInputStore`](crate::TurnInputStore), and
+//! [`StoreMaintenance`](crate::StoreMaintenance).
 
 use super::*;
 
@@ -17,6 +22,12 @@ pub enum AttachmentManifestConformance {
 pub struct RuntimePersistenceConformance {
     pub attachment_manifest: AttachmentManifestConformance,
     pub durability_tier: crate::DurabilityTier,
+    /// Whether the backend physically reclaims unreachable checkpoint blobs on
+    /// [`gc_unreachable`](crate::StoreMaintenance::gc_unreachable). Blob-backed
+    /// durable stores (SQLite, Postgres) set this; the in-memory store keeps
+    /// everything in RAM and reports an empty [`GcReport`](crate::GcReport), so
+    /// the stronger reclamation assertion is gated off for it.
+    pub reclaims_unreachable_blobs: bool,
 }
 
 impl RuntimePersistenceConformance {
@@ -24,6 +35,7 @@ impl RuntimePersistenceConformance {
         Self {
             attachment_manifest: AttachmentManifestConformance::Persistent,
             durability_tier,
+            reclaims_unreachable_blobs: false,
         }
     }
 
@@ -31,7 +43,16 @@ impl RuntimePersistenceConformance {
         Self {
             attachment_manifest: AttachmentManifestConformance::Noop,
             durability_tier,
+            reclaims_unreachable_blobs: false,
         }
+    }
+
+    /// Assert the backend reclaims unreachable checkpoint blobs on GC, running
+    /// the stronger mark/sweep conformance in addition to the minimal
+    /// safe-to-call check.
+    pub const fn reclaiming_unreachable_blobs(mut self) -> Self {
+        self.reclaims_unreachable_blobs = true;
+        self
     }
 }
 
@@ -40,6 +61,7 @@ impl Default for RuntimePersistenceConformance {
         Self {
             attachment_manifest: AttachmentManifestConformance::Persistent,
             durability_tier: crate::DurabilityTier::Durable,
+            reclaims_unreachable_blobs: false,
         }
     }
 }
@@ -48,10 +70,16 @@ impl Default for RuntimePersistenceConformance {
 /// backend produced by `make`. `make` must return a fresh, empty,
 /// single-session store on each call.
 ///
-/// Covers the durability crown jewels owned by the store: optimistic head CAS,
-/// session binding, checkpoint/usage hydration, queued work claim fencing,
-/// attachment manifest intent/commit/GC reconciliation, session metadata,
-/// tombstone/GC behavior, and idempotent final turn commit stamps.
+/// Covers the durability crown jewels owned by the store, grouped by
+/// capability segment: optimistic head CAS, session binding, checkpoint/usage
+/// hydration, session metadata, attachment manifest intent/commit/GC
+/// reconciliation, and idempotent final turn commit stamps
+/// ([`SessionCommitStore`](crate::SessionCommitStore)); execution-lane fencing
+/// ([`SessionExecutionLeaseStore`](crate::SessionExecutionLeaseStore));
+/// queued-work ingress and claim fencing
+/// ([`QueuedWorkStore`](crate::QueuedWorkStore)); the pending turn-input
+/// lifecycle ([`TurnInputStore`](crate::TurnInputStore)); and tombstone/GC
+/// behavior ([`StoreMaintenance`](crate::StoreMaintenance)).
 /// Effect-host workflow history is deliberately outside this suite.
 pub async fn runtime_persistence<F>(make: F)
 where
@@ -75,7 +103,8 @@ where
         || make().open,
         RuntimePersistenceConformance::persistent_attachment_manifest(
             crate::DurabilityTier::Durable,
-        ),
+        )
+        .reclaiming_unreachable_blobs(),
     )
     .await;
     runtime_persistence_survives_reopen(make()).await;
@@ -85,21 +114,31 @@ pub async fn runtime_persistence_with_options<F>(make: F, options: RuntimePersis
 where
     F: Fn() -> Arc<dyn RuntimePersistence>,
 {
+    // [`SessionCommitStore`]: atomic head commits, reads, metadata, the
+    // attachment write-ahead manifest, and turn-commit idempotency.
     runtime_persistence_reports_declared_durability(make(), options.durability_tier).await;
     commit_increments_head_and_round_trips_agent_frames(make()).await;
     commit_rejects_a_different_session_id(make()).await;
     load_hydrates_checkpoint_and_usage(make()).await;
     active_path_read_scope_selects_only_requested_ancestry(make()).await;
-    session_execution_lease_contract(make()).await;
-    session_execution_lease_reclaim_contract(make()).await;
+    session_metadata_round_trips(make()).await;
     match options.attachment_manifest {
         AttachmentManifestConformance::Persistent => {
             attachment_manifest_records_intent_and_commit_stamps(make()).await;
+            attachment_orphan_reclamation_reclaims_aged_and_spares_committed_and_recent(make())
+                .await;
         }
         AttachmentManifestConformance::Noop => {
             noop_attachment_manifest_is_explicit_and_empty(make()).await;
         }
     }
+    final_commit_stamp_is_idempotent_and_conflicts_on_changed_hash(make()).await;
+    // [`SessionExecutionLeaseStore`]: single-writer lane fencing.
+    session_execution_lease_contract(make()).await;
+    session_execution_lease_reclaim_contract(make()).await;
+    // [`QueuedWorkStore`]: durable queued-work ingress, ordering, and claim
+    // leases, plus the commit-side completion atomicity it shares with
+    // [`SessionCommitStore`].
     queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
     queued_work_cancel_removes_only_unclaimed_batches(make()).await;
     queued_work_exact_claim_uses_selected_batch_ids(make()).await;
@@ -110,14 +149,17 @@ where
     queued_work_completion_is_lease_guarded(make()).await;
     queued_wake_delivery_is_source_key_idempotent_and_claimed_once(make()).await;
     queue_completion_and_turn_commit_stamp_are_atomic(make()).await;
+    // [`TurnInputStore`]: pending turn-input lifecycle.
     pending_turn_inputs_source_keys_order_cancel_and_cross_session(make()).await;
     pending_turn_input_bulk_and_suffix_cancellation(make()).await;
     pending_turn_input_claims_reclaim_complete_and_fence(make()).await;
     pending_turn_input_cancel_covers_active_and_deferred_states(make()).await;
     pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(make()).await;
-    session_metadata_round_trips(make()).await;
+    // [`StoreMaintenance`]: tombstone/vacuum/GC retention.
     tombstone_vacuum_and_gc_are_minimally_consistent(make()).await;
-    final_commit_stamp_is_idempotent_and_conflicts_on_changed_hash(make()).await;
+    if options.reclaims_unreachable_blobs {
+        gc_reclaims_unreachable_checkpoint_blobs_and_preserves_live(make()).await;
+    }
 }
 
 /// Build a queued process-wake draft for backend conformance tests.
@@ -2965,6 +3007,179 @@ async fn tombstone_vacuum_and_gc_are_minimally_consistent(store: Arc<dyn Runtime
         .gc_unreachable()
         .await
         .expect("gc_unreachable should be safe to call");
+}
+
+/// Blob-backed backends must physically reclaim the checkpoint blob a superseding
+/// commit orphaned, while preserving the live one. Generalizes the SQLite-only
+/// `gc_unreachable_keeps_rooted_checkpoint_blobs` test to every reclaiming
+/// backend via the [`GcReport`](crate::GcReport) counters plus a post-GC load.
+async fn gc_reclaims_unreachable_checkpoint_blobs_and_preserves_live(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    // First commit writes a live checkpoint blob.
+    let v1 = RuntimeSessionState {
+        session_id: "gc-blobs".to_string(),
+        tool_state_snapshot: Some(ToolState::default().with_generation(1)),
+        ..RuntimeSessionState::default()
+    };
+    commit_runtime_state_for_test(
+        &store,
+        RuntimeCommit::persisted_state(&v1, &[]),
+        "gc-blobs-v1",
+    )
+    .await
+    .expect("commit v1");
+    // Second commit supersedes it with different content, so the v1 checkpoint
+    // blob is now unreachable from every session head.
+    let v2 = RuntimeSessionState {
+        session_id: "gc-blobs".to_string(),
+        tool_state_snapshot: Some(ToolState::default().with_generation(2)),
+        ..RuntimeSessionState::default()
+    };
+    commit_runtime_state_for_test(
+        &store,
+        RuntimeCommit::persisted_state(&v2, &[]),
+        "gc-blobs-v2",
+    )
+    .await
+    .expect("commit v2");
+
+    let report = store
+        .gc_unreachable()
+        .await
+        .expect("gc reclaims unreachable checkpoint blobs");
+    assert!(
+        report.root_count >= 1,
+        "a live checkpoint must be rooted, got {report:?}"
+    );
+    assert!(
+        report.retained_blob_count >= 1,
+        "the live checkpoint blob must be retained, got {report:?}"
+    );
+    assert!(
+        report.deleted_blob_count >= 1,
+        "the superseded checkpoint blob must be reclaimed, got {report:?}"
+    );
+
+    // The reachable checkpoint survived: the session still loads at generation 2.
+    let read = store
+        .load_session(SessionReadScope::FullGraph)
+        .await
+        .expect("load after gc")
+        .expect("session after gc");
+    assert_eq!(
+        read.checkpoint
+            .and_then(|checkpoint| checkpoint.tool_state)
+            .map(|tool_state| tool_state.generation()),
+        Some(2),
+        "gc must preserve the reachable checkpoint's snapshots"
+    );
+
+    // Idempotent: with nothing newly unreachable, a second sweep deletes nothing.
+    let second = store.gc_unreachable().await.expect("second gc");
+    assert_eq!(
+        second.deleted_blob_count, 0,
+        "gc must never reclaim reachable blobs, got {second:?}"
+    );
+}
+
+/// The host-invoked orphan-attachment sweep reclaims aged uncommitted intents,
+/// spares content a session committed, and spares intents newer than the age
+/// threshold. Exercises the durable manifest under test paired with an in-memory
+/// byte store; the S3 delete primitive is covered by that crate's own suite.
+async fn attachment_orphan_reclamation_reclaims_aged_and_spares_committed_and_recent(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let bytes_store = crate::InMemoryAttachmentStore::new();
+    let meta = || {
+        AttachmentCreateMeta::new(
+            MediaType::Image(ImageMediaType::Png),
+            Some(1),
+            Some(1),
+            None,
+        )
+    };
+    // Content ids are the sha256 of the bytes, so the ids recorded as intents
+    // match what the byte store holds.
+    let aged = bytes_store.put(vec![10], meta()).await.expect("put aged");
+    let committed = bytes_store
+        .put(vec![20], meta())
+        .await
+        .expect("put committed");
+    let recent = bytes_store.put(vec![30], meta()).await.expect("put recent");
+
+    let intent = |id: &AttachmentId, at: u64| AttachmentIntent {
+        attachment_id: id.clone(),
+        session_id: "root".to_string(),
+        canonical_uri: format!("sha256:{id}"),
+        intent_at_epoch_ms: at,
+    };
+    store
+        .record_intent(intent(&aged.id, 100))
+        .expect("record aged intent");
+    store
+        .record_intent(intent(&committed.id, 100))
+        .expect("record committed intent");
+    store
+        .record_intent(intent(&recent.id, 10_000))
+        .expect("record recent intent");
+    // `committed` becomes referenced by durable session state.
+    store
+        .commit_refs("root", std::slice::from_ref(&committed.id))
+        .expect("commit attachment ref");
+
+    // Sweep everything aged at/before 200: only the uncommitted `aged` intent
+    // qualifies. `committed` is excluded (it carries a commit stamp); `recent`
+    // is excluded (its intent is newer than the threshold).
+    let report = crate::reclaim_orphaned_attachments(&*store, &bytes_store, 200)
+        .await
+        .expect("reclaim orphaned attachments");
+    assert_eq!(
+        report.scanned_intent_count, 1,
+        "only the aged uncommitted intent is in scope, got {report:?}"
+    );
+    assert_eq!(
+        report.reclaimed_count, 1,
+        "the aged orphan is reclaimed, got {report:?}"
+    );
+
+    assert!(
+        matches!(
+            bytes_store.get(&aged.id).await,
+            Err(AttachmentStoreError::NotFound(_))
+        ),
+        "aged orphan bytes must be deleted"
+    );
+    bytes_store
+        .get(&committed.id)
+        .await
+        .expect("committed content retained");
+    bytes_store
+        .get(&recent.id)
+        .await
+        .expect("recent content retained");
+
+    // A threshold well past every intent above (backends bind the age as i64,
+    // so `u64::MAX` would wrap negative and hide every row).
+    let remaining = store
+        .list_uncommitted(1_000_000)
+        .expect("list remaining uncommitted");
+    assert!(
+        remaining
+            .iter()
+            .any(|entry| entry.attachment_id == recent.id),
+        "a recent uncommitted intent must survive an aged-only sweep"
+    );
+    assert!(
+        !remaining.iter().any(|entry| entry.attachment_id == aged.id),
+        "the reclaimed intent must be forgotten"
+    );
+    assert!(
+        !remaining
+            .iter()
+            .any(|entry| entry.attachment_id == committed.id),
+        "a committed intent is never listed as uncommitted"
+    );
 }
 
 async fn runtime_persistence_survives_reopen(factory: ReopenableRuntimePersistence) {

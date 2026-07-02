@@ -189,6 +189,41 @@ mod tests {
     }
 
     #[test]
+    fn streaming_captures_raw_usage_metadata_sidecar() {
+        let mut full = String::new();
+        let mut text_deltas = Vec::new();
+        let mut usage = LlmUsage::default();
+        let mut provider_usage: Option<Value> = None;
+        let mut finish_event: Option<Value> = None;
+        let meta = json!({"promptTokenCount": 6, "candidatesTokenCount": 4});
+        for raw in [
+            json!({"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}}).to_string(),
+            json!({"response":{"usageMetadata": meta}}).to_string(),
+            // A trailing empty usage block must not clobber the captured raw
+            // sidecar, mirroring the normalized-usage non-zero guard.
+            json!({"response":{"usageMetadata": {}}}).to_string(),
+        ] {
+            GoogleOAuthProvider::process_sse_event_with_text_parts(
+                &raw,
+                crate::support::SseTextPartSink {
+                    full: &mut full,
+                    text_deltas: &mut text_deltas,
+                    usage: &mut usage,
+                    provider_usage: &mut provider_usage,
+                    tool_call_parts: None,
+                    text_parts: None,
+                    finish_event: &mut finish_event,
+                },
+                None,
+            )
+            .expect("sse event");
+        }
+        assert_eq!(provider_usage, Some(meta));
+        assert_eq!(usage.input_tokens, 6);
+        assert_eq!(usage.output_tokens, 4);
+    }
+
+    #[test]
     fn thinking_config_omits_thoughts_unless_provider_exposes_thinking() {
         let hidden_provider = GoogleOAuthProvider::new("access", "refresh", 0);
         let hidden = GoogleOAuthProvider::build_request(

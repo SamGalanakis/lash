@@ -69,14 +69,6 @@ use turn_boundary::*;
 use turn_commit_draft::*;
 use turn_driver::*;
 
-pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 30 * 1000;
-pub(crate) const RUNTIME_TURN_LEASE_RENEW_MS: u64 = 10 * 1000;
-const _: () = {
-    assert!(RUNTIME_TURN_LEASE_TTL_MS == 30_000);
-    assert!(RUNTIME_TURN_LEASE_RENEW_MS == 10_000);
-    assert!(RUNTIME_TURN_LEASE_TTL_MS == RUNTIME_TURN_LEASE_RENEW_MS * 3);
-};
-
 pub(super) fn runtime_error_from_store_commit(err: crate::store::StoreError) -> RuntimeError {
     match err {
         crate::store::StoreError::SessionExecutionLeaseExpired { session_id } => RuntimeError::new(
@@ -136,17 +128,17 @@ pub use process::{
     ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
     ProcessExecutionEnvRef, ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary,
-    ProcessId, ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseCompletion,
-    ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessOriginator,
-    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessService,
-    ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions,
-    ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
-    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeDeliveryRequest, ProcessWakeSpec,
-    ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
-    UnavailableProcessService, WaitKind, WaitState, apply_process_status_projection,
-    current_epoch_ms, epoch_ms_from_system_time, load_process_execution_env,
-    materialize_process_event_semantics, persist_process_execution_env,
+    ProcessId, ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseClaimOutcome,
+    ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
+    ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessService, ProcessSessionDeleteReport, ProcessSpawnProvenance,
+    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
+    ProcessStatusFilter, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery,
+    ProcessWakeDeliveryRequest, ProcessWakeSpec, ProcessWorkObserver, ProcessWorkSnapshot,
+    SessionScope, SessionScopeId, UnavailableProcessService, WaitKind, WaitState,
+    apply_process_status_projection, current_epoch_ms, epoch_ms_from_system_time,
+    load_process_execution_env, materialize_process_event_semantics, persist_process_execution_env,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
     process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
@@ -166,16 +158,15 @@ use state::{
 pub use turn_input_ingress::{
     PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
     PendingTurnInputCancelTarget, PendingTurnInputClaimDiagnostics, PendingTurnInputDraft,
-    PendingTurnInputSuffixCancelOutcome, QueuedCheckpointTurnInput, TURN_INPUT_CLAIM_TTL_MS,
-    TurnInputCheckpointBoundary, TurnInputClaim, TurnInputClaimMode, TurnInputCompletion,
-    TurnInputIngress, TurnInputState,
+    PendingTurnInputSuffixCancelOutcome, QueuedCheckpointTurnInput, TurnInputCheckpointBoundary,
+    TurnInputClaim, TurnInputClaimMode, TurnInputCompletion, TurnInputIngress, TurnInputState,
 };
 pub use turn_loop::ensure_durable_effect_input;
 pub use turn_queue::{
-    DeliveryPolicy, MergeKey, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointWork, QueuedTurnWork,
-    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
-    QueuedWorkClass, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SessionCommand,
-    SessionCommandReceipt, SlotPolicy, process_wake_batch_draft,
+    DeliveryPolicy, MergeKey, QueuedCheckpointWork, QueuedTurnWork, QueuedWorkBatch,
+    QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkClass,
+    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SessionCommand, SessionCommandReceipt,
+    SlotPolicy, process_wake_batch_draft,
 };
 pub use usage::{
     SessionUsageReport, TokenLedgerEntry, UsageReportRow, UsageTotals, diff_token_ledger,
@@ -602,12 +593,24 @@ pub struct CodeOutputRecord {
 }
 
 /// High-level execution summary for a completed turn.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionSummary {
     #[serde(default)]
     pub had_tool_calls: bool,
     #[serde(default)]
     pub had_code_execution: bool,
+    /// Wall-clock turn start as epoch milliseconds, read from the runtime
+    /// [`Clock`]. The measurement window opens when the runtime starts
+    /// claiming the turn (session-execution lease / queued-work claim), so
+    /// it covers the whole host-visible turn. `0` when the turn predates
+    /// this field.
+    #[serde(default)]
+    pub started_at_ms: u64,
+    /// Whole-turn duration in milliseconds — claim through final commit and
+    /// post-persist hooks — measured on the runtime [`Clock`]'s monotonic
+    /// source. `0` when the turn predates this field.
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 /// Structured issue surfaced during turn execution.
@@ -621,6 +624,16 @@ pub struct TurnIssue {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+    /// Whether the failing operation is safe to retry, when the source
+    /// carried a typed signal (provider transports classify retryability;
+    /// terminal LLM responses are deterministic and report `Some(false)`).
+    /// `None` means the source did not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// Typed provider-failure classification, present only when the issue
+    /// came from a classified LLM provider/transport failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_failure_kind: Option<crate::ProviderFailureKind>,
 }
 
 /// Canonical high-level turn result returned to hosts.

@@ -743,6 +743,7 @@ mod tests {
     use super::*;
     use crate::runtime::tests::helpers::RecordingStore;
     use crate::session_model::{ConversationRecord, MessageRole, Part, PartKind, PruneState};
+    use crate::store::SessionExecutionLeaseStore;
     use crate::{Message, SessionGraph, TokenUsage, shared_parts};
 
     fn lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {

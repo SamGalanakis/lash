@@ -93,6 +93,14 @@ impl TokenUsage {
     }
 }
 
+/// Structured error payload carried on [`SessionEvent::Error`] (and
+/// [`SessionEvent::RetryStatus`]).
+///
+/// Durability: this type appears inside persisted session snapshots and turn
+/// checkpoints, so every field added after the initial shape must stay
+/// additive — `#[serde(default)]` on decode and
+/// `#[serde(skip_serializing_if = "Option::is_none")]` on encode — to keep
+/// old snapshots decodable and new snapshots readable by older readers.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ErrorEnvelope {
     pub kind: String,
@@ -103,6 +111,16 @@ pub struct ErrorEnvelope {
     pub user_message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+    /// Whether the failing operation is safe to retry, when the source
+    /// carries a typed signal (provider transports classify retryability).
+    /// `None` means the source did not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// Typed provider-failure classification, set only when the error came
+    /// from an LLM provider/transport failure whose kind was classified
+    /// (an unclassified `Unknown` kind is surfaced as `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_failure_kind: Option<crate::llm::types::ProviderFailureKind>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -300,6 +318,8 @@ pub fn make_error_envelope(
         terminal_reason,
         user_message,
         raw: raw.map(|s| truncate_raw_error(s.trim())),
+        retryable: None,
+        provider_failure_kind: None,
     }
 }
 
@@ -361,4 +381,114 @@ pub fn model_tool_specs_iter<'a>(
 
 pub fn model_tool_specs(tools: &[ToolDefinition]) -> Vec<LlmToolSpec> {
     model_tool_specs_iter(tools.iter())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ErrorEnvelope, SessionEvent};
+    use crate::llm::types::{LlmTerminalReason, ProviderFailureKind};
+
+    // ─── ErrorEnvelope durable-snapshot compatibility ──────────────────
+    //
+    // `ErrorEnvelope` is persisted inside session snapshots and turn
+    // checkpoints. The retryability fields added after the initial shape
+    // must decode from legacy JSON (absent fields → `None`) and must not
+    // appear on the wire when unset, so old readers keep decoding new
+    // snapshots too.
+
+    #[test]
+    fn error_envelope_decodes_legacy_snapshot_without_retryability_fields() {
+        let legacy = r#"{
+            "kind":"llm_provider",
+            "code":"429",
+            "terminal_reason":"provider_error",
+            "user_message":"LLM error: rate limited",
+            "raw":"{\"error\":\"rate_limited\"}"
+        }"#;
+        let envelope: ErrorEnvelope = serde_json::from_str(legacy).expect("legacy envelope");
+        assert_eq!(envelope.kind, "llm_provider");
+        assert_eq!(envelope.retryable, None);
+        assert_eq!(envelope.provider_failure_kind, None);
+
+        // The legacy shape embedded in a persisted `SessionEvent::Error`
+        // record decodes the same way.
+        let legacy_event = r#"{
+            "type":"error",
+            "message":"LLM error: rate limited",
+            "envelope":{"kind":"llm_provider","user_message":"LLM error: rate limited"}
+        }"#;
+        let event: SessionEvent = serde_json::from_str(legacy_event).expect("legacy event");
+        match event {
+            SessionEvent::Error { envelope, .. } => {
+                let envelope = envelope.expect("envelope");
+                assert_eq!(envelope.retryable, None);
+                assert_eq!(envelope.provider_failure_kind, None);
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_envelope_roundtrips_retryability_fields() {
+        let envelope = ErrorEnvelope {
+            kind: "llm_provider".to_string(),
+            code: Some("429".to_string()),
+            terminal_reason: Some(LlmTerminalReason::ProviderError),
+            user_message: "LLM error: rate limited".to_string(),
+            raw: None,
+            retryable: Some(true),
+            provider_failure_kind: Some(ProviderFailureKind::Quota),
+        };
+        let json = serde_json::to_value(&envelope).expect("serialize envelope");
+        assert_eq!(json["retryable"], serde_json::json!(true));
+        assert_eq!(json["provider_failure_kind"], serde_json::json!("quota"));
+        let decoded: ErrorEnvelope = serde_json::from_value(json).expect("decode envelope");
+        assert_eq!(decoded.retryable, Some(true));
+        assert_eq!(
+            decoded.provider_failure_kind,
+            Some(ProviderFailureKind::Quota)
+        );
+    }
+
+    #[test]
+    fn error_envelope_omits_unset_retryability_fields_on_the_wire() {
+        let envelope = ErrorEnvelope {
+            kind: "plugin".to_string(),
+            code: Some("plugin_abort".to_string()),
+            terminal_reason: None,
+            user_message: "stopped".to_string(),
+            raw: None,
+            retryable: None,
+            provider_failure_kind: None,
+        };
+        let json = serde_json::to_value(&envelope).expect("serialize envelope");
+        let object = json.as_object().expect("object");
+        assert!(!object.contains_key("retryable"));
+        assert!(!object.contains_key("provider_failure_kind"));
+    }
+
+    #[test]
+    fn provider_failure_kind_decodes_unknown_future_codes() {
+        // Forward compatibility: a snapshot written by a newer runtime with a
+        // kind this build does not know decodes as `Unknown`.
+        let decoded: ProviderFailureKind =
+            serde_json::from_value(serde_json::json!("some_future_kind")).expect("future kind");
+        assert_eq!(decoded, ProviderFailureKind::Unknown);
+        for kind in [
+            ProviderFailureKind::Transport,
+            ProviderFailureKind::Timeout,
+            ProviderFailureKind::Http,
+            ProviderFailureKind::Stream,
+            ProviderFailureKind::Auth,
+            ProviderFailureKind::Validation,
+            ProviderFailureKind::Quota,
+            ProviderFailureKind::Unsupported,
+            ProviderFailureKind::Unknown,
+        ] {
+            let json = serde_json::to_value(kind).expect("serialize kind");
+            assert_eq!(json, serde_json::json!(kind.code()));
+            let round: ProviderFailureKind = serde_json::from_value(json).expect("decode kind");
+            assert_eq!(round, kind);
+        }
+    }
 }

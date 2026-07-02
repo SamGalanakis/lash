@@ -132,8 +132,8 @@ let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
 let artifact_store =
     Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db")).await?);
 
-let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+let factory = lash::rlm::RlmProtocolPluginFactory::new(
+    lash::rlm::RlmProtocolPluginConfig::default(),
     artifact_store,
 );
 let core = lash::LashCore::rlm_builder(factory)
@@ -168,13 +168,13 @@ println!("{assistant_text}");</code></pre>
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
-            <dd>Cloneable shared config for advanced custom protocol hosts. App code normally starts with <code>StandardCore::builder()</code> or <code>RlmCore::builder()</code>.</dd>
-            <dt><code>StandardCore</code> / <code>RlmCore</code></dt>
-            <dd>Typed facades for the built-in protocols. <code>StandardCore</code> opens native provider-tool sessions; <code>RlmCore</code> opens Lashlang/RLM sessions and exposes RLM-specific builder options.</dd>
+            <dd>Cloneable shared config for advanced custom protocol hosts. App code normally starts with <code>LashCore::standard_builder()</code> or <code>LashCore::rlm_builder(factory)</code>.</dd>
+            <dt><code>LashCore::standard_builder()</code> / <code>LashCore::rlm_builder(factory)</code></dt>
+            <dd>Sugar entry points for the built-in protocols. <code>standard_builder()</code> opens native provider-tool sessions; <code>rlm_builder(factory)</code> opens Lashlang/RLM sessions from a host-configured RLM protocol factory.</dd>
             <dt><code>SessionSpec</code></dt>
             <dd>Provider, model/variant, max context tokens, max turns, prompt layer. Root cores: <code>SessionSpec::new()</code>. Children and subagents: <code>SessionSpec::inherit()</code>.</dd>
             <dt><code>PluginStack</code></dt>
-            <dd>Ordered plugin factory list. <code>StandardCore::builder()</code> and <code>RlmCore::builder()</code> install their protocol plugin; generic <code>LashCore::builder()</code> requires an explicit protocol plugin. All paths still require explicit effect and attachment facets before <code>build()</code>; RLM also requires a Lashlang artifact store.</dd>
+            <dd>Ordered plugin factory list. <code>LashCore::standard_builder()</code> and <code>LashCore::rlm_builder(factory)</code> pre-seed their protocol plugin and the default runtime stack; generic <code>LashCore::builder()</code> requires an explicit protocol plugin. All paths still require explicit effect and attachment facets before <code>build()</code>; RLM also requires a Lashlang artifact store.</dd>
             <dt><code>LashSession</code></dt>
             <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code> (durable pending input for the next turn unless an active-turn ingress is specified), <code>pending_turn_inputs()</code> plus typed pending-input cancellation for user-input previews and edit reconciliation, <code>queued_work()</code> for admin inspection of non-user process wakes and session commands, <code>await_queued_work_batch(batch_id)</code> (resolve when a non-user queued-work batch you enqueued is drained or cancelled, by any handle or process, without claiming it yourself; bound it with <code>tokio::time::timeout</code>), <code>read_view()</code>, and <code>admin()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
@@ -199,8 +199,8 @@ let root_spec = SessionSpec::new().provider_id(provider.kind()).model(
         .expect("valid model metadata"),
 );
 
-let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+let factory = lash::rlm::RlmProtocolPluginFactory::new(
+    lash::rlm::RlmProtocolPluginConfig::default(),
     Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
 );
 let core = lash::LashCore::rlm_builder(factory)
@@ -221,8 +221,8 @@ let plugins = runtime_plugin_stack().configure(|plugins| {
     plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
 });
 
-let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+let factory = lash::rlm::RlmProtocolPluginFactory::new(
+    lash::rlm::RlmProtocolPluginConfig::default(),
     Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
 );
 let core = lash::LashCore::rlm_builder(factory)
