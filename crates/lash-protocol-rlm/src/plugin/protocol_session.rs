@@ -2,10 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use lash_core::plugin::{
     CheckpointHookContext, PluginDirective, PluginError, ProtocolRuntimeContext,
-    ProtocolSessionContext, ProtocolSessionPlugin,
+    ProtocolSessionContext, ProtocolSessionMaterialization, ProtocolSessionPlugin,
 };
-use lash_core::{CheckpointKind, SessionError};
-use lash_rlm_types::RlmCreateExtras;
+use lash_core::{CheckpointKind, PluginOptions, ProtocolTurnOptions, SessionError};
+use lash_rlm_types::{RlmCreateExtras, RlmFinalAnswerFormat};
 
 use super::budget_warning::BUDGET_WARNING_STATUS;
 use super::runtime_state::RlmRuntimeState;
@@ -112,21 +112,61 @@ impl ProtocolSessionPlugin for RlmProtocolSession {
         self.runtime_state.validate_turn_extension(extension).await
     }
 
-    fn configure_runtime_from_request(
+    fn configure_runtime_on_materialize(
         &self,
         mut ctx: ProtocolRuntimeContext<'_>,
-        request: &lash_core::SessionCreateRequest,
+        materialization: ProtocolSessionMaterialization<'_>,
     ) -> Result<(), SessionError> {
-        if let Some(extras) = request
-            .plugin_options
-            .decode::<RlmCreateExtras>(RLM_PROTOCOL_PLUGIN_ID)
-            .map_err(|err| SessionError::Protocol(format!("invalid RLM create options: {err}")))?
-        {
-            let options = lash_core::ProtocolTurnOptions::typed(extras)?;
-            ctx.set_protocol_turn_options(options);
-        }
+        let options = resolve_rlm_session_options(
+            ctx.protocol_turn_options(),
+            materialization.plugin_options,
+            materialization.is_root_session,
+        )?;
+        ctx.set_protocol_turn_options_all_frames(options);
         Ok(())
     }
+}
+
+/// Apply-and-default RLM session options with apply-at-open semantics.
+///
+/// Starts from the existing durable options (preserving fields such as
+/// termination that a prior open applied), overlays any explicit extras from the
+/// materialization's plugin options, and defaults `final_answer_format` —
+/// `Markdown` for root sessions, `RawFinalValue` for children — when none was
+/// supplied explicitly.
+pub(crate) fn resolve_rlm_session_options(
+    existing: &ProtocolTurnOptions,
+    plugin_options: &PluginOptions,
+    is_root_session: bool,
+) -> Result<ProtocolTurnOptions, SessionError> {
+    let explicit = plugin_options
+        .decode::<RlmCreateExtras>(RLM_PROTOCOL_PLUGIN_ID)
+        .map_err(|err| SessionError::Protocol(format!("invalid RLM create options: {err}")))?;
+
+    let mut extras = if existing.is_empty() {
+        RlmCreateExtras::default()
+    } else {
+        existing
+            .decode()
+            .map_err(|err| SessionError::Protocol(err.to_string()))?
+    };
+
+    let explicit_format = match explicit {
+        Some(explicit) => {
+            extras.termination = explicit.termination;
+            explicit.final_answer_format
+        }
+        None => None,
+    };
+
+    let default_format = if is_root_session {
+        RlmFinalAnswerFormat::Markdown
+    } else {
+        RlmFinalAnswerFormat::RawFinalValue
+    };
+    extras.final_answer_format = Some(explicit_format.unwrap_or(default_format));
+
+    Ok(ProtocolTurnOptions::typed(extras)?)
 }
 
 #[cfg(test)]
@@ -187,6 +227,73 @@ mod tests {
 
     #[async_trait::async_trait]
     impl lash_core::plugin::runtime_host::SessionGraphService for NoopPromptManager {}
+
+    #[test]
+    fn resolve_rlm_session_options_preserves_existing_termination() {
+        let existing = ProtocolTurnOptions::typed(RlmCreateExtras {
+            termination: lash_rlm_types::RlmTermination::Natural,
+            final_answer_format: None,
+        })
+        .expect("existing options");
+
+        let options = resolve_rlm_session_options(&existing, &PluginOptions::default(), true)
+            .expect("resolve options");
+        let extras: RlmCreateExtras = options.decode().expect("decode options");
+        assert_eq!(extras.termination, lash_rlm_types::RlmTermination::Natural);
+        assert_eq!(
+            extras.final_answer_format,
+            Some(RlmFinalAnswerFormat::Markdown)
+        );
+    }
+
+    #[test]
+    fn resolve_rlm_session_options_defaults_child_to_raw_final_value() {
+        let options =
+            resolve_rlm_session_options(&ProtocolTurnOptions::empty(), &PluginOptions::default(), false)
+                .expect("resolve options");
+        let extras: RlmCreateExtras = options.decode().expect("decode options");
+        assert_eq!(
+            extras.final_answer_format,
+            Some(RlmFinalAnswerFormat::RawFinalValue)
+        );
+    }
+
+    #[test]
+    fn resolve_rlm_session_options_applies_explicit_extras() {
+        let plugin_options = PluginOptions::typed(
+            RLM_PROTOCOL_PLUGIN_ID,
+            RlmCreateExtras {
+                termination: lash_rlm_types::RlmTermination::FinishRequired { schema: None },
+                final_answer_format: Some(RlmFinalAnswerFormat::RawFinalValue),
+            },
+        )
+        .expect("plugin options");
+
+        let options =
+            resolve_rlm_session_options(&ProtocolTurnOptions::empty(), &plugin_options, false)
+                .expect("resolve options");
+        let extras: RlmCreateExtras = options.decode().expect("decode options");
+        assert_eq!(
+            extras.termination,
+            lash_rlm_types::RlmTermination::FinishRequired { schema: None }
+        );
+        assert_eq!(
+            extras.final_answer_format,
+            Some(RlmFinalAnswerFormat::RawFinalValue)
+        );
+    }
+
+    #[test]
+    fn resolve_rlm_session_options_rejects_malformed_extras() {
+        let mut plugin_options = PluginOptions::default();
+        plugin_options.plugins.insert(
+            RLM_PROTOCOL_PLUGIN_ID.to_string(),
+            serde_json::json!({ "termination": { "kind": "unknown" } }),
+        );
+        let err = resolve_rlm_session_options(&ProtocolTurnOptions::empty(), &plugin_options, false)
+            .expect_err("malformed extras should error");
+        assert!(err.to_string().contains("invalid RLM create options"));
+    }
 
     fn test_session(config: RlmProtocolPluginConfig) -> RlmProtocolSession {
         let runtime_state = Arc::new(

@@ -17,7 +17,8 @@ pub mod conformance {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::core::RlmCoreBuilder;
+    use crate::LashCore;
+    use crate::LashCoreBuilder;
     use crate::plugins::{
         PluginError, PluginExtensionContribution, PluginFactory, PluginRegistrar,
         PluginSessionContext, SessionPlugin,
@@ -26,8 +27,7 @@ pub mod conformance {
         LASHLANG_SURFACE_EXTENSION_ID, LashlangLanguageFeatures, LashlangSurfaceContribution,
     };
     use crate::testing::TestProvider;
-    use crate::{LashCore, RlmCore};
-    use lash_lashlang_runtime::ToolDefinitionLashlangExt;
+    use lash_lashlang_runtime::{LashlangArtifactStore, ToolDefinitionLashlangExt};
 
     /// Stores + registry for one run of the
     /// [`runtime_rebuild_and_worker_recovery`] suite.
@@ -41,7 +41,11 @@ pub mod conformance {
     /// (fresh stores) on each call.
     pub struct RuntimeRebuildBackend {
         pub process_registry: Arc<dyn lash_core::ProcessRegistry>,
-        pub build_core: Box<dyn Fn(RlmCoreBuilder) -> RlmCore + Send + Sync>,
+        /// The Lashlang artifact store, now a construction-time input to the RLM
+        /// protocol factory. The backend supplies it here so `base_builder` can
+        /// seed a tier-consistent factory.
+        pub artifact_store: Arc<dyn LashlangArtifactStore>,
+        pub build_core: Box<dyn Fn(LashCoreBuilder) -> LashCore + Send + Sync>,
     }
 
     /// Run the full cold-rebuild + worker-recovery conformance suite against
@@ -290,12 +294,16 @@ finish "registered"
             .into_handle()
     }
 
-    fn base_builder(registry: Arc<dyn lash_core::ProcessRegistry>) -> RlmCoreBuilder {
-        RlmCore::builder()
-            .rlm_protocol_config(
-                crate::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(rebuild_abilities()),
-            )
+    fn base_builder(
+        registry: Arc<dyn lash_core::ProcessRegistry>,
+        artifact_store: Arc<dyn LashlangArtifactStore>,
+    ) -> LashCoreBuilder {
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            crate::rlm::RlmProtocolPluginConfig::default()
+                .with_lashlang_abilities(rebuild_abilities()),
+            artifact_store,
+        );
+        LashCore::rlm_builder(factory)
             .provider(rebuild_provider())
             .model(rebuild_model())
             .plugin(Arc::new(TriggerResourcePluginFactory))
@@ -436,7 +444,7 @@ finish "registered"
     /// must use for out-of-turn process starts.
     async fn reopen_restores_trigger_registry_state(backend: RuntimeRebuildBackend) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
+        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
         open_mutate_and_restart(&core, None, &registry).await;
 
         let reopened = core
@@ -460,7 +468,7 @@ finish "registered"
         backend: RuntimeRebuildBackend,
     ) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
+        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
         open_mutate_and_restart(&core, None, &registry).await;
 
         let session = core
@@ -485,7 +493,7 @@ finish "registered"
         backend: RuntimeRebuildBackend,
     ) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
+        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
         open_mutate_and_restart_with_prompt(
             &core,
             "register rebuild button trigger",
@@ -582,7 +590,7 @@ finish "registered"
         backend: RuntimeRebuildBackend,
     ) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
+        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
         let registration = worker_registration(
             lash_core::ProcessInput::ToolCall {
                 call: lash_core::PreparedToolCall::from_parts(
@@ -605,7 +613,7 @@ finish "registered"
         backend: RuntimeRebuildBackend,
     ) {
         let registry = Arc::clone(&backend.process_registry);
-        let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
+        let core = (backend.build_core)(base_builder(Arc::clone(&registry), Arc::clone(&backend.artifact_store)));
         let child_policy = lash_core::SessionPolicy {
             model: rebuild_model(),
             ..lash_core::SessionPolicy::default()

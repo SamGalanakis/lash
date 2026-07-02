@@ -364,7 +364,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
         .map_err(anyhow::Error::msg)?;
 
     // one LashCore per app, cloned freely.
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .provider(provider)
         .model(model)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))

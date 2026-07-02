@@ -268,7 +268,7 @@ async fn observation_test_session(
         })
         .build()
         .into_handle();
-    let mut builder = lash::StandardCore::builder()
+    let mut builder = lash::LashCore::standard_builder()
         .provider(provider)
         .model(
             lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)

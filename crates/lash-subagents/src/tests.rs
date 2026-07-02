@@ -760,12 +760,20 @@ async fn run_seed_probe_inner(
     let trace_context = lash_core::TraceContext::default();
     let language_features = LashlangLanguageFeatures::default().with_label_annotations();
     let process_env_store = Arc::new(lash_core::InMemoryProcessExecutionEnvStore::new());
+    // The RLM protocol plugin (which compiles + stores the parent turn's process
+    // artifacts) and the process engine that the worker runs those artifacts
+    // through must share ONE artifact store; otherwise the worker cannot load the
+    // module the parent wrote. This mirrors the pre-ADR-0013 wiring where both
+    // defaulted to the global in-memory store.
+    let artifact_store: Arc<dyn lash_lashlang_runtime::LashlangArtifactStore> =
+        Arc::new(lash_lashlang_runtime::InMemoryLashlangArtifactStore::new());
 
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(
             lash_protocol_rlm::RlmProtocolPluginFactory::new(
                 lash_protocol_rlm::RlmProtocolPluginConfig::default()
                     .with_lashlang_language_features(language_features),
+                Arc::clone(&artifact_store),
             )
             .with_lashlang_execution_trace(execution_sink.clone(), trace_context.clone()),
         ),
@@ -802,7 +810,7 @@ async fn run_seed_probe_inner(
     .with_plugin_extensions(&extensions)
     .expect("process lashlang surface should merge plugin extensions");
     let process_engine = Arc::new(
-        LashlangProcessEngine::in_memory(process_surface)
+        LashlangProcessEngine::new(Arc::clone(&artifact_store), process_surface)
             .with_execution_trace(execution_sink, trace_context),
     );
     let plugins = host_plugins

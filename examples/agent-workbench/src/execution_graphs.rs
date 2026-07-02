@@ -477,7 +477,7 @@ mod tests {
     fn test_process_observer(
         registry: Arc<dyn lash::process::ProcessRegistry>,
     ) -> lash::process::ProcessWorkObserver {
-        let core = lash::StandardCore::builder()
+        let core = lash::LashCore::standard_builder()
             .model(
                 lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
                     .expect("model spec"),

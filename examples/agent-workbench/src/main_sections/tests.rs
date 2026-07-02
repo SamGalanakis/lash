@@ -27,11 +27,21 @@ mod tests {
         .expect("runtime thread")
     }
 
-    fn explicit_durable_test_facets(
-        builder: lash::RlmCoreBuilder,
-        data_dir: &std::path::Path,
-    ) -> lash::RlmCoreBuilder {
-        builder
+    fn explicit_durable_test_facets(data_dir: &std::path::Path) -> lash::LashCoreBuilder {
+        let artifact_store = Arc::new(sync_await({
+            let path = data_dir.join("artifacts.db");
+            async move {
+                lash_sqlite_store::Store::open(&path)
+                    .await
+                    .expect("open artifact store")
+            }
+        })) as Arc<dyn lash::persistence::LashlangArtifactStore>;
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash::rlm::RlmProtocolPluginConfig::default()
+                .with_lashlang_abilities(workbench_lashlang_abilities()),
+            artifact_store,
+        );
+        lash::LashCore::rlm_builder(factory)
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
                 data_dir.join("attachments"),
@@ -42,14 +52,6 @@ mod tests {
                     lash_sqlite_store::Store::open(&path)
                         .await
                         .expect("open process env store")
-                }
-            })))
-            .lashlang_artifact_store(Arc::new(sync_await({
-                let path = data_dir.join("artifacts.db");
-                async move {
-                    lash_sqlite_store::Store::open(&path)
-                        .await
-                        .expect("open artifact store")
                 }
             })))
             .trigger_store(Arc::new(sync_await({
@@ -376,9 +378,7 @@ mod tests {
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let (event_tx, _) = broadcast::channel(16);
         let mut events = event_tx.subscribe();
-        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -446,11 +446,7 @@ finish "observed through live replay"
         let store_factory: Arc<dyn lash::persistence::SessionStoreFactory> = Arc::new(
             lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("lash-sessions")),
         );
-        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
-            .rlm_protocol_config(
-                lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            )
+        let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model.clone())
             .store_factory(Arc::clone(&store_factory))
@@ -540,11 +536,7 @@ finish "gap source"
         let store_factory: Arc<dyn lash::persistence::SessionStoreFactory> = Arc::new(
             lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("lash-sessions")),
         );
-        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
-            .rlm_protocol_config(
-                lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()),
-            )
+        let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model.clone())
             .store_factory(Arc::clone(&store_factory))
@@ -636,9 +628,7 @@ finish "gap source"
         let (event_tx, _) = broadcast::channel(16);
         let mut events = event_tx.subscribe();
         let (restate_admin_url, mut admin_requests) = spawn_restate_admin_capture().await;
-        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -729,9 +719,7 @@ finish "gap source"
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_id = WorkbenchSessionIds::fresh().current();
-        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -815,9 +803,7 @@ finish initial
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_id = WorkbenchSessionIds::fresh().current();
-        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -885,9 +871,7 @@ finish initial
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
-        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -1040,9 +1024,7 @@ finish initial
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
         let session_id = session_ids.current();
-        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -1231,16 +1213,19 @@ finish initial
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let (event_tx, _) = broadcast::channel(1024);
-        let core = RlmCore::builder()
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash::rlm::RlmProtocolPluginConfig::default()
+                .with_lashlang_abilities(workbench_lashlang_abilities()),
+            artifact_store_for_core,
+        );
+        let core = LashCore::rlm_builder(factory)
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(Arc::clone(&process_registry))
             .trigger_store(trigger_store)
-            .lashlang_artifact_store(artifact_store_for_core)
+            .advanced()
             .runtime_host_config(lash::durability::RuntimeHostConfig::new(
                 Arc::new(lash::durability::InlineEffectHost::default()),
                 Arc::new(lash::persistence::FileAttachmentStore::new(
@@ -1429,9 +1414,7 @@ finish initial
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
-        let core = explicit_durable_test_facets(RlmCore::builder(), &data_dir)
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
@@ -1848,20 +1831,22 @@ finish initial
                 restate_http: restate_http.clone(),
                 active_restate_invocations: active_restate_invocations.clone(),
             }));
-        let core = RlmCore::builder()
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash::rlm::RlmProtocolPluginConfig::default()
+                .with_lashlang_abilities(workbench_lashlang_abilities()),
+            artifact_store,
+        )
+        .with_lashlang_execution_sink(lashlang_execution_sink);
+        let core = LashCore::rlm_builder(factory)
             .provider(provider)
             .model(model)
             .store_factory(Arc::clone(&core_store_factory))
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
                 data_dir.join("attachments"),
             )))
-            .lashlang_artifact_store(artifact_store)
             .process_env_store(process_env_store)
             .trigger_store(trigger_store)
             .trace_sink(Arc::clone(&trace_sink))
-            .lashlang_execution_sink(lashlang_execution_sink)
             .trace_level(TraceLevel::Extended)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
@@ -2169,20 +2154,23 @@ finish initial
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
         attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
         process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore>,
-    ) -> RlmCore {
+    ) -> LashCore {
         let provider = trigger_registration_provider();
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
-        RlmCore::builder()
-            .rlm_protocol_config(lash::rlm::RlmProtocolPluginConfig::default()
-                    .with_lashlang_abilities(workbench_lashlang_abilities()))
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash::rlm::RlmProtocolPluginConfig::default()
+                .with_lashlang_abilities(workbench_lashlang_abilities()),
+            artifact_store,
+        );
+        LashCore::rlm_builder(factory)
             .provider(provider)
             .model(model)
             .store_factory(session_store_factory)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(process_registry)
             .trigger_store(trigger_store)
-            .lashlang_artifact_store(artifact_store)
+            .advanced()
             .runtime_host_config(lash::durability::RuntimeHostConfig::new(
                 Arc::new(lash::durability::InlineEffectHost::default()),
                 attachment_store,
@@ -2299,7 +2287,7 @@ finish initial
     }
 
     async fn assert_remote_started_process_surface(
-        core: &RlmCore,
+        core: &LashCore,
         registry: &dyn lash::process::ProcessRegistry,
         session_id: &str,
         process_ids: &[String],
@@ -2394,7 +2382,7 @@ finish initial
     }
 
     async fn emit_test_button_trigger(
-        core: &RlmCore,
+        core: &LashCore,
         button: ButtonChoice,
     ) -> lash::triggers::TriggerEmitReport {
         let source_key = lash::triggers::empty_trigger_source_key(BUTTON_TRIGGER_SOURCE_TYPE)

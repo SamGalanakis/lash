@@ -1,26 +1,22 @@
 error[E0308]: mismatched types
- --> tests/ui/model_selection_requires_variant.rs:2:49
+ --> tests/ui/model_selection_requires_variant.rs:2:54
   |
-2 |     let _ = lash::StandardCore::builder().model("model-only");
-  |                                           ----- ^^^^^^^^^^^^ expected `ModelSpec`, found `&str`
-  |                                           |
-  |                                           arguments to this method are incorrect
+2 |     let _ = lash::LashCore::standard_builder().model("model-only");
+  |                                                ----- ^^^^^^^^^^^^ expected `ModelSpec`, found `&str`
+  |                                                |
+  |                                                arguments to this method are incorrect
   |
 note: method defined here
  --> src/core.rs
   |
-  |             pub fn model(mut self, model: lash_core::ModelSpec) -> Self {
-  |                    ^^^^^
-...
-  | forward_core_builder_methods!(StandardCoreBuilder);
-  | -------------------------------------------------- in this macro invocation
-  = note: this error originates in the macro `forward_core_builder_methods` (in Nightly builds, run with -Z macro-backtrace for more info)
+  |     pub fn model(mut self, model: lash_core::ModelSpec) -> Self {
+  |            ^^^^^
 
-error[E0599]: no method named `model_variant` found for struct `StandardCoreBuilder` in the current scope
- --> tests/ui/model_selection_requires_variant.rs:3:43
+error[E0599]: no method named `model_variant` found for struct `LashCoreBuilder` in the current scope
+ --> tests/ui/model_selection_requires_variant.rs:3:48
   |
-3 |     let _ = lash::StandardCore::builder().model_variant("low");
-  |                                           ^^^^^^^^^^^^^ method not found in `StandardCoreBuilder`
+3 |     let _ = lash::LashCore::standard_builder().model_variant("low");
+  |                                                ^^^^^^^^^^^^^ method not found in `LashCoreBuilder`
 
 error[E0308]: mismatched types
  --> tests/ui/model_selection_requires_variant.rs:7:27

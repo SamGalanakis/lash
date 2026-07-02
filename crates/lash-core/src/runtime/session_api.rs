@@ -47,6 +47,54 @@ impl LashRuntime {
         self.protocol_turn_options = options;
     }
 
+    /// The durable protocol turn options recorded on the session.
+    pub fn protocol_turn_options(&self) -> &crate::ProtocolTurnOptions {
+        &self.state.protocol_turn_options
+    }
+
+    /// Override protocol-owned turn options and mirror them to **every** agent
+    /// frame. Used by the protocol materialization hook (apply-at-open): the
+    /// last applied value is recorded on the session and on all frames.
+    pub fn set_protocol_turn_options_all_frames(&mut self, options: crate::ProtocolTurnOptions) {
+        self.state.protocol_turn_options = options.clone();
+        for frame in &mut self.state.agent_frames {
+            frame.protocol_turn_options = options.clone();
+        }
+        self.protocol_turn_options = options;
+    }
+
+    /// Run the protocol plugin's materialization hook against this runtime.
+    ///
+    /// Fires the [`ProtocolSessionPlugin::configure_runtime_on_materialize`]
+    /// hook, so both the child-create path and the root/builder-open path
+    /// converge on one seam. `plugin_options` are the plugin-keyed options that
+    /// reached this materialization (builder options for root opens, request
+    /// options for child create); `is_root_session` distinguishes root from
+    /// child.
+    pub fn configure_protocol_on_materialize(
+        &mut self,
+        plugin_options: &crate::PluginOptions,
+        is_root_session: bool,
+    ) -> Result<(), crate::PluginError> {
+        let protocol_session = self
+            .session
+            .as_ref()
+            .map(|session| Arc::clone(session.plugins().protocol_session()));
+        if let Some(protocol_session) = protocol_session {
+            let materialization = crate::plugin::ProtocolSessionMaterialization {
+                plugin_options,
+                is_root_session,
+            };
+            protocol_session
+                .configure_runtime_on_materialize(
+                    crate::plugin::ProtocolRuntimeContext::new(self),
+                    materialization,
+                )
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Export current session state for inspection/UI purposes.
     /// This keeps persistence-heavy snapshots untouched; callers that need a
     /// fully persisted view should use `export_persisted_state`.

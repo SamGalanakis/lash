@@ -14,6 +14,7 @@ dotenvy = "0.15"
 futures-util = { workspace = true }
 lash-restate = { workspace = true, optional = true }
 lash-remote-protocol = { workspace = true }
+lash-protocol-rlm = { workspace = true }
 lash-sqlite-store = { workspace = true }
 lash = { workspace = true, features = ["rlm"] }
 lash-provider-openai = { workspace = true }

@@ -21,7 +21,11 @@ pub use lash_lashlang_runtime::{
     LashlangAbilities, LashlangHostCatalog, LashlangHostEnvironment, LashlangLanguageFeatures,
 };
 pub use lashlang::{NamedDataType, TypeExpr, TypeField, format_type_expr};
-pub use plugin::{RLM_PROTOCOL_PLUGIN_ID, RlmProtocolPluginConfig, RlmProtocolPluginFactory};
+pub use plugin::{
+    LashlangCompileSurface, LashlangCompileSurfaceRequest, LashlangModuleCompileError,
+    LashlangModuleCompileRequest, ModuleCompileOutput, RLM_PROTOCOL_PLUGIN_ID,
+    RlmProtocolPluginConfig, RlmProtocolPluginFactory, rlm_lashlang_surface, rlm_protocol_config,
+};
 pub use projection::{
     ProjectionRef, ProjectionRegistry, ProjectionResolveError, ProjectionResolver,
     RlmProjectedBindings, RlmProjectedSeedError, RlmToolResultProjector, RlmTurnInputExt,

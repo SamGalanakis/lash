@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use lash::runtime::ProtocolTurnOptions;
-use lash::{RlmCore, TurnActivity, TurnEvent};
+use lash::{TurnActivity, TurnEvent};
 use lash_cli::config::LashConfig;
 use lash_core::TurnInput;
 use lash_harness_opt::strategies::gepa::{
@@ -419,11 +419,12 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             None,
         )
         .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
-        let core_builder = RlmCore::builder()
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+            Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+        );
+        let core_builder = lash::LashCore::rlm_builder(factory)
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-            .lashlang_artifact_store(Arc::new(
-                lash::persistence::InMemoryLashlangArtifactStore::new(),
-            ))
             .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
             .provider(self.provider.clone())
             .model(model_spec);

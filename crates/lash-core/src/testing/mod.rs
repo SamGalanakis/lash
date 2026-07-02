@@ -878,15 +878,15 @@ mod test_protocol_fakes {
             Ok(())
         }
 
-        fn configure_runtime_from_request(
+        fn configure_runtime_on_materialize(
             &self,
             mut ctx: ProtocolRuntimeContext<'_>,
-            request: &crate::SessionCreateRequest,
+            materialization: crate::plugin::ProtocolSessionMaterialization<'_>,
         ) -> Result<(), crate::SessionError> {
             if !self.decode_code_create_options {
                 return Ok(());
             }
-            if let Some(extras) = request
+            if let Some(extras) = materialization
                 .plugin_options
                 .decode::<TestCodeCreateExtras>("code_protocol")
                 .map_err(|err| {

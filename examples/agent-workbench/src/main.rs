@@ -30,7 +30,7 @@ use lash::prompt::PromptContribution;
 use lash::provider::{ProviderHandle, ProviderOptions};
 use lash::triggers::TriggerEvent;
 use lash::{
-    RlmCore, SessionSpec, TurnActivity, TurnActivitySink, TurnEvent, TurnResult,
+    LashCore, SessionSpec, TurnActivity, TurnActivitySink, TurnEvent, TurnResult,
     tracing::{
         JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceContext, TraceEvent,
         TraceLashlangGraph, TraceLashlangGraphStore, TraceLevel, TraceRecord, TraceSink,

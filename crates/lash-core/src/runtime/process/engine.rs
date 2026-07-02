@@ -250,6 +250,15 @@ pub trait ProcessEngine: Send + Sync {
         let _ = payload;
         ProcessIdentity::new(self.kind())
     }
+
+    /// Durability tier this engine provides. Mirrors
+    /// [`EffectHost::durability_tier`](crate::runtime::AwaitEventResolver::durability_tier):
+    /// an engine that only persists inline reports [`DurabilityTier::Inline`](crate::DurabilityTier::Inline),
+    /// and the store-peer coherence validator rejects wiring it behind a durable
+    /// session store. Defaults to `Inline`.
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Inline
+    }
 }
 
 #[derive(Clone, Default)]
@@ -270,8 +279,31 @@ impl ProcessEngineRegistry {
         }
     }
 
+    /// Register an engine, rejecting a duplicate
+    /// [`ProcessEngine::kind`]. This is the single enforcement point for unique
+    /// engine kinds across everything registered on a runtime host, whether the
+    /// engine was wired directly or contributed through the plugin contract.
+    pub fn try_with_engine(
+        self,
+        engine: Arc<dyn ProcessEngine>,
+    ) -> Result<Self, crate::PluginError> {
+        if self.engines.contains_key(engine.kind()) {
+            return Err(crate::PluginError::Registration(format!(
+                "duplicate process engine kind `{}`; each engine kind may be registered once",
+                engine.kind()
+            )));
+        }
+        Ok(self.with_engine(engine))
+    }
+
     pub fn get(&self, kind: &str) -> Option<Arc<dyn ProcessEngine>> {
         self.engines.get(kind).cloned()
+    }
+
+    /// Iterate over every registered engine, used by the store-peer coherence
+    /// validator to sweep engine durability tiers.
+    pub fn engines(&self) -> impl Iterator<Item = &Arc<dyn ProcessEngine>> {
+        self.engines.values()
     }
 
     pub fn require(&self, kind: &str) -> Result<Arc<dyn ProcessEngine>, crate::PluginError> {

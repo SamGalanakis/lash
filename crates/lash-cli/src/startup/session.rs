@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use lash::{LashSession, PluginStack, PromptLayerSink, RlmCore, StandardCore};
+use lash::{LashCore, LashSession, PluginStack, PromptLayerSink};
 use lash_core::provider::ProviderHandle;
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::store::SessionHead;
@@ -374,7 +374,7 @@ impl CliSessionOpener {
         ));
         let session = match host_config.execution_mode {
             ExecutionMode::Standard => {
-                let mut core_builder = StandardCore::builder()
+                let mut core_builder = LashCore::standard_builder()
                     .provider(self.provider.clone())
                     .model(policy.model.clone())
                     .child_store_factory(child_store_factory)
@@ -400,14 +400,20 @@ impl CliSessionOpener {
             ExecutionMode::Rlm => {
                 let artifact_store = Arc::new(Store::open(&bootstrap.artifacts_db_file()).await?)
                     as Arc<dyn lash::persistence::LashlangArtifactStore>;
-                let mut core_builder = RlmCore::builder()
+                let mut factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+                    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+                    artifact_store,
+                );
+                if let Some(resolver) = self.deferred_tool_resolver.clone() {
+                    factory = factory.with_deferred_tool_resolver(resolver);
+                }
+                let mut core_builder = LashCore::rlm_builder(factory)
                     .provider(self.provider.clone())
                     .model(policy.model.clone())
                     .child_store_factory(child_store_factory)
                     .plugins(self.plugin_stack.clone())
                     .prompt_layer(self.prompt_layer.clone())
                     .effect_host(effect_host)
-                    .lashlang_artifact_store(artifact_store)
                     .attachment_store(Arc::clone(&self.attachment_store))
                     .process_env_store(Arc::clone(&process_env_store))
                     .trace_level(self.trace_level)
@@ -415,9 +421,6 @@ impl CliSessionOpener {
                     .trigger_store(trigger_store);
                 if let Some(trace_jsonl_path) = self.trace_jsonl_path.clone() {
                     core_builder = core_builder.trace_jsonl_path(trace_jsonl_path);
-                }
-                if let Some(resolver) = self.deferred_tool_resolver.clone() {
-                    core_builder = core_builder.deferred_tool_resolver(resolver);
                 }
                 core_builder
                     .build()?

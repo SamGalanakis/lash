@@ -183,15 +183,14 @@ impl AgentScenarioSetup {
             self.scripted_provider_responses,
             Arc::clone(&prompt_captures),
         );
-        let mut builder =
-            explicit_ephemeral_facets(RlmCore::builder())
-                .provider(provider)
-                .model(mock_model_spec())
-                .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-                .process_registry(Arc::clone(&process_registry) as Arc<dyn ProcessRegistry>)
-                .lashlang_execution_sink(
-                    Arc::clone(&graph_store) as Arc<dyn crate::tracing::TraceSink>
-                );
+        let factory = rlm_factory().with_lashlang_execution_sink(
+            Arc::clone(&graph_store) as Arc<dyn crate::tracing::TraceSink>,
+        );
+        let mut builder = explicit_ephemeral_facets(LashCore::rlm_builder(factory))
+            .provider(provider)
+            .model(mock_model_spec())
+            .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+            .process_registry(Arc::clone(&process_registry) as Arc<dyn ProcessRegistry>);
         if let Some(tools) = self.tool_provider {
             builder = builder.tools(tools);
         }
@@ -211,7 +210,7 @@ impl AgentScenarioSetup {
 }
 
 struct AgentScenarioRuntime {
-    core: RlmCore,
+    core: LashCore,
     graph_store: Arc<crate::tracing::TraceLashlangGraphStore>,
     process_registry: Arc<TestLocalProcessRegistry>,
     prompt_captures: Arc<StdMutex<Vec<LlmRequest>>>,

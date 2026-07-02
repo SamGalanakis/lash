@@ -66,7 +66,11 @@ let data_dir = std::path::PathBuf::from("./.lash-data");
 let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
 let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db")).await?);
 
-let core = lash::RlmCore::builder()
+let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    artifact_store,
+);
+let core = lash::LashCore::rlm_builder(factory)
     .provider(provider)
     .model(
         lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
@@ -74,7 +78,6 @@ let core = lash::RlmCore::builder()
     )
     .store_factory(store_factory)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(artifact_store)
     .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
         data_dir.join("attachments"),
     )))
@@ -115,11 +118,14 @@ let attachments = S3AttachmentStore::builder("lash-attachments", "us-east-1")
     .prefix("prod/lash")
     .build()?;
 
-let core = lash::RlmCore::builder()
+let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    Arc::new(storage.lashlang_artifact_store()),
+);
+let core = lash::LashCore::rlm_builder(factory)
     .store_factory(Arc::new(storage.session_store_factory()))
     .process_registry(Arc::new(storage.process_registry()))
     .trigger_store(Arc::new(storage.trigger_store()))
-    .lashlang_artifact_store(Arc::new(storage.lashlang_artifact_store()))
     .attachment_store(Arc::new(attachments))
     // provider, model, effect host...
     .build()?;</code></pre>
@@ -228,7 +234,11 @@ let store_factory = Arc::new(SqliteSessionStoreFactory::new(
 let artifact_store =
     Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("lash-artifacts.db")).await?);
 
-let core = lash::RlmCore::builder()
+let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    artifact_store,
+);
+let core = lash::LashCore::rlm_builder(factory)
     .provider(provider)
     .model(
         lash::ModelSpec::from_token_limits(
@@ -241,7 +251,6 @@ let core = lash::RlmCore::builder()
     )
     .store_factory(store_factory)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(artifact_store)
     .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
         data_dir.join("attachments"),
     )))

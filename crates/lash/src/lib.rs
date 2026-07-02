@@ -29,11 +29,7 @@ pub use crate::admin::{
     AdvancedToolAdmin, Completions, CoreTriggerAdmin, PluginOperations, SessionCommandAdmin,
     SessionTriggerAdmin, ToolAdmin,
 };
-pub use crate::core::{
-    LashCore, LashCoreBuilder, SessionDeleteReport, StandardCore, StandardCoreBuilder,
-};
-#[cfg(feature = "rlm")]
-pub use crate::core::{RlmCore, RlmCoreBuilder};
+pub use crate::core::{LashCore, LashCoreBuilder, SessionDeleteReport};
 pub use crate::error::{EmbedError, Result};
 pub use crate::plugin_binding::PluginBinding;
 pub use crate::prompt_layer::PromptLayerSink;
@@ -67,13 +63,11 @@ pub mod prelude {
         ObservableSession, PendingTurnInputCancelOutcome, PluginBinding, PluginOperations,
         PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder, SessionCommand,
         SessionCommandAdmin, SessionCommandReceipt, SessionConfigPatch, SessionCreateRequest,
-        SessionDeleteReport, SessionSpec, SessionStartPoint, SessionTriggerAdmin, StandardCore,
-        StandardCoreBuilder, ToolAdmin, TurnActivity, TurnActivityFanout, TurnActivityId,
-        TurnActivitySink, TurnBuilder, TurnCause, TurnEvent, TurnFinish, TurnInput, TurnOutcome,
-        TurnOutput, TurnResult, TurnStop, TurnStream, message_role, message_text,
+        SessionDeleteReport, SessionSpec, SessionStartPoint, SessionTriggerAdmin, ToolAdmin,
+        TurnActivity, TurnActivityFanout, TurnActivityId, TurnActivitySink, TurnBuilder, TurnCause,
+        TurnEvent, TurnFinish, TurnInput, TurnOutcome, TurnOutput, TurnResult, TurnStop, TurnStream,
+        message_role, message_text,
     };
-    #[cfg(feature = "rlm")]
-    pub use crate::{RlmCore, RlmCoreBuilder};
 }
 
 /// Session observation: cursors, resumable event streams, and live replay

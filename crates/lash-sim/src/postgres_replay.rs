@@ -314,7 +314,7 @@ struct PostgresRuntimeReplayWorld {
 }
 
 struct PostgresRuntimeReplaySession {
-    _core: lash::StandardCore,
+    _core: lash::LashCore,
     session: lash::LashSession,
     transport: Arc<ScriptedLlmHttpTransport>,
     provider_schedule: ScriptedTransportSchedule,
@@ -958,7 +958,7 @@ fn runtime_core_for_scripts(
     provider_kind: &str,
     scripts: Vec<ProviderWireScript>,
     provider_schedule: Option<ScriptedTransportSchedule>,
-) -> Result<(lash::StandardCore, Arc<ScriptedLlmHttpTransport>, String), PostgresReplayError> {
+) -> Result<(lash::LashCore, Arc<ScriptedLlmHttpTransport>, String), PostgresReplayError> {
     let mut transport = ScriptedLlmHttpTransport::from_scripts(scripts);
     if let Some(schedule) = provider_schedule {
         transport = transport.with_event_schedule(schedule);
@@ -969,7 +969,7 @@ fn runtime_core_for_scripts(
             .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?;
     let process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore> =
         Arc::new(storage.process_env_store());
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             attachment_root.to_path_buf(),

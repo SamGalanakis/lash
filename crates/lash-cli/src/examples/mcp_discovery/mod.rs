@@ -258,7 +258,12 @@ finish { value: "venmo-routed-ok", discovered: hits[0].call, sent: result.sent }
         )));
 
         let prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let core = lash::RlmCore::builder()
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+            Arc::new(InMemoryLashlangArtifactStore::new()),
+        )
+        .with_deferred_tool_resolver(resolver);
+        let core = lash::LashCore::rlm_builder(factory)
             .provider(scripted_provider(Arc::clone(&prompts)))
             .model(
                 ModelSpec::from_token_limits("test/cli-e2e-model", None, 200_000, None)
@@ -272,10 +277,8 @@ finish { value: "venmo-routed-ok", discovered: hits[0].call, sent: result.sent }
             // The CLI's own RLM prompt layer; the catalogue-preview prompt slots
             // into its Execution section.
             .prompt_layer(crate::startup::cli_prompt_config(true, &ExecutionMode::Rlm))
-            .deferred_tool_resolver(resolver)
             .store_factory(Arc::new(InMemorySessionStoreFactory::new()))
             .effect_host(Arc::new(InlineEffectHost::default()))
-            .lashlang_artifact_store(Arc::new(InMemoryLashlangArtifactStore::new()))
             .attachment_store(Arc::new(InMemoryAttachmentStore::new()))
             .process_env_store(Arc::new(InMemoryProcessExecutionEnvStore::new()))
             .build()

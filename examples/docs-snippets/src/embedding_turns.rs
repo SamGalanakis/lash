@@ -269,7 +269,7 @@ fn terminal_value_match(result: TurnResult) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn finish_schema(core: &lash::RlmCore) -> anyhow::Result<()> {
+async fn finish_schema(core: &lash::LashCore) -> anyhow::Result<()> {
     // docs:start:finish-schema
     use lash::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 

@@ -80,7 +80,11 @@ let trigger_store = std::sync::Arc::new(
     lash_sqlite_store::SqliteTriggerStore::open(&amp;data_dir.join("triggers.db")).await?,
 );
 
-let core = lash::RlmCore::builder()
+let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    artifact_store,
+);
+let core = lash::LashCore::rlm_builder(factory)
     .provider(provider)
     .model(
         lash::ModelSpec::from_token_limits(
@@ -95,7 +99,6 @@ let core = lash::RlmCore::builder()
     .effect_host(std::sync::Arc::new(
         lash::durability::InlineEffectHost::default(),
     ))
-    .lashlang_artifact_store(artifact_store)
     .process_env_store(process_env_store)
     .trigger_store(trigger_store)
     .attachment_store(std::sync::Arc::new(

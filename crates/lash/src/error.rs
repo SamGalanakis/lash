@@ -3,17 +3,13 @@ use crate::support::*;
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedError {
     #[error(
-        "protocol plugin is required; call .protocol_plugin(...) or use StandardCore::builder()/RlmCore::builder()"
+        "protocol plugin is required; call .protocol_plugin(...) or use LashCore::standard_builder()/LashCore::rlm_builder(...)"
     )]
     MissingProtocolPlugin,
     #[error("model spec is required; hosts must supply explicit model metadata")]
     MissingModelSpec,
     #[error("effect host is required; provide an explicit effect host with .effect_host(...)")]
     MissingEffectHost,
-    #[error(
-        "lashlang artifact store is required; provide an explicit Lashlang artifact store with .lashlang_artifact_store(...)"
-    )]
-    MissingLashlangArtifactStore,
     #[error(
         "attachment store is required; provide an explicit attachment store with .attachment_store(...)"
     )]

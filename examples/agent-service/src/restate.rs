@@ -335,8 +335,8 @@ mod restate_tests {
     use crate::db::AppDb;
     use crate::demo_plugin::{DemoPlugin, DemoPluginConfig};
     use crate::state::AgentServiceDurability;
+    use lash::LashCore;
     use lash::PluginBinding;
-    use lash::RlmCore;
     use lash::direct::LlmOutputPart;
     use lash::direct::LlmResponse;
     use lash_restate::LashProcessWorkflow;
@@ -553,7 +553,11 @@ finish "done via Restate E2E"
         );
         let process_deployment =
             lash_restate::RestateProcessDeployment::new(ingress_url, Arc::clone(&process_registry));
-        let core = RlmCore::builder()
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+            artifact_store,
+        );
+        let core = LashCore::rlm_builder(factory)
             .provider(provider)
             .model(
                 lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
@@ -563,7 +567,6 @@ finish "done via Restate E2E"
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
                 data_dir.join("attachments"),
             )))
-            .lashlang_artifact_store(artifact_store)
             .process_env_store(process_env_store)
             .trigger_store(trigger_store)
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))

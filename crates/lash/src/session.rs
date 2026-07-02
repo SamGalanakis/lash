@@ -24,15 +24,33 @@ pub struct SessionBuilder {
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
     pub(crate) plugin_factories: Vec<Arc<dyn PluginFactory>>,
-}
-
-#[cfg(feature = "rlm")]
-pub struct RlmSessionBuilder {
-    pub(crate) builder: SessionBuilder,
-    pub(crate) rlm_final_answer_format: Option<lash_rlm_types::RlmFinalAnswerFormat>,
+    /// Plugin-keyed, serializable open-time options. They ride the protocol
+    /// materialization seam (the same `PluginOptions` bag a child
+    /// `SessionCreateRequest` carries) so every plugin gets open-time options
+    /// through one hook.
+    pub(crate) plugin_options: PluginOptions,
 }
 
 impl SessionBuilder {
+    /// Set the plugin-keyed open-time options bag wholesale.
+    pub fn plugin_options(mut self, plugin_options: PluginOptions) -> Self {
+        self.plugin_options = plugin_options;
+        self
+    }
+
+    /// Merge a single plugin's typed options into the open-time options bag,
+    /// preserving any options already set for other plugin keys.
+    pub fn plugin_option<T: serde::Serialize>(
+        mut self,
+        plugin_id: impl Into<String>,
+        extras: T,
+    ) -> Result<Self> {
+        self.plugin_options
+            .insert_typed(plugin_id, extras)
+            .map_err(EmbedError::ProtocolTurnOptions)?;
+        Ok(self)
+    }
+
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
         self.spec = self.spec.provider_id(provider.kind());
         self.provider = Some(provider);
@@ -192,15 +210,23 @@ impl SessionBuilder {
             self.core.plugin_factories.as_ref(),
             self.plugin_factories,
         )?;
-        env.core = self
-            .core
-            .runtime_host_for_plugin_host(env.core.clone(), &plugin_host)?;
+        env.core = plugin_host.install_process_engine_contributions(
+            env.core.clone(),
+            self.core.process_lifecycle_available,
+        )?;
         env.plugin_host = Some(Arc::new(plugin_host));
         let effect_host = Arc::clone(&env.core.control.effect_host);
         let drivers = self.core.work_driver.drivers().await;
         env.process_work_driver = drivers.process.clone();
         env.queued_work_driver = drivers.queued.clone();
         let mut runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
+        // Fire the protocol materialization hook for this root/builder open
+        // (including resume): the protocol plugin applies and defaults its
+        // per-session options at open time.
+        runtime.configure_protocol_on_materialize(
+            &self.plugin_options,
+            self.parent_session_id.is_none(),
+        )?;
         if let Some(owner) = self.session_execution_owner {
             runtime.set_runtime_lease_owner(owner);
         }
@@ -322,159 +348,6 @@ async fn load_persisted_state_for_residency(
 impl PromptLayerSink for SessionBuilder {
     fn prompt_layer_mut(&mut self) -> &mut PromptLayer {
         self.spec.prompt.get_or_insert_with(PromptLayer::new)
-    }
-}
-
-#[cfg(feature = "rlm")]
-impl RlmSessionBuilder {
-    pub fn provider(mut self, provider: ProviderHandle) -> Self {
-        self.builder = self.builder.provider(provider);
-        self
-    }
-
-    pub fn session_spec(mut self, spec: SessionSpec) -> Self {
-        self.builder = self.builder.session_spec(spec);
-        self
-    }
-
-    pub fn parent(mut self, parent_session_id: impl Into<String>) -> Self {
-        self.builder = self.builder.parent(parent_session_id);
-        self
-    }
-
-    pub fn session_execution_owner(mut self, owner: lash_core::LeaseOwnerIdentity) -> Self {
-        self.builder = self.builder.session_execution_owner(owner);
-        self
-    }
-
-    pub fn store(mut self, store: Arc<dyn RuntimePersistence>) -> Self {
-        self.builder = self.builder.store(store);
-        self
-    }
-
-    pub fn plugin<P: PluginBinding>(mut self, config: P::SessionConfig) -> Self {
-        self.builder = self.builder.plugin::<P>(config);
-        self
-    }
-
-    pub async fn open(self) -> Result<LashSession> {
-        self.open_resolved(RlmOpenState::Resume).await
-    }
-
-    pub async fn open_fresh(self) -> Result<LashSession> {
-        self.open_resolved(RlmOpenState::Fresh).await
-    }
-
-    pub async fn open_with_state(self, state: RuntimeSessionState) -> Result<LashSession> {
-        self.open_resolved(RlmOpenState::Explicit(state)).await
-    }
-
-    async fn open_resolved(self, open_state: RlmOpenState) -> Result<LashSession> {
-        let Self {
-            builder,
-            rlm_final_answer_format,
-        } = self;
-        let policy = builder.session_policy();
-        let store = builder.create_store(&policy).await?;
-        let mut state = match open_state {
-            RlmOpenState::Resume => {
-                builder
-                    .load_or_default_state(&policy, store.as_deref())
-                    .await?
-            }
-            RlmOpenState::Fresh => RuntimeSessionState {
-                session_id: builder.session_id.clone(),
-                policy: policy.clone(),
-                graph_replace_required: true,
-                ..RuntimeSessionState::default()
-            },
-            RlmOpenState::Explicit(mut state) => {
-                if state.session_id != builder.session_id {
-                    return Err(EmbedError::StoreSessionMismatch {
-                        loaded: state.session_id,
-                        requested: builder.session_id.clone(),
-                    });
-                }
-                let recorded_provider_id = state.policy.recorded_provider_id().to_string();
-                state.policy = policy.clone();
-                state.policy.provider_id = recorded_provider_id;
-                state
-            }
-        };
-        apply_rlm_session_options(
-            builder.parent_session_id.is_none(),
-            rlm_final_answer_format,
-            &mut state,
-        )?;
-        builder.open_resolved(policy, state, store).await
-    }
-}
-
-#[cfg(feature = "rlm")]
-impl PromptLayerSink for RlmSessionBuilder {
-    fn prompt_layer_mut(&mut self) -> &mut PromptLayer {
-        self.builder.prompt_layer_mut()
-    }
-}
-
-#[cfg(feature = "rlm")]
-#[allow(clippy::large_enum_variant)]
-enum RlmOpenState {
-    Resume,
-    Fresh,
-    Explicit(RuntimeSessionState),
-}
-
-#[cfg(feature = "rlm")]
-fn apply_rlm_session_options(
-    is_root_session: bool,
-    explicit_format: Option<lash_rlm_types::RlmFinalAnswerFormat>,
-    state: &mut RuntimeSessionState,
-) -> Result<()> {
-    let final_answer_format = explicit_format.unwrap_or({
-        if is_root_session {
-            lash_rlm_types::RlmFinalAnswerFormat::Markdown
-        } else {
-            lash_rlm_types::RlmFinalAnswerFormat::RawFinalValue
-        }
-    });
-    let mut extras = if state.protocol_turn_options.is_empty() {
-        lash_rlm_types::RlmCreateExtras::default()
-    } else {
-        state.protocol_turn_options.decode()?
-    };
-    extras.final_answer_format = Some(final_answer_format);
-    let options = ProtocolTurnOptions::typed(extras)?;
-    state.protocol_turn_options = options.clone();
-    for frame in &mut state.agent_frames {
-        frame.protocol_turn_options = options.clone();
-    }
-    Ok(())
-}
-
-#[cfg(all(test, feature = "rlm"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn apply_rlm_session_options_preserves_existing_termination() -> Result<()> {
-        let mut state = RuntimeSessionState {
-            protocol_turn_options: ProtocolTurnOptions::typed(lash_rlm_types::RlmCreateExtras {
-                termination: lash_rlm_types::RlmTermination::Natural,
-                final_answer_format: None,
-            })?,
-            ..Default::default()
-        };
-
-        apply_rlm_session_options(true, None, &mut state)?;
-
-        let extras: lash_rlm_types::RlmCreateExtras = state.protocol_turn_options.decode()?;
-        assert_eq!(extras.termination, lash_rlm_types::RlmTermination::Natural);
-        assert_eq!(
-            extras.final_answer_format,
-            Some(lash_rlm_types::RlmFinalAnswerFormat::Markdown)
-        );
-        Ok(())
     }
 }
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::{SessionAppendNode, SessionCreateRequest};
+use super::SessionAppendNode;
 use crate::runtime::RuntimeSessionState;
 use crate::{
     ExecRequest, ExecResponse, LlmRequest, PromptUsage, RuntimeExecutionContext, SessionReadView,
@@ -66,10 +66,19 @@ pub trait ProtocolSessionPlugin: Send + Sync {
         Ok(())
     }
 
-    fn configure_runtime_from_request(
+    /// Fires on every session materialization — root/builder open (including
+    /// resume) and child create — so a protocol plugin can apply and default
+    /// its per-session options at open time (apply-at-open semantics).
+    ///
+    /// The [`ProtocolSessionMaterialization`] descriptor carries the
+    /// plugin-keyed options that reached this materialization (builder options
+    /// for root opens, request options for child create) and whether this is a
+    /// root session. The plugin reads/writes durable protocol turn options
+    /// through [`ProtocolRuntimeContext`].
+    fn configure_runtime_on_materialize(
         &self,
         _ctx: ProtocolRuntimeContext<'_>,
-        _request: &SessionCreateRequest,
+        _materialization: ProtocolSessionMaterialization<'_>,
     ) -> Result<(), crate::SessionError> {
         Ok(())
     }
@@ -156,9 +165,35 @@ impl<'a> ProtocolRuntimeContext<'a> {
         Self { runtime }
     }
 
+    /// The durable protocol turn options currently recorded on the session.
+    /// Protocol plugins read these to preserve fields (e.g. termination) they
+    /// are not overwriting.
+    pub fn protocol_turn_options(&self) -> &crate::ProtocolTurnOptions {
+        self.runtime.protocol_turn_options()
+    }
+
+    /// Set the durable protocol turn options and mirror them to the current
+    /// agent frame only.
     pub fn set_protocol_turn_options(&mut self, options: crate::ProtocolTurnOptions) {
         self.runtime.set_protocol_turn_options(options);
     }
+
+    /// Set the durable protocol turn options and mirror them to **every** agent
+    /// frame. Apply-at-open semantics: the last applied value is recorded on the
+    /// session and all frames.
+    pub fn set_protocol_turn_options_all_frames(&mut self, options: crate::ProtocolTurnOptions) {
+        self.runtime.set_protocol_turn_options_all_frames(options);
+    }
+}
+
+/// Read-only descriptor of a session materialization handed to
+/// [`ProtocolSessionPlugin::configure_runtime_on_materialize`].
+pub struct ProtocolSessionMaterialization<'a> {
+    /// Plugin-keyed options that reached this materialization: builder options
+    /// for a root/builder open, request options for a child create.
+    pub plugin_options: &'a PluginOptions,
+    /// Whether this materialization is a root session (no parent).
+    pub is_root_session: bool,
 }
 
 #[async_trait::async_trait]

@@ -30,15 +30,32 @@ impl RlmTurnBuilderExt for TurnBuilder {
     }
 }
 
+/// Sugar for setting the RLM final-answer format on a plain [`SessionBuilder`].
+///
+/// This writes `RlmCreateExtras` into the builder's generic open-time plugin
+/// options bag (the same seam every plugin uses), merging with any RLM options
+/// already present so it never clobbers a termination the host set through the
+/// same key.
 #[cfg(feature = "rlm")]
 pub trait RlmSessionBuilderExt: Sized {
     fn final_answer_format(self, format: lash_rlm_types::RlmFinalAnswerFormat) -> Self;
 }
 
 #[cfg(feature = "rlm")]
-impl RlmSessionBuilderExt for RlmSessionBuilder {
+impl RlmSessionBuilderExt for SessionBuilder {
     fn final_answer_format(mut self, format: lash_rlm_types::RlmFinalAnswerFormat) -> Self {
-        self.rlm_final_answer_format = Some(format);
+        let mut extras = self
+            .plugin_options
+            .decode::<lash_rlm_types::RlmCreateExtras>(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        extras.final_answer_format = Some(format);
+        // The value round-trips through the same typed encoder used elsewhere;
+        // `RlmCreateExtras` always serializes, so this cannot fail.
+        self = self
+            .plugin_option(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID, extras)
+            .expect("encode RLM create extras");
         self
     }
 }
@@ -62,114 +79,14 @@ pub use lash_protocol_rlm::{
 };
 pub use lash_rlm_types::RlmFinalAnswerFormat;
 
+/// The Lashlang compile APIs are operations over an
+/// [`RlmProtocolPluginFactory`](lash_protocol_rlm::RlmProtocolPluginFactory) and
+/// a plugin host; they live in `lash-protocol-rlm` and are re-exported here.
 #[cfg(feature = "rlm")]
-pub struct LashlangCompileSurfaceRequest {
-    pub session_id: String,
-    pub execution_env_spec: ProcessExecutionEnvSpec,
-    pub extra_plugin_factories: Vec<Arc<dyn PluginFactory>>,
-}
-
-#[cfg(feature = "rlm")]
-impl LashlangCompileSurfaceRequest {
-    pub fn new(session_id: impl Into<String>, execution_env_spec: ProcessExecutionEnvSpec) -> Self {
-        Self {
-            session_id: session_id.into(),
-            execution_env_spec,
-            extra_plugin_factories: Vec::new(),
-        }
-    }
-
-    pub fn plugin(mut self, plugin: Arc<dyn PluginFactory>) -> Self {
-        self.extra_plugin_factories.push(plugin);
-        self
-    }
-
-    pub fn plugins(mut self, plugins: impl IntoIterator<Item = Arc<dyn PluginFactory>>) -> Self {
-        self.extra_plugin_factories.extend(plugins);
-        self
-    }
-}
-
-#[cfg(feature = "rlm")]
-pub struct LashlangModuleCompileRequest {
-    pub session_id: String,
-    pub source: String,
-    pub execution_env_spec: ProcessExecutionEnvSpec,
-    pub extra_plugin_factories: Vec<Arc<dyn PluginFactory>>,
-}
-
-#[cfg(feature = "rlm")]
-impl LashlangModuleCompileRequest {
-    pub fn new(
-        session_id: impl Into<String>,
-        source: impl Into<String>,
-        execution_env_spec: ProcessExecutionEnvSpec,
-    ) -> Self {
-        Self {
-            session_id: session_id.into(),
-            source: source.into(),
-            execution_env_spec,
-            extra_plugin_factories: Vec::new(),
-        }
-    }
-
-    pub fn plugin(mut self, plugin: Arc<dyn PluginFactory>) -> Self {
-        self.extra_plugin_factories.push(plugin);
-        self
-    }
-
-    pub fn plugins(mut self, plugins: impl IntoIterator<Item = Arc<dyn PluginFactory>>) -> Self {
-        self.extra_plugin_factories.extend(plugins);
-        self
-    }
-}
-
-#[cfg(feature = "rlm")]
-pub type LashlangModuleCompileError = lashlang::ModuleCompileError;
-
-#[cfg(feature = "rlm")]
-pub type ModuleCompileOutput = lashlang::ModuleCompileOutput;
-
-#[cfg(feature = "rlm")]
-pub struct LashlangCompileSurface {
-    pub host_environment: lash_lashlang_runtime::LashlangHostEnvironment,
-    pub tool_catalog: Arc<lash_core::ToolCatalog>,
-    pub surface: lash_lashlang_runtime::LashlangSurface,
-}
-
-#[cfg(feature = "rlm")]
-pub(crate) fn rlm_protocol_config(
-    config: lash_protocol_rlm::RlmProtocolPluginConfig,
-    process_lifecycle: bool,
-) -> lash_protocol_rlm::RlmProtocolPluginConfig {
-    let language_features = config.lashlang_language_features.with_label_annotations();
-    let mut config = config.with_lashlang_language_features(language_features);
-    if process_lifecycle {
-        config.lashlang_abilities = config
-            .lashlang_abilities
-            .with_sleep()
-            .with_processes()
-            .with_process_signals();
-    }
-    config
-}
-
-#[cfg(feature = "rlm")]
-pub(crate) fn rlm_lashlang_surface(
-    config: &lash_protocol_rlm::RlmProtocolPluginConfig,
-    process_lifecycle: bool,
-) -> lash_lashlang_runtime::LashlangSurface {
-    let surface = lash_lashlang_runtime::LashlangSurface::new(
-        config.lashlang_abilities,
-        config.lashlang_language_features,
-        lash_lashlang_runtime::LashlangHostCatalog::new(),
-    );
-    if process_lifecycle {
-        surface.for_process_registry(true)
-    } else {
-        surface
-    }
-}
+pub use lash_protocol_rlm::{
+    LashlangCompileSurface, LashlangCompileSurfaceRequest, LashlangModuleCompileError,
+    LashlangModuleCompileRequest, ModuleCompileOutput,
+};
 
 #[cfg(feature = "rlm")]
 fn rlm_termination(

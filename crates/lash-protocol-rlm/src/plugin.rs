@@ -11,4 +11,8 @@ mod runtime_state;
 mod tool_args;
 
 pub use config::RlmProtocolPluginConfig;
-pub use factory::RlmProtocolPluginFactory;
+pub use factory::{
+    LashlangCompileSurface, LashlangCompileSurfaceRequest, LashlangModuleCompileError,
+    LashlangModuleCompileRequest, ModuleCompileOutput, RlmProtocolPluginFactory,
+    rlm_lashlang_surface, rlm_protocol_config,
+};

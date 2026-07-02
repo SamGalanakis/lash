@@ -18,7 +18,11 @@ async fn sqlite_core(provider: ProviderHandle, model: String) -> anyhow::Result<
     let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
     let artifact_store = Arc::new(Store::open(&data_dir.join("artifacts.db")).await?);
 
-    let core = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        artifact_store,
+    );
+    let core = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
@@ -26,7 +30,6 @@ async fn sqlite_core(provider: ProviderHandle, model: String) -> anyhow::Result<
         )
         .store_factory(store_factory)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(artifact_store)
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )))
@@ -66,11 +69,14 @@ async fn postgres_core(database_url: String) -> anyhow::Result<()> {
         .prefix("prod/lash")
         .build()?;
 
-    let core = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        Arc::new(storage.lashlang_artifact_store()),
+    );
+    let core = lash::LashCore::rlm_builder(factory)
         .store_factory(Arc::new(storage.session_store_factory()))
         .process_registry(Arc::new(storage.process_registry()))
         .trigger_store(Arc::new(storage.trigger_store()))
-        .lashlang_artifact_store(Arc::new(storage.lashlang_artifact_store()))
         .attachment_store(Arc::new(attachments))
         // provider, model, effect host...
         .build()?;
@@ -158,7 +164,11 @@ async fn shared_factory(
     let artifact_store =
         Arc::new(lash_sqlite_store::Store::open(&data_dir.join("lash-artifacts.db")).await?);
 
-    let core = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        artifact_store,
+    );
+    let core = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(
@@ -171,7 +181,6 @@ async fn shared_factory(
         )
         .store_factory(store_factory)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(artifact_store)
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )))

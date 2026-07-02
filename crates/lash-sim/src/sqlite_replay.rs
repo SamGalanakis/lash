@@ -268,7 +268,7 @@ struct SqliteRuntimeReplayWorld {
 }
 
 struct SqliteRuntimeReplaySession {
-    _core: lash::StandardCore,
+    _core: lash::LashCore,
     session: lash::LashSession,
     transport: Arc<ScriptedLlmHttpTransport>,
     provider_schedule: ScriptedTransportSchedule,
@@ -929,7 +929,7 @@ async fn runtime_core_for_scripts(
     provider_kind: &str,
     scripts: Vec<ProviderWireScript>,
     provider_schedule: Option<ScriptedTransportSchedule>,
-) -> Result<(lash::StandardCore, Arc<ScriptedLlmHttpTransport>, String), SqliteReplayError> {
+) -> Result<(lash::LashCore, Arc<ScriptedLlmHttpTransport>, String), SqliteReplayError> {
     let mut transport = ScriptedLlmHttpTransport::from_scripts(scripts);
     if let Some(schedule) = provider_schedule {
         transport = transport.with_event_schedule(schedule);
@@ -943,7 +943,7 @@ async fn runtime_core_for_scripts(
             .await
             .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?,
     );
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             database_root.join("attachments"),

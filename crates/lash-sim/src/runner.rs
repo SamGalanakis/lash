@@ -6062,7 +6062,7 @@ await task.fail({ reason: "parent observed child failure" })?
     let graph_facts = agent_contract_graph_facts(&graph_store.graphs(), &result.state.session_id);
     let failure = agent_failed_child_activity_facts(&result, &recorded);
     let payload = json!({
-        "execution_api": "lash::RlmCore facade",
+        "execution_api": "lash::LashCore facade",
         "provider_kind": "lash_runtime agent failed child graph",
         "session_id": result.state.session_id,
         "turn_index": result.state.turn_index,
@@ -6160,11 +6160,12 @@ async fn facade_final_value_execution_inner(
     tools: Option<Arc<dyn lash_core::ToolProvider>>,
 ) -> Result<Value, FixedScriptRunnerError> {
     let events = Arc::new(RuntimeProofRecordingEvents::default());
-    let mut builder = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    );
+    let mut builder = lash::LashCore::rlm_builder(factory)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -6229,7 +6230,7 @@ async fn facade_final_value_execution_inner(
         "facade final value execution did not produce concrete final-value outcome/event facts",
     )?;
     Ok(json!({
-        "execution_api": "lash::RlmCore facade",
+        "execution_api": "lash::LashCore facade",
         "provider_kind": provider_kind,
         "session_id": result.state.session_id,
         "turn_index": result.state.turn_index,
@@ -6406,7 +6407,7 @@ fn agent_process_contract_core(
     provider_kind: &'static str,
     provider_responses: Vec<&'static str>,
     tools: Option<Arc<dyn lash_core::ToolProvider>>,
-) -> Result<(lash::RlmCore, Arc<lash::tracing::TraceLashlangGraphStore>), FixedScriptRunnerError> {
+) -> Result<(lash::LashCore, Arc<lash::tracing::TraceLashlangGraphStore>), FixedScriptRunnerError> {
     agent_process_contract_core_with_options(provider_kind, provider_responses, tools, false, None)
 }
 
@@ -6416,13 +6417,15 @@ fn agent_process_contract_core_with_options(
     tools: Option<Arc<dyn lash_core::ToolProvider>>,
     install_subagents: bool,
     max_turns: Option<usize>,
-) -> Result<(lash::RlmCore, Arc<lash::tracing::TraceLashlangGraphStore>), FixedScriptRunnerError> {
+) -> Result<(lash::LashCore, Arc<lash::tracing::TraceLashlangGraphStore>), FixedScriptRunnerError> {
     let graph_store = Arc::new(lash::tracing::TraceLashlangGraphStore::default());
-    let mut builder = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    )
+    .with_lashlang_execution_sink(Arc::clone(&graph_store) as Arc<dyn lash::tracing::TraceSink>);
+    let mut builder = lash::LashCore::rlm_builder(factory)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -6432,7 +6435,6 @@ fn agent_process_contract_core_with_options(
         ))
         .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
             as Arc<dyn lash_core::ProcessRegistry>)
-        .lashlang_execution_sink(Arc::clone(&graph_store) as Arc<dyn lash::tracing::TraceSink>)
         .provider(fixed_texts_provider(provider_kind, provider_responses))
         .model(
             lash_core::ModelSpec::from_token_limits(provider_kind, None, 200_000, None)
@@ -6490,7 +6492,7 @@ async fn wait_for_contract_durable_input_key(
 }
 
 async fn agent_process_execution_result(
-    core: &lash::RlmCore,
+    core: &lash::LashCore,
     graph_store: &lash::tracing::TraceLashlangGraphStore,
     result: lash::TurnResult,
     events: Arc<RuntimeProofRecordingEvents>,
@@ -6539,7 +6541,7 @@ async fn agent_process_execution_result(
     };
     let graph_facts = agent_contract_graph_facts(&graph_store.graphs(), &result.state.session_id);
     let mut payload = json!({
-        "execution_api": "lash::RlmCore facade",
+        "execution_api": "lash::LashCore facade",
         "provider_kind": provider_kind,
         "session_id": result.state.session_id,
         "turn_index": result.state.turn_index,
@@ -6577,7 +6579,7 @@ struct AgentContractProcessObservation {
 }
 
 async fn agent_contract_process_observations(
-    core: &lash::RlmCore,
+    core: &lash::LashCore,
 ) -> Result<Vec<AgentContractProcessObservation>, FixedScriptRunnerError> {
     let mut observed = core
         .processes()
@@ -6691,7 +6693,7 @@ fn agent_contract_process_facts(processes: &[AgentContractProcessObservation]) -
 }
 
 async fn agent_contract_process_event_facts(
-    core: &lash::RlmCore,
+    core: &lash::LashCore,
     processes: &[AgentContractProcessObservation],
 ) -> Result<Vec<Value>, FixedScriptRunnerError> {
     let mut events = Vec::new();
@@ -7945,7 +7947,7 @@ struct GeneratedRuntimeWorld {
 /// completion. This generalizes the fixed `prove_pending_tool_completion_through_turn`
 /// proof into the live, interleaved generated search.
 struct SuspendingTurn {
-    core: lash::StandardCore,
+    core: lash::LashCore,
     handle: tokio::task::JoinHandle<Result<lash::TurnResult, FixedScriptRunnerError>>,
     events: Arc<RuntimeProofRecordingEvents>,
     key_slot: Arc<tokio::sync::Mutex<Option<lash_core::AwaitEventKey>>>,
@@ -7962,7 +7964,7 @@ struct SuspendingTurn {
 }
 
 struct GeneratedRuntimeSession {
-    _core: lash::StandardCore,
+    _core: lash::LashCore,
     session: lash::LashSession,
     transport: Arc<ScriptedLlmHttpTransport>,
     provider_schedule: ScriptedTransportSchedule,
@@ -8672,7 +8674,7 @@ impl GeneratedRuntimeWorld {
         let (provider_handle, model, _provider_kind) =
             runtime_provider_components(OPENAI_COMPATIBLE, &transport)
                 .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
-        let core = lash::StandardCore::builder()
+        let core = lash::LashCore::standard_builder()
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
             .process_env_store(Arc::new(
@@ -9208,7 +9210,7 @@ fn runtime_core_for_scripts(
     process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore>,
     provider_schedule: Option<ScriptedTransportSchedule>,
     disable_inline_queued_work_driver: bool,
-) -> Result<(lash::StandardCore, Arc<ScriptedLlmHttpTransport>, String), FixedScriptRunnerError> {
+) -> Result<(lash::LashCore, Arc<ScriptedLlmHttpTransport>, String), FixedScriptRunnerError> {
     let provider_kind = scripts
         .first()
         .ok_or_else(|| {
@@ -9234,7 +9236,7 @@ fn runtime_core_for_scripts(
     let (provider_handle, model, provider_kind) =
         runtime_provider_components(&provider_kind, &transport)
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
-    let mut builder = lash::StandardCore::builder()
+    let mut builder = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(attachment_store)
         .process_env_store(process_env_store)
@@ -9257,7 +9259,7 @@ async fn prove_runtime_facade_turn() -> Result<RuntimeFacadeProof, FixedScriptRu
     let (provider_handle, model, provider_kind) =
         runtime_provider_components(OPENAI_COMPATIBLE, &transport)
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
@@ -9368,7 +9370,7 @@ async fn run_live_turn_facts(
     let (provider_handle, model, provider_kind) =
         runtime_provider_components(provider_kind, &transport)
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
@@ -9529,7 +9531,7 @@ async fn prove_pending_tool_completion_through_turn()
 -> Result<PendingToolCompletionProof, FixedScriptRunnerError> {
     let (key_tx, key_rx) = tokio::sync::oneshot::channel();
     let events = Arc::new(RuntimeProofRecordingEvents::default());
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
@@ -9752,11 +9754,12 @@ impl lash::TurnActivitySink for RuntimeProofRecordingEvents {
 async fn prove_final_value_semantic_channel()
 -> Result<FinalValueSemanticProof, FixedScriptRunnerError> {
     let events = Arc::new(RuntimeProofRecordingEvents::default());
-    let core = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    );
+    let core = lash::LashCore::rlm_builder(factory)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),

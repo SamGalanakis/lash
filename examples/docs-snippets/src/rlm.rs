@@ -8,7 +8,11 @@ async fn rlm_core(provider: ProviderHandle, model_id: &str) -> anyhow::Result<()
 
     use lash::TurnInput;
 
-    let core = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    );
+    let core = lash::LashCore::rlm_builder(factory)
         .plugins(lash::plugins::runtime_plugin_stack())
         .provider(provider)
         .model(
@@ -16,9 +20,6 @@ async fn rlm_core(provider: ProviderHandle, model_id: &str) -> anyhow::Result<()
                 .expect("valid model metadata"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 

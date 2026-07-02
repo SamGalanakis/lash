@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use lash::persistence::SessionStoreFactory;
 use lash::provider::{ProviderHandle, ProviderOptions};
 use lash::tracing::{TraceLevel, TraceSink};
-use lash::{LashSession, RlmCore, TurnInput, TurnResult};
+use lash::{LashCore, LashSession, TurnInput, TurnResult};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 async fn service_core(
@@ -36,7 +36,11 @@ async fn service_core(
         lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db")).await?,
     );
 
-    let core = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        artifact_store,
+    );
+    let core = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(
@@ -51,7 +55,6 @@ async fn service_core(
         .effect_host(std::sync::Arc::new(
             lash::durability::InlineEffectHost::default(),
         ))
-        .lashlang_artifact_store(artifact_store)
         .process_env_store(process_env_store)
         .trigger_store(trigger_store)
         .attachment_store(std::sync::Arc::new(
@@ -65,7 +68,7 @@ async fn service_core(
 }
 
 struct AppState {
-    core: RlmCore,
+    core: LashCore,
 }
 
 impl AppState {

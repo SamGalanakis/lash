@@ -4,7 +4,7 @@ fn rlm_tool_types_are_nameable(binding: LashlangToolBinding) {
     let _ = binding;
 }
 
-fn rlm_core_type_is_nameable(core: lash::RlmCore) {
+fn rlm_core_type_is_nameable(core: lash::LashCore) {
     let _ = core;
 }
 

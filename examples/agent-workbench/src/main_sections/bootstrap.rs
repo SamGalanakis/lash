@@ -131,20 +131,18 @@ async fn async_main() -> AnyhowResult<()> {
         artifact_store.clone(),
     );
 
-    let core = RlmCore::builder()
-        .rlm_protocol_config(
-            lash::rlm::RlmProtocolPluginConfig::default()
-                .with_lashlang_abilities(workbench_lashlang_abilities()),
-        )
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash::rlm::RlmProtocolPluginConfig::default()
+            .with_lashlang_abilities(workbench_lashlang_abilities()),
+        Arc::clone(&artifact_store) as Arc<dyn lash::persistence::LashlangArtifactStore>,
+    )
+    .with_lashlang_execution_sink(Arc::clone(&lashlang_execution_sink));
+    let core = LashCore::rlm_builder(factory)
         .provider(provider)
         .model(model_spec)
         .store_factory(Arc::clone(&core_store_factory))
-        .lashlang_artifact_store(
-            Arc::clone(&artifact_store) as Arc<dyn lash::persistence::LashlangArtifactStore>
-        )
         .trigger_store(trigger_store)
         .trace_sink(Arc::clone(&trace_sink))
-        .lashlang_execution_sink(Arc::clone(&lashlang_execution_sink))
         .trace_level(TraceLevel::Extended)
         .configure_plugins(|plugins| {
             plugins.push(Arc::new(
@@ -161,6 +159,7 @@ async fn async_main() -> AnyhowResult<()> {
         })
         .process_work_driver(process_deployment.process_work_driver())
         .queued_work_driver(queued_work_driver.clone())
+        .advanced()
         .runtime_host_config(runtime_host_config)
         .build()
         .context("build Lash core")?;

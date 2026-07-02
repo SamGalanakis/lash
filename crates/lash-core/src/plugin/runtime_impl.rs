@@ -73,6 +73,34 @@ impl PluginHost {
         self.factories.as_ref().as_slice()
     }
 
+    /// Ask every factory for its process-engine contributions and register them
+    /// on `runtime_host`, enforcing unique [`ProcessEngine::kind`](crate::ProcessEngine::kind)
+    /// across all engines (directly wired or plugin-contributed).
+    ///
+    /// This is the core-owned installation step that replaces facade-level
+    /// out-of-band wiring: engine construction that needs the fully-built plugin
+    /// host's extensions runs here, after the host is built. The trace context
+    /// handed to factories is the one already on `runtime_host`.
+    pub fn install_process_engine_contributions(
+        &self,
+        mut runtime_host: crate::runtime::RuntimeHostConfig,
+        process_lifecycle_available: bool,
+    ) -> Result<crate::runtime::RuntimeHostConfig, PluginError> {
+        let trace_context = runtime_host.tracing.trace_context.clone();
+        let ctx = super::ProcessEngineContributionContext::new(
+            &self.extensions,
+            &trace_context,
+            process_lifecycle_available,
+        );
+        for factory in self.factories() {
+            for engine in factory.process_engine_contributions(&ctx)? {
+                runtime_host.process_engines =
+                    runtime_host.process_engines.clone().try_with_engine(engine)?;
+            }
+        }
+        Ok(runtime_host)
+    }
+
     pub fn build_session(
         &self,
         session_id: impl Into<String>,

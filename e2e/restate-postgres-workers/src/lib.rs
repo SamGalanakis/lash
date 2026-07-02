@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use lash::durability::EffectHost;
+use lash_core::AwaitEventResolver as _;
 use lash::persistence::{
     AttachmentStore, LashlangArtifactStore, ProcessExecutionEnvStore, SessionStoreFactory,
 };
@@ -538,7 +539,7 @@ pub struct E2eCoreConfig {
     pub fail_once: bool,
 }
 
-pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::RlmCore> {
+pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
     let artifact_store =
         Arc::new(config.storage.lashlang_artifact_store()) as Arc<dyn LashlangArtifactStore>;
     let process_env_store =
@@ -554,16 +555,22 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::RlmCore> {
         )
         .into_components(),
     );
-    let mut builder = lash::RlmCore::builder()
-        .rlm_protocol_config(
-            RlmProtocolPluginConfig::default().with_lashlang_abilities(
-                LashlangAbilities::default()
-                    .with_processes()
-                    .with_sleep()
-                    .with_process_signals()
-                    .with_triggers(),
-            ),
-        )
+    let mut factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        RlmProtocolPluginConfig::default().with_lashlang_abilities(
+            LashlangAbilities::default()
+                .with_processes()
+                .with_sleep()
+                .with_process_signals()
+                .with_triggers(),
+        ),
+        artifact_store,
+    );
+    if let Some(trace_dir) = config.trace_dir.as_ref() {
+        factory = factory.with_lashlang_execution_jsonl_path(
+            trace_dir.join(format!("{}.lashlang.jsonl", config.worker_id)),
+        );
+    }
+    let mut builder = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits("e2e-mock", None, 200_000, None)
@@ -571,7 +578,6 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::RlmCore> {
         )
         .store_factory(session_store_factory)
         .attachment_store(config.attachment_store)
-        .lashlang_artifact_store(artifact_store)
         .process_env_store(process_env_store)
         .effect_host(Arc::new(RestateEffectHost::with_ingress_url(
             config.restate_ingress_url.clone(),
@@ -584,12 +590,9 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::RlmCore> {
             restate_ingress_url: config.restate_ingress_url,
             fail_once: config.fail_once,
         }));
-    if let Some(trace_dir) = config.trace_dir {
+    if let Some(trace_dir) = config.trace_dir.as_ref() {
         builder = builder
-            .trace_jsonl_path(trace_dir.join(format!("{}.trace.jsonl", config.worker_id)))
-            .lashlang_execution_jsonl_path(
-                trace_dir.join(format!("{}.lashlang.jsonl", config.worker_id)),
-            );
+            .trace_jsonl_path(trace_dir.join(format!("{}.trace.jsonl", config.worker_id)));
     }
     builder.build().context("build e2e LashCore")
 }

@@ -132,7 +132,11 @@ let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
 let artifact_store =
     Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db")).await?);
 
-let core = lash::RlmCore::builder()
+let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    artifact_store,
+);
+let core = lash::LashCore::rlm_builder(factory)
     .provider(provider)
     .model(
         lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
@@ -142,7 +146,6 @@ let core = lash::RlmCore::builder()
     .tools(Arc::new(AppTools) as Arc&lt;dyn ToolProvider&gt;)
     .store_factory(store_factory)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(artifact_store)
     .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
         data_dir.join("attachments"),
     )))
@@ -196,12 +199,13 @@ let root_spec = SessionSpec::new().provider_id(provider.kind()).model(
         .expect("valid model metadata"),
 );
 
-let core = lash::RlmCore::builder()
+let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+);
+let core = lash::LashCore::rlm_builder(factory)
     .session_spec(root_spec)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(
-        lash::persistence::InMemoryLashlangArtifactStore::new(),
-    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .configure_plugins(|plugins| {
         plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
@@ -217,13 +221,14 @@ let plugins = runtime_plugin_stack().configure(|plugins| {
     plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
 });
 
-let core = lash::RlmCore::builder()
+let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+    lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+    Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+);
+let core = lash::LashCore::rlm_builder(factory)
     .session_spec(root_spec)
     .plugins(plugins)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(
-        lash::persistence::InMemoryLashlangArtifactStore::new(),
-    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;</code></pre>
             </article>

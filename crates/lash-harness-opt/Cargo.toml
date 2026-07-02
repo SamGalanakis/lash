@@ -17,6 +17,7 @@ dirs = "6"
 lash-core = { workspace = true }
 lash-cli = { workspace = true }
 lash = { workspace = true, features = ["rlm"] }
+lash-protocol-rlm = { workspace = true }
 lash-rlm-types = { workspace = true }
 lash-sansio = { workspace = true }
 lash-trace = { workspace = true }

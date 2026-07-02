@@ -77,7 +77,7 @@ impl AppState {
         })
     }
 
-    fn build_core(&self) -> Result<lash::RlmCore> {
+    fn build_core(&self) -> Result<lash::LashCore> {
         build_e2e_core(lash_restate_postgres_workers_e2e::E2eCoreConfig {
             worker_id: self.worker_id.clone(),
             storage: self.storage.clone(),
@@ -127,7 +127,7 @@ impl AppState {
     async fn drain_queued_turn_with_restate(
         &self,
         controller: &RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
-        core: &lash::RlmCore,
+        core: &lash::LashCore,
         request: TurnRequest,
     ) -> HandlerResult<TurnResponse> {
         let session_execution_owner_id = format!("E2eTurnWorkflow/{}/run", request.workflow_id);
@@ -175,7 +175,7 @@ impl AppState {
     async fn main_turn_with_restate(
         &self,
         controller: &RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
-        core: &lash::RlmCore,
+        core: &lash::LashCore,
         request: TurnRequest,
     ) -> HandlerResult<TurnResponse> {
         let session_execution_owner_id = format!("E2eTurnWorkflow/{}/run", request.workflow_id);
@@ -317,7 +317,7 @@ impl AppState {
     async fn signal_process(
         &self,
         controller: &RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
-        core: &lash::RlmCore,
+        core: &lash::LashCore,
         request: &TurnRequest,
     ) -> HandlerResult<TurnResponse> {
         let signal = request

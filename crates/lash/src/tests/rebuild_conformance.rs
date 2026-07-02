@@ -82,6 +82,7 @@ fn runtime_rebuild_and_worker_recovery_with_inline_stores() {
             let (store_factory, registry, trigger_store) = fresh_in_memory_backend();
             RuntimeRebuildBackend {
                 process_registry: registry,
+                artifact_store: Arc::new(crate::persistence::InMemoryLashlangArtifactStore::new()),
                 build_core: Box::new(move |builder| {
                     explicit_ephemeral_facets(builder)
                         .store_factory(Arc::clone(&store_factory))
@@ -118,11 +119,11 @@ fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
                 Arc::clone(&artifact_store) as Arc<dyn lash_core::ProcessExecutionEnvStore>;
             RuntimeRebuildBackend {
                 process_registry: registry,
+                artifact_store: Arc::clone(&artifact),
                 build_core: Box::new(move |builder| {
                     builder
                         .store_factory(Arc::clone(&store_factory))
                         .attachment_store(Arc::clone(&attachment))
-                        .lashlang_artifact_store(Arc::clone(&artifact))
                         .process_env_store(Arc::clone(&process_env_store))
                         .trigger_store(Arc::clone(&trigger_store))
                         .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))

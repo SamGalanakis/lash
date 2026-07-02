@@ -24,6 +24,7 @@ axum = "0.8"
 lash-core = { workspace = true }
 lash = { workspace = true, features = ["rlm"] }
 lash-postgres-store = { workspace = true }
+lash-protocol-rlm = { workspace = true }
 lash-provider-openai = { workspace = true }
 lash-restate = { workspace = true }
 lash-s3-store = { workspace = true }

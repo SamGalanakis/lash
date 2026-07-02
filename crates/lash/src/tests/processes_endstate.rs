@@ -207,14 +207,19 @@ fn process_test_core(
     trigger_store: Arc<dyn lash_core::TriggerStore>,
     registry: Arc<dyn lash_core::ProcessRegistry>,
     process_env_store: Arc<dyn lash_core::ProcessExecutionEnvStore>,
-) -> Result<RlmCore> {
-    explicit_ephemeral_facets(RlmCore::builder())
+) -> Result<LashCore> {
+    explicit_ephemeral_facets(LashCore::rlm_builder(
+        lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+            artifact_store,
+        ),
+    ))
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .lashlang_artifact_store(artifact_store)
         .trigger_store(trigger_store)
         .process_registry(registry)
+        .advanced()
         .runtime_host_config({
             let mut config = lash_core::RuntimeHostConfig::in_memory();
             config.durability.process_env_store = process_env_store;

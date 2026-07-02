@@ -29,7 +29,10 @@ pub(in crate::runtime::session_manager) async fn materialize_session_create_plan
     .await
     .map_err(|err| crate::PluginError::Session(err.to_string()))?;
 
-    configure_protocol_runtime(&mut runtime, &plan.protocol_request)?;
+    runtime.configure_protocol_on_materialize(
+        &plan.protocol_request.plugin_options,
+        plan.protocol_request.relation.parent_session_id().is_none(),
+    )?;
     if let Some(session) = runtime.session.as_mut() {
         session.set_context_overlay(
             plan.context_overlay.tool_providers.clone(),
@@ -106,25 +109,6 @@ fn embedded_host(current: &CurrentSessionCapability) -> EmbeddedRuntimeHost {
         session_store_factory: current.host.session_store_factory.clone(),
         trigger_store: current.host.trigger_store.clone(),
     }
-}
-
-fn configure_protocol_runtime(
-    runtime: &mut LashRuntime,
-    request: &SessionCreateRequest,
-) -> Result<(), crate::PluginError> {
-    let protocol_session = runtime
-        .session
-        .as_ref()
-        .map(|session| Arc::clone(session.plugins().protocol_session()));
-    if let Some(protocol_session) = protocol_session {
-        protocol_session
-            .configure_runtime_from_request(
-                crate::plugin::ProtocolRuntimeContext::new(runtime),
-                request,
-            )
-            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-    }
-    Ok(())
 }
 
 fn child_store_guidance(parent_session_id: Option<&str>) -> String {

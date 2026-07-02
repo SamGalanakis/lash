@@ -1,6 +1,6 @@
 //! DISCRIMINATOR (scratch) for the cross-backend SQLite active-turn divergence.
 //!
-//! Builds TWO real `lash::StandardCore`s identical except the session store
+//! Builds TWO real `lash::LashCore`s identical except the session store
 //! factory (in-memory vs lash-sqlite-store) and drives the SAME operation
 //! sequence on both over the production transport seam with an UN-GATED
 //! `ScriptedLlmHttpTransport` (no `ScriptedTransportSchedule` / no per-event
@@ -14,7 +14,7 @@ use lash::persistence::{
     AttachmentStore, FileAttachmentStore, InMemoryAttachmentStore,
     InMemoryProcessExecutionEnvStore, InMemorySessionStoreFactory, ProcessExecutionEnvStore,
 };
-use lash::{PendingTurnInputCancelOutcome, StandardCore, TurnInput};
+use lash::{PendingTurnInputCancelOutcome, LashCore, TurnInput};
 use lash_core::{SessionStoreFactory, TurnInputCheckpointBoundary, TurnInputIngress};
 use lash_sim::ProviderWireScript;
 use lash_sim::ScriptedLlmHttpTransport;
@@ -34,12 +34,12 @@ async fn build_core(
     process_env_store: Arc<dyn ProcessExecutionEnvStore>,
     attachment_store: Arc<dyn AttachmentStore>,
     scripts: Vec<ProviderWireScript>,
-) -> (StandardCore, Arc<ScriptedLlmHttpTransport>) {
+) -> (LashCore, Arc<ScriptedLlmHttpTransport>) {
     // UN-GATED transport: deliver each scripted response complete/synchronously.
     let transport = Arc::new(ScriptedLlmHttpTransport::from_scripts(scripts));
     let (provider_handle, model, _kind) =
         runtime_provider_components(PROVIDER_KIND, &transport).expect("provider components");
-    let core = StandardCore::builder()
+    let core = LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(attachment_store)
         .process_env_store(process_env_store)
@@ -51,7 +51,7 @@ async fn build_core(
     (core, transport)
 }
 
-async fn build_in_memory(n_scripts: usize) -> (StandardCore, Arc<ScriptedLlmHttpTransport>) {
+async fn build_in_memory(n_scripts: usize) -> (LashCore, Arc<ScriptedLlmHttpTransport>) {
     build_core(
         Arc::new(InMemorySessionStoreFactory::new()),
         Arc::new(InMemoryProcessExecutionEnvStore::new()),
@@ -64,7 +64,7 @@ async fn build_in_memory(n_scripts: usize) -> (StandardCore, Arc<ScriptedLlmHttp
 async fn build_sqlite(
     dir: &Path,
     n_scripts: usize,
-) -> (StandardCore, Arc<ScriptedLlmHttpTransport>) {
+) -> (LashCore, Arc<ScriptedLlmHttpTransport>) {
     std::fs::create_dir_all(dir).expect("create sqlite dir");
     let process_env_store: Arc<dyn ProcessExecutionEnvStore> = Arc::new(
         lash_sqlite_store::Store::open(&dir.join("process-env.sqlite"))
@@ -96,7 +96,7 @@ struct TurnObs {
 /// turns. `t1` is both the active_turn_id and turn 1's turn_id (as in the
 /// trace, where active_turn_id == the running turn's boundary id).
 async fn drive_cancel_before_turn(
-    core: &StandardCore,
+    core: &LashCore,
     transport: &Arc<ScriptedLlmHttpTransport>,
     session_id: &str,
 ) -> (Vec<TurnObs>, String) {
@@ -135,7 +135,7 @@ async fn drive_cancel_before_turn(
 /// Task-literal ordering: run turn 1, THEN enqueue + cancel an active-turn
 /// input targeting turn 1 (already finished), then subsequent turns.
 async fn drive_cancel_after_turn(
-    core: &StandardCore,
+    core: &LashCore,
     transport: &Arc<ScriptedLlmHttpTransport>,
     session_id: &str,
 ) -> (Vec<TurnObs>, String) {
@@ -176,7 +176,7 @@ async fn drive_cancel_after_turn(
 /// then run turn 1 (whose AfterWork checkpoint should claim and inject it,
 /// driving an extra exchange), then turn 2.
 async fn drive_no_cancel_control(
-    core: &StandardCore,
+    core: &LashCore,
     transport: &Arc<ScriptedLlmHttpTransport>,
     session_id: &str,
 ) -> Vec<TurnObs> {
@@ -209,7 +209,7 @@ async fn drive_no_cancel_control(
 /// (its AfterWork checkpoint CLAIMS and completes the input -> extra exchange),
 /// THEN cancel (must observe the post-claim terminal state), then run turn 2.
 async fn drive_claim_then_cancel(
-    core: &StandardCore,
+    core: &LashCore,
     transport: &Arc<ScriptedLlmHttpTransport>,
     session_id: &str,
 ) -> (Vec<TurnObs>, String) {

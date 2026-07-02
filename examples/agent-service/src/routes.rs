@@ -711,7 +711,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use axum::body::to_bytes;
-    use lash::RlmCore;
+    use lash::LashCore;
     use lash::direct::LlmOutputPart;
     use lash::direct::LlmResponse;
 
@@ -740,7 +740,15 @@ finish "done through route"
             })
             .build()
             .into_handle();
-        let core = RlmCore::builder()
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+            Arc::new(
+                lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+                    .await
+                    .expect("artifact store"),
+            ),
+        );
+        let core = LashCore::rlm_builder(factory)
             .provider(provider)
             .model(
                 lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
@@ -754,11 +762,6 @@ finish "done through route"
                 lash_sqlite_store::Store::open(&data_dir.join("process-env.db"))
                     .await
                     .expect("process env store"),
-            ))
-            .lashlang_artifact_store(Arc::new(
-                lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
-                    .await
-                    .expect("artifact store"),
             ))
             .trigger_store(Arc::new(
                 lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))

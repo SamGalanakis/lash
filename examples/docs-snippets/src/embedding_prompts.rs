@@ -18,7 +18,7 @@ async fn observational_memory_core() -> anyhow::Result<()> {
         standard_tool_stack,
     };
 
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .plugins(standard_tool_stack(StandardToolStackOptions {
             standard_context_approach: Some(StandardContextApproach::ObservationalMemory(
                 ObservationalMemoryConfig::default(),
@@ -88,13 +88,14 @@ async fn lazy_projection() -> anyhow::Result<()> {
     use lash_protocol_rlm::{ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt};
 
     let registry = Arc::new(ProjectionRegistry::new());
-    let core = lash::RlmCore::builder()
-        .projection_resolver(registry.clone())
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    )
+    .with_projection_resolver(registry.clone());
+    let core = lash::LashCore::rlm_builder(factory)
         .plugins(runtime_plugin_stack())
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
@@ -127,7 +128,7 @@ async fn prompt_template(provider: ProviderHandle) -> anyhow::Result<()> {
         ),
     ]);
 
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None)
@@ -312,7 +313,11 @@ async fn tone_session(
     sink: lash::runtime::NoopTurnActivitySink,
 ) -> anyhow::Result<()> {
     // docs:start:tone-session
-    let core = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        std::sync::Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    );
+    let core = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
@@ -320,9 +325,6 @@ async fn tone_session(
         )
         .effect_host(std::sync::Arc::new(
             lash::durability::InlineEffectHost::default(),
-        ))
-        .lashlang_artifact_store(std::sync::Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
         ))
         .attachment_store(std::sync::Arc::new(
             lash::persistence::InMemoryAttachmentStore::new(),

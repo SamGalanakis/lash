@@ -299,6 +299,7 @@ pub use plugin::{
     OpenAgentFrameResult, PersistentRuntimeServices, PluginCommand, PluginCommandContext,
     PluginCommandOutcome, PluginCommandReceipt, PluginDirective, PluginError,
     PluginExtensionContribution, PluginExtensions, PluginFactory, PluginHost, PluginLifecycleEvent,
+    ProcessEngineContributionContext,
     PluginLifecycleEventHook, PluginOperation, PluginOperationDef, PluginOperationFailure,
     PluginOperationInvokeError, PluginOperationKind, PluginOptions, PluginOwned, PluginQuery,
     PluginQueryContext, PluginRegistrar, PluginRuntimeDirective, PluginSession,

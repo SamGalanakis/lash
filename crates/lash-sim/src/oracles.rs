@@ -3273,7 +3273,7 @@ fn agent_contract_execution_fact(
         .get("result")
         .ok_or_else(|| format!("{contract} execution missing result"))?;
     require_agent_bool(result, "/done", true, contract)?;
-    require_agent_str(result, "/execution_api", "lash::RlmCore facade", contract)?;
+    require_agent_str(result, "/execution_api", "lash::LashCore facade", contract)?;
     let observed = match contract {
         "agent.foreground_tool_call_round_trip" => {
             require_agent_final_value(result, &json!({ "ok": true }), contract)?;

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use lash::durability::EffectHost;
 use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
+use lash_core::AwaitEventResolver as _;
 use lash_core::{
     AwaitEventKey, ExecutionScope, InlineRuntimeEffectController, RuntimePersistence,
     ScopedEffectController,

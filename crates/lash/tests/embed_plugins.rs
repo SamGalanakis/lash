@@ -7,7 +7,7 @@ use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash::tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult};
-use lash::{EmbedError, PluginBinding, StandardCore};
+use lash::{EmbedError, LashCore, PluginBinding};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -188,7 +188,7 @@ fn response_tool_call() -> LlmResponse {
     }
 }
 
-fn core_with_responses(responses: Vec<LlmResponse>) -> StandardCore {
+fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
     let responses = Arc::new(Mutex::new(responses.into_iter()));
     let provider = lash_core::testing::TestProvider::builder()
         .complete(move |_request| {
@@ -206,7 +206,7 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> StandardCore {
     // These plugin/typed-input tests never start a process, so they wire no
     // process registry (and thus no store factory) and run non-persistent turns
     // — which the live `TurnContext` plugin input path requires.
-    StandardCore::builder()
+    LashCore::standard_builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits("mock-model", None, 16_000, None)

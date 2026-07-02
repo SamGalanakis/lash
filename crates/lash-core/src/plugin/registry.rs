@@ -502,9 +502,65 @@ pub trait PluginFactory: Send + Sync {
         Vec::new()
     }
 
+    /// Host-level contribution of [`ProcessEngine`](crate::ProcessEngine)s,
+    /// mirroring [`extension_contributions`](Self::extension_contributions).
+    ///
+    /// After the plugin host is built, core asks each factory for the process
+    /// engines it wants registered, passing a read-only host context (the built
+    /// plugin extensions, the runtime trace context, and whether process
+    /// lifecycle is available). The returned engines land in the runtime host's
+    /// [`ProcessEngineRegistry`](crate::runtime::ProcessEngineRegistry) with
+    /// unique [`ProcessEngine::kind`](crate::ProcessEngine::kind) enforced.
+    ///
+    /// The default contributes nothing, so most plugins never implement this.
+    fn process_engine_contributions(
+        &self,
+        _ctx: &ProcessEngineContributionContext<'_>,
+    ) -> Result<Vec<Arc<dyn crate::ProcessEngine>>, PluginError> {
+        Ok(Vec::new())
+    }
+
     /// Produce a session-scoped plugin. **Must be cheap** — see the
     /// trait-level docs for the full contract.
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError>;
+}
+
+/// Read-only host context handed to
+/// [`PluginFactory::process_engine_contributions`]. Exposes the built
+/// plugin-host extensions (the same data
+/// [`PluginHost::extensions`](super::PluginHost::extensions) returns), the
+/// runtime trace context, and whether process lifecycle is available on this
+/// deployment (i.e. a process registry is wired).
+pub struct ProcessEngineContributionContext<'a> {
+    extensions: &'a PluginExtensions,
+    trace_context: &'a crate::TraceContext,
+    process_lifecycle_available: bool,
+}
+
+impl<'a> ProcessEngineContributionContext<'a> {
+    pub fn new(
+        extensions: &'a PluginExtensions,
+        trace_context: &'a crate::TraceContext,
+        process_lifecycle_available: bool,
+    ) -> Self {
+        Self {
+            extensions,
+            trace_context,
+            process_lifecycle_available,
+        }
+    }
+
+    pub fn extensions(&self) -> &PluginExtensions {
+        self.extensions
+    }
+
+    pub fn trace_context(&self) -> &crate::TraceContext {
+        self.trace_context
+    }
+
+    pub fn process_lifecycle_available(&self) -> bool {
+        self.process_lifecycle_available
+    }
 }
 
 pub type PluginSpecBuilder =

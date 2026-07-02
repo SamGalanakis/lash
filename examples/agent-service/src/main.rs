@@ -9,7 +9,6 @@ use axum::routing::get;
 #[cfg(feature = "restate")]
 use lash::PluginBinding;
 use lash::{
-    RlmCore,
     durability::InlineEffectHost,
     provider::{ProviderHandle, ProviderOptions},
     tracing::{JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceLevel, TraceSink},
@@ -130,14 +129,17 @@ async fn async_main() -> anyhow_like::Result<()> {
         None,
     )
     .map_err(|err| format!("invalid OPENROUTER_MODEL metadata: {err}"))?;
-    let core_builder = RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        artifact_store,
+    );
+    let core_builder = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(model_spec)
         .store_factory(store_factory)
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )))
-        .lashlang_artifact_store(artifact_store)
         .process_env_store(process_env_store)
         .trace_sink(Arc::new(TeeTraceSink::new([
             Arc::new(StderrTraceSink::default()) as Arc<dyn TraceSink>,

@@ -46,22 +46,9 @@ trait ExplicitEphemeralFacets: Sized {
     fn with_explicit_ephemeral_facets(self) -> Self;
 }
 
-impl ExplicitEphemeralFacets for lash::StandardCoreBuilder {
+impl ExplicitEphemeralFacets for lash::LashCoreBuilder {
     fn with_explicit_ephemeral_facets(self) -> Self {
         self.effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-            .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-            .process_env_store(Arc::new(
-                lash::persistence::InMemoryProcessExecutionEnvStore::new(),
-            ))
-    }
-}
-
-impl ExplicitEphemeralFacets for lash::RlmCoreBuilder {
-    fn with_explicit_ephemeral_facets(self) -> Self {
-        self.effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-            .lashlang_artifact_store(Arc::new(
-                lash::persistence::InMemoryLashlangArtifactStore::new(),
-            ))
             .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
             .process_env_store(Arc::new(
                 lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -71,15 +58,15 @@ impl ExplicitEphemeralFacets for lash::RlmCoreBuilder {
 
 #[derive(Clone)]
 pub(crate) enum BenchmarkCore {
-    Standard(lash::StandardCore),
-    Rlm(lash::RlmCore),
+    Standard(lash::LashCore),
+    Rlm(lash::LashCore),
 }
 
 impl BenchmarkCore {
     pub(crate) fn as_lash_core(&self) -> LashCore {
         match self {
-            Self::Standard(core) => core.clone().into_inner(),
-            Self::Rlm(core) => core.clone().into_inner(),
+            Self::Standard(core) => core.clone(),
+            Self::Rlm(core) => core.clone(),
         }
     }
 
@@ -465,7 +452,7 @@ pub(crate) fn build_embed_core(
     store: Arc<RuntimePerfStore>,
 ) -> anyhow::Result<BenchmarkCore> {
     match scenario {
-        RuntimePerfScenario::EmbedStandard => lash::StandardCore::builder()
+        RuntimePerfScenario::EmbedStandard => lash::LashCore::standard_builder()
             .with_explicit_ephemeral_facets()
             .provider(benchmark_provider(scenario).into_handle())
             .model(benchmark_model_spec())
@@ -473,16 +460,22 @@ pub(crate) fn build_embed_core(
             .build()
             .map(BenchmarkCore::Standard)
             .map_err(anyhow::Error::from),
-        RuntimePerfScenario::EmbedRlm => lash::RlmCore::builder()
-            .with_explicit_ephemeral_facets()
-            .tools(Arc::new(BenchmarkEchoTool))
-            .provider(benchmark_provider(scenario).into_handle())
-            .model(benchmark_model_spec())
-            .store_factory(Arc::new(RuntimePerfStoreFactory::new(store)))
-            .max_turns(RUNTIME_PERF_MAX_TURNS)
-            .build()
-            .map(BenchmarkCore::Rlm)
-            .map_err(anyhow::Error::from),
+        RuntimePerfScenario::EmbedRlm => {
+            let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+                lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+                Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+            );
+            lash::LashCore::rlm_builder(factory)
+                .with_explicit_ephemeral_facets()
+                .tools(Arc::new(BenchmarkEchoTool))
+                .provider(benchmark_provider(scenario).into_handle())
+                .model(benchmark_model_spec())
+                .store_factory(Arc::new(RuntimePerfStoreFactory::new(store)))
+                .max_turns(RUNTIME_PERF_MAX_TURNS)
+                .build()
+                .map(BenchmarkCore::Rlm)
+                .map_err(anyhow::Error::from)
+        }
         _ => anyhow::bail!("{} is not an embed scenario", scenario.name()),
     }
 }
@@ -557,7 +550,7 @@ pub(crate) async fn build_runtime_with_store(
     }
     let core = match execution_mode {
         ExecutionMode::Standard => {
-            let mut builder = lash::StandardCore::builder()
+            let mut builder = lash::LashCore::standard_builder()
                 .with_explicit_ephemeral_facets()
                 .provider(provider)
                 .model(benchmark_model_spec())
@@ -582,7 +575,17 @@ pub(crate) async fn build_runtime_with_store(
             BenchmarkCore::Standard(builder.build()?)
         }
         ExecutionMode::Rlm => {
-            let mut builder = lash::RlmCore::builder()
+            let mut factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+                lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+                Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+            );
+            if let Some(path) = trace_config
+                .as_ref()
+                .and_then(|config| config.lashlang_execution_jsonl_path.clone())
+            {
+                factory = factory.with_lashlang_execution_jsonl_path(path);
+            }
+            let mut builder = lash::LashCore::rlm_builder(factory)
                 .with_explicit_ephemeral_facets()
                 .provider(provider)
                 .model(benchmark_model_spec())
@@ -591,9 +594,6 @@ pub(crate) async fn build_runtime_with_store(
             if let Some(config) = trace_config {
                 if let Some(path) = config.trace_jsonl_path {
                     builder = builder.trace_jsonl_path(path);
-                }
-                if let Some(path) = config.lashlang_execution_jsonl_path {
-                    builder = builder.lashlang_execution_jsonl_path(path);
                 }
                 builder = builder.trace_level(config.trace_level);
             }
@@ -760,7 +760,7 @@ pub(crate) async fn build_runtime_with_sqlite_store(
     ));
     let core = match mode_id {
         ExecutionMode::Standard => BenchmarkCore::Standard(
-            lash::StandardCore::builder()
+            lash::LashCore::standard_builder()
                 .provider(provider)
                 .model(benchmark_model_spec())
                 .effect_host(effect_host.clone())
@@ -773,26 +773,32 @@ pub(crate) async fn build_runtime_with_sqlite_store(
                 .residency(lash::durability::Residency::ActivePathOnly)
                 .build()?,
         ),
-        ExecutionMode::Rlm => BenchmarkCore::Rlm(
-            lash::RlmCore::builder()
-                .provider(provider)
-                .model(benchmark_model_spec())
-                .effect_host(effect_host.clone())
-                .attachment_store(attachment_store.clone())
-                .process_env_store(process_env_store.clone())
-                .lashlang_artifact_store(Arc::new(
-                    lash_sqlite_store::Store::open(&artifacts_db)
-                        .await
-                        .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-                ))
-                .process_registry(process_registry.clone())
-                .trigger_store(trigger_store.clone())
-                .store_factory(store_factory.clone())
-                .plugins(plugin_stack)
-                .max_turns(RUNTIME_PERF_MAX_TURNS)
-                .residency(lash::durability::Residency::ActivePathOnly)
-                .build()?,
-        ),
+        ExecutionMode::Rlm => {
+            let artifact_store = Arc::new(
+                lash_sqlite_store::Store::open(&artifacts_db)
+                    .await
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+            );
+            let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+                lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+                artifact_store,
+            );
+            BenchmarkCore::Rlm(
+                lash::LashCore::rlm_builder(factory)
+                    .provider(provider)
+                    .model(benchmark_model_spec())
+                    .effect_host(effect_host.clone())
+                    .attachment_store(attachment_store.clone())
+                    .process_env_store(process_env_store.clone())
+                    .process_registry(process_registry.clone())
+                    .trigger_store(trigger_store.clone())
+                    .store_factory(store_factory.clone())
+                    .plugins(plugin_stack)
+                    .max_turns(RUNTIME_PERF_MAX_TURNS)
+                    .residency(lash::durability::Residency::ActivePathOnly)
+                    .build()?,
+            )
+        }
     };
     let session = core
         .open_session(format!("runtime-perf-{}", scenario.name()))

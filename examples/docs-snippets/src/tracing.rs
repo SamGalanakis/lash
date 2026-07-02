@@ -17,7 +17,7 @@ async fn jsonl_trace_core(provider: ProviderHandle, model: String) -> anyhow::Re
 
     let trace_sink: Arc<dyn TraceSink> = Arc::new(JsonlTraceSink::new("./.lash-data/trace.jsonl"));
 
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .provider(provider)
         .model(
             lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
@@ -37,19 +37,20 @@ async fn lashlang_execution_jsonl(
     model: ModelSpec,
 ) -> anyhow::Result<()> {
     // docs:start:lashlang-execution-jsonl
-    let core = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        std::sync::Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    )
+    .with_lashlang_execution_jsonl_path("./.lash-data/lashlang-execution.jsonl");
+    let core = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(model)
         .effect_host(std::sync::Arc::new(
             lash::durability::InlineEffectHost::default(),
         ))
-        .lashlang_artifact_store(std::sync::Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(std::sync::Arc::new(
             lash::persistence::InMemoryAttachmentStore::new(),
         ))
-        .lashlang_execution_jsonl_path("./.lash-data/lashlang-execution.jsonl")
         .build()?;
     // docs:end:lashlang-execution-jsonl
     Ok(())
@@ -68,15 +69,16 @@ async fn lashlang_graph_store(provider: ProviderHandle, model: ModelSpec) -> any
             as Arc<dyn TraceSink>,
     ]));
 
-    let core = lash::RlmCore::builder()
+    let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    )
+    .with_lashlang_execution_sink(lashlang_execution_sink);
+    let core = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(model)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(
-            lash::persistence::InMemoryLashlangArtifactStore::new(),
-        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-        .lashlang_execution_sink(lashlang_execution_sink)
         .build()?;
 
     let graph = lashlang_graphs.graph("process:process-id");
@@ -112,7 +114,7 @@ async fn otel_trace_core() -> anyhow::Result<()> {
     // Exporter/provider setup stays with the host; this reads the
     // process-global OpenTelemetry tracer provider.
     let sink: Arc<dyn TraceSink> = Arc::new(OtelTraceSink::from_global_provider());
-    let core = lash::StandardCore::builder()
+    let core = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .trace_sink(sink)
