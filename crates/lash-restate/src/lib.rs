@@ -109,6 +109,30 @@ fn restate_await_event_process_id(key: &AwaitEventKey) -> Option<&str> {
     }
 }
 
+/// Error raised when a caller asks a Restate boundary to cancel *every*
+/// outstanding Durable Wait for a session (the `revoke_durable_waits` lever).
+///
+/// Restate models each Durable Wait as a promise addressable only by its exact
+/// per-wait key ([`AwaitEventKey::promise_key`]): await-event keys are
+/// process-scoped, carry no session id, and the Restate SDK exposes no way to
+/// enumerate a session's outstanding promises. Cancelling a whole session's
+/// waits would therefore require an engine-side session→promise index that
+/// Restate does not provide, so this boundary refuses loudly rather than faking
+/// success or silently ignoring the lever. The honest workaround is to cancel
+/// each known wait individually via
+/// [`AwaitEventResolver::resolve_await_event`] with [`Resolution::Cancelled`],
+/// which the process workflow handler resolves durably by its exact promise key.
+fn restate_cancel_await_events_for_session_unsupported() -> RuntimeError {
+    RuntimeError::new(
+        "restate_await_event_cancel_by_session_unsupported",
+        "Restate resolves Durable Waits only by exact per-wait promise key and \
+         exposes no session-to-promise enumeration, so cancelling every \
+         outstanding wait for a session is unsupported on the Restate boundary; \
+         cancel each wait individually via \
+         resolve_await_event(key, Resolution::Cancelled)",
+    )
+}
+
 fn restate_process_terminal_await_key(process_id: &str) -> Result<AwaitEventKey, RuntimeError> {
     restate_await_event_key(
         &ExecutionScope::process(process_id.to_string()),
@@ -714,6 +738,12 @@ impl AwaitEventResolver for RestateEffectHost {
     async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
         Ok(())
     }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.controller
+            .cancel_await_events_for_session(session_id)
+            .await
+    }
 }
 
 impl EffectHost for RestateEffectHost {
@@ -807,6 +837,10 @@ impl AwaitEventResolver for RestateEffectHostController {
             }
             None => Ok(ResolveOutcome::UnknownOrRevoked),
         }
+    }
+
+    async fn cancel_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
+        Err(restate_cancel_await_events_for_session_unsupported())
     }
 }
 
@@ -1575,6 +1609,10 @@ where
 
     async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
         Ok(())
+    }
+
+    async fn cancel_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
+        Err(restate_cancel_await_events_for_session_unsupported())
     }
 }
 

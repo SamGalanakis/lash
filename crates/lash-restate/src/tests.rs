@@ -1376,6 +1376,85 @@ async fn restate_handler_reports_non_process_await_event_resolution_unknown() {
     );
 }
 
+#[tokio::test]
+async fn restate_handler_cancels_individual_wait_via_documented_workaround() {
+    // The per-wait workaround the session-wide lever points at: resolving a
+    // known key with `Resolution::Cancelled` is accepted and durably recorded
+    // by the process workflow handler under the exact promise key.
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let key = AwaitEventResolver::await_event_key(
+        &host,
+        &ExecutionScope::process("process-cancel-wait"),
+        AwaitEventWaitIdentity::tool_completion("tool-call-cancel"),
+    )
+    .await
+    .expect("await event key");
+
+    let outcome = AwaitEventResolver::resolve_await_event(&host, &key, Resolution::Cancelled)
+        .await
+        .expect("cancel individual wait");
+
+    assert_eq!(outcome, ResolveOutcome::Accepted);
+    let resolved = context
+        .resolved_events
+        .lock()
+        .expect("resolved events lock");
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].process_id, "process-cancel-wait");
+    assert_eq!(resolved[0].key, key.promise_key());
+    assert_eq!(resolved[0].resolution, Resolution::Cancelled);
+}
+
+#[tokio::test]
+async fn restate_handler_controller_rejects_cancel_by_session_with_documented_error() {
+    // Restate cannot enumerate a session's outstanding promises, so the
+    // session-wide lever fails loudly with a specific error naming the
+    // per-wait workaround instead of faking success.
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+
+    let err = AwaitEventResolver::cancel_await_events_for_session(&host, "restate-session")
+        .await
+        .expect_err("Restate must reject session-wide durable-wait cancellation");
+
+    assert_eq!(
+        err.code.as_str(),
+        "restate_await_event_cancel_by_session_unsupported"
+    );
+    assert!(
+        err.message.contains("resolve_await_event"),
+        "error must name the per-wait workaround: {}",
+        err.message
+    );
+    // Refusing must not resolve anything.
+    assert!(
+        context
+            .resolved_events
+            .lock()
+            .expect("resolved events lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn restate_effect_host_rejects_cancel_by_session_with_documented_error() {
+    // The deployment-level host delegates to its controller and surfaces the
+    // same documented refusal, so `LashSession::revoke_durable_waits` reports a
+    // specific limitation on Restate deployments.
+    let host = RestateEffectHost::new();
+
+    let err = AwaitEventResolver::cancel_await_events_for_session(&host, "restate-session")
+        .await
+        .expect_err("Restate effect host must reject session-wide cancellation");
+
+    assert_eq!(
+        err.code.as_str(),
+        "restate_await_event_cancel_by_session_unsupported"
+    );
+    assert!(err.message.contains("resolve_await_event"));
+}
+
 fn replay_test_policy(session_id: &str) -> lash_core::SessionPolicy {
     let mut policy = lash_core::testing::mock_session_policy();
     policy.session_id = Some(session_id.to_string());
