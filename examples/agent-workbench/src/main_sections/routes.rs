@@ -362,6 +362,62 @@ async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>,
     Ok(Json(work))
 }
 
+/// Wait for one durable work item to reach a terminal state, then return its
+/// outcome and the authoritative event log.
+///
+/// This is the host-facing "wait for the work item" flow. It routes through
+/// [`ProcessWorkDriver::await_terminal`](lash::process::ProcessWorkDriver::await_terminal)
+/// (ADR 0016) — the Restate ingress attach, never a store poll loop — and bounds
+/// the wait with `tokio::time::timeout` so a still-running or unknown-to-this-pod
+/// process cannot pin the request. On terminal it reconciles from `events_after`
+/// (ADR 0017): the durable log is the truth; the best-effort event sink is only
+/// freshness and may have dropped events.
+async fn await_work(
+    AxumPath(process_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<WorkAwaitResult>, AppError> {
+    const AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+    let outcome = match tokio::time::timeout(
+        AWAIT_TIMEOUT,
+        state.process_work_driver.await_terminal(&process_id),
+    )
+    .await
+    {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(err)) => return Err(AppError::internal(err)),
+        Err(_elapsed) => {
+            return Err(AppError::gateway_timeout(format!(
+                "timed out waiting for process `{process_id}` to terminate"
+            )));
+        }
+    };
+    let events: Vec<WorkAwaitEvent> = state
+        .process_work_driver
+        .process_registry()
+        .events_after(&process_id, 0)
+        .await
+        .map_err(AppError::internal)?
+        .into_iter()
+        .map(|event| WorkAwaitEvent {
+            sequence: event.sequence,
+            event_type: event.event_type,
+        })
+        .collect();
+    state.trace(
+        "api.work.await",
+        json!({
+            "process_id": process_id,
+            "terminal_state": format!("{:?}", outcome.terminal_state()),
+            "event_count": events.len(),
+        }),
+    );
+    Ok(Json(WorkAwaitResult {
+        process_id,
+        outcome,
+        events,
+    }))
+}
+
 async fn list_lashlang_graphs(
     State(state): State<AppState>,
 ) -> Result<Json<execution_graphs::LashlangGraphIndex>, AppError> {

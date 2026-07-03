@@ -220,6 +220,7 @@ match session.turn(input).run().await {
               <p>Removes tombstoned graph-node rows already detached by gc and prunes terminal pending-turn-input evidence rows, returns a <code>VacuumReport</code>. Run after <code>gc_unreachable</code> to reclaim file size.</p>
             </article>
           </div>
+      <p>The process registry is a separate store with its own retention lever. <code>prune_terminal_processes(cutoff_epoch_ms)</code> physically deletes terminal process rows — with their events, wakes, handle grants, and leases — older than a cutoff, so a host that projects process outcomes into its own store keeps the registry bounded; non-terminal rows are never touched. Run it on the same maintenance cadence, with a window comfortably longer than any in-flight <code>ProcessWorkDriver::await_terminal</code> (a shorter cutoff can prune a process out from under a late await). See <code>docs/adr/0017-process-observation-is-best-effort-push-over-state-truth.md</code>.</p>
     </div>
 
     <div class="section" id="end-to-end">

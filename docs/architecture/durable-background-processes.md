@@ -163,6 +163,22 @@ their own durable execution backend; the Restate driver attaches terminal waits
 to the `LashProcessWorkflow/{process_id}/await_terminal` promise through
 ingress instead of polling the store.
 
+Observation and retention are two more host levers on the same seam, kept honest
+against the durable log (see
+`docs/adr/0017-process-observation-is-best-effort-push-over-state-truth.md`). An
+optional `ProcessEventSink`, installed once at construction
+(`ProcessWorkDriver::new_with_sink`, `RestateProcessDeployment::new_with_sink`,
+or `LashCoreBuilder::process_event_sink`), pushes each appended event to the host
+best-effort — freshness over the durable log, never truth. It makes no delivery
+guarantee, so a consumer that needs completeness reconciles from `events_after`,
+and terminal events deliberately do not ride the sink (they ride
+`await_terminal`). Because the decorator awaits `emit` inline on the append path,
+a sink must return fast and offload any I/O. Retention is
+`ProcessRegistry::prune_terminal_processes(cutoff_epoch_ms)`: a host that has
+projected a process's outcome into its own store calls it on the maintenance
+cadence to drop terminal rows — with their events, wakes, grants, and leases —
+older than a window comfortably longer than any in-flight `await_terminal`.
+
 ## The primitive (a process-side mirror of the turn machinery)
 
 A generalization of code that already existed for turns — not a new subsystem:

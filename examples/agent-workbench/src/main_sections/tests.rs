@@ -392,6 +392,7 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
+            process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
@@ -642,6 +643,7 @@ finish "gap source"
         let state = AppState {
             core,
             process_observer,
+            process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
@@ -888,6 +890,7 @@ finish initial
         let state = AppState {
             core,
             process_observer,
+            process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
@@ -1105,6 +1108,7 @@ finish initial
         let state = AppState {
             core,
             process_observer,
+            process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
@@ -1243,6 +1247,7 @@ finish initial
         let state = AppState {
             core,
             process_observer,
+            process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
@@ -1430,6 +1435,7 @@ finish initial
         let state = AppState {
             core,
             process_observer,
+            process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(vec![ChatMessage {
                 id: "message".to_string(),
@@ -1867,6 +1873,7 @@ finish initial
         let state = AppState {
             core,
             process_observer,
+            process_work_driver: process_deployment.process_work_driver(),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {

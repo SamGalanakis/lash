@@ -386,6 +386,13 @@ impl AppError {
             message: message.to_string(),
         }
     }
+
+    fn gateway_timeout(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for AppError {

@@ -110,8 +110,32 @@ async fn async_main() -> AnyhowResult<()> {
     let (event_tx, _) = broadcast::channel(1024);
     let restate_http = reqwest::Client::new();
     let active_restate_invocations = ActiveRestateInvocations::default();
-    let process_deployment =
-        lash_restate::RestateProcessDeployment::new(restate_ingress_url.clone(), process_registry);
+    // Best-effort freshness feed for appended process events (ADR 0017). The
+    // sink is a freshness overlay on the durable event log, never truth: no
+    // delivery guarantee, terminal events never arrive here (they ride
+    // `await_terminal`), and a consumer needing completeness reconciles from
+    // `events_after`. `emit` must be fast, so it only hands each event to this
+    // channel; the consumer task does the projection off the append path.
+    let (process_event_tx, mut process_event_rx) =
+        mpsc::channel::<lash::process::ProcessEvent>(256);
+    tokio::spawn(async move {
+        while let Some(event) = process_event_rx.recv().await {
+            eprintln!(
+                "agent-workbench process event: process={} seq={} type={}",
+                event.process_id, event.sequence, event.event_type
+            );
+        }
+    });
+    let process_event_sink = Arc::new(ChannelProcessEventSink::new(process_event_tx))
+        as Arc<dyn lash::process::ProcessEventSink>;
+    let process_deployment = lash_restate::RestateProcessDeployment::new_with_sink(
+        restate_ingress_url.clone(),
+        process_registry,
+        Some(process_event_sink),
+    );
+    // Retained so a host-facing "wait for the work item" flow can route through
+    // `ProcessWorkDriver::await_terminal` (see the `/api/work/{id}/await` route).
+    let process_work_driver = process_deployment.process_work_driver();
     let queued_work_driver =
         lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkSubmitter {
             session_ids: session_ids.clone(),
@@ -157,7 +181,7 @@ async fn async_main() -> AnyhowResult<()> {
                     .with_session_spec(SessionSpec::inherit()),
             ));
         })
-        .process_work_driver(process_deployment.process_work_driver())
+        .process_work_driver(process_work_driver.clone())
         .queued_work_driver(queued_work_driver.clone())
         .advanced()
         .runtime_host_config(runtime_host_config)
@@ -175,6 +199,7 @@ async fn async_main() -> AnyhowResult<()> {
     let state = AppState {
         core,
         process_observer,
+        process_work_driver,
         session_ids,
         messages: Arc::new(Mutex::new(Vec::new())),
         selected_model: Arc::new(Mutex::new(ModelSelection {
@@ -230,6 +255,7 @@ async fn async_main() -> AnyhowResult<()> {
         .route("/api/accounts/{slug}/messages/{id}", delete(delete_message))
         .route("/api/accounts/{slug}/inbox", get(account_inbox))
         .route("/api/work", get(list_work))
+        .route("/api/work/{process_id}/await", get(await_work))
         .route("/api/lashlang-graphs", get(list_lashlang_graphs))
         .route("/api/lashlang-graph/{graph_key}", get(lashlang_graph))
         .with_state(state);

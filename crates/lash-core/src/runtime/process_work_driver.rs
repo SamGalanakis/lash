@@ -78,6 +78,36 @@ impl ProcessWorkDriver {
         self.awaiter.clone()
     }
 
+    /// Wait for `process_id` to reach a terminal state and return its outcome.
+    ///
+    /// This is the one way to wait on a started work item (ADR 0016): never a
+    /// raw registry poll loop. The mechanism matches the deployment — an
+    /// engine-native durable promise when a [`ProcessAttach`] is installed
+    /// (Restate ingress attach), otherwise the in-process change hub plus
+    /// bounded backoff point reads. An already-terminal process returns
+    /// immediately.
+    ///
+    /// Callers must bound the wait themselves: a process that never terminates
+    /// would otherwise pin the caller forever. Wrap it in
+    /// [`tokio::time::timeout`].
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use lash_core::{PluginError, ProcessWorkDriver};
+    ///
+    /// async fn wait(driver: &ProcessWorkDriver, process_id: &str) -> Result<(), PluginError> {
+    ///     match tokio::time::timeout(Duration::from_secs(30), driver.await_terminal(process_id)).await {
+    ///         Ok(Ok(output)) => {
+    ///             // Terminal outcome (success / failure / cancelled). To reconcile
+    ///             // the full event history, read `events_after(process_id, 0)`.
+    ///             let _ = output;
+    ///             Ok(())
+    ///         }
+    ///         Ok(Err(err)) => Err(err), // e.g. unknown process, or an attach error
+    ///         Err(_elapsed) => Ok(()),  // bound exceeded; retry or surface to the caller
+    ///     }
+    /// }
+    /// ```
     pub async fn await_terminal(
         &self,
         process_id: &str,
@@ -96,6 +126,14 @@ impl ProcessWorkDriver {
         self.awaiter.await_terminal(process_id).await
     }
 
+    /// Wait for the first event of `event_type` on `process_id` with a sequence
+    /// greater than `after_sequence`, returning it once it appears.
+    ///
+    /// Like [`await_terminal`](Self::await_terminal) this rides the awaiter's
+    /// hub-plus-backoff point reads rather than a store poll loop, and callers
+    /// bound the wait with [`tokio::time::timeout`]. Historical events already
+    /// past `after_sequence` resolve immediately. This waits on a *non-terminal*
+    /// milestone; for completion use [`await_terminal`](Self::await_terminal).
     pub async fn await_event(
         &self,
         process_id: &str,
