@@ -30,7 +30,8 @@ use crate::demo_plugin::{DemoPlugin, DemoPluginConfig};
 #[cfg(feature = "restate")]
 use crate::restate::{AgentServiceTurnWorkflow, AgentServiceTurnWorkflowImpl};
 use crate::routes::{
-    create_chat, index, list_chats, list_messages, send_message, settings, update_chat_model,
+    chat_board, create_chat, index, list_chats, list_messages, send_message, settings,
+    update_chat_model,
 };
 use crate::state::{AgentServiceDurability, AppStateData, anyhow_like};
 #[cfg(feature = "restate")]
@@ -289,6 +290,7 @@ async fn async_main() -> anyhow_like::Result<()> {
             "/api/chats/{chat_id}/messages",
             get(list_messages).post(send_message),
         )
+        .route("/api/chats/{chat_id}/board", get(chat_board))
         .with_state(state);
 
     println!(
