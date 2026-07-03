@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::DurableProcessWorker;
 use super::process::{
-    ProcessAttach, ProcessAwaiter, ProcessChangeHub, ProcessEvent, ProcessRegistry,
-    watch_process_registry,
+    ProcessAttach, ProcessAwaiter, ProcessChangeHub, ProcessEvent, ProcessEventSink,
+    ProcessRegistry, watch_process_registry_with_sink,
 };
 use crate::{PluginError, ProcessAwaitOutput};
 
@@ -25,7 +25,20 @@ pub struct ProcessWorkDriver {
 
 impl ProcessWorkDriver {
     pub fn new(registry: Arc<dyn ProcessRegistry>, run_handle: Arc<dyn ProcessRunHandle>) -> Self {
-        let (registry, hub) = watch_process_registry(registry);
+        Self::new_with_sink(registry, run_handle, None)
+    }
+
+    /// Like [`new`](Self::new), but installs a host-facing
+    /// [`ProcessEventSink`] on the registry decorator this driver wraps.
+    ///
+    /// The sink receives every appended event, best-effort, after its durable
+    /// write — see [`ProcessEventSink`] for the freshness-not-truth contract.
+    pub fn new_with_sink(
+        registry: Arc<dyn ProcessRegistry>,
+        run_handle: Arc<dyn ProcessRunHandle>,
+        sink: Option<Arc<dyn ProcessEventSink>>,
+    ) -> Self {
+        let (registry, hub) = watch_process_registry_with_sink(registry, sink);
         Self::from_watched(registry, hub, run_handle)
     }
 

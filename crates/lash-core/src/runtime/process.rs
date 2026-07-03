@@ -14,7 +14,10 @@ mod time;
 mod validation;
 mod wake;
 
-pub use awaiter::{ProcessAttach, ProcessAwaiter, ProcessChangeHub, watch_process_registry};
+pub use awaiter::{
+    ProcessAttach, ProcessAwaiter, ProcessChangeHub, ProcessEventSink, watch_process_registry,
+    watch_process_registry_with_sink,
+};
 pub use engine::{
     ProcessEngine, ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
     ProcessEngineRuntimeContext, ProcessEngineValidationContext,
@@ -43,7 +46,7 @@ pub use observation::{
     ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessWorkObserver,
     ProcessWorkSnapshot,
 };
-pub use registry::ProcessRegistry;
+pub use registry::{ProcessPruneReport, ProcessRegistry};
 pub use service::{
     DefaultProcessCancelAbility, ProcessCancelAbility, ProcessCancelAllRequest,
     ProcessCancelRequest, ProcessCancelSource, ProcessService, UnavailableProcessService,

@@ -12,7 +12,7 @@ use super::model::{
     ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessListFilter,
     ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, SessionScope, WaitState,
 };
-use super::registry::ProcessRegistry;
+use super::registry::{ProcessPruneReport, ProcessRegistry};
 use crate::PluginError;
 
 const AWAIT_BACKOFF_MIN: Duration = Duration::from_millis(25);
@@ -68,19 +68,82 @@ impl ProcessChangeHub {
     }
 }
 
+/// Host-facing, best-effort push of each appended process event.
+///
+/// A sink is an optional freshness feed, **never a source of truth.** The
+/// durable event log ([`ProcessRegistry::events_after`]) is the only complete
+/// record; a sink lets a host observe appends promptly without polling, but it
+/// makes no delivery promise.
+///
+/// # Contract
+///
+/// - **Best-effort freshness, never truth.** [`WatchedProcessRegistry`] calls
+///   [`emit`](Self::emit) after a successful `append_event`, in that pod's
+///   per-process append order. There is no buffering, no retry, and no
+///   delivery guarantee across pod crashes or restarts: an event that was
+///   appended durably may never reach the sink (e.g. the pod died between the
+///   durable write and the emit). Consumers that need completeness reconcile
+///   from `events_after` — the durable log is authoritative — typically at
+///   terminal time.
+/// - **Terminal events are deliberately NOT emitted through the sink.**
+///   [`ProcessRegistry::complete_process`] appends its terminal event via the
+///   *inner* registry internally, so the decorator never observes it as an
+///   `append_event` and never emits it. Do not wait on the sink for
+///   completion: terminal observation rides
+///   [`ProcessWorkDriver::await_terminal`](crate::ProcessWorkDriver::await_terminal)
+///   (see ADR 0016), which reads the durable terminal state.
+/// - **Emission cannot fail the write.** `emit` returns `()`, so a sink can
+///   never fail or roll back an append; the durable write has already
+///   committed by the time `emit` runs. But the decorator *awaits* `emit`
+///   inline on the append path, so a slow sink slows every append. Implementors
+///   must return fast: hand any real I/O off to a channel or background task
+///   internally rather than blocking inside `emit`.
+#[async_trait::async_trait]
+pub trait ProcessEventSink: Send + Sync {
+    /// Observe one appended process event. Best-effort; see the trait contract.
+    ///
+    /// Must be fast and non-blocking — offload I/O to a channel/task internally.
+    async fn emit(&self, event: &ProcessEvent);
+}
+
+/// [`ProcessRegistry`] decorator: publishes in-process change ticks on every
+/// mutation (so [`ProcessAwaiter`] wakes without polling) and, when a
+/// [`ProcessEventSink`] is installed, emits each appended event to it.
+///
+/// The sink is installed once at wrap time via
+/// [`watch_process_registry_with_sink`]; there is no post-hoc mutation and no
+/// double-wrapping.
 struct WatchedProcessRegistry {
     inner: Arc<dyn ProcessRegistry>,
     hub: ProcessChangeHub,
+    sink: Option<Arc<dyn ProcessEventSink>>,
 }
 
+/// Wrap `inner` in a [`WatchedProcessRegistry`] with no event sink.
+///
+/// The decorated handle publishes change ticks to the returned
+/// [`ProcessChangeHub`]. Use [`watch_process_registry_with_sink`] to also feed a
+/// host-facing [`ProcessEventSink`].
 pub fn watch_process_registry(
     inner: Arc<dyn ProcessRegistry>,
+) -> (Arc<dyn ProcessRegistry>, ProcessChangeHub) {
+    watch_process_registry_with_sink(inner, None)
+}
+
+/// Wrap `inner` in a [`WatchedProcessRegistry`], optionally installing a
+/// [`ProcessEventSink`] that receives every appended event.
+///
+/// The sink is best-effort freshness, not truth — see [`ProcessEventSink`].
+pub fn watch_process_registry_with_sink(
+    inner: Arc<dyn ProcessRegistry>,
+    sink: Option<Arc<dyn ProcessEventSink>>,
 ) -> (Arc<dyn ProcessRegistry>, ProcessChangeHub) {
     let hub = ProcessChangeHub::new();
     (
         Arc::new(WatchedProcessRegistry {
             inner,
             hub: hub.clone(),
+            sink,
         }),
         hub,
     )
@@ -329,6 +392,12 @@ impl ProcessRegistry for WatchedProcessRegistry {
     ) -> Result<ProcessEventAppendResult, PluginError> {
         let result = self.inner.append_event(process_id, request).await?;
         self.hub.notify(process_id);
+        // Best-effort freshness after the durable append: the write already
+        // committed, so the sink cannot fail it. Terminal appends never reach
+        // here — `complete_process` writes them through the inner registry.
+        if let Some(sink) = self.sink.as_ref() {
+            sink.emit(&result.event).await;
+        }
         Ok(result)
     }
 
@@ -456,6 +525,15 @@ impl ProcessRegistry for WatchedProcessRegistry {
     ) -> Result<(), PluginError> {
         self.inner.complete_process_lease(completion).await
     }
+
+    async fn prune_terminal_processes(
+        &self,
+        cutoff_epoch_ms: u64,
+    ) -> Result<ProcessPruneReport, PluginError> {
+        // No hub bump: pruned rows are terminal, so any waiter on them resolved
+        // long ago (terminal state is durable and observed via the await seam).
+        self.inner.prune_terminal_processes(cutoff_epoch_ms).await
+    }
 }
 
 #[cfg(test)]
@@ -475,6 +553,41 @@ mod tests {
             },
             ProcessProvenance::host(),
         )
+    }
+
+    fn plain_event_type(name: &str) -> crate::ProcessEventType {
+        crate::ProcessEventType {
+            name: name.to_string(),
+            payload_schema: crate::LashSchema::any(),
+            semantics: crate::ProcessEventSemanticsSpec::default(),
+        }
+    }
+
+    fn registration_with_events(process_id: &str, event_types: &[&str]) -> ProcessRegistration {
+        registration(process_id)
+            .with_extra_event_types(event_types.iter().map(|name| plain_event_type(name)))
+    }
+
+    /// Records `(event_type, sequence)` in emit order for sink assertions.
+    #[derive(Clone, Default)]
+    struct CollectingSink {
+        events: Arc<Mutex<Vec<(String, u64)>>>,
+    }
+
+    impl CollectingSink {
+        fn collected(&self) -> Vec<(String, u64)> {
+            self.events.lock().expect("sink lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessEventSink for CollectingSink {
+        async fn emit(&self, event: &ProcessEvent) {
+            self.events
+                .lock()
+                .expect("sink lock")
+                .push((event.event_type.clone(), event.sequence));
+        }
     }
 
     fn success(value: serde_json::Value) -> ProcessAwaitOutput {
@@ -605,6 +718,114 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), rx.changed())
             .await
             .expect("append bump")
+            .expect("sender remains open");
+    }
+
+    #[tokio::test]
+    async fn sink_receives_appended_events_in_order() {
+        let raw = Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let sink = CollectingSink::default();
+        let (registry, _hub) = watch_process_registry_with_sink(raw, Some(Arc::new(sink.clone())));
+        registry
+            .register_process(registration_with_events(
+                "proc",
+                &["producer.a", "producer.b"],
+            ))
+            .await
+            .expect("register");
+        registry
+            .append_event(
+                "proc",
+                ProcessEventAppendRequest::new("producer.a", serde_json::json!({})),
+            )
+            .await
+            .expect("append a");
+        registry
+            .append_event(
+                "proc",
+                ProcessEventAppendRequest::new("producer.b", serde_json::json!({})),
+            )
+            .await
+            .expect("append b");
+
+        assert_eq!(
+            sink.collected(),
+            vec![("producer.a".to_string(), 1), ("producer.b".to_string(), 2)],
+            "the sink must observe appended events after their write, in append order"
+        );
+    }
+
+    #[tokio::test]
+    async fn sink_absent_leaves_appends_unchanged() {
+        let raw = Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let (registry, _hub) = watch_process_registry_with_sink(raw, None);
+        registry
+            .register_process(registration_with_events("proc", &["producer.a"]))
+            .await
+            .expect("register");
+        let appended = registry
+            .append_event(
+                "proc",
+                ProcessEventAppendRequest::new("producer.a", serde_json::json!({})),
+            )
+            .await
+            .expect("append succeeds with no sink installed");
+        assert_eq!(appended.event.sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn sink_not_invoked_for_complete_process_terminal_append() {
+        let raw = Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let sink = CollectingSink::default();
+        let (registry, _hub) = watch_process_registry_with_sink(raw, Some(Arc::new(sink.clone())));
+        registry
+            .register_process(registration_with_events("proc", &["producer.a"]))
+            .await
+            .expect("register");
+        registry
+            .append_event(
+                "proc",
+                ProcessEventAppendRequest::new("producer.a", serde_json::json!({})),
+            )
+            .await
+            .expect("explicit append");
+        registry
+            .complete_process("proc", success(serde_json::json!("done")))
+            .await
+            .expect("complete");
+
+        assert_eq!(
+            sink.collected(),
+            vec![("producer.a".to_string(), 1)],
+            "complete_process appends its terminal event through the inner registry, so the \
+             decorator never emits it to the sink"
+        );
+    }
+
+    #[tokio::test]
+    async fn sink_present_still_bumps_hub_on_append() {
+        let raw = Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let sink = CollectingSink::default();
+        let (registry, hub) = watch_process_registry_with_sink(raw, Some(Arc::new(sink)));
+        let mut rx = hub.subscribe("proc");
+        registry
+            .register_process(registration_with_events("proc", &["producer.a"]))
+            .await
+            .expect("register");
+        tokio::time::timeout(Duration::from_millis(100), rx.changed())
+            .await
+            .expect("register bump")
+            .expect("sender remains open");
+        registry
+            .append_event(
+                "proc",
+                ProcessEventAppendRequest::new("producer.a", serde_json::json!({})),
+            )
+            .await
+            .expect("append");
+        tokio::time::timeout(Duration::from_millis(100), rx.changed())
+            .await
+            .expect("append bump with a sink installed")
             .expect("sender remains open");
     }
 

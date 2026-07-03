@@ -9,6 +9,16 @@ use super::model::{
     ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, SessionScope, WaitState,
 };
 
+/// Outcome of [`ProcessRegistry::prune_terminal_processes`]: how many terminal
+/// process rows and event rows were physically deleted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessPruneReport {
+    /// Terminal process rows deleted.
+    pub pruned_processes: usize,
+    /// Event rows deleted across those processes.
+    pub pruned_events: usize,
+}
+
 /// Durability-neutral process registry.
 ///
 /// Process waits are coordination behavior and live on
@@ -244,4 +254,16 @@ pub trait ProcessRegistry: Send + Sync {
         &self,
         completion: &ProcessLeaseCompletion,
     ) -> Result<(), PluginError>;
+
+    /// Physically delete terminal process rows whose `updated_at_ms` is older
+    /// than `cutoff_epoch_ms`, together with their events, wake acks, handle
+    /// grants, and lease rows. Host-scheduled retention: hosts that project
+    /// results/events into their own store call this to keep the registry
+    /// bounded. Non-terminal rows are never touched. Callers must choose a
+    /// retention window comfortably longer than any waiter lifetime — a
+    /// pruned process id becomes "unknown process" to late awaits.
+    async fn prune_terminal_processes(
+        &self,
+        cutoff_epoch_ms: u64,
+    ) -> Result<ProcessPruneReport, PluginError>;
 }
