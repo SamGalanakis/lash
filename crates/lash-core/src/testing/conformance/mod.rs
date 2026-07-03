@@ -15,6 +15,7 @@ mod attachment_store;
 mod effect_host;
 mod helpers;
 mod live_replay;
+mod process_coordination;
 mod process_registry;
 mod runtime_persistence;
 mod session_store_factory;
