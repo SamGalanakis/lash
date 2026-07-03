@@ -55,6 +55,139 @@ pub async fn process_registry_with_expected_durability<F>(
     completed_lease_releases_and_reclaim_bumps_fencing(make()).await;
     stale_lease_completion_cannot_release_live_lease(make()).await;
     process_lease_reclaim_contract(make()).await;
+    prune_removes_terminal_processes_older_than_cutoff(make()).await;
+}
+
+/// Host-scheduled retention: `prune_terminal_processes` physically deletes
+/// terminal rows (and their events, wake acks, grants, leases) older than a
+/// cutoff, leaving fresher terminals and every live process untouched.
+async fn prune_removes_terminal_processes_older_than_cutoff(registry: Arc<dyn ProcessRegistry>) {
+    let scope = SessionScope::new("prune-owner");
+    for id in ["proc-prune-old", "proc-prune-fresh", "proc-prune-live"] {
+        registry
+            .register_process(registration(id))
+            .await
+            .expect("register prune process");
+    }
+    registry
+        .grant_handle(
+            &scope,
+            "proc-prune-old",
+            ProcessHandleDescriptor::new(Some("test"), Some("old")),
+        )
+        .await
+        .expect("grant old");
+
+    // Complete the old process, then — after a short real delay so the terminal
+    // timestamps are distinct even on the in-memory backend — the fresh one.
+    registry
+        .complete_process(
+            "proc-prune-old",
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({ "n": 1 }),
+                control: None,
+            },
+        )
+        .await
+        .expect("complete old");
+    let old_updated = registry
+        .get_process("proc-prune-old")
+        .await
+        .expect("old record")
+        .updated_at_ms;
+    let old_events = registry
+        .events_after("proc-prune-old", 0)
+        .await
+        .expect("old events")
+        .len();
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    registry
+        .complete_process(
+            "proc-prune-fresh",
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({ "n": 2 }),
+                control: None,
+            },
+        )
+        .await
+        .expect("complete fresh");
+    let fresh_updated = registry
+        .get_process("proc-prune-fresh")
+        .await
+        .expect("fresh record")
+        .updated_at_ms;
+    assert!(
+        old_updated < fresh_updated,
+        "terminal timestamps must be distinct for a meaningful cutoff (old {old_updated}, fresh {fresh_updated})"
+    );
+
+    // Cutoff between the two terminals: prunes the old terminal, keeps the fresh
+    // terminal and the live process (`updated_at_ms < cutoff` is exclusive).
+    let report = registry
+        .prune_terminal_processes(fresh_updated)
+        .await
+        .expect("prune terminal processes");
+    assert_eq!(
+        report.pruned_processes, 1,
+        "only the terminal process older than the cutoff is pruned"
+    );
+    assert_eq!(
+        report.pruned_events, old_events,
+        "the report's event count matches the pruned process's log"
+    );
+
+    // The old terminal row, its events, and its grant are gone.
+    assert!(
+        registry.get_process("proc-prune-old").await.is_none(),
+        "a pruned process must read as unknown"
+    );
+    assert!(
+        registry.events_after("proc-prune-old", 0).await.is_err(),
+        "events for a pruned process must read as unknown"
+    );
+    assert!(
+        !registry
+            .has_handle_grant(&scope, "proc-prune-old")
+            .await
+            .expect("grant check for pruned process"),
+        "the pruned process's handle grant must be deleted"
+    );
+    assert!(
+        registry
+            .handle_grants_for_process("proc-prune-old")
+            .await
+            .is_err(),
+        "grants for a pruned process must read as unknown"
+    );
+
+    // The fresh terminal and the live process are intact.
+    assert!(
+        registry
+            .get_process("proc-prune-fresh")
+            .await
+            .expect("fresh terminal survives")
+            .is_terminal(),
+        "the fresh terminal process must be preserved"
+    );
+    assert_eq!(
+        registry
+            .events_after("proc-prune-fresh", 0)
+            .await
+            .expect("fresh events")
+            .len(),
+        1,
+        "the fresh terminal keeps its event log"
+    );
+    assert!(
+        !registry
+            .get_process("proc-prune-live")
+            .await
+            .expect("live process survives")
+            .is_terminal(),
+        "the live process must be untouched"
+    );
 }
 
 fn process_lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {

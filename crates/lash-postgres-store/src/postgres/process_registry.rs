@@ -861,6 +861,64 @@ impl ProcessRegistry for PostgresProcessRegistry {
         .map_err(plugin_sqlx_error)?;
         Ok(())
     }
+
+    async fn prune_terminal_processes(
+        &self,
+        cutoff_epoch_ms: u64,
+    ) -> Result<ProcessPruneReport, PluginError> {
+        let cutoff = cutoff_epoch_ms as i64;
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        // The child deletes select from `lash_processes` (still present until the
+        // final delete) so they resolve the same terminal, older-than-cutoff
+        // set. Delete children first, then the parent rows.
+        const SELECTOR: &str = "process_id IN (
+            SELECT process_id FROM lash_processes
+            WHERE status != 'running' AND updated_at_ms < $1
+        )";
+        let pruned_events = sqlx::query(&format!(
+            "DELETE FROM lash_process_events WHERE {SELECTOR}"
+        ))
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?
+        .rows_affected() as usize;
+        sqlx::query(&format!(
+            "DELETE FROM lash_process_wake_acks WHERE {SELECTOR}"
+        ))
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        sqlx::query(&format!(
+            "DELETE FROM lash_process_handle_grants WHERE {SELECTOR}"
+        ))
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        sqlx::query(&format!(
+            "DELETE FROM lash_process_leases WHERE {SELECTOR}"
+        ))
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        let pruned_processes = sqlx::query(
+            "DELETE FROM lash_processes
+             WHERE status != 'running' AND updated_at_ms < $1",
+        )
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?
+        .rows_affected() as usize;
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        Ok(ProcessPruneReport {
+            pruned_processes,
+            pruned_events,
+        })
+    }
 }
 
 fn process_external_ref_conflict(

@@ -64,18 +64,21 @@ impl ProcessWorkSource {
         !matches!(self, Self::None)
     }
 
-    fn watched(self) -> Self {
+    fn watched(self, sink: Option<Arc<dyn lash_core::ProcessEventSink>>) -> Self {
         match self {
             Self::Inline {
                 registry,
                 hub: None,
             } => {
-                let (registry, hub) = lash_core::watch_process_registry(registry);
+                let (registry, hub) = lash_core::watch_process_registry_with_sink(registry, sink);
                 Self::Inline {
                     registry,
                     hub: Some(hub),
                 }
             }
+            // An external driver was wrapped by its host, which installs any
+            // sink through the driver constructor; the inline sink does not
+            // apply here. Already-watched inline sources keep their wrap.
             other => other,
         }
     }
@@ -608,6 +611,9 @@ pub struct LashCoreBuilder {
     // Single source of truth for process lifecycle support and process-work
     // consumption.
     process_work_source: ProcessWorkSource,
+    // Optional host-facing best-effort feed of appended process events,
+    // installed on the inline process-registry decorator at build time.
+    process_event_sink: Option<Arc<dyn lash_core::ProcessEventSink>>,
     queued_work_source: QueuedWorkSource,
     live_replay_store: Option<Arc<dyn LiveReplayStore>>,
 }
@@ -964,7 +970,10 @@ impl LashCoreBuilder {
             .trigger_store
             .as_ref()
             .map(|store| store.durability_tier());
-        let process_work_source = self.process_work_source.clone().watched();
+        let process_work_source = self
+            .process_work_source
+            .clone()
+            .watched(self.process_event_sink.clone());
         let process_registry_tier = process_work_source
             .process_registry()
             .map(|registry| registry.durability_tier());
@@ -1198,6 +1207,25 @@ impl LashCoreBuilder {
             registry: process_registry,
             hub: None,
         };
+        self
+    }
+
+    /// Install a best-effort, host-facing [`ProcessEventSink`] on the inline
+    /// process registry.
+    ///
+    /// Each appended process event is pushed to the sink after its durable
+    /// write, in per-process append order. This is freshness, not truth: it
+    /// never buffers or retries, terminal events are not emitted through it
+    /// (observe completion via the await seam), and consumers reconcile from
+    /// the durable event log. See [`ProcessEventSink`] for the full contract.
+    ///
+    /// Applies to the inline registry path ([`Self::process_registry`]); a host
+    /// that supplies its own [`ProcessWorkDriver`](lash_core::ProcessWorkDriver)
+    /// installs the sink through the driver's constructor instead.
+    ///
+    /// [`ProcessEventSink`]: lash_core::ProcessEventSink
+    pub fn process_event_sink(mut self, sink: Arc<dyn lash_core::ProcessEventSink>) -> Self {
+        self.process_event_sink = Some(sink);
         self
     }
 

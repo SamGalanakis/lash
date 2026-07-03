@@ -17,7 +17,7 @@ use super::model::{
     ProcessListFilter, ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport,
     SessionScope, SessionScopeId, WaitState,
 };
-use super::registry::ProcessRegistry;
+use super::registry::{ProcessPruneReport, ProcessRegistry};
 use super::time::current_epoch_ms;
 use super::validation::{
     ensure_core_event_types, prepare_process_event_append, process_registration_hash,
@@ -686,6 +686,44 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             current.expires_at_epoch_ms = 0;
         }
         Ok(())
+    }
+
+    async fn prune_terminal_processes(
+        &self,
+        cutoff_epoch_ms: u64,
+    ) -> Result<ProcessPruneReport, PluginError> {
+        let mut pruned_events = 0;
+        let prunable: HashSet<String> = {
+            let mut managed = self.managed.lock().await;
+            let prunable: Vec<String> = managed
+                .iter()
+                .filter(|(_, record)| {
+                    record.record.is_terminal() && record.record.updated_at_ms < cutoff_epoch_ms
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &prunable {
+                if let Some(record) = managed.remove(id) {
+                    pruned_events += record.events.len();
+                }
+            }
+            prunable.into_iter().collect()
+        };
+        {
+            let mut grants = self.grants.lock().await;
+            for session_grants in grants.values_mut() {
+                session_grants.retain(|process_id, _| !prunable.contains(process_id));
+            }
+            grants.retain(|_, session_grants| !session_grants.is_empty());
+        }
+        self.leases
+            .lock()
+            .await
+            .retain(|process_id, _| !prunable.contains(process_id));
+        Ok(ProcessPruneReport {
+            pruned_processes: prunable.len(),
+            pruned_events,
+        })
     }
 }
 

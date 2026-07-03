@@ -66,12 +66,12 @@ use std::time::Duration;
 use lash_core::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, DurabilityTier,
     DurableProcessWorker, EffectHost, ExecutionScope, PluginError, ProcessAttach,
-    ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome, ProcessExecutionContext,
-    ProcessExternalRef, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
-    ProcessWorkDriver, Resolution, ResolveOutcome, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimeInvocation,
-    ScopedEffectController, watch_process_registry,
+    ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome, ProcessEventSink,
+    ProcessExecutionContext, ProcessExternalRef, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessRunHandle, ProcessWorkDriver, Resolution, ResolveOutcome,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeError, RuntimeInvocation, ScopedEffectController, watch_process_registry_with_sink,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -1028,7 +1028,21 @@ pub struct RestateProcessDeployment {
 
 impl RestateProcessDeployment {
     pub fn new(ingress_url: impl Into<String>, registry: Arc<dyn ProcessRegistry>) -> Self {
-        let (registry, hub) = watch_process_registry(registry);
+        Self::new_with_sink(ingress_url, registry, None)
+    }
+
+    /// Like [`new`](Self::new), but installs a host-facing
+    /// [`ProcessEventSink`] on the registry decorator this deployment wraps.
+    ///
+    /// The wrap happens inside the constructor, so the sink must be supplied
+    /// here; each appended event is pushed best-effort after its durable write.
+    /// See [`ProcessEventSink`] for the freshness-not-truth contract.
+    pub fn new_with_sink(
+        ingress_url: impl Into<String>,
+        registry: Arc<dyn ProcessRegistry>,
+        sink: Option<Arc<dyn ProcessEventSink>>,
+    ) -> Self {
+        let (registry, hub) = watch_process_registry_with_sink(registry, sink);
         let ingress_runner = Arc::new(RestateProcessIngressRunner::new(
             ingress_url,
             Arc::clone(&registry),
