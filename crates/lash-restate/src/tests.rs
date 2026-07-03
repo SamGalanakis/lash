@@ -3698,6 +3698,210 @@ async fn restate_process_attach_maps_ingress_error_to_plugin_error() {
     assert!(err.to_string().contains("500 Internal Server Error"));
 }
 
+/// Like [`spawn_restate_http_capture`], but holds each accepted connection open
+/// for `delay` before responding, modeling a durable promise that resolves only
+/// once the workflow's `run` completes.
+async fn spawn_restate_http_capture_delayed(
+    responses: Vec<MockHttpResponse>,
+    delay: std::time::Duration,
+) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let captured_server = Arc::clone(&captured);
+    let server = tokio::spawn(async move {
+        for response in responses {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut socket).await;
+            captured_server.lock().expect("captured lock").push(request);
+            tokio::time::sleep(delay).await;
+            let body = response.body.as_bytes();
+            let header = format!(
+                "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response.status,
+                body.len()
+            );
+            socket
+                .write_all(header.as_bytes())
+                .await
+                .expect("write response headers");
+            socket.write_all(body).await.expect("write response body");
+            socket.flush().await.expect("flush");
+        }
+    });
+    (format!("http://{addr}"), captured, server)
+}
+
+#[tokio::test]
+async fn restate_attach_before_run_resolves_with_delayed_workflow_output() {
+    // The ingress attach is a synchronous long-hold call issued while the
+    // workflow's `run` is still in flight; it resolves only when the durable
+    // promise does. A delayed mock stands in for that hold, and the eventual
+    // output flows back through the driver's attach.
+    let delay = std::time::Duration::from_millis(300);
+    let (base_url, captured, server) = spawn_restate_http_capture_delayed(
+        vec![MockHttpResponse {
+            status: "200 OK",
+            body: r#"{"type":"success","value":{"eventual":true}}"#,
+        }],
+        delay,
+    )
+    .await;
+    let registry = process_registry();
+    let deployment = RestateProcessDeployment::new(base_url, Arc::clone(&registry));
+    let driver = deployment.process_work_driver();
+    // A non-terminal process routes await_terminal through the ingress attach
+    // rather than the registry short-circuit.
+    driver
+        .process_registry()
+        .register_process(external_registration("process-1"))
+        .await
+        .expect("register non-terminal process");
+
+    let started = std::time::Instant::now();
+    let output = driver
+        .await_terminal("process-1")
+        .await
+        .expect("attach await resolves with the eventual output");
+    let elapsed = started.elapsed();
+    server.await.expect("capture server");
+
+    assert_eq!(
+        output,
+        ProcessAwaitOutput::Success {
+            value: serde_json::json!({ "eventual": true }),
+            control: None,
+        }
+    );
+    assert!(
+        elapsed >= delay,
+        "the attach must block on the durable promise until run resolves (waited {elapsed:?})"
+    );
+    let requests = captured.lock().expect("captured lock");
+    assert_eq!(
+        requests.len(),
+        1,
+        "await_terminal issues exactly one ingress call"
+    );
+    assert!(
+        requests[0].starts_with("POST /LashProcessWorkflow/process-1/await_terminal "),
+        "unexpected request: {}",
+        requests[0]
+    );
+}
+
+#[tokio::test]
+async fn restate_driver_short_circuits_terminal_without_ingress_call() {
+    // Empty response set: the capture server accepts nothing, so any ingress
+    // call would fail. The registry terminal short-circuit must fire first, so
+    // the attach is never consulted for an already-terminal process.
+    let (base_url, captured, server) = spawn_restate_http_capture(vec![]).await;
+    let registry = process_registry();
+    let deployment = RestateProcessDeployment::new(base_url, Arc::clone(&registry));
+    let driver = deployment.process_work_driver();
+    let output = ProcessAwaitOutput::Success {
+        value: serde_json::json!("already-terminal"),
+        control: None,
+    };
+    driver
+        .process_registry()
+        .register_process(external_registration("process-1"))
+        .await
+        .expect("register");
+    driver
+        .process_registry()
+        .complete_process("process-1", output.clone())
+        .await
+        .expect("complete");
+
+    let resolved = driver
+        .await_terminal("process-1")
+        .await
+        .expect("terminal short-circuit resolves without ingress");
+    server.await.expect("capture server");
+
+    assert_eq!(resolved, output);
+    assert!(
+        captured.lock().expect("captured lock").is_empty(),
+        "a terminal short-circuit must not issue any ingress call"
+    );
+}
+
+#[tokio::test]
+async fn restate_process_attach_maps_malformed_ingress_body_to_plugin_error() {
+    // A 2xx response whose body does not decode into ProcessAwaitOutput must
+    // surface as a PluginError, not a panic — complementing the non-2xx case.
+    let (base_url, _captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "200 OK",
+        body: "this-is-not-valid-json",
+    }])
+    .await;
+    let runner = RestateProcessIngressRunner::new(base_url, process_registry());
+
+    let err = runner
+        .await_terminal("process-1")
+        .await
+        .expect_err("a malformed ingress body must surface as an error");
+    server.await.expect("capture server");
+
+    assert!(
+        err.to_string()
+            .contains("ingress await for process `process-1` failed"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn restate_process_attach_is_reentrant_across_sequential_awaits() {
+    // The shared await_terminal handler is re-entrant: two sequential attaches
+    // each issue an independent ingress call and both succeed.
+    let (base_url, captured, server) = spawn_restate_http_capture(vec![
+        MockHttpResponse {
+            status: "200 OK",
+            body: r#"{"type":"success","value":"first"}"#,
+        },
+        MockHttpResponse {
+            status: "200 OK",
+            body: r#"{"type":"success","value":"second"}"#,
+        },
+    ])
+    .await;
+    let runner = RestateProcessIngressRunner::new(base_url, process_registry());
+
+    let first = runner
+        .await_terminal("process-1")
+        .await
+        .expect("first attach await");
+    let second = runner
+        .await_terminal("process-1")
+        .await
+        .expect("second attach await");
+    server.await.expect("capture server");
+
+    assert_eq!(
+        first,
+        ProcessAwaitOutput::Success {
+            value: serde_json::json!("first"),
+            control: None,
+        }
+    );
+    assert_eq!(
+        second,
+        ProcessAwaitOutput::Success {
+            value: serde_json::json!("second"),
+            control: None,
+        }
+    );
+    assert_eq!(
+        captured.lock().expect("captured lock").len(),
+        2,
+        "each await issues an independent ingress call"
+    );
+}
+
 #[tokio::test]
 async fn restate_admin_client_cancels_kills_and_queries_invocation_status() {
     let (base_url, captured, server) = spawn_restate_http_capture(vec![

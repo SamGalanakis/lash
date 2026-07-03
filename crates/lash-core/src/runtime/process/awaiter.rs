@@ -898,4 +898,184 @@ mod tests {
             .expect_err("attach error should propagate");
         assert!(err.to_string().contains("attach failed"));
     }
+
+    struct CountingAttach {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessAttach for CountingAttach {
+        async fn await_terminal(
+            &self,
+            _process_id: &str,
+        ) -> Result<ProcessAwaitOutput, PluginError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(PluginError::Session(
+                "attach must not be consulted for a terminal process".to_string(),
+            ))
+        }
+    }
+
+    /// Sim-style race: many waiters attach to one process and completion fires
+    /// while they are mid-flight between their subscribe and their first read.
+    /// The change hub must resolve every one with identical output — no lost
+    /// wakeups, no divergent results (ADR 0016).
+    #[tokio::test]
+    async fn concurrent_waiters_all_resolve_with_identical_output_on_completion() {
+        let raw = Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let (registry, hub) = watch_process_registry(raw);
+        registry
+            .register_process(registration("proc"))
+            .await
+            .expect("register");
+
+        const WAITERS: usize = 16;
+        let barrier = Arc::new(tokio::sync::Barrier::new(WAITERS + 1));
+        let mut waiters = Vec::with_capacity(WAITERS);
+        for _ in 0..WAITERS {
+            let awaiter = ProcessAwaiter::new(Arc::clone(&registry), hub.clone());
+            let barrier = Arc::clone(&barrier);
+            waiters.push(tokio::spawn(async move {
+                barrier.wait().await;
+                awaiter.await_terminal("proc").await
+            }));
+        }
+        // Release every waiter, then complete at once so completion races their
+        // first read and subscribe.
+        barrier.wait().await;
+        let output = success(serde_json::json!({ "raced": true }));
+        registry
+            .complete_process("proc", output.clone())
+            .await
+            .expect("complete");
+
+        for waiter in waiters {
+            let resolved = tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .expect("each racing waiter resolves under 2s")
+                .expect("join waiter")
+                .expect("await terminal");
+            assert_eq!(
+                resolved, output,
+                "every concurrent waiter resolves with identical terminal output"
+            );
+        }
+    }
+
+    /// Sim-style restart/re-attach: a process completes while no waiter is
+    /// attached; a later `await_terminal` resolves instantly through the
+    /// registry short-circuit and never consults the engine attach (ADR 0016 —
+    /// the terminal point-read precedes any attach hand-off).
+    #[tokio::test]
+    async fn driver_reattach_after_terminal_short_circuits_without_engine_call() {
+        use std::sync::atomic::Ordering;
+
+        let raw = Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let driver = crate::ProcessWorkDriver::new(raw, Arc::new(NoopRunHandle)).with_attach(
+            Arc::new(CountingAttach {
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let registry = driver.process_registry();
+        registry
+            .register_process(registration("proc"))
+            .await
+            .expect("register");
+        // Process reaches terminal with no waiter attached.
+        let output = success(serde_json::json!("reattached"));
+        registry
+            .complete_process("proc", output.clone())
+            .await
+            .expect("complete");
+
+        // A later await resolves via the registry short-circuit, instantly.
+        let start = std::time::Instant::now();
+        let resolved = driver.await_terminal("proc").await.expect("await terminal");
+        assert_eq!(resolved, output);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a terminal short-circuit must never call the engine attach"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "a short-circuit resolves without any backoff wait"
+        );
+    }
+
+    /// Records seen vs. dropped emit sequences, dropping even sequences to model
+    /// best-effort push loss.
+    #[derive(Clone, Default)]
+    struct LossySink {
+        seen: Arc<Mutex<Vec<u64>>>,
+        dropped: Arc<Mutex<Vec<u64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessEventSink for LossySink {
+        async fn emit(&self, event: &ProcessEvent) {
+            if event.sequence.is_multiple_of(2) {
+                self.dropped.lock().expect("sink lock").push(event.sequence);
+            } else {
+                self.seen.lock().expect("sink lock").push(event.sequence);
+            }
+        }
+    }
+
+    /// Sim-style sink loss: a sink that drops a fraction of emits still leaves
+    /// the durable log complete. Reconciling from `events_after` at terminal
+    /// recovers every event the push feed missed — ADR 0017's "push loss never
+    /// loses truth".
+    #[tokio::test]
+    async fn lossy_sink_still_reconciles_complete_log_from_events_after() {
+        let raw = Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let sink = LossySink::default();
+        let (registry, _hub) = watch_process_registry_with_sink(raw, Some(Arc::new(sink.clone())));
+        registry
+            .register_process(registration_with_events("proc", &["producer.step"]))
+            .await
+            .expect("register");
+
+        const EVENTS: u64 = 6;
+        for _ in 0..EVENTS {
+            registry
+                .append_event(
+                    "proc",
+                    ProcessEventAppendRequest::new("producer.step", serde_json::json!({})),
+                )
+                .await
+                .expect("append");
+        }
+        // The terminal event never rides the sink at all (ADR 0017): completion
+        // observation is the await seam's job.
+        registry
+            .complete_process("proc", success(serde_json::json!("done")))
+            .await
+            .expect("complete");
+
+        // The push feed genuinely lost some events...
+        assert!(
+            !sink.dropped.lock().expect("sink lock").is_empty(),
+            "the lossy sink must drop at least one emit for the scenario to be meaningful"
+        );
+        assert!(
+            (sink.seen.lock().expect("sink lock").len() as u64) < EVENTS,
+            "the sink observed fewer events than were appended"
+        );
+        // ...but the durable log is the complete, ordered truth.
+        let reconciled = registry
+            .events_after("proc", 0)
+            .await
+            .expect("events")
+            .into_iter()
+            .filter(|event| event.event_type == "producer.step")
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reconciled,
+            (1..=EVENTS).collect::<Vec<_>>(),
+            "events_after reconciles the complete non-terminal log despite push loss"
+        );
+    }
 }
