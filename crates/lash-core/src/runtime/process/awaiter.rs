@@ -597,6 +597,78 @@ mod tests {
         }
     }
 
+    /// ADR 0016 pins the awaiter's polling cadence: a 25ms floor, doubling
+    /// backoff, and a 1s cap. Changing any of the three alters every store-only
+    /// deployment's wait economics, so the exact schedule is asserted here.
+    #[test]
+    fn backoff_schedule_has_25ms_floor_doubling_to_1s_cap() {
+        assert_eq!(AWAIT_BACKOFF_MIN, Duration::from_millis(25));
+        assert_eq!(AWAIT_BACKOFF_MAX, Duration::from_secs(1));
+
+        let mut backoff = AWAIT_BACKOFF_MIN;
+        let mut schedule = vec![backoff];
+        while backoff < AWAIT_BACKOFF_MAX {
+            backoff = next_backoff(backoff);
+            schedule.push(backoff);
+        }
+        assert_eq!(
+            schedule,
+            [25, 50, 100, 200, 400, 800, 1000]
+                .into_iter()
+                .map(Duration::from_millis)
+                .collect::<Vec<_>>(),
+            "the backoff doubles from the 25ms floor and saturates at the 1s cap"
+        );
+        assert_eq!(
+            next_backoff(AWAIT_BACKOFF_MAX),
+            AWAIT_BACKOFF_MAX,
+            "the cap is absorbing"
+        );
+    }
+
+    /// ADR 0017: the decorator delegates `prune_terminal_processes` without a
+    /// hub bump — pruned rows are terminal, so their waiters resolved long ago
+    /// and a tick would only wake unrelated subscribers spuriously.
+    #[tokio::test]
+    async fn prune_through_decorator_does_not_bump_the_hub() {
+        let raw = Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        let (registry, hub) = watch_process_registry(raw);
+        registry
+            .register_process(registration("proc-terminal"))
+            .await
+            .expect("register terminal");
+        registry
+            .complete_process("proc-terminal", success(serde_json::json!("done")))
+            .await
+            .expect("complete");
+        registry
+            .register_process(registration("proc-live"))
+            .await
+            .expect("register live");
+
+        // Subscribe after the mutations above so only post-subscription bumps
+        // are observable.
+        let mut terminal_rx = hub.subscribe("proc-terminal");
+        let mut live_rx = hub.subscribe("proc-live");
+        terminal_rx.mark_unchanged();
+        live_rx.mark_unchanged();
+
+        let report = registry
+            .prune_terminal_processes(u64::MAX)
+            .await
+            .expect("prune");
+        assert_eq!(report.pruned_processes, 1, "the terminal process pruned");
+
+        assert!(
+            !terminal_rx.has_changed().expect("terminal sender open"),
+            "prune must not bump the pruned process's hub entry"
+        );
+        assert!(
+            !live_rx.has_changed().expect("live sender open"),
+            "prune must not bump surviving processes' hub entries"
+        );
+    }
+
     #[tokio::test]
     async fn hub_subscribe_then_notify_wakes_and_gc_drops_empty_entry() {
         let hub = ProcessChangeHub::new();

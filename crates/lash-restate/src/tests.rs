@@ -3854,6 +3854,71 @@ async fn restate_process_attach_maps_malformed_ingress_body_to_plugin_error() {
     );
 }
 
+/// Records each pushed event's `(event_type, sequence)` in emit order.
+#[derive(Clone, Default)]
+struct RecordingProcessEventSink {
+    events: Arc<Mutex<Vec<(String, u64)>>>,
+}
+
+#[async_trait::async_trait]
+impl lash_core::ProcessEventSink for RecordingProcessEventSink {
+    async fn emit(&self, event: &lash_core::ProcessEvent) {
+        self.events
+            .lock()
+            .expect("sink lock")
+            .push((event.event_type.clone(), event.sequence));
+    }
+}
+
+#[tokio::test]
+async fn restate_deployment_sink_funnel_feeds_appended_events() {
+    // ADR 0017 names `RestateProcessDeployment::new_with_sink` as the durable
+    // hosts' wrap funnel: a sink installed there observes every append made
+    // through the deployment's shared registry, and never terminal events.
+    let sink = RecordingProcessEventSink::default();
+    let deployment = RestateProcessDeployment::new_with_sink(
+        "http://127.0.0.1:8080",
+        process_registry(),
+        Some(Arc::new(sink.clone())),
+    );
+    let registry = deployment.process_work_driver().process_registry();
+    registry
+        .register_process(
+            external_registration("sink-funnel").with_extra_event_types([
+                lash_core::ProcessEventType {
+                    name: "producer.tick".to_string(),
+                    payload_schema: lash_core::LashSchema::any(),
+                    semantics: lash_core::ProcessEventSemanticsSpec::default(),
+                },
+            ]),
+        )
+        .await
+        .expect("register");
+    registry
+        .append_event(
+            "sink-funnel",
+            lash_core::ProcessEventAppendRequest::new("producer.tick", serde_json::json!({})),
+        )
+        .await
+        .expect("append");
+    registry
+        .complete_process(
+            "sink-funnel",
+            ProcessAwaitOutput::Success {
+                value: serde_json::Value::Null,
+                control: None,
+            },
+        )
+        .await
+        .expect("complete");
+
+    assert_eq!(
+        sink.events.lock().expect("sink lock").clone(),
+        vec![("producer.tick".to_string(), 1)],
+        "the deployment-wrapped registry feeds appends to the sink and never terminal events"
+    );
+}
+
 #[tokio::test]
 async fn restate_process_attach_is_reentrant_across_sequential_awaits() {
     // The shared await_terminal handler is re-entrant: two sequential attaches
