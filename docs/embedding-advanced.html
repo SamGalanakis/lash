@@ -123,7 +123,7 @@ let core = lash::LashCore::rlm_builder(factory)
         <div class="section" id="process-work">
           <div class="section-header">
             <h2>Process Work</h2>
-            <p>Lashlang <code>process</code> blocks need a process registry. The registry records process intent, handles, wakes, events, and cancellation; a process work runner consumes those records and executes the background work.</p>
+            <p>Lashlang <code>process</code> blocks need a process plane. The registry records process intent, handles, wakes, events, and cancellation; the process work driver consumes those records, executes background work, and owns process waits.</p>
           </div>
           <div class="listing">
             <div class="listing__row">
@@ -136,7 +136,7 @@ let core = lash::LashCore::rlm_builder(factory)
             </div>
             <div class="listing__row">
               <div class="listing__label">observability</div>
-              <div class="listing__body"><p>Use <code>core.processes()</code> for host-level start/list/get/events/await/cancel/signal operations, <code>core.process_registry()</code> for registry-level integrations, and <code>session.processes()</code> for grant-scoped in-session await/cancel/list operations.</p></div>
+              <div class="listing__body"><p>Use <code>core.processes()</code> for host-level start/list/get/events/await/cancel/signal operations, <code>core.process_registry()</code> for point-read/write registry integrations, and <code>session.processes()</code> for grant-scoped in-session await/cancel/list operations.</p></div>
             </div>
           </div>
           <pre data-lang="rust" data-snippet="embedding_advanced#process-registry-core"><code>let factory = lash::rlm::RlmProtocolPluginFactory::new(
@@ -153,7 +153,7 @@ let core = lash::LashCore::rlm_builder(factory)
     .build()?;</code></pre>
           <aside class="gotcha">
             <strong>Gotcha</strong>
-            <p>A process registry enables the generic process admin plane. In RLM, the Lashlang runtime maps that plane into process/lifecycle abilities when the matching artifact store and process engine are configured. The registry does not make in-flight effects durable by itself; durable replay still comes from the active <code>EffectHost</code> and scoped controller.</p>
+            <p>A process registry enables the generic process admin plane, and the configured <code>ProcessWorkDriver</code> owns execution and waits. In RLM, the Lashlang runtime maps that plane into process/lifecycle abilities when the matching artifact store and process engine are configured. The registry does not make in-flight effects durable by itself; durable replay still comes from the active <code>EffectHost</code> and scoped controller.</p>
           </aside>
         </div>
 
@@ -339,7 +339,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="advanced-runtime">
           <div class="section-header">
             <h2>Advanced Runtime</h2>
-            <p><code>.advanced()</code> is reserved for low-level overrides: a custom <code>PluginHost</code> or a replaceable <code>RuntimeHostConfig</code>. Durable embedding concerns such as effect hosts, process registries, process work drivers, residency policy, and termination policy live on the normal <code>LashCoreBuilder</code>. The registry trait itself lives under <code>lash::process::ProcessRegistry</code>; RLM/Lashlang turns that generic process plane into authored process/lifecycle abilities when the Lashlang runtime pieces are installed.</p>
+            <p><code>.advanced()</code> is reserved for low-level overrides: a custom <code>PluginHost</code> or a replaceable <code>RuntimeHostConfig</code>. Durable embedding concerns such as effect hosts, process registries, process work drivers, residency policy, and termination policy live on the normal <code>LashCoreBuilder</code>. The registry trait itself lives under <code>lash::process::ProcessRegistry</code> and stores state only; process waits live on the work driver. RLM/Lashlang turns that generic process plane into authored process/lifecycle abilities when the Lashlang runtime pieces are installed.</p>
           </div>
           <pre data-lang="rust" data-snippet="embedding_advanced#durable-stores-core"><code>let factory = lash::rlm::RlmProtocolPluginFactory::new(
     lash::rlm::RlmProtocolPluginConfig::default(),

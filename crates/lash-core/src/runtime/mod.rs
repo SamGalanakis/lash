@@ -120,11 +120,12 @@ pub use observation::{
 pub use process::TestLocalProcessRegistry;
 pub use process::{
     DefaultProcessCancelAbility, InMemoryProcessExecutionEnvStore, ObservedProcess,
-    ObservedProcessEvent, ObservedWorkItem, PROCESS_LEASE_SCHEMA_VERSION, ProcessAwaitOutput,
-    ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
-    ProcessCancelSummary, ProcessEngine, ProcessEngineRegistry, ProcessEngineRunContext,
-    ProcessEngineRunGuard, ProcessEngineRuntimeContext, ProcessEngineValidationContext,
-    ProcessEvent, ProcessEventAppendPlan, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ObservedProcessEvent, ObservedWorkItem, PROCESS_LEASE_SCHEMA_VERSION, ProcessAttach,
+    ProcessAwaitOutput, ProcessAwaiter, ProcessCancelAbility, ProcessCancelAllRequest,
+    ProcessCancelRequest, ProcessCancelSource, ProcessCancelSummary, ProcessChangeHub,
+    ProcessEngine, ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
+    ProcessEngineRuntimeContext, ProcessEngineValidationContext, ProcessEvent,
+    ProcessEventAppendPlan, ProcessEventAppendRequest, ProcessEventAppendResult,
     ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
     ProcessExecutionEnvRef, ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary,
@@ -143,7 +144,7 @@ pub use process::{
     process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
     process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
-    validate_process_signal_name,
+    validate_process_signal_name, watch_process_registry,
 };
 pub use process_work_driver::{InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver};
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};

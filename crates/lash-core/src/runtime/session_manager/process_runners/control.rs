@@ -188,7 +188,6 @@ impl<'scope> ProcessCommandRunner<'scope> {
         command: crate::ProcessCommand,
     ) -> Result<crate::ProcessEffectOutcome, crate::PluginError> {
         let effect_id = command.effect_id();
-        let is_start = matches!(command, crate::ProcessCommand::Start { .. });
         let invocation = crate::runtime::causal::process_effect_invocation(
             &self.current.session_id,
             self.parent_invocation.clone(),
@@ -205,12 +204,12 @@ impl<'scope> ProcessCommandRunner<'scope> {
             .effect_controller
             .execute_effect(
                 envelope,
-                crate::RuntimeEffectLocalExecutor::processes(Arc::clone(&self.registry)),
+                crate::RuntimeEffectLocalExecutor::processes(
+                    Arc::clone(&self.registry),
+                    self.current.host.process_work_driver.clone(),
+                ),
             )
             .await?;
-        if is_start && let Some(driver) = self.current.host.process_work_driver.as_ref() {
-            driver.claim_and_run_pending("process_start").await?;
-        }
         outcome.into_process().map_err(crate::PluginError::from)
     }
 }

@@ -609,7 +609,10 @@ impl crate::ProcessService for MockSessionManager {
         process_id: &str,
         _scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessAwaitOutput, PluginError> {
-        self.process_registry.await_process(process_id).await
+        let registry: Arc<dyn crate::ProcessRegistry> = self.process_registry.clone();
+        crate::ProcessAwaiter::polling(registry)
+            .await_terminal(process_id)
+            .await
     }
 
     async fn list_visible(

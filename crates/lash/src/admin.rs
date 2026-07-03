@@ -116,7 +116,10 @@ impl Processes {
                     invocation,
                     lash_core::RuntimeEffectCommand::process(command),
                 ),
-                lash_core::RuntimeEffectLocalExecutor::processes(registry),
+                lash_core::RuntimeEffectLocalExecutor::processes(
+                    registry,
+                    self.core.env.process_work_driver.clone(),
+                ),
             )
             .await
             .map_err(|err| EmbedError::Plugin(lash_core::PluginError::Session(err.to_string())))?;
@@ -187,8 +190,11 @@ impl Processes {
     }
 
     pub async fn await_output(&self, process_id: &str) -> Result<lash_core::ProcessAwaitOutput> {
-        self.registry()?
-            .await_process(process_id)
+        if let Some(driver) = self.core.env.process_work_driver.as_ref() {
+            return driver.await_terminal(process_id).await.map_err(Into::into);
+        }
+        lash_core::ProcessAwaiter::polling(self.registry()?)
+            .await_terminal(process_id)
             .await
             .map_err(Into::into)
     }

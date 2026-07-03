@@ -1769,6 +1769,7 @@ async fn process_work_driver_configures_external_runner_without_inline_store_fac
         Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn lash_core::ProcessRegistry>;
     let driver =
         lash_core::ProcessWorkDriver::new(Arc::clone(&registry), Arc::new(NoopProcessRunHandle));
+    let driver_registry = driver.process_registry();
     let core = explicit_ephemeral_facets(peer_coherence_builder(inline_artifact_store()))
         .process_work_driver(driver)
         .build()?;
@@ -1776,7 +1777,7 @@ async fn process_work_driver_configures_external_runner_without_inline_store_fac
     let configured = core
         .process_registry()
         .expect("external driver configures the core registry");
-    assert!(Arc::ptr_eq(&configured, &registry));
+    assert!(Arc::ptr_eq(&configured, &driver_registry));
     assert!(core.processes().observer().is_ok());
     assert!(core.work_driver.drivers().await.process.is_some());
     Ok(())
@@ -1826,7 +1827,10 @@ async fn durable_process_worker_config_uses_core_process_registry() -> Result<()
 
     assert!(core.processes().observer().is_ok());
     let config = core.durable_process_worker_config()?;
-    assert!(Arc::ptr_eq(&config.process_registry, &registry));
+    let core_registry = core
+        .process_registry()
+        .expect("process registry must be configured");
+    assert!(Arc::ptr_eq(&config.process_registry, &core_registry));
     assert!(Arc::ptr_eq(&config.trigger_store, &trigger_store));
     Ok(())
 }

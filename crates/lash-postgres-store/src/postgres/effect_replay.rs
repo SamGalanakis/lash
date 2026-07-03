@@ -487,91 +487,10 @@ impl PostgresRuntimeEffectController {
         }
         match envelope.command {
             RuntimeEffectCommand::Process { command } => {
-                let result = self
-                    .execute_process_command(*command, local_executor)
-                    .await?;
+                let result = local_executor.into_process()?.execute(*command).await?;
                 Ok(RuntimeEffectOutcome::Process { result })
             }
             _ => local_executor.execute(envelope).await,
-        }
-    }
-
-    async fn execute_process_command(
-        &self,
-        command: ProcessCommand,
-        local_executor: RuntimeEffectLocalExecutor<'_>,
-    ) -> Result<ProcessEffectOutcome, RuntimeEffectControllerError> {
-        let execution = local_executor.into_process()?;
-        let registry = execution.registry;
-        match command {
-            ProcessCommand::Start {
-                registration,
-                grant,
-                execution_context: _,
-            } => {
-                let registration_id = registration.id.clone();
-                let record = registry.register_process(registration).await?;
-                if let Some(grant) = grant {
-                    registry
-                        .grant_handle(&grant.session_scope, &registration_id, grant.descriptor)
-                        .await?;
-                }
-                Ok(ProcessEffectOutcome::Start { record })
-            }
-            ProcessCommand::List {
-                session_scope,
-                mode,
-            } => {
-                let entries = match mode {
-                    lash_core::ProcessListMode::Live => {
-                        registry.list_live_handle_grants(&session_scope).await?
-                    }
-                    lash_core::ProcessListMode::All => {
-                        registry.list_handle_grants(&session_scope).await?
-                    }
-                };
-                Ok(ProcessEffectOutcome::List { entries })
-            }
-            ProcessCommand::Transfer {
-                from_scope,
-                to_scope,
-                process_ids,
-            } => {
-                registry
-                    .transfer_handle_grants(&from_scope, &to_scope, &process_ids)
-                    .await?;
-                Ok(ProcessEffectOutcome::Transfer)
-            }
-            ProcessCommand::DeleteSession { session_id } => {
-                let report = registry.delete_session_process_state(&session_id).await?;
-                Ok(ProcessEffectOutcome::DeleteSession { report })
-            }
-            ProcessCommand::Await { process_id } => {
-                let output = registry.await_process(&process_id).await?;
-                Ok(ProcessEffectOutcome::Await { output })
-            }
-            ProcessCommand::Cancel { process_id, reason } => {
-                registry
-                    .append_event(
-                        &process_id,
-                        lash_core::ProcessEventAppendRequest::cancel_requested(&process_id, reason),
-                    )
-                    .await?;
-                let record = registry.get_process(&process_id).await.ok_or_else(|| {
-                    PluginError::Session(format!("unknown process `{process_id}`"))
-                })?;
-                Ok(ProcessEffectOutcome::Cancel { record })
-            }
-            ProcessCommand::Signal {
-                process_id,
-                request,
-                ..
-            } => {
-                let result = registry.append_event(&process_id, request).await?;
-                Ok(ProcessEffectOutcome::Signal {
-                    event: result.event,
-                })
-            }
         }
     }
 }

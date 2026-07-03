@@ -469,6 +469,8 @@ async fn custom_wake_events_preserve_typed_provenance_and_replay(
 async fn event_streams_filter_order_and_wait_without_leaking_old_events(
     registry: Arc<dyn ProcessRegistry>,
 ) {
+    let (registry, hub) = crate::watch_process_registry(registry);
+    let awaiter = crate::ProcessAwaiter::new(Arc::clone(&registry), hub);
     registry
         .register_process(registration("proc-stream").with_extra_event_types([
             plain_event_type("producer.line"),
@@ -543,19 +545,19 @@ async fn event_streams_filter_order_and_wait_without_leaking_old_events(
             .is_empty(),
         "wake_events_after must not return the cursor event itself"
     );
-    let immediate = registry
-        .wait_event_after("proc-stream", "producer.line", 1)
+    let immediate = awaiter
+        .await_event("proc-stream", "producer.line", 1)
         .await
         .expect("immediate wait");
     assert_eq!(
         immediate.sequence, 3,
-        "wait_event_after must return an existing matching event immediately"
+        "ProcessAwaiter::await_event must return an existing matching event immediately"
     );
 
-    let waiter_registry = Arc::clone(&registry);
+    let waiter_awaiter = awaiter.clone();
     let waiter = tokio::spawn(async move {
-        waiter_registry
-            .wait_event_after("proc-stream", "producer.future", 3)
+        waiter_awaiter
+            .await_event("proc-stream", "producer.future", 3)
             .await
             .expect("future wait")
     });
@@ -1036,6 +1038,8 @@ async fn terminal_and_cancel_events_require_keys(registry: Arc<dyn ProcessRegist
 }
 
 async fn await_reads_terminal_materialized_output(registry: Arc<dyn ProcessRegistry>) {
+    let (registry, hub) = crate::watch_process_registry(registry);
+    let awaiter = crate::ProcessAwaiter::new(Arc::clone(&registry), hub);
     registry
         .register_process(registration("proc-2"))
         .await
@@ -1052,7 +1056,7 @@ async fn await_reads_terminal_materialized_output(registry: Arc<dyn ProcessRegis
         .expect("complete");
 
     assert_eq!(
-        registry.await_process("proc-2").await.expect("await"),
+        awaiter.await_terminal("proc-2").await.expect("await"),
         ProcessAwaitOutput::Success {
             value: serde_json::json!({ "ok": true }),
             control: None,

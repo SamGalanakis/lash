@@ -31,6 +31,13 @@ impl RuntimeSessionServices {
             scoped_effect_controller,
             cancellation,
         } = run;
+        let awaiter = self
+            .current
+            .host
+            .process_work_driver
+            .as_ref()
+            .map(crate::ProcessWorkDriver::awaiter)
+            .unwrap_or_else(|| crate::ProcessAwaiter::polling(Arc::clone(&registry)));
         let await_parent_invocation = parent_invocation.clone();
         let await_cancellation = cancellation.clone();
         let run_context = ProcessRunContext::builder(self)
@@ -50,6 +57,7 @@ impl RuntimeSessionServices {
             .process_events(
                 registration.id.clone(),
                 registry,
+                awaiter,
                 self.current.store.clone(),
                 self.current.host.session_store_factory.clone(),
                 self.current.host.queued_work_driver.clone(),

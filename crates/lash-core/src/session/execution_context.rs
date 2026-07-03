@@ -25,6 +25,12 @@ pub struct RuntimeExecutionContext<'run> {
     turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
+    /// Work-driver handle for this execution's process wiring, when the
+    /// deployment provides one. Threaded through so in-run process
+    /// operations (e.g. signalling another process) that build their own
+    /// `RuntimeEffectLocalExecutor::processes(..)` call can hand it along
+    /// instead of falling back to hub-less backoff polling.
+    process_work_driver: Option<crate::ProcessWorkDriver>,
     /// Process ids started by THIS execution context. Possession of a handle
     /// the run itself created is sufficient capability to await/cancel it —
     /// run-local children are not session handle grants (the ephemeral
@@ -36,6 +42,7 @@ pub struct RuntimeExecutionContext<'run> {
 pub(super) struct RuntimeExecutionProcessEventContext {
     pub process_id: String,
     pub registry: Arc<dyn crate::ProcessRegistry>,
+    pub awaiter: crate::ProcessAwaiter,
     pub store: Option<Arc<dyn crate::RuntimePersistence>>,
     pub session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
     pub queued_work_driver: Option<crate::QueuedWorkDriver>,
@@ -95,6 +102,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             turn_phase_probe: None,
             turn_event_tx: None,
             cancellation_token: None,
+            process_work_driver: None,
         }
     }
 
@@ -213,6 +221,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         mut self,
         process_id: impl Into<String>,
         registry: Arc<dyn crate::ProcessRegistry>,
+        awaiter: crate::ProcessAwaiter,
         store: Option<Arc<dyn crate::RuntimePersistence>>,
         session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
         queued_work_driver: Option<crate::QueuedWorkDriver>,
@@ -220,6 +229,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         self.process_event_context = Some(RuntimeExecutionProcessEventContext {
             process_id: process_id.into(),
             registry,
+            awaiter,
             store,
             session_store_factory,
             queued_work_driver,
@@ -303,6 +313,14 @@ impl<'run> RuntimeExecutionContext<'run> {
 
     pub(crate) fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.cancellation_token = Some(cancellation_token);
+        self
+    }
+
+    pub(crate) fn with_process_work_driver(
+        mut self,
+        process_work_driver: Option<crate::ProcessWorkDriver>,
+    ) -> Self {
+        self.process_work_driver = process_work_driver;
         self
     }
 
@@ -496,7 +514,10 @@ impl<'run> RuntimeExecutionContext<'run> {
                     invocation,
                     crate::RuntimeEffectCommand::process(command),
                 ),
-                crate::RuntimeEffectLocalExecutor::processes(Arc::clone(&registry)),
+                crate::RuntimeEffectLocalExecutor::processes(
+                    Arc::clone(&registry),
+                    self.process_work_driver.clone(),
+                ),
             )
             .await?;
         match outcome.into_process()? {

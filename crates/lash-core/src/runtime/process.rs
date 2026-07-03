@@ -1,3 +1,4 @@
+mod awaiter;
 mod engine;
 mod events;
 mod materialization;
@@ -13,6 +14,7 @@ mod time;
 mod validation;
 mod wake;
 
+pub use awaiter::{ProcessAttach, ProcessAwaiter, ProcessChangeHub, watch_process_registry};
 pub use engine::{
     ProcessEngine, ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
     ProcessEngineRuntimeContext, ProcessEngineValidationContext,

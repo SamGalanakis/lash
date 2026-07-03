@@ -328,10 +328,11 @@ pub mod remote {
 pub mod process {
     pub use crate::admin::{Processes, SessionProcessAdmin};
     pub use lash_core::{
-        ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessAwaitOutput,
-        ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
-        ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-        ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
+        ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessAttach, ProcessAwaitOutput,
+        ProcessAwaiter, ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest,
+        ProcessCancelSource, ProcessCancelSummary, ProcessChangeHub, ProcessEvent,
+        ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventType,
+        ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
         ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary,
         ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseClaimOutcome,
         ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
@@ -340,7 +341,7 @@ pub mod process {
         ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
         ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery,
         ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver, ProcessWorkSnapshot, SessionScope,
-        SessionScopeId,
+        SessionScopeId, watch_process_registry,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{

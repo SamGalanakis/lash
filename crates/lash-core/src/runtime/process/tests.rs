@@ -307,7 +307,7 @@ async fn delete_session_process_command_revokes_edges_and_reports_orphans() {
                 session_id: "deleted".to_string(),
             }),
         ),
-        crate::RuntimeEffectLocalExecutor::processes(registry_dyn),
+        crate::RuntimeEffectLocalExecutor::processes(registry_dyn, None),
     )
     .await
     .expect("delete session process command");

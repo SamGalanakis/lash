@@ -161,6 +161,7 @@ impl ToolChildExecutionTraceHook {
 pub(crate) struct ToolProcessEventContext {
     process_id: String,
     registry: Arc<dyn crate::ProcessRegistry>,
+    awaiter: crate::ProcessAwaiter,
     store: Option<Arc<dyn crate::RuntimePersistence>>,
     session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
     session_graph: Arc<dyn SessionGraphService>,
@@ -278,6 +279,7 @@ impl<'run> ToolContextBuilder<'run> {
         mut self,
         process_id: impl Into<String>,
         registry: Arc<dyn crate::ProcessRegistry>,
+        awaiter: crate::ProcessAwaiter,
         store: Option<Arc<dyn crate::RuntimePersistence>>,
         session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
         queued_work_driver: Option<crate::QueuedWorkDriver>,
@@ -285,6 +287,7 @@ impl<'run> ToolContextBuilder<'run> {
         self.process_events = Some(ToolProcessEventContext {
             process_id: process_id.into(),
             registry,
+            awaiter,
             store,
             session_store_factory,
             session_graph: Arc::clone(&self.session_graph),
@@ -621,9 +624,11 @@ impl<'run> ToolContext<'run> {
         process_id: impl Into<String>,
         registry: Arc<dyn crate::ProcessRegistry>,
     ) -> Self {
+        let awaiter = crate::ProcessAwaiter::polling(Arc::clone(&registry));
         self.process_events = Some(ToolProcessEventContext {
             process_id: process_id.into(),
             registry,
+            awaiter,
             store: None,
             session_store_factory: None,
             session_graph: Arc::new(crate::plugin::NoopSessionManager),

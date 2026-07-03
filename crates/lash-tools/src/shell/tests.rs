@@ -140,7 +140,10 @@ mod tests {
             process_id: &str,
             _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<lash_core::ProcessAwaitOutput, PluginError> {
-            self.registry.await_process(process_id).await
+            let registry: Arc<dyn lash_core::ProcessRegistry> = self.registry.clone();
+            lash_core::ProcessAwaiter::polling(registry)
+                .await_terminal(process_id)
+                .await
         }
 
         async fn list_visible(

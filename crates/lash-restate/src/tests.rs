@@ -1636,7 +1636,7 @@ async fn restate_controller_schedules_process_workflow_without_running_executor(
                     execution_context: Box::new(ProcessExecutionContext::default()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone(), None),
         )
         .await
         .expect("start");
@@ -1732,7 +1732,7 @@ async fn restate_controller_replays_process_start_await_command_sequence() {
 
     host.execute_effect(
         start(),
-        RuntimeEffectLocalExecutor::processes(registry.clone()),
+        RuntimeEffectLocalExecutor::processes(registry.clone(), None),
     )
     .await
     .expect("first start");
@@ -1743,7 +1743,7 @@ async fn restate_controller_replays_process_start_await_command_sequence() {
     context.resolve_process_terminal(process_id, &terminal);
     host.execute_effect(
         await_terminal(),
-        RuntimeEffectLocalExecutor::processes(registry.clone()),
+        RuntimeEffectLocalExecutor::processes(registry.clone(), None),
     )
     .await
     .expect("first await");
@@ -1755,13 +1755,13 @@ async fn restate_controller_replays_process_start_await_command_sequence() {
     // send -> call -> ... on every replay.
     host.execute_effect(
         start(),
-        RuntimeEffectLocalExecutor::processes(registry.clone()),
+        RuntimeEffectLocalExecutor::processes(registry.clone(), None),
     )
     .await
     .expect("replay start");
     host.execute_effect(
         await_terminal(),
-        RuntimeEffectLocalExecutor::processes(registry.clone()),
+        RuntimeEffectLocalExecutor::processes(registry.clone(), None),
     )
     .await
     .expect("replay await");
@@ -1816,7 +1816,7 @@ async fn restate_controller_start_emits_send_when_external_ref_already_exists() 
                 execution_context: Box::new(ProcessExecutionContext::default()),
             }),
         ),
-        RuntimeEffectLocalExecutor::processes(registry),
+        RuntimeEffectLocalExecutor::processes(registry, None),
     )
     .await
     .expect("start with existing external ref");
@@ -1847,7 +1847,7 @@ async fn run_parent_shaped_start_await_suspend_flow(
                 execution_context: Box::new(ProcessExecutionContext::default()),
             }),
         ),
-        RuntimeEffectLocalExecutor::processes(registry.clone()),
+        RuntimeEffectLocalExecutor::processes(registry.clone(), None),
     )
     .await
     .expect("parent flow start child");
@@ -1859,7 +1859,7 @@ async fn run_parent_shaped_start_await_suspend_flow(
                 process_id: process_id.to_string(),
             }),
         ),
-        RuntimeEffectLocalExecutor::processes(registry),
+        RuntimeEffectLocalExecutor::processes(registry, None),
     )
     .await
     .expect("parent flow await child");
@@ -1974,7 +1974,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
                     execution_context: Box::new(ProcessExecutionContext::default()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone(), None),
         )
         .await
         .expect("start");
@@ -2064,7 +2064,7 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
                     mode: lash_core::ProcessListMode::Live,
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone(), None),
         )
         .await
         .expect("list");
@@ -2087,7 +2087,7 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
                     process_ids: vec!["task-list".to_string()],
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone(), None),
         )
         .await
         .expect("transfer");
@@ -2150,7 +2150,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                     process_id: "task-await-signal".to_string(),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone(), None),
         )
         .await
         .expect("await");
@@ -2183,7 +2183,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                     .with_replay_key("signal:notify"),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone(), None),
         )
         .await
         .expect("signal");
@@ -2228,7 +2228,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
                     .with_replay_key("signal:notify-2"),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone(), None),
         )
         .await
         .expect("second signal");
@@ -2267,7 +2267,7 @@ async fn restate_controller_cancel_requests_call_workflow_cancel() {
                     reason: Some("user requested".to_string()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry),
+            RuntimeEffectLocalExecutor::processes(registry, None),
         )
         .await
         .expect("cancel");
@@ -2375,7 +2375,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
                     execution_context: Box::new(execution_context),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry.clone()),
+            RuntimeEffectLocalExecutor::processes(registry.clone(), None),
         )
         .await
         .expect("start through endpoint smoke");
@@ -2438,7 +2438,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
                     reason: Some("stop-smoke".to_string()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(registry),
+            RuntimeEffectLocalExecutor::processes(registry, None),
         )
         .await
         .expect("cancel through endpoint smoke");
@@ -2810,7 +2810,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                     execution_context: Box::new(ProcessExecutionContext::default()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(Arc::clone(&registry_a)),
+            RuntimeEffectLocalExecutor::processes(Arc::clone(&registry_a), None),
         )
         .await
         .expect("schedule and run process through Restate endpoint");
@@ -2829,8 +2829,8 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].0.process_id, "recover-tool");
     assert_eq!(
-        registry_b
-            .await_process("recover-tool")
+        lash_core::ProcessAwaiter::polling(Arc::clone(&registry_b))
+            .await_terminal("recover-tool")
             .await
             .expect("await recovered terminal process"),
         ProcessAwaitOutput::Success {
@@ -2884,7 +2884,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                     reason: Some("post-rebuild cancel probe".to_string()),
                 }),
             ),
-            RuntimeEffectLocalExecutor::processes(Arc::clone(&registry_b)),
+            RuntimeEffectLocalExecutor::processes(Arc::clone(&registry_b), None),
         )
         .await
         .expect("cancel through reopened process workflow");
@@ -2933,8 +2933,8 @@ async fn sqlite_process_recovery_rebuilds_snapshot_plugin_options_after_worker_r
         .expect("recover snapshot-backed process");
 
     assert_eq!(
-        registry_b
-            .await_process("snapshot-ok")
+        lash_core::ProcessAwaiter::polling(Arc::clone(&registry_b))
+            .await_terminal("snapshot-ok")
             .await
             .expect("await recovered snapshot-backed process"),
         ProcessAwaitOutput::Success {
@@ -2978,8 +2978,8 @@ async fn sqlite_process_recovery_terminalizes_revoked_snapshot_plugin_options() 
         .await
         .expect("recover revoked snapshot-backed process");
 
-    let await_output = registry_b
-        .await_process("snapshot-revoked")
+    let await_output = lash_core::ProcessAwaiter::polling(Arc::clone(&registry_b))
+        .await_terminal("snapshot-revoked")
         .await
         .expect("await terminal revoked snapshot-backed process");
     let ProcessAwaitOutput::Failure { code, message, .. } = await_output else {
@@ -3144,8 +3144,8 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
         .expect("recover non-terminal trigger-started process");
 
     assert_eq!(
-        registry_b
-            .await_process("trigger-notify")
+        lash_core::ProcessAwaiter::polling(Arc::clone(&registry_b))
+            .await_terminal("trigger-notify")
             .await
             .expect("await recovered trigger-started process"),
         ProcessAwaitOutput::Success {
@@ -3170,8 +3170,8 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
         .await
         .expect("second recovery sweep is idempotent");
     assert_eq!(
-        registry_b
-            .await_process("trigger-notify")
+        lash_core::ProcessAwaiter::polling(Arc::clone(&registry_b))
+            .await_terminal("trigger-notify")
             .await
             .expect("await after idempotent re-sweep"),
         ProcessAwaitOutput::Success {
@@ -3303,15 +3303,19 @@ async fn process_deployment_driver_and_workflow_share_registry() {
     let registry = process_registry();
     let deployment = RestateProcessDeployment::new("http://127.0.0.1:8080", Arc::clone(&registry));
     let driver = deployment.process_work_driver();
+    let driver_registry = driver.process_registry();
 
-    assert!(Arc::ptr_eq(&driver.process_registry(), &registry));
+    assert!(Arc::ptr_eq(&driver.process_registry(), &driver_registry));
 
-    let worker = DurableProcessWorker::new(lash_core::DurableProcessWorkerConfig::new(
-        Arc::new(lash_core::PluginHost::empty()),
-        lash_core::RuntimeHostConfig::in_memory(),
-        Arc::new(lash_core::InMemorySessionStoreFactory::new()),
-        Arc::clone(&registry),
-    ));
+    let worker = DurableProcessWorker::new(
+        lash_core::DurableProcessWorkerConfig::new(
+            Arc::new(lash_core::PluginHost::empty()),
+            lash_core::RuntimeHostConfig::in_memory(),
+            Arc::new(lash_core::InMemorySessionStoreFactory::new()),
+            Arc::clone(&driver_registry),
+        )
+        .with_change_hub(driver.change_hub()),
+    );
     let service = deployment.workflow(worker).serve();
     let discovery = discover_service(&service);
     let endpoint = Endpoint::builder().bind(service).build();
@@ -3608,6 +3612,90 @@ async fn restate_ingress_client_accepts_previously_accepted_send() {
     server.await.expect("capture server");
 
     assert_eq!(invocation_id.as_str(), "inv_duplicate");
+}
+
+#[tokio::test]
+async fn restate_ingress_client_calls_workflow_and_decodes_output() {
+    let (base_url, captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "200 OK",
+        body: r#"{"type":"success","value":{"ok":true}}"#,
+    }])
+    .await;
+    let client = RestateIngressClient::new(base_url);
+
+    let output: ProcessAwaitOutput = client
+        .call_workflow_json(
+            "LashProcessWorkflow",
+            "process-1",
+            "await_terminal",
+            &RestateProcessAwaitRequest {
+                process_id: "process-1".to_string(),
+            },
+        )
+        .await
+        .expect("call workflow");
+    server.await.expect("capture server");
+
+    assert_eq!(
+        output,
+        ProcessAwaitOutput::Success {
+            value: serde_json::json!({ "ok": true }),
+            control: None,
+        }
+    );
+    let requests = captured.lock().expect("captured lock");
+    assert!(
+        requests[0].starts_with("POST /LashProcessWorkflow/process-1/await_terminal "),
+        "unexpected request: {}",
+        requests[0]
+    );
+    assert!(!requests[0].contains("/send "));
+}
+
+#[tokio::test]
+async fn restate_process_attach_calls_await_terminal_ingress() {
+    let (base_url, _captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "200 OK",
+        body: r#"{"type":"success","value":"attached"}"#,
+    }])
+    .await;
+    let runner = RestateProcessIngressRunner::new(base_url, process_registry());
+
+    let output = runner
+        .await_terminal("process-1")
+        .await
+        .expect("attach await");
+    server.await.expect("capture server");
+
+    assert_eq!(
+        output,
+        ProcessAwaitOutput::Success {
+            value: serde_json::json!("attached"),
+            control: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn restate_process_attach_maps_ingress_error_to_plugin_error() {
+    let (base_url, _captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "500 Internal Server Error",
+        body: r#"{"message":"boom"}"#,
+    }])
+    .await;
+    let runner = RestateProcessIngressRunner::new(base_url, process_registry());
+
+    let err = runner
+        .await_terminal("process-1")
+        .await
+        .expect_err("attach error");
+    server.await.expect("capture server");
+
+    assert!(
+        err.to_string()
+            .contains("ingress await for process `process-1` failed")
+    );
+    assert!(err.to_string().contains("500 Internal Server Error"));
 }
 
 #[tokio::test]

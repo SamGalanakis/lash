@@ -33,20 +33,14 @@ impl SqliteProcessRegistry {
         let conn = SqliteConnection::open(path).await?;
         ensure_process_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::File).await?;
-        Ok(Self {
-            conn,
-            notify: tokio::sync::Notify::new(),
-        })
+        Ok(Self { conn })
     }
 
     pub async fn memory() -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open_in_memory().await?;
         ensure_process_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::Memory).await?;
-        Ok(Self {
-            conn,
-            notify: tokio::sync::Notify::new(),
-        })
+        Ok(Self { conn })
     }
 
     fn load_process_conn(
@@ -319,7 +313,6 @@ impl ProcessRegistry for SqliteProcessRegistry {
             })
             .await
             .map_err(process_sqlite_error)??;
-        self.notify.notify_waiters();
         Ok(record)
     }
 
@@ -329,7 +322,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         external_ref: ProcessExternalRef,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let process_id = process_id.to_string();
-        let (record, changed) = self
+        let (record, _changed) = self
             .conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -357,9 +350,6 @@ impl ProcessRegistry for SqliteProcessRegistry {
             })
             .await
             .map_err(process_sqlite_error)??;
-        if changed {
-            self.notify.notify_waiters();
-        }
         Ok(record)
     }
 
@@ -704,7 +694,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         request: ProcessEventAppendRequest,
     ) -> Result<ProcessEventAppendResult, lash_core::PluginError> {
         let process_id = process_id.to_string();
-        let (result, appended) = self
+        let (result, _appended) = self
             .conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -809,9 +799,6 @@ impl ProcessRegistry for SqliteProcessRegistry {
             })
             .await
             .map_err(process_sqlite_error)??;
-        if appended {
-            self.notify.notify_waiters();
-        }
         Ok(result)
     }
 
@@ -963,46 +950,6 @@ impl ProcessRegistry for SqliteProcessRegistry {
             .into_iter()
             .filter(|event| event.semantics.wake.is_some() && !acked.contains(&event.sequence))
             .collect())
-    }
-
-    async fn wait_event_after(
-        &self,
-        process_id: &str,
-        event_type: &str,
-        after_sequence: u64,
-    ) -> Result<ProcessEvent, lash_core::PluginError> {
-        loop {
-            if let Some(event) = self
-                .events_after(process_id, after_sequence)
-                .await?
-                .into_iter()
-                .find(|event| event.event_type == event_type)
-            {
-                return Ok(event);
-            }
-            tokio::select! {
-                _ = self.notify.notified() => {}
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-            }
-        }
-    }
-
-    async fn await_process(
-        &self,
-        process_id: &str,
-    ) -> Result<ProcessAwaitOutput, lash_core::PluginError> {
-        loop {
-            let record = self.get_process(process_id).await.ok_or_else(|| {
-                lash_core::PluginError::Session(format!("unknown process `{process_id}`"))
-            })?;
-            if let Some(await_output) = record.status.await_output() {
-                return Ok(await_output.clone());
-            }
-            tokio::select! {
-                _ = self.notify.notified() => {}
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-            }
-        }
     }
 
     async fn complete_process(

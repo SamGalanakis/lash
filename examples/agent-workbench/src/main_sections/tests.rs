@@ -1057,9 +1057,10 @@ finish initial
         assert_remote_trigger_emit_report_round_trip(&report);
 
         assert_eq!(report.started_process_ids.len(), 1);
+        let awaiter = lash::process::ProcessAwaiter::polling(Arc::clone(&process_registry));
         tokio::time::timeout(
             Duration::from_secs(5),
-            process_registry.await_process(&report.started_process_ids[0]),
+            awaiter.await_terminal(&report.started_process_ids[0]),
         )
         .await
         .expect("trigger process should finish promptly")
@@ -2109,8 +2110,8 @@ finish initial
             .expect("reopen session");
         let report = emit_test_button_trigger(&core, ButtonChoice::Blue).await;
         assert_eq!(report.started_process_ids.len(), 1);
-        process_registry
-            .await_process(&report.started_process_ids[0])
+        lash::process::ProcessAwaiter::polling(Arc::clone(&process_registry))
+            .await_terminal(&report.started_process_ids[0])
             .await
             .expect("trigger process should finish");
 
