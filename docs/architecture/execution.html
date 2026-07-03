@@ -129,7 +129,7 @@ let result = session
         <div class="section" id="background-work">
           <div class="section-header">
             <h2>Background Work</h2>
-            <p>Subagents are sessions. Started async tool calls are explicit process handles backed by the installed <code>ProcessRegistry</code>.</p>
+            <p>Subagents are sessions. Started async tool calls are explicit process handles backed by the installed process work driver and registry.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Subagent and process path</div>
@@ -139,7 +139,7 @@ flowchart LR
   Provider --> Host["ToolContext sessions/processes<br/>+ process events"]
   Host --> Manager["runtime session manager"]
   Manager --> Child["start_turn -> stream_turn"]
-  Manager --> Registry["process registry"]
+  Manager --> Registry["process driver<br/>+ registry"]
   Registry --> Handles["processes.list<br/>tool.*"]
   Handles --> Await["await / cancel / submit_error"]
   Child --> Parent["usage relay + final result"]

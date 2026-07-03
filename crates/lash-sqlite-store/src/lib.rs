@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -119,7 +119,6 @@ pub struct Store {
 /// handle visibility across all sessions sharing the registry.
 pub struct SqliteProcessRegistry {
     conn: SqliteConnection,
-    notify: tokio::sync::Notify,
 }
 
 fn sqlite_error(err: rusqlite::Error) -> StoreError {
@@ -675,9 +674,11 @@ mod tests {
                 .expect("complete");
         }
 
-        let registry = SqliteProcessRegistry::open(&path)
-            .await
-            .expect("reopen registry");
+        let registry = Arc::new(
+            SqliteProcessRegistry::open(&path)
+                .await
+                .expect("reopen registry"),
+        ) as Arc<dyn lash_core::ProcessRegistry>;
         let session_scope = lash_core::SessionScope::new("session");
         let record = registry
             .get_process("proc-persist")
@@ -690,8 +691,8 @@ mod tests {
             lash_core::ProcessOriginator::session(session_scope.clone())
         );
         assert_eq!(
-            registry
-                .await_process("proc-persist")
+            lash_core::ProcessAwaiter::polling(Arc::clone(&registry))
+                .await_terminal("proc-persist")
                 .await
                 .expect("await persisted"),
             ProcessAwaitOutput::Success {

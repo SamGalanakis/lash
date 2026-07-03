@@ -382,8 +382,9 @@ finish "registered"
     }
 
     async fn await_success(registry: &Arc<dyn lash_core::ProcessRegistry>, process_id: &str) {
+        let awaiter = lash_core::ProcessAwaiter::polling(Arc::clone(registry));
         let outcome =
-            tokio::time::timeout(Duration::from_secs(10), registry.await_process(process_id))
+            tokio::time::timeout(Duration::from_secs(10), awaiter.await_terminal(process_id))
                 .await
                 .expect("worker runs the process to terminal promptly")
                 .expect("await terminal output");
@@ -532,12 +533,8 @@ finish "registered"
             )
             .await
             .expect("emit trigger occurrence");
-        let process_records = registry
-            .list_non_terminal()
-            .await
-            .expect("trigger-triggered process records");
-        assert_eq!(process_records.len(), 1);
-        let process_id = process_records[0].id.clone();
+        assert_eq!(report.started_process_ids.len(), 1);
+        let process_id = report.started_process_ids[0].clone();
         let record = registry
             .get_process(&process_id)
             .await

@@ -1846,7 +1846,7 @@
         <form class="account-add" id="accountAddForm">
           <input id="accountNameInput" placeholder="add account, e.g. Work" autocomplete="off"
                  spellcheck="false" aria-label="New mock email account name"
-                 title="Connect a mock account; the agent sees it as gmail.<name>." />
+                 title="Connect a mock account; the agent sees it as inbox.<name>." />
           <button type="submit" title="Connect a mock email account">add account</button>
         </form>
         <span class="accounts-count" id="accountsCount">0 accounts</span>
@@ -2806,7 +2806,7 @@
       if (!accounts.length) {
         const empty = document.createElement("p");
         empty.className = "accounts-empty";
-        empty.textContent = "no accounts yet. add one above to expose it to the agent as gmail.<name>.";
+        empty.textContent = "no accounts yet. add one above to expose it to the agent as inbox.<name>.";
         accountsGrid.appendChild(empty);
         return;
       }
@@ -2958,7 +2958,7 @@
     }
 
     async function deleteAccount(slug, displayName) {
-      if (!window.confirm("Delete account \"" + displayName + "\"? The gmail." + slug +
+      if (!window.confirm("Delete account \"" + displayName + "\"? The inbox." + slug +
           " authority disappears and any trigger using it will stop matching.")) return;
       showAccountsError("");
       try {

@@ -10,6 +10,12 @@ use super::model::{
 };
 
 /// Durability-neutral process registry.
+///
+/// Process waits are coordination behavior and live on
+/// [`ProcessWorkDriver`](crate::ProcessWorkDriver) /
+/// [`ProcessAwaiter`](crate::ProcessAwaiter), not on persistence
+/// implementations. Registry methods are point reads and writes only. See
+/// `docs/adr/0016-process-waits-live-on-the-work-driver-seam.md`.
 #[async_trait::async_trait]
 pub trait ProcessRegistry: Send + Sync {
     /// Durability tier this process registry provides; defaults to
@@ -148,15 +154,6 @@ pub trait ProcessRegistry: Send + Sync {
         process_id: &str,
         after_sequence: u64,
     ) -> Result<Vec<ProcessEvent>, PluginError>;
-
-    async fn wait_event_after(
-        &self,
-        process_id: &str,
-        event_type: &str,
-        after_sequence: u64,
-    ) -> Result<ProcessEvent, PluginError>;
-
-    async fn await_process(&self, process_id: &str) -> Result<ProcessAwaitOutput, PluginError>;
 
     async fn complete_process(
         &self,

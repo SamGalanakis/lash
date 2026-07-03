@@ -24,13 +24,13 @@ use lash_core::store::{
 use lash_core::{
     AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
     AwaitEventResolver, BlobRef, DeliveryPolicy, DurabilityTier, EffectHost, ExecutionScope,
-    GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey, ProcessAwaitOutput, ProcessCommand,
-    ProcessEffectOutcome, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
-    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry, QueuedWorkStore,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
-    RuntimePersistence, ScopedEffectController, SessionCommitStore, SessionExecutionLease,
+    GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey, ProcessAwaitOutput, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseCompletion,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, QueuedWorkStore, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimePersistence,
+    ScopedEffectController, SessionCommitStore, SessionExecutionLease,
     SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
     SessionExecutionLeaseStore, SessionMeta, SessionNodeRecord, SessionReadScope, SessionScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, StoreMaintenance,
@@ -74,7 +74,6 @@ pub struct PostgresSessionStore {
 #[derive(Clone)]
 pub struct PostgresProcessRegistry {
     pool: PgPool,
-    notify: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]
@@ -208,7 +207,6 @@ impl PostgresStorage {
     pub fn process_registry(&self) -> PostgresProcessRegistry {
         PostgresProcessRegistry {
             pool: self.pool.clone(),
-            notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 

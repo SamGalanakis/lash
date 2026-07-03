@@ -357,17 +357,11 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 wake_delivery,
                 occurred_at_ms,
             } => {
-                let repaired = if let Some(status) = repair_status {
+                if let Some(status) = repair_status {
                     lash_core::apply_process_status_projection(&mut record, status, occurred_at_ms);
                     save_process_tx(&mut tx, &record).await?;
-                    true
-                } else {
-                    false
-                };
-                tx.commit().await.map_err(plugin_sqlx_error)?;
-                if repaired {
-                    self.notify.notify_waiters();
                 }
+                tx.commit().await.map_err(plugin_sqlx_error)?;
                 Ok(ProcessEventAppendResult {
                     event,
                     wake_delivery,
@@ -404,7 +398,6 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 }
                 save_process_tx(&mut tx, &record).await?;
                 tx.commit().await.map_err(plugin_sqlx_error)?;
-                self.notify.notify_waiters();
                 Ok(ProcessEventAppendResult {
                     event,
                     wake_delivery,
@@ -518,43 +511,6 @@ impl ProcessRegistry for PostgresProcessRegistry {
             .collect())
     }
 
-    async fn wait_event_after(
-        &self,
-        process_id: &str,
-        event_type: &str,
-        after_sequence: u64,
-    ) -> Result<ProcessEvent, PluginError> {
-        loop {
-            if let Some(event) = self
-                .events_after(process_id, after_sequence)
-                .await?
-                .into_iter()
-                .find(|event| event.event_type == event_type)
-            {
-                return Ok(event);
-            }
-            tokio::select! {
-                _ = self.notify.notified() => {}
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-            }
-        }
-    }
-
-    async fn await_process(&self, process_id: &str) -> Result<ProcessAwaitOutput, PluginError> {
-        loop {
-            let record = load_process(&self.pool, process_id)
-                .await?
-                .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
-            if let Some(await_output) = record.status.await_output() {
-                return Ok(await_output.clone());
-            }
-            tokio::select! {
-                _ = self.notify.notified() => {}
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-            }
-        }
-    }
-
     async fn complete_process(
         &self,
         process_id: &str,
@@ -599,7 +555,6 @@ impl ProcessRegistry for PostgresProcessRegistry {
         record.updated_at_ms = current_epoch_ms();
         save_process_tx(&mut tx, &record).await?;
         tx.commit().await.map_err(plugin_sqlx_error)?;
-        self.notify.notify_waiters();
         Ok(record)
     }
 
@@ -612,7 +567,6 @@ impl ProcessRegistry for PostgresProcessRegistry {
         record.updated_at_ms = current_epoch_ms();
         save_process_tx(&mut tx, &record).await?;
         tx.commit().await.map_err(plugin_sqlx_error)?;
-        self.notify.notify_waiters();
         Ok(record)
     }
 

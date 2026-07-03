@@ -543,6 +543,87 @@ pub struct ProcessLocalExecution {
     pub process_work_driver: Option<crate::ProcessWorkDriver>,
 }
 
+impl ProcessLocalExecution {
+    pub async fn execute(
+        self,
+        command: ProcessCommand,
+    ) -> Result<ProcessEffectOutcome, RuntimeEffectControllerError> {
+        let Self {
+            registry,
+            process_work_driver,
+        } = self;
+        match command {
+            ProcessCommand::Start {
+                registration,
+                grant,
+                execution_context: _,
+            } => {
+                let record =
+                    InlineRuntimeEffectController::start_process(registry, registration, grant)
+                        .await?;
+                if let Some(driver) = process_work_driver.as_ref() {
+                    driver.claim_and_run_pending("process_start").await?;
+                }
+                Ok(ProcessEffectOutcome::Start { record })
+            }
+            ProcessCommand::List {
+                session_scope,
+                mode,
+            } => {
+                let entries = match mode {
+                    crate::ProcessListMode::Live => {
+                        registry.list_live_handle_grants(&session_scope).await?
+                    }
+                    crate::ProcessListMode::All => {
+                        registry.list_handle_grants(&session_scope).await?
+                    }
+                };
+                Ok(ProcessEffectOutcome::List { entries })
+            }
+            ProcessCommand::Transfer {
+                from_scope,
+                to_scope,
+                process_ids,
+            } => {
+                registry
+                    .transfer_handle_grants(&from_scope, &to_scope, &process_ids)
+                    .await?;
+                Ok(ProcessEffectOutcome::Transfer)
+            }
+            ProcessCommand::DeleteSession { session_id } => {
+                let report = registry.delete_session_process_state(&session_id).await?;
+                Ok(ProcessEffectOutcome::DeleteSession { report })
+            }
+            ProcessCommand::Await { process_id } => {
+                let output = if let Some(driver) = process_work_driver.as_ref() {
+                    driver.await_terminal(&process_id).await?
+                } else {
+                    crate::ProcessAwaiter::polling(registry)
+                        .await_terminal(&process_id)
+                        .await?
+                };
+                Ok(ProcessEffectOutcome::Await { output })
+            }
+            ProcessCommand::Cancel { process_id, reason } => {
+                let record = InlineRuntimeEffectController
+                    .request_process_cancel(registry, &process_id, reason)
+                    .await?;
+                Ok(ProcessEffectOutcome::Cancel { record })
+            }
+            ProcessCommand::Signal {
+                process_id,
+                request,
+                ..
+            } => {
+                let result = registry.append_event(&process_id, request).await?;
+                Ok(ProcessEffectOutcome::Signal {
+                    event: result.event,
+                })
+            }
+        }
+    }
+}
+
 pub(super) struct LocalTurnEffectRunner<'a, 'run> {
     driver: &'a mut RuntimeTurnDriver<'run>,
     machine: &'a mut crate::TurnMachine,
@@ -662,11 +743,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
-    pub fn processes(registry: Arc<dyn ProcessRegistry>) -> Self {
-        Self::processes_with_driver(registry, None)
-    }
-
-    pub fn processes_with_driver(
+    pub fn processes(
         registry: Arc<dyn ProcessRegistry>,
         process_work_driver: Option<crate::ProcessWorkDriver>,
     ) -> Self {
@@ -1163,18 +1240,14 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
             }
             RuntimeEffectCommand::Process { command } => {
                 let execution = local_executor.into_process()?;
-                let registry = execution.registry;
-                let process_work_driver = execution.process_work_driver;
-                let result = tokio::task::spawn(async move {
-                    Self::execute_process_command(registry, process_work_driver, *command).await
-                })
-                .await
-                .map_err(|err| {
-                    RuntimeEffectControllerError::new(
-                        "runtime_effect_process_task_join",
-                        format!("inline process effect task failed: {err}"),
-                    )
-                })??;
+                let result = tokio::task::spawn(async move { execution.execute(*command).await })
+                    .await
+                    .map_err(|err| {
+                        RuntimeEffectControllerError::new(
+                            "runtime_effect_process_task_join",
+                            format!("inline process effect task failed: {err}"),
+                        )
+                    })??;
                 Ok(RuntimeEffectOutcome::Process { result })
             }
             _ => local_executor.execute(envelope).await,
@@ -1316,74 +1389,6 @@ impl InlineRuntimeEffectController {
             .get_process(process_id)
             .await
             .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))
-    }
-
-    async fn execute_process_command(
-        registry: Arc<dyn crate::ProcessRegistry>,
-        process_work_driver: Option<crate::ProcessWorkDriver>,
-        command: ProcessCommand,
-    ) -> Result<ProcessEffectOutcome, RuntimeEffectControllerError> {
-        match command {
-            ProcessCommand::Start {
-                registration,
-                grant,
-                execution_context: _,
-            } => {
-                let record = Self::start_process(registry, registration, grant).await?;
-                if let Some(driver) = process_work_driver.as_ref() {
-                    driver.claim_and_run_pending("process_start").await?;
-                }
-                Ok(ProcessEffectOutcome::Start { record })
-            }
-            ProcessCommand::List {
-                session_scope,
-                mode,
-            } => {
-                let entries = match mode {
-                    crate::ProcessListMode::Live => {
-                        registry.list_live_handle_grants(&session_scope).await?
-                    }
-                    crate::ProcessListMode::All => {
-                        registry.list_handle_grants(&session_scope).await?
-                    }
-                };
-                Ok(ProcessEffectOutcome::List { entries })
-            }
-            ProcessCommand::Transfer {
-                from_scope,
-                to_scope,
-                process_ids,
-            } => {
-                registry
-                    .transfer_handle_grants(&from_scope, &to_scope, &process_ids)
-                    .await?;
-                Ok(ProcessEffectOutcome::Transfer)
-            }
-            ProcessCommand::DeleteSession { session_id } => {
-                let report = registry.delete_session_process_state(&session_id).await?;
-                Ok(ProcessEffectOutcome::DeleteSession { report })
-            }
-            ProcessCommand::Await { process_id } => {
-                let output = registry.await_process(&process_id).await?;
-                Ok(ProcessEffectOutcome::Await { output })
-            }
-            ProcessCommand::Cancel { process_id, reason } => {
-                let record = InlineRuntimeEffectController
-                    .request_process_cancel(registry, &process_id, reason)
-                    .await?;
-                Ok(ProcessEffectOutcome::Cancel { record })
-            }
-            ProcessCommand::Signal {
-                process_id,
-                request,
-                ..
-            } => {
-                let result = registry.append_event(&process_id, request).await?;
-                Ok(ProcessEffectOutcome::Signal {
-                    event: result.event,
-                })
-            }
-        }
     }
 }
 

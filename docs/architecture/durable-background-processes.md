@@ -6,7 +6,8 @@ is the *sole* executor of every non-terminal process, behind a single-owner
 `ProcessLease`. There is no off-lease in-process spawn — out-of-turn starts no
 longer run on a detached `tokio::spawn`. The registry's non-terminal rows are the
 durable work queue, and a `ProcessWorkDriver` drains them **after a successful
-start and once on session open**. So the *first* run of an out-of-turn start is
+start and once on session open**. The same driver/awaiter seam owns process
+waits; registries remain point-read/write state stores. So the *first* run of an out-of-turn start is
 itself lease-protected and prompt (the driver is invoked directly after the
 start), not merely eventually recovered by the next restart's sweep. This closes
 the turn-vs-trigger asymmetry
@@ -153,6 +154,15 @@ This deletes the asymmetry: a trigger-started process is identically durable to 
 turn-started one, because both are just registered intent that the durable worker
 executes. "How it was started" leaves the durability story entirely.
 
+Process waiting follows the same split. `ProcessRegistry` exposes state only;
+terminal and event waits live in `ProcessWorkDriver` / `ProcessAwaiter` (see
+`docs/adr/0016-process-waits-live-on-the-work-driver-seam.md`). Inline
+deployments get prompt local wakeups from the watched-registry change hub and
+bounded point-read backoff otherwise. External deployments can attach waits to
+their own durable execution backend; the Restate driver attaches terminal waits
+to the `LashProcessWorkflow/{process_id}/await_terminal` promise through
+ingress instead of polling the store.
+
 ## The primitive (a process-side mirror of the turn machinery)
 
 A generalization of code that already existed for turns — not a new subsystem:
@@ -252,7 +262,9 @@ eagerly at `build()` (failing loudly with
 factory is wired) and the inline driver is constructed lazily exactly once on
 the first `session().open()` that needs it — while `.process_work_driver(...)`
 installs an externally owned driver whose registry becomes the core's process
-registry, so no inline driver is constructed. A Restate deployment builds a
+registry, so no inline driver is constructed. The facade wraps raw inline
+registries once with the watched-registry decorator so `env.process_registry`
+and `driver.process_registry()` refer to the same decorated state store. A Restate deployment builds a
 `RestateProcessDeployment` and passes its `process_work_driver()` into the core
 (`lash-restate/src/lib.rs`).
 
@@ -300,7 +312,10 @@ terminal are carried as request config / tool-access, not lost.
   worker-time Lashlang Host Requirements validation from captured Process Plugin
   Options.
 - `crates/lash-core/src/runtime/process/registry.rs` — `ProcessRegistry`
-  defaulted `durability_tier()` + `list_non_terminal()` and the lease ops.
+  defaulted `durability_tier()` + `list_non_terminal()` and the lease ops;
+  state only, no wait loops.
+- `crates/lash-core/src/runtime/process/awaiter.rs` — `ProcessChangeHub`,
+  watched-registry decorator, `ProcessAwaiter`, and `ProcessAttach`.
 - `crates/lash-core/src/runtime/session_manager/process_runners/control.rs` —
   explicit-controller routing (the silent fallback removed), register-and-poke
   seam after a successful `Start`, + out-of-turn idempotency comment.

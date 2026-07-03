@@ -970,7 +970,10 @@ impl TriggerRouter {
                     invocation,
                     crate::RuntimeEffectCommand::process(command),
                 ),
-                crate::RuntimeEffectLocalExecutor::processes(process_registry),
+                crate::RuntimeEffectLocalExecutor::processes(
+                    process_registry,
+                    self.process_work_driver.clone(),
+                ),
             )
             .await?;
         match outcome {

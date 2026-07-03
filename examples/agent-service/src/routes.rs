@@ -166,6 +166,23 @@ pub(crate) async fn list_messages(
         .map(Json)
 }
 
+/// Debug read of the app-owned board: the same authoritative state the board
+/// tools operate on, so an external harness can verify the UI against the
+/// backend instead of trusting either alone.
+pub(crate) async fn chat_board(
+    State(state): State<AppStateData>,
+    AxumPath(chat_id): AxumPath<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    state
+        .with_db(move |db| {
+            db.require_chat(&chat_id)?;
+            let board = db.chat_board(&chat_id)?;
+            Ok(crate::board::board_snapshot(&board))
+        })
+        .await
+        .map(Json)
+}
+
 pub(crate) async fn send_message(
     State(state): State<AppStateData>,
     AxumPath(chat_id): AxumPath<String>,

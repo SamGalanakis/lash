@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use super::DurableProcessWorker;
-use super::process::ProcessRegistry;
-use crate::PluginError;
+use super::process::{
+    ProcessAttach, ProcessAwaiter, ProcessChangeHub, ProcessEvent, ProcessRegistry,
+    watch_process_registry,
+};
+use crate::{PluginError, ProcessAwaitOutput};
 
 /// Registry and run handle for process work owned outside
 /// [`LashCore`](https://docs.rs/lash/latest/lash/struct.LashCore.html).
@@ -15,14 +18,35 @@ use crate::PluginError;
 pub struct ProcessWorkDriver {
     registry: Arc<dyn ProcessRegistry>,
     run_handle: Arc<dyn ProcessRunHandle>,
+    awaiter: ProcessAwaiter,
+    attach: Option<Arc<dyn ProcessAttach>>,
+    hub: ProcessChangeHub,
 }
 
 impl ProcessWorkDriver {
     pub fn new(registry: Arc<dyn ProcessRegistry>, run_handle: Arc<dyn ProcessRunHandle>) -> Self {
+        let (registry, hub) = watch_process_registry(registry);
+        Self::from_watched(registry, hub, run_handle)
+    }
+
+    pub fn from_watched(
+        registry: Arc<dyn ProcessRegistry>,
+        hub: ProcessChangeHub,
+        run_handle: Arc<dyn ProcessRunHandle>,
+    ) -> Self {
+        let awaiter = ProcessAwaiter::new(Arc::clone(&registry), hub.clone());
         Self {
             registry,
             run_handle,
+            awaiter,
+            attach: None,
+            hub,
         }
+    }
+
+    pub fn with_attach(mut self, attach: Arc<dyn ProcessAttach>) -> Self {
+        self.attach = Some(attach);
+        self
     }
 
     pub fn inline(registry: Arc<dyn ProcessRegistry>, worker: DurableProcessWorker) -> Self {
@@ -31,6 +55,43 @@ impl ProcessWorkDriver {
 
     pub fn process_registry(&self) -> Arc<dyn ProcessRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    pub fn change_hub(&self) -> ProcessChangeHub {
+        self.hub.clone()
+    }
+
+    pub fn awaiter(&self) -> ProcessAwaiter {
+        self.awaiter.clone()
+    }
+
+    pub async fn await_terminal(
+        &self,
+        process_id: &str,
+    ) -> Result<ProcessAwaitOutput, PluginError> {
+        let record = self
+            .registry
+            .get_process(process_id)
+            .await
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        if let Some(output) = record.status.await_output() {
+            return Ok(output.clone());
+        }
+        if let Some(attach) = self.attach.as_ref() {
+            return attach.await_terminal(process_id).await;
+        }
+        self.awaiter.await_terminal(process_id).await
+    }
+
+    pub async fn await_event(
+        &self,
+        process_id: &str,
+        event_type: &str,
+        after_sequence: u64,
+    ) -> Result<ProcessEvent, PluginError> {
+        self.awaiter
+            .await_event(process_id, event_type, after_sequence)
+            .await
     }
 
     pub async fn claim_and_run_pending(&self, reason: &str) -> Result<(), PluginError> {

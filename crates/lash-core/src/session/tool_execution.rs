@@ -750,6 +750,7 @@ impl RuntimeExecutionContext<'_> {
                     tool_context = tool_context.process_events(
                         process_events.process_id.clone(),
                         std::sync::Arc::clone(&process_events.registry),
+                        process_events.awaiter.clone(),
                         process_events.store.clone(),
                         process_events.session_store_factory.clone(),
                         process_events.queued_work_driver.clone(),
@@ -903,6 +904,7 @@ impl RuntimeExecutionContext<'_> {
                     tool_context = tool_context.process_events(
                         process_events.process_id.clone(),
                         std::sync::Arc::clone(&process_events.registry),
+                        process_events.awaiter.clone(),
                         process_events.store.clone(),
                         process_events.session_store_factory.clone(),
                         process_events.queued_work_driver.clone(),
@@ -977,6 +979,7 @@ impl RuntimeExecutionContext<'_> {
             tool_context = tool_context.process_events(
                 process_events.process_id.clone(),
                 std::sync::Arc::clone(&process_events.registry),
+                process_events.awaiter.clone(),
                 process_events.store.clone(),
                 process_events.session_store_factory.clone(),
                 process_events.queued_work_driver.clone(),

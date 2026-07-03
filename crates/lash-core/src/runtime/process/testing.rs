@@ -52,7 +52,6 @@ struct ManagedProcessRecord {
     events: Vec<ProcessEvent>,
     keyed_events: HashMap<String, (String, ProcessEvent)>,
     acked_wakes: HashSet<u64>,
-    notify: Arc<tokio::sync::Notify>,
 }
 
 impl TestLocalProcessRegistry {
@@ -95,7 +94,6 @@ impl TestLocalProcessRegistry {
                 events: Vec::new(),
                 keyed_events: HashMap::new(),
                 acked_wakes: HashSet::new(),
-                notify: Arc::new(tokio::sync::Notify::new()),
             },
         );
         Ok(record)
@@ -335,9 +333,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             }
         }
         for record in managed.values_mut() {
-            if record.record.clear_wake_target_for_session(session_id) {
-                record.notify.notify_waiters();
-            }
+            let _ = record.record.clear_wake_target_for_session(session_id);
         }
         orphaned_process_ids.sort();
         orphaned_process_ids.dedup();
@@ -389,7 +385,6 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                         status,
                         occurred_at_ms,
                     );
-                    record.notify.notify_waiters();
                 }
                 Ok(ProcessEventAppendResult {
                     event,
@@ -418,7 +413,6 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                         .keyed_events
                         .insert(replay.key, (payload_hash, event.clone()));
                 }
-                record.notify.notify_waiters();
                 Ok(ProcessEventAppendResult {
                     event,
                     wake_delivery,
@@ -467,52 +461,6 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             .collect())
     }
 
-    async fn wait_event_after(
-        &self,
-        process_id: &str,
-        event_type: &str,
-        after_sequence: u64,
-    ) -> Result<ProcessEvent, PluginError> {
-        loop {
-            let notify = {
-                let managed = self.managed.lock().await;
-                let Some(record) = managed.get(process_id) else {
-                    return Err(PluginError::Session(format!(
-                        "unknown process `{process_id}`"
-                    )));
-                };
-                if let Some(event) = record
-                    .events
-                    .iter()
-                    .find(|event| event.sequence > after_sequence && event.event_type == event_type)
-                    .cloned()
-                {
-                    return Ok(event);
-                }
-                Arc::clone(&record.notify)
-            };
-            notify.notified().await;
-        }
-    }
-
-    async fn await_process(&self, process_id: &str) -> Result<ProcessAwaitOutput, PluginError> {
-        loop {
-            let notify = {
-                let managed = self.managed.lock().await;
-                let Some(record) = managed.get(process_id) else {
-                    return Err(PluginError::Session(format!(
-                        "unknown process `{process_id}`"
-                    )));
-                };
-                if let Some(await_output) = record.record.status.await_output() {
-                    return Ok(await_output.clone());
-                }
-                Arc::clone(&record.notify)
-            };
-            notify.notified().await;
-        }
-    }
-
     async fn complete_process(
         &self,
         process_id: &str,
@@ -557,7 +505,6 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         }
         record.record.wait = Some(wait);
         record.record.updated_at_ms = current_epoch_ms();
-        record.notify.notify_waiters();
         Ok(record.record.clone())
     }
 
@@ -570,7 +517,6 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         };
         record.record.wait = None;
         record.record.updated_at_ms = current_epoch_ms();
-        record.notify.notify_waiters();
         Ok(record.record.clone())
     }
 

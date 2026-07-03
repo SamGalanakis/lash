@@ -81,6 +81,13 @@ impl RuntimeSessionServices {
         let session_store_factory = self.current.host.session_store_factory.clone();
         let queued_work_driver = self.current.host.queued_work_driver.clone();
         let process_registry_available = self.current.host.process_registry.is_some();
+        let process_awaiter = self
+            .current
+            .host
+            .process_work_driver
+            .as_ref()
+            .map(crate::ProcessWorkDriver::awaiter)
+            .unwrap_or_else(|| crate::ProcessAwaiter::polling(Arc::clone(&registry)));
         let services = self.clone();
         let registration_for_runtime = registration.clone();
         let execution_context_for_runtime = execution_context.clone();
@@ -107,11 +114,13 @@ impl RuntimeSessionServices {
             .with_process_event_context(
                 registration_for_runtime.id.clone(),
                 Arc::clone(&registry_for_runtime),
+                process_awaiter.clone(),
                 services.current.store.clone(),
                 services.current.host.session_store_factory.clone(),
                 services.current.host.queued_work_driver.clone(),
             )
-            .with_cancellation_token(cancellation_for_runtime.clone());
+            .with_cancellation_token(cancellation_for_runtime.clone())
+            .with_process_work_driver(services.current.host.process_work_driver.clone());
             if let Some(invocation) = execution_context_for_runtime.causal_invocation.clone() {
                 context = context.with_parent_invocation(invocation);
             }

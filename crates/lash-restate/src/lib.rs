@@ -65,13 +65,13 @@ use std::time::Duration;
 
 use lash_core::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, DurabilityTier,
-    DurableProcessWorker, EffectHost, ExecutionScope, PluginError, ProcessAwaitOutput,
-    ProcessCommand, ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessWorkDriver,
-    Resolution, ResolveOutcome, RuntimeEffectCommand, RuntimeEffectController,
+    DurableProcessWorker, EffectHost, ExecutionScope, PluginError, ProcessAttach,
+    ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome, ProcessExecutionContext,
+    ProcessExternalRef, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
+    ProcessWorkDriver, Resolution, ResolveOutcome, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
     RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimeInvocation,
-    ScopedEffectController,
+    ScopedEffectController, watch_process_registry,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -359,6 +359,43 @@ impl RestateIngressClient {
     ) -> Result<RestateInvocationId, RestateHttpError> {
         self.send_json_path(format!("{workflow}/{workflow_key}/{handler}/send"), body)
             .await
+    }
+
+    pub async fn call_workflow_json<T, R>(
+        &self,
+        workflow: &str,
+        workflow_key: &str,
+        handler: &str,
+        body: &T,
+    ) -> Result<R, RestateHttpError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let path = format!("{workflow}/{workflow_key}/{handler}");
+        let url = format_restate_url(&self.ingress_url, &path);
+        let response = self
+            .http
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|source| RestateHttpError::Request {
+                operation: "Restate workflow call",
+                url: url.clone(),
+                source,
+            })?;
+        if !response.status().is_success() {
+            return Err(status_error("Restate workflow call", url, response).await);
+        }
+        response
+            .json::<R>()
+            .await
+            .map_err(|source| RestateHttpError::Decode {
+                operation: "Restate workflow call",
+                url,
+                source,
+            })
     }
 
     pub async fn send_service_json<T: Serialize + ?Sized>(
@@ -958,6 +995,28 @@ impl ProcessRunHandle for RestateProcessIngressRunner {
     }
 }
 
+#[async_trait::async_trait]
+impl ProcessAttach for RestateProcessIngressRunner {
+    async fn await_terminal(&self, process_id: &str) -> Result<ProcessAwaitOutput, PluginError> {
+        self.ingress
+            .call_workflow_json::<_, ProcessAwaitOutput>(
+                "LashProcessWorkflow",
+                process_id,
+                "await_terminal",
+                &RestateProcessAwaitRequest {
+                    process_id: process_id.to_string(),
+                },
+            )
+            .await
+            .map_err(|err| {
+                RestateEffectError::BackgroundScheduler(format!(
+                    "ingress await for process `{process_id}` failed: {err}"
+                ))
+                .into_plugin_error()
+            })
+    }
+}
+
 /// Bundled Restate process deployment wiring for a Lash core.
 ///
 /// Construct this once per deployment, pass [`process_work_driver`](Self::process_work_driver)
@@ -969,8 +1028,14 @@ pub struct RestateProcessDeployment {
 
 impl RestateProcessDeployment {
     pub fn new(ingress_url: impl Into<String>, registry: Arc<dyn ProcessRegistry>) -> Self {
-        let ingress_runner = RestateProcessIngressRunner::new(ingress_url, Arc::clone(&registry));
-        let driver = ProcessWorkDriver::new(registry, Arc::new(ingress_runner));
+        let (registry, hub) = watch_process_registry(registry);
+        let ingress_runner = Arc::new(RestateProcessIngressRunner::new(
+            ingress_url,
+            Arc::clone(&registry),
+        ));
+        let run_handle: Arc<dyn ProcessRunHandle> = ingress_runner.clone();
+        let attach: Arc<dyn ProcessAttach> = ingress_runner;
+        let driver = ProcessWorkDriver::from_watched(registry, hub, run_handle).with_attach(attach);
         Self { driver }
     }
 

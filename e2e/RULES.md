@@ -34,8 +34,9 @@ finding to report, never to reconcile by editing the doc.
 
 ## The operator surface
 
-Everything is driven through `scripts/lash-operator.py`, which launches the real `lash`
-binary in a child PTY and reads line commands from stdin or `--script FILE`.
+CLI scenarios are driven through `scripts/lash-operator.py`, which launches the real `lash`
+binary in a child PTY and reads line commands from stdin or `--script FILE`. Example-app
+scenarios drive a browser instead — see "The browser surface" below.
 
 **Launch lines**
 
@@ -87,6 +88,68 @@ harness gap. Confirm the idle prompt renders (`expect 20 Message · / for comman
 driving anything. If a scenario needs a key, scenario, or surface the operator cannot
 reach, that missing capability → Abort/RCA, noted as a harness gap (do not pretend around
 it).
+
+## The browser surface (example apps)
+
+Some scenarios drive an **example web app** (`examples/agent-service`,
+`examples/agent-workbench`) instead of the CLI. There is no scripted driver for these —
+browser automation *is* the driver. Use whatever your harness provides: a browser
+MCP/plugin, Playwright, or similar. If nothing is pre-wired, the known-good zero-install
+path is a PEP 723 Playwright script run with `uv`:
+
+```python
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["playwright"]
+# ///
+from playwright.sync_api import sync_playwright
+```
+
+`uv run script.py` resolves Playwright into a cached venv and launches the shared
+`~/.cache/ms-playwright` Chromium (run `playwright install chromium` once if the launch
+reports a missing browser build).
+
+Every rule below applies to the browser surface too, translated:
+
+- **Poll, don't sleep** → gate on a waiting assertion with an explicit timeout
+  (`expect(locator).to_be_visible(timeout=...)`, or polling an app API until a condition
+  holds) — never a fixed sleep to decide async work finished.
+- **Gate objectively**, in order of authority: (1) the **rendered page** — text/elements a
+  user actually sees, captured as a **named-checkpoint screenshot**; (2) the app's **HTTP
+  API** — the runbook names the endpoints that are backend truth; (3) **on-disk artifacts**
+  — the example's data dir (SQLite session stores, `trace.jsonl`). The UI and the backend
+  must agree: a rendered board the board endpoint contradicts, or an inbox card that
+  disagrees with the inbox API, is a **contract violation** → Abort/RCA.
+- **Screenshots are evidence, not decoration.** Take one at every checkpoint the runbook
+  names, save it under the run's artifact directory, and cite the filename in the
+  scorecard. A screenshot alone never passes a gate — pair it with the text or API
+  assertion that proves what it shows. Scroll containers hide evidence: scroll the
+  transcript/timeline to the newest entry before capturing, or the checkpoint reply sits
+  below the fold.
+- **Selectors are yours to discover.** Runbooks name UI affordances (the board grid, the
+  compose form), not CSS selectors — inspect the served page and pick stable selectors
+  yourself; a UI change that breaks an affordance the runbook names is a finding, not a
+  reason to guess.
+
+**Real tokens, deliberate runs.** The examples have no deterministic test provider: they
+call OpenRouter (and Tavily for web tools) with keys from the environment / repo `.env`.
+Treat every browser scenario like `--provider real` — deliberate, token-spending, and
+model-nondeterministic. Gate on **structural outcomes** (a terminal game state, a message
+present in an inbox), never on exact model prose. A missing required key is a harness gap
+→ Abort, do not stub around it.
+
+**Boot and teardown are part of the run.** Phase 0 boots the example (`cargo run -p
+agent-service`, `just agent-workbench <port>`) and gates on its readiness signal
+(`/healthz`, the listening line). Boot via `cargo run` / the `just` recipe **only** —
+never launch a `target/debug/*` path directly: this repo redirects builds through
+`CARGO_TARGET_DIR`, so a stale in-repo `target/` binary can predate the endpoints a
+runbook gates on and fake a contract violation. You own everything you started: end the run — success
+or Abort — with the example stopped and any Docker containers it launched torn down
+(`just agent-workbench-down <port>`).
+
+For an Abort/RCA on this surface, translate the CLI stage list in "How to REPORT" to the
+app's pipeline — e.g. UI event handling / HTTP API / turn or trigger execution / durable
+process / store persistence / render — and name the stage the failure lives in.
 
 ## Poll, don't sleep
 

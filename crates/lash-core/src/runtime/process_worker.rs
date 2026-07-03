@@ -24,6 +24,7 @@ pub struct DurableProcessWorkerConfig {
     pub session_policy: crate::SessionPolicy,
     pub session_store_factory: Arc<dyn SessionStoreFactory>,
     pub process_registry: Arc<dyn ProcessRegistry>,
+    pub process_change_hub: Option<crate::ProcessChangeHub>,
     pub trigger_store: Arc<dyn crate::TriggerStore>,
     pub process_work_driver: Option<ProcessWorkDriver>,
     pub queued_work_driver: Option<QueuedWorkDriver>,
@@ -64,6 +65,7 @@ impl DurableProcessWorkerConfig {
             session_policy: crate::SessionPolicy::default(),
             session_store_factory,
             process_registry,
+            process_change_hub: None,
             trigger_store: Arc::new(crate::InMemoryTriggerStore::with_clock(clock)),
             process_work_driver: None,
             queued_work_driver: None,
@@ -93,6 +95,11 @@ impl DurableProcessWorkerConfig {
 
     pub fn with_process_work_driver(mut self, driver: ProcessWorkDriver) -> Self {
         self.process_work_driver = Some(driver);
+        self
+    }
+
+    pub fn with_change_hub(mut self, hub: crate::ProcessChangeHub) -> Self {
+        self.process_change_hub = Some(hub);
         self
     }
 
@@ -468,12 +475,21 @@ impl DurableProcessWorker {
         let process_id = registration.id.clone();
         let cancellation = CancellationToken::new();
         let cancel_watcher = {
-            let registry = Arc::clone(&self.config.process_registry);
+            let awaiter = self
+                .config
+                .process_change_hub
+                .clone()
+                .map(|hub| {
+                    crate::ProcessAwaiter::new(Arc::clone(&self.config.process_registry), hub)
+                })
+                .unwrap_or_else(|| {
+                    crate::ProcessAwaiter::polling(Arc::clone(&self.config.process_registry))
+                });
             let process_id = process_id.clone();
             let cancellation = cancellation.clone();
             tokio::spawn(async move {
-                match registry
-                    .wait_event_after(&process_id, "process.cancel_requested", 0)
+                match awaiter
+                    .await_event(&process_id, "process.cancel_requested", 0)
                     .await
                 {
                     Ok(_) => cancellation.cancel(),
@@ -612,7 +628,15 @@ impl DurableProcessWorker {
     ) -> Result<LashRuntime, PluginError> {
         let store = Arc::new(InMemorySessionStore::default());
         let process_work_driver = self.config.process_work_driver.clone().unwrap_or_else(|| {
-            ProcessWorkDriver::inline(Arc::clone(&self.config.process_registry), self.clone())
+            if let Some(hub) = self.config.process_change_hub.clone() {
+                ProcessWorkDriver::from_watched(
+                    Arc::clone(&self.config.process_registry),
+                    hub,
+                    Arc::new(crate::InlineProcessRunHandle::new(self.clone())),
+                )
+            } else {
+                ProcessWorkDriver::inline(Arc::clone(&self.config.process_registry), self.clone())
+            }
         });
         let mut builder = EmbeddedRuntimeBuilder::new()
             .with_session_id(session_id.to_string())
@@ -777,9 +801,10 @@ mod recovery_tests {
     }
 
     async fn await_terminal(registry: &Arc<dyn ProcessRegistry>, process_id: &str) {
+        let awaiter = crate::ProcessAwaiter::polling(Arc::clone(registry));
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            registry.await_process(process_id),
+            awaiter.await_terminal(process_id),
         )
         .await
         .expect("recovered process reaches terminal within the sweep")

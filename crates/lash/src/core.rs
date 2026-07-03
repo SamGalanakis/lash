@@ -46,6 +46,7 @@ pub(crate) enum ProcessWorkSource {
     None,
     Inline {
         registry: Arc<dyn ProcessRegistry>,
+        hub: Option<lash_core::ProcessChangeHub>,
     },
     External(ProcessWorkDriver),
 }
@@ -54,13 +55,29 @@ impl ProcessWorkSource {
     fn process_registry(&self) -> Option<Arc<dyn ProcessRegistry>> {
         match self {
             Self::None => None,
-            Self::Inline { registry } => Some(Arc::clone(registry)),
+            Self::Inline { registry, .. } => Some(Arc::clone(registry)),
             Self::External(driver) => Some(driver.process_registry()),
         }
     }
 
     fn has_registry(&self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    fn watched(self) -> Self {
+        match self {
+            Self::Inline {
+                registry,
+                hub: None,
+            } => {
+                let (registry, hub) = lash_core::watch_process_registry(registry);
+                Self::Inline {
+                    registry,
+                    hub: Some(hub),
+                }
+            }
+            other => other,
+        }
     }
 }
 
@@ -141,8 +158,18 @@ impl InlineWorkDriverSlot {
                             config = config.with_queued_work_driver(driver);
                         }
                         let registry = Arc::clone(&config.process_registry);
+                        let hub = config.process_change_hub.clone();
                         let worker = DurableProcessWorker::new(config);
-                        (Some(ProcessWorkDriver::inline(registry, worker)), true)
+                        let driver = if let Some(hub) = hub {
+                            ProcessWorkDriver::from_watched(
+                                registry,
+                                hub,
+                                Arc::new(lash_core::InlineProcessRunHandle::new(worker)),
+                            )
+                        } else {
+                            ProcessWorkDriver::inline(registry, worker)
+                        };
+                        (Some(driver), true)
                     }
                 };
                 ResolvedWorkDrivers {
@@ -438,7 +465,10 @@ impl LashCore {
                             session_id: session_id.clone(),
                         }),
                     ),
-                    RuntimeEffectLocalExecutor::processes(Arc::clone(process_registry)),
+                    RuntimeEffectLocalExecutor::processes(
+                        Arc::clone(process_registry),
+                        self.env.process_work_driver.clone(),
+                    ),
                 )
                 .await
                 .map_err(|err| EmbedError::SessionDeleteProcess {
@@ -533,7 +563,9 @@ impl LashCore {
             config = config.with_trigger_store(Arc::clone(trigger_store));
         }
         if let Some(driver) = self.work_driver.configured_process_work_driver() {
-            config = config.with_process_work_driver(driver);
+            config = config
+                .with_change_hub(driver.change_hub())
+                .with_process_work_driver(driver);
         }
         if let Some(driver) = self.work_driver.configured_queued_work_driver() {
             config = config.with_queued_work_driver(driver);
@@ -932,8 +964,8 @@ impl LashCoreBuilder {
             .trigger_store
             .as_ref()
             .map(|store| store.durability_tier());
-        let process_registry_tier = self
-            .process_work_source
+        let process_work_source = self.process_work_source.clone().watched();
+        let process_registry_tier = process_work_source
             .process_registry()
             .map(|registry| registry.durability_tier());
 
@@ -962,7 +994,7 @@ impl LashCoreBuilder {
         // Whether process lifecycle is available (a process registry is wired).
         // Threaded to every plugin host so core installs the same
         // plugin-contributed process engines wherever it rebuilds a runtime.
-        let process_lifecycle_available = self.process_work_source.has_registry();
+        let process_lifecycle_available = process_work_source.has_registry();
         // Install onto a throwaway clone purely to sweep every registered
         // engine's durability tier for the coherence check. `env.core` stays
         // free of plugin-contributed engines so that each runtime-construction
@@ -981,7 +1013,7 @@ impl LashCoreBuilder {
             &core_with_engines,
         )?;
 
-        let process_registry = self.process_work_source.process_registry();
+        let process_registry = process_work_source.process_registry();
 
         // Resolve process work before the process source is moved into the
         // environment. The default inline driver's config is built
@@ -989,7 +1021,7 @@ impl LashCoreBuilder {
         // first open. It is built from the same single-protocol plugin host the
         // live runtime uses, so the worker can rebuild a runtime for a process.
         let process_work_driver = Self::resolve_process_work_driver(
-            &self.process_work_source,
+            &process_work_source,
             &default_plugin_host,
             &core,
             process_lifecycle_available,
@@ -1081,14 +1113,14 @@ impl LashCoreBuilder {
         residency: lash_core::Residency,
         trigger_store: Option<&Arc<dyn lash_core::TriggerStore>>,
     ) -> Result<ProcessWorkDriverSetup> {
-        let process_registry = match process_work_source {
+        let (process_registry, process_change_hub) = match process_work_source {
             ProcessWorkSource::None => return Ok(ProcessWorkDriverSetup::None),
             ProcessWorkSource::External(driver) => {
                 return Ok(ProcessWorkDriverSetup::External {
                     driver: driver.clone(),
                 });
             }
-            ProcessWorkSource::Inline { registry } => Arc::clone(registry),
+            ProcessWorkSource::Inline { registry, hub } => (Arc::clone(registry), hub.clone()),
         };
         // The worker rebuilds a session runtime per process, so it needs a store
         // factory; without one the default runner could not execute anything, so
@@ -1103,22 +1135,24 @@ impl LashCoreBuilder {
         let runtime_host = worker_plugin_host
             .install_process_engine_contributions(core.clone(), process_lifecycle_available)?;
         let phase_probe_slot = lash_core::runtime::RuntimeTurnPhaseProbeSlot::default();
-        let config = Box::new(
-            DurableProcessWorkerConfig::new(
-                Arc::new(worker_plugin_host.clone()),
-                runtime_host,
-                Arc::clone(store_factory),
-                process_registry,
-            )
-            .with_session_policy(policy.clone())
-            .with_trigger_store(trigger_store.cloned().unwrap_or_else(|| {
-                Arc::new(lash_core::InMemoryTriggerStore::with_clock(Arc::clone(
-                    &core.clock,
-                )))
-            }))
-            .with_residency(residency)
-            .with_turn_phase_probe_slot(phase_probe_slot),
-        );
+        let mut config = DurableProcessWorkerConfig::new(
+            Arc::new(worker_plugin_host.clone()),
+            runtime_host,
+            Arc::clone(store_factory),
+            process_registry,
+        )
+        .with_session_policy(policy.clone())
+        .with_trigger_store(trigger_store.cloned().unwrap_or_else(|| {
+            Arc::new(lash_core::InMemoryTriggerStore::with_clock(Arc::clone(
+                &core.clock,
+            )))
+        }))
+        .with_residency(residency)
+        .with_turn_phase_probe_slot(phase_probe_slot);
+        if let Some(hub) = process_change_hub {
+            config = config.with_change_hub(hub);
+        }
+        let config = Box::new(config);
         Ok(ProcessWorkDriverSetup::LazyDefault { config })
     }
 
@@ -1162,6 +1196,7 @@ impl LashCoreBuilder {
     pub fn process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
         self.process_work_source = ProcessWorkSource::Inline {
             registry: process_registry,
+            hub: None,
         };
         self
     }

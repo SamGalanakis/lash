@@ -91,8 +91,8 @@ impl ToolProcessEventClient {
             ));
         };
         process
-            .registry
-            .wait_event_after(&process.process_id, event_type, after_sequence)
+            .awaiter
+            .await_event(&process.process_id, event_type, after_sequence)
             .await
     }
 
