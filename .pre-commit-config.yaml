@@ -1,3 +1,13 @@
+# Managed by prek (https://github.com/j178/prek): `prek install --hook-type pre-commit --hook-type pre-push`
+#
+# pre-commit = seconds (hygiene + the cheap gates CI's Lint job enforces).
+# pre-push  = the expensive workspace-wide lint.
+# Tests deliberately stay out of hooks: the full workspace suite is minutes
+# long and belongs to the development loop and CI's Test job — a hook that
+# slow gets --no-verify'd and rots.
+# docs/pagefind is a generated search index; scenarios/ holds replay
+# fixtures whose bytes are load-bearing. Neither should be "fixed".
+exclude: '^(docs/pagefind/|scenarios/)'
 repos:
   - repo: builtin
     hooks:
@@ -8,58 +18,36 @@ repos:
 
   - repo: local
     hooks:
-      # Rust — lash-core (runtime library)
-      - id: cargo-fmt-lash-core
-        name: cargo fmt (lash-core)
+      # Mirrors CI Lint "Check formatting" — whole workspace, check-only.
+      - id: cargo-fmt-check
+        name: cargo fmt --all --check
         language: system
-        entry: cargo fmt --manifest-path crates/lash-core/Cargo.toml
-        files: '^crates/lash-core/.*\.rs$'
+        entry: cargo fmt --all --check
+        files: '\.rs$'
         pass_filenames: false
 
-      # Rust — lash (facade)
-      - id: cargo-fmt-lash
-        name: cargo fmt (lash)
+      # Mirrors CI Lint "Check production file-size budget".
+      - id: file-size-budget
+        name: production file-size budget
         language: system
-        entry: cargo fmt --manifest-path crates/lash/Cargo.toml
-        files: '^crates/lash/.*\.rs$'
+        entry: bash scripts/check-production-file-size.sh
+        files: '\.rs$'
         pass_filenames: false
 
-      # Rust — lash-cli
-      - id: cargo-fmt-cli
-        name: cargo fmt (lash-cli)
+      # Mirrors CI Lint "Check core/UI boundary".
+      - id: core-ui-boundary
+        name: core/UI boundary
         language: system
-        entry: cargo fmt --manifest-path crates/lash-cli/Cargo.toml
-        files: '^crates/lash-cli/.*\.rs$'
+        entry: bash scripts/check-core-ui-boundary.sh
+        files: '\.rs$'
         pass_filenames: false
 
-      # Rust clippy — lash-core (runtime library)
-      - id: cargo-clippy-lash-core
-        name: cargo clippy (lash-core)
+      # Mirrors CI Lint "Clippy (workspace, all targets)". Warm-cache this is
+      # tens of seconds; run at push so commits stay instant.
+      - id: cargo-clippy-workspace
+        name: cargo clippy (workspace, all targets)
         language: system
-        entry: cargo clippy --manifest-path crates/lash-core/Cargo.toml -- -D warnings
-        files: '^crates/lash-core/.*\.rs$'
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        files: '\.rs$'
         pass_filenames: false
-
-      # Rust clippy — lash (facade)
-      - id: cargo-clippy-lash
-        name: cargo clippy (lash)
-        language: system
-        entry: cargo clippy --manifest-path crates/lash/Cargo.toml -- -D warnings
-        files: '^crates/lash/.*\.rs$'
-        pass_filenames: false
-
-      # Rust clippy — lash-cli
-      - id: cargo-clippy-cli
-        name: cargo clippy (lash-cli)
-        language: system
-        entry: cargo clippy --manifest-path crates/lash-cli/Cargo.toml -- -D warnings
-        files: '^crates/lash-cli/.*\.rs$'
-        pass_filenames: false
-
-      # Rust workspace tests
-      - id: cargo-test-workspace
-        name: cargo test (workspace)
-        language: system
-        entry: cargo test --workspace --locked
-        files: '^(Cargo\.(toml|lock)|[A-Za-z0-9._-]+/Cargo\.toml|.+\.rs)$'
-        pass_filenames: false
+        stages: [pre-push]
