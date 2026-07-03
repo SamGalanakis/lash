@@ -98,6 +98,30 @@ impl ProcessChangeHub {
 ///   inline on the append path, so a slow sink slows every append. Implementors
 ///   must return fast: hand any real I/O off to a channel or background task
 ///   internally rather than blocking inside `emit`.
+///
+/// # Example: offload to a channel
+///
+/// A sink must return fast, so a real implementation hands each event to a
+/// channel and does its projection/logging on a consumer task. Dropping on a
+/// full channel is the correct best-effort behavior — the durable log, read via
+/// `events_after`, remains the reconcile source.
+///
+/// ```
+/// use lash_core::{ProcessEvent, ProcessEventSink};
+/// use tokio::sync::mpsc;
+///
+/// struct ChannelSink {
+///     tx: mpsc::Sender<ProcessEvent>,
+/// }
+///
+/// #[async_trait::async_trait]
+/// impl ProcessEventSink for ChannelSink {
+///     async fn emit(&self, event: &ProcessEvent) {
+///         // Non-blocking: drop on a full channel rather than slow the append.
+///         let _ = self.tx.try_send(event.clone());
+///     }
+/// }
+/// ```
 #[async_trait::async_trait]
 pub trait ProcessEventSink: Send + Sync {
     /// Observe one appended process event. Best-effort; see the trait contract.
@@ -149,6 +173,14 @@ pub fn watch_process_registry_with_sink(
     )
 }
 
+/// Core waiter for process terminal state and events (ADR 0016).
+///
+/// The awaiter is the store-only fallback that
+/// [`ProcessWorkDriver`](crate::ProcessWorkDriver) uses when no engine-native
+/// [`ProcessAttach`] owns the wait. It performs narrow point reads
+/// (`get_process`, `events_after`) and, when constructed with a
+/// [`ProcessChangeHub`], wakes promptly on local mutations instead of polling.
+/// Callers still bound every wait with [`tokio::time::timeout`].
 #[derive(Clone)]
 pub struct ProcessAwaiter {
     registry: Arc<dyn ProcessRegistry>,
@@ -156,6 +188,9 @@ pub struct ProcessAwaiter {
 }
 
 impl ProcessAwaiter {
+    /// Hub-backed awaiter: local mutations published to `hub` wake waiters
+    /// without database polling. This is what a [`WatchedProcessRegistry`]
+    /// wrapping provides via [`watch_process_registry`].
     pub fn new(registry: Arc<dyn ProcessRegistry>, hub: ProcessChangeHub) -> Self {
         Self {
             registry,
@@ -163,6 +198,9 @@ impl ProcessAwaiter {
         }
     }
 
+    /// Hubless awaiter: correct without any change signal, using only the
+    /// bounded backoff point-read loop (25ms floor, doubling, 1s cap). Use when
+    /// the registry is not wrapped in-process — e.g. a store-only test.
     pub fn polling(registry: Arc<dyn ProcessRegistry>) -> Self {
         Self {
             registry,
@@ -170,6 +208,9 @@ impl ProcessAwaiter {
         }
     }
 
+    /// Resolve once `process_id` is terminal, returning its outcome. See
+    /// [`ProcessWorkDriver::await_terminal`](crate::ProcessWorkDriver::await_terminal)
+    /// for the timeout-bounding contract.
     pub async fn await_terminal(
         &self,
         process_id: &str,
@@ -208,6 +249,8 @@ impl ProcessAwaiter {
         }
     }
 
+    /// Resolve with the first `event_type` event on `process_id` past
+    /// `after_sequence`. Historical matches resolve immediately.
     pub async fn await_event(
         &self,
         process_id: &str,

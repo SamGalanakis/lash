@@ -276,6 +276,11 @@ async fn async_main() -> anyhow_like::Result<()> {
         println!("agent-service Restate endpoint listening on http://{restate_endpoint_addr}");
     }
 
+    // Host-scheduled retention for terminal process rows (ADR 0017). This runs
+    // in both durability modes: whichever registry backs the deployment is the
+    // one that accumulates rows.
+    spawn_process_retention(Arc::clone(&process_registry));
+
     // Keep a state clone for the drain; the router consumes the original.
     let drain_state = state.clone();
     let app = Router::new()
@@ -310,6 +315,49 @@ async fn async_main() -> anyhow_like::Result<()> {
     // Admission has stopped; run the teardown levers this process owns.
     drain(&drain_state, &drain_provider).await;
     Ok(())
+}
+
+/// Host-scheduled retention for terminal process rows (ADR 0017). The process
+/// registry keeps a row — plus its events, wake acks, handle grants, and leases
+/// — for every process this service ever started; once a run is terminal and
+/// its outcome has been consumed, those rows have no remaining reader and would
+/// grow without bound. `prune_terminal_processes` drops terminal rows older than
+/// a cutoff and never touches a non-terminal row. Retention is a host lever, not
+/// an automatic sweep inside the registry: only the host knows its window. Run
+/// it on the same maintenance cadence as the session-store `vacuum` /
+/// `gc_unreachable` reclamation (see docs/persistence.html).
+fn spawn_process_retention(process_registry: Arc<dyn lash::process::ProcessRegistry>) {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    // The window must be comfortably longer than any wait: a cutoff shorter than
+    // a live `await_terminal` could prune a process out from under a late await,
+    // which then reads back as "unknown process".
+    const RETENTION_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    const PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(PRUNE_INTERVAL);
+        // Drop the immediate first tick: nothing is old enough on a fresh boot.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(since) => since.as_millis() as u64,
+                Err(_) => continue,
+            };
+            let cutoff = now_ms.saturating_sub(RETENTION_WINDOW.as_millis() as u64);
+            match process_registry.prune_terminal_processes(cutoff).await {
+                Ok(report) if report.pruned_processes > 0 || report.pruned_events > 0 => {
+                    println!(
+                        "agent-service pruned {} terminal processes and {} events (cutoff {cutoff}ms)",
+                        report.pruned_processes, report.pruned_events
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => eprintln!("agent-service: process retention prune failed: {err}"),
+            }
+        }
+    });
 }
 
 /// Resolve when the process receives Ctrl-C or SIGTERM — the host-owned signal

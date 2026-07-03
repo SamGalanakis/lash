@@ -52,7 +52,11 @@ structural outcomes only.
   (title/text) form and per-message delete.
 - **Backend truth**: `GET /api/state` (settings + transcript snapshot),
   `GET /api/accounts`, `GET /api/accounts/{slug}/inbox`, `GET /api/work`,
-  `GET /api/lashlang-graphs`.
+  `GET /api/lashlang-graphs`. `GET /api/work/{process_id}/await` blocks until a
+  work item reaches a terminal state (server-side timeout-bounded) and returns
+  its outcome plus the authoritative event log reconciled from the durable
+  store — the host-facing wait-on-work-item seam, an alternative to polling
+  `/api/work` for a terminal row.
 - **Disk** — two separate trees: `trace.jsonl` and `lashlang-execution.jsonl` live in the
   **data dir** (`AGENT_WORKBENCH_DATA_DIR`, default `.agent-workbench/`) and move with it
   when you override it; the dev script's pid/log/run metadata lives in its own state dir

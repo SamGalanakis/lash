@@ -2,6 +2,7 @@
 struct AppState {
     core: LashCore,
     process_observer: lash::process::ProcessWorkObserver,
+    process_work_driver: lash::process::ProcessWorkDriver,
     session_ids: WorkbenchSessionIds,
     messages: Arc<Mutex<Vec<ChatMessage>>>,
     selected_model: Arc<Mutex<ModelSelection>>,
@@ -189,6 +190,30 @@ struct CommandAccepted {
     accepted: bool,
 }
 
+/// Best-effort [`ProcessEventSink`](lash::process::ProcessEventSink) that hands
+/// each appended process event to a channel (ADR 0017). `emit` runs inline on
+/// the registry append path, so it must return fast: it does no I/O, only a
+/// non-blocking `try_send`. Dropping on a full channel is intentional — the
+/// durable event log (`events_after`) is the reconcile source, not this feed.
+#[derive(Clone)]
+struct ChannelProcessEventSink {
+    tx: mpsc::Sender<lash::process::ProcessEvent>,
+}
+
+impl ChannelProcessEventSink {
+    fn new(tx: mpsc::Sender<lash::process::ProcessEvent>) -> Self {
+        Self { tx }
+    }
+}
+
+#[async_trait]
+impl lash::process::ProcessEventSink for ChannelProcessEventSink {
+    async fn emit(&self, event: &lash::process::ProcessEvent) {
+        // Non-blocking: drop on a full channel rather than slow every append.
+        let _ = self.tx.try_send(event.clone());
+    }
+}
+
 #[derive(Clone)]
 struct WorkbenchQueuedWorkSubmitter {
     session_ids: WorkbenchSessionIds,
@@ -271,6 +296,26 @@ fn inert_queued_work_driver() -> lash::runtime::QueuedWorkDriver {
     lash::runtime::QueuedWorkDriver::new(Arc::new(NoopQueuedWorkRunHandle))
 }
 
+#[cfg(test)]
+struct NoopProcessRunHandle;
+
+#[cfg(test)]
+#[async_trait]
+impl lash::process::ProcessRunHandle for NoopProcessRunHandle {
+    async fn claim_and_run_pending(&self) -> std::result::Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+/// A driver that reads the registry directly (no external run handle) — enough
+/// for tests that build state but do not drive process execution.
+#[cfg(test)]
+fn inert_process_work_driver(
+    registry: Arc<dyn lash::process::ProcessRegistry>,
+) -> lash::process::ProcessWorkDriver {
+    lash::process::ProcessWorkDriver::new(registry, Arc::new(NoopProcessRunHandle))
+}
+
 #[derive(Debug, Serialize)]
 struct WorkItem {
     process: WorkProcess,
@@ -302,4 +347,19 @@ struct WorkEvent {
     event_type: String,
     occurred_at_ms: u64,
     payload: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkAwaitResult {
+    process_id: String,
+    outcome: lash::process::ProcessAwaitOutput,
+    /// Reconciled from the durable log at terminal (ADR 0017): the authoritative,
+    /// complete record, unlike the best-effort event sink.
+    events: Vec<WorkAwaitEvent>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkAwaitEvent {
+    sequence: u64,
+    event_type: String,
 }

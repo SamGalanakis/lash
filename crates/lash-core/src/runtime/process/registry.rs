@@ -262,6 +262,26 @@ pub trait ProcessRegistry: Send + Sync {
     /// bounded. Non-terminal rows are never touched. Callers must choose a
     /// retention window comfortably longer than any waiter lifetime — a
     /// pruned process id becomes "unknown process" to late awaits.
+    ///
+    /// ```no_run
+    /// use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    /// use lash_core::{PluginError, ProcessRegistry};
+    ///
+    /// async fn prune_week_old(registry: &dyn ProcessRegistry) -> Result<(), PluginError> {
+    ///     let now_ms = SystemTime::now()
+    ///         .duration_since(UNIX_EPOCH)
+    ///         .expect("clock after epoch")
+    ///         .as_millis() as u64;
+    ///     // Window must exceed any in-flight await's lifetime (ADR 0017).
+    ///     let cutoff = now_ms - Duration::from_secs(7 * 24 * 60 * 60).as_millis() as u64;
+    ///     let report = registry.prune_terminal_processes(cutoff).await?;
+    ///     eprintln!(
+    ///         "pruned {} processes, {} events",
+    ///         report.pruned_processes, report.pruned_events
+    ///     );
+    ///     Ok(())
+    /// }
+    /// ```
     async fn prune_terminal_processes(
         &self,
         cutoff_epoch_ms: u64,
