@@ -1,0 +1,85 @@
+name: Staging guard
+
+# Full CI only runs on main and PRs; a plain push to staging otherwise only
+# triggers Docs Pages. This lightweight guard runs on every staging push so the
+# two things that would block or embarrass a main merge are known BEFORE the
+# merge: a missing-release-notes state, and the fmt/clippy/boundary lints. It
+# reuses the exact scripts the prek pre-push hooks and CI's Lint job run (it
+# does not restate their rules), on one runner with a restore-only cache.
+#
+# Docs Pages on staging stays as-is in its own workflow.
+
+on:
+  push:
+    branches:
+      - staging
+
+concurrency:
+  group: staging-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  LASH_CI_FEATURES: >-
+    -F lash-cli/fff-zlob
+    -F lash-cli/bench
+
+jobs:
+  guard:
+    name: Notes + lint mirror
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Full history + tags: release_notes.py walks previous-tag..HEAD.
+          fetch-depth: 0
+
+      # Fails in seconds, before any toolchain install, if the range that would
+      # merge to main carries no curated notes. Push with [skip release] to opt
+      # a work-in-progress staging push out of the requirement.
+      - name: Require release notes
+        if: "!contains(github.event.head_commit.message, '[skip release]')"
+        run: python3 scripts/release_notes.py collect --require
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install Zig
+        uses: ./.github/actions/setup-ci-zig
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          # Read the linux-debug cache the main test-doc job writes; never save
+          # from staging so it stays a single-writer cache.
+          shared-key: linux-debug
+          save-if: false
+
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
+
+      # The four checks CI's Lint job and the prek pre-push hooks run: a green
+      # staging guard implies a green Lint job on the eventual main merge.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy (workspace, all targets)
+        run: |
+          # shellcheck disable=SC2086
+          cargo clippy --workspace --all-targets --locked ${LASH_CI_FEATURES} -- -D warnings
+
+      - name: Check core/UI boundary
+        run: bash scripts/check-core-ui-boundary.sh
+
+      - name: Check production file-size budget
+        run: bash scripts/check-production-file-size.sh

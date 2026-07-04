@@ -1,18 +1,21 @@
 name: CI
 
-# Note: GitHub natively skips push/PR runs when the head commit message
-# contains [skip ci], so no per-job guards are needed for it.
+# GitHub natively skips push/PR runs when the head commit requests a CI skip,
+# so no per-job guards are needed for that.
+#
+# A green push to main cuts a release directly from that commit. There is no
+# version-bump commit and no second validation pass: the release-notes-gate
+# fails fast when the range carries no curated notes, the full matrix validates
+# the pushed commit, and `prepare-release` tags that exact commit and dispatches
+# release.yml. The release version is never written to main — it is stamped into
+# the manifests at packaging time inside release.yml's ephemeral tag checkout
+# (scripts/release_version.py stamp, scripts/publish_workspace.py --version).
 
 on:
   pull_request:
   push:
     branches:
       - main
-  # The release flow is two-pass and the bump commit is pushed with
-  # GITHUB_TOKEN, which never triggers `on: push` runs — so pass 1
-  # explicitly dispatches this workflow to validate the bump commit and
-  # cut the tag (pass 2).
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -33,25 +36,36 @@ env:
     -F lash-cli/bench
 
 jobs:
-  test:
-    name: Test
+  # Fail-early release-notes gate: no cargo, no cache, no `needs`, so a main
+  # push with no curated notes in its range fails in under a minute instead of
+  # after the full matrix. The release-cut job relies on this gate rather than
+  # re-running the check.
+  release-notes-gate:
+    name: Release notes gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip release]')
     runs-on: ubuntu-latest
 
     steps:
-      # The full workspace test profile plus a restored cargo cache exceeds
-      # the hosted runner's free disk when a version bump invalidates every
-      # workspace fingerprint (observed: ld Bus error after ENOSPC). Reclaim
-      # the large preinstalled toolchains this job never uses.
-      - name: Reclaim runner disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h /
-
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
+          # Full history + tags: release_notes.py walks previous-tag..HEAD.
+          fetch-depth: 0
+
+      - name: Require release notes
+        run: python3 scripts/release_notes.py collect --require
+
+  # Sole writer of the shared linux-debug cache and the doctest gate. It builds
+  # the superset (`cargo check --workspace --all-targets` plus the doctest
+  # link) that every read-only debug-profile job restores. The nextest run is
+  # sharded out to the test-shard matrix below.
+  test-doc:
+    name: Test docs + build cache
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -64,14 +78,17 @@ jobs:
         with:
           cache-bin: false
           # This job builds a superset of what the other debug-profile jobs
-          # (Postgres store, Restate E2E, the distributed-workers e2e
-          # workflow) need, so it is the sole writer of the shared cache.
+          # (test shards, Postgres store, Restate E2E, the distributed-workers
+          # e2e workflow) need, so it is the sole writer of the shared cache.
           shared-key: linux-debug
 
-      - name: Install protoc and nextest
+      - name: Install protoc
         uses: taiki-e/install-action@v2
         with:
-          tool: protoc,nextest
+          tool: protoc
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache
 
       - name: Lint docs
         run: python3 scripts/lint_docs.py
@@ -87,7 +104,8 @@ jobs:
       # Compiles every target of every workspace crate — libs, bins, tests,
       # examples, and benches. This subsumes the old standalone checks for
       # docs-snippets and the perf harness (lash-perf + lash-cli's bench
-      # feature), which would otherwise only break post-merge.
+      # feature), which would otherwise only break post-merge. It also warms the
+      # dependency graph the test-shard matrix restores.
       - name: Check workspace (all targets)
         run: |
           # shellcheck disable=SC2086
@@ -111,19 +129,61 @@ jobs:
             exit 1
           fi
 
-      # Workspace-wide: every crate's tests run, not a hand-maintained crate
-      # list. Live tests (Restate e2e, Postgres conformance without a
-      # database URL) are #[ignore]d or self-skip.
-      - name: Test workspace
-        run: |
-          # shellcheck disable=SC2086
-          cargo nextest run --workspace --locked ${LASH_CI_FEATURES}
-
-      # nextest does not run doctests; keep them covered.
+      # nextest does not run doctests; keep them covered here (also builds the
+      # workspace crates as rlibs, warming the shared cache for the readers).
       - name: Test workspace doctests
         run: |
           # shellcheck disable=SC2086
           cargo test --doc --workspace --locked ${LASH_CI_FEATURES}
+
+  # The workspace test suite, sharded by nextest partitions so it drops off the
+  # critical path. Restore-only against the linux-debug cache the test-doc job
+  # writes; sccache absorbs the workspace test-binary codegen that rust-cache's
+  # read-only restore cannot save, sharing it across the shards and runs.
+  # --no-fail-fast so one failure never hides the rest (the alpha.82 lesson).
+  test-shard:
+    name: Test shard ${{ matrix.shard }}/3
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig
+        uses: ./.github/actions/setup-ci-zig
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          shared-key: linux-debug
+          save-if: false
+
+      - name: Install protoc and nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc,nextest
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache
+
+      # Workspace-wide: every crate's tests run, not a hand-maintained crate
+      # list. Live tests (Restate e2e, Postgres conformance without a database
+      # URL) are #[ignore]d or self-skip. Partition count:i/3 splits execution
+      # across the three shards.
+      - name: Test workspace shard
+        run: |
+          # shellcheck disable=SC2086
+          cargo nextest run --workspace --locked ${LASH_CI_FEATURES} \
+            --no-fail-fast --partition count:${{ matrix.shard }}/3
 
   lint:
     name: Lint
@@ -132,8 +192,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -147,8 +205,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-          # The Test job is the sole writer of the shared linux-debug cache; the
-          # lint job only reads it so clippy reuses the checked dependency graph.
+          # The test-doc job is the sole writer of the shared linux-debug cache;
+          # the lint job only reads it so clippy reuses the checked dependency
+          # graph.
           shared-key: linux-debug
           save-if: false
 
@@ -159,7 +218,7 @@ jobs:
 
       # `cargo fmt --all --check` and the same `--all-targets` clippy the local
       # push gate runs, plus the two boundary guards that otherwise gate nothing.
-      # The clippy feature set mirrors the Test job's workspace check so the
+      # The clippy feature set mirrors the test-doc workspace check so the
       # dependency graph resolves identically (fff-zlob + bench).
       - name: Check formatting
         run: cargo fmt --all --check
@@ -185,16 +244,13 @@ jobs:
         shard:
           - scenario-harnesses
           - fault-matrix
-          - sim-unit
+          - sim-unit-perf-guards
           - sim-generated
           - minimizer-fixtures
-          - perf-guards
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -213,6 +269,9 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: protoc,nextest
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache
 
       - name: Run confidence fast shard
         run: bash scripts/confidence-gate.sh "fast:${{ matrix.shard }}"
@@ -235,8 +294,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Download confidence fast shard artifacts
         uses: actions/download-artifact@v4
@@ -249,7 +306,7 @@ jobs:
         run: |
           rm -rf target/confidence/fast
           mkdir -p target/confidence/fast
-          for shard in scenario-harnesses fault-matrix sim-unit sim-generated minimizer-fixtures perf-guards; do
+          for shard in scenario-harnesses fault-matrix sim-unit-perf-guards sim-generated minimizer-fixtures; do
             cp -a "target/confidence/fast-download/confidence-fast-${shard}" "target/confidence/fast/${shard}"
           done
 
@@ -286,8 +343,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -326,8 +381,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -370,8 +423,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -410,8 +461,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -424,13 +473,17 @@ jobs:
         with:
           cache-bin: false
           # Sole writer of the linux release-profile cache; release.yml's
-          # x86_64 build restores it after the versioned release commit passes CI.
+          # x86_64 build restores it (then stamps the release version, so only
+          # the workspace crates rebuild — the cached deps stay warm).
           shared-key: linux-release
 
       - name: Install protoc
         uses: taiki-e/install-action@v2
         with:
           tool: protoc
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache
 
       - name: Build release binary
         run: cargo build --locked --release -p lash-cli --features fff-zlob --target x86_64-unknown-linux-gnu
@@ -451,8 +504,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -488,15 +539,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       # The e2e binaries are built on the host by the just recipe and
       # bind-mounted into the compose services, so the build reuses the
-      # workspace debug cache that the Test job saves.
+      # workspace debug cache that the test-doc job saves.
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -512,16 +561,21 @@ jobs:
       - name: Run distributed backend E2E
         run: bash scripts/restate-postgres-workers-e2e.sh
 
+  # Cuts the release straight from the validated commit: compute the next
+  # version from the release channel + tags, tag this exact commit, and dispatch
+  # release.yml. No version-bump commit, no second CI pass — release.yml stamps
+  # the version into its ephemeral tag checkout at packaging time.
   prepare-release:
-    name: Prepare release
+    name: Cut release
     # Allows release-automation-only fixes to run the full CI matrix without
-    # immediately cutting the next version.
+    # cutting the next version (push with [skip release]).
     if: >
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
       !contains(github.event.head_commit.message, '[skip release]')
     needs:
-      - test
+      - test-doc
+      - test-shard
       - lint
       - confidence-fast-summary
       - postgres-store
@@ -530,6 +584,7 @@ jobs:
       - linux-release-cache
       - restate-e2e
       - restate-postgres-workers
+      - release-notes-gate
     runs-on: ubuntu-latest
     concurrency:
       group: lash-release-main
@@ -542,19 +597,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'main' && 'main' || github.sha }}
           # Full history INCLUDING TAGS: release_version.py computes the next
           # version from `git tag --list`. A shallow checkout with fetch-tags
           # does NOT deliver the tags (tag-following only covers fetched
           # commits), which silently re-releases the current version forever.
           fetch-depth: 0
-
-      # Every release ships curated notes: at least one commit in
-      # last-tag..HEAD must carry a `Release-Notes:` section (Markdown after
-      # the marker line). Fails BEFORE any release mutation; push with
-      # [skip release] if this range deliberately cuts no release.
-      - name: Require release notes
-        run: python3 scripts/release_notes.py collect --require
 
       - name: Compute next release version
         id: version
@@ -562,88 +609,28 @@ jobs:
           version="$(python3 scripts/release_version.py print-next)"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-      - name: Update workspace version files
-        run: python3 scripts/release_version.py set "${{ steps.version.outputs.version }}"
-
-      - name: Validate locked workspace after release bump
-        run: cargo metadata --format-version 1 --locked >/dev/null
-
-      - name: Commit release version
-        id: commit
-        run: |
-          if git diff --quiet; then
-            echo "created=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Stage everything release_version.py rewrote — Cargo manifests, the
-          # lockfile, AND the doc version snippets (README + docs/*.html). The
-          # checkout is clean, so -A captures exactly the bump's edits. Staging
-          # only Cargo files here is what let the docs drift behind the version.
-          git add -A
-          git commit -m "Release v${{ steps.version.outputs.version }}"
-          git push origin HEAD:main
-          echo "created=true" >> "$GITHUB_OUTPUT"
-
-      # GITHUB_TOKEN pushes never trigger `on: push`, so the bump commit
-      # would otherwise sit on main forever with no pass-2 run to validate
-      # it and cut the tag. Dispatch the next pass explicitly.
-      - name: Dispatch validation pass for the release commit
-        if: steps.commit.outputs.created == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run ci.yml --ref main
-
-      - name: Sync release version to staging
-        run: |
-          if ! git ls-remote --exit-code --heads origin staging >/dev/null 2>&1; then
-            echo "origin/staging not found; skipping version sync."
-            exit 0
-          fi
-
-          sync_dir="$(mktemp -d)"
-          trap 'git worktree remove --force "$sync_dir"' EXIT
-          git worktree add --detach "$sync_dir" origin/staging
-
-          cd "$sync_dir"
-          python3 scripts/release_version.py set "${{ steps.version.outputs.version }}"
-          cargo metadata --format-version 1 --locked >/dev/null
-          if git diff --quiet; then
-            echo "origin/staging already has version ${{ steps.version.outputs.version }}."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Stage everything release_version.py rewrote (Cargo files + the doc
-          # version snippets). git diff above now also notices doc-only drift,
-          # so a stale README/docs heals on the next release even if Cargo is
-          # already current.
-          git add -A
-          git commit -m "Sync release version to staging (v${{ steps.version.outputs.version }})"
-          git push origin HEAD:staging
-
-      - name: Create and push release tag
-        if: steps.commit.outputs.created != 'true'
+      - name: Tag the validated commit
+        id: tag
         run: |
           tag="v${{ steps.version.outputs.version }}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "Tag ${tag} already exists on origin; skipping."
+            echo "Tag ${tag} already exists on origin; skipping tag creation."
             exit 0
           fi
-          git fetch origin main --tags
-          git checkout main
-          git reset --hard origin/main
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Tag the exact validated commit (this run's HEAD). Pushing with
+          # GITHUB_TOKEN does not start release.yml's `on: push tags` run, so
+          # the next step dispatches it explicitly.
           git tag "${tag}"
           git push origin "${tag}"
 
       - name: Trigger release workflow
-        if: steps.commit.outputs.created != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v${{ steps.version.outputs.version }}"
+          tag="${{ steps.tag.outputs.tag }}"
           for _ in 1 2 3 4 5; do
             if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
               break

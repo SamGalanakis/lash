@@ -32,13 +32,15 @@ else
 fi
 ci_features="${LASH_CI_FEATURES:--F lash-cli/fff-zlob -F lash-cli/bench}"
 critical_packages=(lash-core lashlang lash-protocol-rlm lash-protocol-standard)
+# The two micro lanes (deterministic sim unit/oracle suite + perf-guard
+# identity checks) share one shard: sequentially they finish well under the
+# fault-matrix lane, so a separate runner each just burned scheduling overhead.
 fast_shards=(
   scenario-harnesses
   fault-matrix
-  sim-unit
+  sim-unit-perf-guards
   sim-generated
   minimizer-fixtures
-  perf-guards
 )
 SIM_SEARCH_MIN_SEEDS=4
 SIM_SEARCH_MIN_MAX_BOUNDARIES=256
@@ -109,10 +111,9 @@ Lanes:
 Fast shards:
   fast:scenario-harnesses
   fast:fault-matrix
-  fast:sim-unit
+  fast:sim-unit-perf-guards
   fast:sim-generated
   fast:minimizer-fixtures
-  fast:perf-guards
   fast:summary
 
   `fast` runs all fast shards sequentially and then runs fast:summary. CI runs
@@ -178,7 +179,7 @@ esac
 
 if [ "$lane" = "fast" ]; then
   case "$fast_shard" in
-    all|summary|scenario-harnesses|fault-matrix|sim-unit|sim-generated|minimizer-fixtures|perf-guards) ;;
+    all|summary|scenario-harnesses|fault-matrix|sim-unit-perf-guards|sim-generated|minimizer-fixtures) ;;
     *)
       usage >&2
       exit 2
@@ -2026,8 +2027,9 @@ run_fast_shard() {
       run_state_machine_and_fault_matrix
       write_fast_shard_summary "$fast_shard"
       ;;
-    sim-unit)
+    sim-unit-perf-guards)
       run_sim_unit_suite
+      run_perf_identity_checks
       write_fast_shard_summary "$fast_shard"
       ;;
     sim-generated)
@@ -2042,10 +2044,6 @@ run_fast_shard() {
       ;;
     minimizer-fixtures)
       run_minimizer_fixture_suite
-      write_fast_shard_summary "$fast_shard"
-      ;;
-    perf-guards)
-      run_perf_identity_checks
       write_fast_shard_summary "$fast_shard"
       ;;
     summary)

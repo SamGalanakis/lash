@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""Release version helper for the publish-time version-injection flow.
+
+The working tree carries the honest ``0.0.0-dev`` placeholder in every
+workspace manifest — there is no version-bump commit. At release time the
+release workflow computes the next version from the release *channel* declared
+in ``[workspace.metadata.release]`` plus the existing ``v*`` tags, then stamps
+that version into the manifests of its ephemeral tag checkout before building
+binaries and publishing crates. Nothing in ``main`` ever carries a released
+version number.
+
+Commands:
+  print-next        Print the next release version for the declared channel.
+  stamp <version>   Rewrite the workspace manifests + lockfile to <version>
+                    (used by the release workflow's ephemeral checkout).
+  stamp-docs <ver>  Rewrite the checked-in doc install snippets to <version>
+                    (a maintainer convenience; CI no longer runs it).
+"""
+
 from __future__ import annotations
 
 import json
@@ -18,11 +36,9 @@ DOC_VERSION_FILES = [
     ROOT / "docs" / "tracing.html",
 ]
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
-# Pre-release versions (e.g. "0.1.0-alpha.1") are honoured but never
-# promoted to a stable release by CI. Numeric pre-release series do
-# auto-advance when the current tag already exists.
+# Pre-release versions (e.g. "0.1.0-alpha.1") and the "0.0.0-dev" working-tree
+# placeholder both match this shape.
 PRERELEASE_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-[A-Za-z0-9.-]+$")
-PRERELEASE_NUMBER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-(.+)\.(\d+)$")
 
 
 def main() -> int:
@@ -34,15 +50,18 @@ def main() -> int:
     if command == "print-next":
         print(compute_next_version())
         return 0
-    if command == "set":
+    if command in ("stamp", "stamp-docs"):
         if len(sys.argv) != 3:
-            print("set requires a version argument", file=sys.stderr)
+            print(f"{command} requires a version argument", file=sys.stderr)
             return 1
         value = sys.argv[2]
         if not (VERSION_RE.fullmatch(value) or PRERELEASE_RE.fullmatch(value)):
             print(f"unsupported version format: {value!r}", file=sys.stderr)
             return 1
-        apply_version_text(value)
+        if command == "stamp":
+            stamp_manifests(value)
+        else:
+            update_doc_example_versions(value)
         return 0
 
     print(f"unknown command: {command}", file=sys.stderr)
@@ -54,73 +73,78 @@ def print_usage() -> None:
     print(
         "Usage:\n"
         "  scripts/release_version.py print-next\n"
-        "  scripts/release_version.py set <version>",
+        "  scripts/release_version.py stamp <version>\n"
+        "  scripts/release_version.py stamp-docs <version>",
         file=sys.stderr,
     )
 
 
+# --- next-version computation -------------------------------------------------
+
+
+def read_release_channel() -> str:
+    """The release channel declared in [workspace.metadata.release].
+
+    The channel is the series CI advances — a pre-release series like
+    ``0.1.0-alpha`` (advancing ``0.1.0-alpha.N``) or a clean ``X.Y.Z`` (advancing
+    the patch). It replaces reading the version from the manifest, which now
+    always holds the ``0.0.0-dev`` placeholder.
+    """
+    data = tomllib.loads(CARGO_TOML.read_text())
+    try:
+        channel = data["workspace"]["metadata"]["release"]["channel"]
+    except (KeyError, TypeError):
+        raise SystemExit("missing [workspace.metadata.release] channel in Cargo.toml")
+    if not isinstance(channel, str) or not (
+        VERSION_RE.fullmatch(channel) or PRERELEASE_RE.fullmatch(channel)
+    ):
+        raise SystemExit(f"unsupported release channel: {channel!r}")
+    return channel
+
+
 def compute_next_version() -> str:
-    workspace_version = read_workspace_version()
-    if PRERELEASE_RE.fullmatch(workspace_version):
-        return compute_next_prerelease_version(workspace_version)
-    latest_tag = read_latest_release_tag()
-    if latest_tag is None:
-        return workspace_version
-
-    latest_version = latest_tag.removeprefix("v")
-    workspace_tuple = parse_version(workspace_version)
-    latest_tuple = parse_version(latest_version)
-    if workspace_tuple > latest_tuple:
-        return workspace_version
-    return format_version((latest_tuple[0], latest_tuple[1], latest_tuple[2] + 1))
+    channel = read_release_channel()
+    if PRERELEASE_RE.fullmatch(channel):
+        return compute_next_prerelease_version(channel)
+    return compute_next_stable_version(channel)
 
 
-def compute_next_prerelease_version(workspace_version: str) -> str:
-    match = PRERELEASE_NUMBER_RE.fullmatch(workspace_version)
-    if not match:
-        current_tag = f"v{workspace_version}"
-        if tag_exists(current_tag):
-            raise SystemExit(
-                f"{current_tag} already exists; use a numeric pre-release suffix "
-                "such as alpha.1 so CI can advance it"
-            )
-        return workspace_version
+def compute_next_prerelease_version(channel: str) -> str:
+    """Next ``<channel>.N`` for a pre-release channel like ``0.1.0-alpha``.
 
-    major, minor, patch, label, current_number = match.groups()
-    prefix = f"{major}.{minor}.{patch}-{label}."
-    next_number = int(current_number)
+    N is one past the highest numeric suffix among ``v<channel>.<N>`` tags, or
+    1 when the channel has no tagged releases yet.
+    """
+    prefix = f"{channel}."
+    next_number = 1
     for tag in read_release_tags():
         value = tag.removeprefix("v")
         if not value.startswith(prefix):
             continue
-        tag_match = PRERELEASE_NUMBER_RE.fullmatch(value)
-        if tag_match:
-            next_number = max(next_number, int(tag_match.group(5)) + 1)
+        suffix = value[len(prefix):]
+        if suffix.isdigit():
+            next_number = max(next_number, int(suffix) + 1)
     return f"{prefix}{next_number}"
 
 
-def read_workspace_version() -> str:
-    cargo_toml = CARGO_TOML.read_text()
-    match = re.search(
-        r"(?ms)^\[workspace\.package\]\s+version = \"([^\"]+)\"$",
-        cargo_toml,
-    )
-    if not match:
-        raise SystemExit("failed to find [workspace.package] version in Cargo.toml")
-    value = match.group(1)
-    # accept either clean semver or a pre-release tag; neither shape
-    # raises here so the helper can still report the current version
-    if not (VERSION_RE.fullmatch(value) or PRERELEASE_RE.fullmatch(value)):
-        raise SystemExit(f"unsupported workspace version: {value!r}")
-    return value
+def compute_next_stable_version(channel: str) -> str:
+    """Next patch for a clean ``X.Y.Z`` channel.
 
-
-def read_latest_release_tag() -> str | None:
+    The first release of a channel is the channel version itself; afterwards CI
+    advances the patch past the highest tag sharing the channel's major.minor.
+    """
+    channel_tuple = parse_version(channel)
+    highest = channel_tuple
     for tag in read_release_tags():
         value = tag.removeprefix("v")
-        if VERSION_RE.fullmatch(value):
-            return tag
-    return None
+        if not VERSION_RE.fullmatch(value):
+            continue
+        candidate = parse_version(value)
+        if candidate[:2] == channel_tuple[:2] and candidate > highest:
+            highest = candidate
+    if highest == channel_tuple and not tag_exists(f"v{channel}"):
+        return format_version(channel_tuple)
+    return format_version((highest[0], highest[1], highest[2] + 1))
 
 
 def read_release_tags() -> list[str]:
@@ -149,14 +173,25 @@ def format_version(version: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in version)
 
 
-def apply_version(version: tuple[int, int, int]) -> None:
-    apply_version_text(format_version(version))
+# --- stamping -----------------------------------------------------------------
 
 
 def apply_version_text(version_text: str) -> None:
+    """Stamp manifests + lockfile + doc snippets (full local stamp)."""
+    stamp_manifests(version_text)
+    update_doc_example_versions(version_text)
+
+
+def stamp_manifests(version_text: str) -> None:
+    """Stamp the workspace manifests + lockfile to an exact version.
+
+    This is what the release workflow runs on its ephemeral tag checkout so the
+    published crates and the built binaries carry the real release version.
+    Doc snippets are intentionally NOT touched here — they are checked-in
+    display text, decoupled from the release cut.
+    """
     update_workspace_version(version_text)
     update_workspace_dependency_versions(version_text)
-    update_doc_example_versions(version_text)
     update_lockfile_versions(version_text)
 
 
@@ -209,11 +244,13 @@ def update_workspace_dependency_versions(version: str) -> None:
 
 
 def update_doc_example_versions(version: str) -> None:
-    """Keep checked-in docs snippets in sync with the workspace version.
+    """Keep checked-in docs snippets in sync with a version.
 
-    The docs are static HTML/Markdown rather than a templated site build, so the
-    release bump is the substitution point. Only lines that mention Lash crates
-    are rewritten; unrelated dependency versions in examples stay untouched.
+    The docs are static HTML/Markdown rather than a templated site build. Only
+    lines that mention Lash crates are rewritten; unrelated dependency versions
+    in examples stay untouched. CI no longer runs this (there is no release
+    commit); it stays as a maintainer convenience for refreshing the display
+    snippets in a normal PR.
     """
     simple_dep_re = re.compile(
         r'(?P<prefix>\b(?:lash-[A-Za-z0-9_-]+|lashlang)\s*=\s*")'

@@ -10,15 +10,17 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 CONFIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "confidence.yml"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+STAGING_GUARD_WORKFLOW = ROOT / ".github" / "workflows" / "staging-guard.yml"
 GATE = ROOT / "scripts" / "confidence-gate.sh"
+CARGO_TOML = ROOT / "Cargo.toml"
 FOCUSED_SQLITE_REPRO = ROOT / "scripts" / "lash-sim-focused-sqlite-repro.sh"
+# The two micro lanes (sim unit/oracle + perf-guard identity) share one shard.
 FAST_SHARDS = [
     "scenario-harnesses",
     "fault-matrix",
-    "sim-unit",
+    "sim-unit-perf-guards",
     "sim-generated",
     "minimizer-fixtures",
-    "perf-guards",
 ]
 OLD_BROAD_CI_STEP_NAME = "Run bounded broad " + "replay/backend confidence"
 OLD_BROAD_CI_JOB_ID = "bounded-" + "broad-replay-backend"
@@ -338,6 +340,87 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, gate)
+
+    def test_publish_time_version_injection_has_no_bump_commit_or_second_pass(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        cargo = CARGO_TOML.read_text(encoding="utf-8")
+
+        # The bump commit + pass-1/pass-2 re-run chain + staging version sync
+        # are all gone: a green main push cuts the release from that sha.
+        self.assertNotIn("release_version.py set", workflow)
+        self.assertNotIn("Commit release version", workflow)
+        self.assertNotIn("Dispatch validation pass", workflow)
+        self.assertNotIn("Sync release version to staging", workflow)
+        self.assertNotIn("gh workflow run ci.yml", workflow)
+        # ci.yml is no longer workflow_dispatch-triggered (that trigger only
+        # existed to re-validate the bump commit as pass 2).
+        self.assertNotIn("workflow_dispatch:", workflow)
+
+        # main carries the honest dev placeholder; the channel is the source of
+        # truth for which release series a cut belongs to.
+        self.assertIn('version = "0.0.0-dev"', cargo)
+        self.assertIn("[workspace.metadata.release]", cargo)
+        self.assertNotIn("0.1.0-alpha.", cargo)
+
+        # The version is stamped into the ephemeral tag checkout at packaging
+        # time: binaries built from the stamped tree, crates pinned to the real
+        # version.
+        self.assertIn("release_version.py stamp", release)
+        self.assertIn("publish_workspace.py --version", release)
+
+    def test_release_notes_gate_is_fail_early_and_cut_relies_on_it(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("  release-notes-gate:\n", workflow)
+        gate_block = workflow_job_block(workflow, "release-notes-gate")
+        # No cargo, no cache, no `needs`: it runs at t=0 and fails in <1 min.
+        self.assertIn("release_notes.py collect --require", gate_block)
+        self.assertNotIn("rust-cache", gate_block)
+        self.assertNotIn("needs:", gate_block)
+
+        # The cut job relies on the gate instead of re-checking notes.
+        prepare_release = workflow_job_block(workflow, "prepare-release")
+        self.assertIn("- release-notes-gate\n", prepare_release)
+        self.assertNotIn("collect --require", prepare_release)
+
+    def test_workspace_tests_are_sharded_off_the_critical_path(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        # The monolithic `test:` job is gone; a doctest/build-cache writer plus
+        # the nextest partition shards replace it.
+        self.assertNotIn("  test:\n", workflow)
+        self.assertIn("  test-doc:\n", workflow)
+        self.assertIn("  test-shard:\n", workflow)
+        self.assertIn("--partition count:${{ matrix.shard }}/3", workflow)
+        # --no-fail-fast so one failure never hides the rest (alpha.82 lesson).
+        self.assertIn("--no-fail-fast", workflow)
+
+        prepare_release = workflow_job_block(workflow, "prepare-release")
+        self.assertIn("- test-doc\n", prepare_release)
+        self.assertIn("- test-shard\n", prepare_release)
+
+    def test_heavy_compile_jobs_route_through_sccache(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        for job_id in ("test-doc", "test-shard", "confidence-fast", "linux-release-cache"):
+            block = workflow_job_block(workflow, job_id)
+            self.assertIn("./.github/actions/setup-sccache", block)
+        self.assertIn("./.github/actions/setup-sccache", release)
+
+    def test_staging_guard_runs_notes_and_lint_mirror(self) -> None:
+        guard = STAGING_GUARD_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("branches:\n      - staging", guard)
+        self.assertIn("release_notes.py collect --require", guard)
+        self.assertIn("cargo fmt --all --check", guard)
+        self.assertIn("cargo clippy --workspace --all-targets --locked", guard)
+        self.assertIn("-- -D warnings", guard)
+        self.assertIn("bash scripts/check-core-ui-boundary.sh", guard)
+        self.assertIn("bash scripts/check-production-file-size.sh", guard)
+        # Restore-only: staging is never a second writer of the shared cache.
+        self.assertIn("save-if: false", guard)
 
 
 if __name__ == "__main__":

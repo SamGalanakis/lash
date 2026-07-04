@@ -5,13 +5,14 @@ Convention: a commit that should contribute user-facing release notes carries a
 `Release-Notes:` line in its body; everything after that line (to the end of
 the message) is the note, written as Markdown. Notes are collected across the
 release range (previous release tag → the release ref), oldest first, so the
-release body reads chronologically. Commits authored by the release automation
-("Release vX" bumps, staging version syncs) never contribute.
+release body reads chronologically. The publish-time version-injection flow
+authors no synthetic commits (no version bump, no staging sync), so every
+commit in range is a real change eligible to contribute notes.
 
 The release pipeline uses two entry points:
-  - prepare-release runs `collect --require` before mutating anything, so a
-    main push with no curated notes anywhere in its range fails loudly instead
-    of cutting a noteless release.
+  - the fail-early `release-notes-gate` job runs `collect --require` at t=0 on
+    a main push, so a range with no curated notes fails in under a minute
+    instead of after the full matrix; the release-cut job relies on the gate.
   - the publish job runs `collect --end <tag> --out <file>` and feeds the file
     to the GitHub release body (the auto-generated commit list is appended
     below it). Empty output is allowed there so manually pushed tags still
@@ -23,7 +24,6 @@ Uses only the Python standard library, like the sibling release scripts.
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -31,9 +31,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 MARKER = "Release-Notes:"
-AUTOMATION_SUBJECT_RE = re.compile(
-    r"^(Release v\d|Sync release version to staging)"
-)
 RECORD_SEPARATOR = "\x1e"
 FIELD_SEPARATOR = "\x1f"
 
@@ -88,10 +85,6 @@ def extract_note(body: str) -> str | None:
     return None
 
 
-def is_automation_commit(subject: str) -> bool:
-    return bool(AUTOMATION_SUBJECT_RE.match(subject.strip()))
-
-
 def collect_notes(end: str) -> list[str]:
     prev = previous_tag(end)
     range_spec = f"{prev}..{end}" if prev else end
@@ -116,9 +109,7 @@ def collect_notes(end: str) -> list[str]:
         parts = record.split(FIELD_SEPARATOR)
         if len(parts) != 3:
             continue
-        _sha, subject, body = parts
-        if is_automation_commit(subject):
-            continue
+        _sha, _subject, body = parts
         note = extract_note(body)
         if note:
             notes.append(note)

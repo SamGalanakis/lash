@@ -1,9 +1,10 @@
 # Publishing to crates.io
 
 The workspace publishes as one lockstep release: every publishable crate shares
-the `[workspace.package]` version and pins its internal dependencies to that
-exact version (centralized in the root `[workspace.dependencies]`). A release
-publishes them all together, in dependency order.
+the workspace version (the `0.0.0-dev` placeholder in-tree; the real release
+version once stamped at packaging time) and pins its internal dependencies to
+that exact version (centralized in the root `[workspace.dependencies]`). A
+release publishes them all together, in dependency order.
 
 ## What gets published
 
@@ -27,23 +28,32 @@ dependency order and waits for crates.io visibility between crates.
 
 ## How a release runs (CI)
 
-1. Bump the version (`scripts/release_version.py set <version>` — edits the
-   root `[workspace.package]` version, root `[workspace.dependencies]` pins,
-   checked-in docs snippets, and lockfile entries for workspace members that
-   use `version.workspace = true`). Private fixed-version members, such as E2E
-   harness crates at `0.0.0`, are intentionally left alone.
-2. Tag it `vX.Y.Z` and push (or use the `Release` workflow's
-   `workflow_dispatch`).
-3. `.github/workflows/release.yml` validates `cargo metadata --locked`, then
-   the `publish-crates` job runs `python3 .release-tools/scripts/publish_workspace.py`.
-   Already-published versions are skipped, so a failed run can be re-run to
-   resume.
-4. The same release workflow builds the CLI release assets and publishes the
-   GitHub release. On `main`, CI prepares automated releases in two passes:
-   the first passing run may push the version-bump commit, and the next CI run
-   validates that exact versioned commit before creating the tag and dispatching
-   `release.yml`. The normal CI workflow does not auto-release when its commit
-   message contains `[skip release]`.
+There is no version-bump commit and no second CI pass. `main` always carries the
+`0.0.0-dev` placeholder in every workspace manifest; the release version is
+computed at cut time and stamped into an ephemeral tag checkout at packaging
+time (`scripts/release_version.py stamp`, `scripts/publish_workspace.py
+--version`), so `main` never records a released version.
+
+1. A push to `main` runs CI (`.github/workflows/ci.yml`). The
+   `release-notes-gate` job fails in under a minute when the range carries no
+   curated notes; the full matrix validates the pushed commit.
+2. When the matrix and the gate are green, the `prepare-release` job computes the
+   next version — `scripts/release_version.py print-next` reads the release
+   series from `[workspace.metadata.release].channel` and returns the next
+   `<channel>.N` from the existing `v*` tags — tags that exact commit `vX.Y.Z`,
+   and dispatches `release.yml`. A push whose head commit says `[skip release]`
+   skips the cut.
+3. `release.yml` validates `cargo metadata --locked`, then:
+   - `build-release-assets` stamps the real version into its tag checkout and
+     builds the CLI binaries, so `lash --version` reports the release version.
+   - `publish-crates` runs
+     `python3 .release-tools/scripts/publish_workspace.py --version <version>`,
+     which stamps the manifests + lockfile and publishes every crate in
+     topological dependency layers (crates in a layer publish concurrently, one
+     crates.io visibility wait per layer). Already-published versions are
+     skipped, so a failed run can be re-run to resume.
+   - the `publish` job builds the GitHub release with the curated notes and the
+     packaged assets.
 
 The main CI workflow also runs:
 
@@ -72,15 +82,16 @@ Release-Notes:
 - Signals are named and typed; the unnamed `wait_signal()` is removed.
 ```
 
-`prepare-release` runs `scripts/release_notes.py collect --require` before
-mutating anything: if no commit in `previous-tag..HEAD` carries a section, the
-release fails loudly (push with `[skip release]` if the range deliberately
-cuts no release). The publish job collects the same range's sections (oldest
-first) into the GitHub release body; the auto-generated commit list is
-appended below. The previous tag is resolved by graph ancestry
-(`git describe`), not version sorting, so tags from unrelated history lines
-are ignored. Release-automation commits ("Release vX", staging version syncs)
-never contribute notes.
+The `release-notes-gate` job runs `scripts/release_notes.py collect --require`
+at t=0 on a main push: if no commit in `previous-tag..HEAD` carries a section,
+CI fails in under a minute (push with `[skip release]` if the range deliberately
+cuts no release). The same gate runs on staging pushes, so a missing-notes state
+is known before the merge to main. The publish job collects the same range's
+sections (oldest first) into the GitHub release body; the auto-generated commit
+list is appended below. The previous tag is resolved by graph ancestry
+(`git describe`), not version sorting, so tags from unrelated history lines are
+ignored. The flow authors no synthetic commits, so every commit in range is a
+real change eligible to contribute notes.
 
 ## Docs code snippets
 
@@ -126,18 +137,22 @@ New publishable crates inherit the lockstep version automatically
 `[workspace.dependencies]` so dependents can use it, and keep internal-only
 crates `publish = false`.
 
-To publish the workspace at the current checked-out release version:
+To publish the workspace manually (the working tree carries `0.0.0-dev`, so pass
+the real version to stamp):
 
 ```bash
 # from a clean checkout at the release tag, with a crates.io token:
 cargo login          # or export CARGO_REGISTRY_TOKEN=...
-python3 scripts/publish_workspace.py
+python3 scripts/publish_workspace.py --version X.Y.Z
 ```
 
-The helper asks crates.io whether each `(crate, version)` is already visible,
-skips published versions, publishes ready crates with `cargo publish -p <crate>
+`--version` stamps the manifests + lockfile, then the helper asks crates.io
+whether each `(crate, version)` is already visible, skips published versions,
+publishes each dependency layer concurrently with `cargo publish -p <crate>
 --no-verify --locked`, retries transient registry/network failures, waits for
-API visibility, then continues to dependents.
+API visibility once per layer, then continues to the next layer.
+`python3 scripts/publish_workspace.py --plan --version X.Y.Z` prints the computed
+publish layers without touching crates.io.
 
 ### Upgrade to Trusted Publishing (recommended, after bootstrap)
 

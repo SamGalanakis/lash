@@ -31,17 +31,6 @@ def test_marker_must_start_the_line() -> None:
     assert release_notes.extract_note(body) is None
 
 
-def test_automation_commits_are_excluded() -> None:
-    assert release_notes.is_automation_commit("Release v0.1.0-alpha.46 [skip ci]")
-    assert release_notes.is_automation_commit(
-        "Sync release version to staging (v0.1.0-alpha.46) [skip ci]"
-    )
-    assert not release_notes.is_automation_commit("Add durable suspension")
-    assert not release_notes.is_automation_commit("Releases page polish")
-
-
-
-
 def main() -> int:
     failures = 0
     for name, test in sorted(globals().items()):
