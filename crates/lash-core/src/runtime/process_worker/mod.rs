@@ -159,6 +159,14 @@ pub struct DurableProcessWorker {
     config: Arc<DurableProcessWorkerConfig>,
 }
 
+/// Report from a graceful [owner drain](DurableProcessWorker::drain_owner_bound_work).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessDrainReport {
+    /// Process ids this host's own started `OwnerBound` work was terminalized as
+    /// `Abandoned{OwnerDrain}` on, in the order they were drained.
+    pub abandoned: Vec<String>,
+}
+
 /// Why a recovery run did not produce a terminal outcome under the lease.
 enum RecoverFailure {
     /// The lease was lost mid-run (another owner reclaimed an expired lease).
@@ -318,6 +326,109 @@ impl DurableProcessWorker {
             tokio::spawn(async move { worker.recover_process(record).await });
         }
         Ok(())
+    }
+
+    /// Graceful owner drain: terminalize this host's own started `OwnerBound`
+    /// work as `Abandoned{OwnerDrain}` at close (ADR 0019).
+    ///
+    /// This is an explicit **host lever on the worker**, never an implicit
+    /// consequence of closing a session. Processes are global and outlive any
+    /// one session ([ADR 0011]), so `LashSession::close`/`park` must not touch
+    /// them; a host that wants its in-flight owner-bound work terminalized at
+    /// shutdown calls this on the worker it is tearing down.
+    ///
+    /// Drain sequence (the operations runbook owns the surrounding steps; this
+    /// is the terminal-writing step):
+    /// 1. stop admitting new work to this worker;
+    /// 2. cancel or await the worker's in-flight run tasks so they release their
+    ///    per-run leases — for **Rerunnable** in-flight work that is the whole
+    ///    story: stopping the local run task without any terminal write leaves
+    ///    the row non-terminal so the next worker re-runs it (its contract);
+    /// 3. call this lever: for every non-terminal **OwnerBound** row this exact
+    ///    worker started (`first_started.owner == self.config.lease_owner`),
+    ///    claim a fresh drain lease and, being the owner completing its own
+    ///    work, write `Abandoned{OwnerDrain}` under it — the ordinary graceful
+    ///    completion path, respecting the single-writer rule.
+    ///
+    /// A row still held by a live foreign lease (an in-flight run under one of
+    /// this worker's own recovery incarnations that step 2 has not yet released)
+    /// is deferred rather than reclaimed, so the drain never races a still-live
+    /// run; such a row reaches `Abandoned` on the next drain pass or at a peer's
+    /// recovery sweep. Rows started by a different owner, not-yet-started
+    /// OwnerBound rows (still claimable by anyone), Rerunnable rows, and
+    /// Externally-Owned rows are all left untouched.
+    ///
+    /// [ADR 0011]: durable process registration is session-independent.
+    pub async fn drain_owner_bound_work(&self) -> Result<ProcessDrainReport, PluginError> {
+        let mut abandoned = Vec::new();
+        for record in self.config.process_registry.list_non_terminal().await? {
+            if record.disposition != RecoveryDisposition::OwnerBound {
+                continue;
+            }
+            let Some(first_started) = record.first_started.as_ref() else {
+                // Never started: first execution is not re-execution, so any
+                // worker may still claim it. Draining it would strand runnable
+                // work as Abandoned.
+                continue;
+            };
+            if first_started.owner != self.config.lease_owner {
+                // Started by a different owner; not this host's to drain.
+                continue;
+            }
+            let owner = first_started.owner.clone();
+            if self.drain_one_owner_bound(&record.id, owner).await {
+                abandoned.push(record.id);
+            }
+        }
+        Ok(ProcessDrainReport { abandoned })
+    }
+
+    /// Terminalize one of this host's started OwnerBound rows as
+    /// `Abandoned{OwnerDrain}` under a freshly claimed drain lease. Returns
+    /// whether the terminal was written (`false` when the row is held by a live
+    /// foreign lease, already terminal, or the claim failed).
+    async fn drain_one_owner_bound(
+        &self,
+        process_id: &str,
+        owner: crate::LeaseOwnerIdentity,
+    ) -> bool {
+        let lease_ttl_ms = self.lease_timings().ttl_ms();
+        let drain_owner = self.recovery_lease_owner();
+        let lease = match self
+            .config
+            .process_registry
+            .claim_process_lease(process_id, &drain_owner, lease_ttl_ms)
+            .await
+        {
+            Ok(crate::ProcessLeaseClaimOutcome::Acquired(lease)) => lease,
+            // A live run still holds the lease, or the claim failed: defer.
+            Ok(crate::ProcessLeaseClaimOutcome::Busy { .. }) | Err(_) => return false,
+        };
+        if self
+            .config
+            .process_registry
+            .get_process(process_id)
+            .await
+            .is_some_and(|current| current.is_terminal())
+        {
+            self.release_or_log(&lease).await;
+            return false;
+        }
+        let evidence = AbandonEvidence {
+            writer: AbandonWriter::OwnerDrain,
+            owner: Some(owner),
+            epoch_ms: self.now_ms(),
+        };
+        self.complete_and_release(
+            &lease,
+            process_id,
+            ProcessAwaitOutput::Abandoned {
+                evidence: Box::new(evidence),
+                control: None,
+            },
+        )
+        .await;
+        true
     }
 
     /// Unique lease owner for one recovery attempt.

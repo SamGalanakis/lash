@@ -396,3 +396,98 @@ async fn owner_bound_unstarted_runs_once() {
         record.status
     );
 }
+
+/// Owner drain (ADR 0019): a host closing gracefully terminalizes its own
+/// started OwnerBound work inline as `Abandoned{OwnerDrain}` under a live lease,
+/// while leaving rerunnable, not-yet-started, and other-owner rows untouched.
+#[tokio::test]
+async fn drain_terminalizes_this_hosts_started_owner_bound_work() {
+    let registry: Arc<dyn ProcessRegistry> = Arc::new(TestLocalProcessRegistry::default());
+    let owner = local_owner("drain-host", "host-a", "start-a");
+    let worker = inline_worker(Arc::clone(&registry), owner.clone());
+
+    // (a) OwnerBound row this worker started -> drained.
+    registry
+        .register_process(registration_with_disposition(
+            "mine-started",
+            RecoveryDisposition::OwnerBound,
+        ))
+        .await
+        .expect("register mine-started");
+    registry
+        .record_first_started(
+            "mine-started",
+            ProcessStarted {
+                owner: owner.clone(),
+                started_at_ms: 1,
+            },
+        )
+        .await
+        .expect("record first_started for mine-started");
+
+    // (b) OwnerBound row a DIFFERENT owner started -> not ours to drain.
+    registry
+        .register_process(registration_with_disposition(
+            "theirs-started",
+            RecoveryDisposition::OwnerBound,
+        ))
+        .await
+        .expect("register theirs-started");
+    registry
+        .record_first_started(
+            "theirs-started",
+            ProcessStarted {
+                owner: local_owner("other-host", "host-b", "start-b"),
+                started_at_ms: 1,
+            },
+        )
+        .await
+        .expect("record first_started for theirs-started");
+
+    // (c) OwnerBound row never started -> still claimable by anyone.
+    registry
+        .register_process(registration_with_disposition(
+            "mine-unstarted",
+            RecoveryDisposition::OwnerBound,
+        ))
+        .await
+        .expect("register mine-unstarted");
+
+    // (d) Rerunnable in-flight row this worker started -> left non-terminal for
+    // the next worker (its contract; drain never terminalizes rerunnable work).
+    registry
+        .register_process(registration_with_disposition(
+            "rerunnable",
+            RecoveryDisposition::Rerunnable,
+        ))
+        .await
+        .expect("register rerunnable");
+    registry
+        .record_first_started(
+            "rerunnable",
+            ProcessStarted {
+                owner: owner.clone(),
+                started_at_ms: 1,
+            },
+        )
+        .await
+        .expect("record first_started for rerunnable");
+
+    let report = worker.drain_owner_bound_work().await.expect("drain");
+    assert_eq!(report.abandoned, vec!["mine-started".to_string()]);
+
+    let evidence = abandoned_evidence(&registry, "mine-started").await;
+    assert_eq!(evidence.writer, AbandonWriter::OwnerDrain);
+    assert_eq!(evidence.owner.as_ref(), Some(&owner));
+
+    for untouched in ["theirs-started", "mine-unstarted", "rerunnable"] {
+        assert!(
+            !registry
+                .get_process(untouched)
+                .await
+                .expect("row exists")
+                .is_terminal(),
+            "{untouched} must be left non-terminal by owner drain",
+        );
+    }
+}

@@ -130,7 +130,7 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
         .commands()
         .refresh_tool_catalog("control admin test", "control-admin-refresh")
         .await?;
-    session.processes().await_all().await?;
+    session.refresh_background_graph().await?;
     assert!(session.processes().list().await?.is_empty());
     let err = session
         .admin()

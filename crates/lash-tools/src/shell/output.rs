@@ -65,14 +65,25 @@ pub(crate) enum PollOutcome {
 }
 
 pub(crate) fn kill_child(state: &ProcessState) {
-    // The PTY child is its own session/process-group leader (portable-pty runs
-    // `setsid` in `pre_exec`), so SIGKILL the whole group first to reap any
-    // backgrounded descendants, mirroring the pipe path's
-    // `terminate_pipe_process`. The portable-pty killer only signals the direct
-    // child, so we still invoke it as a fallback (and on non-unix where group
-    // kill is unavailable).
-    terminate_process_group(state.pid);
-    if let Some(mut killer) = state.killer.lock().unwrap().take() {
+    kill_process_group_and_reap(state.pid, &state.killer);
+}
+
+/// SIGKILL a PTY child's whole process group and then its direct child.
+///
+/// The PTY child is its own session/process-group leader (portable-pty runs
+/// `setsid` in `pre_exec`), so we SIGKILL the whole group first to reap any
+/// backgrounded descendants, mirroring the pipe path's `terminate_pipe_process`.
+/// The portable-pty killer only signals the direct child, so we still invoke it
+/// as a fallback (and on non-unix where group kill is unavailable). The child is
+/// reaped by its detached wait thread ([`spawn_wait_thread`]) once the signal
+/// lands. Shared by the in-run cancel/timeout path and the [`ShellRuntime`]
+/// teardown RAII kill (`crate::shell::runtime`).
+pub(crate) fn kill_process_group_and_reap(
+    pid: Option<u32>,
+    killer: &Arc<StdMutex<Option<Box<dyn portable_pty::ChildKiller + Send + Sync>>>>,
+) {
+    terminate_process_group(pid);
+    if let Some(mut killer) = killer.lock().unwrap().take() {
         let _ = killer.kill();
     }
 }

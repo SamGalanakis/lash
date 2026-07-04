@@ -233,8 +233,7 @@ impl BenchmarkRuntime {
         self.session
             .as_ref()
             .expect("benchmark session")
-            .processes()
-            .await_all()
+            .refresh_background_graph()
             .await?;
         Ok(())
     }

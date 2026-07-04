@@ -14,6 +14,7 @@ pub mod admin;
 mod core;
 mod error;
 mod plugin_binding;
+pub(crate) mod process_admin;
 mod prompt_layer;
 #[cfg(feature = "rlm")]
 pub mod rlm;
@@ -328,7 +329,8 @@ pub mod remote {
 }
 
 pub mod process {
-    pub use crate::admin::{Processes, SessionProcessAdmin};
+    pub use crate::admin::SessionProcessAdmin;
+    pub use crate::process_admin::Processes;
     pub use lash_core::{
         AbandonEvidence, AbandonRequest, AbandonWriter, ObservedProcess, ObservedProcessEvent,
         ObservedWorkItem, ProcessAttach, ProcessAwaitOutput, ProcessAwaiter, ProcessCancelAbility,
@@ -344,7 +346,8 @@ pub mod process {
         ProcessStarted, ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessWake,
         ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
         ProcessWorkObserver, ProcessWorkSnapshot, RecoveryDisposition, SessionScope,
-        SessionScopeId, watch_process_registry, watch_process_registry_with_sink,
+        SessionScopeId, ToolSessionProcessAdmin, watch_process_registry,
+        watch_process_registry_with_sink,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
@@ -356,8 +359,8 @@ pub mod process {
 pub mod durability {
     pub use lash_core::{
         DurableProcessWorker, DurableProcessWorkerConfig, EffectHost, InlineEffectHost,
-        LeaseTimings, LeaseTimingsError, Residency, RuntimeEnvironment, RuntimeHostConfig,
-        TerminationPolicy,
+        LeaseTimings, LeaseTimingsError, ProcessDrainReport, Residency, RuntimeEnvironment,
+        RuntimeHostConfig, TerminationPolicy,
     };
 }
 

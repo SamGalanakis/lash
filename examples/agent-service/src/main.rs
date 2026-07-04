@@ -229,6 +229,10 @@ async fn async_main() -> anyhow_like::Result<()> {
     } else {
         None
     };
+    // Capture a process facade handle before `core` is moved into the app
+    // state, so host-scheduled retention runs through the same
+    // `Processes::prune` lever every embedder uses.
+    let retention_processes = core.processes();
     #[cfg(feature = "restate")]
     let restate_ingress_url =
         (durability == AgentServiceDurability::Restate).then_some(restate_ingress_url);
@@ -279,7 +283,7 @@ async fn async_main() -> anyhow_like::Result<()> {
     // Host-scheduled retention for terminal process rows (ADR 0017). This runs
     // in both durability modes: whichever registry backs the deployment is the
     // one that accumulates rows.
-    spawn_process_retention(Arc::clone(&process_registry));
+    spawn_process_retention(retention_processes);
 
     // Keep a state clone for the drain; the router consumes the original.
     let drain_state = state.clone();
@@ -326,7 +330,11 @@ async fn async_main() -> anyhow_like::Result<()> {
 /// an automatic sweep inside the registry: only the host knows its window. Run
 /// it on the same maintenance cadence as the session-store `vacuum` /
 /// `gc_unreachable` reclamation (see docs/persistence.html).
-fn spawn_process_retention(process_registry: Arc<dyn lash::process::ProcessRegistry>) {
+///
+/// Retention is driven through the [`Processes::prune`](lash::process::Processes::prune)
+/// facade lever rather than the raw registry method, so the example uses the
+/// same host surface every embedder does.
+fn spawn_process_retention(processes: lash::process::Processes) {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     // The window must be comfortably longer than any wait: a cutoff shorter than
@@ -346,7 +354,7 @@ fn spawn_process_retention(process_registry: Arc<dyn lash::process::ProcessRegis
                 Err(_) => continue,
             };
             let cutoff = now_ms.saturating_sub(RETENTION_WINDOW.as_millis() as u64);
-            match process_registry.prune_terminal_processes(cutoff).await {
+            match processes.prune(cutoff).await {
                 Ok(report) if report.pruned_processes > 0 || report.pruned_events > 0 => {
                     println!(
                         "agent-service pruned {} terminal processes and {} events (cutoff {cutoff}ms)",

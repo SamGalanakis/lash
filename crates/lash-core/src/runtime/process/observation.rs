@@ -195,6 +195,52 @@ impl ProcessWorkObserver {
         filter: &ProcessListFilter,
     ) -> Result<Vec<ObservedProcess>, PluginError> {
         let records = self.registry.list_processes(filter).await?;
+        self.observe_records(records).await
+    }
+
+    /// List processes a session may address — the grant filter (ADR 0019 /
+    /// process design grill). "Granted to" is the security lens: a process is
+    /// visible here only if `scope` holds a handle grant for it. This is the
+    /// single home for the grant-scoped view; the session facade sugar is a thin
+    /// caller of this method, never a parallel implementation.
+    pub async fn list_granted_to(
+        &self,
+        scope: &SessionScope,
+        filter: &ProcessListFilter,
+    ) -> Result<Vec<ObservedProcess>, PluginError> {
+        let entries = self.registry.list_handle_grants(scope).await?;
+        let records = entries
+            .into_iter()
+            .map(|(_, record)| record)
+            .filter(|record| filter.matches_record(record))
+            .collect::<Vec<_>>();
+        self.observe_records(records).await
+    }
+
+    /// List processes a session originated — the provenance filter (ADR 0019 /
+    /// process design grill). "Originated by" is the lineage lens, distinct from
+    /// the grant lens: a process matches when its recorded originator is a
+    /// session whose id equals `scope.session_id` (and its agent frame, when
+    /// `scope` names one), regardless of who currently holds a grant.
+    pub async fn list_originated_by(
+        &self,
+        scope: &SessionScope,
+        filter: &ProcessListFilter,
+    ) -> Result<Vec<ObservedProcess>, PluginError> {
+        let records = self
+            .registry
+            .list_processes(filter)
+            .await?
+            .into_iter()
+            .filter(|record| originator_matches(&record.provenance.originator, scope))
+            .collect::<Vec<_>>();
+        self.observe_records(records).await
+    }
+
+    async fn observe_records(
+        &self,
+        records: Vec<ProcessRecord>,
+    ) -> Result<Vec<ObservedProcess>, PluginError> {
         let mut observed = Vec::with_capacity(records.len());
         for record in records {
             let lease = self.registry.get_process_lease(&record.id).await?;
@@ -289,6 +335,22 @@ fn child_session_id(input: &ProcessInput) -> Option<String> {
         ProcessInput::ToolCall { .. }
         | ProcessInput::Engine { .. }
         | ProcessInput::External { .. } => None,
+    }
+}
+
+/// Whether `originator` names the session (or session+frame) identified by
+/// `scope`. Frame is matched only when `scope` names one, so a session-level
+/// provenance filter captures every frame the session originated.
+fn originator_matches(originator: &ProcessOriginator, scope: &SessionScope) -> bool {
+    match originator {
+        ProcessOriginator::Host => false,
+        ProcessOriginator::Session {
+            scope: origin_scope,
+        } => {
+            origin_scope.session_id == scope.session_id
+                && (scope.agent_frame_id.is_none()
+                    || origin_scope.agent_frame_id == scope.agent_frame_id)
+        }
     }
 }
 

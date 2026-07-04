@@ -431,8 +431,8 @@ impl LashCore {
         crate::admin::CoreTriggerAdmin { core: self.clone() }
     }
 
-    pub fn processes(&self) -> crate::admin::Processes {
-        crate::admin::Processes { core: self.clone() }
+    pub fn processes(&self) -> crate::process_admin::Processes {
+        crate::process_admin::Processes { core: self.clone() }
     }
 
     pub fn completions(&self) -> crate::admin::Completions {

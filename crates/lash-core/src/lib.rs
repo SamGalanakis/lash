@@ -341,11 +341,11 @@ pub use runtime::{
     PendingTurnInputCancelTarget, PendingTurnInputClaimDiagnostics, PendingTurnInputDraft,
     PendingTurnInputSuffixCancelOutcome, ProcessAttach, ProcessAwaitOutput, ProcessAwaiter,
     ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
-    ProcessCancelSummary, ProcessChangeHub, ProcessEngine, ProcessEngineRegistry,
-    ProcessEngineRunContext, ProcessEngineRunGuard, ProcessEngineRuntimeContext,
-    ProcessEngineValidationContext, ProcessEvent, ProcessEventAppendPlan,
-    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSink, ProcessEventType,
-    ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
+    ProcessCancelSummary, ProcessChangeHub, ProcessDrainReport, ProcessEngine,
+    ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
+    ProcessEngineRuntimeContext, ProcessEngineValidationContext, ProcessEvent,
+    ProcessEventAppendPlan, ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSink,
+    ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
     ProcessExecutionEnvStore, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
     ProcessHandleSummary, ProcessId, ProcessIdentity, ProcessInput, ProcessLease,
     ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
@@ -435,7 +435,7 @@ pub use tool_provider::{
     PreparedToolBatch, PreparedToolBatchCall, PreparedToolCall, ProgressSender, SandboxMessage,
     ToolCall, ToolChildExecutionTraceHook, ToolChildProcessStarted, ToolContext,
     ToolDurableEffects, ToolExecutionGrant, ToolPrepareCall, ToolPrepareContext, ToolProvider,
-    ToolSessionAdmin, ToolSessionModel, ToolTriggerClient,
+    ToolSessionAdmin, ToolSessionModel, ToolSessionProcessAdmin, ToolTriggerClient,
 };
 
 #[cfg(test)]

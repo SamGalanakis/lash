@@ -254,7 +254,7 @@ pub(super) async fn run_agent_turn_scenario_without_success_assertions(
         .turn(TurnInput::text(case.root_prompt))
         .stream_to(events.as_ref())
         .await?;
-    session.processes().await_all().await?;
+    session.refresh_background_graph().await?;
     let final_process_list = runtime.final_process_list().await?;
     assert_remote_process_dto_surface(
         &runtime.core,
@@ -478,7 +478,7 @@ impl AgentSessionTurnProcessScenario {
             )
             .await?;
         assert_eq!(handle.process_id, self.process_id);
-        session.processes().await_all().await?;
+        session.refresh_background_graph().await?;
         self.assert_process_output(&runtime).await?;
         self.assert_agent_contracts(&runtime).await?;
         Ok(())
@@ -620,7 +620,7 @@ impl AgentDurableInputSuspensionScenario {
             .await;
         self.resolve_key(&runtime, key).await?;
         let turn_output = turn.await.expect("turn task")?;
-        session.processes().await_all().await?;
+        session.refresh_background_graph().await?;
 
         self.assert_turn_completed(&turn_output, tools.as_ref());
         self.assert_agent_contracts(&runtime).await?;

@@ -2791,9 +2791,7 @@ finish value"#,
 
     let processes = session.processes().list().await?;
     let running_app_lookup = processes.iter().any(|process| {
-        process.descriptor.kind.as_deref() == Some("lashlang")
-            && process.descriptor.label.as_deref() == Some("lookup")
-            && !process.status.is_terminal()
+        process.kind == "lashlang" && process.label == "lookup" && !process.terminal
     });
     assert!(
         running_app_lookup,
@@ -2863,7 +2861,7 @@ finish value"#,
     let processes = session.processes().list().await?;
     let running = processes
         .iter()
-        .find(|process| process.descriptor.label.as_deref() == Some("lookup"))
+        .find(|process| process.label == "lookup")
         .expect("running lookup process");
     let graph = graph_store
         .graph(&format!("process:{}", running.process_id))

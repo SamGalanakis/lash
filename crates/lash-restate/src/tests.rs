@@ -178,6 +178,28 @@ fn external_registration(id: &str) -> ProcessRegistration {
     )
 }
 
+fn rerunnable_registration(id: &str) -> ProcessRegistration {
+    ProcessRegistration::new(
+        id,
+        ProcessInput::External {
+            metadata: serde_json::Value::Null,
+        },
+        lash_core::RecoveryDisposition::Rerunnable,
+        lash_core::ProcessProvenance::host(),
+    )
+}
+
+fn owner_bound_registration(id: &str) -> ProcessRegistration {
+    ProcessRegistration::new(
+        id,
+        ProcessInput::External {
+            metadata: serde_json::Value::Null,
+        },
+        lash_core::RecoveryDisposition::OwnerBound,
+        lash_core::ProcessProvenance::host(),
+    )
+}
+
 fn sync_await<T, F>(future: F) -> T
 where
     T: Send + 'static,
@@ -3413,15 +3435,122 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
 }
 
 #[tokio::test]
+async fn run_registration_abandons_restarted_owner_bound_without_running() {
+    // ADR 0019: when the engine re-invokes the workflow for an OwnerBound row
+    // whose prior incarnation already recorded `first_started` but left no
+    // outcome, the run handler must NOT re-execute it. It completes the row as
+    // Abandoned{Sweep} — the durable tier's crash-recovery verdict — and returns
+    // that output so the durable promise still resolves for awaiters.
+    let runner = Arc::new(RecordingRunner::default());
+    let registry = process_registry();
+    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let registration = owner_bound_registration("ob-restart");
+    registry
+        .register_process(registration.clone())
+        .await
+        .expect("register owner-bound process");
+    // Simulate the prior incarnation that began executing but never completed.
+    let started_owner = lash_core::LeaseOwnerIdentity::opaque("owner-a", "incarnation-1");
+    registry
+        .record_first_started(
+            "ob-restart",
+            lash_core::ProcessStarted {
+                owner: started_owner.clone(),
+                started_at_ms: 42,
+            },
+        )
+        .await
+        .expect("record prior incarnation start");
+
+    let output = workflow
+        .run_registration(
+            registration,
+            ProcessExecutionContext::default(),
+            lash_core::ScopedEffectController::shared(
+                Arc::new(lash_core::InlineRuntimeEffectController),
+                lash_core::ExecutionScope::process("ob-restart"),
+            )
+            .expect("inline process scope"),
+        )
+        .await
+        .expect("run_registration");
+
+    // The runner is never invoked: re-execution of a started OwnerBound row is
+    // refused.
+    assert!(
+        runner.ran.lock().expect("runner ran lock").is_empty(),
+        "a restarted OwnerBound row must not be re-executed"
+    );
+    // Both the returned output and the persisted terminal are Abandoned{Sweep},
+    // naming the incarnation that began the work as the evidence owner.
+    let ProcessAwaitOutput::Abandoned { evidence, .. } = &output else {
+        panic!("expected Abandoned output, got {output:?}");
+    };
+    assert_eq!(evidence.writer, AbandonWriter::Sweep);
+    assert_eq!(evidence.owner.as_ref(), Some(&started_owner));
+    let record = registry
+        .get_process("ob-restart")
+        .await
+        .expect("get abandoned row");
+    assert!(record.is_terminal(), "the row is completed as terminal");
+    assert!(matches!(
+        record.status.await_output(),
+        Some(ProcessAwaitOutput::Abandoned { .. })
+    ));
+}
+
+#[tokio::test]
+async fn run_registration_runs_fresh_owner_bound() {
+    // A fresh OwnerBound row has no `first_started` (the runner records it inside
+    // run_process, during execution), so the re-invocation guard must NOT fire:
+    // the runner executes normally on the first invocation.
+    let runner = Arc::new(RecordingRunner::default());
+    let registry = process_registry();
+    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let registration = owner_bound_registration("ob-fresh");
+    registry
+        .register_process(registration.clone())
+        .await
+        .expect("register fresh owner-bound process");
+
+    let output = workflow
+        .run_registration(
+            registration,
+            ProcessExecutionContext::default(),
+            lash_core::ScopedEffectController::shared(
+                Arc::new(lash_core::InlineRuntimeEffectController),
+                lash_core::ExecutionScope::process("ob-fresh"),
+            )
+            .expect("inline process scope"),
+        )
+        .await
+        .expect("run_registration");
+
+    assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
+    assert_eq!(
+        runner
+            .ran
+            .lock()
+            .expect("runner ran lock")
+            .iter()
+            .map(|run| run.process_id.clone())
+            .collect::<Vec<_>>(),
+        vec!["ob-fresh".to_string()],
+        "a fresh OwnerBound row runs through the runner on first invocation"
+    );
+}
+
+#[tokio::test]
 async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    // A non-terminal process is the durable worklist row the ingress runner
-    // must submit.
+    // A non-terminal, Lash-executed (Rerunnable) process is the durable
+    // worklist row the ingress runner must submit. ExternallyOwned rows are
+    // never submitted (ADR 0019), so the submittable case uses a Rerunnable row.
     let registry = process_registry();
     registry
-        .register_process(external_registration("task-1"))
+        .register_process(rerunnable_registration("task-1"))
         .await
         .expect("register");
 
@@ -3495,6 +3624,98 @@ async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
             .and_then(|external| external.metadata.as_ref())
             .and_then(|metadata| metadata.get("invocation_id")),
         Some(&serde_json::json!("inv_task_1"))
+    );
+}
+
+#[tokio::test]
+async fn ingress_sweep_skips_externally_owned_and_reconciles_abandon_request() {
+    // ADR 0019 at the Restate tier: the ingress sweep never POSTs a run for an
+    // ExternallyOwned row (Lash does not execute it), but it does reconcile such
+    // a row's pending Abandon Request into an `Abandoned{ReconciledRequest}`
+    // terminal — mirroring the core sweep's `reconcile_externally_owned_abandon`.
+    // A Rerunnable row alongside them still submits, so exactly one ingress call
+    // fires and it is for the Lash-executed row.
+    let registry = process_registry();
+    registry
+        .register_process(external_registration("ext-abandon"))
+        .await
+        .expect("register externally-owned row with pending abandon");
+    registry
+        .request_process_abandon(
+            "ext-abandon",
+            lash_core::AbandonRequest {
+                requested_by: "operator".to_string(),
+                requested_at_ms: 111,
+                reason: Some("host retired".to_string()),
+            },
+        )
+        .await
+        .expect("record abandon request");
+    registry
+        .register_process(external_registration("ext-idle"))
+        .await
+        .expect("register externally-owned row without abandon");
+    registry
+        .register_process(rerunnable_registration("rerun-1"))
+        .await
+        .expect("register rerunnable row");
+
+    // The capture server accepts exactly one connection: if any ExternallyOwned
+    // row were submitted, a second connect would be attempted and the extra
+    // submit would fail, so the single-response server also proves they are not.
+    let (base_url, captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "202 Accepted",
+        body: r#"{"invocationId":"inv_rerun_1","status":"Accepted"}"#,
+    }])
+    .await;
+    let runner = RestateProcessIngressRunner::new(base_url, Arc::clone(&registry));
+    runner
+        .claim_and_run_pending()
+        .await
+        .expect("sweep skips externally-owned rows and submits the rerunnable one");
+    server.await.expect("mock ingress server task");
+
+    let requests = captured.lock().expect("captured lock").clone();
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the Rerunnable row is submitted; ExternallyOwned rows are never POSTed"
+    );
+    assert!(
+        requests[0].starts_with("POST /LashProcessWorkflow/rerun-1/run/send "),
+        "the single submit is the Lash-executed row: {}",
+        requests[0]
+    );
+
+    // The abandon-request externally-owned row is now terminal Abandoned, written
+    // by the reconciled-request path with no Lash execution owner to name.
+    let abandoned = registry
+        .get_process("ext-abandon")
+        .await
+        .expect("get reconciled row");
+    assert!(
+        abandoned.is_terminal(),
+        "an externally-owned row with a pending abandon request is reconciled to terminal"
+    );
+    let Some(ProcessAwaitOutput::Abandoned { evidence, .. }) = abandoned.status.await_output()
+    else {
+        panic!("expected Abandoned terminal, got {:?}", abandoned.status);
+    };
+    assert_eq!(evidence.writer, AbandonWriter::ReconciledRequest);
+    assert!(
+        evidence.owner.is_none(),
+        "externally-owned work has no Lash execution owner to name"
+    );
+
+    // The externally-owned row without an abandon request is left untouched for
+    // its external owner to complete.
+    let idle = registry
+        .get_process("ext-idle")
+        .await
+        .expect("get idle externally-owned row");
+    assert!(
+        !idle.is_terminal(),
+        "an externally-owned row with no abandon request is left non-terminal"
     );
 }
 

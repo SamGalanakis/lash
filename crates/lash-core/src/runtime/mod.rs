@@ -149,7 +149,7 @@ pub use process::{
     validate_process_signal_name, watch_process_registry, watch_process_registry_with_sink,
 };
 pub use process_work_driver::{InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver};
-pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
+pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig, ProcessDrainReport};
 pub use queued_work_driver::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest};
 pub use scenario_contracts::{RUNTIME_SCENARIO_CONTRACTS, ScenarioContractSpec};
 pub use session_manager::DirectCompletionClient;

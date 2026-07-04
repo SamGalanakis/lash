@@ -43,6 +43,26 @@ impl ToolSessionProcessAdmin<'_> {
             .await
     }
 
+    /// Record the terminal outcome of an Externally-Owned process this session
+    /// owns (ADR 0019). A `shell.start` detach registers its launch as an
+    /// Externally-Owned row and immediately completes it with the launch
+    /// identity — lash never claims it as running. Only Externally-Owned rows
+    /// accept this out-of-band completion.
+    pub async fn complete_external(
+        &self,
+        process_id: &str,
+        await_output: crate::ProcessAwaitOutput,
+    ) -> Result<crate::ProcessRecord, PluginError> {
+        self.processes
+            .complete_external(
+                &self.session_id,
+                process_id,
+                await_output,
+                self.process_scope(),
+            )
+            .await
+    }
+
     /// Await a process started from this session to its terminal output.
     pub async fn await_process(
         &self,

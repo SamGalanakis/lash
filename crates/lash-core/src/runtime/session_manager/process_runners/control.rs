@@ -384,6 +384,52 @@ impl ProcessCapability {
             .await
     }
 
+    /// Write the terminal outcome for an Externally-Owned process the session
+    /// holds a grant for (ADR 0019). This is the "external actor calling
+    /// `complete_process`" closure path: a `shell.start` detach records its
+    /// immediately-terminal launch fact through here. Only Externally-Owned rows
+    /// may be completed this way — an OwnerBound or Rerunnable row has a lash
+    /// execution owner as its single terminal writer, so completing it out of
+    /// band is rejected.
+    pub(in crate::runtime::session_manager) async fn complete_external_process(
+        &self,
+        current: &CurrentSessionCapability,
+        session_id: &str,
+        process_id: &str,
+        await_output: crate::ProcessAwaitOutput,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessRecord, crate::PluginError> {
+        let runner = self.command_runner(current, &scope)?;
+        let session_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
+        if !runner
+            .registry()
+            .has_handle_grant(&session_scope, process_id)
+            .await?
+        {
+            return Err(crate::PluginError::Session(format!(
+                "process handle `{process_id}` is not visible in this session"
+            )));
+        }
+        match runner.registry().get_process(process_id).await {
+            Some(record) if record.disposition != crate::RecoveryDisposition::ExternallyOwned => {
+                return Err(crate::PluginError::Session(format!(
+                    "process `{process_id}` is not externally-owned; only externally-owned rows may be completed out of band"
+                )));
+            }
+            None => {
+                return Err(crate::PluginError::Session(format!(
+                    "unknown process `{process_id}`"
+                )));
+            }
+            Some(_) => {}
+        }
+        self.mark_current_process_sync_needed(current, session_id);
+        runner
+            .registry()
+            .complete_process(process_id, await_output)
+            .await
+    }
+
     pub(in crate::runtime::session_manager) async fn list_process_handles(
         &self,
         current: &CurrentSessionCapability,

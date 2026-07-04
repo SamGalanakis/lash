@@ -32,7 +32,7 @@ finish {
             .turn(TurnInput::text("run stack budget process fanout"))
             .stream_to(&events)
             .await?;
-        session.processes().await_all().await?;
+        session.refresh_background_graph().await?;
 
         assert_eq!(
             turn.final_value(),

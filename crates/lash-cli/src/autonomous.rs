@@ -447,7 +447,7 @@ async fn finish_autonomous_outcome(
 ) -> anyhow::Result<(crate::turn_runner::RuntimeRunResult, bool)> {
     let (mut done, cancel) = (outcome.done, outcome.cancel);
     if persistence.await_background_work {
-        session.processes().await_all().await?;
+        session.refresh_background_graph().await?;
         let state = session.admin().state().persist_current().await?;
         done.result.state = state.to_snapshot();
     }

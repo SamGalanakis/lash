@@ -135,6 +135,41 @@ mod tests {
             Ok(record)
         }
 
+        async fn complete_external(
+            &self,
+            session_id: &str,
+            process_id: &str,
+            await_output: lash_core::ProcessAwaitOutput,
+            scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<lash_core::ProcessRecord, PluginError> {
+            let session_scope = Self::session_scope(session_id, &scope);
+            if !self
+                .registry
+                .has_handle_grant(&session_scope, process_id)
+                .await?
+            {
+                return Err(PluginError::Session(format!(
+                    "process handle `{process_id}` is not visible in this session"
+                )));
+            }
+            match self.registry.get_process(process_id).await {
+                Some(record)
+                    if record.disposition != lash_core::RecoveryDisposition::ExternallyOwned =>
+                {
+                    return Err(PluginError::Session(format!(
+                        "process `{process_id}` is not externally-owned"
+                    )));
+                }
+                None => {
+                    return Err(PluginError::Session(format!(
+                        "unknown process `{process_id}`"
+                    )));
+                }
+                Some(_) => {}
+            }
+            self.registry.complete_process(process_id, await_output).await
+        }
+
         async fn await_process(
             &self,
             process_id: &str,
@@ -207,13 +242,27 @@ mod tests {
 
         async fn signal(
             &self,
-            _session_id: &str,
+            session_id: &str,
             process_id: &str,
             signal_name: String,
             signal_id: String,
             payload: serde_json::Value,
-            _scope: lash_core::ProcessOpScope<'_>,
+            scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<lash_core::ProcessEvent, PluginError> {
+            // Mirror the real service: a signal only targets a live, visible
+            // handle, so a terminal row (e.g. a detached command) is rejected.
+            let session_scope = Self::session_scope(session_id, &scope);
+            let visible = self
+                .registry
+                .list_live_handle_grants(&session_scope)
+                .await?
+                .into_iter()
+                .any(|(grant, _record)| grant.process_id == process_id);
+            if !visible {
+                return Err(PluginError::Session(format!(
+                    "process handle `{process_id}` is not live or visible in this session"
+                )));
+            }
             let event_type = lash_core::process_signal_event_type(&signal_name)?;
             self.registry
                 .append_event(
@@ -531,6 +580,167 @@ mod tests {
         assert_eq!(events[0].event_type, SHELL_STDIN_SIGNAL_EVENT);
         assert_eq!(events[0].payload["chars"], "hello\n");
         assert_eq!(events[0].payload["close_stdin"], true);
+    }
+
+    #[cfg(unix)]
+    fn process_alive(pid: u32) -> bool {
+        // kill(pid, 0) probes existence/permission without delivering a signal.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    async fn wait_until_dead(pid: u32) -> bool {
+        for _ in 0..100 {
+            if !process_alive(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        !process_alive(pid)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_runtime_teardown_kills_tracked_pty_children() {
+        // Tool-layer RAII / lease-loss self-fence (ADR 0019): the worker rebuilds
+        // a fresh runtime per process run that owns the shell plugin instance,
+        // and hence this `ShellRuntime`. When that runtime is torn down — session
+        // close, run end, or a run task dropped on LeaseLost before its
+        // cooperative cancel ran — the plugin instance drops, the last table Arc
+        // drops, and every still-tracked PTY group is SIGKILLed. This proves the
+        // drop => kill link the worker relies on for self-fencing.
+        let runtime = ShellRuntime::new().with_cwd("/");
+        let id = runtime.allocate_handle_id();
+        runtime
+            .spawn_process(
+                id.clone(),
+                "sleep 300",
+                std::path::Path::new("/"),
+                false,
+                "bash",
+            )
+            .expect("spawn pty process");
+        let pid = runtime.tracked_pid(&id).expect("tracked pid");
+        assert!(process_alive(pid), "child should be running after spawn");
+        drop(runtime);
+        assert!(
+            wait_until_dead(pid).await,
+            "PTY child {pid} should be dead after ShellRuntime teardown",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_detached_is_untracked_and_survives_teardown() {
+        let runtime = ShellRuntime::new().with_cwd("/");
+        let launch = runtime
+            .spawn_detached("sleep 300", std::path::Path::new("/"), false, "bash")
+            .expect("spawn detached");
+        // A Detached Command is never inserted into the tracked map, so the
+        // teardown group-kill can never reach it (ADR 0019).
+        assert_eq!(
+            runtime.tracked_len(),
+            0,
+            "detached command must not be tracked",
+        );
+        assert_eq!(
+            launch.pgid, launch.pid,
+            "setsid makes the child its own process-group leader",
+        );
+        assert!(process_alive(launch.pid), "detached child should be running");
+        drop(runtime);
+        assert!(
+            process_alive(launch.pid),
+            "detached child must survive host teardown",
+        );
+        // Reap the process group we intentionally detached.
+        unsafe {
+            libc::kill(-(launch.pgid as i32), libc::SIGKILL);
+        }
+    }
+
+    #[tokio::test]
+    async fn start_command_detach_records_terminal_audit_fact() {
+        let shell = shell_provider(StandardShell::new().with_cwd("/"));
+        let service = Arc::new(TestProcessService::default());
+        let ctx = context_with_processes(Arc::clone(&service), "detach-call-1");
+        let result = run_with_context(
+            &shell,
+            "start_command",
+            &json!({"cmd": "sleep 300", "detach": true}),
+            &ctx,
+        )
+        .await;
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        let value = result.value_for_projection();
+        // Immediately-terminal audit fact — never a running claim.
+        assert_eq!(value["status"], "detached");
+        assert_eq!(value["done"], true);
+        assert_eq!(value["running"], false);
+        assert_eq!(value["__handle__"], "process");
+        assert_eq!(value["command"], "sleep 300");
+        assert!(value["pid"].as_u64().is_some(), "detach reports pid");
+        assert!(value["pgid"].as_u64().is_some(), "detach reports pgid");
+        assert!(
+            value["started_at"].as_u64().is_some(),
+            "detach reports started_at",
+        );
+
+        // The registry row is externally-owned and already terminal.
+        let record = service
+            .registry()
+            .get_process("detach-call-1")
+            .await
+            .expect("registry row");
+        assert!(
+            record.is_terminal(),
+            "detached row must be terminal from birth",
+        );
+        assert_eq!(
+            record.disposition,
+            lash_core::RecoveryDisposition::ExternallyOwned,
+        );
+
+        // Reap the process group we launched.
+        #[cfg(unix)]
+        if let Some(pgid) = value["pgid"].as_u64() {
+            unsafe {
+                libc::kill(-(pgid as i32), libc::SIGKILL);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn write_stdin_rejects_terminal_detached_target() {
+        let shell = test_shell();
+        let service = Arc::new(TestProcessService::default());
+        let registry = service.registry();
+        register_signal_target(registry.as_ref(), "detached-1").await;
+        // A detached row is externally-owned and terminal from birth; completing
+        // it here reproduces that state.
+        registry
+            .complete_process(
+                "detached-1",
+                lash_core::ProcessAwaitOutput::Success {
+                    value: serde_json::json!({ "pid": 1234 }),
+                    control: None,
+                },
+            )
+            .await
+            .expect("complete external row");
+        let ctx = context_with_processes(Arc::clone(&service), "write-detached");
+        let result = run_with_context(
+            &shell,
+            "write_stdin",
+            &json!({"process_id": "detached-1", "chars": "hello\n"}),
+            &ctx,
+        )
+        .await;
+        assert!(
+            !result.is_success(),
+            "write_stdin to a terminal detached row must be rejected: {}",
+            result.value_for_projection()
+        );
     }
 
     #[tokio::test]
