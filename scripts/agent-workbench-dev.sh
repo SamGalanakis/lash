@@ -301,19 +301,22 @@ start_detached() {
   log "building agent-workbench"
   cargo build -p agent-workbench
 
+  # Launch the binary cargo just built: honor CARGO_TARGET_DIR, or a stale
+  # binary in the repo-local target/ boots instead of the fresh build.
+  local workbench_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/agent-workbench"
   printf '\n[%s] starting agent-workbench at %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$workbench_url" >> "$log_file"
   if command -v setsid >/dev/null 2>&1; then
     setsid env \
       AGENT_WORKBENCH_ADDR="$workbench_addr" \
       AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
       RESTATE_INGRESS_URL="$restate_ingress_url" \
-      "$repo_root/target/debug/agent-workbench" >> "$log_file" 2>&1 < /dev/null &
+      "$workbench_bin" >> "$log_file" 2>&1 < /dev/null &
   else
     nohup env \
       AGENT_WORKBENCH_ADDR="$workbench_addr" \
       AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
       RESTATE_INGRESS_URL="$restate_ingress_url" \
-      "$repo_root/target/debug/agent-workbench" >> "$log_file" 2>&1 < /dev/null &
+      "$workbench_bin" >> "$log_file" 2>&1 < /dev/null &
   fi
   local pid="$!"
   printf '%s\n' "$pid" > "$pid_file"

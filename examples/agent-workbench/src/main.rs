@@ -66,3 +66,4 @@ include!("main_sections/app_state.rs");
 include!("main_sections/plugins.rs");
 include!("main_sections/prompt.rs");
 include!("main_sections/tests.rs");
+include!("main_sections/tests/process_work.rs");
