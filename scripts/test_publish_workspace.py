@@ -105,6 +105,114 @@ class PublishWorkspaceTest(unittest.TestCase):
             packages["provider-id"]["workspace_dependencies"], {"transport-id"}
         )
 
+    def test_stamp_workspace_invokes_release_version_stamp(self) -> None:
+        # --version stamps the real release version into the tree being
+        # published, by running the workspace checkout's own release_version.py.
+        publish_workspace = load_publish_workspace_module()
+        with (
+            mock.patch.object(
+                publish_workspace, "run_json", return_value={"workspace_root": str(ROOT)}
+            ),
+            mock.patch.object(publish_workspace.subprocess, "run") as run,
+        ):
+            publish_workspace.stamp_workspace("1.2.3")
+        run.assert_called_once()
+        stamp_args = run.call_args[0][0]
+        self.assertIn("stamp", stamp_args)
+        self.assertIn("1.2.3", stamp_args)
+        self.assertTrue(
+            any(str(arg).endswith("release_version.py") for arg in stamp_args),
+            stamp_args,
+        )
+
+    def test_compute_layers_orders_by_dependency_depth(self) -> None:
+        # A chain leaf <- mid <- top publishes leaf-first, one crate per layer.
+        publish_workspace = load_publish_workspace_module()
+        packages = {
+            "top": {"id": "top", "name": "top", "version": "1", "workspace_dependencies": {"mid"}},
+            "mid": {"id": "mid", "name": "mid", "version": "1", "workspace_dependencies": {"leaf"}},
+            "leaf": {"id": "leaf", "name": "leaf", "version": "1", "workspace_dependencies": set()},
+        }
+        layers = publish_workspace.compute_layers(packages)
+        self.assertEqual(layers, [["leaf"], ["mid"], ["top"]])
+
+    def test_compute_layers_groups_independent_crates_in_one_layer(self) -> None:
+        # Two leaves plus a crate depending on both: leaves batch together, then
+        # the dependent forms the next layer. In-layer order is by crate name.
+        publish_workspace = load_publish_workspace_module()
+        packages = {
+            "b": {"id": "b", "name": "b-leaf", "version": "1", "workspace_dependencies": set()},
+            "a": {"id": "a", "name": "a-leaf", "version": "1", "workspace_dependencies": set()},
+            "top": {
+                "id": "top",
+                "name": "top",
+                "version": "1",
+                "workspace_dependencies": {"a", "b"},
+            },
+        }
+        layers = publish_workspace.compute_layers(packages)
+        self.assertEqual(layers, [["a", "b"], ["top"]])
+
+    def test_compute_layers_skips_already_completed_crates(self) -> None:
+        # A resumed run seeds the already-visible crate as completed, so the
+        # dependent lands in the first computed layer.
+        publish_workspace = load_publish_workspace_module()
+        packages = {
+            "leaf": {"id": "leaf", "name": "leaf", "version": "1", "workspace_dependencies": set()},
+            "top": {"id": "top", "name": "top", "version": "1", "workspace_dependencies": {"leaf"}},
+        }
+        layers = publish_workspace.compute_layers(packages, {"leaf"})
+        self.assertEqual(layers, [["top"]])
+
+    def test_compute_layers_reports_dependency_cycle(self) -> None:
+        publish_workspace = load_publish_workspace_module()
+        packages = {
+            "a": {"id": "a", "name": "a", "version": "1", "workspace_dependencies": {"b"}},
+            "b": {"id": "b", "name": "b", "version": "1", "workspace_dependencies": {"a"}},
+        }
+        with self.assertRaises(RuntimeError):
+            publish_workspace.compute_layers(packages)
+
+    def test_versioned_dev_dependency_is_a_layering_edge(self) -> None:
+        # The same versioned-dev-dep ordering constraint that gates the
+        # one-at-a-time planner must gate the layered planner: the store
+        # publishes in a later layer than the runtime it dev-depends on.
+        publish_workspace = load_publish_workspace_module()
+        runtime_dir = str(ROOT / "crates" / "lash-lashlang-runtime")
+        store_dir = str(ROOT / "crates" / "lash-postgres-store")
+        metadata = {
+            "workspace_members": ["runtime-id", "store-id"],
+            "packages": [
+                {
+                    "id": "runtime-id",
+                    "name": "lash-lashlang-runtime",
+                    "version": "0.0.1",
+                    "publish": None,
+                    "manifest_path": f"{runtime_dir}/Cargo.toml",
+                    "dependencies": [],
+                },
+                {
+                    "id": "store-id",
+                    "name": "lash-postgres-store",
+                    "version": "0.0.1",
+                    "publish": None,
+                    "manifest_path": f"{store_dir}/Cargo.toml",
+                    "dependencies": [
+                        {
+                            "name": "lash-lashlang-runtime",
+                            "path": runtime_dir,
+                            "kind": "dev",
+                            "req": "=0.0.1",
+                        },
+                    ],
+                },
+            ],
+        }
+        with mock.patch.object(publish_workspace, "run_json", return_value=metadata):
+            packages = publish_workspace.load_publishable_workspace_packages()
+        layers = publish_workspace.compute_layers(packages)
+        self.assertEqual(layers, [["runtime-id"], ["store-id"]])
+
     def test_versioned_dev_dependencies_gate_publish_ordering(self) -> None:
         # A workspace-versioned dev-dependency survives into the published
         # manifest and must resolve on the index when cargo packages the

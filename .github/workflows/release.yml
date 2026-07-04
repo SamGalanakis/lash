@@ -63,10 +63,18 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Publishes every publishable workspace member one crate at a time in
-      # dependency order, waiting for crates.io API visibility between crates.
+      # Publishes every publishable workspace member in topological dependency
+      # layers (crates within a layer publish concurrently under a conservative
+      # cap; the publisher waits for crates.io API visibility once per layer).
       # publish=false crates are skipped; versions already visible on crates.io
       # are skipped, so reruns resume after partial publication.
+      #
+      # --version stamps the real release version into the tag checkout's
+      # manifests + lockfile before reading the graph and publishing: `main`
+      # carries the 0.0.0-dev placeholder, so this is what makes the published
+      # crates pin the real version. The stamp runs the tag checkout's own
+      # scripts/release_version.py (the publisher script itself is the pinned
+      # `.release-tools` copy).
       #
       # --no-verify: skip the per-crate verify-build. It is both unnecessary and
       # broken here — the release is cut from a fully CI-tested `main`, and the
@@ -85,9 +93,10 @@ jobs:
       # CARGO_REGISTRY_TOKEN to `${{ steps.auth.outputs.token }}` — then the
       # long-lived secret can be removed.
       - name: Publish workspace to crates.io
-        run: python3 .release-tools/scripts/publish_workspace.py
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: python3 .release-tools/scripts/publish_workspace.py --version "${RELEASE_TAG#v}"
 
   perf-guard-full:
     name: Perf Guard Full
@@ -178,6 +187,19 @@ jobs:
       - name: Install Zig
         uses: ./.github/actions/setup-ci-zig
 
+      # Stamping the release version (below) invalidates every workspace
+      # fingerprint, so this build recompiles all workspace crates on top of the
+      # restored (dependency-warm) release cache. Reclaim the large preinstalled
+      # toolchains this job never uses so the full workspace rebuild cannot
+      # ENOSPC. (The debug jobs no longer need this: with the version-bump
+      # commit gone, main pushes rebuild incrementally.)
+      - name: Reclaim runner disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
       # Restore-only against the shared caches ci.yml saves on main. Caches
       # saved here would be scoped to this run's tag ref, which no future
       # run can read — saving them would only thrash the repo's cache quota.
@@ -193,6 +215,9 @@ jobs:
         with:
           tool: protoc
 
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: scripts/ci-install-apt-packages.sh ${{ matrix.apt_packages }}
@@ -200,6 +225,13 @@ jobs:
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: brew install ${{ matrix.brew_packages }}
+
+      # main carries 0.0.0-dev; stamp the real version so the built binary
+      # reports it (CARGO_PKG_VERSION -> `lash --version`, self-update checks).
+      - name: Stamp release version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: python3 scripts/release_version.py stamp "${RELEASE_TAG#v}"
 
       - name: Build release binary
         env:

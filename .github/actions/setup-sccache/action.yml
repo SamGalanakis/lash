@@ -1,0 +1,23 @@
+name: Setup sccache
+description: >-
+  Install sccache with the GitHub Actions cache backend and route rustc through
+  it, so the heavy compile that rust-cache's read-only restorers (the Test
+  shards, cross builds) cannot save is cached across shards and runs.
+
+runs:
+  using: composite
+  steps:
+    - name: Install sccache
+      uses: mozilla-actions/sccache-action@v0.0.6
+
+    - name: Route rustc through sccache
+      shell: bash
+      run: |
+        # GHA cache backend (keyed content-addressed compilation units) shared
+        # across jobs/runs. CARGO_INCREMENTAL must be off for sccache to cache;
+        # CI never reuses an incremental dir anyway.
+        {
+          echo "SCCACHE_GHA_ENABLED=true"
+          echo "RUSTC_WRAPPER=sccache"
+          echo "CARGO_INCREMENTAL=0"
+        } >> "$GITHUB_ENV"

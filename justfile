@@ -169,8 +169,10 @@ release-automation-test:
   python3 "{{repo}}/scripts/test_publish_workspace.py"
 
 # ── crates.io publishing ─────────────────────────────────────
-# Show the current publishable workspace set and version. The release
-# publisher computes the real dependency order from cargo metadata.
+# Show the publishable workspace set. The in-tree version is the 0.0.0-dev
+# placeholder — the release publisher stamps the real version at packaging time
+# and computes the dependency layers from cargo metadata
+# (`python3 scripts/publish_workspace.py --plan --version X.Y.Z`).
 publish-order:
   #!/usr/bin/env bash
   set -euo pipefail
@@ -212,8 +214,11 @@ publish-dry-run:
   cargo publish --dry-run --locked -p lashlang
   @echo "OK."
 
-# Publish a single crate. Idempotent: returns success if the same
-# version is already on crates.io.
+# Publish a single crate at the in-tree version. Idempotent: returns success if
+# the same version is already on crates.io. NOTE: the in-tree version is the
+# 0.0.0-dev placeholder unless you have stamped a real version first
+# (`python3 scripts/release_version.py stamp X.Y.Z`); for a real release use the
+# layered publisher (`python3 scripts/publish_workspace.py --version X.Y.Z`).
 publish-one CRATE *args:
   #!/usr/bin/env bash
   set -euo pipefail
