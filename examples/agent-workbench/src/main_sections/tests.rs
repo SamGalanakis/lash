@@ -27,7 +27,7 @@ mod tests {
         .expect("runtime thread")
     }
 
-    fn explicit_durable_test_facets(data_dir: &std::path::Path) -> lash::LashCoreBuilder {
+    pub(super) fn explicit_durable_test_facets(data_dir: &std::path::Path) -> lash::LashCoreBuilder {
         let artifact_store = Arc::new(sync_await({
             let path = data_dir.join("artifacts.db");
             async move {
@@ -66,7 +66,7 @@ mod tests {
 
     const STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
 
-    fn run_async_test_on_stack_budget<F, Fut>(name: &str, test: F)
+    pub(super) fn run_async_test_on_stack_budget<F, Fut>(name: &str, test: F)
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + 'static,

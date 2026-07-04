@@ -126,8 +126,23 @@ Gates, in order:
    which matches the same subscription and starts a second run that no-ops on the
    account filter — the filter is the loop-breaker. One user delivery, exactly one
    forwarded copy, one **or two** process runs are all healthy; a second **copy** is not.
-4. `GET /api/lashlang-graphs` includes the concierge's graph;
+4. Take a concierge run's `process_id` from `/api/work` and call
+   `GET /api/work/{process_id}/await`. This is the wait-on-work-item seam
+   (`ProcessWorkDriver::await_terminal`, ADR 0016) — prefer it over re-polling
+   `/api/work` for a terminal row. It returns the terminal outcome plus the event
+   log reconciled from the durable store (ADR 0017); an already-terminal run
+   returns immediately. Gate: a `success` outcome for the forwarding run. The
+   server bounds the wait (~120s) and answers 504 for a run still going —
+   re-request; do not fall back to polling.
+5. `GET /api/lashlang-graphs` includes the concierge's graph;
    `lashlang-execution.jsonl` grew.
+
+Sink freshness is **evidence, never a gate**: when a run appends non-terminal
+events, the workbench log (in the dev script's state dir — see Working material)
+gains `agent-workbench process event:` lines from the best-effort
+`ProcessEventSink` feed (ADR 0017). A quick concierge run may legitimately append
+none, absence alone is not a finding, and completion never arrives through it —
+that is what gate 4 is for.
 
 Screenshot `06-forwarded.png` showing **both** inbox cards (original + copy) and
 `07-process-rail.png` for the registry.
@@ -147,6 +162,7 @@ gone. Then fill:
 | Trigger registration | assistant confirms; fires in Phase 6 | | `05-registered.png` |
 | Forwarding (the chain) | copy in `/api/accounts/personal/inbox`, **no chat turn involved** | | `06-forwarded.png` |
 | Durable process visibility | concierge in `/api/work` + graphs API | | `07-process-rail.png` |
+| Work-item await seam | `/api/work/{id}/await` returns `success` outcome + reconciled events | | API output |
 | UI/API agreement throughout | cards match inbox API at every gate | | screenshots + API output |
 
 **Aggregate:** did the chat, the search tool, the typed inbox authorities, and the
