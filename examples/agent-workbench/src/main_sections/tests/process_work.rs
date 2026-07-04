@@ -86,6 +86,7 @@ mod process_work_tests {
                     lash::process::ProcessInput::External {
                         metadata: Value::Null,
                     },
+                    lash::process::RecoveryDisposition::ExternallyOwned,
                     lash::process::ProcessProvenance::host(),
                 )
                 .with_extra_event_types([lash::process::ProcessEventType {

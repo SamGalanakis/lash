@@ -164,7 +164,7 @@ impl Processes {
         if let Some(driver) = self.core.work_driver.drivers().await.process {
             driver.claim_and_run_pending("admin_process_start").await?;
         }
-        Ok(record)
+        Ok(*record)
     }
 
     pub async fn list(
@@ -216,7 +216,7 @@ impl Processes {
                 "process cancel returned the wrong outcome".to_string(),
             )));
         };
-        Ok(lash_core::ProcessCancelSummary::from_record(record))
+        Ok(lash_core::ProcessCancelSummary::from_record(*record))
     }
 
     pub async fn signal(
@@ -293,7 +293,7 @@ impl Processes {
                     EmbedError::Plugin(lash_core::PluginError::Session(err.to_string()))
                 })?;
         }
-        Ok(event)
+        Ok(*event)
     }
 
     pub async fn session_snapshot(

@@ -310,6 +310,7 @@ fn remote_process_dtos_json_round_trip() {
         input: RemoteProcessInput::External {
             metadata: serde_json::json!({ "label": "Import" }),
         },
+        disposition: RemoteRecoveryDisposition::ExternallyOwned,
         env_spec: Some(RemoteProcessExecutionEnvSpec {
             plugin_options: RemoteProcessPluginOptions {
                 plugins: BTreeMap::from([(
@@ -387,9 +388,14 @@ fn remote_process_dtos_json_round_trip() {
                 lifecycle: RemoteProcessLifecycleStatus::Running,
                 status_label: "running".to_string(),
                 terminal: false,
+                disposition: RemoteRecoveryDisposition::ExternallyOwned,
                 error: None,
                 created_at_ms: 1,
                 updated_at_ms: 2,
+                first_started: None,
+                lease_holder: None,
+                lease_expires_at_ms: None,
+                abandon_request: None,
                 input: RemoteProcessInput::External {
                     metadata: serde_json::json!({ "label": "Import" }),
                 },
@@ -705,7 +711,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 6);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 7);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());
@@ -925,6 +931,7 @@ fn remote_process_record() -> RemoteProcessRecord {
         input: RemoteProcessInput::External {
             metadata: serde_json::json!({ "label": "Import" }),
         },
+        disposition: RemoteRecoveryDisposition::ExternallyOwned,
         identity: RemoteProcessIdentity {
             kind: "external".to_string(),
             label: Some("Import".to_string()),
@@ -948,6 +955,8 @@ fn remote_process_record() -> RemoteProcessRecord {
             id: "external:1".to_string(),
             metadata: None,
         }),
+        first_started: None,
+        abandon_request: None,
         wait: Some(RemoteProcessWaitState {
             kind: RemoteProcessWaitKind::Signal {
                 name: "ready".to_string(),

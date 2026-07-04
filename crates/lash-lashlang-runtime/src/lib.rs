@@ -656,6 +656,9 @@ pub async fn prepare_lashlang_process_start(
     let registration = lash_core::ProcessRegistration::new(
         process_id,
         process_input,
+        // Lashlang engine rows are journaled and idempotent by process id, so
+        // recovery may re-execute them (ADR 0019).
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessProvenance::host(),
     )
     .with_identity(identity)

@@ -564,7 +564,9 @@ impl ProcessLocalExecution {
                 if let Some(driver) = process_work_driver.as_ref() {
                     driver.claim_and_run_pending("process_start").await?;
                 }
-                Ok(ProcessEffectOutcome::Start { record })
+                Ok(ProcessEffectOutcome::Start {
+                    record: Box::new(record),
+                })
             }
             ProcessCommand::List {
                 session_scope,
@@ -608,7 +610,9 @@ impl ProcessLocalExecution {
                 let record = InlineRuntimeEffectController
                     .request_process_cancel(registry, &process_id, reason)
                     .await?;
-                Ok(ProcessEffectOutcome::Cancel { record })
+                Ok(ProcessEffectOutcome::Cancel {
+                    record: Box::new(record),
+                })
             }
             ProcessCommand::Signal {
                 process_id,
@@ -617,7 +621,7 @@ impl ProcessLocalExecution {
             } => {
                 let result = registry.append_event(&process_id, request).await?;
                 Ok(ProcessEffectOutcome::Signal {
-                    event: result.event,
+                    event: Box::new(result.event),
                 })
             }
         }

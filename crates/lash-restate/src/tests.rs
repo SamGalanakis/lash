@@ -173,6 +173,7 @@ fn external_registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
+        lash_core::RecoveryDisposition::ExternallyOwned,
         lash_core::ProcessProvenance::host(),
     )
 }
@@ -1956,6 +1957,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
             process_name: "scan".to_string(),
             args: args.clone(),
         }),
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessProvenance::session(lash_core::SessionScope::new("session")),
     )
     .with_extra_event_types(lash_lashlang_runtime::lashlang_process_event_types())
@@ -2735,6 +2737,7 @@ async fn snapshot_lashlang_registration(
             process_name: "main".to_string(),
             args: serde_json::Map::new(),
         }),
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessProvenance::host(),
     )
     .with_extra_event_types(lash_lashlang_runtime::lashlang_process_event_types())
@@ -2788,6 +2791,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                 serde_json::Value::Null,
             ),
         },
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessProvenance::session(creator_scope.clone()),
     )
     .with_extra_event_types([process_wake_event_type()])
@@ -3036,6 +3040,7 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
             process_name: "notify".to_string(),
             args,
         }),
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessProvenance::session(lash_core::SessionScope::new("root")).with_caused_by(
             Some(lash_core::CausalRef::SessionNode {
                 session_id: "root".to_string(),

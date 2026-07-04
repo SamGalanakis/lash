@@ -58,8 +58,15 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                 );
                 engine.run(engine_context, payload.clone()).await
             }
-            crate::ProcessInput::External { metadata } => crate::ProcessAwaitOutput::Success {
-                value: serde_json::json!({ "metadata": metadata.clone() }),
+            // Externally-owned rows are never executed by lash (ADR 0019): the
+            // worker's run path rejects the disposition before dispatch, so this
+            // is defensively unreachable. Never fabricate a success outcome for
+            // work lash did not observe completing — surface a loud failure.
+            crate::ProcessInput::External { .. } => crate::ProcessAwaitOutput::Failure {
+                class: crate::ToolFailureClass::Internal,
+                code: "external_process_not_executable".to_string(),
+                message: "externally-owned process must not be executed by lash".to_string(),
+                raw: None,
                 control: None,
             },
         }

@@ -80,6 +80,7 @@ impl LinkedTestProcess {
         lash_core::ProcessStartRequest::new(
             process_id,
             self.process_input(),
+            lash_core::RecoveryDisposition::Rerunnable,
             lash_core::ProcessOriginator::host(),
         )
         .with_env_spec(process_env_spec())

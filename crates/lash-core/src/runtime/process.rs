@@ -23,23 +23,24 @@ pub use engine::{
     ProcessEngineRuntimeContext, ProcessEngineValidationContext,
 };
 pub use events::{
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessTerminalSemantics,
-    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, process_signal_event_type,
-    process_signal_name_from_event_type, process_signal_wait_key, validate_process_signal_name,
+    AbandonEvidence, AbandonWriter, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
+    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
+    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
+    validate_process_signal_name,
 };
 pub use materialization::materialize_process_event_semantics;
 pub use model::{
-    InMemoryProcessExecutionEnvStore, PROCESS_LEASE_SCHEMA_VERSION, ProcessCancelSummary,
-    ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
+    AbandonRequest, InMemoryProcessExecutionEnvStore, PROCESS_LEASE_SCHEMA_VERSION,
+    ProcessCancelSummary, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
     ProcessExecutionEnvStore, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
     ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessIdentity, ProcessInput,
     ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessLifecycleStatus,
     ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessOriginator, ProcessProvenance,
     ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, ProcessSpawnProvenance,
-    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
-    ProcessStatusFilter, SessionScope, SessionScopeId, WaitKind, WaitState,
+    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStarted, ProcessStatus,
+    ProcessStatusFilter, RecoveryDisposition, SessionScope, SessionScopeId, WaitKind, WaitState,
     load_process_execution_env, persist_process_execution_env,
 };
 pub use observation::{

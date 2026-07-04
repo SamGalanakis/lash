@@ -67,6 +67,9 @@ impl RlmSubagentToolsProvider {
                 turn_input: Box::new(prepared.turn_input),
                 output_contract: lash_core::ToolOutputContract::Static,
             },
+            // Subagent session-turn rows are journaled child sessions, idempotent
+            // by process id, so recovery may re-execute them (ADR 0019).
+            lash_core::RecoveryDisposition::Rerunnable,
             lash_core::ProcessOriginator::host(),
         )
         .with_grant(Some(lash_core::ProcessStartGrant {
@@ -183,6 +186,9 @@ fn child_task_result(output: lash_core::ProcessAwaitOutput) -> Result<Value, Str
         }
         lash_core::ProcessAwaitOutput::Failure { message, .. } => Err(message),
         lash_core::ProcessAwaitOutput::Cancelled { message, .. } => Err(message),
+        lash_core::ProcessAwaitOutput::Abandoned { .. } => {
+            Err("subagent process was abandoned before recording an outcome".to_string())
+        }
     }
 }
 

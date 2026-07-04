@@ -266,6 +266,7 @@ pub enum RemoteProcessLifecycleStatus {
     Completed,
     Failed,
     Cancelled,
+    Abandoned,
 }
 
 impl RemoteProcessLifecycleStatus {
@@ -286,6 +287,9 @@ pub enum RemoteProcessStatus {
         await_output: RemoteProcessAwaitOutput,
     },
     Cancelled {
+        await_output: RemoteProcessAwaitOutput,
+    },
+    Abandoned {
         await_output: RemoteProcessAwaitOutput,
     },
 }
@@ -314,12 +318,17 @@ pub enum RemoteProcessAwaitOutput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         control: Option<serde_json::Value>,
     },
+    Abandoned {
+        evidence: RemoteAbandonEvidence,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        control: Option<serde_json::Value>,
+    },
 }
 
 impl RemoteProcessAwaitOutput {
     pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
         match self {
-            Self::Success { .. } => Ok(()),
+            Self::Success { .. } | Self::Abandoned { .. } => Ok(()),
             Self::Failure { code, message, .. } => {
                 require_non_empty(type_name, "await_output.code", code)?;
                 require_non_empty(type_name, "await_output.message", message)
@@ -429,6 +438,7 @@ impl RemoteProcessSummary {
 pub struct RemoteProcessRecord {
     pub process_id: String,
     pub input: RemoteProcessInput,
+    pub disposition: RemoteRecoveryDisposition,
     pub identity: RemoteProcessIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub event_types: Vec<RemoteProcessEventType>,
@@ -441,6 +451,10 @@ pub struct RemoteProcessRecord {
     pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<RemoteProcessExternalRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_started: Option<RemoteProcessStarted>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandon_request: Option<RemoteAbandonRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<RemoteProcessWaitState>,
     #[serde(default)]
@@ -472,7 +486,8 @@ impl RemoteProcessRecord {
             RemoteProcessStatus::Running => Ok(()),
             RemoteProcessStatus::Completed { await_output }
             | RemoteProcessStatus::Failed { await_output }
-            | RemoteProcessStatus::Cancelled { await_output } => await_output.validate(type_name),
+            | RemoteProcessStatus::Cancelled { await_output }
+            | RemoteProcessStatus::Abandoned { await_output } => await_output.validate(type_name),
         }
     }
 }
@@ -536,10 +551,19 @@ pub struct RemoteObservedProcess {
     pub lifecycle: RemoteProcessLifecycleStatus,
     pub status_label: String,
     pub terminal: bool,
+    pub disposition: RemoteRecoveryDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_started: Option<RemoteProcessStarted>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_holder: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandon_request: Option<RemoteAbandonRequest>,
     pub input: RemoteProcessInput,
     pub originator: RemoteProcessOriginator,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -722,6 +746,53 @@ pub enum RemoteProcessTerminalState {
     Completed,
     Failed,
     Cancelled,
+    Abandoned,
+}
+
+/// Wire mirror of the producer-declared recovery contract (ADR 0019).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteRecoveryDisposition {
+    Rerunnable,
+    OwnerBound,
+    ExternallyOwned,
+}
+
+/// Wire mirror of the writer that established an Abandoned terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAbandonWriter {
+    OwnerDrain,
+    Sweep,
+    ReconciledRequest,
+}
+
+/// Wire mirror of Abandoned-terminal evidence. The dead/lapsed owner identity is
+/// carried opaquely (the wire has no lease-owner mirror), matching how other
+/// nested core types ride the wire as JSON.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteAbandonEvidence {
+    pub writer: RemoteAbandonWriter,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<serde_json::Value>,
+    pub epoch_ms: u64,
+}
+
+/// Wire mirror of the durable execution-started fact.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteProcessStarted {
+    #[serde(default)]
+    pub owner: serde_json::Value,
+    pub started_at_ms: u64,
+}
+
+/// Wire mirror of the pending Abandon Request marker.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteAbandonRequest {
+    pub requested_by: String,
+    pub requested_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1051,6 +1122,7 @@ pub struct RemoteProcessStartRequest {
     pub protocol_version: u32,
     pub id: String,
     pub input: RemoteProcessInput,
+    pub disposition: RemoteRecoveryDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_spec: Option<RemoteProcessExecutionEnvSpec>,
     pub originator: RemoteProcessOriginator,
@@ -1121,6 +1193,7 @@ pub enum RemoteProcessStatusFilter {
     Completed,
     Failed,
     Cancelled,
+    Abandoned,
     Any,
 }
 

@@ -30,7 +30,15 @@ pub use turn_input::*;
 pub use turn_result::*;
 pub use usage_activity::*;
 
-pub const REMOTE_PROTOCOL_VERSION: u32 = 6;
+// Bumped to 7: the process wire mirror gained the additive-but-breaking
+// `Abandoned` terminal variant (on `RemoteProcessTerminalState`,
+// `RemoteProcessAwaitOutput`, `RemoteProcessStatus`, `RemoteProcessLifecycleStatus`,
+// `RemoteProcessStatusFilter`) plus the required `disposition` field and the
+// `first_started`/`abandon_request`/lease-holder read-side fields (ADR 0019). A
+// new tagged-enum variant cannot be deserialized by a version-6 peer, so per
+// docs/reporting.html's "bump for a breaking wire change" policy the version
+// dial moves; `validate()` rejects a version-6 envelope outright.
+pub const REMOTE_PROTOCOL_VERSION: u32 = 7;
 
 pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
     if actual == REMOTE_PROTOCOL_VERSION {

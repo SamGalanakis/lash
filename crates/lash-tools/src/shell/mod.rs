@@ -246,6 +246,10 @@ impl StandardShell {
         let request = ProcessStartRequest::new(
             process_id.clone(),
             ProcessInput::ToolCall { call },
+            // A shell.start row spawns an OS process group and its side effects are
+            // not idempotent: recovery must never re-execute a started command, so
+            // its contract binds at first start (ADR 0019).
+            lash_core::RecoveryDisposition::OwnerBound,
             lash_core::ProcessOriginator::host(),
         )
         .with_grant(Some(lash_core::ProcessStartGrant {

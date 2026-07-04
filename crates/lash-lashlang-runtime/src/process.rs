@@ -762,6 +762,13 @@ impl LashlangProcessExecutionTrace {
             lash_core::ProcessAwaitOutput::Cancelled { message, .. } => {
                 (TraceLashlangStatus::Cancelled, Some(message.clone()))
             }
+            // `emit_finished` fires after an actual execution, whose outcome is
+            // Success/Failure/Cancelled — abandonment is written out-of-band by the
+            // sweep, never returned by a run. Map it defensively to Failed.
+            lash_core::ProcessAwaitOutput::Abandoned { .. } => (
+                TraceLashlangStatus::Failed,
+                Some("process abandoned".to_string()),
+            ),
         };
         self.emit(TraceLashlangExecutionEvent::ExecutionFinished {
             event_key: self.event_key("finished"),

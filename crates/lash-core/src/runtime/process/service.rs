@@ -374,6 +374,7 @@ mod tests {
                             ProcessInput::External {
                                 metadata: json!(null),
                             },
+                            crate::RecoveryDisposition::ExternallyOwned,
                             ProcessProvenance::host(),
                         )),
                     )
@@ -523,6 +524,7 @@ mod tests {
             ProcessInput::External {
                 metadata: json!(null),
             },
+            crate::RecoveryDisposition::ExternallyOwned,
             ProcessProvenance::host(),
         ));
         record.status = ProcessStatus::Cancelled {

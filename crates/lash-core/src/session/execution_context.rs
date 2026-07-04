@@ -686,7 +686,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                         .resolve_await_event(&key, crate::Resolution::Ok(signal_payload))
                         .await?;
                 }
-                Ok(event)
+                Ok(*event)
             }
             other => Err(crate::RuntimeEffectControllerError::new(
                 "runtime_effect_wrong_outcome",

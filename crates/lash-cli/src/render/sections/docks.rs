@@ -80,6 +80,7 @@ pub fn process_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'
             Some(lash_core::ProcessTerminalState::Completed) => "success",
             Some(lash_core::ProcessTerminalState::Failed) => "error",
             Some(lash_core::ProcessTerminalState::Cancelled) => "cancelled",
+            Some(lash_core::ProcessTerminalState::Abandoned) => "abandoned",
         };
         let producer = task.definition.as_deref().unwrap_or(task.kind.as_str());
         let elapsed_duration = task
@@ -92,7 +93,8 @@ pub fn process_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'
             None => theme::turn_status_state(),
             Some(lash_core::ProcessTerminalState::Completed) => theme::tool_success(),
             Some(lash_core::ProcessTerminalState::Failed)
-            | Some(lash_core::ProcessTerminalState::Cancelled) => theme::tool_failure(),
+            | Some(lash_core::ProcessTerminalState::Cancelled)
+            | Some(lash_core::ProcessTerminalState::Abandoned) => theme::tool_failure(),
         };
         let selected_chrome = theme::process_selected_chrome();
         let row_style = |style: Style| {

@@ -12,10 +12,10 @@ use super::events::{
     ProcessTerminalState,
 };
 use super::model::{
-    PROCESS_LEASE_SCHEMA_VERSION, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion,
-    ProcessListFilter, ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport,
-    SessionScope, SessionScopeId, WaitState,
+    AbandonRequest, PROCESS_LEASE_SCHEMA_VERSION, ProcessExternalRef, ProcessHandleDescriptor,
+    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome,
+    ProcessLeaseCompletion, ProcessListFilter, ProcessRecord, ProcessRegistration,
+    ProcessSessionDeleteReport, ProcessStarted, SessionScope, SessionScopeId, WaitState,
 };
 use super::registry::{ProcessPruneReport, ProcessRegistry};
 use super::time::current_epoch_ms;
@@ -470,6 +470,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             ProcessTerminalState::Completed => "process.completed",
             ProcessTerminalState::Failed => "process.failed",
             ProcessTerminalState::Cancelled => "process.cancelled",
+            ProcessTerminalState::Abandoned => "process.abandoned",
         };
         self.append_event(
             process_id,
@@ -485,6 +486,49 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                 "unknown process `{process_id}` after terminal event"
             ))
         })
+    }
+
+    async fn record_first_started(
+        &self,
+        process_id: &str,
+        started: ProcessStarted,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        // First-writer-wins: the started fact is immutable once recorded.
+        if record.record.first_started.is_none() {
+            record.record.first_started = Some(Box::new(started));
+            record.record.updated_at_ms = current_epoch_ms();
+        }
+        Ok(record.record.clone())
+    }
+
+    async fn request_process_abandon(
+        &self,
+        process_id: &str,
+        request: AbandonRequest,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        if record.record.is_terminal() {
+            return Err(PluginError::Session(format!(
+                "terminal process `{process_id}` cannot accept an abandon request"
+            )));
+        }
+        // First-writer-wins: preserve the original recorded authorization.
+        if record.record.abandon_request.is_none() {
+            record.record.abandon_request = Some(Box::new(request));
+            record.record.updated_at_ms = current_epoch_ms();
+        }
+        Ok(record.record.clone())
     }
 
     async fn set_process_wait(
@@ -667,6 +711,19 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         };
         leases.insert(lease.process_id.clone(), renewed.clone());
         Ok(renewed)
+    }
+
+    async fn get_process_lease(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessLease>, PluginError> {
+        Ok(self
+            .leases
+            .lock()
+            .await
+            .get(process_id)
+            .filter(|lease| !lease.lease_token.is_empty())
+            .cloned())
     }
 
     async fn complete_process_lease(

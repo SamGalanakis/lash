@@ -46,7 +46,7 @@ impl<'scope> ProcessCommandRunner<'scope> {
             })
             .await?
         {
-            crate::ProcessEffectOutcome::Start { record } => Ok(record),
+            crate::ProcessEffectOutcome::Start { record } => Ok(*record),
             _ => Err(wrong_process_outcome("start")),
         }
     }
@@ -91,7 +91,7 @@ impl<'scope> ProcessCommandRunner<'scope> {
             })
             .await?
         {
-            crate::ProcessEffectOutcome::Cancel { record } => Ok(record),
+            crate::ProcessEffectOutcome::Cancel { record } => Ok(*record),
             _ => Err(wrong_process_outcome("cancel")),
         }
     }
@@ -114,7 +114,7 @@ impl<'scope> ProcessCommandRunner<'scope> {
             })
             .await?
         {
-            crate::ProcessEffectOutcome::Signal { event } => event,
+            crate::ProcessEffectOutcome::Signal { event } => *event,
             _ => return Err(wrong_process_outcome("signal")),
         };
         let waiting_ordinal = self

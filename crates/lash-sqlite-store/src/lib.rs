@@ -56,16 +56,17 @@ use lash_core::store::{
     RuntimeCommitResult, SessionCheckpoint, SessionHead, SessionHeadMeta,
 };
 use lash_core::{
-    AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef,
-    DeliveryPolicy, DurabilityTier, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey,
-    PROCESS_LEASE_SCHEMA_VERSION, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
-    ProcessEventAppendResult, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessPruneReport,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, QueuedWorkStore, RuntimePersistence,
-    SessionCommitStore, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
-    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionExecutionLeaseStore,
-    SessionMeta, SessionPickerInfo, SessionReadScope, SessionScope, SessionStoreCreateRequest,
-    SessionStoreFactory, SlotPolicy, StoreError, StoreMaintenance, TurnInputStore, VacuumReport,
+    AbandonRequest, AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
+    BlobRef, DeliveryPolicy, DurabilityTier, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness,
+    MergeKey, PROCESS_LEASE_SCHEMA_VERSION, ProcessAwaitOutput, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseClaimOutcome,
+    ProcessLeaseCompletion, ProcessPruneReport, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessStarted, QueuedWorkStore, RuntimePersistence, SessionCommitStore,
+    SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
+    SessionExecutionLeaseFence, SessionExecutionLeaseStore, SessionMeta, SessionPickerInfo,
+    SessionReadScope, SessionScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
+    StoreError, StoreMaintenance, TurnInputStore, VacuumReport,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -606,6 +607,7 @@ mod tests {
             ProcessInput::External {
                 metadata: serde_json::Value::Null,
             },
+            lash_core::RecoveryDisposition::ExternallyOwned,
             lash_core::ProcessProvenance::session(lash_core::SessionScope::new("session")),
         )
     }

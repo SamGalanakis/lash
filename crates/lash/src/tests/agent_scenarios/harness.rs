@@ -500,6 +500,7 @@ impl AgentSessionTurnProcessScenario {
                 turn_input: Box::new(TurnInput::text("run child session turn")),
                 output_contract: lash_core::ToolOutputContract::Static,
             },
+            lash_core::RecoveryDisposition::Rerunnable,
             lash_core::ProcessOriginator::host(),
         )
         .with_grant(Some(lash_core::ProcessStartGrant {

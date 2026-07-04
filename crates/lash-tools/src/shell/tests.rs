@@ -279,6 +279,7 @@ mod tests {
                     lash_core::ProcessInput::External {
                         metadata: serde_json::json!({}),
                     },
+                    lash_core::RecoveryDisposition::ExternallyOwned,
                     lash_core::ProcessProvenance::host(),
                 )
                 .with_extra_event_types([shell_signal_event_type()]),

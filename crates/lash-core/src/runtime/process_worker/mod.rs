@@ -6,10 +6,10 @@ use super::effect::ProcessRunner;
 use super::session_manager::RuntimeSessionServices;
 use super::{EmbeddedRuntimeBuilder, ProcessWorkDriver, QueuedWorkDriver, RuntimeHostConfig};
 use crate::{
-    InMemorySessionStore, LashRuntime, PluginError, PluginFactory, PluginHost, PluginStack,
-    ProcessAwaitOutput, ProcessExecutionContext, ProcessInput, ProcessLease,
-    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
-    SessionStoreFactory,
+    AbandonEvidence, AbandonWriter, InMemorySessionStore, LashRuntime, PluginError, PluginFactory,
+    PluginHost, PluginStack, ProcessAwaitOutput, ProcessExecutionContext, ProcessInput,
+    ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    RecoveryDisposition, SessionStoreFactory,
 };
 
 /// Deployment-local configuration for rebuilding durable process executions.
@@ -221,12 +221,30 @@ impl DurableProcessWorker {
     ) -> Result<ProcessAwaitOutput, PluginError> {
         self.ensure_stable_process_id(&registration)?;
         self.ensure_durable_store_facets()?;
-        if let ProcessInput::External { metadata } = registration.input.as_ref() {
-            return Ok(ProcessAwaitOutput::Success {
-                value: serde_json::json!({ "metadata": metadata.clone() }),
-                control: None,
-            });
+        // Externally-owned rows are never executed by lash (ADR 0019). Reject the
+        // disposition before touching a runtime — the old fabricated-success path
+        // for External inputs is deleted.
+        if registration.disposition == RecoveryDisposition::ExternallyOwned {
+            return Err(PluginError::Session(format!(
+                "process `{}` is externally-owned and must not be executed by lash",
+                registration.id
+            )));
         }
+        // Durable, lease-fenced "execution started" fact: recorded immediately
+        // before executing so a later sweep can distinguish a started OwnerBound
+        // row (never re-run) from an unstarted one (runnable by anyone). This is
+        // the shared run path both the inline sweep and the Restate run handler
+        // funnel through. First-writer-wins, so a re-invocation is a no-op.
+        self.config
+            .process_registry
+            .record_first_started(
+                &registration.id,
+                crate::ProcessStarted {
+                    owner: self.config.lease_owner.clone(),
+                    started_at_ms: self.now_ms(),
+                },
+            )
+            .await?;
         let mut runtime = self.runtime_for_registration(&registration).await?;
         let originator_scope = if let crate::ProcessOriginator::Session { scope } =
             &registration.provenance.originator
@@ -318,41 +336,49 @@ impl DurableProcessWorker {
         }
     }
 
+    /// Recover one non-terminal row, obeying its declared recovery disposition
+    /// (ADR 0019). The verdict per disposition:
+    ///
+    /// - **ExternallyOwned**: never claimed, never run. If a pending Abandon
+    ///   Request is present it is reconciled into `Abandoned{reconciled_request}`.
+    /// - **Rerunnable**: exactly today's behavior — claim, (re-)run, complete.
+    /// - **OwnerBound, never started**: any worker may run it (first execution is
+    ///   not re-execution); the runner records `first_started` before executing.
+    /// - **OwnerBound, started**: never re-run. A provably-dead holder yields
+    ///   `Abandoned{sweep}`; a merely silent/expired holder is left non-terminal
+    ///   unless an Abandon Request is present and the lease has lapsed, which
+    ///   yields `Abandoned{reconciled_request}`. Elapsed time alone never
+    ///   terminalizes.
+    ///
+    /// Every Abandoned write goes through `complete_process` under this sweep's
+    /// own fenced lease, so the sweep stays the single writer and a revenant's
+    /// stale token is rejected.
     async fn recover_process(&self, record: ProcessRecord) {
         let process_id = record.id.clone();
-        let lease_ttl_ms = self.lease_timings().ttl_ms();
-        let owner = &self.recovery_lease_owner();
-        // Skip if held live by another owner: a busy claim means a worker is
-        // already running this process, so re-running here would violate the
-        // single-owner contract. A busy holder whose persisted local-process
-        // liveness proves it definitely dead is reclaimed with the fenced CAS
-        // discipline the session execution lane uses, so an orphaned process
-        // recovers without waiting out the full lease TTL. Treat claim errors
-        // as "leased elsewhere".
-        let lease = match self
-            .config
-            .process_registry
-            .claim_process_lease(&process_id, owner, lease_ttl_ms)
-            .await
-        {
-            Ok(crate::ProcessLeaseClaimOutcome::Acquired(lease)) => lease,
-            Ok(crate::ProcessLeaseClaimOutcome::Busy { holder })
-                if holder.owner.is_definitely_dead_for_claimant(owner) =>
-            {
-                match self
-                    .config
-                    .process_registry
-                    .reclaim_process_lease(&process_id, owner, &holder, lease_ttl_ms)
-                    .await
-                {
-                    Ok(crate::ProcessLeaseClaimOutcome::Acquired(lease)) => lease,
-                    Ok(crate::ProcessLeaseClaimOutcome::Busy { .. }) | Err(_) => return,
-                }
+        // ExternallyOwned: lash never executes the row. The only recovery action
+        // is reconciling a pending Abandon Request; there is no owner lease to
+        // wait out.
+        if record.disposition == RecoveryDisposition::ExternallyOwned {
+            if record.abandon_request.is_some() {
+                self.reconcile_externally_owned_abandon(&process_id).await;
             }
-            Ok(crate::ProcessLeaseClaimOutcome::Busy { .. }) | Err(_) => return,
+            return;
+        }
+
+        let lease_ttl_ms = self.lease_timings().ttl_ms();
+        let owner = self.recovery_lease_owner();
+        // Claim the single-owner lease, distinguishing a fenced reclaim of a
+        // provably-dead holder (death evidence) from acquiring a free/expired
+        // lease (no death evidence). A live, not-provably-dead holder or a claim
+        // error leaves the row to its owner.
+        let Some((lease, dead_holder)) = self
+            .claim_for_recovery(&process_id, &owner, lease_ttl_ms)
+            .await
+        else {
+            return;
         };
-        // The process may have reached a terminal state between the list and the
-        // claim. Idempotent by process_id: do not re-execute a finished process.
+        // Terminal between the list and the claim. Idempotent by process_id: do
+        // not re-execute or re-terminalize a finished process.
         if self
             .config
             .process_registry
@@ -363,15 +389,152 @@ impl DurableProcessWorker {
             self.release_or_log(&lease).await;
             return;
         }
-        let registration = ProcessRegistration {
-            id: record.id,
-            input: record.input,
-            identity: record.identity,
-            event_types: record.event_types,
-            provenance: record.provenance.clone(),
-            env_ref: record.env_ref.clone(),
-            wake_target: record.wake_target.clone(),
+
+        match record.disposition {
+            // Rerunnable: claim, (re-)run, complete — exactly today's behavior.
+            RecoveryDisposition::Rerunnable => self.run_and_complete(record, lease).await,
+            RecoveryDisposition::OwnerBound if record.first_started.is_some() => {
+                // Started OwnerBound work is NEVER re-run — abandonment is the
+                // only recovery. `first_started`'s owner is the lapsed owner the
+                // reconciled-request evidence names.
+                let lapsed_owner = record
+                    .first_started
+                    .as_ref()
+                    .map(|started| started.owner.clone());
+                let evidence = if let Some(dead_holder) = dead_holder {
+                    // Holder provably dead ⇒ Abandoned{sweep}.
+                    Some(AbandonEvidence {
+                        writer: AbandonWriter::Sweep,
+                        owner: Some(dead_holder.owner),
+                        epoch_ms: self.now_ms(),
+                    })
+                } else if record.abandon_request.is_some() {
+                    // Silent/expired holder without death evidence, but an
+                    // operator authorized abandonment and the lease has lapsed
+                    // (we acquired a free/expired lease) ⇒ Abandoned{reconciled}.
+                    Some(AbandonEvidence {
+                        writer: AbandonWriter::ReconciledRequest,
+                        owner: lapsed_owner,
+                        epoch_ms: self.now_ms(),
+                    })
+                } else {
+                    // No death evidence and no authorization: elapsed time alone
+                    // never terminalizes. Leave the row non-terminal.
+                    None
+                };
+                match evidence {
+                    Some(evidence) => {
+                        self.complete_and_release(
+                            &lease,
+                            &process_id,
+                            ProcessAwaitOutput::Abandoned {
+                                evidence: Box::new(evidence),
+                                control: None,
+                            },
+                        )
+                        .await;
+                    }
+                    None => self.release_or_log(&lease).await,
+                }
+            }
+            // OwnerBound, never started: first execution is not re-execution, so
+            // any worker may run it; the runner records first_started first.
+            RecoveryDisposition::OwnerBound => self.run_and_complete(record, lease).await,
+            // Filtered above; releasing keeps the lease honest if reached.
+            RecoveryDisposition::ExternallyOwned => self.release_or_log(&lease).await,
+        }
+    }
+
+    /// Wall-clock epoch ms from the worker's configured clock.
+    fn now_ms(&self) -> u64 {
+        self.config.runtime_host.clock.timestamp_ms()
+    }
+
+    /// Claim the recovery lease. Returns the acquired lease plus, when the claim
+    /// fenced out a provably-dead holder, that holder as death evidence. Returns
+    /// `None` when the row is held by a live (not provably-dead) owner or the
+    /// claim fails — either way this pass leaves the row to its owner.
+    async fn claim_for_recovery(
+        &self,
+        process_id: &str,
+        owner: &crate::LeaseOwnerIdentity,
+        lease_ttl_ms: u64,
+    ) -> Option<(ProcessLease, Option<ProcessLease>)> {
+        match self
+            .config
+            .process_registry
+            .claim_process_lease(process_id, owner, lease_ttl_ms)
+            .await
+        {
+            Ok(crate::ProcessLeaseClaimOutcome::Acquired(lease)) => Some((lease, None)),
+            Ok(crate::ProcessLeaseClaimOutcome::Busy { holder })
+                if holder.owner.is_definitely_dead_for_claimant(owner) =>
+            {
+                match self
+                    .config
+                    .process_registry
+                    .reclaim_process_lease(process_id, owner, &holder, lease_ttl_ms)
+                    .await
+                {
+                    Ok(crate::ProcessLeaseClaimOutcome::Acquired(lease)) => {
+                        Some((lease, Some(holder)))
+                    }
+                    Ok(crate::ProcessLeaseClaimOutcome::Busy { .. }) | Err(_) => None,
+                }
+            }
+            Ok(crate::ProcessLeaseClaimOutcome::Busy { .. }) | Err(_) => None,
+        }
+    }
+
+    /// Reconcile a pending Abandon Request on an externally-owned row into an
+    /// `Abandoned{reconciled_request}` terminal. Lash never executed the row, so
+    /// there is no owner lease to wait out — but the terminal still goes through
+    /// the sweep's own fenced lease so the sweep stays the single writer.
+    async fn reconcile_externally_owned_abandon(&self, process_id: &str) {
+        let lease_ttl_ms = self.lease_timings().ttl_ms();
+        let owner = self.recovery_lease_owner();
+        let lease = match self
+            .config
+            .process_registry
+            .claim_process_lease(process_id, &owner, lease_ttl_ms)
+            .await
+        {
+            Ok(crate::ProcessLeaseClaimOutcome::Acquired(lease)) => lease,
+            // A concurrent writer holds the lease; let it finish.
+            Ok(crate::ProcessLeaseClaimOutcome::Busy { .. }) | Err(_) => return,
         };
+        if self
+            .config
+            .process_registry
+            .get_process(process_id)
+            .await
+            .is_some_and(|current| current.is_terminal())
+        {
+            self.release_or_log(&lease).await;
+            return;
+        }
+        let evidence = AbandonEvidence {
+            writer: AbandonWriter::ReconciledRequest,
+            // Externally-owned work has no lash execution owner to name.
+            owner: None,
+            epoch_ms: self.now_ms(),
+        };
+        self.complete_and_release(
+            &lease,
+            process_id,
+            ProcessAwaitOutput::Abandoned {
+                evidence: Box::new(evidence),
+                control: None,
+            },
+        )
+        .await;
+    }
+
+    /// (Re-)run a claimed row under its renewed lease and write the terminal
+    /// outcome, the same live-owner-is-single-writer path used before ADR 0019.
+    async fn run_and_complete(&self, record: ProcessRecord, lease: ProcessLease) {
+        let process_id = record.id.clone();
+        let registration = registration_from_record(record);
         let execution_context = ProcessExecutionContext::default();
         match self
             .run_process_with_lease_renewal(registration, execution_context, lease.clone())
@@ -566,7 +729,13 @@ impl DurableProcessWorker {
             ProcessInput::ToolCall { .. } | ProcessInput::Engine { .. } => {
                 self.runtime_for_process_env(registration).await
             }
-            ProcessInput::External { .. } => unreachable!("external processes short-circuit"),
+            // Externally-owned rows are rejected before dispatch (ADR 0019), so an
+            // External input has no execution runtime; fail loudly rather than
+            // fabricate one.
+            ProcessInput::External { .. } => Err(PluginError::Session(format!(
+                "process `{}` is externally-owned and has no execution runtime",
+                registration.id
+            ))),
         }
     }
 
@@ -735,503 +904,22 @@ impl DurableProcessWorker {
     }
 }
 
-#[cfg(test)]
-mod recovery_tests {
-    use super::*;
-    use crate::{
-        DurabilityTier, LeaseOwnerIdentity, LeaseOwnerLiveness, ProcessInput, ProcessRegistration,
-    };
-
-    fn inline_worker(
-        registry: Arc<dyn ProcessRegistry>,
-        lease_owner: LeaseOwnerIdentity,
-    ) -> DurableProcessWorker {
-        struct InlineSessionStoreFactory;
-
-        #[async_trait::async_trait]
-        impl SessionStoreFactory for InlineSessionStoreFactory {
-            fn durability_tier(&self) -> DurabilityTier {
-                DurabilityTier::Inline
-            }
-
-            async fn create_store(
-                &self,
-                _request: &crate::SessionStoreCreateRequest,
-            ) -> Result<Arc<dyn crate::RuntimePersistence>, String> {
-                Ok(Arc::new(InMemorySessionStore::default()))
-            }
-
-            async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
-                Ok(())
-            }
-        }
-
-        DurableProcessWorker::new(
-            DurableProcessWorkerConfig::new(
-                Arc::new(PluginHost::new(Vec::new())),
-                RuntimeHostConfig::in_memory(),
-                Arc::new(InlineSessionStoreFactory),
-                registry,
-            )
-            .with_lease_owner(lease_owner),
-        )
-    }
-
-    fn external_registration(id: &str) -> ProcessRegistration {
-        ProcessRegistration::new(
-            id,
-            ProcessInput::External {
-                metadata: serde_json::json!({}),
-            },
-            crate::ProcessProvenance::host(),
-        )
-    }
-
-    fn local_owner(owner_id: &str, host_id: &str, process_start: &str) -> LeaseOwnerIdentity {
-        LeaseOwnerIdentity {
-            owner_id: owner_id.to_string(),
-            incarnation_id: format!("{owner_id}:incarnation"),
-            liveness: LeaseOwnerLiveness::local_process_for_test(
-                host_id,
-                "boot-a",
-                std::process::id(),
-                process_start,
-            ),
-        }
-    }
-
-    async fn await_terminal(registry: &Arc<dyn ProcessRegistry>, process_id: &str) {
-        let awaiter = crate::ProcessAwaiter::polling(Arc::clone(registry));
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            awaiter.await_terminal(process_id),
-        )
-        .await
-        .expect("recovered process reaches terminal within the sweep")
-        .expect("recovered process terminal output");
-    }
-
-    /// The sweep reclaims a lease whose holder is provably dead (same
-    /// host/boot, process gone) instead of waiting out the full TTL.
-    #[tokio::test]
-    async fn sweep_reclaims_dead_holder_lease_and_recovers_the_process() {
-        let registry: Arc<dyn ProcessRegistry> =
-            Arc::new(crate::TestLocalProcessRegistry::default());
-        registry
-            .register_process(external_registration("proc-sweep-reclaim"))
-            .await
-            .expect("register");
-        let dead_holder = local_owner("dead-worker", "host-a", "not-the-current-process-start");
-        registry
-            .claim_process_lease("proc-sweep-reclaim", &dead_holder, 60_000)
-            .await
-            .expect("dead holder claims")
-            .acquired()
-            .expect("dead holder lease acquired");
-
-        let claimant = local_owner("live-worker", "host-a", "claimant-start");
-        let worker = inline_worker(Arc::clone(&registry), claimant);
-        worker
-            .drive_pending_processes()
-            .await
-            .expect("sweep dispatches");
-        await_terminal(&registry, "proc-sweep-reclaim").await;
-    }
-
-    /// A live-leased row whose holder is not provably dead is skipped.
-    #[tokio::test]
-    async fn sweep_skips_rows_whose_holder_is_not_provably_dead() {
-        let registry: Arc<dyn ProcessRegistry> =
-            Arc::new(crate::TestLocalProcessRegistry::default());
-        registry
-            .register_process(external_registration("proc-sweep-skip"))
-            .await
-            .expect("register");
-        // Opaque holders carry no liveness proof, so they are never reclaimed.
-        registry
-            .claim_process_lease(
-                "proc-sweep-skip",
-                &LeaseOwnerIdentity::opaque("other-worker", "other-incarnation"),
-                60_000,
-            )
-            .await
-            .expect("live holder claims")
-            .acquired()
-            .expect("live holder lease acquired");
-
-        let claimant = local_owner("live-worker", "host-a", "claimant-start");
-        let worker = inline_worker(Arc::clone(&registry), claimant);
-        worker
-            .drive_pending_processes()
-            .await
-            .expect("sweep dispatches");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let record = registry
-            .get_process("proc-sweep-skip")
-            .await
-            .expect("process exists");
-        assert!(
-            !record.is_terminal(),
-            "a live-leased process must not be re-run by the sweep"
-        );
+/// Rebuild a runnable registration from a persisted row, preserving its declared
+/// disposition (ADR 0019).
+fn registration_from_record(record: ProcessRecord) -> ProcessRegistration {
+    ProcessRegistration {
+        id: record.id,
+        input: record.input,
+        disposition: record.disposition,
+        identity: record.identity,
+        event_types: record.event_types,
+        provenance: record.provenance,
+        env_ref: record.env_ref,
+        wake_target: record.wake_target,
     }
 }
 
 #[cfg(test)]
-mod boundary_tests {
-    use super::*;
-    use crate::{
-        AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier,
-        DurableStoreFacet, InMemoryAttachmentStore, ProcessExecutionEnvRef,
-        ProcessExecutionEnvStore, ProcessInput, ProcessRegistration, RuntimeEffectController,
-        RuntimeError, StoredAttachment, TriggerStore,
-    };
-    use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentRef};
-
-    /// Effect controller that reports the durable tier; the worker boundary
-    /// only reads the tier, so the effect path is never exercised here.
-    #[derive(Default)]
-    struct DurableController;
-
-    impl crate::AwaitEventResolver for DurableController {
-        fn durability_tier(&self) -> DurabilityTier {
-            DurabilityTier::Durable
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl RuntimeEffectController for DurableController {
-        async fn execute_effect(
-            &self,
-            _envelope: crate::RuntimeEffectEnvelope,
-            _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
-        ) -> Result<crate::RuntimeEffectOutcome, crate::RuntimeEffectControllerError> {
-            unreachable!("worker boundary rejects before executing any effect")
-        }
-    }
-
-    /// Attachment store reporting a durable tier over in-memory storage.
-    #[derive(Default)]
-    struct DurableAttachmentStore {
-        inner: InMemoryAttachmentStore,
-    }
-
-    #[async_trait::async_trait]
-    impl AttachmentStore for DurableAttachmentStore {
-        fn persistence(&self) -> AttachmentStorePersistence {
-            AttachmentStorePersistence::Durable
-        }
-
-        async fn put(
-            &self,
-            bytes: Vec<u8>,
-            meta: AttachmentCreateMeta,
-        ) -> Result<AttachmentRef, AttachmentStoreError> {
-            self.inner.put(bytes, meta).await
-        }
-
-        async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
-            self.inner.get(id).await
-        }
-
-        async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
-            self.inner.delete(id).await
-        }
-    }
-
-    /// Process env store reporting a durable tier over in-memory storage.
-    #[derive(Default)]
-    struct DurableProcessEnvStore {
-        inner: crate::InMemoryProcessExecutionEnvStore,
-    }
-
-    #[async_trait::async_trait]
-    impl ProcessExecutionEnvStore for DurableProcessEnvStore {
-        fn durability_tier(&self) -> DurabilityTier {
-            DurabilityTier::Durable
-        }
-
-        async fn put_process_execution_env(
-            &self,
-            env_ref: &ProcessExecutionEnvRef,
-            bytes: &[u8],
-        ) -> Result<(), PluginError> {
-            self.inner.put_process_execution_env(env_ref, bytes).await
-        }
-
-        async fn get_process_execution_env(
-            &self,
-            env_ref: &ProcessExecutionEnvRef,
-        ) -> Result<Option<Vec<u8>>, PluginError> {
-            self.inner.get_process_execution_env(env_ref).await
-        }
-    }
-
-    /// Session store factory whose declared tier is configurable; it never has
-    /// to create a store because the worker boundary rejects first.
-    struct TierSessionStoreFactory {
-        tier: DurabilityTier,
-    }
-
-    #[async_trait::async_trait]
-    impl SessionStoreFactory for TierSessionStoreFactory {
-        fn durability_tier(&self) -> DurabilityTier {
-            self.tier
-        }
-
-        async fn create_store(
-            &self,
-            _request: &crate::SessionStoreCreateRequest,
-        ) -> Result<Arc<dyn crate::RuntimePersistence>, String> {
-            unreachable!("worker boundary rejects before creating a session store")
-        }
-
-        async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    struct TierTriggerStore {
-        tier: DurabilityTier,
-        inner: crate::InMemoryTriggerStore,
-    }
-
-    impl TierTriggerStore {
-        fn new(tier: DurabilityTier) -> Self {
-            Self {
-                tier,
-                inner: crate::InMemoryTriggerStore::default(),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TriggerStore for TierTriggerStore {
-        fn durability_tier(&self) -> DurabilityTier {
-            self.tier
-        }
-
-        async fn register_subscription(
-            &self,
-            draft: crate::TriggerSubscriptionDraft,
-        ) -> Result<crate::TriggerSubscriptionRecord, PluginError> {
-            self.inner.register_subscription(draft).await
-        }
-
-        async fn list_subscriptions(
-            &self,
-            filter: crate::TriggerSubscriptionFilter,
-        ) -> Result<Vec<crate::TriggerSubscriptionRecord>, PluginError> {
-            self.inner.list_subscriptions(filter).await
-        }
-
-        async fn cancel_subscription(
-            &self,
-            session_id: &str,
-            handle: &str,
-        ) -> Result<bool, PluginError> {
-            self.inner.cancel_subscription(session_id, handle).await
-        }
-
-        async fn delete_session_subscriptions(
-            &self,
-            session_id: &str,
-        ) -> Result<usize, PluginError> {
-            self.inner.delete_session_subscriptions(session_id).await
-        }
-
-        async fn record_occurrence(
-            &self,
-            request: crate::TriggerOccurrenceRequest,
-        ) -> Result<crate::TriggerOccurrenceRecord, PluginError> {
-            self.inner.record_occurrence(request).await
-        }
-
-        async fn reserve_matching_deliveries(
-            &self,
-            occurrence_id: &str,
-        ) -> Result<Vec<crate::TriggerDeliveryReservation>, PluginError> {
-            self.inner.reserve_matching_deliveries(occurrence_id).await
-        }
-    }
-
-    /// Build a worker whose controller is durable but whose stores can be set
-    /// per-facet to durable/ephemeral, so each facet's loud rejection can be
-    /// exercised independently.
-    fn worker(
-        attachment: Arc<dyn AttachmentStore>,
-        process_env_store: Arc<dyn ProcessExecutionEnvStore>,
-        session_store_tier: DurabilityTier,
-    ) -> DurableProcessWorker {
-        worker_with_store_tiers(
-            attachment,
-            process_env_store,
-            session_store_tier,
-            DurabilityTier::Durable,
-            DurabilityTier::Durable,
-        )
-    }
-
-    fn worker_with_store_tiers(
-        attachment: Arc<dyn AttachmentStore>,
-        process_env_store: Arc<dyn ProcessExecutionEnvStore>,
-        session_store_tier: DurabilityTier,
-        process_registry_tier: DurabilityTier,
-        trigger_store_tier: DurabilityTier,
-    ) -> DurableProcessWorker {
-        let mut runtime_host = RuntimeHostConfig::in_memory();
-        runtime_host.control.effect_host =
-            Arc::new(crate::InlineEffectHost::new(Arc::new(DurableController)));
-        runtime_host.durability.attachment_store = attachment;
-        runtime_host.durability.process_env_store = process_env_store;
-        let plugin_host = Arc::new(crate::PluginHost::new(Vec::new()));
-        let factory: Arc<dyn SessionStoreFactory> = Arc::new(TierSessionStoreFactory {
-            tier: session_store_tier,
-        });
-        let registry: Arc<dyn ProcessRegistry> = Arc::new(
-            crate::TestLocalProcessRegistry::default().with_durability_tier(process_registry_tier),
-        );
-        let trigger_store: Arc<dyn TriggerStore> =
-            Arc::new(TierTriggerStore::new(trigger_store_tier));
-        DurableProcessWorker::new(
-            DurableProcessWorkerConfig::new(plugin_host, runtime_host, factory, registry)
-                .with_trigger_store(trigger_store),
-        )
-    }
-
-    fn external_registration() -> ProcessRegistration {
-        ProcessRegistration::new(
-            "worker-boundary-process",
-            ProcessInput::External {
-                metadata: serde_json::json!({}),
-            },
-            crate::ProcessProvenance::host(),
-        )
-    }
-
-    async fn run(worker: &DurableProcessWorker) -> Result<ProcessAwaitOutput, PluginError> {
-        worker
-            .run_process(
-                external_registration(),
-                ProcessExecutionContext::default(),
-                CancellationToken::new(),
-            )
-            .await
-    }
-
-    fn assert_facet(err: PluginError, facet: DurableStoreFacet) {
-        let PluginError::Session(message) = err else {
-            panic!("expected PluginError::Session, got {err:?}");
-        };
-        let expected = RuntimeError::durable_store_required(facet).to_string();
-        assert_eq!(message, expected, "worker must reject the {facet:?} facet");
-    }
-
-    #[tokio::test]
-    async fn durable_worker_rejects_ephemeral_attachment_store() {
-        let worker = worker(
-            Arc::new(InMemoryAttachmentStore::new()),
-            Arc::new(DurableProcessEnvStore::default()),
-            DurabilityTier::Durable,
-        );
-        let err = run(&worker)
-            .await
-            .expect_err("ephemeral attachment store must be rejected at the worker boundary");
-        assert_facet(err, DurableStoreFacet::AttachmentStore);
-    }
-
-    #[tokio::test]
-    async fn durable_worker_rejects_ephemeral_process_env_store() {
-        let worker = worker(
-            Arc::new(DurableAttachmentStore::default()),
-            Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
-            DurabilityTier::Durable,
-        );
-        let err = run(&worker)
-            .await
-            .expect_err("ephemeral process env store must be rejected at the worker boundary");
-        assert_facet(err, DurableStoreFacet::ProcessEnvStore);
-    }
-
-    #[tokio::test]
-    async fn durable_worker_rejects_ephemeral_session_store_factory() {
-        let worker = worker(
-            Arc::new(DurableAttachmentStore::default()),
-            Arc::new(DurableProcessEnvStore::default()),
-            DurabilityTier::Inline,
-        );
-        let err = run(&worker)
-            .await
-            .expect_err("ephemeral session store factory must be rejected at the worker boundary");
-        assert_facet(err, DurableStoreFacet::SessionStore);
-    }
-
-    #[tokio::test]
-    async fn durable_worker_rejects_ephemeral_process_registry() {
-        let worker = worker_with_store_tiers(
-            Arc::new(DurableAttachmentStore::default()),
-            Arc::new(DurableProcessEnvStore::default()),
-            DurabilityTier::Durable,
-            DurabilityTier::Inline,
-            DurabilityTier::Durable,
-        );
-        let err = run(&worker)
-            .await
-            .expect_err("ephemeral process registry must be rejected at the worker boundary");
-        assert_facet(err, DurableStoreFacet::ProcessRegistry);
-    }
-
-    #[tokio::test]
-    async fn durable_worker_rejects_ephemeral_trigger_store() {
-        let worker = worker_with_store_tiers(
-            Arc::new(DurableAttachmentStore::default()),
-            Arc::new(DurableProcessEnvStore::default()),
-            DurabilityTier::Durable,
-            DurabilityTier::Durable,
-            DurabilityTier::Inline,
-        );
-        let err = run(&worker)
-            .await
-            .expect_err("ephemeral trigger store must be rejected at the worker boundary");
-        assert_facet(err, DurableStoreFacet::TriggerStore);
-    }
-
-    #[tokio::test]
-    async fn durable_worker_with_all_durable_stores_passes_store_facet_check() {
-        // Positive control: a durable worker wired against fully durable stores
-        // clears the store-facet guard and proceeds to run the (External)
-        // process.
-        let worker = worker(
-            Arc::new(DurableAttachmentStore::default()),
-            Arc::new(DurableProcessEnvStore::default()),
-            DurabilityTier::Durable,
-        );
-        let output = run(&worker)
-            .await
-            .expect("all-durable worker should pass the store-facet guard");
-        assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
-    }
-
-    #[tokio::test]
-    async fn inline_worker_passes_store_facet_check_with_ephemeral_stores() {
-        // Inline controllers impose no requirement, so an in-memory worker runs
-        // unchanged — the durable-first guard must not regress inline hosts.
-        let runtime_host = RuntimeHostConfig::in_memory();
-        let plugin_host = Arc::new(crate::PluginHost::new(Vec::new()));
-        let factory: Arc<dyn SessionStoreFactory> = Arc::new(TierSessionStoreFactory {
-            tier: DurabilityTier::Inline,
-        });
-        let registry: Arc<dyn ProcessRegistry> =
-            Arc::new(crate::TestLocalProcessRegistry::default());
-        let worker = DurableProcessWorker::new(DurableProcessWorkerConfig::new(
-            plugin_host,
-            runtime_host,
-            factory,
-            registry,
-        ));
-        let output = run(&worker)
-            .await
-            .expect("inline worker should pass the store-facet guard");
-        assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
-    }
-}
+mod boundary_tests;
+#[cfg(test)]
+mod recovery_tests;

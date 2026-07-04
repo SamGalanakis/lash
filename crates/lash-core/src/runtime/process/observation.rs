@@ -7,9 +7,10 @@ use crate::plugin::PluginError;
 
 use super::events::{ProcessAwaitOutput, ProcessEvent};
 use super::model::{
-    ProcessExecutionEnvRef, ProcessExternalRef, ProcessHandleDescriptor, ProcessId,
-    ProcessIdentity, ProcessInput, ProcessLifecycleStatus, ProcessListFilter, ProcessOriginator,
-    ProcessRecord, ProcessStatusFilter, SessionScope, WaitState,
+    AbandonRequest, ProcessExecutionEnvRef, ProcessExternalRef, ProcessHandleDescriptor, ProcessId,
+    ProcessIdentity, ProcessInput, ProcessLease, ProcessLifecycleStatus, ProcessListFilter,
+    ProcessOriginator, ProcessRecord, ProcessStarted, ProcessStatusFilter, RecoveryDisposition,
+    SessionScope, WaitState,
 };
 use super::registry::ProcessRegistry;
 use super::time::epoch_ms_from_system_time;
@@ -44,10 +45,25 @@ pub struct ObservedProcess {
     pub identity: ProcessIdentity,
     pub status_label: String,
     pub terminal: bool,
+    /// Declared recovery contract (ADR 0019). Raw fact; hosts classify.
+    pub disposition: RecoveryDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    /// Durable execution-started fact, if the row has begun executing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_started: Option<ProcessStarted>,
+    /// Current lease holder identity, if the row is leased (ADR 0019). Raw
+    /// fact for host-side staleness classification — no derived "stuck" verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_holder: Option<crate::LeaseOwnerIdentity>,
+    /// Current lease expiry, paired with `lease_holder`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_ms: Option<u64>,
+    /// Pending Abandon Request the sweep reconciles once the lease lapses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandon_request: Option<AbandonRequest>,
     pub input: ProcessInput,
     pub originator: ProcessOriginator,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,7 +161,8 @@ impl ProcessWorkObserver {
             .into_iter()
             .map(ObservedProcessEvent::from)
             .collect();
-        let process = ObservedProcess::from_record(record);
+        let lease = self.registry.get_process_lease(&record.id).await?;
+        let process = ObservedProcess::from_record(record, lease);
         let kind = process.identity.kind.clone();
         let label = process
             .identity
@@ -163,23 +180,27 @@ impl ProcessWorkObserver {
     }
 
     pub async fn process(&self, process_id: &str) -> Option<ObservedProcess> {
-        self.registry
-            .get_process(process_id)
+        let record = self.registry.get_process(process_id).await?;
+        let lease = self
+            .registry
+            .get_process_lease(process_id)
             .await
-            .map(ObservedProcess::from_record)
+            .ok()
+            .flatten();
+        Some(ObservedProcess::from_record(record, lease))
     }
 
     pub async fn list(
         &self,
         filter: &ProcessListFilter,
     ) -> Result<Vec<ObservedProcess>, PluginError> {
-        Ok(self
-            .registry
-            .list_processes(filter)
-            .await?
-            .into_iter()
-            .map(ObservedProcess::from_record)
-            .collect())
+        let records = self.registry.list_processes(filter).await?;
+        let mut observed = Vec::with_capacity(records.len());
+        for record in records {
+            let lease = self.registry.get_process_lease(&record.id).await?;
+            observed.push(ObservedProcess::from_record(record, lease));
+        }
+        Ok(observed)
     }
 
     pub async fn events_after(
@@ -198,13 +219,20 @@ impl ProcessWorkObserver {
 }
 
 impl ObservedProcess {
-    fn from_record(record: ProcessRecord) -> Self {
+    /// Build a read-side view of a process. `lease` is the current lease row (if
+    /// any), read separately so the observer exposes holder identity and expiry
+    /// as raw facts — no derived "stuck" classification (ADR 0019).
+    fn from_record(record: ProcessRecord, lease: Option<ProcessLease>) -> Self {
         let lifecycle = ProcessLifecycleStatus::from(&record.status);
         let input = record.input.as_ref().clone();
         let identity = record.identity;
         let kind = identity.kind.clone();
         let label = identity.label.clone().unwrap_or_else(|| kind.clone());
         let process_id = record.id;
+        let (lease_holder, lease_expires_at_ms) = match lease {
+            Some(lease) => (Some(lease.owner), Some(lease.expires_at_epoch_ms)),
+            None => (None, None),
+        };
         Self {
             graph_key: format!("process:{process_id}"),
             process_id,
@@ -213,9 +241,14 @@ impl ObservedProcess {
             identity,
             status_label: lifecycle.label().to_string(),
             terminal: lifecycle.is_terminal(),
+            disposition: record.disposition,
             error: terminal_error(&record.status),
             created_at_ms: record.created_at_ms,
             updated_at_ms: record.updated_at_ms,
+            first_started: record.first_started.map(|started| *started),
+            lease_holder,
+            lease_expires_at_ms,
+            abandon_request: record.abandon_request.map(|request| *request),
             originator: record.provenance.originator,
             env_ref: record.env_ref,
             wake_target: record.wake_target,
@@ -244,7 +277,9 @@ fn terminal_error(status: &super::model::ProcessStatus) -> Option<String> {
     match status.await_output()? {
         ProcessAwaitOutput::Failure { message, .. }
         | ProcessAwaitOutput::Cancelled { message, .. } => Some(message.clone()),
-        ProcessAwaitOutput::Success { .. } => None,
+        // Abandonment is not a reported failure; the status label conveys it and
+        // the evidence rides the terminal event. No derived error string here.
+        ProcessAwaitOutput::Success { .. } | ProcessAwaitOutput::Abandoned { .. } => None,
     }
 }
 
@@ -293,6 +328,7 @@ mod tests {
             ProcessInput::External {
                 metadata: json!({ "label": label }),
             },
+            RecoveryDisposition::ExternallyOwned,
             ProcessProvenance::host(),
         )
     }
@@ -369,6 +405,7 @@ mod tests {
                 ProcessInput::External {
                     metadata: json!({ "label": "Frame originated" }),
                 },
+                RecoveryDisposition::ExternallyOwned,
                 ProcessProvenance::session(frame_scope.clone()),
             ))
             .await
@@ -418,6 +455,7 @@ mod tests {
                         kind: "test-engine".to_string(),
                         payload: json!({}),
                     },
+                    RecoveryDisposition::Rerunnable,
                     ProcessProvenance::host(),
                 )
                 .with_identity(
@@ -648,8 +686,12 @@ mod tests {
                 input,
                 ProcessInput::ToolCall { .. } | ProcessInput::Engine { .. }
             );
+            let disposition = match input {
+                ProcessInput::External { .. } => RecoveryDisposition::ExternallyOwned,
+                _ => RecoveryDisposition::Rerunnable,
+            };
             let mut registration =
-                ProcessRegistration::new(process_id, input, ProcessProvenance::host())
+                ProcessRegistration::new(process_id, input, disposition, ProcessProvenance::host())
                     .with_identity(ProcessIdentity::new(kind).with_label(Some(label.to_string())));
             if needs_env {
                 registration = registration.with_execution_env_ref(Some(

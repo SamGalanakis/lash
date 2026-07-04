@@ -944,6 +944,7 @@ impl RestateProcessIngressRunner {
         let registration = ProcessRegistration {
             id: record.id,
             input: record.input,
+            disposition: record.disposition,
             identity: record.identity,
             event_types: record.event_types,
             provenance: record.provenance.clone(),
@@ -1809,7 +1810,9 @@ where
                 context,
             )
             .await?;
-            Ok(ProcessEffectOutcome::Start { record })
+            Ok(ProcessEffectOutcome::Start {
+                record: Box::new(record),
+            })
         }
         ProcessCommand::List {
             session_scope,
@@ -1871,7 +1874,9 @@ where
                 .map_err(|err| {
                     RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
                 })?;
-            Ok(ProcessEffectOutcome::Cancel { record })
+            Ok(ProcessEffectOutcome::Cancel {
+                record: Box::new(record),
+            })
         }
         ProcessCommand::Signal {
             process_id,
@@ -1899,7 +1904,7 @@ where
                     RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
                 })?;
             Ok(ProcessEffectOutcome::Signal {
-                event: result.event,
+                event: Box::new(result.event),
             })
         }
     }

@@ -74,6 +74,37 @@ pub enum ProcessTerminalState {
     Completed,
     Failed,
     Cancelled,
+    /// The owner stopped executing the work without recording an outcome. The
+    /// true result is unknowable and no cleanup is assumed to have run. Peer of
+    /// the other three terminals; see ADR 0019.
+    Abandoned,
+}
+
+/// Who wrote an [`ProcessTerminalState::Abandoned`] terminal — the exactly-one
+/// legitimate writer per path (ADR 0019).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbandonWriter {
+    /// The owner abandoned its own OwnerBound work inline at graceful drain,
+    /// under its own live lease.
+    OwnerDrain,
+    /// The recovery sweep abandoned an OwnerBound, started row whose holder is
+    /// provably dead.
+    Sweep,
+    /// The sweep reconciled a durable Abandon Request into Abandoned once the
+    /// row's lease had lapsed.
+    ReconciledRequest,
+}
+
+/// Evidence attached to an [`ProcessTerminalState::Abandoned`] terminal: which
+/// path wrote it, the dead-or-lapsed owner identity it was established against
+/// (absent for an externally-owned row lash never executed), and when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbandonEvidence {
+    pub writer: AbandonWriter,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::LeaseOwnerIdentity>,
+    pub epoch_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -106,6 +137,16 @@ pub enum ProcessAwaitOutput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         control: Option<crate::ToolControl>,
     },
+    /// The owner stopped executing without recording an outcome. Written only by
+    /// the sweep or an owner's graceful drain, never round-tripped from a tool
+    /// (a tool cannot self-report abandonment); see [`AbandonEvidence`]. The
+    /// evidence is boxed so this rare terminal does not enlarge the pervasive
+    /// `ProcessAwaitOutput` that flows through every tool result.
+    Abandoned {
+        evidence: Box<AbandonEvidence>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        control: Option<crate::ToolControl>,
+    },
 }
 
 impl ProcessAwaitOutput {
@@ -114,6 +155,7 @@ impl ProcessAwaitOutput {
             Self::Success { .. } => ProcessTerminalState::Completed,
             Self::Failure { .. } => ProcessTerminalState::Failed,
             Self::Cancelled { .. } => ProcessTerminalState::Cancelled,
+            Self::Abandoned { .. } => ProcessTerminalState::Abandoned,
         }
     }
 
@@ -167,6 +209,37 @@ impl ProcessAwaitOutput {
                 let mut cancellation = crate::ToolCancellation::runtime(message);
                 cancellation.raw = raw.map(crate::ToolValue::from);
                 let mut output = crate::ToolCallOutput::cancelled(cancellation);
+                output.control = control;
+                output
+            }
+            // Abandonment has no `ToolCallOutcome` peer: a tool never self-reports
+            // it. To a caller awaiting the result it surfaces one-directionally as
+            // an external failure whose raw payload names it abandoned and carries
+            // the evidence, while the process layer keeps `Abandoned` a distinct
+            // terminal (ADR 0019). `from_tool_output` therefore never reverses this.
+            Self::Abandoned { evidence, control } => {
+                let raw = serde_json::to_value(&evidence)
+                    .ok()
+                    .map(crate::ToolValue::from);
+                let message = match evidence.writer {
+                    AbandonWriter::OwnerDrain => {
+                        "process abandoned: owner drained without recording an outcome".to_string()
+                    }
+                    AbandonWriter::Sweep => {
+                        "process abandoned: recovery observed the owner provably dead".to_string()
+                    }
+                    AbandonWriter::ReconciledRequest => {
+                        "process abandoned: reconciled abandon request after the lease lapsed"
+                            .to_string()
+                    }
+                };
+                let mut failure = crate::ToolFailure::tool(
+                    crate::ToolFailureClass::External,
+                    "process_abandoned",
+                    message,
+                );
+                failure.raw = raw;
+                let mut output = crate::ToolCallOutput::failure(failure);
                 output.control = control;
                 output
             }
@@ -334,6 +407,7 @@ pub(super) fn default_process_event_types() -> Vec<ProcessEventType> {
         terminal_event_type("process.completed", ProcessTerminalState::Completed),
         terminal_event_type("process.failed", ProcessTerminalState::Failed),
         terminal_event_type("process.cancelled", ProcessTerminalState::Cancelled),
+        terminal_event_type("process.abandoned", ProcessTerminalState::Abandoned),
     ]
 }
 

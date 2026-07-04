@@ -961,6 +961,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
             lash_core::ProcessTerminalState::Completed => "process.completed",
             lash_core::ProcessTerminalState::Failed => "process.failed",
             lash_core::ProcessTerminalState::Cancelled => "process.cancelled",
+            lash_core::ProcessTerminalState::Abandoned => "process.abandoned",
         };
         self.append_event(
             process_id,
@@ -976,6 +977,67 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 "unknown process `{process_id}` after terminal event"
             ))
         })
+    }
+
+    async fn record_first_started(
+        &self,
+        process_id: &str,
+        started: ProcessStarted,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        let process_id = process_id.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                Ok(tx_outcome((|| {
+                    let mut record =
+                        Self::load_process_conn(tx, &process_id)?.ok_or_else(|| {
+                            lash_core::PluginError::Session(format!(
+                                "unknown process `{process_id}`"
+                            ))
+                        })?;
+                    // First-writer-wins: the started fact is immutable once written.
+                    if record.first_started.is_none() {
+                        record.first_started = Some(Box::new(started));
+                        record.updated_at_ms = current_epoch_ms();
+                        Self::save_process_conn(tx, &record)?;
+                    }
+                    Ok(record)
+                })()))
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
+    async fn request_process_abandon(
+        &self,
+        process_id: &str,
+        request: AbandonRequest,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        let process_id = process_id.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                Ok(tx_outcome((|| {
+                    let mut record =
+                        Self::load_process_conn(tx, &process_id)?.ok_or_else(|| {
+                            lash_core::PluginError::Session(format!(
+                                "unknown process `{process_id}`"
+                            ))
+                        })?;
+                    if record.is_terminal() {
+                        return Err(lash_core::PluginError::Session(format!(
+                            "terminal process `{process_id}` cannot accept an abandon request"
+                        )));
+                    }
+                    // First-writer-wins: preserve the original recorded authorization.
+                    if record.abandon_request.is_none() {
+                        record.abandon_request = Some(Box::new(request));
+                        record.updated_at_ms = current_epoch_ms();
+                        Self::save_process_conn(tx, &record)?;
+                    }
+                    Ok(record)
+                })()))
+            })
+            .await
+            .map_err(process_sqlite_error)?
     }
 
     async fn set_process_wait(
@@ -1369,6 +1431,17 @@ impl ProcessRegistry for SqliteProcessRegistry {
                     Ok(renewed)
                 })()))
             })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
+    async fn get_process_lease(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessLease>, lash_core::PluginError> {
+        let process_id = process_id.to_string();
+        self.conn
+            .call(move |conn| Ok(Self::load_process_lease_conn(conn, &process_id)))
             .await
             .map_err(process_sqlite_error)?
     }
