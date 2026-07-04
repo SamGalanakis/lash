@@ -25,30 +25,22 @@ pub struct TokenLedgerEntry {
     pub usage: TokenUsage,
 }
 
+/// Aggregated usage for a report row: the canonical [`TokenUsage`] counters
+/// plus a precomputed `total_tokens` so JSON consumers don't recompute the sum.
+/// `TokenUsage` is embedded (flattened) rather than re-declared so a new counter
+/// tier is added in exactly one place and automatically flows through here.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct UsageTotals {
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cache_read_input_tokens: i64,
-    #[serde(default)]
-    pub cache_write_input_tokens: i64,
-    #[serde(default)]
-    pub reasoning_output_tokens: i64,
+    #[serde(flatten)]
+    pub usage: TokenUsage,
     pub total_tokens: i64,
-    pub context_total_tokens: i64,
 }
 
 impl UsageTotals {
     fn from_usage(usage: &TokenUsage) -> Self {
-        let total_tokens = usage.total();
         Self {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_read_input_tokens: usage.cache_read_input_tokens,
-            cache_write_input_tokens: usage.cache_write_input_tokens,
-            reasoning_output_tokens: usage.reasoning_output_tokens,
-            total_tokens,
-            context_total_tokens: total_tokens,
+            usage: usage.clone(),
+            total_tokens: usage.total(),
         }
     }
 }
@@ -178,37 +170,18 @@ pub fn diff_usage_reports(
     before: &SessionUsageReport,
     after: &SessionUsageReport,
 ) -> Result<Vec<TokenLedgerEntry>, String> {
-    let before_entries = before
-        .by_source_model
-        .iter()
-        .map(|row| TokenLedgerEntry {
-            source: row.source.clone(),
-            model: row.model.clone(),
-            usage: TokenUsage {
-                input_tokens: row.usage.input_tokens,
-                output_tokens: row.usage.output_tokens,
-                cache_read_input_tokens: row.usage.cache_read_input_tokens,
-                cache_write_input_tokens: row.usage.cache_write_input_tokens,
-                reasoning_output_tokens: row.usage.reasoning_output_tokens,
-            },
-        })
-        .collect::<Vec<_>>();
-    let after_entries = after
-        .by_source_model
-        .iter()
-        .map(|row| TokenLedgerEntry {
-            source: row.source.clone(),
-            model: row.model.clone(),
-            usage: TokenUsage {
-                input_tokens: row.usage.input_tokens,
-                output_tokens: row.usage.output_tokens,
-                cache_read_input_tokens: row.usage.cache_read_input_tokens,
-                cache_write_input_tokens: row.usage.cache_write_input_tokens,
-                reasoning_output_tokens: row.usage.reasoning_output_tokens,
-            },
-        })
-        .collect::<Vec<_>>();
-    diff_token_ledger(&before_entries, &after_entries)
+    let row_entries = |report: &SessionUsageReport| {
+        report
+            .by_source_model
+            .iter()
+            .map(|row| TokenLedgerEntry {
+                source: row.source.clone(),
+                model: row.model.clone(),
+                usage: row.usage.usage.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    diff_token_ledger(&row_entries(before), &row_entries(after))
 }
 
 pub(super) fn merge_ledger_entry(ledger: &mut Vec<TokenLedgerEntry>, entry: TokenLedgerEntry) {
@@ -219,11 +192,7 @@ pub(super) fn merge_ledger_entry(ledger: &mut Vec<TokenLedgerEntry>, entry: Toke
         .iter_mut()
         .find(|e| e.source == entry.source && e.model == entry.model)
     {
-        existing.usage.input_tokens += entry.usage.input_tokens;
-        existing.usage.output_tokens += entry.usage.output_tokens;
-        existing.usage.cache_read_input_tokens += entry.usage.cache_read_input_tokens;
-        existing.usage.cache_write_input_tokens += entry.usage.cache_write_input_tokens;
-        existing.usage.reasoning_output_tokens += entry.usage.reasoning_output_tokens;
+        existing.usage.add(&entry.usage);
     } else {
         ledger.push(entry);
     }

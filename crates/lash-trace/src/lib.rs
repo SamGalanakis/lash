@@ -1,3 +1,24 @@
+//! Durable diagnostics for the lash runtime: the [`TraceSink`] channel and its
+//! record vocabulary.
+//!
+//! A [`TraceSink`] receives one [`TraceRecord`] per runtime event — session and
+//! turn lifecycle, prompt builds, LLM calls, per-tool start/completion, token
+//! usage, protocol steps, and Lashlang execution-graph updates. Each record
+//! carries a [`TraceContext`] (session / turn / graph-node identity) plus a
+//! tagged [`TraceEvent`] payload; [`TraceEvent::kind`] is the single source of
+//! truth for the `type` tag string that consumers match on.
+//!
+//! [`JsonlTraceSink`] writes one JSON line per record at schema
+//! [`TRACE_SCHEMA_VERSION`]; [`TeeTraceSink`] fans out to several sinks; and the
+//! optional `otel` feature adds an `OtelTraceSink` that converts each record to
+//! an OpenTelemetry span. This is the *durable diagnostics* reporting channel —
+//! distinct from the app-facing `TurnActivity` stream and the low-level
+//! `SessionEvent` stream that the runtime crates expose.
+//!
+//! For the full map of reporting channels, guidance on when to consume which,
+//! and the schema-evolution policy that governs [`TRACE_SCHEMA_VERSION`], see
+//! `docs/reporting.html`; for the attach-a-sink how-to, see `docs/tracing.html`.
+
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -18,6 +39,22 @@ pub use lashlang_graph::{
     TraceLashlangNodeStatus,
 };
 
+/// Version of the durable trace JSONL schema, written to
+/// [`TraceRecord::schema_version`] on every record.
+///
+/// Bump rules (the normative reporting-schema policy lives in
+/// `docs/reporting.html`):
+///
+/// - Adding a new [`TraceEvent`] variant, or adding an optional
+///   (`skip_serializing_if`) field to an existing payload, is **additive**:
+///   older readers skip the unknown variant or field, so this version does
+///   **not** change.
+/// - Renaming a field, removing a field, or changing the meaning of an existing
+///   field is a breaking change and **does** bump this version.
+/// - The free-form [`TraceEvent::Custom`] and [`TraceEvent::ProtocolStep`]
+///   payloads are opaque `serde_json::Value`; adding to or reshaping the data
+///   inside them never forces a bump. (This is why the `exec_code_completed`
+///   diagnostic's `tool_calls` payload was purely additive.)
 pub const TRACE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +248,33 @@ pub enum TraceEvent {
         name: String,
         payload: Value,
     },
+}
+
+impl TraceEvent {
+    /// The `type` tag serde writes for this variant. This is the single source
+    /// of truth for event-kind strings — consumers (e.g. the trace viewer)
+    /// match on the enum and read the kind from here rather than re-deriving
+    /// tag strings by hand. The match is exhaustive on purpose: a new variant
+    /// fails to compile here until it is given a kind.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SessionStarted { .. } => "session_started",
+            Self::TurnStarted { .. } => "turn_started",
+            Self::PromptBuilt { .. } => "prompt_built",
+            Self::LlmCallStarted { .. } => "llm_call_started",
+            Self::LlmCallCompleted { .. } => "llm_call_completed",
+            Self::LlmCallFailed { .. } => "llm_call_failed",
+            Self::ProviderStreamEvent { .. } => "provider_stream_event",
+            Self::RuntimeStreamEvent { .. } => "runtime_stream_event",
+            Self::ToolCallStarted { .. } => "tool_call_started",
+            Self::ToolCallCompleted { .. } => "tool_call_completed",
+            Self::ProtocolStep { .. } => "protocol_step",
+            Self::TokenUsage { .. } => "token_usage",
+            Self::LashlangExecution { .. } => "lashlang_execution",
+            Self::TurnCompleted { .. } => "turn_completed",
+            Self::Custom { .. } => "custom",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -889,6 +953,32 @@ mod tests {
             json["output"]["outcome"]["payload"]["raw"]["path"],
             "missing"
         );
+    }
+
+    #[test]
+    fn event_kind_matches_serialized_type_tag() {
+        let events = [
+            TraceEvent::SessionStarted {
+                metadata: Default::default(),
+            },
+            TraceEvent::TurnStarted {
+                metadata: Default::default(),
+            },
+            TraceEvent::ToolCallStarted {
+                call_id: None,
+                name: "read_file".to_string(),
+                args: Value::Null,
+            },
+            TraceEvent::Custom {
+                name: "x".to_string(),
+                payload: Value::Null,
+            },
+        ];
+        for event in events {
+            let kind = event.kind();
+            let json = serde_json::to_value(&event).expect("serialize event");
+            assert_eq!(json["type"], kind, "kind() disagrees with serde tag");
+        }
     }
 
     #[test]

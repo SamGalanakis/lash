@@ -684,6 +684,8 @@ fn remote_activity_preserves_semantic_fields_and_collapses_runtime_diagnostics()
             args: serde_json::json!({ "a": 1 }),
             output,
             duration_ms: 42,
+            graph_key: None,
+            parent_call_id: None,
         },
     );
     let remote = RemoteTurnActivity::from_core(9, activity);

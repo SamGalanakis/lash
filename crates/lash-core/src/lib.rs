@@ -401,6 +401,7 @@ pub use runtime::{
     ToolBatchEffectOutcome,
 };
 pub use schemars::JsonSchema;
+pub(crate) use session::RuntimeExecutionTracing;
 pub use session::{
     ExecRequest, InjectedTurnInput, RuntimeExecutionContext, Session, SessionError, ToolInvocation,
     ToolInvocationReply,

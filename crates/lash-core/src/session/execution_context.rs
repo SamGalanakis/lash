@@ -25,6 +25,18 @@ pub struct RuntimeExecutionContext<'run> {
     turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
+    /// Per-tool trace emission handle for this execution. Present only when the
+    /// host installed a trace sink; `None` keeps every trace call a no-op.
+    tracing: Option<RuntimeExecutionTracing>,
+    /// Graph key of the enclosing code block, stamped onto the per-tool
+    /// `TurnEvent`s emitted from this context so consumers can attribute a tool
+    /// call to its code block without ordering heuristics. `None` when the
+    /// context is not executing a code block.
+    code_block_graph_key: Option<String>,
+    /// Call id of the parent `batch` tool call when this context runs the
+    /// children of a batch dispatch, stamped onto child `TurnEvent`s. `None`
+    /// for top-level tool execution.
+    batch_parent_call_id: Option<String>,
     /// Work-driver handle for this execution's process wiring, when the
     /// deployment provides one. Threaded through so in-run process
     /// operations (e.g. signalling another process) that build their own
@@ -46,6 +58,43 @@ pub(super) struct RuntimeExecutionProcessEventContext {
     pub store: Option<Arc<dyn crate::RuntimePersistence>>,
     pub session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
     pub queued_work_driver: Option<crate::QueuedWorkDriver>,
+}
+
+/// Trace-sink handle threaded into tool execution so per-tool trace events are
+/// emitted from the single shared seam, whichever protocol drives the turn.
+///
+/// `scope_context` carries the turn-scoped identity (session / turn / iteration)
+/// so [`crate::trace::assign_span_identity`] stamps `tool:<call_id>` under the
+/// right turn; `base_context` carries the host's run-level trace context.
+#[derive(Clone)]
+pub(crate) struct RuntimeExecutionTracing {
+    sink: Arc<dyn lash_trace::TraceSink>,
+    base_context: lash_trace::TraceContext,
+    scope_context: lash_trace::TraceContext,
+}
+
+impl RuntimeExecutionTracing {
+    pub(crate) fn new(
+        sink: Arc<dyn lash_trace::TraceSink>,
+        base_context: lash_trace::TraceContext,
+        scope_context: lash_trace::TraceContext,
+    ) -> Self {
+        Self {
+            sink,
+            base_context,
+            scope_context,
+        }
+    }
+
+    fn emit(&self, event: lash_trace::TraceEvent, clock: &dyn crate::Clock) {
+        crate::trace::emit_trace(
+            &Some(Arc::clone(&self.sink)),
+            &self.base_context,
+            self.scope_context.clone(),
+            event,
+            clock,
+        );
+    }
 }
 
 impl<'run> RuntimeExecutionContext<'run> {
@@ -102,6 +151,9 @@ impl<'run> RuntimeExecutionContext<'run> {
             turn_phase_probe: None,
             turn_event_tx: None,
             cancellation_token: None,
+            tracing: None,
+            code_block_graph_key: None,
+            batch_parent_call_id: None,
             process_work_driver: None,
         }
     }
@@ -191,6 +243,70 @@ impl<'run> RuntimeExecutionContext<'run> {
     pub(crate) fn with_turn_event_sender(mut self, turn_event_tx: Sender<TurnActivity>) -> Self {
         self.turn_event_tx = Some(turn_event_tx);
         self
+    }
+
+    pub(crate) fn with_tracing(mut self, tracing: Option<RuntimeExecutionTracing>) -> Self {
+        self.tracing = tracing;
+        self
+    }
+
+    pub(crate) fn with_code_block_graph_key(mut self, graph_key: Option<String>) -> Self {
+        self.code_block_graph_key = graph_key;
+        self
+    }
+
+    pub(crate) fn with_batch_parent_call_id(mut self, parent_call_id: Option<String>) -> Self {
+        self.batch_parent_call_id = parent_call_id;
+        self
+    }
+
+    /// Graph key of the enclosing code block for tool calls run from this
+    /// context, or `None` when no code block is executing.
+    pub(super) fn code_block_graph_key(&self) -> Option<String> {
+        self.code_block_graph_key.clone()
+    }
+
+    /// Parent batch call id for tool calls run from this context, or `None`
+    /// when this context is not executing batch children.
+    pub(super) fn batch_parent_call_id(&self) -> Option<String> {
+        self.batch_parent_call_id.clone()
+    }
+
+    /// Emit a `ToolCallStarted` trace event for a tool run from this context.
+    /// No-op when the host installed no trace sink.
+    pub(super) fn emit_tool_call_started_trace(
+        &self,
+        call_id: &str,
+        name: &str,
+        args: &serde_json::Value,
+    ) {
+        if let Some(tracing) = self.tracing.as_ref() {
+            tracing.emit(
+                lash_trace::TraceEvent::ToolCallStarted {
+                    call_id: Some(call_id.to_string()),
+                    name: name.to_string(),
+                    args: args.clone(),
+                },
+                self.dispatch.clock.as_ref(),
+            );
+        }
+    }
+
+    /// Emit a `ToolCallCompleted` trace event for a tool run from this context.
+    /// No-op when the host installed no trace sink.
+    pub(super) fn emit_tool_call_completed_trace(&self, record: &crate::ToolCallRecord) {
+        if let Some(tracing) = self.tracing.as_ref() {
+            tracing.emit(
+                lash_trace::TraceEvent::ToolCallCompleted {
+                    call_id: record.call_id.clone(),
+                    name: record.tool.clone(),
+                    args: record.args.clone(),
+                    output: crate::trace::trace_tool_call_output(&record.output),
+                    duration_ms: record.duration_ms,
+                },
+                self.dispatch.clock.as_ref(),
+            );
+        }
     }
 
     pub(crate) fn with_parent_invocation(mut self, metadata: crate::RuntimeInvocation) -> Self {

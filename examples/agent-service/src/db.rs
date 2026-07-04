@@ -674,6 +674,7 @@ fn tool_payload(event: TurnEvent) -> AppResult<serde_json::Value> {
             call_id,
             name,
             args,
+            ..
         } => Ok(json!({
             "phase": "started",
             "call_id": call_id,
@@ -686,6 +687,7 @@ fn tool_payload(event: TurnEvent) -> AppResult<serde_json::Value> {
             args,
             output,
             duration_ms,
+            ..
         } => Ok(json!({
             "phase": "completed",
             "call_id": call_id,

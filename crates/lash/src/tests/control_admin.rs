@@ -124,7 +124,7 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
 
     session.turn(TurnInput::text("usage")).run().await?;
     let usage = session.usage_report();
-    assert_eq!(usage.usage.output_tokens, 2);
+    assert_eq!(usage.usage.usage.output_tokens, 2);
     session
         .admin()
         .commands()
@@ -747,7 +747,7 @@ async fn observation_updates_after_completed_turn() -> Result<()> {
 
     let observed = session.observe();
     assert_eq!(observed.read_view().messages().len(), 2);
-    assert_eq!(observed.usage_report().usage.output_tokens, 2);
+    assert_eq!(observed.usage_report().usage.usage.output_tokens, 2);
     assert_eq!(observed.policy_snapshot().model.id, "mock-model");
     Ok(())
 }

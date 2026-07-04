@@ -163,6 +163,12 @@
           kind: "guide",
         },
         {
+          title: "Reporting channels",
+          href: "reporting.html",
+          summary: "Map the reporting channels — SessionEvent, TurnActivity, TraceSink, ProcessEventSink, the remote wire mirror — with roles, the runtime-vs-surface tool-name mapping, and the schema-evolution policy.",
+          kind: "reference",
+        },
+        {
           title: "Durability and replay",
           href: "architecture/durability.html",
           summary: "EffectHost, ScopedEffectController, workflow replay, idempotent commits, and durable background work.",

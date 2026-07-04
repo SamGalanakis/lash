@@ -1263,30 +1263,33 @@ fn handle_tool_call_merges_contiguous_edit_activity() {
 }
 
 #[test]
-fn live_batch_tool_call_expands_children_without_parent_batch_block() {
+fn live_batch_tool_children_render_from_events_without_parent_batch_block() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.timeline.truncate(0);
 
+    // The batch container renders nothing on its own.
     app.handle_session_event(SessionEvent::ToolCall {
-        call_id: None,
+        call_id: Some("batch-0".into()),
         name: "batch".into(),
-        args: serde_json::json!({
-            "tool_uses": [
-                {
-                    "recipient_name": "functions.read_file",
-                    "parameters": {"path": "README.md"}
-                },
-                {
-                    "recipient_name": "functions.grep",
-                    "parameters": {"query": "OpenAI", "path": "README.md"}
-                }
-            ]
-        }),
-        output: lash_core::ToolCallOutput::success(serde_json::json!([
-            {"success": true, "result": "README body", "duration_ms": 8},
-            {"success": true, "result": "match", "duration_ms": 13}
-        ])),
+        args: serde_json::json!({ "tool_calls": [] }),
+        output: lash_core::ToolCallOutput::success(serde_json::json!({ "results": [] })),
         duration_ms: 21,
+    });
+    // Its children surface as their own tool events and render directly, with
+    // no batch arg/result re-parsing.
+    app.handle_session_event(SessionEvent::ToolCall {
+        call_id: Some("batch-0:00".into()),
+        name: "read_file".into(),
+        args: serde_json::json!({ "path": "README.md" }),
+        output: lash_core::ToolCallOutput::success(serde_json::json!("README body")),
+        duration_ms: 8,
+    });
+    app.handle_session_event(SessionEvent::ToolCall {
+        call_id: Some("batch-0:01".into()),
+        name: "grep".into(),
+        args: serde_json::json!({ "query": "OpenAI", "path": "README.md" }),
+        output: lash_core::ToolCallOutput::success(serde_json::json!("match")),
+        duration_ms: 13,
     });
 
     let activities = app

@@ -765,16 +765,22 @@ fn finish_turn_from_read_view_preserves_live_lashlang_tool_activity_from_cli_jou
     let turn = PreparedTurn::new("What time is it?".into(), Vec::new());
     app.push_prepared_user_input(&turn);
     app.start_turn();
+    // Tool containment attaches by graph key: the tool call carries the same
+    // `graph_key` as its enclosing code block, so it journals under the block
+    // without any ordering heuristic.
+    let graph_key = "effect:test-session-id:turn:1".to_string();
     app.handle_turn_activity(TurnActivity::independent(TurnEvent::CodeBlockStarted {
         language: "lashlang".to_string(),
         code: "now = await tools.exec_command({ cmd: \"date\" })?\nfinish trim(now.output)"
             .to_string(),
-        graph_key: None,
+        graph_key: Some(graph_key.clone()),
     }));
     app.handle_turn_activity(TurnActivity::independent(TurnEvent::ToolCallStarted {
         call_id: Some("lashlang:tool-0".to_string()),
         name: "exec_command".to_string(),
         args: serde_json::json!({"cmd": "date"}),
+        graph_key: Some(graph_key.clone()),
+        parent_call_id: None,
     }));
     app.handle_turn_activity(TurnActivity::independent(TurnEvent::ToolCallCompleted {
         call_id: Some("lashlang:tool-0".to_string()),
@@ -785,11 +791,13 @@ fn finish_turn_from_read_view_preserves_live_lashlang_tool_activity_from_cli_jou
             "stdout": "Sunday, June 21, 2026\n"
         })),
         duration_ms: 8,
+        graph_key: Some(graph_key.clone()),
+        parent_call_id: None,
     }));
     app.handle_turn_activity(TurnActivity::independent(TurnEvent::CodeBlockCompleted {
         language: "lashlang".to_string(),
         output: String::new(),
-        graph_key: None,
+        graph_key: Some(graph_key.clone()),
         success: true,
         error: None,
         duration_ms: 8,

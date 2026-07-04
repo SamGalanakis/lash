@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use lash_core::{PluginRuntimeEvent, TurnActivity, TurnEvent};
+use lash_core::{TurnActivity, TurnEvent};
 use lash_tui::{PerfCounters, ScreenSnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -75,12 +75,24 @@ impl UiTraceContext {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum UiTraceOp {
     StartTurn,
-    UserTurn { text: String },
-    QueueTurn { text: String },
-    QueueCurrentTurnInput { text: String },
-    SlashCommand { text: String },
-    SystemMessage { text: String },
-    InputInsertText { text: String },
+    UserTurn {
+        text: String,
+    },
+    QueueTurn {
+        text: String,
+    },
+    QueueCurrentTurnInput {
+        text: String,
+    },
+    SlashCommand {
+        text: String,
+    },
+    SystemMessage {
+        text: String,
+    },
+    InputInsertText {
+        text: String,
+    },
     InputBackspace,
     InputDelete,
     MoveCursorLeft,
@@ -92,19 +104,35 @@ pub(crate) enum UiTraceOp {
     SuggestionUp,
     SuggestionDown,
     SuggestionComplete,
-    EmitPrompt { request: TracePromptRequest },
+    EmitPrompt {
+        request: TracePromptRequest,
+    },
     PromptUp,
     PromptDown,
     PromptToggleCurrentOption,
     PromptToggleNoteFocus,
-    PromptInsertText { text: String },
+    PromptInsertText {
+        text: String,
+    },
     PromptBackspace,
     PromptDismiss,
     SubmitPrompt,
-    ScrollUp { amount: usize },
-    ScrollDown { amount: usize },
-    Event { event: TraceSessionEvent },
-    Render { snapshot: String },
+    ScrollUp {
+        amount: usize,
+    },
+    ScrollDown {
+        amount: usize,
+    },
+    /// A recorded turn activity, serialized as the runtime's own
+    /// [`TurnActivity`] — the single lossless schema for turn events. The
+    /// recorder filters which activities are logged (see
+    /// [`should_record_activity`]); it never re-encodes into a parallel type.
+    Event {
+        activity: Box<TurnActivity>,
+    },
+    Render {
+        snapshot: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,120 +202,23 @@ impl TracePromptRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum TraceSessionEvent {
-    TextDelta {
-        content: String,
-    },
-    ToolCall {
-        #[serde(default)]
-        call_id: Option<String>,
-        name: String,
-        args: serde_json::Value,
-        result: serde_json::Value,
-        success: bool,
-        duration_ms: u64,
-    },
-    Message {
-        text: String,
-        kind: String,
-    },
-    LlmRequest {
-        protocol_iteration: usize,
-        message_count: usize,
-        tool_list: String,
-    },
-    Error {
-        message: String,
-    },
-    PluginEvent {
-        plugin_id: String,
-        event: TracePluginRuntimeEvent,
-    },
-}
-
-impl TraceSessionEvent {
-    pub(crate) fn from_turn_activity(activity: &TurnActivity) -> Option<Self> {
-        match &activity.event {
-            TurnEvent::AssistantProseDelta { text } => Some(Self::TextDelta {
-                content: text.clone(),
-            }),
-            TurnEvent::ToolCallCompleted {
-                call_id,
-                name,
-                args,
-                output,
-                duration_ms,
-            } => Some(Self::ToolCall {
-                call_id: call_id.clone(),
-                name: name.clone(),
-                args: args.clone(),
-                result: output.value_for_projection(),
-                success: output.is_success(),
-                duration_ms: *duration_ms,
-            }),
-            TurnEvent::CodeBlockStarted { code, .. } => Some(Self::Message {
-                text: code.clone(),
-                kind: "lashlang_code".to_string(),
-            }),
-            TurnEvent::ModelRequestStarted { protocol_iteration } => Some(Self::LlmRequest {
-                protocol_iteration: *protocol_iteration,
-                message_count: 0,
-                tool_list: String::new(),
-            }),
-            TurnEvent::Error { message } => Some(Self::Error {
-                message: message.clone(),
-            }),
-            TurnEvent::PluginRuntime { plugin_id, event } => Some(Self::PluginEvent {
-                plugin_id: plugin_id.clone(),
-                event: TracePluginRuntimeEvent::from_event(event),
-            }),
-            TurnEvent::ToolCallStarted { .. }
-            | TurnEvent::QueuedWorkStarted { .. }
-            | TurnEvent::Usage { .. }
-            | TurnEvent::ChildUsage { .. }
-            | TurnEvent::RetryStatus { .. }
-            | TurnEvent::QueuedInputAccepted { .. }
-            | TurnEvent::QueuedMessagesCommitted { .. }
-            | TurnEvent::CodeBlockCompleted { .. }
-            | TurnEvent::FinalValue { .. }
-            | TurnEvent::ToolValue { .. }
-            | TurnEvent::ReasoningDelta { .. } => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum TracePluginRuntimeEvent {
-    Status {
-        key: String,
-        label: String,
-        detail: Option<String>,
-    },
-    Custom {
-        name: String,
-        payload: serde_json::Value,
-    },
-}
-
-impl TracePluginRuntimeEvent {
-    pub(crate) fn from_event(event: &PluginRuntimeEvent) -> Self {
-        match event {
-            PluginRuntimeEvent::Status {
-                key, label, detail, ..
-            } => Self::Status {
-                key: key.clone(),
-                label: label.clone(),
-                detail: detail.clone(),
-            },
-            PluginRuntimeEvent::Custom { name, payload } => Self::Custom {
-                name: name.clone(),
-                payload: payload.clone(),
-            },
-        }
-    }
+/// Whether a turn activity is worth recording in the UI trace.
+///
+/// The trace is a compact log of the semantically interesting turn events, not
+/// a full firehose: fine-grained deltas (reasoning), accounting (usage/retry),
+/// and queue bookkeeping are dropped to keep captures small. This filters
+/// *which* [`TurnActivity`] items are logged — the ones that pass are recorded
+/// verbatim as their own [`TurnActivity`], never re-encoded into another type.
+fn should_record_activity(event: &TurnEvent) -> bool {
+    matches!(
+        event,
+        TurnEvent::AssistantProseDelta { .. }
+            | TurnEvent::ToolCallCompleted { .. }
+            | TurnEvent::CodeBlockStarted { .. }
+            | TurnEvent::ModelRequestStarted { .. }
+            | TurnEvent::Error { .. }
+            | TurnEvent::PluginRuntime { .. }
+    )
 }
 
 pub(crate) fn render_screen_snapshot(app: &mut App, width: u16, height: u16) -> ScreenSnapshot {
@@ -492,8 +423,10 @@ impl UiTraceRecorder {
     }
 
     pub(crate) fn record_turn_activity(&mut self, activity: &TurnActivity) {
-        if let Some(event) = TraceSessionEvent::from_turn_activity(activity) {
-            self.fixture.ops.push(UiTraceOp::Event { event });
+        if should_record_activity(&activity.event) {
+            self.fixture.ops.push(UiTraceOp::Event {
+                activity: Box::new(activity.clone()),
+            });
         }
     }
 
@@ -615,10 +548,25 @@ mod tests {
 
         let trace_json =
             fs::read_to_string(dir.join("capture.json")).expect("read generated trace file");
+        // The recorded activity is the runtime's own TurnActivity, tagged with
+        // its snake_case `type`, not a re-encoded viewer-specific schema.
+        assert!(trace_json.contains("\"assistant_prose_delta\""));
         let trace: UiTraceFixture = serde_json::from_str(&trace_json).expect("parse trace");
         assert_eq!(trace.width, 80);
         assert_eq!(trace.height, 24);
         assert!(matches!(trace.ops[0], UiTraceOp::UserTurn { .. }));
+        let event_op = trace
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                UiTraceOp::Event { activity } => Some(activity),
+                _ => None,
+            })
+            .expect("recorded turn activity op");
+        assert!(matches!(
+            &event_op.event,
+            TurnEvent::AssistantProseDelta { text } if text == "world"
+        ));
         assert!(matches!(
             trace.ops.last(),
             Some(UiTraceOp::Render { snapshot }) if snapshot == "capture.snap"

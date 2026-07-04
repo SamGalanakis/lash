@@ -856,7 +856,7 @@ pub fn runtime_single_active_agent_frame(events: &[DeliveredBoundary]) -> Oracle
 
 pub fn runtime_usage_monotonic(events: &[DeliveredBoundary]) -> OracleVerdict {
     let mut checked = 0;
-    let mut last_context_total_by_session = BTreeMap::<String, i64>::new();
+    let mut last_total_by_session = BTreeMap::<String, i64>::new();
     for event in events
         .iter()
         .filter(|event| event.kind == BoundaryKind::Provider)
@@ -890,15 +890,14 @@ pub fn runtime_usage_monotonic(events: &[DeliveredBoundary]) -> OracleVerdict {
                 ),
             );
         }
-        let current = facts.token_ledger_total.context_total_tokens;
-        if let Some(previous) =
-            last_context_total_by_session.insert(event.actor_alias.clone(), current)
+        let current = facts.token_ledger_total.total_tokens;
+        if let Some(previous) = last_total_by_session.insert(event.actor_alias.clone(), current)
             && current < previous
         {
             return OracleVerdict::failed(
                 RUNTIME_USAGE_MONOTONIC_ORACLE,
                 format!(
-                    "session `{}` token ledger context total regressed from {previous} to {current} at `{}`",
+                    "session `{}` cumulative token ledger total regressed from {previous} to {current} at `{}`",
                     event.actor_alias, event.boundary_id
                 ),
             );

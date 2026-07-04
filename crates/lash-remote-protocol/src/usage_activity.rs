@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 use crate::ensure_protocol_version;
 use crate::registry_errors::{RemoteProtocolError, require_non_empty};
 
+// Wire mirror of the runtime usage counters. This is a deliberately versioned
+// protocol boundary, kept independent of the internal types so the wire format
+// stays stable across internal refactors. The `From` converters in
+// `core_conversions::llm` destructure their `lash_core` source exhaustively
+// (no `..`), so adding a counter upstream is a compile error until it is mirrored
+// here too.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteUsage {
     pub input_tokens: i64,
@@ -84,6 +90,10 @@ pub enum RemoteTurnEvent {
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     ToolCallCompleted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +102,10 @@ pub enum RemoteTurnEvent {
         args: serde_json::Value,
         output: serde_json::Value,
         duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     FinalValue {
         value: serde_json::Value,

@@ -802,6 +802,7 @@ pub enum TurnEvent {
     CodeBlockCompleted {
         language: String,
         output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         success: bool,
         duration_ms: u64,
@@ -810,16 +811,34 @@ pub enum TurnEvent {
         graph_key: Option<String>,
     },
     ToolCallStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
+        /// Graph key of the enclosing code block, when this tool call ran
+        /// inside one. `None` when the call did not run inside a code block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_key: Option<String>,
+        /// Call id of the parent batch tool call, when this call is a child of
+        /// a `batch` dispatch. `None` for top-level tool calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     ToolCallCompleted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
         output: crate::ToolCallOutput,
         duration_ms: u64,
+        /// Graph key of the enclosing code block, when this tool call ran
+        /// inside one. `None` when the call did not run inside a code block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_key: Option<String>,
+        /// Call id of the parent batch tool call, when this call is a child of
+        /// a `batch` dispatch. `None` for top-level tool calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     FinalValue {
         value: serde_json::Value,

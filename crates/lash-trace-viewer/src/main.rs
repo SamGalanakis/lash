@@ -1,5 +1,13 @@
 //! `lash-trace-viewer` renders Lash trace JSONL into a self-contained HTML
 //! debugging surface, preserving unknown future events as raw records.
+//!
+//! All per-event interpretation (kind, title, one-line summary, failure
+//! detection, pills) happens once in Rust as a typed match over
+//! [`lash_trace::TraceEvent`], producing a [`RenderModel`] of plain serde
+//! structs. That model is embedded as JSON and the browser script is a dumb
+//! renderer over it — it carries zero event-kind strings and no schema
+//! knowledge. Records that fail the typed parse still get a raw-JSON render
+//! path so future/unknown events are never dropped.
 
 use std::fs;
 use std::io::{self, Write};
@@ -8,7 +16,12 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use lash_trace::TraceRecord;
+use lash_trace::{
+    TraceContentBlock, TraceError, TraceEvent, TraceLashlangChildExecution,
+    TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, TraceLashlangStatus,
+    TraceLlmRequest, TraceRecord, TraceRuntimeSubject, TraceTokenUsage,
+};
+use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Debug, Parser)]
@@ -107,13 +120,556 @@ fn default_output_path(trace: &Path) -> PathBuf {
     out
 }
 
-fn render_html(title: &str, source_path: &Path, trace: &LoadedTrace) -> Result<String> {
-    let raw_records = trace.records.iter().map(|record| &record.raw);
-    let records_json = escape_script_json(
-        &serde_json::to_string(&raw_records.collect::<Vec<_>>())
-            .context("serialize trace records")?,
+// ---------------------------------------------------------------------------
+// Prepared render model — the single source of event interpretation.
+// ---------------------------------------------------------------------------
+
+/// Everything the browser script needs to draw the viewer. Built entirely in
+/// Rust; the script never re-derives any of these fields from the raw record.
+#[derive(Debug, Serialize)]
+struct RenderModel {
+    events: Vec<RenderEvent>,
+    stats: RenderStats,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RenderStats {
+    total: usize,
+    llm_calls: usize,
+    failures: usize,
+    total_tokens: i64,
+}
+
+/// One prepared event row.
+#[derive(Debug, Serialize)]
+struct RenderEvent {
+    /// 1-based position in the trace.
+    index: usize,
+    kind: String,
+    /// Badge colour class: "", "fail", "llm", "tool", or "stream".
+    badge: &'static str,
+    title: String,
+    /// One-line summary; may contain `\n` for the pre-wrapped body.
+    summary: String,
+    failed: bool,
+    /// Belongs on the "LLM Calls" tab.
+    is_llm_call: bool,
+    /// Belongs on the "Streams" tab.
+    is_stream: bool,
+    timestamp: String,
+    short_time: String,
+    turn_index: Option<i64>,
+    protocol_iteration: Option<i64>,
+    id: String,
+    llm_call_id: Option<String>,
+    effect_id: Option<String>,
+    /// Prebuilt context pills, e.g. "session s1".
+    pills: Vec<String>,
+    /// The raw record, embedded verbatim for the details/raw views and search.
+    raw: Value,
+}
+
+fn build_model(trace: &LoadedTrace) -> RenderModel {
+    let mut events = Vec::with_capacity(trace.records.len());
+    let mut stats = RenderStats {
+        total: trace.records.len(),
+        ..RenderStats::default()
+    };
+    for (offset, entry) in trace.records.iter().enumerate() {
+        let event = render_event(offset + 1, entry);
+        if event.kind == "llm_call_started" {
+            stats.llm_calls += 1;
+        }
+        if event.failed {
+            stats.failures += 1;
+        }
+        stats.total_tokens += token_total(entry);
+        events.push(event);
+    }
+    RenderModel { events, stats }
+}
+
+/// Tokens contributed by a record — typed match on the real usage structs.
+fn token_total(entry: &TraceEntry) -> i64 {
+    let Some(record) = entry.typed.as_ref() else {
+        return 0;
+    };
+    let usage = match &record.event {
+        TraceEvent::LlmCallCompleted {
+            usage: Some(usage), ..
+        }
+        | TraceEvent::TokenUsage { usage, .. } => usage,
+        _ => return 0,
+    };
+    usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_write_input_tokens
+}
+
+fn render_event(index: usize, entry: &TraceEntry) -> RenderEvent {
+    let raw = &entry.raw;
+    let (kind, title, summary, failed) = match entry.typed.as_ref() {
+        Some(record) => {
+            let (title, summary, failed) = interpret_typed(&record.event, raw);
+            (record.event.kind().to_string(), title, summary, failed)
+        }
+        None => interpret_raw(raw),
+    };
+
+    let badge = if failed || kind.contains("failed") {
+        "fail"
+    } else if kind.starts_with("llm") {
+        "llm"
+    } else if kind.starts_with("tool") {
+        "tool"
+    } else if kind == "lashlang_execution" || kind.ends_with("stream_event") {
+        "stream"
+    } else {
+        ""
+    };
+
+    let timestamp = string_field(raw, "timestamp");
+    RenderEvent {
+        index,
+        is_llm_call: kind.starts_with("llm_call_"),
+        is_stream: kind.ends_with("stream_event"),
+        short_time: short_time(&timestamp),
+        turn_index: context_i64(raw, "turn_index"),
+        protocol_iteration: context_i64(raw, "protocol_iteration"),
+        id: string_field(raw, "id"),
+        llm_call_id: context_string(raw, "llm_call_id"),
+        effect_id: context_string(raw, "effect_id"),
+        pills: pills(raw),
+        badge,
+        title,
+        summary,
+        failed,
+        kind,
+        timestamp,
+        raw: raw.clone(),
+    }
+}
+
+/// Title, summary, and failure flag for a typed event. The match is exhaustive
+/// on `TraceEvent` (no wildcard): a new variant will not compile until it is
+/// given a rendering here — this is the viewer's drift guard against the
+/// schema.
+fn interpret_typed(event: &TraceEvent, raw: &Value) -> (String, String, bool) {
+    match event {
+        TraceEvent::LlmCallStarted { request } => (
+            llm_request_title(request),
+            summarize_request(request),
+            false,
+        ),
+        TraceEvent::LlmCallCompleted {
+            response, usage, ..
+        } => {
+            let usage_line = match usage {
+                Some(usage) => usage_text(usage, None),
+                None => "usage unavailable".to_string(),
+            };
+            (
+                format!("completed in {} ms", response.duration_ms),
+                format!("{usage_line}\n{}", response.text),
+                false,
+            )
+        }
+        TraceEvent::LlmCallFailed { error, .. } => {
+            (error.message.clone(), failure_detail(error), true)
+        }
+        TraceEvent::ToolCallStarted { name, args, .. } => (name.clone(), json_compact(args), false),
+        TraceEvent::ToolCallCompleted {
+            name,
+            output,
+            duration_ms,
+            ..
+        } => {
+            let ok = output.is_success();
+            let summary = format!(
+                "{} in {duration_ms} ms\n{}",
+                if ok { "ok" } else { "error" },
+                json_compact(&output.value_for_projection())
+            );
+            (name.clone(), summary, !ok)
+        }
+        TraceEvent::ProviderStreamEvent { event } => (
+            format!("{}: {}", event.provider, event.event_name),
+            format!(
+                "seq {}, {} ms, raw {} chars, sha {}",
+                event.sequence, event.elapsed_ms, event.raw_len, event.raw_sha256
+            ),
+            false,
+        ),
+        TraceEvent::RuntimeStreamEvent { event } => {
+            let summary = event
+                .visible_text
+                .clone()
+                .or_else(|| event.raw_text.clone())
+                .unwrap_or_else(|| json_compact(event));
+            (event.event_name.clone(), summary, false)
+        }
+        TraceEvent::ProtocolStep { plugin_id, payload } => (
+            "protocol step".to_string(),
+            format!("{plugin_id}\n{}", json_compact(payload)),
+            false,
+        ),
+        TraceEvent::TokenUsage { usage, cumulative } => (
+            "token usage".to_string(),
+            usage_text(usage, cumulative.as_ref()),
+            false,
+        ),
+        TraceEvent::LashlangExecution { event } => (
+            lashlang_title(event),
+            lashlang_summary(event),
+            lashlang_failed(event),
+        ),
+        TraceEvent::TurnCompleted {
+            status,
+            done_reason,
+            ..
+        } => (
+            format!("{status}: {done_reason}"),
+            default_summary(raw),
+            // `status` is a free-form string in the schema, not an enum; this
+            // is the one place the viewer compares it as a string.
+            status == "failed",
+        ),
+        TraceEvent::Custom { name, payload } => (name.clone(), json_compact(payload), false),
+        TraceEvent::PromptBuilt {
+            prompt_chars,
+            components,
+            ..
+        } => {
+            let summary = components
+                .iter()
+                .map(|component| {
+                    let chars = component
+                        .chars
+                        .map(|chars| chars.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    format!("{}:{} {chars} chars", component.kind, component.id)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (format!("{prompt_chars} prompt chars"), summary, false)
+        }
+        TraceEvent::SessionStarted { .. } | TraceEvent::TurnStarted { .. } => {
+            (kind_title(event.kind()), default_summary(raw), false)
+        }
+    }
+}
+
+/// Fallback rendering for a record that did not parse into the typed schema
+/// (a future or malformed event). Everything comes from the raw JSON.
+fn interpret_raw(raw: &Value) -> (String, String, String, bool) {
+    let kind = raw
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let failed = kind.contains("failed")
+        || raw.get("success") == Some(&Value::Bool(false))
+        || raw.get("status").and_then(Value::as_str) == Some("failed");
+    (
+        kind.clone(),
+        kind_title(&kind),
+        default_summary(raw),
+        failed,
+    )
+}
+
+fn llm_request_title(request: &TraceLlmRequest) -> String {
+    match &request.model_variant {
+        Some(variant) => format!("{} / {variant}", request.model),
+        None => request.model.clone(),
+    }
+}
+
+fn summarize_request(request: &TraceLlmRequest) -> String {
+    let mut parts = vec![
+        format!("{} messages", request.messages.len()),
+        format!("{} tools", request.tools.len()),
+    ];
+    if !request.attachments.is_empty() {
+        parts.push(format!("{} attachments", request.attachments.len()));
+    }
+    let text = request
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            TraceContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!("{}\n{}", parts.join(", "), truncate_chars(&text, 2000))
+}
+
+fn usage_text(usage: &TraceTokenUsage, cumulative: Option<&TraceTokenUsage>) -> String {
+    let total = usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_write_input_tokens;
+    let mut text = format!(
+        "tokens {total} = in {}, out {}, cache read {}, cache write {}, reasoning {}",
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_input_tokens,
+        usage.cache_write_input_tokens,
+        usage.reasoning_output_tokens
     );
-    let stats = TraceStats::from_trace(trace);
+    if let Some(cumulative) = cumulative {
+        let cumulative_total = cumulative.input_tokens
+            + cumulative.output_tokens
+            + cumulative.cache_read_input_tokens
+            + cumulative.cache_write_input_tokens;
+        text.push_str(&format!("\ncumulative {cumulative_total}"));
+    }
+    text
+}
+
+fn failure_detail(error: &TraceError) -> String {
+    error
+        .raw
+        .clone()
+        .or_else(|| error.code.clone())
+        .unwrap_or_default()
+}
+
+fn lashlang_title(event: &TraceLashlangExecutionEvent) -> String {
+    match event {
+        TraceLashlangExecutionEvent::ExecutionStarted { identity, .. } => {
+            format!("{} started", entry_name(identity))
+        }
+        TraceLashlangExecutionEvent::ExecutionFinished {
+            identity, status, ..
+        } => format!("{} {}", entry_name(identity), lashlang_status_str(*status)),
+        TraceLashlangExecutionEvent::NodeStarted { label, .. } => format!("{label} started"),
+        TraceLashlangExecutionEvent::NodeCompleted { label, .. } => format!("{label} completed"),
+        TraceLashlangExecutionEvent::NodeFailed { label, .. } => format!("{label} failed"),
+        TraceLashlangExecutionEvent::BranchSelected { selected, .. } => {
+            format!("branch selected: {}", branch_selection_str(*selected))
+        }
+        TraceLashlangExecutionEvent::ChildStarted {
+            identity, child, ..
+        } => format!(
+            "{} started child {}",
+            entry_name(identity),
+            child_label(child)
+        ),
+    }
+}
+
+fn lashlang_summary(event: &TraceLashlangExecutionEvent) -> String {
+    let mut parts = Vec::new();
+    let identity = lashlang_identity(event);
+    if !identity.entry_name.is_empty() {
+        parts.push(format!("entry {}", identity.entry_name));
+    }
+    if !identity.entry_kind.is_empty() {
+        parts.push(format!("kind {}", identity.entry_kind));
+    }
+    parts.push(format!("subject {}", subject_summary(&identity.subject)));
+    if !identity.scope.session_id.is_empty() {
+        parts.push(format!("session {}", identity.scope.session_id));
+    }
+    if let Some(turn_id) = &identity.scope.turn_id {
+        parts.push(format!("turn {turn_id}"));
+    }
+    if !identity.module_ref.is_empty() {
+        parts.push(format!("module {}", identity.module_ref));
+    }
+    match event {
+        TraceLashlangExecutionEvent::NodeStarted {
+            node_id,
+            occurrence,
+            ..
+        }
+        | TraceLashlangExecutionEvent::NodeCompleted {
+            node_id,
+            occurrence,
+            ..
+        } => {
+            parts.push(format!("node {node_id}"));
+            parts.push(format!("occurrence {occurrence}"));
+        }
+        TraceLashlangExecutionEvent::NodeFailed {
+            node_id,
+            occurrence,
+            error,
+            ..
+        } => {
+            parts.push(format!("node {node_id}"));
+            parts.push(format!("occurrence {occurrence}"));
+            parts.push(format!("error {error}"));
+        }
+        TraceLashlangExecutionEvent::BranchSelected {
+            node_id,
+            occurrence,
+            edge_id,
+            ..
+        } => {
+            parts.push(format!("node {node_id}"));
+            parts.push(format!("occurrence {occurrence}"));
+            parts.push(format!("edge {edge_id}"));
+        }
+        TraceLashlangExecutionEvent::ChildStarted {
+            occurrence, child, ..
+        } => {
+            parts.push(format!("occurrence {occurrence}"));
+            parts.push(format!("child {}", subject_summary(&child.subject)));
+        }
+        TraceLashlangExecutionEvent::ExecutionFinished { error, .. } => {
+            if let Some(error) = error {
+                parts.push(format!("error {error}"));
+            }
+        }
+        TraceLashlangExecutionEvent::ExecutionStarted { execution_map, .. } => {
+            parts.push(format!("{} nodes", execution_map.nodes.len()));
+            parts.push(format!("{} edges", execution_map.edges.len()));
+        }
+    }
+    parts.join("\n")
+}
+
+fn lashlang_failed(event: &TraceLashlangExecutionEvent) -> bool {
+    matches!(
+        event,
+        TraceLashlangExecutionEvent::NodeFailed { .. }
+            | TraceLashlangExecutionEvent::ExecutionFinished {
+                status: TraceLashlangStatus::Failed,
+                ..
+            }
+    )
+}
+
+fn lashlang_identity(event: &TraceLashlangExecutionEvent) -> &TraceLashlangExecutionIdentity {
+    match event {
+        TraceLashlangExecutionEvent::ExecutionStarted { identity, .. }
+        | TraceLashlangExecutionEvent::ExecutionFinished { identity, .. }
+        | TraceLashlangExecutionEvent::NodeStarted { identity, .. }
+        | TraceLashlangExecutionEvent::NodeCompleted { identity, .. }
+        | TraceLashlangExecutionEvent::NodeFailed { identity, .. }
+        | TraceLashlangExecutionEvent::BranchSelected { identity, .. }
+        | TraceLashlangExecutionEvent::ChildStarted { identity, .. } => identity,
+    }
+}
+
+fn entry_name(identity: &TraceLashlangExecutionIdentity) -> &str {
+    if identity.entry_name.is_empty() {
+        "Lashlang"
+    } else {
+        &identity.entry_name
+    }
+}
+
+fn child_label(child: &TraceLashlangChildExecution) -> String {
+    child
+        .entry_name
+        .clone()
+        .unwrap_or_else(|| subject_summary(&child.subject))
+}
+
+fn subject_summary(subject: &TraceRuntimeSubject) -> String {
+    match subject {
+        TraceRuntimeSubject::Process { process_id } => format!("process {process_id}"),
+        TraceRuntimeSubject::Effect { effect_id, kind } => format!("effect {kind}:{effect_id}"),
+    }
+}
+
+fn lashlang_status_str(status: TraceLashlangStatus) -> &'static str {
+    match status {
+        TraceLashlangStatus::Running => "running",
+        TraceLashlangStatus::Completed => "completed",
+        TraceLashlangStatus::Failed => "failed",
+        TraceLashlangStatus::Cancelled => "cancelled",
+    }
+}
+
+fn branch_selection_str(selection: lash_trace::TraceBranchSelection) -> &'static str {
+    match selection {
+        lash_trace::TraceBranchSelection::Then => "then",
+        lash_trace::TraceBranchSelection::Else => "else",
+    }
+}
+
+fn kind_title(kind: &str) -> String {
+    kind.replace('_', " ")
+}
+
+fn default_summary(raw: &Value) -> String {
+    truncate_chars(&json_compact(raw), 800)
+}
+
+fn json_compact<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((byte_idx, _)) => text[..byte_idx].to_string(),
+        None => text.to_string(),
+    }
+}
+
+fn string_field(raw: &Value, key: &str) -> String {
+    raw.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn context_string(raw: &Value, key: &str) -> Option<String> {
+    raw.get("context")
+        .and_then(|context| context.get(key))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn context_i64(raw: &Value, key: &str) -> Option<i64> {
+    raw.get("context")
+        .and_then(|context| context.get(key))
+        .and_then(Value::as_i64)
+}
+
+fn pills(raw: &Value) -> Vec<String> {
+    let mut pills = Vec::new();
+    if let Some(session) = context_string(raw, "session_id") {
+        pills.push(format!("session {session}"));
+    }
+    if let Some(turn) = context_string(raw, "turn_id") {
+        pills.push(format!("turn {turn}"));
+    }
+    if let Some(llm) = context_string(raw, "llm_call_id") {
+        pills.push(format!("llm {llm}"));
+    }
+    if let Some(effect) = context_string(raw, "effect_id") {
+        pills.push(format!("effect {effect}"));
+    }
+    if let Some(schema) = raw.get("schema_version").and_then(Value::as_i64) {
+        pills.push(format!("schema {schema}"));
+    }
+    pills
+}
+
+fn short_time(timestamp: &str) -> String {
+    // Pull HH:MM:SS out of an RFC3339 timestamp, else keep the whole string.
+    if let Some(t_index) = timestamp.find('T') {
+        let rest = &timestamp[t_index + 1..];
+        let time: String = rest.chars().take(8).collect();
+        if time.len() == 8 && time.as_bytes()[2] == b':' && time.as_bytes()[5] == b':' {
+            return time;
+        }
+    }
+    timestamp.to_string()
+}
+
+fn render_html(title: &str, source_path: &Path, trace: &LoadedTrace) -> Result<String> {
+    let model = build_model(trace);
+    let model_json =
+        escape_script_json(&serde_json::to_string(&model).context("serialize render model")?);
     let source = source_path.display().to_string();
     Ok(format!(
         r#"<!doctype html>
@@ -166,7 +722,7 @@ fn render_html(title: &str, source_path: &Path, trace: &LoadedTrace) -> Result<S
   </section>
 </main>
 
-<script id="trace-data" type="application/json">{records_json}</script>
+<script id="trace-data" type="application/json">{model_json}</script>
 <script>
 {js}
 </script>
@@ -174,65 +730,13 @@ fn render_html(title: &str, source_path: &Path, trace: &LoadedTrace) -> Result<S
 </html>"#,
         title = escape_html(title),
         source = escape_html(&source),
-        total = trace.records.len(),
-        llm_calls = stats.llm_calls,
-        failures = stats.failures,
-        tokens = stats.total_tokens,
+        total = model.stats.total,
+        llm_calls = model.stats.llm_calls,
+        failures = model.stats.failures,
+        tokens = model.stats.total_tokens,
         css = CSS,
         js = JS,
     ))
-}
-
-#[derive(Default)]
-struct TraceStats {
-    llm_calls: usize,
-    failures: usize,
-    total_tokens: i64,
-}
-
-impl TraceStats {
-    fn from_trace(trace: &LoadedTrace) -> Self {
-        let mut stats = Self::default();
-        for record in trace
-            .records
-            .iter()
-            .filter_map(|record| record.typed.as_ref())
-        {
-            match &record.event {
-                lash_trace::TraceEvent::LlmCallStarted { .. } => stats.llm_calls += 1,
-                lash_trace::TraceEvent::LlmCallFailed { .. } => stats.failures += 1,
-                lash_trace::TraceEvent::ToolCallCompleted { output, .. }
-                    if !output.is_success() =>
-                {
-                    stats.failures += 1;
-                }
-                lash_trace::TraceEvent::TurnCompleted { status, .. } if status == "failed" => {
-                    stats.failures += 1;
-                }
-                lash_trace::TraceEvent::LlmCallCompleted {
-                    usage: Some(usage), ..
-                }
-                | lash_trace::TraceEvent::TokenUsage { usage, .. } => {
-                    stats.total_tokens += usage.input_tokens
-                        + usage.output_tokens
-                        + usage.cache_read_input_tokens
-                        + usage.cache_write_input_tokens;
-                }
-                lash_trace::TraceEvent::LashlangExecution {
-                    event:
-                        lash_trace::TraceLashlangExecutionEvent::NodeFailed { .. }
-                        | lash_trace::TraceLashlangExecutionEvent::ExecutionFinished {
-                            status: lash_trace::TraceLashlangStatus::Failed,
-                            ..
-                        },
-                } => {
-                    stats.failures += 1;
-                }
-                _ => {}
-            }
-        }
-        stats
-    }
 }
 
 fn escape_html(value: &str) -> String {
@@ -519,19 +1023,22 @@ pre {
 }
 "#;
 
+// The script is a dumb renderer over the prepared model. It knows the shape of
+// a RenderEvent but nothing about event kinds, titles, or summaries — those are
+// all computed in Rust.
 const JS: &str = r#"
-const records = JSON.parse(document.getElementById('trace-data').textContent);
-const state = { query: '', enabled: new Set(records.map(eventKind)), selected: null };
+const model = JSON.parse(document.getElementById('trace-data').textContent);
+const events = model.events;
+const state = { query: '', enabled: new Set(events.map(e => e.kind)), selected: null };
 
-const eventKinds = [...records.reduce((set, record) => set.add(eventKind(record)), new Set())].sort();
-const counts = records.reduce((map, record) => {
-  const kind = eventKind(record);
-  map[kind] = (map[kind] || 0) + 1;
+const kinds = [...events.reduce((set, event) => set.add(event.kind), new Set())].sort();
+const counts = events.reduce((map, event) => {
+  map[event.kind] = (map[event.kind] || 0) + 1;
   return map;
 }, {});
 
 const filters = document.getElementById('filters');
-for (const kind of eventKinds) {
+for (const kind of kinds) {
   const button = document.createElement('button');
   button.className = 'filter';
   button.dataset.kind = kind;
@@ -559,251 +1066,85 @@ document.querySelectorAll('.tab').forEach(tab => {
   });
 });
 
-function filteredRecords() {
-  return records.filter(record => {
-    if (!state.enabled.has(eventKind(record))) return false;
+function searchText(event) {
+  return (JSON.stringify(event.raw) + '\n' + event.title + '\n' + event.summary).toLowerCase();
+}
+
+function filteredEvents() {
+  return events.filter(event => {
+    if (!state.enabled.has(event.kind)) return false;
     if (!state.query) return true;
-    return JSON.stringify(record).toLowerCase().includes(state.query);
+    return searchText(event).includes(state.query);
   });
 }
 
 function renderAll() {
-  renderTimeline();
-  renderLlm();
-  renderStreams();
+  renderList('timeline', filteredEvents(), 'event', 'No events match the current filters.');
+  renderList('llm', filteredEvents().filter(e => e.is_llm_call), 'llm-card', 'No LLM call events match.');
+  renderList('streams', filteredEvents().filter(e => e.is_stream), 'stream-card',
+    'No stream events match. Run with --trace-level extended to capture provider/runtime stream records.');
   renderRaw();
 }
 
-function renderTimeline() {
-  const root = document.getElementById('timeline');
-  const visible = filteredRecords();
-  root.innerHTML = visible.length ? '' : `<div class="empty">No events match the current filters.</div>`;
-  visible.forEach((record, index) => root.appendChild(eventCard(record, index)));
-}
-
-function renderLlm() {
-  const root = document.getElementById('llm');
-  const calls = filteredRecords().filter(r => eventKind(r).startsWith('llm_call_'));
-  root.innerHTML = calls.length ? '' : `<div class="empty">No LLM call events match.</div>`;
-  calls.forEach((record, index) => root.appendChild(eventCard(record, index, 'llm-card')));
-}
-
-function renderStreams() {
-  const root = document.getElementById('streams');
-  const streams = filteredRecords().filter(r => eventKind(r).endsWith('stream_event'));
-  root.innerHTML = streams.length ? '' : `<div class="empty">No stream events match. Run with --trace-level extended to capture provider/runtime stream records.</div>`;
-  streams.forEach((record, index) => root.appendChild(eventCard(record, index, 'stream-card')));
+function renderList(viewId, visible, className, emptyText) {
+  const root = document.getElementById(viewId);
+  root.innerHTML = visible.length ? '' : `<div class="empty">${escapeHtml(emptyText)}</div>`;
+  visible.forEach(event => root.appendChild(eventCard(event, className)));
 }
 
 function renderRaw() {
   const root = document.getElementById('raw');
-  const visible = filteredRecords();
+  const visible = filteredEvents();
   root.innerHTML = visible.length ? '' : `<div class="empty">No raw records match.</div>`;
-  visible.forEach((record, index) => {
+  visible.forEach(event => {
     const card = document.createElement('article');
     card.className = 'raw-card';
-    card.innerHTML = `<div class="event-rail"><span class="kind">${escapeHtml(eventKind(record))}</span><div class="meta-line">#${index + 1}</div></div><div class="event-body"><pre>${escapeHtml(JSON.stringify(record, null, 2))}</pre></div>`;
+    card.innerHTML = `<div class="event-rail"><span class="kind">${escapeHtml(event.kind)}</span><div class="meta-line">#${event.index}</div></div><div class="event-body"><pre>${escapeHtml(rawJson(event))}</pre></div>`;
     root.appendChild(card);
   });
 }
 
-function eventCard(record, index, className = 'event') {
-  const kind = eventKind(record);
+function eventCard(event, className) {
   const card = document.createElement('article');
   card.className = className;
-  card.dataset.id = record.id;
-  card.addEventListener('click', () => selectRecord(record, card));
-  const badgeClass = kind.includes('failed') || isFailed(record) ? 'fail'
-    : kind.startsWith('llm') ? 'llm'
-    : kind.startsWith('tool') ? 'tool'
-    : kind === 'lashlang_execution' ? 'stream'
-    : kind.endsWith('stream_event') ? 'stream'
-    : '';
+  card.dataset.id = event.id;
+  card.addEventListener('click', () => selectEvent(event, card));
+  const turn = event.turn_index ?? 'na';
+  const step = event.protocol_iteration ?? 'na';
   card.innerHTML = `
     <div class="event-rail">
-      <span class="kind ${badgeClass}">${escapeHtml(kind)}</span>
-      <div class="meta-line">${escapeHtml(shortTime(record.timestamp))}</div>
-      <div class="meta-line">turn ${record.context?.turn_index ?? 'na'} · step ${record.context?.protocol_iteration ?? 'na'}</div>
+      <span class="kind ${event.badge}">${escapeHtml(event.kind)}</span>
+      <div class="meta-line">${escapeHtml(event.short_time)}</div>
+      <div class="meta-line">turn ${escapeHtml(String(turn))} · step ${escapeHtml(String(step))}</div>
     </div>
     <div class="event-body">
-      <div class="title-line">${escapeHtml(eventTitle(record))}</div>
-      <div class="summary-line">${escapeHtml(eventSummary(record))}</div>
-      ${pillRow(record)}
-      <details><summary>Raw JSON</summary><pre>${escapeHtml(JSON.stringify(record, null, 2))}</pre></details>
+      <div class="title-line">${escapeHtml(event.title)}</div>
+      <div class="summary-line">${escapeHtml(event.summary)}</div>
+      ${pillRow(event.pills)}
+      <details><summary>Raw JSON</summary><pre>${escapeHtml(rawJson(event))}</pre></details>
     </div>`;
   return card;
 }
 
-function selectRecord(record, element) {
+function selectEvent(event, element) {
   document.querySelectorAll('.selected').forEach(el => el.classList.remove('selected'));
   element.classList.add('selected');
-  state.selected = record.id;
+  state.selected = event.id;
   document.getElementById('selectionMeta').innerHTML = `
-    <div><strong>${escapeHtml(eventKind(record))}</strong></div>
-    <div>${escapeHtml(record.timestamp || '')}</div>
-    <div>${escapeHtml(record.id || '')}</div>
-    <div>llm: ${escapeHtml(record.context?.llm_call_id || 'none')}</div>
-    <div>effect: ${escapeHtml(record.context?.effect_id || 'none')}</div>`;
+    <div><strong>${escapeHtml(event.kind)}</strong></div>
+    <div>${escapeHtml(event.timestamp)}</div>
+    <div>${escapeHtml(event.id)}</div>
+    <div>llm: ${escapeHtml(event.llm_call_id || 'none')}</div>
+    <div>effect: ${escapeHtml(event.effect_id || 'none')}</div>`;
 }
 
-function eventKind(record) {
-  return record.type || 'unknown';
-}
-
-function eventTitle(record) {
-  switch (eventKind(record)) {
-    case 'llm_call_started':
-      return `${record.request.model}${record.request.model_variant ? ' / ' + record.request.model_variant : ''}`;
-    case 'llm_call_completed':
-      return `completed in ${record.response.duration_ms} ms`;
-    case 'llm_call_failed':
-      return record.error.message;
-    case 'tool_call_started':
-    case 'tool_call_completed':
-      return record.name || 'tool call';
-    case 'provider_stream_event':
-      return `${record.event.provider}: ${record.event.event_name}`;
-    case 'runtime_stream_event':
-      return record.event.event_name;
-    case 'turn_completed':
-      return `${record.status}: ${record.done_reason}`;
-    case 'lashlang_execution':
-      return lashlangExecutionTitle(record.event);
-    case 'custom':
-      return record.name;
-    case 'prompt_built':
-      return `${record.prompt_chars} prompt chars`;
-    default:
-      return eventKind(record).replaceAll('_', ' ');
-  }
-}
-
-function eventSummary(record) {
-  switch (eventKind(record)) {
-    case 'llm_call_started':
-      return summarizeRequest(record.request);
-    case 'llm_call_completed':
-      return summarizeCompleted(record);
-    case 'llm_call_failed':
-      return record.error.raw || record.error.code || '';
-    case 'tool_call_started':
-      return JSON.stringify(record.args);
-    case 'tool_call_completed':
-      return `${record.success ? 'ok' : 'error'} in ${record.duration_ms} ms\n${JSON.stringify(record.result)}`;
-    case 'provider_stream_event':
-      return `seq ${record.event.sequence}, ${record.event.elapsed_ms} ms, raw ${record.event.raw_len} chars, sha ${record.event.raw_sha256}`;
-    case 'runtime_stream_event':
-      return record.event.visible_text || record.event.raw_text || JSON.stringify(record.event);
-    case 'protocol_step':
-      return `${record.plugin_id}\n${JSON.stringify(record.payload)}`;
-    case 'token_usage':
-      return usageText(record.usage, record.cumulative);
-    case 'lashlang_execution':
-      return lashlangExecutionSummary(record.event);
-    case 'custom':
-      return JSON.stringify(record.payload);
-    case 'prompt_built':
-      return (record.components || []).map(c => `${c.kind}:${c.id} ${c.chars ?? '?'} chars`).join('\n');
-    default:
-      return JSON.stringify(record).slice(0, 800);
-  }
-}
-
-function summarizeRequest(request) {
-  const parts = [];
-  parts.push(`${request.messages.length} messages`);
-  parts.push(`${request.tools.length} tools`);
-  if (request.attachments?.length) parts.push(`${request.attachments.length} attachments`);
-  const text = request.messages.flatMap(m => m.blocks || []).filter(b => b.kind === 'text').map(b => b.text).join('\n\n');
-  return `${parts.join(', ')}\n${text.slice(0, 2000)}`;
-}
-
-function summarizeCompleted(record) {
-  const usage = record.usage ? usageText(record.usage) : 'usage unavailable';
-  return `${usage}\n${record.response.text || ''}`;
-}
-
-function usageText(usage, cumulative = null) {
-  const total = (usage.input_tokens || 0) + (usage.output_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_write_input_tokens || 0);
-  let text = `tokens ${total} = in ${usage.input_tokens || 0}, out ${usage.output_tokens || 0}, cache read ${usage.cache_read_input_tokens || 0}, cache write ${usage.cache_write_input_tokens || 0}, reasoning ${usage.reasoning_output_tokens || 0}`;
-  if (cumulative) {
-    const ctotal = (cumulative.input_tokens || 0) + (cumulative.output_tokens || 0) + (cumulative.cache_read_input_tokens || 0) + (cumulative.cache_write_input_tokens || 0);
-    text += `\ncumulative ${ctotal}`;
-  }
-  return text;
-}
-
-function lashlangExecutionTitle(event) {
-  if (!event) return 'Lashlang execution';
-  switch (event.kind) {
-    case 'execution_started':
-      return `${event.identity?.entry_name || 'Lashlang'} started`;
-    case 'execution_finished':
-      return `${event.identity?.entry_name || 'Lashlang'} ${event.status}`;
-    case 'node_started':
-      return `${event.label} started`;
-    case 'node_completed':
-      return `${event.label} completed`;
-    case 'node_failed':
-      return `${event.label} failed`;
-    case 'branch_selected':
-      return `branch selected: ${event.selected}`;
-    case 'child_started':
-      return `${event.identity?.entry_name || 'Lashlang'} started child ${event.child?.entry_name || subjectSummary(event.child?.subject) || 'execution'}`;
-    default:
-      return event.kind || 'Lashlang execution';
-  }
-}
-
-function lashlangExecutionSummary(event) {
-  if (!event) return '';
-  const identity = event.identity || {};
-  const parts = [];
-  if (identity.entry_name) parts.push(`entry ${identity.entry_name}`);
-  if (identity.entry_kind) parts.push(`kind ${identity.entry_kind}`);
-  if (identity.subject) parts.push(`subject ${subjectSummary(identity.subject)}`);
-  if (identity.scope?.session_id) parts.push(`session ${identity.scope.session_id}`);
-  if (identity.scope?.turn_id) parts.push(`turn ${identity.scope.turn_id}`);
-  if (identity.module_ref) parts.push(`module ${identity.module_ref}`);
-  if (event.node_id) parts.push(`node ${event.node_id}`);
-  if (event.occurrence) parts.push(`occurrence ${event.occurrence}`);
-  if (event.edge_id) parts.push(`edge ${event.edge_id}`);
-  if (event.child) parts.push(`child ${subjectSummary(event.child.subject)}`);
-  if (event.error) parts.push(`error ${event.error}`);
-  if (event.execution_map) {
-    parts.push(`${event.execution_map.nodes?.length || 0} nodes`);
-    parts.push(`${event.execution_map.edges?.length || 0} edges`);
-  }
-  return parts.join('\n');
-}
-
-function subjectSummary(subject) {
-  if (!subject) return '';
-  if (subject.type === 'process') return `process ${subject.process_id}`;
-  if (subject.type === 'effect') return `effect ${subject.kind || 'effect'}:${subject.effect_id}`;
-  return JSON.stringify(subject);
-}
-
-function pillRow(record) {
-  const pills = [];
-  const ctx = record.context || {};
-  if (ctx.session_id) pills.push(`session ${ctx.session_id}`);
-  if (ctx.turn_id) pills.push(`turn ${ctx.turn_id}`);
-  if (ctx.llm_call_id) pills.push(`llm ${ctx.llm_call_id}`);
-  if (ctx.effect_id) pills.push(`effect ${ctx.effect_id}`);
-  if (record.schema_version) pills.push(`schema ${record.schema_version}`);
-  if (!pills.length) return '';
+function pillRow(pills) {
+  if (!pills || !pills.length) return '';
   return `<div class="pill-row">${pills.map(p => `<span class="pill">${escapeHtml(p)}</span>`).join('')}</div>`;
 }
 
-function isFailed(record) {
-  return eventKind(record).includes('failed') || record.success === false || record.status === 'failed';
-}
-
-function shortTime(timestamp) {
-  if (!timestamp) return '';
-  const match = timestamp.match(/T(\d\d:\d\d:\d\d)/);
-  return match ? match[1] : timestamp;
+function rawJson(event) {
+  return JSON.stringify(event.raw, null, 2);
 }
 
 function escapeHtml(value) {
@@ -821,7 +1162,13 @@ renderAll();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_trace::{TraceContext, TraceEvent, TraceRecord};
+    use lash_trace::{
+        TraceAgentFrameSwitch, TraceContentBlock, TraceContext, TraceError, TraceEvent,
+        TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, TraceLashlangMap,
+        TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TraceProviderStreamEvent, TraceRecord,
+        TraceRuntimeScope, TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceTokenUsage,
+        TraceToolCallOutcome, TraceToolCallOutput,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn loaded_trace(records: Vec<TraceRecord>) -> LoadedTrace {
@@ -845,6 +1192,161 @@ mod tests {
             "lash-trace-viewer-{name}-{}-{nanos}.jsonl",
             std::process::id()
         ))
+    }
+
+    fn identity() -> TraceLashlangExecutionIdentity {
+        TraceLashlangExecutionIdentity {
+            scope: TraceRuntimeScope::new("s1"),
+            subject: TraceRuntimeSubject::Process {
+                process_id: "p1".to_string(),
+            },
+            module_ref: "module".to_string(),
+            entry_kind: "process".to_string(),
+            entry_ref: None,
+            entry_name: "main".to_string(),
+        }
+    }
+
+    fn sample_request() -> TraceLlmRequest {
+        TraceLlmRequest {
+            model: "gpt-5.5".to_string(),
+            model_variant: Some("high".to_string()),
+            messages: vec![TraceLlmMessage {
+                role: "system".to_string(),
+                blocks: vec![TraceContentBlock::Text {
+                    text: "hello".to_string(),
+                    cache_breakpoint: false,
+                }],
+            }],
+            attachments: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: "auto".to_string(),
+            output_spec: None,
+            stream: true,
+        }
+    }
+
+    fn usage() -> TraceTokenUsage {
+        TraceTokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_input_tokens: 2,
+            cache_write_input_tokens: 1,
+            reasoning_output_tokens: 3,
+        }
+    }
+
+    /// One sample of every `TraceEvent` variant. The list must stay complete —
+    /// the drift-guard test below asserts each renders a non-empty kind/title,
+    /// and `interpret_typed`'s exhaustive match refuses to compile if a variant
+    /// is added without a rendering.
+    fn every_variant() -> Vec<TraceEvent> {
+        vec![
+            TraceEvent::SessionStarted {
+                metadata: Default::default(),
+            },
+            TraceEvent::TurnStarted {
+                metadata: Default::default(),
+            },
+            TraceEvent::PromptBuilt {
+                prompt_hash: "h".to_string(),
+                prompt_chars: 42,
+                components: Vec::new(),
+            },
+            TraceEvent::LlmCallStarted {
+                request: sample_request(),
+            },
+            TraceEvent::LlmCallCompleted {
+                response: TraceLlmResponse {
+                    text: "ok".to_string(),
+                    duration_ms: 12,
+                    terminal_reason: None,
+                    parts: None,
+                },
+                usage: Some(usage()),
+                provider_usage: None,
+                stream_summary: None,
+            },
+            TraceEvent::LlmCallFailed {
+                error: TraceError {
+                    message: "boom".to_string(),
+                    retryable: false,
+                    terminal_reason: None,
+                    code: Some("bad".to_string()),
+                    raw: None,
+                },
+                stream_summary: None,
+            },
+            TraceEvent::ProviderStreamEvent {
+                event: TraceProviderStreamEvent {
+                    provider: "anthropic".to_string(),
+                    sequence: 1,
+                    elapsed_ms: 2,
+                    event_name: "delta".to_string(),
+                    item_id: None,
+                    output_index: None,
+                    raw_len: 3,
+                    raw_sha256: "sha".to_string(),
+                    raw_json: None,
+                },
+            },
+            TraceEvent::RuntimeStreamEvent {
+                event: TraceRuntimeStreamEvent {
+                    sequence: 1,
+                    elapsed_ms: 2,
+                    event_name: "delta".to_string(),
+                    raw_text: Some("raw".to_string()),
+                    visible_text: Some("visible".to_string()),
+                    item_id: None,
+                    output_index: None,
+                    call_id: None,
+                    tool_name: None,
+                    input_json: None,
+                    usage: None,
+                },
+            },
+            TraceEvent::ToolCallStarted {
+                call_id: Some("c1".to_string()),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"path": "x"}),
+            },
+            TraceEvent::ToolCallCompleted {
+                call_id: Some("c1".to_string()),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"path": "x"}),
+                output: TraceToolCallOutput {
+                    outcome: TraceToolCallOutcome::Success(serde_json::json!({"ok": true})),
+                    control: None,
+                },
+                duration_ms: 4,
+            },
+            TraceEvent::ProtocolStep {
+                plugin_id: "rlm".to_string(),
+                payload: serde_json::json!({"tool_calls": []}),
+            },
+            TraceEvent::TokenUsage {
+                usage: usage(),
+                cumulative: Some(usage()),
+            },
+            TraceEvent::LashlangExecution {
+                event: TraceLashlangExecutionEvent::ExecutionStarted {
+                    event_key: "k".to_string(),
+                    identity: identity(),
+                    execution_map: TraceLashlangMap::default(),
+                },
+            },
+            TraceEvent::TurnCompleted {
+                status: "completed".to_string(),
+                done_reason: "modelstop".to_string(),
+                agent_frame_switch: Some(TraceAgentFrameSwitch {
+                    frame_id: "f1".to_string(),
+                }),
+            },
+            TraceEvent::Custom {
+                name: "x".to_string(),
+                payload: serde_json::json!({"ok": true}),
+            },
+        ]
     }
 
     #[test]
@@ -888,6 +1390,88 @@ mod tests {
     }
 
     #[test]
+    fn every_trace_event_variant_renders_kind_and_title() {
+        for event in every_variant() {
+            let record = TraceRecord::new(TraceContext::default().for_session("s1"), event);
+            let entry = TraceEntry {
+                raw: serde_json::to_value(&record).expect("record json"),
+                typed: Some(record),
+            };
+            let rendered = render_event(1, &entry);
+            assert!(!rendered.kind.is_empty(), "empty kind");
+            assert!(
+                !rendered.title.is_empty(),
+                "kind {} rendered an empty title",
+                rendered.kind
+            );
+        }
+    }
+
+    #[test]
+    fn stats_count_llm_calls_failures_and_tokens_from_typed_events() {
+        let trace = loaded_trace(every_variant().into_iter().fold(
+            Vec::new(),
+            |mut records, event| {
+                records.push(TraceRecord::new(
+                    TraceContext::default().for_session("s1"),
+                    event,
+                ));
+                records
+            },
+        ));
+        let model = build_model(&trace);
+        assert_eq!(model.stats.llm_calls, 1);
+        // llm_call_failed contributes one failure; every other sample is ok.
+        assert_eq!(model.stats.failures, 1);
+        // LlmCallCompleted usage (18) + TokenUsage usage (18); reasoning excluded.
+        assert_eq!(model.stats.total_tokens, 36);
+    }
+
+    #[test]
+    fn tool_failure_is_flagged_and_badged() {
+        let record = TraceRecord::new(
+            TraceContext::default(),
+            TraceEvent::ToolCallCompleted {
+                call_id: Some("c1".to_string()),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"path": "missing"}),
+                output: TraceToolCallOutput {
+                    outcome: TraceToolCallOutcome::Failure(serde_json::json!({"message": "no"})),
+                    control: None,
+                },
+                duration_ms: 2,
+            },
+        );
+        let entry = TraceEntry {
+            raw: serde_json::to_value(&record).expect("json"),
+            typed: Some(record),
+        };
+        let rendered = render_event(1, &entry);
+        assert!(rendered.failed);
+        assert_eq!(rendered.badge, "fail");
+        assert!(rendered.summary.starts_with("error in 2 ms"));
+    }
+
+    #[test]
+    fn protocol_step_payload_renders_generically() {
+        let record = TraceRecord::new(
+            TraceContext::default(),
+            TraceEvent::ProtocolStep {
+                plugin_id: "rlm".to_string(),
+                payload: serde_json::json!({"tool_calls": [{"name": "shell"}]}),
+            },
+        );
+        let entry = TraceEntry {
+            raw: serde_json::to_value(&record).expect("json"),
+            typed: Some(record),
+        };
+        let rendered = render_event(1, &entry);
+        // A future field (tool_calls) shows up with no viewer change.
+        assert!(rendered.summary.contains("tool_calls"));
+        assert!(rendered.summary.contains("shell"));
+    }
+
+    #[test]
     fn load_trace_keeps_unknown_valid_json_records() {
         let path = temp_trace_path("unknown");
         std::fs::write(
@@ -902,6 +1486,12 @@ mod tests {
         assert_eq!(trace.records.len(), 1);
         assert!(trace.records[0].typed.is_none());
         assert_eq!(trace.records[0].raw["type"], "future_event");
+
+        // The unknown record still renders through the raw-JSON fallback path.
+        let rendered = render_event(1, &trace.records[0]);
+        assert_eq!(rendered.kind, "future_event");
+        assert_eq!(rendered.title, "future event");
+        assert!(rendered.summary.contains("kept raw"));
 
         let html = render_html("title", &path, &trace).expect("render");
         assert!(html.contains("future_event"));

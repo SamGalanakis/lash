@@ -9,6 +9,7 @@ publish = false
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 lash-trace = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 [[bin]]

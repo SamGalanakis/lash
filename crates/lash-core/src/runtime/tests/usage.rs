@@ -41,17 +41,16 @@ fn session_usage_report_aggregates_sources_and_models() {
     let report = SessionUsageReport::from_entries(&entries);
 
     assert_eq!(report.entry_count, 3);
-    assert_eq!(report.usage.input_tokens, 37);
-    assert_eq!(report.usage.output_tokens, 7);
-    assert_eq!(report.usage.cache_read_input_tokens, 8);
-    assert_eq!(report.usage.cache_write_input_tokens, 0);
-    assert_eq!(report.usage.reasoning_output_tokens, 3);
+    assert_eq!(report.usage.usage.input_tokens, 37);
+    assert_eq!(report.usage.usage.output_tokens, 7);
+    assert_eq!(report.usage.usage.cache_read_input_tokens, 8);
+    assert_eq!(report.usage.usage.cache_write_input_tokens, 0);
+    assert_eq!(report.usage.usage.reasoning_output_tokens, 3);
     assert_eq!(report.usage.total_tokens, 52);
-    assert_eq!(report.usage.context_total_tokens, 52);
-    assert_eq!(report.by_source["turn"].input_tokens, 30);
-    assert_eq!(report.by_source["observer"].output_tokens, 1);
-    assert_eq!(report.by_model["gpt-5.4-mini"].input_tokens, 17);
-    assert_eq!(report.by_model["gpt-5.4"].reasoning_output_tokens, 2);
+    assert_eq!(report.by_source["turn"].usage.input_tokens, 30);
+    assert_eq!(report.by_source["observer"].usage.output_tokens, 1);
+    assert_eq!(report.by_model["gpt-5.4-mini"].usage.input_tokens, 17);
+    assert_eq!(report.by_model["gpt-5.4"].usage.reasoning_output_tokens, 2);
 
     let delta = diff_token_ledger(
         &[TokenLedgerEntry {

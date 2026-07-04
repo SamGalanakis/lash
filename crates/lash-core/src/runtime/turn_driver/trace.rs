@@ -28,38 +28,21 @@ impl RuntimeTurnDriver<'_> {
         );
     }
 
-    pub(super) fn emit_tool_call_trace(
+    /// Build the per-tool trace handle threaded into a code/tool execution
+    /// context so tool trace events are emitted from the shared seam. `None`
+    /// when the host installed no trace sink, keeping emission a no-op.
+    pub(super) fn execution_tracing(
         &self,
         protocol_iteration: usize,
-        record: &crate::ToolCallRecord,
-    ) {
-        self.emit_trace(
-            protocol_iteration,
-            lash_trace::TraceEvent::ToolCallCompleted {
-                call_id: record.call_id.clone(),
-                name: record.tool.clone(),
-                args: record.args.clone(),
-                output: crate::trace::trace_tool_call_output(&record.output),
-                duration_ms: record.duration_ms,
-            },
-        );
-    }
-
-    pub(super) fn emit_tool_call_started_trace(
-        &self,
-        protocol_iteration: usize,
-        call_id: Option<String>,
-        name: String,
-        args: serde_json::Value,
-    ) {
-        self.emit_trace(
-            protocol_iteration,
-            lash_trace::TraceEvent::ToolCallStarted {
-                call_id,
-                name,
-                args,
-            },
-        );
+    ) -> Option<crate::RuntimeExecutionTracing> {
+        let tracing = &self.host.core.tracing;
+        tracing.trace_sink.as_ref().map(|sink| {
+            crate::RuntimeExecutionTracing::new(
+                std::sync::Arc::clone(sink),
+                tracing.trace_context.clone(),
+                self.trace_context(protocol_iteration),
+            )
+        })
     }
 
     pub(super) fn mark_phase_begin(&self, phase: RuntimeTurnPhase) {

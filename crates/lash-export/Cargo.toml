@@ -10,6 +10,7 @@ lash-core = { workspace = true }
 lash-protocol-rlm = { workspace = true }
 lash-sqlite-store = { workspace = true }
 lash-rlm-types = { workspace = true }
+lash-trace = { workspace = true }
 anyhow = { workspace = true }
 pulldown-cmark = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

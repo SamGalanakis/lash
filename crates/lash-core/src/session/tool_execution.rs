@@ -616,12 +616,15 @@ impl RuntimeExecutionContext<'_> {
                 args: args.clone(),
             })
             .await;
+        self.emit_tool_call_started_trace(call_id, name, &args);
         self.emit_turn_activity(
             activity_id,
             TurnEvent::ToolCallStarted {
                 call_id: Some(call_id.to_string()),
                 name: name.to_string(),
                 args,
+                graph_key: self.code_block_graph_key(),
+                parent_call_id: self.batch_parent_call_id(),
             },
         )
         .await;
@@ -709,12 +712,15 @@ impl RuntimeExecutionContext<'_> {
             })
             .await;
         let tool_correlation_id = TurnActivityId::new(format!("tool:{call_id}"));
+        self.emit_tool_call_started_trace(&call_id, &name, &args);
         self.emit_turn_activity(
             tool_correlation_id.clone(),
             TurnEvent::ToolCallStarted {
                 call_id: Some(call_id.clone()),
                 name: name.clone(),
                 args: args.clone(),
+                graph_key: self.code_block_graph_key(),
+                parent_call_id: self.batch_parent_call_id(),
             },
         )
         .await;
@@ -857,12 +863,15 @@ impl RuntimeExecutionContext<'_> {
             })
             .await;
         let tool_correlation_id = TurnActivityId::new(format!("tool:{call_id}"));
+        self.emit_tool_call_started_trace(&call_id, &name, &args);
         self.emit_turn_activity(
             tool_correlation_id.clone(),
             TurnEvent::ToolCallStarted {
                 call_id: Some(call_id.clone()),
                 name: name.clone(),
                 args: args.clone(),
+                graph_key: self.code_block_graph_key(),
+                parent_call_id: self.batch_parent_call_id(),
             },
         )
         .await;
@@ -1100,6 +1109,14 @@ impl RuntimeExecutionContext<'_> {
             ),
         };
 
+        let record = ToolCallRecord {
+            call_id: Some(call_id.clone()),
+            tool: outcome.record.tool.clone(),
+            args: outcome.record.args.clone(),
+            output: output.clone(),
+            duration_ms: outcome.record.duration_ms,
+        };
+        self.emit_tool_call_completed_trace(&record);
         self.emit_turn_activity(
             tool_correlation_id,
             TurnEvent::ToolCallCompleted {
@@ -1108,17 +1125,11 @@ impl RuntimeExecutionContext<'_> {
                 args: outcome.record.args.clone(),
                 output: output.clone(),
                 duration_ms: outcome.record.duration_ms,
+                graph_key: self.code_block_graph_key(),
+                parent_call_id: self.batch_parent_call_id(),
             },
         )
         .await;
-
-        let record = ToolCallRecord {
-            call_id: Some(call_id.clone()),
-            tool: outcome.record.tool.clone(),
-            args: outcome.record.args.clone(),
-            output: output.clone(),
-            duration_ms: outcome.record.duration_ms,
-        };
         CompletedProtocolToolCall {
             completed: crate::sansio::CompletedToolCall {
                 call_id,

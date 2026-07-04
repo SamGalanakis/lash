@@ -391,23 +391,42 @@ pub(crate) fn trace_llm_response(
     }
 }
 
+// `lash-trace` is a standalone leaf crate (no dependency on the runtime), so it
+// carries its own `TraceTokenUsage` mirror of the usage counters. These two
+// converters are the only bridge to it; each destructures its source
+// exhaustively (no `..`) so adding a counter to the runtime's usage types is a
+// compile error here until the trace mirror is extended too.
 pub(crate) fn trace_usage_from_llm(usage: &LlmUsage) -> TraceTokenUsage {
+    let LlmUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens,
+        cache_write_input_tokens,
+        reasoning_output_tokens,
+    } = usage;
     TraceTokenUsage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        cache_read_input_tokens: usage.cache_read_input_tokens,
-        cache_write_input_tokens: usage.cache_write_input_tokens,
-        reasoning_output_tokens: usage.reasoning_output_tokens,
+        input_tokens: *input_tokens,
+        output_tokens: *output_tokens,
+        cache_read_input_tokens: *cache_read_input_tokens,
+        cache_write_input_tokens: *cache_write_input_tokens,
+        reasoning_output_tokens: *reasoning_output_tokens,
     }
 }
 
 pub(crate) fn trace_usage_from_session(usage: &TokenUsage) -> TraceTokenUsage {
+    let TokenUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens,
+        cache_write_input_tokens,
+        reasoning_output_tokens,
+    } = usage;
     TraceTokenUsage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        cache_read_input_tokens: usage.cache_read_input_tokens,
-        cache_write_input_tokens: usage.cache_write_input_tokens,
-        reasoning_output_tokens: usage.reasoning_output_tokens,
+        input_tokens: *input_tokens,
+        output_tokens: *output_tokens,
+        cache_read_input_tokens: *cache_read_input_tokens,
+        cache_write_input_tokens: *cache_write_input_tokens,
+        reasoning_output_tokens: *reasoning_output_tokens,
     }
 }
 

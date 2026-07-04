@@ -122,16 +122,11 @@ impl RuntimeTurnDriver<'_> {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<(), RuntimeError> {
-        if self.host.core.tracing.trace_sink.is_some() {
-            for pending in &calls {
-                self.emit_tool_call_started_trace(
-                    machine.protocol_iteration(),
-                    Some(pending.call_id.clone()),
-                    pending.tool_name.clone(),
-                    pending.args.clone(),
-                );
-            }
-        }
+        // Per-tool trace events (ToolCallStarted / ToolCallCompleted) are
+        // emitted from the shared tool-execution seam so every tool call
+        // produces exactly one Started + one Completed pair. See
+        // `RuntimeExecutionContext::emit_tool_call_started_trace` /
+        // `emit_tool_call_completed_trace`.
         let results = match self
             .invoke_turn_tool_calls_effect(machine, id, calls, event_tx, cancel)
             .await
@@ -142,18 +137,6 @@ impl RuntimeTurnDriver<'_> {
                 return Ok(());
             }
         };
-        if self.host.core.tracing.trace_sink.is_some() {
-            for outcome in &results {
-                let record = ToolCallRecord {
-                    call_id: Some(outcome.call_id.clone()),
-                    tool: outcome.tool_name.clone(),
-                    args: outcome.args.clone(),
-                    output: outcome.output.clone(),
-                    duration_ms: outcome.duration_ms,
-                };
-                self.emit_tool_call_trace(machine.protocol_iteration(), &record);
-            }
-        }
         machine.handle_response(Response::ToolResults { id, results });
         Ok(())
     }
@@ -309,6 +292,19 @@ impl RuntimeTurnDriver<'_> {
         if let Ok(output) = &result {
             if self.host.core.tracing.trace_sink.is_some() {
                 let observations_text = output.observations.join("\n");
+                let tool_calls = output
+                    .tool_calls
+                    .iter()
+                    .map(|record| {
+                        serde_json::json!({
+                            "call_id": record.call_id,
+                            "name": record.tool,
+                            "duration_ms": record.duration_ms,
+                            "status": format!("{:?}", record.output.status())
+                                .to_ascii_lowercase(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 self.emit_protocol_diagnostic_trace(
                     iteration,
                     "exec_code_completed",
@@ -322,6 +318,7 @@ impl RuntimeTurnDriver<'_> {
                         "terminal_finish": output.terminal_finish,
                         "terminal_finish_present": output.terminal_finish.is_some(),
                         "tool_call_count": output.tool_calls.len(),
+                        "tool_calls": tool_calls,
                     }),
                 );
                 if !output.observation_truncation.is_empty() {
@@ -357,7 +354,7 @@ impl RuntimeTurnDriver<'_> {
     }
 }
 
-fn foreground_exec_graph_key(invocation: &RuntimeInvocation) -> Option<String> {
+pub(super) fn foreground_exec_graph_key(invocation: &RuntimeInvocation) -> Option<String> {
     let RuntimeSubject::Effect { effect_id, kind } = &invocation.subject else {
         return None;
     };

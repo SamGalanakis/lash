@@ -152,7 +152,7 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">activity stream</div>
-        <div class="listing__body"><p><code>RemoteTurnActivity</code> wraps semantic turn events with monotonically assigned per-stream <code>sequence</code>, event id, correlation id, and one flattened <code>RemoteTurnEvent</code>. It is still a turn convenience item, not the reconnect cursor. See <a href="./streaming.html#remote-boundaries">Streaming and reconnect</a> for NDJSON and SSE framing guidance.</p></div>
+        <div class="listing__body"><p><code>RemoteTurnActivity</code> wraps semantic turn events with monotonically assigned per-stream <code>sequence</code>, event id, correlation id, and one flattened <code>RemoteTurnEvent</code>. The wire enum is a deliberately narrower mirror of the in-process <code>TurnEvent</code>: four host-internal variants collapse into a single <code>RuntimeDiagnostic { kind, data }</code> so the versioned contract does not churn on every runtime-internal signal. It is still a turn convenience item, not the reconnect cursor. See <a href="./streaming.html#remote-boundaries">Streaming and reconnect</a> for NDJSON and SSE framing guidance, and <a href="./reporting.html">Reporting channels</a> for how the mirror relates to the other reporting surfaces.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">session observation</div>

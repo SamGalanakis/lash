@@ -205,14 +205,12 @@ impl App {
                 output,
                 duration_ms,
                 call_id,
+                graph_key,
                 ..
             } => {
                 self.finalize_live_markdown();
                 self.clear_live_tool_output();
-                let journal_anchor = call_id
-                    .as_ref()
-                    .and_then(|call_id| self.lashlang_tool_call_anchors.get(call_id).copied())
-                    .or_else(|| self.active_lashlang_activity_anchor());
+                let journal_anchor = self.lashlang_block_anchor(graph_key.as_deref());
                 let mut activities =
                     self.activity_state
                         .project_tool_output(&name, args, output, duration_ms);
@@ -244,9 +242,6 @@ impl App {
                     self.journal_lashlang_activity(journal_anchor, &activity);
                     self.push_activity_block(activity);
                 }
-                if let Some(call_id) = call_id.as_ref() {
-                    self.lashlang_tool_call_anchors.remove(call_id);
-                }
                 if !matches!(self.timeline.last(), Some(UiTimelineItem::Splash)) {
                     self.mark_visible_output();
                 }
@@ -256,13 +251,12 @@ impl App {
                 call_id,
                 name,
                 args,
+                graph_key,
+                ..
             } => {
                 self.finalize_live_markdown();
                 let title = live::live_tool_output_title(&name, &args);
-                let journal_anchor = self.active_lashlang_activity_anchor();
-                if let Some(anchor) = journal_anchor {
-                    self.remember_lashlang_tool_anchor(&call_id, anchor);
-                }
+                let journal_anchor = self.lashlang_block_anchor(graph_key.as_deref());
                 let activities =
                     self.activity_state
                         .project_tool_start(call_id.clone(), &name, args.clone());
@@ -278,12 +272,20 @@ impl App {
                 self.invalidate_live_tool_output_cache();
                 self.scroll_to_bottom();
             }
-            TurnEvent::CodeBlockStarted { code, .. } => {
+            TurnEvent::CodeBlockStarted {
+                code, graph_key, ..
+            } => {
                 self.finalize_live_markdown();
                 let lashlang_block_ordinal = self.next_lashlang_block_ordinal;
                 self.next_lashlang_block_ordinal += 1;
-                self.active_ui_turn_ordinal = Some(self.current_ui_turn_ordinal());
-                self.active_lashlang_block_ordinal = Some(lashlang_block_ordinal);
+                let turn_ordinal = self.current_ui_turn_ordinal();
+                self.active_ui_turn_ordinal = Some(turn_ordinal);
+                // Register this block's journal anchor under its graph key so
+                // tool calls inside it attach by identity, not by ordering.
+                if let Some(graph_key) = graph_key {
+                    self.lashlang_block_anchors
+                        .insert(graph_key, (turn_ordinal, lashlang_block_ordinal));
+                }
                 let changed_idx = self.timeline.len();
                 let invalidate_from = self.append_invalidation_start();
                 self.timeline.push(UiTimelineItem::LashlangCode(code));
@@ -451,7 +453,6 @@ impl App {
                     self.mark_visible_output();
                     self.scroll_to_bottom();
                 }
-                self.active_lashlang_block_ordinal = None;
             }
             TurnEvent::ToolValue { .. } => {}
         }
@@ -497,6 +498,8 @@ fn test_session_event_to_turn_activity(event: SessionEvent) -> Option<TurnActivi
             call_id,
             name,
             args,
+            graph_key: None,
+            parent_call_id: None,
         },
         SessionEvent::ToolCall {
             call_id,
@@ -510,6 +513,8 @@ fn test_session_event_to_turn_activity(event: SessionEvent) -> Option<TurnActivi
             args,
             output,
             duration_ms,
+            graph_key: None,
+            parent_call_id: None,
         },
         SessionEvent::Message { text, kind } if kind == "lashlang_code" => {
             TurnEvent::CodeBlockStarted {

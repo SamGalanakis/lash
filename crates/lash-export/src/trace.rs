@@ -7,6 +7,11 @@
 //! every `llm_call_started` event with the full request, including the system
 //! block. We pull provider request snapshots out so the HTML exporter can show
 //! what the model was actually told on each call.
+//!
+//! Each JSONL line is a typed [`lash_trace::TraceRecord`]. We deserialize into
+//! that schema and pattern-match the typed [`lash_trace::TraceEvent`] variants
+//! rather than string-matching raw JSON keys. A line that fails to parse (a
+//! malformed record, or a future/unknown event kind) is skipped, not fatal.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
@@ -15,7 +20,10 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde_json::Value;
+use lash_trace::{
+    TraceContentBlock, TraceContext, TraceEvent, TraceLlmMessage, TraceLlmRequest,
+    TraceLlmResponse, TraceRecord, TraceTokenUsage,
+};
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct LlmPromptSnapshot {
@@ -78,18 +86,28 @@ pub fn load_prompts_from_trace(trace_path: &Path) -> Result<Vec<LlmPromptSnapsho
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(record) = serde_json::from_str::<Value>(trimmed) else {
+        // A record that does not deserialize into the typed schema (malformed,
+        // or a future/unknown event kind) is silently skipped.
+        let Ok(record) = serde_json::from_str::<TraceRecord>(trimmed) else {
             continue;
         };
-        match record.get("type").and_then(Value::as_str) {
-            Some("llm_call_started") => {
-                if let Some(snapshot) = snapshot_from_record(&record) {
+        match &record.event {
+            TraceEvent::LlmCallStarted { request } => {
+                if let Some(snapshot) =
+                    snapshot_from_started(&record.context, &record.timestamp, request)
+                {
                     snapshots.push(snapshot);
                 }
             }
-            Some("llm_call_completed") => {
-                if let Some(usage) = usage_from_completed_record(&record) {
-                    attach_usage_to_latest_matching_snapshot(&mut snapshots, &record, usage);
+            TraceEvent::LlmCallCompleted {
+                response, usage, ..
+            } => {
+                if let Some(usage) = usage_from_completed(response, usage.as_ref()) {
+                    attach_usage_to_latest_matching_snapshot(
+                        &mut snapshots,
+                        record.context.llm_call_id.as_deref(),
+                        usage,
+                    );
                 }
             }
             _ => {}
@@ -98,17 +116,19 @@ pub fn load_prompts_from_trace(trace_path: &Path) -> Result<Vec<LlmPromptSnapsho
     Ok(snapshots)
 }
 
-fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
-    let request = record.get("request")?;
-    let messages = request.get("messages").and_then(Value::as_array)?;
-    let system_text = collect_system_text(messages);
+fn snapshot_from_started(
+    context: &TraceContext,
+    timestamp: &str,
+    request: &TraceLlmRequest,
+) -> Option<LlmPromptSnapshot> {
+    let system_text = collect_system_text(&request.messages);
     if system_text.is_empty() {
         return None;
     }
     let system_chars = system_text.chars().count();
     let system_hash = short_hash(&system_text);
-    let total_chars = total_message_chars(messages);
-    let request_messages = collect_non_system_messages(messages);
+    let total_chars = total_message_chars(&request.messages);
+    let request_messages = collect_non_system_messages(&request.messages);
     let request_chars: usize = request_messages.iter().map(|m| m.chars).sum();
     let request_concat = request_messages
         .iter()
@@ -116,42 +136,22 @@ fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
         .collect::<Vec<_>>()
         .join("\n");
     let request_hash = short_hash(&request_concat);
-    let context = record.get("context");
     Some(LlmPromptSnapshot {
-        session_id: context
-            .and_then(|c| c.get("session_id"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        turn_index: context
-            .and_then(|c| c.get("turn_index"))
-            .and_then(Value::as_u64),
-        protocol_iteration: context
-            .and_then(|c| c.get("protocol_iteration"))
-            .and_then(Value::as_u64),
-        llm_call_id: context
-            .and_then(|c| c.get("llm_call_id"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        session_id: context.session_id.clone(),
+        turn_index: context.turn_index.map(|v| v as u64),
+        protocol_iteration: context.protocol_iteration.map(|v| v as u64),
+        llm_call_id: context.llm_call_id.clone(),
         caused_by: context
-            .and_then(|c| c.get("metadata"))
-            .and_then(|m| m.get("caused_by"))
-            .and_then(trace_causal_ref),
-        timestamp: record
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        model: request
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        model_variant: request
-            .get("model_variant")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+            .metadata
+            .get("caused_by")
+            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+        timestamp: Some(timestamp.to_string()),
+        model: Some(request.model.clone()),
+        model_variant: request.model_variant.clone(),
         system_text,
         system_chars,
         system_hash,
-        message_count: messages.len(),
+        message_count: request.messages.len(),
         total_chars,
         request_messages,
         request_chars,
@@ -160,28 +160,18 @@ fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
     })
 }
 
-fn trace_causal_ref(value: &Value) -> Option<lash_core::CausalRef> {
-    serde_json::from_value(value.clone()).ok()
-}
-
-fn usage_from_completed_record(record: &Value) -> Option<LlmCallUsage> {
-    let usage = record.get("usage")?;
+fn usage_from_completed(
+    response: &TraceLlmResponse,
+    usage: Option<&TraceTokenUsage>,
+) -> Option<LlmCallUsage> {
+    let usage = usage?;
     let parsed = LlmCallUsage {
-        input_tokens: usage.get("input_tokens").and_then(Value::as_i64)?,
-        output_tokens: usage.get("output_tokens").and_then(Value::as_i64)?,
-        cache_read_input_tokens: usage
-            .get("cache_read_input_tokens")
-            .and_then(Value::as_i64)?,
-        cache_write_input_tokens: usage
-            .get("cache_write_input_tokens")
-            .and_then(Value::as_i64)?,
-        reasoning_output_tokens: usage
-            .get("reasoning_output_tokens")
-            .and_then(Value::as_i64)?,
-        duration_ms: record
-            .get("response")
-            .and_then(|response| response.get("duration_ms"))
-            .and_then(Value::as_u64),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
+        reasoning_output_tokens: usage.reasoning_output_tokens,
+        duration_ms: Some(response.duration_ms),
     };
     if parsed.input_tokens == 0
         && parsed.output_tokens == 0
@@ -198,13 +188,9 @@ fn usage_from_completed_record(record: &Value) -> Option<LlmCallUsage> {
 
 fn attach_usage_to_latest_matching_snapshot(
     snapshots: &mut [LlmPromptSnapshot],
-    record: &Value,
+    call_id: Option<&str>,
     usage: LlmCallUsage,
 ) {
-    let context = record.get("context");
-    let call_id = context
-        .and_then(|c| c.get("llm_call_id"))
-        .and_then(Value::as_str);
     if let Some(snapshot) = snapshots.iter_mut().rev().find(|snapshot| {
         snapshot.usage.is_none() && call_id.is_some() && snapshot.llm_call_id.as_deref() == call_id
     }) {
@@ -212,70 +198,70 @@ fn attach_usage_to_latest_matching_snapshot(
     }
 }
 
-fn total_message_chars(messages: &[Value]) -> usize {
+/// Text carried by a content block. Matches the historical extraction, which
+/// pulled any block exposing a `text` field — that is `Text` and `Reasoning`
+/// blocks (a `ToolResult`'s prose lives under `content`, not `text`).
+fn block_text(block: &TraceContentBlock) -> Option<&str> {
+    match block {
+        TraceContentBlock::Text { text, .. } | TraceContentBlock::Reasoning { text, .. } => {
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
+fn total_message_chars(messages: &[TraceLlmMessage]) -> usize {
     let mut total = 0usize;
     for message in messages {
-        if let Some(blocks) = message.get("blocks").and_then(Value::as_array) {
-            for block in blocks {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    total = total.saturating_add(text.chars().count());
-                }
+        for block in &message.blocks {
+            if let Some(text) = block_text(block) {
+                total = total.saturating_add(text.chars().count());
             }
-        } else if let Some(text) = message.get("text").and_then(Value::as_str) {
-            total = total.saturating_add(text.chars().count());
         }
     }
     total
 }
 
-fn collect_system_text(messages: &[Value]) -> String {
+fn collect_system_text(messages: &[TraceLlmMessage]) -> String {
     let mut out = String::new();
     for message in messages {
-        if message.get("role").and_then(Value::as_str) != Some("system") {
+        if message.role != "system" {
             continue;
         }
-        append_message_text(message, &mut out);
+        append_message_text(&message.blocks, &mut out);
     }
     out
 }
 
-fn collect_non_system_messages(messages: &[Value]) -> Vec<RequestMessage> {
+fn collect_non_system_messages(messages: &[TraceLlmMessage]) -> Vec<RequestMessage> {
     let mut out = Vec::new();
     for message in messages {
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if role == "system" {
+        if message.role == "system" {
             continue;
         }
         let mut text = String::new();
-        append_message_text(message, &mut text);
+        append_message_text(&message.blocks, &mut text);
         if text.is_empty() {
             continue;
         }
         let chars = text.chars().count();
-        out.push(RequestMessage { role, text, chars });
+        out.push(RequestMessage {
+            role: message.role.clone(),
+            text,
+            chars,
+        });
     }
     out
 }
 
-fn append_message_text(message: &Value, out: &mut String) {
-    if let Some(blocks) = message.get("blocks").and_then(Value::as_array) {
-        for block in blocks {
-            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                if !out.is_empty() && !out.ends_with('\n') {
-                    out.push_str("\n\n");
-                }
-                out.push_str(text);
+fn append_message_text(blocks: &[TraceContentBlock], out: &mut String) {
+    for block in blocks {
+        if let Some(text) = block_text(block) {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push_str("\n\n");
             }
+            out.push_str(text);
         }
-    } else if let Some(text) = message.get("text").and_then(Value::as_str) {
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push_str("\n\n");
-        }
-        out.push_str(text);
     }
 }
 
@@ -288,27 +274,93 @@ fn short_hash(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash_trace::{TraceContext, TraceLlmMessage, TraceRecord};
     use std::io::Write;
+
+    fn text_block(text: &str) -> TraceContentBlock {
+        TraceContentBlock::Text {
+            text: text.to_string(),
+            cache_breakpoint: false,
+        }
+    }
+
+    fn message(role: &str, text: &str) -> TraceLlmMessage {
+        TraceLlmMessage {
+            role: role.to_string(),
+            blocks: vec![text_block(text)],
+        }
+    }
+
+    fn request(messages: Vec<TraceLlmMessage>) -> TraceLlmRequest {
+        TraceLlmRequest {
+            model: "gpt-5.5".to_string(),
+            model_variant: Some("high".to_string()),
+            messages,
+            attachments: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: "auto".to_string(),
+            output_spec: None,
+            stream: true,
+        }
+    }
+
+    fn write_records(tmp: &mut tempfile::NamedTempFile, records: &[TraceRecord]) {
+        for record in records {
+            writeln!(
+                tmp,
+                "{}",
+                serde_json::to_string(record).expect("serialize record")
+            )
+            .unwrap();
+        }
+        tmp.flush().unwrap();
+    }
 
     #[test]
     fn parses_system_text_and_metadata() {
         let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
-        writeln!(
-            tmp,
-            r#"{{"type":"turn_started","context":{{"turn_index":1,"turn_id":"turn-1"}}}}"#
-        )
-        .unwrap();
-        writeln!(
-            tmp,
-            r#"{{"type":"llm_call_started","timestamp":"2026-05-04T00:00:00Z","context":{{"turn_index":1,"protocol_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"request":{{"model":"gpt-5.5","model_variant":"high","messages":[{{"role":"system","blocks":[{{"kind":"text","text":"You are lash."}}]}},{{"role":"user","blocks":[{{"kind":"text","text":"hi"}}]}}]}}}}"#
-        )
-        .unwrap();
-        writeln!(
-            tmp,
-            r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"protocol_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"response":{{"text":"ok","duration_ms":1234}},"usage":{{"input_tokens":100,"output_tokens":12,"cache_read_input_tokens":80,"cache_write_input_tokens":0,"reasoning_output_tokens":4}}}}"#
-        )
-        .unwrap();
-        tmp.flush().unwrap();
+        let started = TraceRecord::new(
+            TraceContext {
+                turn_index: Some(1),
+                protocol_iteration: Some(0),
+                turn_id: Some("turn-1".to_string()),
+                llm_call_id: Some("abc:1:0:0".to_string()),
+                ..Default::default()
+            },
+            TraceEvent::LlmCallStarted {
+                request: request(vec![
+                    message("system", "You are lash."),
+                    message("user", "hi"),
+                ]),
+            },
+        );
+        let completed = TraceRecord::new(
+            TraceContext {
+                turn_index: Some(1),
+                protocol_iteration: Some(0),
+                turn_id: Some("turn-1".to_string()),
+                llm_call_id: Some("abc:1:0:0".to_string()),
+                ..Default::default()
+            },
+            TraceEvent::LlmCallCompleted {
+                response: TraceLlmResponse {
+                    text: "ok".to_string(),
+                    duration_ms: 1234,
+                    terminal_reason: None,
+                    parts: None,
+                },
+                usage: Some(TraceTokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 12,
+                    cache_read_input_tokens: 80,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 4,
+                }),
+                provider_usage: None,
+                stream_summary: None,
+            },
+        );
+        write_records(&mut tmp, &[started, completed]);
 
         let prompts = load_prompts_from_trace(tmp.path()).unwrap();
         assert_eq!(prompts.len(), 1);
@@ -350,33 +402,89 @@ mod tests {
     #[test]
     fn skips_records_without_system_block() {
         let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
-        writeln!(
-            tmp,
-            r#"{{"type":"llm_call_started","request":{{"messages":[{{"role":"user","blocks":[{{"text":"hi"}}]}}]}}}}"#
-        )
-        .unwrap();
-        tmp.flush().unwrap();
+        let started = TraceRecord::new(
+            TraceContext::default(),
+            TraceEvent::LlmCallStarted {
+                request: request(vec![message("user", "hi")]),
+            },
+        );
+        write_records(&mut tmp, &[started]);
 
         let prompts = load_prompts_from_trace(tmp.path()).unwrap();
         assert!(prompts.is_empty());
     }
 
     #[test]
+    fn skips_malformed_and_unknown_lines() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+        // Not JSON at all, a future/unknown event kind, and a valid but
+        // non-llm record — all skipped without a snapshot or a hard error.
+        writeln!(tmp, "not json").unwrap();
+        writeln!(
+            tmp,
+            r#"{{"schema_version":2,"id":"x","timestamp":"t","context":{{}},"type":"future_event","payload":{{}}}}"#
+        )
+        .unwrap();
+        let started = TraceRecord::new(
+            TraceContext::default(),
+            TraceEvent::LlmCallStarted {
+                request: request(vec![message("system", "sys"), message("user", "hi")]),
+            },
+        );
+        write_records(&mut tmp, &[started]);
+
+        let prompts = load_prompts_from_trace(tmp.path()).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].system_text, "sys");
+    }
+
+    #[test]
     fn repeated_llm_call_ids_attach_usage_in_trace_order() {
         let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
-        for input in [11, 22] {
-            writeln!(
-                tmp,
-                r#"{{"type":"llm_call_started","context":{{"turn_index":1,"protocol_iteration":0,"llm_call_id":"root:1:0:{input}"}},"request":{{"messages":[{{"role":"system","blocks":[{{"text":"sys {input}"}}]}},{{"role":"user","blocks":[{{"text":"hi"}}]}}]}}}}"#
-            )
-            .unwrap();
-            writeln!(
-                tmp,
-                r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"protocol_iteration":0,"llm_call_id":"root:1:0:{input}"}},"response":{{"duration_ms":1,"text":"ok"}},"usage":{{"input_tokens":{input},"output_tokens":1,"cache_read_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}}}"#
-            )
-            .unwrap();
+        let mut records = Vec::new();
+        for input in [11i64, 22] {
+            let call_id = format!("root:1:0:{input}");
+            records.push(TraceRecord::new(
+                TraceContext {
+                    turn_index: Some(1),
+                    protocol_iteration: Some(0),
+                    llm_call_id: Some(call_id.clone()),
+                    ..Default::default()
+                },
+                TraceEvent::LlmCallStarted {
+                    request: request(vec![
+                        message("system", &format!("sys {input}")),
+                        message("user", "hi"),
+                    ]),
+                },
+            ));
+            records.push(TraceRecord::new(
+                TraceContext {
+                    turn_index: Some(1),
+                    protocol_iteration: Some(0),
+                    llm_call_id: Some(call_id),
+                    ..Default::default()
+                },
+                TraceEvent::LlmCallCompleted {
+                    response: TraceLlmResponse {
+                        text: "ok".to_string(),
+                        duration_ms: 1,
+                        terminal_reason: None,
+                        parts: None,
+                    },
+                    usage: Some(TraceTokenUsage {
+                        input_tokens: input,
+                        output_tokens: 1,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_output_tokens: 0,
+                    }),
+                    provider_usage: None,
+                    stream_summary: None,
+                },
+            ));
         }
-        tmp.flush().unwrap();
+        write_records(&mut tmp, &records);
 
         let prompts = load_prompts_from_trace(tmp.path()).unwrap();
         assert_eq!(prompts.len(), 2);
