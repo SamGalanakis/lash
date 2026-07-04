@@ -6,15 +6,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::generator::generate_workload;
 use crate::oracles::{
-    backend_failure_observed, cancellation_observed, combine_oracles, cross_session_isolation,
-    durable_effect_exactly_once, exec_code_observed, generated_final_value_semantic_channel,
-    generated_suspend_resume, ingress_sessions_opened, lease_time_monotonic, observer_convergence,
-    observer_reconnect_observed, operational_coverage, process_wake_observed,
-    provider_mutation_rejected, provider_transport_mutation_classified,
-    provider_turn_interleaving_depth, queued_ingress_observed, runtime_session_graph_contract,
-    scenario_contract_mini_oracles, scenario_contract_oracles, scheduler_controlled_delivery,
-    scheduler_owned_runtime_completions, state_machine_semantic_invariants, tool_boundary_observed,
-    trigger_delivery_observed, worker_failover_continues_work, worker_stale_completion_rejected,
+    abandoned_requires_evidence, backend_failure_observed, cancellation_observed, combine_oracles,
+    cross_session_isolation, durable_effect_exactly_once, exec_code_observed,
+    generated_final_value_semantic_channel, generated_suspend_resume, ingress_sessions_opened,
+    lease_time_monotonic, observer_convergence, observer_reconnect_observed, operational_coverage,
+    process_never_double_started, process_wake_observed, provider_mutation_rejected,
+    provider_transport_mutation_classified, provider_turn_interleaving_depth,
+    queued_ingress_observed, runtime_session_graph_contract, scenario_contract_mini_oracles,
+    scenario_contract_oracles, scheduler_controlled_delivery, scheduler_owned_runtime_completions,
+    state_machine_semantic_invariants, tool_boundary_observed, trigger_delivery_observed,
+    worker_failover_continues_work, worker_stale_completion_rejected,
 };
 use crate::replay::{ReplayError, replay_trace};
 use crate::runner::run_generated_workload_for_fixture;
@@ -363,6 +364,7 @@ fn boundary_kind_name(kind: BoundaryKind) -> &'static str {
         BoundaryKind::ExecCode => "exec_code",
         BoundaryKind::DurableEffect => "durable_effect",
         BoundaryKind::ProcessWake => "process_wake",
+        BoundaryKind::ProcessLifecycle => "process_lifecycle",
         BoundaryKind::Worker => "worker",
         BoundaryKind::Observer => "observer",
         BoundaryKind::Cancellation => "cancellation",
@@ -704,6 +706,7 @@ fn fixture_boundary_kind(kind: &str) -> Result<BoundaryKind, MinimizeError> {
         "exec_code" => Ok(BoundaryKind::ExecCode),
         "backend_failure" => Ok(BoundaryKind::BackendFailure),
         "process_wake" => Ok(BoundaryKind::ProcessWake),
+        "process_lifecycle" => Ok(BoundaryKind::ProcessLifecycle),
         "trigger" => Ok(BoundaryKind::Trigger),
         "worker" => Ok(BoundaryKind::Worker),
         other => Err(MinimizeError::Fixture(format!(
@@ -731,6 +734,8 @@ fn generated_oracles(
         provider_transport_mutation_classified(events),
         provider_turn_interleaving_depth(events),
         process_wake_observed(summary, events),
+        process_never_double_started(events),
+        abandoned_requires_evidence(events),
         tool_boundary_observed(summary, events),
         exec_code_observed(summary, events),
         cross_session_isolation(summary),

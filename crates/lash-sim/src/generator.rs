@@ -10,7 +10,7 @@ use crate::runtime_providers::{
 use crate::scheduler::{BoundaryEvent, BoundaryKind, next_seed};
 use crate::trace::StableAliases;
 
-pub const GENERATOR_VERSION: &str = "lash-sim.generated-workload.v8";
+pub const GENERATOR_VERSION: &str = "lash-sim.generated-workload.v9";
 pub const WORKLOAD_FAMILY: &str = "deterministic-runtime-state-machine";
 const ACTIVE_TURN_QUEUE_OFFSET: u64 = 15;
 pub const VALID_WORKLOAD_PROFILES: &[&str] = &[
@@ -243,6 +243,7 @@ struct SessionPlan {
     tool_count: usize,
     exec_code_count: usize,
     process_wake_count: usize,
+    process_lifecycle_count: usize,
     durable_effect_count: usize,
     worker_stale_count: usize,
     lease_time_count: usize,
@@ -269,6 +270,7 @@ impl SessionPlan {
             tool_count: 0,
             exec_code_count: 0,
             process_wake_count: 0,
+            process_lifecycle_count: 0,
             durable_effect_count: 0,
             worker_stale_count: 0,
             lease_time_count: 0,
@@ -325,6 +327,11 @@ impl SessionPlan {
     fn next_process_wake(&mut self) -> usize {
         self.process_wake_count += 1;
         self.process_wake_count
+    }
+
+    fn next_process_lifecycle(&mut self) -> usize {
+        self.process_lifecycle_count += 1;
+        self.process_lifecycle_count
     }
 
     fn next_durable_effect(&mut self) -> usize {
@@ -411,6 +418,10 @@ enum PlannedOperation {
         session: usize,
         wake_index: usize,
         dedupe_index: usize,
+    },
+    ProcessLifecycle {
+        session: usize,
+        lifecycle_index: usize,
     },
     DurableEffect {
         session: usize,
@@ -524,6 +535,9 @@ impl StateMachinePlanner {
         self.plan_duplicate_process_wake(primary, process_wake);
         self.plan_durable_effect_pair(primary);
         self.plan_worker_stale_completion(secondary);
+        // One disposition-driven recovery scenario per workload: spawn / crash /
+        // sweep / abandon-request against a real DurableProcessWorker (ADR 0019).
+        self.plan_process_lifecycle(secondary);
     }
 
     fn plan_extra_transitions(&mut self, max_boundaries: usize) {
@@ -702,6 +716,14 @@ impl StateMachinePlanner {
             dedupe_index: wake_index,
         });
         wake_index
+    }
+
+    fn plan_process_lifecycle(&mut self, session: usize) {
+        let lifecycle_index = self.sessions[session].next_process_lifecycle();
+        self.operations.push(PlannedOperation::ProcessLifecycle {
+            session,
+            lifecycle_index,
+        });
     }
 
     fn plan_duplicate_process_wake(&mut self, session: usize, dedupe_index: usize) {
@@ -1112,6 +1134,22 @@ impl StateMachinePlanner {
                     }),
                 )
             }
+            PlannedOperation::ProcessLifecycle {
+                session,
+                lifecycle_index,
+            } => {
+                let session = &self.sessions[session];
+                BoundaryEvent::new(
+                    format!("{}:process-lifecycle:{lifecycle_index:03}", session.alias),
+                    session.alias.clone(),
+                    BoundaryKind::ProcessLifecycle,
+                    at,
+                    "process.lifecycle.recovery",
+                    json!({
+                        "session": session.alias.clone(),
+                    }),
+                )
+            }
             PlannedOperation::DurableEffect {
                 session,
                 durable_index,
@@ -1364,6 +1402,7 @@ mod tests {
             BoundaryKind::ExecCode,
             BoundaryKind::DurableEffect,
             BoundaryKind::ProcessWake,
+            BoundaryKind::ProcessLifecycle,
             BoundaryKind::Worker,
             BoundaryKind::Observer,
             BoundaryKind::Cancellation,

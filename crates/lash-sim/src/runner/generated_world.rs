@@ -147,6 +147,7 @@ impl GeneratedRuntimeWorld {
             BoundaryKind::ProviderMutation => self.provider_mutations.reject(event).await,
             BoundaryKind::DurableEffect
             | BoundaryKind::ProcessWake
+            | BoundaryKind::ProcessLifecycle
             | BoundaryKind::Worker
             | BoundaryKind::Tool
             | BoundaryKind::ExecCode => self

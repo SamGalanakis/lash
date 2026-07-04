@@ -322,6 +322,7 @@ impl SqliteRuntimeReplayWorld {
             | BoundaryKind::ExecCode
             | BoundaryKind::DurableEffect
             | BoundaryKind::ProcessWake
+            | BoundaryKind::ProcessLifecycle
             | BoundaryKind::Worker
             | BoundaryKind::Trigger
             | BoundaryKind::BackendFailure
@@ -997,6 +998,7 @@ fn is_runtime_backed_boundary(kind: BoundaryKind) -> bool {
             | BoundaryKind::ExecCode
             | BoundaryKind::DurableEffect
             | BoundaryKind::ProcessWake
+            | BoundaryKind::ProcessLifecycle
             | BoundaryKind::Worker
     )
 }
@@ -1011,6 +1013,7 @@ fn boundary_family_name(kind: BoundaryKind) -> &'static str {
         BoundaryKind::ExecCode => "exec_code",
         BoundaryKind::DurableEffect => "durable_effect",
         BoundaryKind::ProcessWake => "process_wake",
+        BoundaryKind::ProcessLifecycle => "process_lifecycle",
         BoundaryKind::Worker => "worker",
         BoundaryKind::Observer => "observer",
         BoundaryKind::Cancellation => "cancellation",

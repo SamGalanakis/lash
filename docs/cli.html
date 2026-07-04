@@ -123,6 +123,7 @@
                 <dt><kbd>Enter</kbd></dt><dd>Open an overview of the focused process.</dd>
                 <dt><kbd>Delete</kbd></dt><dd>Cancel the focused process.</dd>
               </dl>
+              <p>A running process shows <code>running</code>; a terminal one shows its outcome — <code>success</code>, <code>error</code>, <code>cancelled</code>, or <code>abandoned</code>. <code>abandoned</code> (ADR 0019) means the owner was lost without recording an outcome and renders in the failure style, like <code>error</code>. A detached command (<code>shell.start</code> with <code>detach: true</code>) never appears in the dock: it returns immediately with <code>status: "detached"</code> and is owned by the host/OS, not tracked as a session process.</p>
             </article>
           </div>
         </div>

@@ -46,21 +46,21 @@ use crate::generator::{
 };
 use crate::minimize::{MinimizeError, minimize_trace};
 use crate::oracles::{
-    LiveProviderFailureFacts, backend_failure_observed, cancellation_observed, combine_oracles,
-    cross_session_isolation, durable_effect_exactly_once, exec_code_observed,
-    generated_final_value_semantic_channel,
+    LiveProviderFailureFacts, abandoned_requires_evidence, backend_failure_observed,
+    cancellation_observed, combine_oracles, cross_session_isolation, durable_effect_exactly_once,
+    exec_code_observed, generated_final_value_semantic_channel,
     generated_runtime_provider_matrix as generated_runtime_provider_matrix_oracle,
     generated_suspend_resume, ingress_sessions_opened, lease_time_monotonic,
     live_provider_failure_coverage, observer_convergence, observer_reconnect_observed,
     operational_coverage, peak_concurrent_live_turns, pending_tool_completion,
-    process_wake_observed, provider_mutation_rejected, provider_transport_mutation_classified,
-    provider_turn_interleaving_depth, queued_ingress_observed, replay_determinism,
-    runtime_final_value_semantic, runtime_graph_acyclic, runtime_provider_turn,
-    runtime_session_graph_contract, runtime_single_active_agent_frame, runtime_usage_monotonic,
-    scenario_contract_generated_facts, scenario_contract_mini_oracles, scenario_contract_oracles,
-    scheduler_controlled_delivery, scheduler_owned_runtime_completions,
-    state_machine_semantic_invariants, tool_boundary_observed, trigger_delivery_observed,
-    worker_failover_continues_work, worker_stale_completion_rejected,
+    process_never_double_started, process_wake_observed, provider_mutation_rejected,
+    provider_transport_mutation_classified, provider_turn_interleaving_depth,
+    queued_ingress_observed, replay_determinism, runtime_final_value_semantic,
+    runtime_graph_acyclic, runtime_provider_turn, runtime_session_graph_contract,
+    runtime_single_active_agent_frame, runtime_usage_monotonic, scenario_contract_generated_facts,
+    scenario_contract_mini_oracles, scenario_contract_oracles, scheduler_controlled_delivery,
+    scheduler_owned_runtime_completions, state_machine_semantic_invariants, tool_boundary_observed,
+    trigger_delivery_observed, worker_failover_continues_work, worker_stale_completion_rejected,
 };
 use crate::provider::{
     ProviderWireEvent, ProviderWireHeader, ProviderWireScript, ScriptedLlmHttpExchange,
