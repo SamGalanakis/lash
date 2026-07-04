@@ -89,7 +89,7 @@ impl RemoteSessionObservationEvent {
         let payload = match payload {
             lash_core::SessionObservationEventPayload::TurnActivity(activity) => {
                 RemoteSessionObservationEventPayload::TurnActivity {
-                    activity: RemoteTurnActivity::from_core(sequence, activity),
+                    activity: Box::new(RemoteTurnActivity::from_core(sequence, activity)),
                 }
             }
             // The committed read view is a local handle; only the commit
@@ -204,10 +204,14 @@ impl From<lash_core::TurnEvent> for RemoteTurnEvent {
                 call_id,
                 name,
                 args,
+                graph_key,
+                parent_call_id,
             } => Self::ToolCallStarted {
                 call_id,
                 name,
                 args,
+                graph_key,
+                parent_call_id,
             },
             lash_core::TurnEvent::ToolCallCompleted {
                 call_id,
@@ -215,12 +219,16 @@ impl From<lash_core::TurnEvent> for RemoteTurnEvent {
                 args,
                 output,
                 duration_ms,
+                graph_key,
+                parent_call_id,
             } => Self::ToolCallCompleted {
                 call_id,
                 name,
                 args,
                 output: serde_json::to_value(output).unwrap_or(serde_json::Value::Null),
                 duration_ms,
+                graph_key,
+                parent_call_id,
             },
             lash_core::TurnEvent::FinalValue { value } => Self::FinalValue { value },
             lash_core::TurnEvent::ToolValue { tool_name, value } => {

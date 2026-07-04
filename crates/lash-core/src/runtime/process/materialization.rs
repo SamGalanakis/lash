@@ -1,9 +1,9 @@
 use crate::plugin::PluginError;
 
 use super::events::{
-    ProcessAwaitOutput, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessTerminalSemantics,
-    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeSpec,
+    AbandonEvidence, AbandonWriter, ProcessAwaitOutput, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeSpec,
 };
 
 pub fn materialize_process_event_semantics(
@@ -80,6 +80,19 @@ fn selected_value_to_await_output(
         ProcessTerminalState::Cancelled => ProcessAwaitOutput::Cancelled {
             message: selector_value_to_string(&value),
             raw: Some(value),
+            control: None,
+        },
+        // Reached only if a producer declares its own `Abandoned` terminal event
+        // and emits a raw value (not a serialized `ProcessAwaitOutput`); the
+        // sweep/drain path writes structured evidence through `complete_process`,
+        // which deserializes directly above. With no structured evidence to carry,
+        // synthesize a minimal owner-drain marker.
+        ProcessTerminalState::Abandoned => ProcessAwaitOutput::Abandoned {
+            evidence: Box::new(AbandonEvidence {
+                writer: AbandonWriter::OwnerDrain,
+                owner: None,
+                epoch_ms: 0,
+            }),
             control: None,
         },
     }

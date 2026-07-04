@@ -4,9 +4,10 @@ use super::events::{
     ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
 };
 use super::model::{
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessListFilter,
-    ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, SessionScope, WaitState,
+    AbandonRequest, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion,
+    ProcessListFilter, ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport,
+    ProcessStarted, SessionScope, WaitState,
 };
 
 /// Outcome of [`ProcessRegistry::prune_terminal_processes`]: how many terminal
@@ -171,6 +172,31 @@ pub trait ProcessRegistry: Send + Sync {
         await_output: ProcessAwaitOutput,
     ) -> Result<ProcessRecord, PluginError>;
 
+    /// Record the durable, lease-fenced "execution started" fact (ADR 0019).
+    ///
+    /// First-writer-wins: the first call stores `started`; a later call is an
+    /// idempotent no-op returning the existing record unchanged (the fact is
+    /// immutable once written, so the sweep can prove an OwnerBound row has
+    /// begun executing). Implementations reject unknown process ids.
+    async fn record_first_started(
+        &self,
+        process_id: &str,
+        started: ProcessStarted,
+    ) -> Result<ProcessRecord, PluginError>;
+
+    /// Set the durable, non-terminal Abandon Request marker (ADR 0019).
+    ///
+    /// First-writer-wins: if a marker is already present the call is an
+    /// idempotent no-op returning the existing record unchanged, preserving the
+    /// original recorded authorization rather than letting a later requester
+    /// clobber it. Setting it on a terminal row is a model error — a terminal
+    /// process has already recorded its outcome, so there is nothing to abandon.
+    async fn request_process_abandon(
+        &self,
+        process_id: &str,
+        request: AbandonRequest,
+    ) -> Result<ProcessRecord, PluginError>;
+
     async fn set_process_wait(
         &self,
         process_id: &str,
@@ -242,6 +268,18 @@ pub trait ProcessRegistry: Send + Sync {
         lease: &ProcessLease,
         lease_ttl_ms: u64,
     ) -> Result<ProcessLease, PluginError>;
+
+    /// Read the current lease row for a process without claiming it.
+    ///
+    /// Returns the persisted lease when one is held (owner and token present),
+    /// or `None` when the row is unleased or released. The returned lease may be
+    /// expired: expiry is a raw fact exposed read-side (ADR 0019) so hosts
+    /// classify staleness themselves; this never mutates the lease. Unknown
+    /// process ids return `None`.
+    async fn get_process_lease(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessLease>, PluginError>;
 
     /// Release a lease the caller owns, fenced by the completion's
     /// `(process_id, lease_token)`.

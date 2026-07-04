@@ -77,7 +77,10 @@ pub fn replay_trace(
         // replays). The abstract ModelStore cannot re-derive it, so the model
         // carries the REAL recorded reclaim/fence facts rather than fabricating
         // them: thread the recorded observation in directly instead of projecting.
-        let observed = if event.kind == BoundaryKind::Worker {
+        let observed = if matches!(
+            event.kind,
+            BoundaryKind::Worker | BoundaryKind::ProcessLifecycle
+        ) {
             store.apply_observed_boundary(&event, &expected.observed);
             expected.observed.clone()
         } else {
@@ -294,6 +297,7 @@ fn normalize(value: &Value) -> Value {
         object.remove("runtime_tool_record");
         object.remove("runtime_queued_work");
         object.remove("runtime_worker_store");
+        object.remove("runtime_process_lifecycle");
         object.remove("runtime_active_lease");
         object.remove("runtime_stale_completion");
         object.remove("runtime_lease_probe");

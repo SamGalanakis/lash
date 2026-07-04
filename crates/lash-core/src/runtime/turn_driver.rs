@@ -16,6 +16,7 @@ pub(in crate::runtime) use crate::runtime::turn_loop::{
     queued_work_trace_payload, send_queued_work_started_event,
 };
 pub(super) use events::{emit_semantic_response_parts, send_session_event, send_turn_activity};
+use handlers::foreground_exec_graph_key;
 pub(super) use trace::protocol_step_trace_event;
 
 pub(super) struct RuntimeTurnDriver<'a> {

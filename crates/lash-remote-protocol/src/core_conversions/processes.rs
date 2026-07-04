@@ -161,6 +161,7 @@ impl From<lash_core::ProcessLifecycleStatus> for RemoteProcessLifecycleStatus {
             lash_core::ProcessLifecycleStatus::Completed => Self::Completed,
             lash_core::ProcessLifecycleStatus::Failed => Self::Failed,
             lash_core::ProcessLifecycleStatus::Cancelled => Self::Cancelled,
+            lash_core::ProcessLifecycleStatus::Abandoned => Self::Abandoned,
         }
     }
 }
@@ -172,6 +173,7 @@ impl From<RemoteProcessLifecycleStatus> for lash_core::ProcessLifecycleStatus {
             RemoteProcessLifecycleStatus::Completed => Self::Completed,
             RemoteProcessLifecycleStatus::Failed => Self::Failed,
             RemoteProcessLifecycleStatus::Cancelled => Self::Cancelled,
+            RemoteProcessLifecycleStatus::Abandoned => Self::Abandoned,
         }
     }
 }
@@ -241,6 +243,12 @@ impl From<lash_core::ProcessAwaitOutput> for RemoteProcessAwaitOutput {
                     serde_json::to_value(control).expect("tool control serializes")
                 }),
             },
+            lash_core::ProcessAwaitOutput::Abandoned { evidence, control } => Self::Abandoned {
+                evidence: (*evidence).into(),
+                control: control.map(|control| {
+                    serde_json::to_value(control).expect("tool control serializes")
+                }),
+            },
         }
     }
 }
@@ -277,6 +285,10 @@ impl TryFrom<RemoteProcessAwaitOutput> for lash_core::ProcessAwaitOutput {
                 raw,
                 control: decode_remote_tool_control(control, "RemoteProcessAwaitOutput")?,
             }),
+            RemoteProcessAwaitOutput::Abandoned { evidence, control } => Ok(Self::Abandoned {
+                evidence: Box::new(evidence.try_into()?),
+                control: decode_remote_tool_control(control, "RemoteProcessAwaitOutput")?,
+            }),
         }
     }
 }
@@ -303,6 +315,9 @@ impl From<lash_core::ProcessStatus> for RemoteProcessStatus {
             lash_core::ProcessStatus::Cancelled { await_output } => Self::Cancelled {
                 await_output: await_output.into(),
             },
+            lash_core::ProcessStatus::Abandoned { await_output } => Self::Abandoned {
+                await_output: await_output.into(),
+            },
         }
     }
 }
@@ -320,6 +335,9 @@ impl TryFrom<RemoteProcessStatus> for lash_core::ProcessStatus {
                 await_output: await_output.try_into()?,
             }),
             RemoteProcessStatus::Cancelled { await_output } => Ok(Self::Cancelled {
+                await_output: await_output.try_into()?,
+            }),
+            RemoteProcessStatus::Abandoned { await_output } => Ok(Self::Abandoned {
                 await_output: await_output.try_into()?,
             }),
         }
@@ -613,6 +631,7 @@ impl From<lash_core::ProcessTerminalState> for RemoteProcessTerminalState {
             lash_core::ProcessTerminalState::Completed => Self::Completed,
             lash_core::ProcessTerminalState::Failed => Self::Failed,
             lash_core::ProcessTerminalState::Cancelled => Self::Cancelled,
+            lash_core::ProcessTerminalState::Abandoned => Self::Abandoned,
         }
     }
 }
@@ -623,6 +642,141 @@ impl From<RemoteProcessTerminalState> for lash_core::ProcessTerminalState {
             RemoteProcessTerminalState::Completed => Self::Completed,
             RemoteProcessTerminalState::Failed => Self::Failed,
             RemoteProcessTerminalState::Cancelled => Self::Cancelled,
+            RemoteProcessTerminalState::Abandoned => Self::Abandoned,
+        }
+    }
+}
+
+impl From<lash_core::RecoveryDisposition> for RemoteRecoveryDisposition {
+    fn from(value: lash_core::RecoveryDisposition) -> Self {
+        match value {
+            lash_core::RecoveryDisposition::Rerunnable => Self::Rerunnable,
+            lash_core::RecoveryDisposition::OwnerBound => Self::OwnerBound,
+            lash_core::RecoveryDisposition::ExternallyOwned => Self::ExternallyOwned,
+        }
+    }
+}
+
+impl From<RemoteRecoveryDisposition> for lash_core::RecoveryDisposition {
+    fn from(value: RemoteRecoveryDisposition) -> Self {
+        match value {
+            RemoteRecoveryDisposition::Rerunnable => Self::Rerunnable,
+            RemoteRecoveryDisposition::OwnerBound => Self::OwnerBound,
+            RemoteRecoveryDisposition::ExternallyOwned => Self::ExternallyOwned,
+        }
+    }
+}
+
+impl From<lash_core::AbandonWriter> for RemoteAbandonWriter {
+    fn from(value: lash_core::AbandonWriter) -> Self {
+        match value {
+            lash_core::AbandonWriter::OwnerDrain => Self::OwnerDrain,
+            lash_core::AbandonWriter::Sweep => Self::Sweep,
+            lash_core::AbandonWriter::ReconciledRequest => Self::ReconciledRequest,
+        }
+    }
+}
+
+impl From<RemoteAbandonWriter> for lash_core::AbandonWriter {
+    fn from(value: RemoteAbandonWriter) -> Self {
+        match value {
+            RemoteAbandonWriter::OwnerDrain => Self::OwnerDrain,
+            RemoteAbandonWriter::Sweep => Self::Sweep,
+            RemoteAbandonWriter::ReconciledRequest => Self::ReconciledRequest,
+        }
+    }
+}
+
+impl From<lash_core::AbandonEvidence> for RemoteAbandonEvidence {
+    fn from(value: lash_core::AbandonEvidence) -> Self {
+        let lash_core::AbandonEvidence {
+            writer,
+            owner,
+            epoch_ms,
+        } = value;
+        Self {
+            writer: writer.into(),
+            owner: owner.map(|owner| {
+                serde_json::to_value(owner).expect("lease owner identity serializes")
+            }),
+            epoch_ms,
+        }
+    }
+}
+
+impl TryFrom<RemoteAbandonEvidence> for lash_core::AbandonEvidence {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteAbandonEvidence) -> Result<Self, Self::Error> {
+        let RemoteAbandonEvidence {
+            writer,
+            owner,
+            epoch_ms,
+        } = value;
+        Ok(Self {
+            writer: writer.into(),
+            owner: owner
+                .map(|owner| decode_remote_json(owner, "RemoteAbandonEvidence", "owner"))
+                .transpose()?,
+            epoch_ms,
+        })
+    }
+}
+
+impl From<lash_core::ProcessStarted> for RemoteProcessStarted {
+    fn from(value: lash_core::ProcessStarted) -> Self {
+        let lash_core::ProcessStarted {
+            owner,
+            started_at_ms,
+        } = value;
+        Self {
+            owner: serde_json::to_value(owner).expect("lease owner identity serializes"),
+            started_at_ms,
+        }
+    }
+}
+
+impl TryFrom<RemoteProcessStarted> for lash_core::ProcessStarted {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteProcessStarted) -> Result<Self, Self::Error> {
+        let RemoteProcessStarted {
+            owner,
+            started_at_ms,
+        } = value;
+        Ok(Self {
+            owner: decode_remote_json(owner, "RemoteProcessStarted", "owner")?,
+            started_at_ms,
+        })
+    }
+}
+
+impl From<lash_core::AbandonRequest> for RemoteAbandonRequest {
+    fn from(value: lash_core::AbandonRequest) -> Self {
+        let lash_core::AbandonRequest {
+            requested_by,
+            requested_at_ms,
+            reason,
+        } = value;
+        Self {
+            requested_by,
+            requested_at_ms,
+            reason,
+        }
+    }
+}
+
+impl From<RemoteAbandonRequest> for lash_core::AbandonRequest {
+    fn from(value: RemoteAbandonRequest) -> Self {
+        let RemoteAbandonRequest {
+            requested_by,
+            requested_at_ms,
+            reason,
+        } = value;
+        Self {
+            requested_by,
+            requested_at_ms,
+            reason,
         }
     }
 }
@@ -1166,6 +1320,7 @@ impl TryFrom<lash_core::ProcessRecord> for RemoteProcessRecord {
             id,
             registration_hash: _,
             input,
+            disposition,
             identity,
             event_types,
             provenance,
@@ -1174,12 +1329,15 @@ impl TryFrom<lash_core::ProcessRecord> for RemoteProcessRecord {
             created_at_ms,
             updated_at_ms,
             external_ref,
+            first_started,
+            abandon_request,
             wait,
             status,
         } = value;
         Ok(Self {
             process_id: id,
             input: input.as_ref().clone().try_into()?,
+            disposition: disposition.into(),
             identity: identity.into(),
             event_types: event_types.into_iter().map(Into::into).collect(),
             provenance: provenance.into(),
@@ -1190,6 +1348,8 @@ impl TryFrom<lash_core::ProcessRecord> for RemoteProcessRecord {
             created_at_ms,
             updated_at_ms,
             external_ref: external_ref.map(Into::into),
+            first_started: first_started.map(|started| (*started).into()),
+            abandon_request: abandon_request.map(|request| (*request).into()),
             wait: wait.map(Into::into),
             status: status.into(),
         })
@@ -1204,6 +1364,7 @@ impl TryFrom<RemoteProcessRecord> for lash_core::ProcessRecord {
         let RemoteProcessRecord {
             process_id,
             input,
+            disposition,
             identity,
             event_types,
             provenance,
@@ -1212,12 +1373,15 @@ impl TryFrom<RemoteProcessRecord> for lash_core::ProcessRecord {
             created_at_ms,
             updated_at_ms,
             external_ref,
+            first_started,
+            abandon_request,
             wait,
             status,
         } = value;
         let registration = lash_core::ProcessRegistration::new(
             process_id,
             input.try_into()?,
+            disposition.into(),
             provenance.into(),
         )
         .with_identity(identity.into())
@@ -1230,6 +1394,10 @@ impl TryFrom<RemoteProcessRecord> for lash_core::ProcessRecord {
         record.created_at_ms = created_at_ms;
         record.updated_at_ms = updated_at_ms;
         record.external_ref = external_ref.map(Into::into);
+        record.first_started = first_started
+            .map(|started| started.try_into().map(Box::new))
+            .transpose()?;
+        record.abandon_request = abandon_request.map(|request| Box::new(request.into()));
         record.wait = wait.map(Into::into);
         record.status = status.try_into()?;
         Ok(record)
@@ -1248,9 +1416,14 @@ impl TryFrom<lash_core::ObservedProcess> for RemoteObservedProcess {
             lifecycle,
             status_label,
             terminal,
+            disposition,
             error,
             created_at_ms,
             updated_at_ms,
+            first_started,
+            lease_holder,
+            lease_expires_at_ms,
+            abandon_request,
             input,
             originator,
             env_ref,
@@ -1269,9 +1442,16 @@ impl TryFrom<lash_core::ObservedProcess> for RemoteObservedProcess {
             lifecycle: lifecycle.into(),
             status_label,
             terminal,
+            disposition: disposition.into(),
             error,
             created_at_ms,
             updated_at_ms,
+            first_started: first_started.map(Into::into),
+            lease_holder: lease_holder.map(|owner| {
+                serde_json::to_value(owner).expect("lease owner identity serializes")
+            }),
+            lease_expires_at_ms,
+            abandon_request: abandon_request.map(Into::into),
             input: input.try_into()?,
             originator: originator.into(),
             env_ref: env_ref
@@ -1300,9 +1480,14 @@ impl TryFrom<RemoteObservedProcess> for lash_core::ObservedProcess {
             lifecycle,
             status_label,
             terminal,
+            disposition,
             error,
             created_at_ms,
             updated_at_ms,
+            first_started,
+            lease_holder,
+            lease_expires_at_ms,
+            abandon_request,
             input,
             originator,
             env_ref,
@@ -1321,9 +1506,16 @@ impl TryFrom<RemoteObservedProcess> for lash_core::ObservedProcess {
             lifecycle: lifecycle.into(),
             status_label,
             terminal,
+            disposition: disposition.into(),
             error,
             created_at_ms,
             updated_at_ms,
+            first_started: first_started.map(TryInto::try_into).transpose()?,
+            lease_holder: lease_holder
+                .map(|owner| decode_remote_json(owner, "RemoteObservedProcess", "lease_holder"))
+                .transpose()?,
+            lease_expires_at_ms,
+            abandon_request: abandon_request.map(Into::into),
             input: input.try_into()?,
             originator: originator.into(),
             env_ref: env_ref.map(|env_ref| {
@@ -1434,17 +1626,22 @@ impl TryFrom<RemoteProcessStartRequest> for lash_core::ProcessStartRequest {
             protocol_version: _,
             id,
             input,
+            disposition,
             env_spec,
             originator,
             wake_target,
             grant,
             event_types,
         } = value;
-        let mut request =
-            lash_core::ProcessStartRequest::new(id, input.try_into()?, originator.into())
-                .with_wake_target(wake_target.map(Into::into))
-                .with_grant(grant.map(Into::into))
-                .with_event_types(event_types.into_iter().map(Into::into));
+        let mut request = lash_core::ProcessStartRequest::new(
+            id,
+            input.try_into()?,
+            disposition.into(),
+            originator.into(),
+        )
+        .with_wake_target(wake_target.map(Into::into))
+        .with_grant(grant.map(Into::into))
+        .with_event_types(event_types.into_iter().map(Into::into));
         request.env_spec = env_spec.map(TryInto::try_into).transpose()?;
         Ok(request)
     }
@@ -1457,6 +1654,7 @@ impl TryFrom<lash_core::ProcessStartRequest> for RemoteProcessStartRequest {
         let lash_core::ProcessStartRequest {
             id,
             input,
+            disposition,
             env_spec,
             originator,
             wake_target,
@@ -1467,6 +1665,7 @@ impl TryFrom<lash_core::ProcessStartRequest> for RemoteProcessStartRequest {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             id,
             input: input.try_into()?,
+            disposition: disposition.into(),
             env_spec: env_spec.map(Into::into),
             originator: originator.into(),
             wake_target: wake_target.map(Into::into),
@@ -1509,6 +1708,7 @@ impl From<lash_core::ProcessStatusFilter> for RemoteProcessStatusFilter {
             lash_core::ProcessStatusFilter::Completed => Self::Completed,
             lash_core::ProcessStatusFilter::Failed => Self::Failed,
             lash_core::ProcessStatusFilter::Cancelled => Self::Cancelled,
+            lash_core::ProcessStatusFilter::Abandoned => Self::Abandoned,
             lash_core::ProcessStatusFilter::Any => Self::Any,
         }
     }
@@ -1521,6 +1721,7 @@ impl From<RemoteProcessStatusFilter> for lash_core::ProcessStatusFilter {
             RemoteProcessStatusFilter::Completed => Self::Completed,
             RemoteProcessStatusFilter::Failed => Self::Failed,
             RemoteProcessStatusFilter::Cancelled => Self::Cancelled,
+            RemoteProcessStatusFilter::Abandoned => Self::Abandoned,
             RemoteProcessStatusFilter::Any => Self::Any,
         }
     }

@@ -23,9 +23,10 @@ use lash_core::{ProgressSender, SandboxMessage};
 
 use crate::shell::output::{
     OUTPUT_QUIET_PERIOD_MS, PollOutcome, ProcessState, ShellOutputSpill, activate_spill,
-    clean_terminal_output, exit_status_code, kill_child, progress_chunk, render_buffer_output,
-    spawn_async_reader, spawn_reader_thread, spawn_wait_thread, terminate_pipe_process,
-    truncate_exec_output, wait_for_buffer_settle, wait_for_child_exit,
+    clean_terminal_output, exit_status_code, kill_child, kill_process_group_and_reap,
+    progress_chunk, render_buffer_output, spawn_async_reader, spawn_reader_thread,
+    spawn_wait_thread, terminate_pipe_process, truncate_exec_output, wait_for_buffer_settle,
+    wait_for_child_exit,
 };
 
 pub(crate) const DEFAULT_EXEC_COMMAND_TIMEOUT_MS: u64 = 10 * 60 * 1000;
@@ -89,13 +90,61 @@ pub(crate) struct StartCommandParams {
     pub(crate) shell_path: String,
     pub(crate) login: bool,
     pub(crate) max_output_tokens: Option<usize>,
+    /// Launch the command as a Detached Command (ADR 0019): its own session,
+    /// no PTY retained, host/OS-owned from birth. lash records only an
+    /// immediately-terminal audit fact and never tracks it as running.
+    pub(crate) detach: bool,
+}
+
+/// Identity of a launched [Detached Command](StartCommandParams::detach) — the
+/// only fact lash retains about it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DetachedLaunch {
+    pub(crate) pid: u32,
+    pub(crate) pgid: u32,
+}
+
+/// Owner of the live PTY/pipe process map with deterministic teardown.
+///
+/// This is the tool-layer RAII / self-fencing seam (ADR 0019): the shell
+/// runtime kills its own process groups on teardown. When the last
+/// [`ShellRuntime`] clone drops — session close, run end, or the worker's
+/// runtime being torn down after a lease loss — this table drops with it and
+/// SIGKILLs every still-tracked (non-detached) process group, so a PTY child a
+/// dropped run left running does not outlive its owner. Detached commands are
+/// never inserted here (they are host/OS property from birth, ADR 0019), so the
+/// teardown never touches them.
+struct ShellProcessTable {
+    processes: StdMutex<HashMap<String, ShellProcess>>,
+}
+
+impl ShellProcessTable {
+    fn new() -> Self {
+        Self {
+            processes: StdMutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Drop for ShellProcessTable {
+    fn drop(&mut self) {
+        // Drop is sync, and the group SIGKILL is a sync libc call, so no
+        // async teardown hook is needed. Each child is reaped by its detached
+        // wait thread once the signal lands.
+        let Ok(mut processes) = self.processes.lock() else {
+            return;
+        };
+        for (_, proc) in processes.drain() {
+            kill_process_group_and_reap(proc.pid, &proc.killer);
+        }
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct ShellRuntime {
     pub(crate) shell_path: String,
     cwd: PathBuf,
-    processes: Arc<StdMutex<HashMap<String, ShellProcess>>>,
+    table: Arc<ShellProcessTable>,
     next_session_id: Arc<AtomicI32>,
 }
 
@@ -111,7 +160,7 @@ impl ShellRuntime {
         Self {
             shell_path,
             cwd,
-            processes: Arc::new(StdMutex::new(HashMap::new())),
+            table: Arc::new(ShellProcessTable::new()),
             next_session_id: Arc::new(AtomicI32::new(1)),
         }
     }
@@ -256,8 +305,60 @@ impl ShellRuntime {
             killer,
             pid,
         };
-        self.processes.lock().unwrap().insert(id, process);
+        self.table.processes.lock().unwrap().insert(id, process);
         Ok(())
+    }
+
+    /// Launch a Detached Command (ADR 0019): a process that outlives every lash
+    /// host. It is placed in its own session (`setsid`), so it leaves the
+    /// worker's process group and controlling terminal — the teardown group-kill
+    /// never reaches it and it survives host exit. lash keeps **no** PTY, writer,
+    /// or process-map entry, so it will never track, signal, or stop it again;
+    /// the returned identity is the whole of what lash retains. Because the child
+    /// is its own session leader, its pgid equals its pid.
+    pub(crate) fn spawn_detached(
+        &self,
+        command: &str,
+        workdir: &Path,
+        login: bool,
+        shell_path: &str,
+    ) -> Result<DetachedLaunch, String> {
+        let mut cmd = std::process::Command::new(shell_path);
+        for arg in self.shell_args(command, login, shell_path, false)? {
+            cmd.arg(arg);
+        }
+        cmd.current_dir(workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let child = cmd.spawn().map_err(|err| {
+            format!(
+                "Failed to spawn detached command with shell `{}` in `{}`: {err}",
+                shell_path,
+                workdir.display()
+            )
+        })?;
+        let pid = child.id();
+        // Reap the child in a fire-and-forget thread so it does not zombie inside
+        // the worker while both live. If the worker exits first, the child (its
+        // own session) keeps running and init reaps it — lash retains no handle.
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+        Ok(DetachedLaunch { pid, pgid: pid })
     }
 
     pub(crate) fn allocate_handle_id(&self) -> String {
@@ -266,8 +367,25 @@ impl ShellRuntime {
             .to_string()
     }
 
+    /// PID of a tracked PTY/pipe child, for teardown/self-fencing tests.
+    #[cfg(test)]
+    pub(crate) fn tracked_pid(&self, id: &str) -> Option<u32> {
+        self.table
+            .processes
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|proc| proc.pid)
+    }
+
+    /// Count of tracked (non-detached) processes, for teardown tests.
+    #[cfg(test)]
+    pub(crate) fn tracked_len(&self) -> usize {
+        self.table.processes.lock().unwrap().len()
+    }
+
     fn process_state(&self, id: &str) -> Result<ProcessState, String> {
-        let procs = self.processes.lock().unwrap();
+        let procs = self.table.processes.lock().unwrap();
         let proc = procs
             .get(id)
             .ok_or_else(|| format!("No process with id: {id}"))?;
@@ -288,7 +406,7 @@ impl ShellRuntime {
         max_output_tokens: Option<usize>,
     ) -> Result<(String, Option<usize>, Option<PathBuf>), String> {
         let (buffer, buffer_start, truncated, read_cursor, spill) = {
-            let procs = self.processes.lock().unwrap();
+            let procs = self.table.processes.lock().unwrap();
             let proc = procs
                 .get(id)
                 .ok_or_else(|| format!("Unknown session id {id}"))?;
@@ -447,7 +565,7 @@ impl ShellRuntime {
     }
 
     pub(crate) fn remove_process(&self, id: &str) {
-        if let Some(proc) = self.processes.lock().unwrap().remove(id)
+        if let Some(proc) = self.table.processes.lock().unwrap().remove(id)
             && let Some(mut spill) = proc.spill.lock().unwrap().take()
         {
             // Flush but deliberately do NOT delete the spill here: this hook
@@ -461,7 +579,7 @@ impl ShellRuntime {
 
     pub(crate) async fn write_stdin(&self, id: &str, input: &str) -> Result<(), String> {
         let writer = {
-            let procs = self.processes.lock().unwrap();
+            let procs = self.table.processes.lock().unwrap();
             let proc = procs
                 .get(id)
                 .ok_or_else(|| format!("Unknown session id {id}"))?;
@@ -484,7 +602,7 @@ impl ShellRuntime {
 
     pub(crate) async fn close_stdin(&self, id: &str) -> Result<(), String> {
         let writer = {
-            let procs = self.processes.lock().unwrap();
+            let procs = self.table.processes.lock().unwrap();
             let proc = procs
                 .get(id)
                 .ok_or_else(|| format!("Unknown session id {id}"))?;

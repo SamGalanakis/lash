@@ -13,6 +13,36 @@ use crate::app::PreparedTurn;
 use crate::turn_runner::{make_turn_input, spawn_session_turn};
 use crate::util;
 
+/// Version stamped into the autonomous JSONL surface: the `turn_start` frame in
+/// Json mode and the `ready` frame in Rpc mode both carry it under
+/// `protocol_version`. Bump when the record shapes below change incompatibly;
+/// the docs describe the surface contract keyed off this constant.
+pub const AUTONOMOUS_JSON_VERSION: u32 = 1;
+
+/// Human-facing status token for a completed tool call in Print mode.
+fn tool_status_label(status: lash_core::ToolCallStatus) -> &'static str {
+    match status {
+        lash_core::ToolCallStatus::Success => "ok",
+        lash_core::ToolCallStatus::Failure => "error",
+        lash_core::ToolCallStatus::Cancelled => "cancelled",
+    }
+}
+
+/// Render the Print-mode `[tool]` summary line for a completed tool call.
+/// Sub-second durations are elided to keep the stream quiet (see
+/// [`util::format_duration_ms_if_visible`]).
+pub(crate) fn format_tool_line(
+    name: &str,
+    status: lash_core::ToolCallStatus,
+    duration_ms: u64,
+) -> String {
+    let status = tool_status_label(status);
+    match util::format_duration_ms_if_visible(duration_ms) {
+        Some(duration_text) => format!("[tool] {name} · {status} · {duration_text}"),
+        None => format!("[tool] {name} · {status}"),
+    }
+}
+
 pub(crate) struct AutonomousPersistenceContext {
     pub(crate) await_background_work: bool,
     pub(crate) turn_usage_json: Option<std::path::PathBuf>,
@@ -57,16 +87,7 @@ impl AutonomousRenderer {
                 duration_ms,
                 ..
             } => {
-                let status = match output.status() {
-                    lash_core::ToolCallStatus::Success => "ok",
-                    lash_core::ToolCallStatus::Failure => "error",
-                    lash_core::ToolCallStatus::Cancelled => "cancelled",
-                };
-                if let Some(duration_text) = util::format_duration_ms_if_visible(duration_ms) {
-                    eprintln!("[tool] {name} · {status} · {duration_text}");
-                } else {
-                    eprintln!("[tool] {name} · {status}");
-                }
+                eprintln!("{}", format_tool_line(&name, output.status(), duration_ms));
             }
             TurnEvent::ModelRequestStarted { protocol_iteration } => {
                 eprintln!("[thinking] step {}", protocol_iteration + 1);
@@ -139,6 +160,65 @@ impl AutonomousRenderer {
     }
 }
 
+/// Build the Json-mode `turn_start` frame — the first NDJSON record of a
+/// `--print --mode json` stream, carrying the [`AUTONOMOUS_JSON_VERSION`] stamp.
+fn json_turn_start_record(stream_id: u64) -> serde_json::Value {
+    serde_json::json!({
+        "type": "turn_start",
+        "stream_id": stream_id,
+        "protocol_version": AUTONOMOUS_JSON_VERSION,
+    })
+}
+
+/// Build an `event` frame embedding a [`TurnActivity`] verbatim under
+/// `activity`. Rpc streams also echo the originating request `id`.
+fn json_event_record(
+    stream_id: u64,
+    request_id: Option<&serde_json::Value>,
+    activity: &TurnActivity,
+) -> serde_json::Value {
+    let mut record = serde_json::json!({
+        "type": "event",
+        "stream_id": stream_id,
+        "activity": activity,
+    });
+    if let Some(id) = request_id {
+        record["id"] = id.clone();
+    }
+    record
+}
+
+/// Build the terminal `turn_finish` frame pinning the turn's outcome, assistant
+/// text, usage, errors, execution summary, and tool-call records.
+fn json_finish_record(
+    stream_id: u64,
+    request_id: Option<&serde_json::Value>,
+    turn: &lash::TurnResult,
+    cancelled: bool,
+) -> serde_json::Value {
+    let ok = matches!(
+        turn.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
+    ) && !cancelled;
+    let mut record = serde_json::json!({
+        "type": "turn_finish",
+        "stream_id": stream_id,
+        "ok": ok,
+        "cancelled": cancelled,
+        "assistant_text": turn.assistant_output.safe_text,
+        "outcome": turn.outcome,
+        "usage": turn.usage,
+        "children_usage": turn.children_usage,
+        "errors": turn.errors,
+        "execution": turn.execution,
+        "tool_calls": turn.tool_calls,
+    });
+    if let Some(id) = request_id {
+        record["id"] = id.clone();
+    }
+    record
+}
+
 struct JsonRenderer {
     stream_id: u64,
     request_id: Option<serde_json::Value>,
@@ -152,10 +232,7 @@ impl JsonRenderer {
             request_id: None,
             stdout: io::stdout(),
         };
-        renderer.write_record(serde_json::json!({
-            "type": "turn_start",
-            "stream_id": stream_id,
-        }))?;
+        renderer.write_record(json_turn_start_record(stream_id))?;
         Ok(renderer)
     }
 
@@ -175,38 +252,12 @@ impl JsonRenderer {
     }
 
     fn handle(&mut self, activity: TurnActivity) -> anyhow::Result<()> {
-        let mut record = serde_json::json!({
-            "type": "event",
-            "stream_id": self.stream_id,
-            "activity": activity,
-        });
-        if let Some(id) = &self.request_id {
-            record["id"] = id.clone();
-        }
+        let record = json_event_record(self.stream_id, self.request_id.as_ref(), &activity);
         self.write_record(record)
     }
 
     fn finish(&mut self, turn: &lash::TurnResult, cancelled: bool) -> anyhow::Result<()> {
-        let ok = matches!(
-            turn.outcome,
-            TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
-        ) && !cancelled;
-        let mut record = serde_json::json!({
-            "type": "turn_finish",
-            "stream_id": self.stream_id,
-            "ok": ok,
-            "cancelled": cancelled,
-            "assistant_text": turn.assistant_output.safe_text,
-            "outcome": turn.outcome,
-            "usage": turn.usage,
-            "children_usage": turn.children_usage,
-            "errors": turn.errors,
-            "execution": turn.execution,
-            "tool_calls": turn.tool_calls,
-        });
-        if let Some(id) = &self.request_id {
-            record["id"] = id.clone();
-        }
+        let record = json_finish_record(self.stream_id, self.request_id.as_ref(), turn, cancelled);
         self.write_record(record)
     }
 }
@@ -396,7 +447,7 @@ async fn finish_autonomous_outcome(
 ) -> anyhow::Result<(crate::turn_runner::RuntimeRunResult, bool)> {
     let (mut done, cancel) = (outcome.done, outcome.cancel);
     if persistence.await_background_work {
-        session.processes().await_all().await?;
+        session.refresh_background_graph().await?;
         let state = session.admin().state().persist_current().await?;
         done.result.state = state.to_snapshot();
     }
@@ -528,6 +579,7 @@ async fn run_rpc(
     rpc_write(serde_json::json!({
         "type": "ready",
         "protocol": "lash.rpc.v1",
+        "protocol_version": AUTONOMOUS_JSON_VERSION,
         "methods": ["prompt", "ping", "shutdown"],
     }))?;
 
@@ -619,4 +671,206 @@ async fn run_rpc(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash::TurnResult;
+    use lash_core::{
+        AssistantOutput, ExecutionSummary, OutputState, SessionSnapshot, TokenUsage,
+        ToolCallOutput, ToolCallRecord, ToolCallStatus, TurnActivityId, TurnFinish, TurnOutcome,
+        TurnStop,
+    };
+    use serde_json::json;
+
+    fn completed_tool_activity() -> TurnActivity {
+        TurnActivity {
+            id: TurnActivityId::new("act-1"),
+            correlation_id: TurnActivityId::new("corr-1"),
+            event: TurnEvent::ToolCallCompleted {
+                call_id: Some("call-1".to_string()),
+                name: "read_file".to_string(),
+                args: json!({ "path": "README.md" }),
+                output: ToolCallOutput::success("ok"),
+                duration_ms: 5,
+                graph_key: None,
+                parent_call_id: None,
+            },
+        }
+    }
+
+    fn sample_turn_result() -> TurnResult {
+        TurnResult {
+            state: SessionSnapshot::default(),
+            outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
+                text: "hello".to_string(),
+            }),
+            assistant_output: AssistantOutput {
+                safe_text: "hello".to_string(),
+                raw_text: "hello".to_string(),
+                state: OutputState::Usable,
+            },
+            usage: TokenUsage {
+                input_tokens: 3,
+                output_tokens: 4,
+                ..TokenUsage::default()
+            },
+            children_usage: Vec::new(),
+            tool_calls: vec![ToolCallRecord {
+                call_id: Some("call-1".to_string()),
+                tool: "read_file".to_string(),
+                args: json!({ "path": "README.md" }),
+                output: ToolCallOutput::success("ok"),
+                duration_ms: 5,
+            }],
+            execution: ExecutionSummary {
+                had_tool_calls: true,
+                had_code_execution: false,
+                started_at_ms: 1_000,
+                duration_ms: 42,
+            },
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn turn_start_record_stamps_protocol_version() {
+        assert_eq!(
+            json_turn_start_record(1),
+            json!({
+                "type": "turn_start",
+                "stream_id": 1,
+                "protocol_version": AUTONOMOUS_JSON_VERSION,
+            })
+        );
+        assert_eq!(AUTONOMOUS_JSON_VERSION, 1);
+    }
+
+    #[test]
+    fn event_record_embeds_turn_activity_verbatim() {
+        let activity = completed_tool_activity();
+        let record = json_event_record(1, None, &activity);
+
+        assert_eq!(record["type"], "event");
+        assert_eq!(record["stream_id"], 1);
+        assert!(record.get("id").is_none());
+        // The activity is embedded verbatim: the flattened event tag, identity,
+        // and correlation id all survive the record wrapper unchanged.
+        assert_eq!(
+            record["activity"],
+            serde_json::to_value(&activity).unwrap(),
+            "event frame must embed the TurnActivity verbatim"
+        );
+        assert_eq!(record["activity"]["type"], "tool_call_completed");
+        assert_eq!(record["activity"]["id"], "act-1");
+        assert_eq!(record["activity"]["correlation_id"], "corr-1");
+    }
+
+    #[test]
+    fn event_record_echoes_rpc_request_id() {
+        let activity = completed_tool_activity();
+        let record = json_event_record(7, Some(&json!("req-2")), &activity);
+
+        assert_eq!(record["stream_id"], 7);
+        assert_eq!(record["id"], "req-2");
+        assert_eq!(record["activity"]["type"], "tool_call_completed");
+    }
+
+    #[test]
+    fn finish_record_pins_success_shape() {
+        let record = json_finish_record(1, None, &sample_turn_result(), false);
+
+        assert_eq!(record["type"], "turn_finish");
+        assert_eq!(record["stream_id"], 1);
+        assert_eq!(record["ok"], true);
+        assert_eq!(record["cancelled"], false);
+        assert_eq!(record["assistant_text"], "hello");
+        assert!(record.get("id").is_none());
+        assert_eq!(
+            record["outcome"],
+            json!({ "finished": { "assistant_message": { "text": "hello" } } })
+        );
+        assert_eq!(
+            record["usage"],
+            json!({
+                "input_tokens": 3,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "reasoning_output_tokens": 0,
+            })
+        );
+        assert_eq!(record["children_usage"], json!([]));
+        assert_eq!(record["errors"], json!([]));
+        assert_eq!(
+            record["execution"],
+            json!({
+                "had_tool_calls": true,
+                "had_code_execution": false,
+                "started_at_ms": 1_000,
+                "duration_ms": 42,
+            })
+        );
+        assert_eq!(
+            record["tool_calls"],
+            json!([{
+                "call_id": "call-1",
+                "tool": "read_file",
+                "args": { "path": "README.md" },
+                "output": { "outcome": { "status": "success", "payload": "ok" } },
+                "duration_ms": 5,
+            }])
+        );
+    }
+
+    #[test]
+    fn finish_record_marks_stopped_turn_not_ok() {
+        let mut turn = sample_turn_result();
+        turn.outcome = TurnOutcome::Stopped(TurnStop::ToolFailure);
+        let record = json_finish_record(1, None, &turn, false);
+        assert_eq!(record["ok"], false);
+        assert_eq!(record["outcome"], json!({ "stopped": "tool_failure" }));
+    }
+
+    #[test]
+    fn finish_record_marks_cancelled_turn_not_ok_and_echoes_id() {
+        let record = json_finish_record(2, Some(&json!("req-9")), &sample_turn_result(), true);
+        assert_eq!(record["id"], "req-9");
+        assert_eq!(record["stream_id"], 2);
+        assert_eq!(record["cancelled"], true);
+        assert_eq!(record["ok"], false, "a cancelled turn is never ok");
+    }
+
+    #[test]
+    fn tool_line_renders_status_and_visible_duration() {
+        assert_eq!(
+            format_tool_line("read_file", ToolCallStatus::Success, 1_500),
+            "[tool] read_file · ok · 1.5s"
+        );
+    }
+
+    #[test]
+    fn tool_line_elides_subsecond_duration() {
+        assert_eq!(
+            format_tool_line("read_file", ToolCallStatus::Success, 500),
+            "[tool] read_file · ok"
+        );
+    }
+
+    #[test]
+    fn tool_line_renders_failure_status() {
+        assert_eq!(
+            format_tool_line("write_file", ToolCallStatus::Failure, 2_000),
+            "[tool] write_file · error · 2.0s"
+        );
+    }
+
+    #[test]
+    fn tool_line_renders_cancelled_status() {
+        assert_eq!(
+            format_tool_line("shell", ToolCallStatus::Cancelled, 0),
+            "[tool] shell · cancelled"
+        );
+    }
 }

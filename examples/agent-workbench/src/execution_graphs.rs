@@ -539,6 +539,7 @@ mod tests {
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
                 },
+                lash::process::RecoveryDisposition::Rerunnable,
                 lash::process::ProcessProvenance::session(lash::process::SessionScope::new("root")),
             ))
             .await
@@ -640,6 +641,7 @@ mod tests {
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
                 },
+                lash::process::RecoveryDisposition::Rerunnable,
                 lash::process::ProcessProvenance::session(lash::process::SessionScope::new(
                     current_session_id,
                 )),
@@ -660,6 +662,7 @@ mod tests {
                 RuntimeInput::External {
                     metadata: json!({ "old": true }),
                 },
+                lash::process::RecoveryDisposition::ExternallyOwned,
                 lash::process::ProcessProvenance::host(),
             ))
             .await

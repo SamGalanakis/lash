@@ -213,6 +213,21 @@ fn replay_plugin_operation_receipt(
     }
 }
 
+/// Project the facade's rich [`ObservedProcess`](lash_core::ObservedProcess)
+/// onto the model/handle row the process dock renders. The dock is keyed on the
+/// grant-entry handle shape, so this is the one boundary that maps the unified
+/// facade vocabulary back to it.
+pub(crate) fn observed_to_handle_summary(
+    process: lash_core::ObservedProcess,
+) -> lash_core::ProcessHandleSummary {
+    lash_core::ProcessHandleSummary::new(
+        process.process_id,
+        lash_core::ProcessHandleDescriptor::new(Some(process.kind), Some(process.label)),
+        process.lifecycle,
+    )
+    .with_definition(process.identity.definition)
+}
+
 fn push_plugin_operation_message(app: &mut App, output: &serde_json::Value) {
     if let Some(message) = output.get("message").and_then(|value| value.as_str()) {
         push_system_message(app, message.to_string());
@@ -225,7 +240,7 @@ pub(crate) async fn collect_ui_snapshot(
     let started = std::time::Instant::now();
     let mut diagnostics = Vec::new();
     let processes = match session.processes().list().await {
-        Ok(tasks) => Some(tasks),
+        Ok(tasks) => Some(tasks.into_iter().map(observed_to_handle_summary).collect()),
         Err(err) => {
             diagnostics.push(format!("process snapshot failed: {err}"));
             None

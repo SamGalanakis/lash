@@ -243,7 +243,12 @@ CREATE TABLE IF NOT EXISTS process_leases (
 
 ";
 
-pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 8;
+// Bumped to 9: `ProcessRecord` gained a required `disposition` field (plus
+// optional `first_started`/`abandon_request`) inside `record_json` (ADR 0019).
+// There is no migration chain — a pre-9 database's rows predate the column and
+// cannot deserialize, so the version bump rejects them at open (delete and start
+// fresh). New rows always carry the disposition; nothing survives to backfill.
+pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 9;
 
 pub(crate) const TRIGGER_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS trigger_subscription_seq (

@@ -28,7 +28,8 @@ impl RuntimeTurnDriver<'_> {
             )
             .map_err(|err| {
                 RuntimeEffectControllerError::new("tool_catalog_resolution_failed", err.to_string())
-            })?;
+            })?
+            .with_tracing(self.execution_tracing(machine.protocol_iteration()));
         let call_count = calls.len();
         let mut results = vec![None; call_count];
         let mut prepared_entries = Vec::new();
@@ -133,6 +134,8 @@ impl RuntimeTurnDriver<'_> {
                                 args: completed.args.clone(),
                                 output: completed.output.clone(),
                                 duration_ms: completed.duration_ms,
+                                graph_key: None,
+                                parent_call_id: None,
                             },
                         )
                         .await;
@@ -179,12 +182,14 @@ impl RuntimeTurnDriver<'_> {
                 let _ = runtime_event_tx.send(RuntimeStreamEvent::Turn(event)).await;
             }
         });
+        let protocol_iteration = invocation.scope.protocol_iteration.unwrap_or_default();
         let context = match self.execution_context(
             tool_event_tx.clone(),
             Arc::new(crate::ChronologicalProjection::default()),
         ) {
             Ok(context) => context
                 .with_turn_event_sender(turn_event_tx.clone())
+                .with_tracing(self.execution_tracing(protocol_iteration))
                 .with_cancellation_token(cancel.clone()),
             Err(err) => {
                 drop(tool_event_tx);

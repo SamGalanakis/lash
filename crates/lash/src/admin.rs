@@ -70,248 +70,6 @@ impl CoreTriggerAdmin {
 }
 
 #[derive(Clone)]
-pub struct Processes {
-    pub(crate) core: LashCore,
-}
-
-impl Processes {
-    fn registry(&self) -> Result<Arc<dyn lash_core::ProcessRegistry>> {
-        self.core
-            .env
-            .process_registry
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| {
-                EmbedError::Plugin(lash_core::PluginError::Session(
-                    "process registry is unavailable in this runtime".to_string(),
-                ))
-            })
-    }
-
-    fn make_observer(&self) -> Result<lash_core::ProcessWorkObserver> {
-        Ok(lash_core::ProcessWorkObserver::new(self.registry()?))
-    }
-
-    fn process_invocation(command: &lash_core::ProcessCommand) -> lash_core::RuntimeInvocation {
-        let effect_id = command.effect_id();
-        lash_core::RuntimeInvocation::effect(
-            lash_core::runtime::RuntimeScope::new("runtime"),
-            effect_id.clone(),
-            lash_core::RuntimeEffectKind::Process,
-            effect_id,
-        )
-    }
-
-    async fn run_command(
-        &self,
-        command: lash_core::ProcessCommand,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::ProcessEffectOutcome> {
-        let registry = self.registry()?;
-        let invocation = Self::process_invocation(&command);
-        let outcome = scoped_effect_controller
-            .controller()
-            .execute_effect(
-                lash_core::RuntimeEffectEnvelope::new(
-                    invocation,
-                    lash_core::RuntimeEffectCommand::process(command),
-                ),
-                lash_core::RuntimeEffectLocalExecutor::processes(
-                    registry,
-                    self.core.env.process_work_driver.clone(),
-                ),
-            )
-            .await
-            .map_err(|err| EmbedError::Plugin(lash_core::PluginError::Session(err.to_string())))?;
-        match outcome {
-            lash_core::RuntimeEffectOutcome::Process { result } => Ok(result),
-            _ => Err(EmbedError::Plugin(lash_core::PluginError::Session(
-                "process effect returned non-process outcome".to_string(),
-            ))),
-        }
-    }
-
-    pub async fn start(
-        &self,
-        request: lash_core::ProcessStartRequest,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::ProcessRecord> {
-        let env_ref = match request.env_spec.as_ref() {
-            Some(env_spec) => Some(
-                lash_core::runtime::persist_process_execution_env(
-                    self.core.env.core.durability.process_env_store.as_ref(),
-                    env_spec,
-                )
-                .await?,
-            ),
-            None => None,
-        };
-        let grant = request.grant.clone();
-        let registration = request.into_registration(env_ref);
-        let command = lash_core::ProcessCommand::Start {
-            registration,
-            grant,
-            execution_context: Box::new(lash_core::ProcessExecutionContext::default()),
-        };
-        let outcome = self
-            .run_command(command, scoped_effect_controller.clone())
-            .await?;
-        let lash_core::ProcessEffectOutcome::Start { record } = outcome else {
-            return Err(EmbedError::Plugin(lash_core::PluginError::Session(
-                "process start returned the wrong outcome".to_string(),
-            )));
-        };
-        if let Some(driver) = self.core.work_driver.drivers().await.process {
-            driver.claim_and_run_pending("admin_process_start").await?;
-        }
-        Ok(record)
-    }
-
-    pub async fn list(
-        &self,
-        filter: &lash_core::ProcessListFilter,
-    ) -> Result<Vec<lash_core::ObservedProcess>> {
-        self.make_observer()?.list(filter).await.map_err(Into::into)
-    }
-
-    pub async fn get(&self, process_id: &str) -> Result<Option<lash_core::ObservedProcess>> {
-        Ok(self.make_observer()?.process(process_id).await)
-    }
-
-    pub async fn events(
-        &self,
-        process_id: &str,
-        after_sequence: u64,
-    ) -> Result<Vec<lash_core::ObservedProcessEvent>> {
-        self.make_observer()?
-            .events_after(process_id, after_sequence)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn await_output(&self, process_id: &str) -> Result<lash_core::ProcessAwaitOutput> {
-        if let Some(driver) = self.core.env.process_work_driver.as_ref() {
-            return driver.await_terminal(process_id).await.map_err(Into::into);
-        }
-        lash_core::ProcessAwaiter::polling(self.registry()?)
-            .await_terminal(process_id)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn cancel(
-        &self,
-        process_id: &str,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::ProcessCancelSummary> {
-        let command = lash_core::ProcessCommand::Cancel {
-            process_id: process_id.to_string(),
-            reason: Some("requested by host".to_string()),
-        };
-        let outcome = self
-            .run_command(command, scoped_effect_controller.clone())
-            .await?;
-        let lash_core::ProcessEffectOutcome::Cancel { record } = outcome else {
-            return Err(EmbedError::Plugin(lash_core::PluginError::Session(
-                "process cancel returned the wrong outcome".to_string(),
-            )));
-        };
-        Ok(lash_core::ProcessCancelSummary::from_record(record))
-    }
-
-    pub async fn signal(
-        &self,
-        process_id: &str,
-        signal_name: impl Into<String>,
-        signal_id: impl Into<String>,
-        request: lash_core::ProcessEventAppendRequest,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::ProcessEvent> {
-        let signal_name = signal_name.into();
-        let event_type = request.event_type.clone();
-        let payload = request.payload.clone();
-        let command = lash_core::ProcessCommand::Signal {
-            process_id: process_id.to_string(),
-            signal_name: signal_name.clone(),
-            signal_id: signal_id.into(),
-            request,
-        };
-        let outcome = self
-            .run_command(command, scoped_effect_controller.clone())
-            .await?;
-        let lash_core::ProcessEffectOutcome::Signal { event } = outcome else {
-            return Err(EmbedError::Plugin(lash_core::PluginError::Session(
-                "process signal returned the wrong outcome".to_string(),
-            )));
-        };
-        let registry = self.registry()?;
-        let waiting_ordinal =
-            registry
-                .get_process(process_id)
-                .await
-                .and_then(|record| match record.wait {
-                    Some(lash_core::WaitState {
-                        kind:
-                            lash_core::WaitKind::Signal {
-                                name,
-                                event_type: wait_event_type,
-                                ordinal,
-                                ..
-                            },
-                        ..
-                    }) if name == signal_name && wait_event_type == event_type => Some(ordinal),
-                    _ => None,
-                });
-        let ordinal = match waiting_ordinal {
-            Some(ordinal) => ordinal,
-            None => {
-                registry
-                    .count_events_through(process_id, &event_type, event.sequence)
-                    .await?
-            }
-        };
-        if ordinal > 0 {
-            let key = scoped_effect_controller
-                .controller()
-                .await_event_key(
-                    &lash_core::ExecutionScope::process(process_id),
-                    lash_core::AwaitEventWaitIdentity::process_signal(
-                        process_id,
-                        &signal_name,
-                        ordinal,
-                    ),
-                )
-                .await
-                .map_err(|err| {
-                    EmbedError::Plugin(lash_core::PluginError::Session(err.to_string()))
-                })?;
-            let _ = scoped_effect_controller
-                .controller()
-                .resolve_await_event(&key, lash_core::Resolution::Ok(payload))
-                .await
-                .map_err(|err| {
-                    EmbedError::Plugin(lash_core::PluginError::Session(err.to_string()))
-                })?;
-        }
-        Ok(event)
-    }
-
-    pub async fn session_snapshot(
-        &self,
-        session_id: impl Into<String>,
-    ) -> Result<lash_core::ProcessWorkSnapshot> {
-        self.make_observer()?
-            .snapshot_for_session(session_id)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub fn observer(&self) -> Result<lash_core::ProcessWorkObserver> {
-        self.make_observer()
-    }
-}
-
-#[derive(Clone)]
 pub struct SessionAdmin {
     pub(crate) runtime: RuntimeHandle,
 }
@@ -512,11 +270,142 @@ impl SessionAdmin {
         .await
     }
 
-    async fn await_background_work(&self) -> Result<()> {
+    /// Refresh the session graph from any background process that signalled it
+    /// changed. This is the honest name for what the core `await_background_work`
+    /// call does — a session-graph resync, **not** a terminal wait on background
+    /// work (that lives on the process admin's `await_output`). Renamed off the
+    /// old `SessionProcessAdmin::await_all` misnomer per the ADR 0019 grill.
+    pub(crate) async fn refresh_background_graph(&self) -> Result<()> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime.await_background_work().await.map_err(Into::into)
         })
         .await
+    }
+
+    fn process_registry(&self) -> Result<Arc<dyn lash_core::ProcessRegistry>> {
+        self.runtime
+            .observe()
+            .process_registry
+            .clone()
+            .ok_or_else(|| {
+                EmbedError::Plugin(lash_core::PluginError::Session(
+                    "process registry is unavailable in this runtime".to_string(),
+                ))
+            })
+    }
+
+    fn process_observer(&self) -> Result<lash_core::ProcessWorkObserver> {
+        Ok(lash_core::ProcessWorkObserver::new(
+            self.process_registry()?,
+        ))
+    }
+
+    /// An observer over the session's process registry, or `None` when this
+    /// runtime has no registry. Session-scoped reads use this so a registry-less
+    /// runtime observes an empty process set rather than erroring, matching the
+    /// pre-unification `list_process_handles` behavior.
+    fn process_observer_opt(&self) -> Option<lash_core::ProcessWorkObserver> {
+        self.runtime
+            .observe()
+            .process_registry
+            .clone()
+            .map(lash_core::ProcessWorkObserver::new)
+    }
+
+    /// The session scopes this session may address grants under: its root scope
+    /// plus its current agent frame, deduplicated. Mirrors the scope set the
+    /// runtime observation lists handles across, so the grant-scoped session
+    /// view sees exactly what the session can address.
+    fn process_visible_scopes(&self) -> Vec<lash_core::SessionScope> {
+        let observation = self.runtime.observe();
+        let root = observation.process_scope();
+        let mut scopes = vec![root.clone()];
+        let frame_id = observation.persisted_state.current_agent_frame_id.as_str();
+        if !frame_id.is_empty() {
+            let frame_scope =
+                lash_core::SessionScope::for_agent_frame(observation.session_id(), frame_id);
+            if frame_scope.id() != root.id() {
+                scopes.push(frame_scope);
+            }
+        }
+        scopes
+    }
+
+    async fn signal_process(
+        &self,
+        process_id: &str,
+        signal_name: String,
+        signal_id: String,
+        payload: serde_json::Value,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<lash_core::ProcessEvent> {
+        let writer = self.runtime.writer();
+        let runtime = writer.lock().await;
+        let session_id = runtime.session_id().to_string();
+        let processes = runtime.process_service()?;
+        let scope = lash_core::ProcessOpScope::new(scoped_effect_controller);
+        processes
+            .signal(
+                &session_id,
+                process_id,
+                signal_name,
+                signal_id,
+                payload,
+                scope,
+            )
+            .await
+            .map_err(EmbedError::Plugin)
+    }
+
+    async fn transfer_process_handles(
+        &self,
+        to_session_id: &str,
+        process_ids: Vec<String>,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<()> {
+        let writer = self.runtime.writer();
+        let runtime = writer.lock().await;
+        let session_id = runtime.session_id().to_string();
+        let processes = runtime.process_service()?;
+        let scope = lash_core::ProcessOpScope::new(scoped_effect_controller);
+        processes
+            .transfer(&session_id, to_session_id, process_ids, scope)
+            .await
+            .map_err(EmbedError::Plugin)
+    }
+
+    async fn await_process_output(
+        &self,
+        process_id: &str,
+    ) -> Result<lash_core::ProcessAwaitOutput> {
+        lash_core::ProcessAwaiter::polling(self.process_registry()?)
+            .await_terminal(process_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn request_process_abandon(
+        &self,
+        process_id: &str,
+        reason: Option<String>,
+    ) -> Result<lash_core::ObservedProcess> {
+        let session_id = self.runtime.observe().session_id().to_string();
+        let request = lash_core::AbandonRequest {
+            requested_by: format!("session:{session_id}"),
+            requested_at_ms: crate::process_admin::now_epoch_ms(),
+            reason,
+        };
+        self.process_registry()?
+            .request_process_abandon(process_id, request)
+            .await?;
+        self.process_observer()?
+            .process(process_id)
+            .await
+            .ok_or_else(|| {
+                EmbedError::Plugin(lash_core::PluginError::Session(format!(
+                    "process `{process_id}` vanished after recording its abandon request"
+                )))
+            })
     }
 
     async fn refresh_tool_catalog(&self) -> Result<()> {
@@ -677,14 +566,6 @@ impl SessionAdmin {
             Ok(runtime.export_persisted_state())
         })
         .await
-    }
-
-    async fn list_process_handles(&self) -> Result<Vec<lash_core::ProcessHandleSummary>> {
-        Ok(self.runtime.observe().list_process_handles().await)
-    }
-
-    async fn list_all_process_handles(&self) -> Result<Vec<lash_core::ProcessHandleSummary>> {
-        Ok(self.runtime.observe().list_all_process_handles().await)
     }
 
     async fn start_process(
@@ -1149,9 +1030,42 @@ pub struct SessionProcessAdmin {
     control: SessionAdmin,
 }
 
+/// Session-scoped view of the global process surface ([`Processes`]).
+///
+/// This is thin sugar, not a parallel surface (ADR 0019 grill): every read is
+/// the global observer pre-filtered by this session's **grant** scope (what the
+/// session may address), and every mutation delegates to the same runtime
+/// process path the global surface uses. It speaks the same [`ObservedProcess`]
+/// vocabulary as [`Processes`]; [`start`](Self::start) returns the
+/// grant-entry handle row ([`lash_core::ProcessHandleSummary`]), the one row
+/// type retained for the model/handle contract.
 impl SessionProcessAdmin {
     pub(crate) fn new(control: SessionAdmin) -> Self {
         Self { control }
+    }
+
+    /// Grant-scoped read: the global observer filtered to every scope this
+    /// session may address (root + current frame), deduplicated. One home for
+    /// the session's read logic — it calls the observer, never reimplements it.
+    async fn list_granted(
+        &self,
+        filter: &lash_core::ProcessListFilter,
+    ) -> Result<Vec<lash_core::ObservedProcess>> {
+        // A registry-less runtime has no processes to address; observe empty
+        // rather than erroring, matching the pre-unification session read.
+        let Some(observer) = self.control.process_observer_opt() else {
+            return Ok(Vec::new());
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for scope in self.control.process_visible_scopes() {
+            for process in observer.list_granted_to(&scope, filter).await? {
+                if seen.insert(process.process_id.clone()) {
+                    out.push(process);
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub async fn start(
@@ -1164,16 +1078,68 @@ impl SessionProcessAdmin {
             .await
     }
 
-    pub async fn list(&self) -> Result<Vec<lash_core::ProcessHandleSummary>> {
-        self.control.list_process_handles().await
+    /// Running processes this session may address.
+    pub async fn list(&self) -> Result<Vec<lash_core::ObservedProcess>> {
+        self.list_granted(&lash_core::ProcessListFilter {
+            status: lash_core::ProcessStatusFilter::Running,
+            ..lash_core::ProcessListFilter::default()
+        })
+        .await
     }
 
-    pub async fn list_all(&self) -> Result<Vec<lash_core::ProcessHandleSummary>> {
-        self.control.list_all_process_handles().await
+    /// Every process (any status) this session may address.
+    pub async fn list_all(&self) -> Result<Vec<lash_core::ObservedProcess>> {
+        self.list_granted(&lash_core::ProcessListFilter {
+            status: lash_core::ProcessStatusFilter::Any,
+            ..lash_core::ProcessListFilter::default()
+        })
+        .await
     }
 
-    pub async fn await_all(&self) -> Result<()> {
-        self.control.await_background_work().await
+    /// One process this session may address, if present.
+    pub async fn get(&self, process_id: &str) -> Result<Option<lash_core::ObservedProcess>> {
+        Ok(self
+            .list_all()
+            .await?
+            .into_iter()
+            .find(|process| process.process_id == process_id))
+    }
+
+    pub async fn events(
+        &self,
+        process_id: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<lash_core::ObservedProcessEvent>> {
+        let Some(observer) = self.control.process_observer_opt() else {
+            return Ok(Vec::new());
+        };
+        observer
+            .events_after(process_id, after_sequence)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn await_output(&self, process_id: &str) -> Result<lash_core::ProcessAwaitOutput> {
+        self.control.await_process_output(process_id).await
+    }
+
+    pub async fn signal(
+        &self,
+        process_id: &str,
+        signal_name: impl Into<String>,
+        signal_id: impl Into<String>,
+        payload: serde_json::Value,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<lash_core::ProcessEvent> {
+        self.control
+            .signal_process(
+                process_id,
+                signal_name.into(),
+                signal_id.into(),
+                payload,
+                scoped_effect_controller,
+            )
+            .await
     }
 
     pub async fn cancel(
@@ -1192,6 +1158,32 @@ impl SessionProcessAdmin {
     ) -> Result<Vec<lash_core::ProcessCancelSummary>> {
         self.control
             .cancel_visible_processes(scoped_effect_controller)
+            .await
+    }
+
+    /// Move this session's handle grants for `process_ids` to another session.
+    /// Re-homes the addressing grant only; the process itself is global.
+    pub async fn transfer(
+        &self,
+        to_session_id: &str,
+        process_ids: Vec<String>,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<()> {
+        self.control
+            .transfer_process_handles(to_session_id, process_ids, scoped_effect_controller)
+            .await
+    }
+
+    /// Record an Abandon Request (ADR 0019) against a process this session
+    /// owns: an authorization the recovery sweep reconciles into `Abandoned`
+    /// once the owner's lease lapses. Returns the process as observed after.
+    pub async fn request_abandon(
+        &self,
+        process_id: &str,
+        reason: Option<String>,
+    ) -> Result<lash_core::ObservedProcess> {
+        self.control
+            .request_process_abandon(process_id, reason)
             .await
     }
 }

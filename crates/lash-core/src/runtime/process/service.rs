@@ -171,6 +171,23 @@ pub trait ProcessService: Send + Sync {
         scope: ProcessOpScope<'_>,
     ) -> Result<ProcessRecord, PluginError>;
 
+    /// Write the terminal outcome for an Externally-Owned process the session
+    /// holds a grant for (ADR 0019). Closure for work lash never executes — a
+    /// detached command records its immediately-terminal launch fact here. Only
+    /// Externally-Owned rows may be completed this way.
+    async fn complete_external(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        await_output: ProcessAwaitOutput,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<ProcessRecord, PluginError> {
+        let _ = (session_id, process_id, await_output, scope);
+        Err(PluginError::Session(
+            "external process completion is unavailable in this service".to_string(),
+        ))
+    }
+
     async fn await_process(
         &self,
         process_id: &str,
@@ -374,6 +391,7 @@ mod tests {
                             ProcessInput::External {
                                 metadata: json!(null),
                             },
+                            crate::RecoveryDisposition::ExternallyOwned,
                             ProcessProvenance::host(),
                         )),
                     )
@@ -523,6 +541,7 @@ mod tests {
             ProcessInput::External {
                 metadata: json!(null),
             },
+            crate::RecoveryDisposition::ExternallyOwned,
             ProcessProvenance::host(),
         ));
         record.status = ProcessStatus::Cancelled {

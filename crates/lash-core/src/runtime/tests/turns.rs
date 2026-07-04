@@ -1109,6 +1109,7 @@ async fn next_turn_input_turn_claims_process_wake_at_active_checkpoint() {
                 crate::ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
+                crate::RecoveryDisposition::ExternallyOwned,
                 crate::ProcessProvenance::session(target_scope.clone()),
             )
             .with_extra_event_types([process_wake_event_type()]),
@@ -1199,6 +1200,7 @@ async fn selected_process_wake_drain_does_not_claim_pending_next_turn_input() {
                 crate::ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
+                crate::RecoveryDisposition::ExternallyOwned,
                 crate::ProcessProvenance::session(target_scope.clone()),
             )
             .with_extra_event_types([process_wake_event_type()]),
@@ -1330,6 +1332,7 @@ async fn process_wake_claimed_at_checkpoint_is_completed_when_turn_is_cancelled(
                 crate::ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
+                crate::RecoveryDisposition::ExternallyOwned,
                 crate::ProcessProvenance::session(target_scope.clone()),
             )
             .with_extra_event_types([process_wake_event_type()]),
@@ -1583,6 +1586,7 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
                 crate::ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
+                crate::RecoveryDisposition::ExternallyOwned,
                 crate::ProcessProvenance::session(target_scope.clone())
                     .with_caused_by(Some(process_caused_by.clone())),
             )
@@ -2203,6 +2207,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
                 crate::ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
+                crate::RecoveryDisposition::ExternallyOwned,
                 crate::ProcessProvenance::session(target_scope.clone())
                     .with_caused_by(Some(process_caused_by.clone())),
             )

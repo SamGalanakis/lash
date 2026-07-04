@@ -14,6 +14,7 @@ pub mod admin;
 mod core;
 mod error;
 mod plugin_binding;
+pub(crate) mod process_admin;
 mod prompt_layer;
 #[cfg(feature = "rlm")]
 pub mod rlm;
@@ -242,6 +243,7 @@ pub mod remote {
     /// environments.
     pub mod processes {
         pub use lash_remote_protocol::processes::{
+            RemoteAbandonEvidence, RemoteAbandonRequest, RemoteAbandonWriter,
             RemoteObservedProcess, RemoteObservedProcessEvent, RemotePersistProcessEnvRequest,
             RemotePersistProcessEnvResult, RemoteProcessAwaitOutput, RemoteProcessAwaitRequest,
             RemoteProcessAwaitResult, RemoteProcessCancelRequest, RemoteProcessCancelResult,
@@ -254,13 +256,14 @@ pub mod remote {
             RemoteProcessModelSpec, RemoteProcessOriginator, RemoteProcessPluginOptions,
             RemoteProcessProvenance, RemoteProcessSignalRequest, RemoteProcessSignalResult,
             RemoteProcessStartGrant, RemoteProcessStartRequest, RemoteProcessStartResult,
-            RemoteProcessStatus, RemoteProcessStatusFilter, RemoteProcessSummary,
-            RemoteProcessTerminalSemantics, RemoteProcessTerminalSpec, RemoteProcessTerminalState,
-            RemoteProcessValueSelector, RemoteProcessWaitKind, RemoteProcessWaitState,
-            RemoteProcessWake, RemoteProcessWakeDedupeKey, RemoteProcessWakeSpec,
-            RemoteProcessWorkItem, RemoteProcessWorkSnapshot, RemoteRuntimeEffectKind,
-            RemoteRuntimeInvocation, RemoteRuntimeReplay, RemoteRuntimeScope, RemoteRuntimeSubject,
-            RemoteSessionScope, RemoteToolFailureClass,
+            RemoteProcessStarted, RemoteProcessStatus, RemoteProcessStatusFilter,
+            RemoteProcessSummary, RemoteProcessTerminalSemantics, RemoteProcessTerminalSpec,
+            RemoteProcessTerminalState, RemoteProcessValueSelector, RemoteProcessWaitKind,
+            RemoteProcessWaitState, RemoteProcessWake, RemoteProcessWakeDedupeKey,
+            RemoteProcessWakeSpec, RemoteProcessWorkItem, RemoteProcessWorkSnapshot,
+            RemoteRecoveryDisposition, RemoteRuntimeEffectKind, RemoteRuntimeInvocation,
+            RemoteRuntimeReplay, RemoteRuntimeScope, RemoteRuntimeSubject, RemoteSessionScope,
+            RemoteToolFailureClass,
         };
     }
 
@@ -326,22 +329,24 @@ pub mod remote {
 }
 
 pub mod process {
-    pub use crate::admin::{Processes, SessionProcessAdmin};
+    pub use crate::admin::SessionProcessAdmin;
+    pub use crate::process_admin::Processes;
     pub use lash_core::{
-        ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessAttach, ProcessAwaitOutput,
-        ProcessAwaiter, ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest,
-        ProcessCancelSource, ProcessCancelSummary, ProcessChangeHub, ProcessEvent,
-        ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSink, ProcessEventType,
-        ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
-        ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary,
-        ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseClaimOutcome,
-        ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
-        ProcessOpScope, ProcessProvenance, ProcessPruneReport, ProcessRecord, ProcessRegistration,
-        ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessService,
-        ProcessSessionDeleteReport, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
-        ProcessStatusFilter, ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey,
-        ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver,
-        ProcessWorkSnapshot, SessionScope, SessionScopeId, watch_process_registry,
+        AbandonEvidence, AbandonRequest, AbandonWriter, ObservedProcess, ObservedProcessEvent,
+        ObservedWorkItem, ProcessAttach, ProcessAwaitOutput, ProcessAwaiter, ProcessCancelAbility,
+        ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource, ProcessCancelSummary,
+        ProcessChangeHub, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
+        ProcessEventSink, ProcessEventType, ProcessExecutionContext, ProcessExecutionEnvRef,
+        ProcessExecutionEnvSpec, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+        ProcessHandleSummary, ProcessIdentity, ProcessInput, ProcessLease,
+        ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessLifecycleStatus,
+        ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessProvenance, ProcessPruneReport,
+        ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost,
+        ProcessService, ProcessSessionDeleteReport, ProcessStartOptions, ProcessStartRequest,
+        ProcessStarted, ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessWake,
+        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
+        ProcessWorkObserver, ProcessWorkSnapshot, RecoveryDisposition, SessionScope,
+        SessionScopeId, ToolSessionProcessAdmin, watch_process_registry,
         watch_process_registry_with_sink,
     };
     #[cfg(feature = "rlm")]
@@ -354,8 +359,8 @@ pub mod process {
 pub mod durability {
     pub use lash_core::{
         DurableProcessWorker, DurableProcessWorkerConfig, EffectHost, InlineEffectHost,
-        LeaseTimings, LeaseTimingsError, Residency, RuntimeEnvironment, RuntimeHostConfig,
-        TerminationPolicy,
+        LeaseTimings, LeaseTimingsError, ProcessDrainReport, Residency, RuntimeEnvironment,
+        RuntimeHostConfig, TerminationPolicy,
     };
 }
 

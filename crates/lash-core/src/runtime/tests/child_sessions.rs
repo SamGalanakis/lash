@@ -331,10 +331,10 @@ async fn parent_turn_receives_live_child_token_usage_events() {
     assert_eq!(child_entry.usage.reasoning_output_tokens, 1);
 
     let usage = runtime.usage_report();
-    assert_eq!(usage.by_source["subagent"].input_tokens, 7);
-    assert_eq!(usage.by_source["subagent"].output_tokens, 2);
-    assert_eq!(usage.by_source["subagent"].cache_read_input_tokens, 4);
-    assert_eq!(usage.by_source["subagent"].reasoning_output_tokens, 1);
+    assert_eq!(usage.by_source["subagent"].usage.input_tokens, 7);
+    assert_eq!(usage.by_source["subagent"].usage.output_tokens, 2);
+    assert_eq!(usage.by_source["subagent"].usage.cache_read_input_tokens, 4);
+    assert_eq!(usage.by_source["subagent"].usage.reasoning_output_tokens, 1);
 }
 
 #[tokio::test]
@@ -430,8 +430,8 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
     assert_eq!(child_usage_event.1.cache_read_input_tokens, 9);
 
     let usage = runtime.usage_report();
-    assert_eq!(usage.by_source["subagent"].input_tokens, 0);
-    assert_eq!(usage.by_source["subagent"].output_tokens, 0);
-    assert_eq!(usage.by_source["subagent"].cache_read_input_tokens, 9);
-    assert_eq!(usage.by_source["subagent"].reasoning_output_tokens, 0);
+    assert_eq!(usage.by_source["subagent"].usage.input_tokens, 0);
+    assert_eq!(usage.by_source["subagent"].usage.output_tokens, 0);
+    assert_eq!(usage.by_source["subagent"].usage.cache_read_input_tokens, 9);
+    assert_eq!(usage.by_source["subagent"].usage.reasoning_output_tokens, 0);
 }

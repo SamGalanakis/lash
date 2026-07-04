@@ -8,9 +8,10 @@ use super::events::{
     ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
 };
 use super::model::{
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessListFilter,
-    ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, SessionScope, WaitState,
+    AbandonRequest, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion,
+    ProcessListFilter, ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport,
+    ProcessStarted, SessionScope, WaitState,
 };
 use super::registry::{ProcessPruneReport, ProcessRegistry};
 use crate::PluginError;
@@ -494,6 +495,29 @@ impl ProcessRegistry for WatchedProcessRegistry {
         Ok(record)
     }
 
+    async fn record_first_started(
+        &self,
+        process_id: &str,
+        started: ProcessStarted,
+    ) -> Result<ProcessRecord, PluginError> {
+        let record = self.inner.record_first_started(process_id, started).await?;
+        self.hub.notify(process_id);
+        Ok(record)
+    }
+
+    async fn request_process_abandon(
+        &self,
+        process_id: &str,
+        request: AbandonRequest,
+    ) -> Result<ProcessRecord, PluginError> {
+        let record = self
+            .inner
+            .request_process_abandon(process_id, request)
+            .await?;
+        self.hub.notify(process_id);
+        Ok(record)
+    }
+
     async fn set_process_wait(
         &self,
         process_id: &str,
@@ -562,6 +586,13 @@ impl ProcessRegistry for WatchedProcessRegistry {
         self.inner.renew_process_lease(lease, lease_ttl_ms).await
     }
 
+    async fn get_process_lease(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessLease>, PluginError> {
+        self.inner.get_process_lease(process_id).await
+    }
+
     async fn complete_process_lease(
         &self,
         completion: &ProcessLeaseCompletion,
@@ -594,6 +625,7 @@ mod tests {
             ProcessInput::External {
                 metadata: serde_json::json!({}),
             },
+            crate::RecoveryDisposition::ExternallyOwned,
             ProcessProvenance::host(),
         )
     }

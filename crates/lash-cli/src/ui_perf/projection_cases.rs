@@ -324,6 +324,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
             call_id: Some(format!("shell-{index}")),
             name: "exec_command".to_string(),
             args: json!({ "cmd": "cargo test -p lash-cli" }),
+            graph_key: None,
+            parent_call_id: None,
         },
         4 => TurnEvent::ToolCallCompleted {
             call_id: Some(format!("shell-{index}")),
@@ -331,6 +333,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
             args: json!({ "cmd": "cargo test -p lash-cli", "workdir": "/home/sam/code/lash" }),
             output: ToolCallOutput::success(json!({ "output": "ok\n", "exit_code": 0 })),
             duration_ms: 12,
+            graph_key: None,
+            parent_call_id: None,
         },
         5 => TurnEvent::ToolCallCompleted {
             call_id: Some(format!("shell-fail-{index}")),
@@ -342,6 +346,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
                 "command exited with 1",
             )),
             duration_ms: 6,
+            graph_key: None,
+            parent_call_id: None,
         },
         6 => TurnEvent::ToolCallCompleted {
             call_id: Some(format!("cancel-{index}")),
@@ -349,6 +355,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
             args: json!({ "path": "README.md" }),
             output: ToolCallOutput::cancelled(ToolCancellation::runtime("tool call cancelled")),
             duration_ms: 1,
+            graph_key: None,
+            parent_call_id: None,
         },
         7 => TurnEvent::ToolCallCompleted {
             call_id: Some(format!("agent-{index}")),
@@ -356,6 +364,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
             args: json!({ "task": "inspect projection path", "capability": "explore" }),
             output: ToolCallOutput::success(json!({ "claim": "done" })),
             duration_ms: 22,
+            graph_key: None,
+            parent_call_id: None,
         },
         8 => TurnEvent::ToolCallCompleted {
             call_id: Some(format!("process-{index}")),
@@ -371,6 +381,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
                 }
             ])),
             duration_ms: 2,
+            graph_key: None,
+            parent_call_id: None,
         },
         9 => TurnEvent::ToolCallCompleted {
             call_id: Some(format!("batch-{index}")),
@@ -388,6 +400,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
                 ]
             })),
             duration_ms: 10,
+            graph_key: None,
+            parent_call_id: None,
         },
         10 => TurnEvent::ToolCallCompleted {
             call_id: Some(format!("plan-{index}")),
@@ -400,6 +414,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
             }),
             output: ToolCallOutput::success(json!({ "ok": true })),
             duration_ms: 1,
+            graph_key: None,
+            parent_call_id: None,
         },
         11 => TurnEvent::RetryStatus {
             wait_seconds: 1,
@@ -418,6 +434,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
                 .into_done_output()
                 .expect("static failure output"),
             duration_ms: 4,
+            graph_key: None,
+            parent_call_id: None,
         },
     }
 }

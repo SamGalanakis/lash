@@ -112,6 +112,7 @@ mod tests {
                     prepared_payload: serde_json::json!({"context": "prepared"}),
                 },
             },
+            crate::RecoveryDisposition::Rerunnable,
             crate::ProcessProvenance::host(),
         );
         let invocation = RuntimeInvocation::effect(

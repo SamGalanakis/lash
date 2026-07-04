@@ -197,6 +197,10 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
 }</code></pre>
           </div>
           <div class="callout">
+            <strong>Tool and code events carry their containment.</strong>
+            <p><code>ToolCallStarted</code> and <code>ToolCallCompleted</code> carry an optional <code>graph_key</code> — the enclosing code block, matching <code>CodeBlockStarted.graph_key</code> — and an optional <code>parent_call_id</code>, the id of the parent <code>batch</code> call. Group rows from these fields directly instead of inferring containment from arrival order. Every <code>Option</code> field on <code>TurnEvent</code> is skip-when-<code>None</code>: an absent <code>graph_key</code>, <code>call_id</code>, or <code>error</code> is omitted from the serialized event rather than sent as <code>null</code>. The full channel map and stability contract live in <a href="./reporting.html">Reporting channels</a>.</p>
+          </div>
+          <div class="callout">
             <strong>Use event identity, not duplicate detection.</strong>
             <p>Same <code>correlation_id</code> → same logical row. <code>FinalValue</code> / <code>ToolValue</code> signal a control-path terminal; they are not emitted for normal prose finishes, since that prose already streamed as <code>AssistantProseDelta</code> and the settled message comes from the read view.</p>
           </div>

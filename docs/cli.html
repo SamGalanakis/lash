@@ -123,6 +123,7 @@
                 <dt><kbd>Enter</kbd></dt><dd>Open an overview of the focused process.</dd>
                 <dt><kbd>Delete</kbd></dt><dd>Cancel the focused process.</dd>
               </dl>
+              <p>A running process shows <code>running</code>; a terminal one shows its outcome — <code>success</code>, <code>error</code>, <code>cancelled</code>, or <code>abandoned</code>. <code>abandoned</code> (ADR 0019) means the owner was lost without recording an outcome and renders in the failure style, like <code>error</code>. A detached command (<code>shell.start</code> with <code>detach: true</code>) never appears in the dock: it returns immediately with <code>status: "detached"</code> and is owned by the host/OS, not tracked as a session process.</p>
             </article>
           </div>
         </div>
@@ -207,9 +208,12 @@
           <div class="section-header">
             <h2>Print Mode</h2>
             <p><code>lash --print "&lt;prompt&gt;"</code> runs Lash autonomously: it boots, executes the prompt, prints the settled <code>TurnFinish::AssistantMessage</code> prose to stdout, and exits. Print mode runs without a TUI; status and tool output go to stderr. An autonomous system prompt is injected so the assistant completes the task without asking for input.</p>
+            <p>Each completed tool call prints a one-line status marker to stderr: <code>[tool] &lt;name&gt; · &lt;status&gt; · &lt;duration&gt;</code>, where <code>status</code> is <code>ok</code>, <code>error</code>, or <code>cancelled</code> and the duration is dropped when it is negligible. The <code>&lt;name&gt;</code> is the runtime tool name (<code>exec_command</code>, not the <code>shell.exec</code> surface path); see <a href="./reporting.html#tool-names">Reporting channels → Tool names</a>.</p>
           </div>
           <pre data-lang="console"><code>$ lash --print "Summarise this branch's changes in two bullets."
-# Assistant prose to stdout, tool/lifecycle logs to stderr.
+# Assistant prose to stdout, tool/lifecycle logs to stderr:
+#   [tool] exec_command · ok · 41ms
+#   [tool] read_file · ok
 
 $ lash --print "Investigate the latest test failure." \
        --await-background-work \
@@ -219,13 +223,15 @@ $ lash --print "Investigate the latest test failure." \
         <div class="section" id="json-and-rpc-modes">
           <div class="section-header">
             <h2>JSON &amp; RPC Modes</h2>
-            <p><code>--mode json</code> and <code>--mode rpc</code> are machine-facing CLI surfaces. They do not enter the TUI and they reserve stdout for LF-delimited JSON records.</p>
+            <p><code>--mode json</code> and <code>--mode rpc</code> are machine-facing CLI surfaces. They do not enter the TUI and they reserve stdout for LF-delimited JSON records. The stream is versioned: the opening <code>turn_start</code> record (and the RPC <code>ready</code> record) carries <code>protocol_version: 1</code>, so a consumer can pin the wire shape before parsing the rest.</p>
           </div>
           <pre data-lang="console"><code>$ lash --mode json --print "Summarise this repository."
-{"type":"turn_start","stream_id":1}
-{"type":"event","stream_id":1,"activity":{"id":"...","correlation_id":"...","type":"model_request_started","protocol_iteration":0}}
-{"type":"turn_finish","stream_id":1,"ok":true,"cancelled":false,"assistant_text":"...","outcome":{...},"usage":{...},"children_usage":[],"errors":[],"execution":{...},"tool_calls":[]}</code></pre>
-          <p>RPC mode starts a reusable session and reads one JSON object per line from stdin. Supported methods are <code>prompt</code>, <code>ping</code>, and <code>shutdown</code>. A <code>prompt</code> request streams <code>turn_start</code>, <code>event</code>, and <code>turn_finish</code> records tagged with the request <code>id</code>, then writes a final <code>response</code>.</p>
+{"type":"turn_start","protocol_version":1,"stream_id":1}
+{"type":"event","stream_id":1,"activity":{"id":"a1","correlation_id":"c1","type":"model_request_started","protocol_iteration":0}}
+{"type":"event","stream_id":1,"activity":{"id":"a2","correlation_id":"call-3","type":"tool_call_completed","call_id":"call-3","name":"exec_command","args":{"...":"..."},"output":{"...":"..."},"duration_ms":41}}
+{"type":"turn_finish","stream_id":1,"ok":true,"cancelled":false,"assistant_text":"...","outcome":{...},"usage":{...},"children_usage":[],"errors":[],"execution":{...},"tool_calls":[...]}</code></pre>
+          <p>Each <code>event</code> wraps one <code>TurnActivity</code>: an <code>id</code>, a <code>correlation_id</code>, and a flattened <code>TurnEvent</code> tagged by <code>type</code>. Tool events report the runtime tool name (<code>exec_command</code>), not the <code>shell.exec</code> surface path; for the full event vocabulary and stability contract see <a href="./reporting.html">Reporting channels</a>.</p>
+          <p>RPC mode starts a reusable session and reads one JSON object per line from stdin. It opens with a <code>ready</code> record (<code>{"type":"ready","protocol_version":1,"protocol":"lash.rpc.v1","methods":["prompt","ping","shutdown"]}</code>). A <code>prompt</code> request streams <code>turn_start</code>, <code>event</code>, and <code>turn_finish</code> records tagged with the request <code>id</code>, then writes a final <code>response</code>.</p>
           <pre data-lang="json"><code>{"id":1,"method":"prompt","params":{"prompt":"List the top-level crates."}}
 {"id":2,"method":"shutdown"}</code></pre>
         </div>

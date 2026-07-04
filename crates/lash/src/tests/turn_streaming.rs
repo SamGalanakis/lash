@@ -1627,6 +1627,8 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
                 args: serde_json::json!({}),
                 output: lash_core::ToolCallOutput::success(serde_json::json!({ "ok": true })),
                 duration_ms: 3,
+                graph_key: None,
+                parent_call_id: None,
             },
         ))
         .await;
@@ -1776,6 +1778,86 @@ async fn turn_run_batch_tool_runs_parallel_bucket_then_serial_and_preserves_orde
             serial_window,
             parallel_start,
             parallel_end
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn batch_child_tool_calls_carry_parent_call_id_linkage() -> Result<()> {
+    let tools = Arc::new(RuntimeBatchTools::new());
+    let tool_provider: Arc<dyn ToolProvider> = tools.clone();
+    let core = explicit_ephemeral_facets(LashCore::standard_builder())
+        .provider(runtime_batch_provider())
+        .model(mock_model_spec())
+        .tools(tool_provider)
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    let session = core.session("batch-child-parent-linkage").open().await?;
+
+    let output = session.turn(TurnInput::text("run batch")).run().await?;
+
+    // The batch container call itself is a top-level standard-mode call: no
+    // parent linkage and no code-block graph key.
+    let (batch_call_id, batch_parent, batch_graph_key) = output
+        .activities
+        .iter()
+        .find_map(|activity| match &activity.event {
+            TurnEvent::ToolCallStarted {
+                name,
+                call_id,
+                parent_call_id,
+                graph_key,
+                ..
+            } if name == "runtime_batch" => {
+                Some((call_id.clone(), parent_call_id.clone(), graph_key.clone()))
+            }
+            _ => None,
+        })
+        .expect("batch container ToolCallStarted");
+    assert_eq!(
+        batch_parent, None,
+        "batch container must not carry a parent"
+    );
+    assert_eq!(batch_graph_key, None, "standard-mode call has no graph key");
+    let batch_call_id = batch_call_id.expect("batch container call id");
+
+    // Each batch child is delivered as its own tool event pointing back at the
+    // batch call, so consumers reconstruct containment from real events.
+    let child_parents = output
+        .activities
+        .iter()
+        .filter_map(|activity| match &activity.event {
+            TurnEvent::ToolCallCompleted {
+                name,
+                parent_call_id,
+                graph_key,
+                ..
+            } if matches!(name.as_str(), "par_a" | "par_b" | "ser") => {
+                Some((name.clone(), parent_call_id.clone(), graph_key.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let child_names = child_parents
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        child_names,
+        BTreeSet::from(["par_a".to_string(), "par_b".to_string(), "ser".to_string()]),
+        "every batch child must surface as its own tool event"
+    );
+    for (name, parent, graph_key) in &child_parents {
+        assert_eq!(
+            parent.as_deref(),
+            Some(batch_call_id.as_str()),
+            "batch child {name} must link to the batch call"
+        );
+        assert_eq!(
+            graph_key, &None,
+            "standard-mode batch child {name} has no code-block graph key"
         );
     }
     Ok(())
@@ -2109,7 +2191,11 @@ finish "done""#,
     )));
 
     let TurnEvent::ToolCallCompleted {
-        call_id, output, ..
+        call_id,
+        output,
+        graph_key: tool_completed_graph_key,
+        parent_call_id: tool_completed_parent,
+        ..
     } = &events[tool_completed].event
     else {
         unreachable!();
@@ -2148,6 +2234,20 @@ finish "done""#,
     assert_eq!(call_id.as_ref(), tool_call_ids.first());
     assert_eq!(tool_call_ids.len(), 1);
     assert_eq!(completed_graph_key, started_graph_key);
+    // Task 4: the RLM tool call carries the enclosing block's graph_key for
+    // structural containment, and no batch parent for a top-level call.
+    let TurnEvent::ToolCallStarted {
+        graph_key: tool_started_graph_key,
+        parent_call_id: tool_started_parent,
+        ..
+    } = &events[tool_started].event
+    else {
+        unreachable!();
+    };
+    assert_eq!(tool_started_graph_key, started_graph_key);
+    assert_eq!(tool_completed_graph_key, started_graph_key);
+    assert_eq!(tool_started_parent, &None);
+    assert_eq!(tool_completed_parent, &None);
     let read_view = result.state.read_view();
     assert!(
         read_view.messages().iter().all(|message| message
@@ -2170,6 +2270,194 @@ finish "done""#,
         unreachable!();
     };
     assert_eq!(value, &serde_json::json!("done"));
+    Ok(())
+}
+
+#[test]
+fn rlm_code_block_aggregate_lists_every_collected_tool_call() -> Result<()> {
+    run_async_test_on_stack_budget("rlm-aggregate-tool-ids-test", || {
+        rlm_code_block_aggregate_lists_every_collected_tool_call_inner()
+    })
+}
+
+async fn rlm_code_block_aggregate_lists_every_collected_tool_call_inner() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::rlm_builder(rlm_factory()))
+        .provider(queued_text_provider(vec![lashlang_block(
+            r#"a = await tools.app_lookup({})?
+b = await tools.app_lookup({})?
+finish "done""#,
+        )]))
+        .model(mock_model_spec())
+        .tools(Arc::new(AppTools))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    let session = core.session("rlm-aggregate-tool-ids").open().await?;
+    let events = Arc::new(RecordingEvents::default());
+
+    let result = session
+        .turn(TurnInput::text("use tools"))
+        .stream_to(events.as_ref())
+        .await?;
+    assert!(matches!(
+        result.outcome,
+        TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
+    ));
+    let events = events.snapshot().await;
+
+    // Every collected RLM tool record carries a call_id, so the code block's
+    // `tool_call_ids` aggregate (which filters `Some(call_id)`) can never drop
+    // a call and disagree with the trace's `tool_call_count`
+    // (`output.tool_calls.len()`).
+    let completed_ids = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            TurnEvent::ToolCallCompleted { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed_ids.len(), 2, "expected two tool completions");
+    assert!(
+        completed_ids.iter().all(Option::is_some),
+        "every collected RLM tool record must carry a call_id"
+    );
+
+    let tool_call_ids = events
+        .iter()
+        .find_map(|event| match &event.event {
+            TurnEvent::CodeBlockCompleted { tool_call_ids, .. } => Some(tool_call_ids.clone()),
+            _ => None,
+        })
+        .expect("code block completed");
+    assert_eq!(tool_call_ids.len(), completed_ids.len());
+    for call_id in completed_ids.into_iter().flatten() {
+        assert!(
+            tool_call_ids.contains(&call_id),
+            "code block aggregate must list collected tool call {call_id}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rlm_tool_calls_emit_typed_trace_pair_and_structured_exec_diagnostic() -> Result<()> {
+    run_async_test_on_stack_budget("rlm-tool-trace-test", || {
+        rlm_tool_calls_emit_typed_trace_pair_and_structured_exec_diagnostic_inner()
+    })
+}
+
+async fn rlm_tool_calls_emit_typed_trace_pair_and_structured_exec_diagnostic_inner() -> Result<()> {
+    let trace_path = std::env::temp_dir().join(format!(
+        "lash-rlm-tool-trace-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let core = explicit_ephemeral_facets(LashCore::rlm_builder(rlm_factory()))
+        .provider(queued_text_provider(vec![lashlang_block(
+            r#"value = await tools.app_lookup({})?
+finish "done""#,
+        )]))
+        .model(mock_model_spec())
+        .tools(Arc::new(AppTools))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .trace_jsonl_path(trace_path.clone())
+        .build()?;
+    let session = core.session("rlm-tool-trace").open().await?;
+
+    let result = session.turn(TurnInput::text("use tool")).run().await?;
+    assert!(matches!(
+        result.result.outcome,
+        TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
+    ));
+    core.flush_trace_sink()?;
+
+    let logged = std::fs::read_to_string(&trace_path).expect("read trace");
+    let entries = logged
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json log entry"))
+        .collect::<Vec<_>>();
+
+    // Task 1: RLM tool calls emit a single typed Started/Completed trace pair,
+    // with span identity stamped so each nests under its turn as tool:<call_id>.
+    let started = entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("tool_call_started"))
+        .collect::<Vec<_>>();
+    let completed = entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("tool_call_completed"))
+        .collect::<Vec<_>>();
+    assert_eq!(started.len(), 1, "expected one RLM tool start: {entries:?}");
+    assert_eq!(
+        completed.len(),
+        1,
+        "expected one RLM tool completion: {entries:?}"
+    );
+    let call_id = completed[0]
+        .get("call_id")
+        .and_then(|v| v.as_str())
+        .expect("completed tool trace call id");
+    assert_eq!(
+        completed[0].get("name").and_then(|v| v.as_str()),
+        Some("app_lookup")
+    );
+    assert_eq!(
+        completed[0]
+            .get("context")
+            .and_then(|context| context.get("graph_node_id"))
+            .and_then(|v| v.as_str()),
+        Some(format!("tool:{call_id}").as_str()),
+        "RLM tool span identity must be tool:<call_id>"
+    );
+
+    // Task 2: the exec_code_completed runtime diagnostic carries a structured
+    // tool_calls array whose length matches tool_call_count.
+    let exec_completed = entries
+        .iter()
+        .find(|entry| {
+            entry.get("type").and_then(|v| v.as_str()) == Some("protocol_step")
+                && entry
+                    .get("payload")
+                    .and_then(|payload| payload.get("diagnostic"))
+                    .and_then(|diagnostic| diagnostic.get("phase"))
+                    .and_then(|v| v.as_str())
+                    == Some("exec_code_completed")
+        })
+        .expect("exec_code_completed diagnostic");
+    let diagnostic_payload = exec_completed
+        .get("payload")
+        .and_then(|payload| payload.get("diagnostic"))
+        .and_then(|diagnostic| diagnostic.get("payload"))
+        .expect("diagnostic payload");
+    let tool_calls = diagnostic_payload
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .expect("structured tool_calls array");
+    let tool_call_count = diagnostic_payload
+        .get("tool_call_count")
+        .and_then(|v| v.as_u64())
+        .expect("tool_call_count");
+    assert_eq!(tool_calls.len() as u64, tool_call_count);
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(
+        tool_calls[0].get("call_id").and_then(|v| v.as_str()),
+        Some(call_id)
+    );
+    assert_eq!(
+        tool_calls[0].get("name").and_then(|v| v.as_str()),
+        Some("app_lookup")
+    );
+    assert_eq!(
+        tool_calls[0].get("status").and_then(|v| v.as_str()),
+        Some("success")
+    );
+    assert!(tool_calls[0].get("duration_ms").is_some());
+
+    let _ = std::fs::remove_file(&trace_path);
     Ok(())
 }
 
@@ -2503,9 +2791,7 @@ finish value"#,
 
     let processes = session.processes().list().await?;
     let running_app_lookup = processes.iter().any(|process| {
-        process.descriptor.kind.as_deref() == Some("lashlang")
-            && process.descriptor.label.as_deref() == Some("lookup")
-            && !process.status.is_terminal()
+        process.kind == "lashlang" && process.label == "lookup" && !process.terminal
     });
     assert!(
         running_app_lookup,
@@ -2575,7 +2861,7 @@ finish value"#,
     let processes = session.processes().list().await?;
     let running = processes
         .iter()
-        .find(|process| process.descriptor.label.as_deref() == Some("lookup"))
+        .find(|process| process.label == "lookup")
         .expect("running lookup process");
     let graph = graph_store
         .graph(&format!("process:{}", running.process_id))

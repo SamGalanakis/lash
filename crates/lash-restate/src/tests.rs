@@ -173,6 +173,29 @@ fn external_registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
+        lash_core::RecoveryDisposition::ExternallyOwned,
+        lash_core::ProcessProvenance::host(),
+    )
+}
+
+fn rerunnable_registration(id: &str) -> ProcessRegistration {
+    ProcessRegistration::new(
+        id,
+        ProcessInput::External {
+            metadata: serde_json::Value::Null,
+        },
+        lash_core::RecoveryDisposition::Rerunnable,
+        lash_core::ProcessProvenance::host(),
+    )
+}
+
+fn owner_bound_registration(id: &str) -> ProcessRegistration {
+    ProcessRegistration::new(
+        id,
+        ProcessInput::External {
+            metadata: serde_json::Value::Null,
+        },
+        lash_core::RecoveryDisposition::OwnerBound,
         lash_core::ProcessProvenance::host(),
     )
 }
@@ -1956,6 +1979,7 @@ async fn restate_controller_schedules_lashlang_process_with_serializable_input()
             process_name: "scan".to_string(),
             args: args.clone(),
         }),
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessProvenance::session(lash_core::SessionScope::new("session")),
     )
     .with_extra_event_types(lash_lashlang_runtime::lashlang_process_event_types())
@@ -2735,6 +2759,7 @@ async fn snapshot_lashlang_registration(
             process_name: "main".to_string(),
             args: serde_json::Map::new(),
         }),
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessProvenance::host(),
     )
     .with_extra_event_types(lash_lashlang_runtime::lashlang_process_event_types())
@@ -2788,6 +2813,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                 serde_json::Value::Null,
             ),
         },
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessProvenance::session(creator_scope.clone()),
     )
     .with_extra_event_types([process_wake_event_type()])
@@ -3036,6 +3062,7 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
             process_name: "notify".to_string(),
             args,
         }),
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessProvenance::session(lash_core::SessionScope::new("root")).with_caused_by(
             Some(lash_core::CausalRef::SessionNode {
                 session_id: "root".to_string(),
@@ -3178,6 +3205,239 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
             value: serde_json::json!({ "triggered": "issue-42" }),
             control: None,
         }
+    );
+}
+
+/// A process tool that counts executions in a shared atomic. Its execution is
+/// the observable side effect the crash-recovery e2e keys off: a started
+/// OwnerBound row that is (correctly) NOT re-run leaves the counter untouched,
+/// while a Rerunnable sibling that IS re-run bumps it exactly once.
+struct CountingProcessTool {
+    executions: Arc<AtomicUsize>,
+}
+
+impl CountingProcessTool {
+    fn definition() -> lash_core::ToolDefinition {
+        lash_core::ToolDefinition::raw(
+            "tool:recovery_count",
+            "recovery_count",
+            "Increment a shared execution counter (a stand-in non-idempotent side effect).",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "line": { "type": "string" } },
+                "required": ["line"],
+                "additionalProperties": false
+            }),
+            serde_json::json!({ "type": "object" }),
+        )
+        .with_lashlang_binding(LashlangToolBinding::new(["tools"], "recovery_count"))
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::ToolProvider for CountingProcessTool {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![Self::definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "recovery_count").then(|| Arc::new(Self::definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        let executed = self.executions.fetch_add(1, Ordering::SeqCst) + 1;
+        let line = call
+            .args
+            .get("line")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        lash_core::ToolResult::ok(serde_json::json!({ "executed": executed, "line": line }))
+    }
+}
+
+fn counting_tool_plugin(executions: Arc<AtomicUsize>) -> Arc<dyn lash_core::PluginFactory> {
+    Arc::new(lash_core::plugin::StaticPluginFactory::new(
+        "counting-process-tool",
+        lash_core::PluginSpec::new()
+            .with_tool_provider(Arc::new(CountingProcessTool { executions })),
+    ))
+}
+
+/// A recovery worker whose lease owner is a real same-host/same-boot local
+/// process (not the default opaque owner) so `is_definitely_dead_for_claimant`
+/// can render a provably-dead verdict against a fabricated dead holder.
+fn recovery_worker_local_owner(
+    registry: Arc<dyn ProcessRegistry>,
+    store_factory: Arc<dyn lash_core::SessionStoreFactory>,
+    owner: lash_core::LeaseOwnerIdentity,
+    extra_plugins: Vec<Arc<dyn lash_core::PluginFactory>>,
+) -> DurableProcessWorker {
+    let base = recovery_worker_with_plugins(registry, store_factory, extra_plugins);
+    DurableProcessWorker::from_shared_config(Arc::new(
+        base.config().clone().with_lease_owner(owner),
+    ))
+}
+
+/// A same-host/same-boot local-process lease owner. When `process_start` does
+/// not match this live process's real start time, the holder is provably dead
+/// for a claimant fabricated the same way — exactly the recovery-sweep death
+/// evidence path (`process_worker::recovery_tests`).
+fn local_process_owner(owner_id: &str, process_start: &str) -> lash_core::LeaseOwnerIdentity {
+    lash_core::LeaseOwnerIdentity {
+        owner_id: owner_id.to_string(),
+        incarnation_id: format!("{owner_id}:incarnation"),
+        liveness: lash_core::LeaseOwnerLiveness::local_process_for_test(
+            "restate-recovery-host",
+            "restate-recovery-boot",
+            std::process::id(),
+            process_start,
+        ),
+    }
+}
+
+fn counting_tool_registration(
+    id: &str,
+    disposition: lash_core::RecoveryDisposition,
+    env_ref: lash_core::ProcessExecutionEnvRef,
+) -> ProcessRegistration {
+    ProcessRegistration::new(
+        id,
+        ProcessInput::ToolCall {
+            call: lash_core::PreparedToolCall::from_parts(
+                format!("{id}-call"),
+                "tool:recovery_count",
+                "recovery_count",
+                serde_json::json!({ "line": id }),
+                None,
+                serde_json::Value::Null,
+            ),
+        },
+        disposition,
+        lash_core::ProcessProvenance::host(),
+    )
+    .with_execution_env_ref(Some(env_ref))
+}
+
+/// The Harbor reproducer at the process layer, over a REOPENED sqlite registry
+/// (ADR 0019): a host crashed mid-flight leaving a started OwnerBound row whose
+/// holder is provably dead. A fresh worker's recovery sweep must terminalize it
+/// `Abandoned{Sweep}` — never re-execute it (double side effects) — while a
+/// Rerunnable sibling in the same sweep IS re-run. The shared execution counter
+/// proves exactly one execution happened: the Rerunnable one.
+#[tokio::test]
+async fn sqlite_sweep_abandons_started_owner_bound_without_rerunning_but_reruns_sibling() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let process_db = temp.path().join("processes.db");
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        temp.path().join("sessions"),
+    )) as Arc<dyn lash_core::SessionStoreFactory>;
+    let env_ref = persist_recovery_env_ref().await;
+
+    // The crashed host: it started an OwnerBound row and a Rerunnable row, then
+    // died. We register that mid-flight state directly on the durable registry.
+    let registry_a = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+            .await
+            .expect("open registry"),
+    ) as Arc<dyn ProcessRegistry>;
+    let dead_holder = local_process_owner("crashed-host", "before-the-crash");
+    registry_a
+        .register_process(counting_tool_registration(
+            "ob-crashed",
+            lash_core::RecoveryDisposition::OwnerBound,
+            env_ref.clone(),
+        ))
+        .await
+        .expect("register OwnerBound crashed row");
+    registry_a
+        .record_first_started(
+            "ob-crashed",
+            lash_core::ProcessStarted {
+                owner: dead_holder.clone(),
+                started_at_ms: 1,
+            },
+        )
+        .await
+        .expect("record OwnerBound first_started");
+    registry_a
+        .claim_process_lease("ob-crashed", &dead_holder, 60_000)
+        .await
+        .expect("dead holder claims OwnerBound lease")
+        .acquired()
+        .expect("dead holder lease acquired");
+    // A Rerunnable sibling the same crashed host had started (no live lease held).
+    registry_a
+        .register_process(counting_tool_registration(
+            "rerun-crashed",
+            lash_core::RecoveryDisposition::Rerunnable,
+            env_ref.clone(),
+        ))
+        .await
+        .expect("register Rerunnable crashed row");
+    registry_a
+        .record_first_started(
+            "rerun-crashed",
+            lash_core::ProcessStarted {
+                owner: dead_holder.clone(),
+                started_at_ms: 1,
+            },
+        )
+        .await
+        .expect("record Rerunnable first_started");
+    drop(registry_a);
+
+    // The recovery counterpart: reopen the registry, stand up a fresh worker
+    // whose lease owner can render the provably-dead verdict, and sweep.
+    let registry_b = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+            .await
+            .expect("reopen registry"),
+    ) as Arc<dyn ProcessRegistry>;
+    let executions = Arc::new(AtomicUsize::new(0));
+    let worker = recovery_worker_local_owner(
+        Arc::clone(&registry_b),
+        Arc::clone(&store_factory),
+        local_process_owner("recovery-host", "recovery-claimant"),
+        vec![counting_tool_plugin(Arc::clone(&executions))],
+    );
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("recovery sweep dispatches");
+
+    // The OwnerBound crashed row reaches Abandoned{Sweep}, naming the dead holder
+    // — never a run terminal.
+    let ob_output = lash_core::ProcessAwaiter::polling(Arc::clone(&registry_b))
+        .await_terminal("ob-crashed")
+        .await
+        .expect("OwnerBound crashed row reaches terminal");
+    let ProcessAwaitOutput::Abandoned { evidence, .. } = &ob_output else {
+        panic!("expected Abandoned terminal for the started OwnerBound row, got {ob_output:?}");
+    };
+    assert_eq!(evidence.writer, AbandonWriter::Sweep);
+    assert_eq!(
+        evidence.owner.as_ref().map(|owner| owner.owner_id.as_str()),
+        Some("crashed-host"),
+        "the sweep names the provably-dead holder as the abandoned owner"
+    );
+
+    // The Rerunnable sibling IS re-run to a run terminal in the same sweep.
+    let rerun_output = lash_core::ProcessAwaiter::polling(Arc::clone(&registry_b))
+        .await_terminal("rerun-crashed")
+        .await
+        .expect("Rerunnable crashed row reaches terminal");
+    assert!(
+        matches!(rerun_output, ProcessAwaitOutput::Success { .. }),
+        "the Rerunnable sibling is re-run to a run terminal, got {rerun_output:?}"
+    );
+
+    // The counter is the execution journal: exactly one execution happened — the
+    // Rerunnable one. The started OwnerBound row's non-idempotent side effect was
+    // NEVER repeated.
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        1,
+        "exactly one execution: the Rerunnable sibling; the abandoned OwnerBound row was never re-run"
     );
 }
 
@@ -3408,15 +3668,122 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
 }
 
 #[tokio::test]
+async fn run_registration_abandons_restarted_owner_bound_without_running() {
+    // ADR 0019: when the engine re-invokes the workflow for an OwnerBound row
+    // whose prior incarnation already recorded `first_started` but left no
+    // outcome, the run handler must NOT re-execute it. It completes the row as
+    // Abandoned{Sweep} — the durable tier's crash-recovery verdict — and returns
+    // that output so the durable promise still resolves for awaiters.
+    let runner = Arc::new(RecordingRunner::default());
+    let registry = process_registry();
+    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let registration = owner_bound_registration("ob-restart");
+    registry
+        .register_process(registration.clone())
+        .await
+        .expect("register owner-bound process");
+    // Simulate the prior incarnation that began executing but never completed.
+    let started_owner = lash_core::LeaseOwnerIdentity::opaque("owner-a", "incarnation-1");
+    registry
+        .record_first_started(
+            "ob-restart",
+            lash_core::ProcessStarted {
+                owner: started_owner.clone(),
+                started_at_ms: 42,
+            },
+        )
+        .await
+        .expect("record prior incarnation start");
+
+    let output = workflow
+        .run_registration(
+            registration,
+            ProcessExecutionContext::default(),
+            lash_core::ScopedEffectController::shared(
+                Arc::new(lash_core::InlineRuntimeEffectController),
+                lash_core::ExecutionScope::process("ob-restart"),
+            )
+            .expect("inline process scope"),
+        )
+        .await
+        .expect("run_registration");
+
+    // The runner is never invoked: re-execution of a started OwnerBound row is
+    // refused.
+    assert!(
+        runner.ran.lock().expect("runner ran lock").is_empty(),
+        "a restarted OwnerBound row must not be re-executed"
+    );
+    // Both the returned output and the persisted terminal are Abandoned{Sweep},
+    // naming the incarnation that began the work as the evidence owner.
+    let ProcessAwaitOutput::Abandoned { evidence, .. } = &output else {
+        panic!("expected Abandoned output, got {output:?}");
+    };
+    assert_eq!(evidence.writer, AbandonWriter::Sweep);
+    assert_eq!(evidence.owner.as_ref(), Some(&started_owner));
+    let record = registry
+        .get_process("ob-restart")
+        .await
+        .expect("get abandoned row");
+    assert!(record.is_terminal(), "the row is completed as terminal");
+    assert!(matches!(
+        record.status.await_output(),
+        Some(ProcessAwaitOutput::Abandoned { .. })
+    ));
+}
+
+#[tokio::test]
+async fn run_registration_runs_fresh_owner_bound() {
+    // A fresh OwnerBound row has no `first_started` (the runner records it inside
+    // run_process, during execution), so the re-invocation guard must NOT fire:
+    // the runner executes normally on the first invocation.
+    let runner = Arc::new(RecordingRunner::default());
+    let registry = process_registry();
+    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let registration = owner_bound_registration("ob-fresh");
+    registry
+        .register_process(registration.clone())
+        .await
+        .expect("register fresh owner-bound process");
+
+    let output = workflow
+        .run_registration(
+            registration,
+            ProcessExecutionContext::default(),
+            lash_core::ScopedEffectController::shared(
+                Arc::new(lash_core::InlineRuntimeEffectController),
+                lash_core::ExecutionScope::process("ob-fresh"),
+            )
+            .expect("inline process scope"),
+        )
+        .await
+        .expect("run_registration");
+
+    assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
+    assert_eq!(
+        runner
+            .ran
+            .lock()
+            .expect("runner ran lock")
+            .iter()
+            .map(|run| run.process_id.clone())
+            .collect::<Vec<_>>(),
+        vec!["ob-fresh".to_string()],
+        "a fresh OwnerBound row runs through the runner on first invocation"
+    );
+}
+
+#[tokio::test]
 async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    // A non-terminal process is the durable worklist row the ingress runner
-    // must submit.
+    // A non-terminal, Lash-executed (Rerunnable) process is the durable
+    // worklist row the ingress runner must submit. ExternallyOwned rows are
+    // never submitted (ADR 0019), so the submittable case uses a Rerunnable row.
     let registry = process_registry();
     registry
-        .register_process(external_registration("task-1"))
+        .register_process(rerunnable_registration("task-1"))
         .await
         .expect("register");
 
@@ -3490,6 +3857,98 @@ async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
             .and_then(|external| external.metadata.as_ref())
             .and_then(|metadata| metadata.get("invocation_id")),
         Some(&serde_json::json!("inv_task_1"))
+    );
+}
+
+#[tokio::test]
+async fn ingress_sweep_skips_externally_owned_and_reconciles_abandon_request() {
+    // ADR 0019 at the Restate tier: the ingress sweep never POSTs a run for an
+    // ExternallyOwned row (Lash does not execute it), but it does reconcile such
+    // a row's pending Abandon Request into an `Abandoned{ReconciledRequest}`
+    // terminal — mirroring the core sweep's `reconcile_externally_owned_abandon`.
+    // A Rerunnable row alongside them still submits, so exactly one ingress call
+    // fires and it is for the Lash-executed row.
+    let registry = process_registry();
+    registry
+        .register_process(external_registration("ext-abandon"))
+        .await
+        .expect("register externally-owned row with pending abandon");
+    registry
+        .request_process_abandon(
+            "ext-abandon",
+            lash_core::AbandonRequest {
+                requested_by: "operator".to_string(),
+                requested_at_ms: 111,
+                reason: Some("host retired".to_string()),
+            },
+        )
+        .await
+        .expect("record abandon request");
+    registry
+        .register_process(external_registration("ext-idle"))
+        .await
+        .expect("register externally-owned row without abandon");
+    registry
+        .register_process(rerunnable_registration("rerun-1"))
+        .await
+        .expect("register rerunnable row");
+
+    // The capture server accepts exactly one connection: if any ExternallyOwned
+    // row were submitted, a second connect would be attempted and the extra
+    // submit would fail, so the single-response server also proves they are not.
+    let (base_url, captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "202 Accepted",
+        body: r#"{"invocationId":"inv_rerun_1","status":"Accepted"}"#,
+    }])
+    .await;
+    let runner = RestateProcessIngressRunner::new(base_url, Arc::clone(&registry));
+    runner
+        .claim_and_run_pending()
+        .await
+        .expect("sweep skips externally-owned rows and submits the rerunnable one");
+    server.await.expect("mock ingress server task");
+
+    let requests = captured.lock().expect("captured lock").clone();
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the Rerunnable row is submitted; ExternallyOwned rows are never POSTed"
+    );
+    assert!(
+        requests[0].starts_with("POST /LashProcessWorkflow/rerun-1/run/send "),
+        "the single submit is the Lash-executed row: {}",
+        requests[0]
+    );
+
+    // The abandon-request externally-owned row is now terminal Abandoned, written
+    // by the reconciled-request path with no Lash execution owner to name.
+    let abandoned = registry
+        .get_process("ext-abandon")
+        .await
+        .expect("get reconciled row");
+    assert!(
+        abandoned.is_terminal(),
+        "an externally-owned row with a pending abandon request is reconciled to terminal"
+    );
+    let Some(ProcessAwaitOutput::Abandoned { evidence, .. }) = abandoned.status.await_output()
+    else {
+        panic!("expected Abandoned terminal, got {:?}", abandoned.status);
+    };
+    assert_eq!(evidence.writer, AbandonWriter::ReconciledRequest);
+    assert!(
+        evidence.owner.is_none(),
+        "externally-owned work has no Lash execution owner to name"
+    );
+
+    // The externally-owned row without an abandon request is left untouched for
+    // its external owner to complete.
+    let idle = registry
+        .get_process("ext-idle")
+        .await
+        .expect("get idle externally-owned row");
+    assert!(
+        !idle.is_terminal(),
+        "an externally-owned row with no abandon request is left non-terminal"
     );
 }
 

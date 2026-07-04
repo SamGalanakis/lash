@@ -925,6 +925,9 @@ impl TriggerRouter {
         let registration = crate::ProcessRegistration::new(
             reservation.process_id.clone(),
             target.clone(),
+            // Trigger targets are journaled engine/tool rows, idempotent by
+            // process id, so recovery may re-execute them (ADR 0019).
+            crate::RecoveryDisposition::Rerunnable,
             crate::ProcessProvenance::new(subscription.registrant.clone())
                 .with_caused_by(trigger_occurrence_invocation.causal_ref()),
         )

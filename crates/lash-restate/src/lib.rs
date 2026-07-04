@@ -64,12 +64,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, DurabilityTier,
-    DurableProcessWorker, EffectHost, ExecutionScope, PluginError, ProcessAttach,
+    AbandonEvidence, AbandonWriter, AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity,
+    DurabilityTier, DurableProcessWorker, EffectHost, ExecutionScope, PluginError, ProcessAttach,
     ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome, ProcessEventSink,
     ProcessExecutionContext, ProcessExternalRef, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessRunHandle, ProcessWorkDriver, Resolution, ResolveOutcome,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    ProcessRegistry, ProcessRunHandle, ProcessWorkDriver, RecoveryDisposition, Resolution,
+    ResolveOutcome, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
     RuntimeError, RuntimeInvocation, ScopedEffectController, watch_process_registry_with_sink,
 };
@@ -107,6 +107,17 @@ fn restate_await_event_process_id(key: &AwaitEventKey) -> Option<&str> {
         ExecutionScope::Process { process_id } => Some(process_id.as_str()),
         _ => None,
     }
+}
+
+/// Wall-clock epoch milliseconds for terminal evidence written at the Restate
+/// tier (ADR 0019 recovery enforcement). The Restate boundary carries no
+/// injected Lash clock — its durability comes from the engine and workflow-key
+/// coalescing rather than a Lash lease — so it reads the system clock directly.
+fn restate_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Error raised when a caller asks a Restate boundary to cancel *every*
@@ -931,6 +942,14 @@ impl RestateProcessIngressRunner {
 
     async fn submit_record(&self, record: ProcessRecord) -> Result<(), PluginError> {
         let process_id = record.id.clone();
+        // ExternallyOwned rows are never executed by Lash (ADR 0019). Defensively
+        // refuse to POST a run for one even when reached directly, so both the
+        // sweep and any direct caller are safe; their closure comes from an
+        // external actor calling `complete_process` or a reconciled Abandon
+        // Request (see `claim_and_run_pending`).
+        if record.disposition == RecoveryDisposition::ExternallyOwned {
+            return Ok(());
+        }
         // The record may have reached a terminal state between the list and the submit.
         // Idempotent by process_id: never re-submit a finished process.
         if self
@@ -944,6 +963,7 @@ impl RestateProcessIngressRunner {
         let registration = ProcessRegistration {
             id: record.id,
             input: record.input,
+            disposition: record.disposition,
             identity: record.identity,
             event_types: record.event_types,
             provenance: record.provenance.clone(),
@@ -983,12 +1003,62 @@ impl RestateProcessIngressRunner {
             .await
             .map(|_| ())
     }
+
+    /// Reconcile a pending Abandon Request on an externally-owned row into an
+    /// `Abandoned{ReconciledRequest}` terminal, mirroring the core sweep's
+    /// `reconcile_externally_owned_abandon`.
+    ///
+    /// Lash never executed the row, so there is no execution owner to name
+    /// (`owner: None`). The Restate tier holds no Lash lease — workflow-key
+    /// coalescing is its single-writer discipline — so the terminal is written
+    /// directly after re-checking the row is still non-terminal (it may have
+    /// been completed between the worklist scan and here). The terminal write
+    /// bypasses the event sink as usual.
+    async fn reconcile_externally_owned_abandon(
+        &self,
+        process_id: &str,
+    ) -> Result<(), PluginError> {
+        if self
+            .registry
+            .get_process(process_id)
+            .await
+            .is_some_and(|current| current.is_terminal())
+        {
+            return Ok(());
+        }
+        self.registry
+            .complete_process(
+                process_id,
+                ProcessAwaitOutput::Abandoned {
+                    evidence: Box::new(AbandonEvidence {
+                        writer: AbandonWriter::ReconciledRequest,
+                        owner: None,
+                        epoch_ms: restate_now_ms(),
+                    }),
+                    control: None,
+                },
+            )
+            .await
+            .map(|_| ())
+    }
 }
 
 #[async_trait::async_trait]
 impl ProcessRunHandle for RestateProcessIngressRunner {
     async fn claim_and_run_pending(&self) -> Result<(), PluginError> {
         for record in self.registry.list_non_terminal().await? {
+            // ExternallyOwned rows are never submitted to ingress (ADR 0019):
+            // Lash does not execute them at the Restate tier either. A pending
+            // Abandon Request on such a row is reconciled into an Abandoned
+            // terminal here, mirroring the core sweep's
+            // `reconcile_externally_owned_abandon`; rows without a request are
+            // left untouched for their external owner to complete.
+            if record.disposition == RecoveryDisposition::ExternallyOwned {
+                if record.abandon_request.is_some() {
+                    self.reconcile_externally_owned_abandon(&record.id).await?;
+                }
+                continue;
+            }
             self.submit_record(record).await?;
         }
         Ok(())
@@ -1129,6 +1199,38 @@ where
         scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<ProcessAwaitOutput, PluginError> {
         let process_id = registration.id.clone();
+        // ADR 0019: refuse to re-execute an already-started OwnerBound row. A
+        // fresh OwnerBound row has `first_started == None` (the runner records
+        // it inside `run_process`, during execution), so this guard never fires
+        // on the first invocation — only when the engine re-invoked the workflow
+        // for a row whose prior incarnation began executing but recorded no
+        // outcome. Re-running would violate the OwnerBound contract (once started,
+        // no other owner may re-execute), so complete it as Abandoned instead and
+        // return that output; the normal `run` tail then resolves the durable
+        // promise so awaiters still unblock. Rerunnable rows are never affected.
+        if let Some(record) = self.registry.get_process(&process_id).await
+            && record.disposition == RecoveryDisposition::OwnerBound
+            && record.first_started.is_some()
+        {
+            // Writer attribution = Sweep: the Restate run handler is standing in
+            // as the crash-recovery sweep for the durable tier. The engine
+            // re-invoked a started OwnerBound row whose prior incarnation left no
+            // outcome — exactly the sweep's "OwnerBound + started + holder gone"
+            // verdict. The evidence owner is the incarnation that began the work
+            // (the recorded `first_started` owner).
+            let output = ProcessAwaitOutput::Abandoned {
+                evidence: Box::new(AbandonEvidence {
+                    writer: AbandonWriter::Sweep,
+                    owner: record.first_started.map(|started| started.owner.clone()),
+                    epoch_ms: restate_now_ms(),
+                }),
+                control: None,
+            };
+            self.registry
+                .complete_process(&process_id, output.clone())
+                .await?;
+            return Ok(output);
+        }
         let output = self
             .runner
             .run_process(registration, execution_context, scoped_effect_controller)
@@ -1809,7 +1911,9 @@ where
                 context,
             )
             .await?;
-            Ok(ProcessEffectOutcome::Start { record })
+            Ok(ProcessEffectOutcome::Start {
+                record: Box::new(record),
+            })
         }
         ProcessCommand::List {
             session_scope,
@@ -1871,7 +1975,9 @@ where
                 .map_err(|err| {
                     RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
                 })?;
-            Ok(ProcessEffectOutcome::Cancel { record })
+            Ok(ProcessEffectOutcome::Cancel {
+                record: Box::new(record),
+            })
         }
         ProcessCommand::Signal {
             process_id,
@@ -1899,7 +2005,7 @@ where
                     RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
                 })?;
             Ok(ProcessEffectOutcome::Signal {
-                event: result.event,
+                event: Box::new(result.event),
             })
         }
     }

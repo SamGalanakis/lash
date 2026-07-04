@@ -32,7 +32,7 @@
     </div>
     <aside class="contract">
       <strong>Contract</strong>
-      <p>Every top-level remote envelope carries <code>protocol_version</code>. Current code uses <code>REMOTE_PROTOCOL_VERSION == 6</code>; call <code>validate()</code> or <code>ensure_protocol_version(...)</code> before executing a received envelope.</p>
+      <p>Every top-level remote envelope carries <code>protocol_version</code>. Current code uses <code>REMOTE_PROTOCOL_VERSION == 7</code>; call <code>validate()</code> or <code>ensure_protocol_version(...)</code> before executing a received envelope.</p>
     </aside>
   </div>
 
@@ -86,14 +86,14 @@ let request = RemoteTurnRequest {
 };
 
 request.validate()?;</code></pre>
-    <p>Process starts use the same rule. The optional <code>env_spec</code> is a closed Lash DTO: plugin-owned options plus runtime policy. It is not a product metadata bag.</p>
+    <p>Process starts use the same rule. The optional <code>env_spec</code> is a closed Lash DTO: plugin-owned options plus runtime policy. It is not a product metadata bag. A start also carries a required <code>disposition</code> (<code>RemoteRecoveryDisposition</code>) — the declared recovery contract that mirrors <code>RecoveryDisposition</code> across the wire (ADR 0019). It has no wire default, so an envelope that omits it does not deserialize; an external placeholder like the one below declares <code>ExternallyOwned</code>.</p>
 <pre data-lang="rust" data-snippet="remote_protocol#remote-process-start-request"><code>use std::collections::BTreeMap;
 
 use lash::remote::REMOTE_PROTOCOL_VERSION;
 use lash::remote::processes::{
     RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy, RemoteProcessInput,
     RemoteProcessModelLimits, RemoteProcessModelSpec, RemoteProcessOriginator,
-    RemoteProcessPluginOptions, RemoteProcessStartRequest,
+    RemoteProcessPluginOptions, RemoteProcessStartRequest, RemoteRecoveryDisposition,
 };
 use serde_json::json;
 
@@ -103,6 +103,7 @@ let request = RemoteProcessStartRequest {
     input: RemoteProcessInput::External {
         metadata: json!({ "source": "scheduler" }),
     },
+    disposition: RemoteRecoveryDisposition::ExternallyOwned,
     env_spec: Some(RemoteProcessExecutionEnvSpec {
         plugin_options: RemoteProcessPluginOptions {
             plugins: BTreeMap::from([(
@@ -152,7 +153,7 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">activity stream</div>
-        <div class="listing__body"><p><code>RemoteTurnActivity</code> wraps semantic turn events with monotonically assigned per-stream <code>sequence</code>, event id, correlation id, and one flattened <code>RemoteTurnEvent</code>. It is still a turn convenience item, not the reconnect cursor. See <a href="./streaming.html#remote-boundaries">Streaming and reconnect</a> for NDJSON and SSE framing guidance.</p></div>
+        <div class="listing__body"><p><code>RemoteTurnActivity</code> wraps semantic turn events with monotonically assigned per-stream <code>sequence</code>, event id, correlation id, and one flattened <code>RemoteTurnEvent</code>. The wire enum is a deliberately narrower mirror of the in-process <code>TurnEvent</code>: four host-internal variants collapse into a single <code>RuntimeDiagnostic { kind, data }</code> so the versioned contract does not churn on every runtime-internal signal. It is still a turn convenience item, not the reconnect cursor. See <a href="./streaming.html#remote-boundaries">Streaming and reconnect</a> for NDJSON and SSE framing guidance, and <a href="./reporting.html">Reporting channels</a> for how the mirror relates to the other reporting surfaces.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">session observation</div>

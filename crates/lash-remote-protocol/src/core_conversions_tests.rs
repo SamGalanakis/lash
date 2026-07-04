@@ -348,6 +348,7 @@ fn process_start_requests_round_trip_core_values() {
     let lashlang = lash_core::ProcessStartRequest::new(
         "process:lashlang",
         engine_process_input("main", serde_json::json!({ "event": true })),
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessOriginator::session(lash_core::SessionScope::new("session-a")),
     )
     .with_env_spec(lash_core::ProcessExecutionEnvSpec::new(
@@ -383,6 +384,7 @@ fn process_start_requests_round_trip_core_values() {
                 Some(serde_json::json!({ "type": "object" })),
             ),
         },
+        lash_core::RecoveryDisposition::Rerunnable,
         lash_core::ProcessOriginator::host(),
     );
     assert_process_start_roundtrip(session_turn);
@@ -684,6 +686,8 @@ fn remote_activity_preserves_semantic_fields_and_collapses_runtime_diagnostics()
             args: serde_json::json!({ "a": 1 }),
             output,
             duration_ms: 42,
+            graph_key: None,
+            parent_call_id: None,
         },
     );
     let remote = RemoteTurnActivity::from_core(9, activity);
@@ -980,6 +984,7 @@ fn process_record(process_id: &str) -> lash_core::ProcessRecord {
         lash_core::ProcessInput::External {
             metadata: serde_json::json!({ "label": "External" }),
         },
+        lash_core::RecoveryDisposition::ExternallyOwned,
         lash_core::ProcessProvenance::host().with_caused_by(Some(
             lash_core::CausalRef::TriggerOccurrence {
                 occurrence_id: "trigger:1".to_string(),
@@ -1048,9 +1053,14 @@ fn observed_process() -> lash_core::ObservedProcess {
         lifecycle: lash_core::ProcessLifecycleStatus::Running,
         status_label: "running".to_string(),
         terminal: false,
+        disposition: lash_core::RecoveryDisposition::ExternallyOwned,
         error: None,
         created_at_ms: 1,
         updated_at_ms: 2,
+        first_started: None,
+        lease_holder: None,
+        lease_expires_at_ms: None,
+        abandon_request: None,
         input: lash_core::ProcessInput::External {
             metadata: serde_json::json!({ "label": "External" }),
         },

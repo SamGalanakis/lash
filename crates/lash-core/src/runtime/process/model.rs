@@ -125,6 +125,51 @@ impl ProcessInput {
     }
 }
 
+/// Producer-declared contract stating what recovery may do with a process row
+/// after owner loss. Required at registration and applied mechanically by the
+/// sweep; never inferred at runtime. See ADR 0019.
+///
+/// There is deliberately no `Default` and no serde default: a producer that
+/// forgets to declare a disposition must fail to compile rather than silently
+/// inherit re-execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryDisposition {
+    /// Another owner may re-execute the work — the contract for journaled,
+    /// idempotent inputs (engine rows, session-turn rows).
+    Rerunnable,
+    /// The contract binds at first start: before any owner has begun execution
+    /// any worker may claim the row; once execution has started, no other owner
+    /// may ever re-execute it — abandonment is the only recovery.
+    OwnerBound,
+    /// Lash never executes the row at all. Closure comes from an external actor
+    /// calling `complete_process`, or from a reconciled Abandon Request.
+    ExternallyOwned,
+}
+
+/// Durable "execution started" fact: which owner began executing the row and
+/// when. The runner writes it under its live lease immediately before executing
+/// so the sweep can distinguish an OwnerBound row that has started (never
+/// re-run) from one that has not (runnable by anyone). First-writer-wins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessStarted {
+    pub owner: crate::LeaseOwnerIdentity,
+    pub started_at_ms: u64,
+}
+
+/// Durable, non-terminal marker recording that a non-owner authorized
+/// abandonment without proof the owner is gone. The sweep reconciles it into
+/// [`ProcessTerminalState::Abandoned`](super::events::ProcessTerminalState::Abandoned)
+/// only once the row's lease has lapsed; the marker never terminates anything
+/// by itself and is visible to observers while pending. See ADR 0019.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbandonRequest {
+    pub requested_by: String,
+    pub requested_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProcessExecutionEnvRef(String);
@@ -397,6 +442,7 @@ impl ProcessStartOptions {
 pub struct ProcessStartRequest {
     pub id: ProcessId,
     pub input: ProcessInput,
+    pub disposition: RecoveryDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_spec: Option<ProcessExecutionEnvSpec>,
     pub originator: ProcessOriginator,
@@ -412,11 +458,13 @@ impl ProcessStartRequest {
     pub fn new(
         id: impl Into<ProcessId>,
         input: ProcessInput,
+        disposition: RecoveryDisposition,
         originator: ProcessOriginator,
     ) -> Self {
         Self {
             id: id.into(),
             input,
+            disposition,
             env_spec: None,
             originator,
             wake_target: None,
@@ -425,12 +473,19 @@ impl ProcessStartRequest {
         }
     }
 
+    /// External placeholder start: `ProcessInput::External` is always
+    /// [`RecoveryDisposition::ExternallyOwned`] — lash never executes it.
     pub fn external(
         id: impl Into<ProcessId>,
         originator: ProcessOriginator,
         metadata: serde_json::Value,
     ) -> Self {
-        Self::new(id, ProcessInput::External { metadata }, originator)
+        Self::new(
+            id,
+            ProcessInput::External { metadata },
+            RecoveryDisposition::ExternallyOwned,
+            originator,
+        )
     }
 
     pub fn with_env_spec(mut self, env_spec: ProcessExecutionEnvSpec) -> Self {
@@ -465,10 +520,15 @@ impl ProcessStartRequest {
     }
 
     pub fn into_registration(self, env_ref: Option<ProcessExecutionEnvRef>) -> ProcessRegistration {
-        ProcessRegistration::new(self.id, self.input, ProcessProvenance::new(self.originator))
-            .with_event_types(self.event_types)
-            .with_execution_env_ref(env_ref)
-            .with_wake_target(self.wake_target)
+        ProcessRegistration::new(
+            self.id,
+            self.input,
+            self.disposition,
+            ProcessProvenance::new(self.originator),
+        )
+        .with_event_types(self.event_types)
+        .with_execution_env_ref(env_ref)
+        .with_wake_target(self.wake_target)
     }
 }
 
@@ -569,6 +629,7 @@ impl SessionScope {
 pub struct ProcessRegistration {
     pub id: ProcessId,
     pub input: Arc<ProcessInput>,
+    pub disposition: RecoveryDisposition,
     pub identity: ProcessIdentity,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
@@ -584,6 +645,7 @@ impl Clone for ProcessRegistration {
         Self {
             id: self.id.clone(),
             input: Arc::clone(&self.input),
+            disposition: self.disposition,
             identity: self.identity.clone(),
             event_types: self.event_types.clone(),
             provenance: self.provenance.clone(),
@@ -597,12 +659,14 @@ impl ProcessRegistration {
     pub fn new(
         id: impl Into<ProcessId>,
         input: ProcessInput,
+        disposition: RecoveryDisposition,
         provenance: ProcessProvenance,
     ) -> Self {
         let identity = ProcessIdentity::from_process_input(&input);
         Self {
             id: id.into(),
             input: Arc::new(input),
+            disposition,
             identity,
             event_types: default_process_event_types(),
             provenance,
@@ -611,8 +675,12 @@ impl ProcessRegistration {
         }
     }
 
-    pub(crate) fn session_start_draft(id: impl Into<ProcessId>, input: ProcessInput) -> Self {
-        Self::new(id, input, ProcessProvenance::host())
+    pub(crate) fn session_start_draft(
+        id: impl Into<ProcessId>,
+        input: ProcessInput,
+        disposition: RecoveryDisposition,
+    ) -> Self {
+        Self::new(id, input, disposition, ProcessProvenance::host())
     }
 
     pub fn with_process_provenance(mut self, provenance: ProcessProvenance) -> Self {
@@ -666,6 +734,9 @@ pub enum ProcessStatus {
     Cancelled {
         await_output: ProcessAwaitOutput,
     },
+    Abandoned {
+        await_output: ProcessAwaitOutput,
+    },
 }
 
 impl ProcessStatus {
@@ -678,6 +749,9 @@ impl ProcessStatus {
                 await_output: terminal.await_output,
             },
             ProcessTerminalState::Cancelled => Self::Cancelled {
+                await_output: terminal.await_output,
+            },
+            ProcessTerminalState::Abandoned => Self::Abandoned {
                 await_output: terminal.await_output,
             },
         }
@@ -693,6 +767,7 @@ impl ProcessStatus {
             Self::Completed { .. } => "completed",
             Self::Failed { .. } => "failed",
             Self::Cancelled { .. } => "cancelled",
+            Self::Abandoned { .. } => "abandoned",
         }
     }
 
@@ -702,6 +777,7 @@ impl ProcessStatus {
             Self::Completed { .. } => Some(ProcessTerminalState::Completed),
             Self::Failed { .. } => Some(ProcessTerminalState::Failed),
             Self::Cancelled { .. } => Some(ProcessTerminalState::Cancelled),
+            Self::Abandoned { .. } => Some(ProcessTerminalState::Abandoned),
         }
     }
 
@@ -710,7 +786,8 @@ impl ProcessStatus {
             Self::Running => None,
             Self::Completed { await_output }
             | Self::Failed { await_output }
-            | Self::Cancelled { await_output } => Some(await_output),
+            | Self::Cancelled { await_output }
+            | Self::Abandoned { await_output } => Some(await_output),
         }
     }
 
@@ -729,6 +806,10 @@ pub struct ProcessRecord {
     pub id: ProcessId,
     pub registration_hash: String,
     pub input: Arc<ProcessInput>,
+    /// Declared recovery contract. Required with no serde default: pre-column
+    /// durable rows cannot deserialize and are handled by each store's schema
+    /// version bump (reject-and-recreate), never by an API/serde default.
+    pub disposition: RecoveryDisposition,
     pub identity: ProcessIdentity,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
@@ -743,6 +824,16 @@ pub struct ProcessRecord {
     pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<ProcessExternalRef>,
+    /// Durable, lease-fenced execution-started fact (ADR 0019). `None` until a
+    /// runner records it immediately before executing. Boxed so these
+    /// usually-absent facts do not enlarge the pervasive `ProcessRecord` that
+    /// flows through the runtime; serde treats `Option<Box<T>>` identically to
+    /// `Option<T>`, so the persisted JSON is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_started: Option<Box<ProcessStarted>>,
+    /// Pending Abandon Request the sweep reconciles once the lease lapses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandon_request: Option<Box<AbandonRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<WaitState>,
     #[serde(default)]
@@ -792,6 +883,7 @@ impl ProcessRecord {
             id: registration.id,
             registration_hash,
             input: registration.input,
+            disposition: registration.disposition,
             identity: registration.identity,
             event_types: registration.event_types,
             provenance: registration.provenance,
@@ -800,6 +892,8 @@ impl ProcessRecord {
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             external_ref: None,
+            first_started: None,
+            abandon_request: None,
             wait: None,
             status: ProcessStatus::Running,
         }
@@ -1012,6 +1106,7 @@ pub enum ProcessLifecycleStatus {
     Completed,
     Failed,
     Cancelled,
+    Abandoned,
 }
 
 impl ProcessLifecycleStatus {
@@ -1021,6 +1116,7 @@ impl ProcessLifecycleStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Abandoned => "abandoned",
         }
     }
 
@@ -1034,6 +1130,7 @@ impl ProcessLifecycleStatus {
             Self::Completed => Some(ProcessTerminalState::Completed),
             Self::Failed => Some(ProcessTerminalState::Failed),
             Self::Cancelled => Some(ProcessTerminalState::Cancelled),
+            Self::Abandoned => Some(ProcessTerminalState::Abandoned),
         }
     }
 }
@@ -1045,6 +1142,7 @@ impl From<&ProcessStatus> for ProcessLifecycleStatus {
             ProcessStatus::Completed { .. } => Self::Completed,
             ProcessStatus::Failed { .. } => Self::Failed,
             ProcessStatus::Cancelled { .. } => Self::Cancelled,
+            ProcessStatus::Abandoned { .. } => Self::Abandoned,
         }
     }
 }
@@ -1128,6 +1226,7 @@ pub enum ProcessStatusFilter {
     Completed,
     Failed,
     Cancelled,
+    Abandoned,
     Any,
 }
 
@@ -1138,9 +1237,10 @@ impl ProcessStatusFilter {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
+            "abandoned" => Ok(Self::Abandoned),
             "any" => Ok(Self::Any),
             other => Err(format!(
-                "processes.list status must be `running`, `completed`, `failed`, `cancelled`, or `any`, got `{other}`"
+                "processes.list status must be `running`, `completed`, `failed`, `cancelled`, `abandoned`, or `any`, got `{other}`"
             )),
         }
     }
@@ -1148,7 +1248,9 @@ impl ProcessStatusFilter {
     pub fn list_mode(self) -> ProcessListMode {
         match self {
             Self::Running => ProcessListMode::Live,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Any => ProcessListMode::All,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Abandoned | Self::Any => {
+                ProcessListMode::All
+            }
         }
     }
 
@@ -1158,6 +1260,7 @@ impl ProcessStatusFilter {
             Self::Completed => status == ProcessLifecycleStatus::Completed,
             Self::Failed => status == ProcessLifecycleStatus::Failed,
             Self::Cancelled => status == ProcessLifecycleStatus::Cancelled,
+            Self::Abandoned => status == ProcessLifecycleStatus::Abandoned,
             Self::Any => true,
         }
     }
@@ -1283,6 +1386,7 @@ mod tests {
                         "label": process_name,
                     }),
                 },
+                RecoveryDisposition::Rerunnable,
                 ProcessProvenance::host(),
             )
             .with_identity(

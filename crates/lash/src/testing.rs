@@ -318,6 +318,8 @@ finish "registered"
         lash_core::ProcessRegistration::new(
             id,
             input,
+            // Worker-rebuild recovery tests need the row to be re-executable.
+            lash_core::RecoveryDisposition::Rerunnable,
             lash_core::ProcessProvenance::session(lash_core::SessionScope::new(SESSION_ID)),
         )
     }

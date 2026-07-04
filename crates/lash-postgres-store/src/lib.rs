@@ -22,13 +22,13 @@ use lash_core::store::{
     RuntimeCommitResult, SessionCheckpoint, SessionHeadMeta,
 };
 use lash_core::{
-    AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
+    AbandonRequest, AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
     AwaitEventResolver, BlobRef, DeliveryPolicy, DurabilityTier, EffectHost, ExecutionScope,
     GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey, ProcessAwaitOutput, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseCompletion,
-    ProcessPruneReport, ProcessRecord, ProcessRegistration, ProcessRegistry, QueuedWorkStore,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    ProcessPruneReport, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted,
+    QueuedWorkStore, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
     RuntimePersistence, ScopedEffectController, SessionCommitStore, SessionExecutionLease,
     SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
@@ -45,7 +45,12 @@ use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::{Executor, Row};
 
 const SCHEMA_COMPONENT: &str = "lash-postgres-store";
-const SCHEMA_VERSION: i32 = 6;
+// Bumped to 7: `ProcessRecord` gained a required `disposition` field (plus
+// optional `first_started`/`abandon_request`) inside `record_json` (ADR 0019).
+// The schema is a reject-and-recreate boundary — a pre-7 database's rows predate
+// the column and cannot deserialize, so the version mismatch is rejected at open
+// rather than backfilled; new rows always carry the disposition.
+const SCHEMA_VERSION: i32 = 7;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]

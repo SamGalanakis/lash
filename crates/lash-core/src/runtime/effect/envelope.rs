@@ -502,7 +502,10 @@ impl ProcessCommand {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ProcessEffectOutcome {
     Start {
-        record: ProcessRecord,
+        // Boxed so the fat durable record does not size the whole outcome enum
+        // (and the runtime effect enum wrapping it) inline through the recursive
+        // effect executor.
+        record: Box<ProcessRecord>,
     },
     List {
         entries: Vec<ProcessHandleGrantEntry>,
@@ -515,10 +518,12 @@ pub enum ProcessEffectOutcome {
         output: ProcessAwaitOutput,
     },
     Cancel {
-        record: ProcessRecord,
+        record: Box<ProcessRecord>,
     },
     Signal {
-        event: crate::ProcessEvent,
+        // Boxed for the same reason as the record variants: a fat event should
+        // not size the outcome enum inline through the recursive executor.
+        event: Box<crate::ProcessEvent>,
     },
 }
 

@@ -11,6 +11,7 @@ pub(crate) mod process_handles;
 mod tool_execution;
 
 pub use execution_context::RuntimeExecutionContext;
+pub(crate) use execution_context::RuntimeExecutionTracing;
 pub use tool_execution::{ToolInvocation, ToolInvocationReply};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

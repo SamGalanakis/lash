@@ -483,8 +483,7 @@ await task.fail({ reason: "parent observed child failure" })?
         .await
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     session
-        .processes()
-        .await_all()
+        .refresh_background_graph()
         .await
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     let recorded = events.snapshot().await;
@@ -732,8 +731,7 @@ async fn facade_agent_process_execution_with_options(
         .await
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     session
-        .processes()
-        .await_all()
+        .refresh_background_graph()
         .await
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     agent_process_execution_result(
@@ -811,8 +809,7 @@ finish { recovered: true }
         FixedScriptRunnerError::Runtime(format!("durable input turn task failed to join: {err}"))
     })??;
     session
-        .processes()
-        .await_all()
+        .refresh_background_graph()
         .await
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     let completed_after_resolution = events.tool_completed_count().await;

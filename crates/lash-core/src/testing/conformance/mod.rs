@@ -36,6 +36,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
+    AbandonEvidence, AbandonRequest, AbandonWriter, LashSchema, ProcessAwaitOutput,
+    ProcessEventAppendRequest, ProcessEventSemanticsSpec, ProcessEventType, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessInput, ProcessLeaseCompletion, ProcessListFilter,
+    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted,
+    ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessValueSelector,
+    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition, SessionScope,
+    SessionScopeId, WaitKind, WaitState,
+};
+use crate::{
     AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, AwaitEventWaitIdentity,
     CausalRef, DeliveryPolicy, EffectHost, ExecutionScope, LiveReplayGapReason, LiveReplayResult,
     LiveReplayStore, LiveReplayStoreError, LiveReplaySubscribeResult, MergeKey, ModelSpec,
@@ -51,14 +60,6 @@ use crate::{
     TurnEvent,
 };
 use crate::{AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier};
-use crate::{
-    LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
-    ProcessEventType, ProcessExternalRef, ProcessHandleDescriptor, ProcessInput,
-    ProcessLeaseCompletion, ProcessListFilter, ProcessProvenance, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessStatusFilter, ProcessTerminalState,
-    ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, SessionScope,
-    SessionScopeId, WaitKind, WaitState,
-};
 use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
 
 #[cfg(test)]

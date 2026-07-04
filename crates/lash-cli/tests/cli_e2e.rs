@@ -54,6 +54,54 @@ fn cli_short_rlm_mode_runs_subagent_spawn_with_test_provider() {
 }
 
 #[test]
+fn cli_json_mode_stamps_protocol_version_in_turn_start() {
+    let temp = tempfile::tempdir().expect("temp lash home");
+    write_test_provider_config(temp.path(), "rlm-subagent-smoke");
+    write_test_model_catalog(temp.path());
+
+    let output = run_lash_with_timeout(
+        Command::new(lash_bin())
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("LASH_HOME", temp.path())
+            .env("LASH_LOG", "warn")
+            .args([
+                "-em",
+                "rlm",
+                "--model",
+                "test/cli-e2e-model",
+                "--mode",
+                "json",
+                "--print",
+                "Does your subagent tool work",
+            ]),
+        Duration::from_secs(30),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "lash CLI json mode failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        stdout,
+        stderr
+    );
+
+    // The first NDJSON record is the versioned `turn_start` frame.
+    let first_line = stdout
+        .lines()
+        .next()
+        .unwrap_or_else(|| panic!("json mode produced no stdout\nstderr:\n{stderr}"));
+    let turn_start: serde_json::Value = serde_json::from_str(first_line)
+        .unwrap_or_else(|err| panic!("parse turn_start line `{first_line}`: {err}"));
+    assert_eq!(turn_start["type"], "turn_start");
+    assert_eq!(
+        turn_start["protocol_version"], 1,
+        "json-mode turn_start must carry protocol_version\nstdout:\n{stdout}"
+    );
+}
+
+#[test]
 fn cli_interactive_pty_smoke_runs_turn_and_exits() {
     let lash_home = test_lash_home("standard-echo");
     let mut harness = start_interactive_harness(&lash_home, ExecutionMode::Standard, None);
@@ -298,7 +346,7 @@ fn cli_interactive_pty_rlm_subagent_smoke_runs_turn_and_exits() {
         )
     });
     assert!(
-        trace.contains("lashlang_code") && trace.contains("spawn_agent"),
+        trace.contains("code_block_started") && trace.contains("spawn_agent"),
         "interactive RLM trace did not include lashlang/subagent execution\ntrace:\n{trace}\nvisible screen:\n{}",
         run.screen_text
     );

@@ -47,6 +47,11 @@ impl<'run> ToolDispatchClient<'run> {
                 })
                 .collect();
         };
-        runtime.call_tool_batch(calls).await
+        // Children of a batch dispatch carry the batch call's id so consumers
+        // can attribute them to their parent without re-parsing batch args.
+        runtime
+            .with_batch_parent_call_id(self.context.tool_call_id.clone())
+            .call_tool_batch(calls)
+            .await
     }
 }

@@ -1070,8 +1070,8 @@ finish initial
         .expect("trigger process should finish");
         let handles = session.processes().list_all().await.expect("list handles");
         assert_eq!(handles.len(), 1);
-        assert_eq!(handles[0].descriptor.kind.as_deref(), Some("lashlang"));
-        assert_eq!(handles[0].descriptor.label.as_deref(), Some("remember"));
+        assert_eq!(handles[0].kind, "lashlang");
+        assert_eq!(handles[0].label, "remember");
         session.close().await.expect("close session");
 
         let reopened = core
@@ -1086,10 +1086,10 @@ finish initial
             .expect("list handles after reopen");
         assert_eq!(reopened_handles.len(), 1);
         assert_eq!(
-            reopened_handles[0].status.label(),
+            reopened_handles[0].status_label,
             "completed",
             "{:?}",
-            reopened_handles[0].status
+            reopened_handles[0].lifecycle
         );
         drop(reopened);
 

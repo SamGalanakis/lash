@@ -1,6 +1,120 @@
 use super::*;
 
 #[tokio::test]
+async fn standard_runtime_emits_single_tool_call_trace_pair_per_call() {
+    // A standard-mode tool call must produce exactly one ToolCallStarted and
+    // one ToolCallCompleted trace record: the emission moved to the shared
+    // tool-execution seam, and the old standard-only path must not double it.
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "call-1".to_string(),
+                    tool_name: "echo_tool".to_string(),
+                    input_json: r#"{"value":"sample"}"#.to_string(),
+                    replay: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "done".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "done".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let trace_path = std::env::temp_dir().join(format!(
+        "lash-standard-tool-trace-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let mut runtime = runtime_with_plugins_and_tools_and_host(
+        Vec::new(),
+        Arc::new(EchoTool),
+        transport,
+        test_host_config_with_trace_path(trace_path.clone()),
+    )
+    .await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "call the tool".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "trace-standard-tool-turn"),
+        )
+        .await
+        .expect("turn");
+
+    assert!(matches!(
+        &turn.outcome,
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
+    ));
+
+    let logged = std::fs::read_to_string(&trace_path).expect("read trace");
+    let entries = logged
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json log entry"))
+        .collect::<Vec<_>>();
+
+    let started = entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("tool_call_started"))
+        .collect::<Vec<_>>();
+    let completed = entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("tool_call_completed"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        started.len(),
+        1,
+        "expected exactly one ToolCallStarted trace: {entries:?}"
+    );
+    assert_eq!(
+        completed.len(),
+        1,
+        "expected exactly one ToolCallCompleted trace: {entries:?}"
+    );
+    assert_eq!(
+        started[0].get("call_id").and_then(|v| v.as_str()),
+        Some("call-1")
+    );
+    assert_eq!(
+        started[0].get("name").and_then(|v| v.as_str()),
+        Some("echo_tool")
+    );
+    // Span identity is stamped from session/turn context so the tool nests
+    // under its turn as `tool:<call_id>`.
+    assert_eq!(
+        completed[0]
+            .get("context")
+            .and_then(|context| context.get("graph_node_id"))
+            .and_then(|v| v.as_str()),
+        Some("tool:call-1")
+    );
+
+    let _ = std::fs::remove_file(&trace_path);
+}
+
+#[tokio::test]
 async fn standard_runtime_trace_records_stream_event_entries() {
     let transport = mock_provider(vec![MockCall {
         stream_events: vec![

@@ -265,8 +265,8 @@ where
             }
             TraceEvent::SessionStarted { .. } => self.emit_instant(record, "lash.session", None),
             TraceEvent::PromptBuilt { .. } => self.emit_instant(record, "lash.prompt", None),
-            TraceEvent::ProtocolStep { .. } => {
-                self.emit_instant(record, "lash.protocol_step", None)
+            TraceEvent::ProtocolStep { payload, .. } => {
+                self.emit_instant(record, protocol_step_span_name(payload), None)
             }
             TraceEvent::TokenUsage { .. } => self.emit_instant(record, "lash.token_usage", None),
             TraceEvent::LashlangExecution { .. } => {
@@ -558,6 +558,12 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
         }
         TraceEvent::ProtocolStep { plugin_id, payload } => {
             attrs.push(KeyValue::new("lash.protocol.plugin_id", plugin_id.clone()));
+            if let Some(phase) = protocol_step_diagnostic_phase(payload) {
+                attrs.push(KeyValue::new(
+                    "lash.protocol.diagnostic_phase",
+                    phase.to_string(),
+                ));
+            }
             push_payload_json(&mut attrs, options, "lash.protocol.payload_json", payload);
         }
         TraceEvent::TokenUsage { usage, cumulative } => {
@@ -936,6 +942,29 @@ fn tool_key(event: &TraceEvent) -> Option<String> {
     }
 }
 
+/// Runtime diagnostics ride on `ProtocolStep` under a `diagnostic.phase`
+/// envelope (see lash-core's `emit_protocol_diagnostic_trace`). Extract that
+/// phase so diagnostics get distinguishable span names/attributes instead of a
+/// uniform `lash.protocol_step`.
+fn protocol_step_diagnostic_phase(payload: &Value) -> Option<&str> {
+    payload
+        .get("diagnostic")
+        .and_then(|diagnostic| diagnostic.get("phase"))
+        .and_then(Value::as_str)
+}
+
+/// Map a `ProtocolStep` to a span name. Runtime exec diagnostics collapse into
+/// the `lash.exec_code` family (with the precise phase carried as an
+/// attribute); other diagnostics keep a phase-scoped `lash.<noun>` name. Plain
+/// protocol steps stay `lash.protocol_step`.
+fn protocol_step_span_name(payload: &Value) -> &'static str {
+    match protocol_step_diagnostic_phase(payload) {
+        Some("exec_code_started" | "exec_code_completed" | "exec_code_failed") => "lash.exec_code",
+        Some("observation_projection") => "lash.observation_projection",
+        _ => "lash.protocol_step",
+    }
+}
+
 fn record_time(record: &TraceRecord) -> SystemTime {
     DateTime::parse_from_rfc3339(&record.timestamp)
         .map(|time| time.with_timezone(&Utc).into())
@@ -989,6 +1018,35 @@ mod tests {
 
     use super::*;
     use crate::{TraceLlmRequest, TraceRecord};
+
+    #[test]
+    fn protocol_step_exec_diagnostics_get_distinct_span_names() {
+        let diagnostic =
+            |phase: &str| serde_json::json!({ "diagnostic": { "phase": phase, "payload": {} } });
+        // Exec-code diagnostics collapse into the lash.exec_code family, with
+        // the precise phase available as an attribute; other diagnostics keep a
+        // phase-scoped name; plain protocol steps stay lash.protocol_step.
+        assert_eq!(
+            protocol_step_span_name(&diagnostic("exec_code_started")),
+            "lash.exec_code"
+        );
+        assert_eq!(
+            protocol_step_span_name(&diagnostic("exec_code_completed")),
+            "lash.exec_code"
+        );
+        assert_eq!(
+            protocol_step_span_name(&diagnostic("observation_projection")),
+            "lash.observation_projection"
+        );
+        assert_eq!(
+            protocol_step_span_name(&serde_json::json!({ "code": "print 1" })),
+            "lash.protocol_step"
+        );
+        assert_eq!(
+            protocol_step_diagnostic_phase(&diagnostic("exec_code_completed")),
+            Some("exec_code_completed")
+        );
+    }
 
     #[test]
     fn otel_sink_accepts_turn_and_llm_lifecycle() {

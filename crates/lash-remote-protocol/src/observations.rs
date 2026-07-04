@@ -83,7 +83,7 @@ impl RemoteSessionObservationEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RemoteSessionObservationEventPayload {
     TurnActivity {
-        activity: RemoteTurnActivity,
+        activity: Box<RemoteTurnActivity>,
     },
     Committed,
     AgentFrameSwitched {

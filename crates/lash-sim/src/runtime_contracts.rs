@@ -79,7 +79,6 @@ pub struct RuntimeUsageTotals {
     pub cache_write_input_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
-    pub context_total_tokens: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -345,9 +344,11 @@ pub fn runtime_usage_invariant_facts(
             _ => None,
         })
         .collect::<Vec<_>>();
+    // Cumulative usage events carry lifetime totals, so `total_tokens` must never
+    // regress from one event to the next.
     let usage_events_monotonic = usage_event_cumulative_totals
         .windows(2)
-        .all(|window| window[1].context_total_tokens >= window[0].context_total_tokens);
+        .all(|window| window[1].total_tokens >= window[0].total_tokens);
     let mut negative_fields = Vec::new();
     collect_negative_usage_fields("turn_usage", &turn_usage, &mut negative_fields);
     collect_negative_usage_fields("total_usage", &total_usage, &mut negative_fields);
@@ -444,15 +445,13 @@ pub fn runtime_final_value_invariant_facts(
 
 impl RuntimeUsageTotals {
     pub fn from_usage(usage: &lash_core::TokenUsage) -> Self {
-        let total_tokens = usage.total();
         Self {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             cache_read_input_tokens: usage.cache_read_input_tokens,
             cache_write_input_tokens: usage.cache_write_input_tokens,
             reasoning_output_tokens: usage.reasoning_output_tokens,
-            total_tokens,
-            context_total_tokens: total_tokens,
+            total_tokens: usage.total(),
         }
     }
 
@@ -471,7 +470,6 @@ impl RuntimeUsageTotals {
             && self.cache_write_input_tokens >= 0
             && self.reasoning_output_tokens >= 0
             && self.total_tokens >= 0
-            && self.context_total_tokens >= 0
     }
 }
 
@@ -487,7 +485,6 @@ fn collect_negative_usage_fields(
         ("cache_write_input_tokens", totals.cache_write_input_tokens),
         ("reasoning_output_tokens", totals.reasoning_output_tokens),
         ("total_tokens", totals.total_tokens),
-        ("context_total_tokens", totals.context_total_tokens),
     ] {
         if value < 0 {
             negative_fields.push(format!("{prefix}.{field}"));

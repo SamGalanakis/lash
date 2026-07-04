@@ -2602,6 +2602,7 @@ dependencies = [
  "lash-protocol-rlm",
  "lash-rlm-types",
  "lash-sqlite-store",
+ "lash-trace",
  "pulldown-cmark",
  "serde",
  "serde_json",
@@ -3179,6 +3180,7 @@ dependencies = [
  "anyhow",
  "clap",
  "lash-trace",
+ "serde",
  "serde_json",
 ]
 

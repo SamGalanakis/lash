@@ -10,6 +10,7 @@ fn registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
+        crate::RecoveryDisposition::ExternallyOwned,
         ProcessProvenance::host(),
     )
 }

@@ -55,8 +55,17 @@ pub struct SessionAbstractSummary {
     pub backend_failure_count: usize,
     pub provider_mutation_count: usize,
     pub process_wake_count: usize,
+    // Defaulted and omitted when zero so traces recorded before the
+    // process-lifecycle boundary (which have no recovery scenario, count 0) keep
+    // their exact recorded summary digest.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub process_lifecycle_count: usize,
     pub durable_effect_keys: Vec<String>,
     pub lease_time_ticks: Vec<u64>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

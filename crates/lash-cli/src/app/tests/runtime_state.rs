@@ -77,6 +77,8 @@ fn plan_exit_tool_does_not_create_local_shadow_queue() {
             call_id: Some("tc-plan-exit".into()),
             name: "plan_exit".into(),
             args: serde_json::json!({}),
+            graph_key: None,
+            parent_call_id: None,
             output: lash_core::ToolCallOutput::success(serde_json::json!({
                 "approved": true,
                 "confirmation_display": "Start implementing now\n\nNote: safe slice first",
@@ -155,6 +157,8 @@ fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
             call_id: Some("tc-plan-exit-fresh".into()),
             name: "plan_exit".into(),
             args: serde_json::json!({}),
+            graph_key: None,
+            parent_call_id: None,
             output: lash_core::ToolCallOutput::success(serde_json::json!({
                 "approved": true,
                 "execution_mode": "fresh_context",

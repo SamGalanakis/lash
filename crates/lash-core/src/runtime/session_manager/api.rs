@@ -237,6 +237,25 @@ impl crate::ProcessService for RuntimeSessionProcessService {
             .await
     }
 
+    async fn complete_external(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        await_output: crate::ProcessAwaitOutput,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessRecord, crate::PluginError> {
+        self.services
+            .processes
+            .complete_external_process(
+                &self.services.current,
+                session_id,
+                process_id,
+                await_output,
+                scope,
+            )
+            .await
+    }
+
     async fn await_process(
         &self,
         process_id: &str,

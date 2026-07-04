@@ -43,7 +43,7 @@ fn remote_process_start_request() -> anyhow::Result<()> {
     use lash::remote::processes::{
         RemoteProcessExecutionEnvSpec, RemoteProcessExecutionPolicy, RemoteProcessInput,
         RemoteProcessModelLimits, RemoteProcessModelSpec, RemoteProcessOriginator,
-        RemoteProcessPluginOptions, RemoteProcessStartRequest,
+        RemoteProcessPluginOptions, RemoteProcessStartRequest, RemoteRecoveryDisposition,
     };
     use serde_json::json;
 
@@ -53,6 +53,7 @@ fn remote_process_start_request() -> anyhow::Result<()> {
         input: RemoteProcessInput::External {
             metadata: json!({ "source": "scheduler" }),
         },
+        disposition: RemoteRecoveryDisposition::ExternallyOwned,
         env_spec: Some(RemoteProcessExecutionEnvSpec {
             plugin_options: RemoteProcessPluginOptions {
                 plugins: BTreeMap::from([(

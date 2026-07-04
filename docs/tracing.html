@@ -232,7 +232,7 @@ impl TraceSink for FanoutTraceSink {
         <div class="section" id="what-is-emitted">
           <div class="section-header">
             <h2>What Is Emitted</h2>
-            <p>Tagged enums on <code>TraceEvent</code>. New variants are additive; existing fields are not renamed across schema versions.</p>
+            <p>Tagged enums on <code>TraceEvent</code>. <code>TraceEvent::kind()</code> is the single source of truth for each variant's <code>type</code> tag — consumers such as the trace viewer match on the enum and read the kind from there rather than re-deriving tag strings. New variants and optional fields are additive; renames and removals bump the schema. The full rule set lives in <a href="./reporting.html#schema-evolution">Reporting channels → Schema evolution</a>.</p>
           </div>
           <div class="def-list-grid">
             <article class="panel">
@@ -253,7 +253,7 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Tool calls</h3>
-              <p><code>ToolCallStarted</code>, <code>ToolCallCompleted</code>. Args, <code>output</code> outcome (success / failure / cancelled), duration.</p>
+              <p><code>ToolCallStarted</code>, <code>ToolCallCompleted</code>. Args, <code>output</code> outcome (success / failure / cancelled), duration. Emitted per tool from one shared tool-execution seam, so a standard native call and a tool run inside a code block both produce exactly one Started + Completed pair. Containment (code block, batch parent) rides the matching <code>TurnActivity</code>; see <a href="./reporting.html#standard-and-code-exec">Reporting channels</a>.</p>
             </article>
             <article class="panel">
               <h3>Usage</h3>
@@ -261,7 +261,7 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Protocol steps</h3>
-              <p><code>ProtocolStep</code>: agentic-loop iterations (RLM execute / observe / finish).</p>
+              <p><code>ProtocolStep</code>: agentic-loop iterations (RLM execute / observe / finish). The <code>exec_code_completed</code> diagnostic carries a per-tool <code>tool_calls</code> roll-up (<code>call_id</code>, <code>name</code>, <code>duration_ms</code>, <code>status</code>) and a matching <code>tool_call_count</code> inside its free-form payload — additive, no schema bump.</p>
             </article>
             <article class="panel">
               <h3>Custom</h3>
@@ -273,7 +273,7 @@ impl TraceSink for FanoutTraceSink {
         <div class="section" id="jsonl-schema">
           <div class="section-header">
             <h2>The JSONL Schema</h2>
-            <p>One line of UTF-8 JSON per record. <code>TRACE_SCHEMA_VERSION = 2</code>. Reject or warn on higher unrecognized versions.</p>
+            <p>One line of UTF-8 JSON per record. <code>TRACE_SCHEMA_VERSION = 2</code>. Reject or warn on higher unrecognized versions. When to bump it — and when an additive change (a new variant, an optional field, a reshaped <code>Custom</code> / <code>ProtocolStep</code> payload) does not — is the <a href="./reporting.html#schema-evolution">schema-evolution policy</a>.</p>
           </div>
           <pre data-lang="json"><code>{
   "schema_version": 2,
@@ -335,6 +335,7 @@ let core = lash::LashCore::standard_builder()
     .trace_level(TraceLevel::Extended)
     .build()?;</code></pre>
           <p><code>OtelTraceSink::flush</code> is deliberately a no-op: the sink only starts and ends spans on your tracer, while the buffering that risks span loss on exit lives in your <code>BatchSpanProcessor</code> / exporter. Flushing it is the host's duty — call <code>force_flush()</code> (or <code>shutdown()</code>) on your <code>TracerProvider</code> before the process exits. Lash never owns the provider, so it cannot do this for you; <code>LashCore::flush_trace_sink</code> flushes the sink only.</p>
+          <p>Span names are derived from the typed event. Turn, LLM, and tool lifecycles become nested spans (<code>lash.turn</code>, <code>lash.llm</code>, <code>lash.tool</code>); a tool produces one <code>lash.tool</code> span whether it was a standard native call or ran inside a code block, because both flow through the same emission seam. Runtime exec diagnostics collapse into a <code>lash.exec_code</code> family, with the precise phase (<code>exec_code_started</code> / <code>exec_code_completed</code> / <code>exec_code_failed</code>) on the <code>lash.protocol.diagnostic_phase</code> attribute; observation-projection diagnostics get <code>lash.observation_projection</code>, and other protocol steps stay <code>lash.protocol_step</code>. The channel map that ties these span names back to the other reporting surfaces is <a href="./reporting.html">Reporting channels</a>.</p>
         </div>
   </main>
 

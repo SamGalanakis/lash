@@ -77,6 +77,9 @@ impl RuntimeExecutionContext<'_> {
             ProcessInput::ToolCall {
                 call: prepared_call.clone(),
             },
+            // Tool-call rows are journaled and idempotent by process id, so
+            // recovery may re-execute them (ADR 0019).
+            crate::RecoveryDisposition::Rerunnable,
         );
         let registration = match self
             .attach_captured_process_execution_env(registration)
@@ -540,6 +543,7 @@ mod tests {
                     ProcessInput::External {
                         metadata: serde_json::Value::Null,
                     },
+                    crate::RecoveryDisposition::ExternallyOwned,
                     crate::ProcessProvenance::host(),
                 )
                 .with_extra_event_types([crate::ProcessEventType {
@@ -640,6 +644,7 @@ mod tests {
                 ProcessInput::External {
                     metadata: serde_json::Value::Null,
                 },
+                crate::RecoveryDisposition::ExternallyOwned,
                 crate::ProcessProvenance::host(),
             ))
             .await

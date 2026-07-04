@@ -93,10 +93,10 @@ async fn active_path_residency(
     Ok(())
 }
 
-async fn await_all_processes(session: &LashSession) -> anyhow::Result<()> {
-    // docs:start:await-all-processes
-    session.processes().await_all().await?;
-    // docs:end:await-all-processes
+async fn refresh_background_graph(session: &LashSession) -> anyhow::Result<()> {
+    // docs:start:refresh-background-graph
+    session.refresh_background_graph().await?;
+    // docs:end:refresh-background-graph
     Ok(())
 }
 

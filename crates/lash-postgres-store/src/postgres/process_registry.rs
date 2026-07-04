@@ -520,6 +520,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
             lash_core::ProcessTerminalState::Completed => "process.completed",
             lash_core::ProcessTerminalState::Failed => "process.failed",
             lash_core::ProcessTerminalState::Cancelled => "process.cancelled",
+            lash_core::ProcessTerminalState::Abandoned => "process.abandoned",
         };
         self.append_event(
             process_id,
@@ -535,6 +536,49 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 "unknown process `{process_id}` after terminal event"
             ))
         })
+    }
+
+    async fn record_first_started(
+        &self,
+        process_id: &str,
+        started: ProcessStarted,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let mut record = load_process_tx(&mut tx, process_id)
+            .await?
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        // First-writer-wins: the started fact is immutable once written.
+        if record.first_started.is_none() {
+            record.first_started = Some(Box::new(started));
+            record.updated_at_ms = current_epoch_ms();
+            save_process_tx(&mut tx, &record).await?;
+        }
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        Ok(record)
+    }
+
+    async fn request_process_abandon(
+        &self,
+        process_id: &str,
+        request: AbandonRequest,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let mut record = load_process_tx(&mut tx, process_id)
+            .await?
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        if record.is_terminal() {
+            return Err(PluginError::Session(format!(
+                "terminal process `{process_id}` cannot accept an abandon request"
+            )));
+        }
+        // First-writer-wins: preserve the original recorded authorization.
+        if record.abandon_request.is_none() {
+            record.abandon_request = Some(Box::new(request));
+            record.updated_at_ms = current_epoch_ms();
+            save_process_tx(&mut tx, &record).await?;
+        }
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        Ok(record)
     }
 
     async fn set_process_wait(
@@ -840,6 +884,16 @@ impl ProcessRegistry for PostgresProcessRegistry {
         .map_err(plugin_sqlx_error)?;
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(renewed)
+    }
+
+    async fn get_process_lease(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessLease>, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let lease = load_process_lease_tx(&mut tx, process_id).await?;
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        Ok(lease)
     }
 
     async fn complete_process_lease(

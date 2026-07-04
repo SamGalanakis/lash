@@ -354,7 +354,10 @@ impl ActivityState {
         };
         let success = output.is_success();
         if name == "batch" {
-            return self.blocks_for_batch_tool_call(&args, &result);
+            // Batch children surface as their own tool events (each carrying a
+            // `parent_call_id` back to this call), so the container renders
+            // nothing and the children render from those real events.
+            return Vec::new();
         }
         let status = match output.status() {
             lash_core::ToolCallStatus::Success => ActivityStatus::Completed,
@@ -412,55 +415,6 @@ impl ActivityState {
         timeline.push(UiTimelineItem::Activity(Box::new(activity)));
     }
 
-    fn blocks_for_batch_tool_call(&mut self, args: &Value, result: &Value) -> Vec<ActivityBlock> {
-        let Some(entries) = batch_result_entries(result) else {
-            return Vec::new();
-        };
-        let calls = batch_call_specs(args);
-
-        entries
-            .iter()
-            .enumerate()
-            .flat_map(|(index, item)| {
-                let child_name = item
-                    .get("tool")
-                    .and_then(|value| value.as_str())
-                    .or_else(|| calls.get(index).and_then(|call| call.tool_name.as_deref()))
-                    .unwrap_or("tool")
-                    .to_string();
-                let child_args = calls
-                    .get(index)
-                    .map(|call| call.args.clone())
-                    .unwrap_or_else(|| Value::Object(Default::default()));
-                let child_success = item
-                    .get("success")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or_else(|| item.get("error").is_none());
-                let child_duration = item
-                    .get("duration_ms")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0);
-                let child_result = if let Some(result) = item.get("result") {
-                    result.clone()
-                } else if let Some(error) = item.get("error") {
-                    error.clone()
-                } else {
-                    item.clone()
-                };
-
-                let child_output = if child_success {
-                    lash_core::ToolCallOutput::success(child_result)
-                } else {
-                    lash_core::ToolResult::err(child_result)
-                        .into_done_output()
-                        .expect("static failure output")
-                };
-
-                self.project_tool_output(&child_name, child_args, child_output, child_duration)
-            })
-            .collect()
-    }
-
     #[cfg(test)]
     pub fn project_tool_call(
         &mut self,
@@ -515,60 +469,16 @@ fn replace_running_activity(timeline: &mut UiTimeline, incoming: ActivityBlock) 
     false
 }
 
-#[derive(Clone, Debug, Default)]
-struct BatchChildCallSpec {
-    tool_name: Option<String>,
-    args: Value,
-}
-
-fn batch_call_specs(args: &Value) -> Vec<BatchChildCallSpec> {
-    if let Some(calls) = args.get("tool_calls").and_then(|value| value.as_array()) {
-        return calls
-            .iter()
-            .map(|item| BatchChildCallSpec {
-                tool_name: item
-                    .get("tool")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                args: item
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or_else(|| Value::Object(Default::default())),
-            })
-            .collect();
-    }
-    if let Some(calls) = args.get("tool_uses").and_then(|value| value.as_array()) {
-        return calls
-            .iter()
-            .map(|item| BatchChildCallSpec {
-                tool_name: item
-                    .get("recipient_name")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                args: item
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or_else(|| Value::Object(Default::default())),
-            })
-            .collect();
-    }
-    Vec::new()
-}
-
-fn batch_result_entries(result: &Value) -> Option<&Vec<Value>> {
-    result
-        .get("results")
-        .and_then(|value| value.as_array())
-        .or_else(|| result.as_array())
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
     #[test]
-    fn batch_expands_into_child_tool_blocks() {
+    fn batch_container_projects_no_blocks_children_render_from_events() {
+        // The batch container renders nothing: its children now arrive as their
+        // own tool events (each carrying `parent_call_id`), so there is no
+        // arg/result re-parsing here.
         let mut state = ActivityState::default();
         let blocks = state.project_tool_call(
             "batch",
@@ -587,19 +497,15 @@ pub(crate) mod tests {
             true,
             12,
         );
+        assert!(blocks.is_empty());
 
-        // Single-op exploration activities promote the op straight onto
-        // the call line. There are no detail lines and no `EXPLORE`
-        // wrapper — that's now reserved for multi-op clusters.
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].call.tool_name, "read_file");
-        assert_eq!(blocks[0].call.summary, "Read a.rs");
-        assert!(blocks[0].result.detail_lines.is_empty());
-        assert_eq!(blocks[1].call.tool_name, "grep");
-        assert_eq!(blocks[1].call.summary, "Search \"foo\"");
-        assert!(blocks[1].result.detail_lines.is_empty());
-        assert_ne!(blocks[0].call.tool_name, "batch");
-        assert_ne!(blocks[1].call.tool_name, "batch");
+        // The child tool calls project as ordinary top-level activities from
+        // their own events.
+        let child =
+            state.project_tool_call("read_file", json!({ "path": "a.rs" }), json!("x"), true, 4);
+        assert_eq!(child.len(), 1);
+        assert_eq!(child[0].call.tool_name, "read_file");
+        assert_eq!(child[0].call.summary, "Read a.rs");
     }
 
     #[test]
@@ -616,119 +522,6 @@ pub(crate) mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].result.status, ActivityStatus::Cancelled);
-    }
-
-    #[test]
-    fn batch_normalizes_namespaced_child_tool_blocks() {
-        let mut state = ActivityState::default();
-        let blocks = state.project_tool_call(
-            "batch",
-            json!({
-                "tool_calls": [
-                    {"tool": "functions.read_file", "parameters": {"path": "a.rs"}},
-                    {"tool": "functions.grep", "parameters": {"query": "foo"}}
-                ]
-            }),
-            json!({
-                "results": [
-                    {"tool": "functions.read_file", "success": true, "result": "x"},
-                    {"tool": "functions.grep", "success": true, "result": "match"}
-                ]
-            }),
-            true,
-            12,
-        );
-
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].call.tool_name, "read_file");
-        assert_eq!(blocks[0].call.summary, "Read a.rs");
-        assert_eq!(blocks[1].call.tool_name, "grep");
-        assert_eq!(blocks[1].call.summary, "Search \"foo\"");
-    }
-
-    #[test]
-    fn namespaced_batch_expands_into_child_tool_blocks() {
-        let mut state = ActivityState::default();
-        let blocks = state.project_tool_call(
-            "functions.batch",
-            json!({
-                "tool_calls": [
-                    {"tool": "functions.read_file", "parameters": {"path": "a.rs"}},
-                    {"tool": "functions.grep", "parameters": {"query": "foo"}}
-                ]
-            }),
-            json!({
-                "results": [
-                    {"tool": "functions.read_file", "success": true, "result": "x"},
-                    {"tool": "functions.grep", "success": true, "result": "match"}
-                ]
-            }),
-            true,
-            12,
-        );
-
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].call.tool_name, "read_file");
-        assert_eq!(blocks[1].call.tool_name, "grep");
-    }
-
-    #[test]
-    fn projected_batch_results_expand_into_child_tool_blocks() {
-        let mut state = ActivityState::default();
-        let blocks = state.project_tool_call(
-            "batch",
-            json!({
-                "tool_calls": [
-                    {"tool": "read_file", "parameters": {"path": "README.md"}},
-                    {"tool": "search_web", "parameters": {"query": "OpenAI"}}
-                ]
-            }),
-            json!({
-                "results": [
-                    {"tool": "read_file", "success": true, "duration_ms": 8, "result": "README body"},
-                    {"tool": "search_web", "success": true, "duration_ms": 1300, "result": {"results": []}}
-                ]
-            }),
-            true,
-            1308,
-        );
-
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].call.tool_name, "read_file");
-        assert_eq!(blocks[0].call.summary, "Read README.md");
-        assert!(blocks[0].result.detail_lines.is_empty());
-        assert_eq!(blocks[1].call.tool_name, "search_web");
-        assert_eq!(blocks[1].call.summary, "searched web for \"OpenAI\"");
-    }
-
-    #[test]
-    fn tool_use_batch_results_expand_into_child_tool_blocks() {
-        let mut state = ActivityState::default();
-        let blocks = state.project_tool_call(
-            "batch",
-            json!({
-                "tool_uses": [
-                    {
-                        "recipient_name": "functions.read_file",
-                        "parameters": {"path": "README.md"}
-                    },
-                    {
-                        "recipient_name": "functions.grep",
-                        "parameters": {"query": "OpenAI", "path": "README.md"}
-                    }
-                ]
-            }),
-            json!([
-                {"success": true, "result": "README body", "duration_ms": 8},
-                {"success": true, "result": "match", "duration_ms": 13}
-            ]),
-            true,
-            21,
-        );
-
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].call.tool_name, "read_file");
-        assert_eq!(blocks[1].call.tool_name, "grep");
     }
 
     #[test]

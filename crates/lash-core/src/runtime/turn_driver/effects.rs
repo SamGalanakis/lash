@@ -291,10 +291,13 @@ impl RuntimeTurnDriver<'_> {
         let code_executor = self.session.plugins().code_executor();
         let read_view = self.checkpoint_state_view(messages, protocol_iteration);
         let chronological_projection = read_view.shared_chronological_projection();
+        let code_block_graph_key = foreground_exec_graph_key(&invocation);
         let context = self
             .execution_context(session_event_tx.clone(), chronological_projection)
             .map_err(|err| err.to_string())?
-            .with_turn_event_sender(turn_event_tx.clone());
+            .with_turn_event_sender(turn_event_tx.clone())
+            .with_tracing(self.execution_tracing(protocol_iteration))
+            .with_code_block_graph_key(code_block_graph_key);
         let context = context.with_parent_invocation(invocation);
         let result = match code_executor {
             Some(code_executor) => code_executor

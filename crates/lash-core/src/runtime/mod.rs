@@ -119,25 +119,26 @@ pub use observation::{
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{
-    DefaultProcessCancelAbility, InMemoryProcessExecutionEnvStore, ObservedProcess,
-    ObservedProcessEvent, ObservedWorkItem, PROCESS_LEASE_SCHEMA_VERSION, ProcessAttach,
-    ProcessAwaitOutput, ProcessAwaiter, ProcessCancelAbility, ProcessCancelAllRequest,
-    ProcessCancelRequest, ProcessCancelSource, ProcessCancelSummary, ProcessChangeHub,
-    ProcessEngine, ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
-    ProcessEngineRuntimeContext, ProcessEngineValidationContext, ProcessEvent,
-    ProcessEventAppendPlan, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventSink, ProcessEventType,
-    ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
-    ProcessExecutionEnvStore, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessIdentity, ProcessInput,
-    ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessLifecycleStatus,
-    ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessOriginator, ProcessProvenance,
-    ProcessPruneReport, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessService,
-    ProcessSessionDeleteReport, ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions,
-    ProcessStartRequest, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
+    AbandonEvidence, AbandonRequest, AbandonWriter, DefaultProcessCancelAbility,
+    InMemoryProcessExecutionEnvStore, ObservedProcess, ObservedProcessEvent, ObservedWorkItem,
+    PROCESS_LEASE_SCHEMA_VERSION, ProcessAttach, ProcessAwaitOutput, ProcessAwaiter,
+    ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
+    ProcessCancelSummary, ProcessChangeHub, ProcessEngine, ProcessEngineRegistry,
+    ProcessEngineRunContext, ProcessEngineRunGuard, ProcessEngineRuntimeContext,
+    ProcessEngineValidationContext, ProcessEvent, ProcessEventAppendPlan,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventSink, ProcessEventType, ProcessExecutionContext,
+    ProcessExecutionEnvRef, ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary,
+    ProcessId, ProcessIdentity, ProcessInput, ProcessLease, ProcessLeaseClaimOutcome,
+    ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter, ProcessListMode,
+    ProcessOpScope, ProcessOriginator, ProcessProvenance, ProcessPruneReport, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessService, ProcessSessionDeleteReport,
+    ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
+    ProcessStarted, ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics,
     ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
     ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeDeliveryRequest, ProcessWakeSpec,
-    ProcessWorkObserver, ProcessWorkSnapshot, SessionScope, SessionScopeId,
+    ProcessWorkObserver, ProcessWorkSnapshot, RecoveryDisposition, SessionScope, SessionScopeId,
     UnavailableProcessService, WaitKind, WaitState, apply_process_status_projection,
     current_epoch_ms, epoch_ms_from_system_time, load_process_execution_env,
     materialize_process_event_semantics, persist_process_execution_env,
@@ -148,7 +149,7 @@ pub use process::{
     validate_process_signal_name, watch_process_registry, watch_process_registry_with_sink,
 };
 pub use process_work_driver::{InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver};
-pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
+pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig, ProcessDrainReport};
 pub use queued_work_driver::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest};
 pub use scenario_contracts::{RUNTIME_SCENARIO_CONTRACTS, ScenarioContractSpec};
 pub use session_manager::DirectCompletionClient;
@@ -802,6 +803,7 @@ pub enum TurnEvent {
     CodeBlockCompleted {
         language: String,
         output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         success: bool,
         duration_ms: u64,
@@ -810,16 +812,34 @@ pub enum TurnEvent {
         graph_key: Option<String>,
     },
     ToolCallStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
+        /// Graph key of the enclosing code block, when this tool call ran
+        /// inside one. `None` when the call did not run inside a code block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_key: Option<String>,
+        /// Call id of the parent batch tool call, when this call is a child of
+        /// a `batch` dispatch. `None` for top-level tool calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     ToolCallCompleted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
         output: crate::ToolCallOutput,
         duration_ms: u64,
+        /// Graph key of the enclosing code block, when this tool call ran
+        /// inside one. `None` when the call did not run inside a code block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_key: Option<String>,
+        /// Call id of the parent batch tool call, when this call is a child of
+        /// a `batch` dispatch. `None` for top-level tool calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     FinalValue {
         value: serde_json::Value,

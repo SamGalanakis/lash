@@ -191,6 +191,8 @@ fn test_session_event_to_turn_event(event: &SessionEvent) -> Option<TurnEvent> {
             args: args.clone(),
             output: output.clone(),
             duration_ms: *duration_ms,
+            graph_key: None,
+            parent_call_id: None,
         }),
         SessionEvent::PluginEvent { plugin_id, event } => Some(TurnEvent::PluginRuntime {
             plugin_id: plugin_id.clone(),

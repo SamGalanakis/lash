@@ -778,6 +778,8 @@ mod tests {
             args: json!({}),
             output: lash::tools::ToolCallOutput::success(result),
             duration_ms: 12,
+            graph_key: None,
+            parent_call_id: None,
         }
     }
 

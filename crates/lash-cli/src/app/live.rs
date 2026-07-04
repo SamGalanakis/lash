@@ -151,9 +151,8 @@ impl App {
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
         self.active_ui_turn_ordinal = Some(self.latest_ui_turn_ordinal());
-        self.active_lashlang_block_ordinal = None;
         self.next_lashlang_block_ordinal = 0;
-        self.lashlang_tool_call_anchors.clear();
+        self.lashlang_block_anchors.clear();
         self.iteration = 0;
         self.live.assistant.clear();
         self.live.reasoning.clear();
@@ -207,9 +206,8 @@ impl App {
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
         self.active_ui_turn_ordinal = None;
-        self.active_lashlang_block_ordinal = None;
         self.next_lashlang_block_ordinal = 0;
-        self.lashlang_tool_call_anchors.clear();
+        self.lashlang_block_anchors.clear();
         self.live.reasoning.clear();
         self.live.assistant.clear();
         self.clear_live_tool_output();

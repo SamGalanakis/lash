@@ -637,9 +637,12 @@ pub struct App {
     pub ui_activity_journal: UiActivityJournal,
     pending_ui_activity_records: Vec<UiActivityRecord>,
     active_ui_turn_ordinal: Option<usize>,
-    active_lashlang_block_ordinal: Option<usize>,
     next_lashlang_block_ordinal: usize,
-    lashlang_tool_call_anchors: HashMap<String, (usize, usize)>,
+    /// Journal anchor `(turn ordinal, block ordinal)` for each live RLM code
+    /// block, keyed by the block's graph key. Tool calls attach to their block
+    /// by matching their own `graph_key`, so containment is structural rather
+    /// than inferred from event ordering.
+    lashlang_block_anchors: HashMap<String, (usize, usize)>,
     /// Set only when this local UI requested cancellation via Esc.
     manual_interrupt_requested: bool,
     /// Retry details to keep visible once the retry request is in flight.
@@ -694,16 +697,11 @@ impl App {
         }
     }
 
-    fn active_lashlang_activity_anchor(&mut self) -> Option<(usize, usize)> {
-        let lashlang_block_ordinal = self.active_lashlang_block_ordinal?;
-        Some((self.current_ui_turn_ordinal(), lashlang_block_ordinal))
-    }
-
-    fn remember_lashlang_tool_anchor(&mut self, call_id: &Option<String>, anchor: (usize, usize)) {
-        if let Some(call_id) = call_id.as_ref() {
-            self.lashlang_tool_call_anchors
-                .insert(call_id.clone(), anchor);
-        }
+    /// Journal anchor for a tool call, resolved from the enclosing code block's
+    /// graph key. `None` for standard-mode tool calls (no graph key) or when no
+    /// live block registered that key.
+    fn lashlang_block_anchor(&self, graph_key: Option<&str>) -> Option<(usize, usize)> {
+        self.lashlang_block_anchors.get(graph_key?).copied()
     }
 
     fn journal_lashlang_activity(
@@ -897,9 +895,8 @@ impl App {
             ui_activity_journal: UiActivityJournal::default(),
             pending_ui_activity_records: Vec::new(),
             active_ui_turn_ordinal: None,
-            active_lashlang_block_ordinal: None,
             next_lashlang_block_ordinal: 0,
-            lashlang_tool_call_anchors: HashMap::new(),
+            lashlang_block_anchors: HashMap::new(),
             manual_interrupt_requested: false,
             pending_retry_status: None,
             selection: TextSelection::default(),

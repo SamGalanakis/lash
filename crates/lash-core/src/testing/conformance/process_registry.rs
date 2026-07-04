@@ -46,6 +46,8 @@ pub async fn process_registry_with_expected_durability<F>(
     wake_semantic_events_without_target_record_without_delivery(make()).await;
     terminal_and_cancel_events_require_keys(make()).await;
     await_reads_terminal_materialized_output(make()).await;
+    disposition_first_started_and_abandon_request_persist(make()).await;
+    abandoned_terminal_round_trips_and_pins_writer_rules(make()).await;
     wait_state_round_trips_filters_and_clears_on_terminal(make()).await;
     list_processes_filters_by_status_and_waiting(make()).await;
     count_and_recent_events_match_the_log(make()).await;
@@ -98,6 +100,18 @@ pub(super) fn registration(id: &str) -> ProcessRegistration {
         ProcessInput::External {
             metadata: serde_json::Value::Null,
         },
+        RecoveryDisposition::ExternallyOwned,
+        ProcessProvenance::host(),
+    )
+}
+
+fn owner_bound_registration(id: &str) -> ProcessRegistration {
+    ProcessRegistration::new(
+        id,
+        ProcessInput::External {
+            metadata: serde_json::Value::Null,
+        },
+        RecoveryDisposition::OwnerBound,
         ProcessProvenance::host(),
     )
 }
@@ -1080,6 +1094,224 @@ async fn await_reads_terminal_materialized_output(registry: Arc<dyn ProcessRegis
             .await
             .expect("record")
             .is_terminal()
+    );
+}
+
+/// Recovery-disposition, first-started, and abandon-request facts persist and
+/// round-trip, with the first-writer-wins immutability the sweep relies on
+/// (ADR 0019).
+async fn disposition_first_started_and_abandon_request_persist(registry: Arc<dyn ProcessRegistry>) {
+    let record = registry
+        .register_process(owner_bound_registration("proc-disposition"))
+        .await
+        .expect("register");
+    assert_eq!(record.disposition, RecoveryDisposition::OwnerBound);
+    assert!(record.first_started.is_none());
+    assert!(record.abandon_request.is_none());
+    assert!(
+        registry
+            .get_process_lease("proc-disposition")
+            .await
+            .expect("lease read")
+            .is_none(),
+        "an unclaimed row reports no lease holder"
+    );
+
+    // first_started persists and is immutable once written (first-writer-wins).
+    let started = ProcessStarted {
+        owner: process_lease_owner("starter"),
+        started_at_ms: 111,
+    };
+    let recorded = registry
+        .record_first_started("proc-disposition", started.clone())
+        .await
+        .expect("record started");
+    assert_eq!(recorded.first_started.as_deref(), Some(&started));
+    let rerecorded = registry
+        .record_first_started(
+            "proc-disposition",
+            ProcessStarted {
+                owner: process_lease_owner("other-starter"),
+                started_at_ms: 222,
+            },
+        )
+        .await
+        .expect("re-record started");
+    assert_eq!(
+        rerecorded.first_started.as_deref(),
+        Some(&started),
+        "first_started is immutable once written"
+    );
+
+    // A live lease is exposed read-side by holder and expiry.
+    let holder = registry
+        .claim_process_lease("proc-disposition", &process_lease_owner("holder"), 60_000)
+        .await
+        .expect("claim")
+        .acquired()
+        .expect("acquired");
+    let read = registry
+        .get_process_lease("proc-disposition")
+        .await
+        .expect("lease read")
+        .expect("a claimed row reports its holder");
+    assert_eq!(read.lease_token, holder.lease_token);
+    assert_eq!(read.expires_at_epoch_ms, holder.expires_at_epoch_ms);
+
+    // abandon_request persists and preserves the first recorded authorization.
+    let request = AbandonRequest {
+        requested_by: "operator".to_string(),
+        requested_at_ms: 333,
+        reason: Some("host retired".to_string()),
+    };
+    let marked = registry
+        .request_process_abandon("proc-disposition", request.clone())
+        .await
+        .expect("request abandon");
+    assert_eq!(marked.abandon_request.as_deref(), Some(&request));
+    let remarked = registry
+        .request_process_abandon(
+            "proc-disposition",
+            AbandonRequest {
+                requested_by: "second-operator".to_string(),
+                requested_at_ms: 444,
+                reason: None,
+            },
+        )
+        .await
+        .expect("re-request abandon");
+    assert_eq!(
+        remarked.abandon_request.as_deref(),
+        Some(&request),
+        "the first recorded abandon request is preserved"
+    );
+    let reloaded = registry
+        .get_process("proc-disposition")
+        .await
+        .expect("reload");
+    assert_eq!(reloaded.first_started.as_deref(), Some(&started));
+    assert_eq!(reloaded.abandon_request.as_deref(), Some(&request));
+
+    assert!(
+        registry
+            .record_first_started(
+                "missing-process",
+                ProcessStarted {
+                    owner: process_lease_owner("x"),
+                    started_at_ms: 1,
+                },
+            )
+            .await
+            .is_err(),
+        "recording started for an unknown process must fail"
+    );
+    assert!(
+        registry
+            .request_process_abandon(
+                "missing-process",
+                AbandonRequest {
+                    requested_by: "x".to_string(),
+                    requested_at_ms: 1,
+                    reason: None,
+                },
+            )
+            .await
+            .is_err(),
+        "requesting abandon for an unknown process must fail"
+    );
+}
+
+/// The Abandoned terminal round-trips its evidence payload, is prunable, rejects
+/// a revenant's later write, and rejects an abandon request once terminal
+/// (ADR 0019).
+async fn abandoned_terminal_round_trips_and_pins_writer_rules(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(owner_bound_registration("proc-abandoned"))
+        .await
+        .expect("register");
+    let evidence = AbandonEvidence {
+        writer: AbandonWriter::Sweep,
+        owner: Some(process_lease_owner("dead-owner")),
+        epoch_ms: 999,
+    };
+    let terminal = registry
+        .complete_process(
+            "proc-abandoned",
+            ProcessAwaitOutput::Abandoned {
+                evidence: Box::new(evidence.clone()),
+                control: None,
+            },
+        )
+        .await
+        .expect("abandon");
+    assert_eq!(
+        terminal.status.terminal_state(),
+        Some(ProcessTerminalState::Abandoned)
+    );
+    match terminal.status {
+        ProcessStatus::Abandoned {
+            await_output: ProcessAwaitOutput::Abandoned { evidence: got, .. },
+        } => assert_eq!(
+            *got, evidence,
+            "the Abandoned terminal round-trips its evidence"
+        ),
+        other => panic!("expected an Abandoned terminal, got {other:?}"),
+    }
+
+    let abandoned = registry
+        .list_processes(&ProcessListFilter {
+            status: ProcessStatusFilter::Abandoned,
+            ..ProcessListFilter::default()
+        })
+        .await
+        .expect("list abandoned");
+    assert!(
+        abandoned.iter().any(|record| record.id == "proc-abandoned"),
+        "the abandoned status filter includes abandoned rows"
+    );
+
+    // A revenant cannot overwrite the terminal — the row is already terminal.
+    assert!(
+        registry
+            .complete_process(
+                "proc-abandoned",
+                ProcessAwaitOutput::Success {
+                    value: serde_json::json!("revenant"),
+                    control: None,
+                },
+            )
+            .await
+            .is_err(),
+        "a terminal Abandoned row rejects a later terminal write"
+    );
+    assert!(
+        registry
+            .request_process_abandon(
+                "proc-abandoned",
+                AbandonRequest {
+                    requested_by: "operator".to_string(),
+                    requested_at_ms: 1,
+                    reason: None,
+                },
+            )
+            .await
+            .is_err(),
+        "a terminal row cannot accept an abandon request"
+    );
+
+    // A far-future cutoff (kept within i64 range for SQL backends that bind the
+    // cutoff as a signed integer) prunes every terminal row.
+    let report = registry
+        .prune_terminal_processes(i64::MAX as u64)
+        .await
+        .expect("prune");
+    assert!(
+        report.pruned_processes >= 1,
+        "abandoned rows are terminal and therefore prunable"
+    );
+    assert!(
+        registry.get_process("proc-abandoned").await.is_none(),
+        "a pruned abandoned row is gone"
     );
 }
 

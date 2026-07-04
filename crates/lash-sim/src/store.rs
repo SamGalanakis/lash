@@ -210,6 +210,14 @@ impl ModelStore {
                 let session = self.ensure_session(boundary_session_alias(event));
                 session.process_wake_count += 1;
             }
+            BoundaryKind::ProcessLifecycle => {
+                // The disposition/evidence verdicts live in the boundary's real
+                // observed (`runtime_process_lifecycle`, read by the lifecycle
+                // oracles); the abstract model tracks only the presence count so
+                // the cross-backend summary stays reproducible.
+                let session = self.ensure_session(boundary_session_alias(event));
+                session.process_lifecycle_count += 1;
+            }
             BoundaryKind::Observer => {
                 let session = self.ensure_session(event.actor_alias.clone());
                 let turn_index = observed
@@ -602,6 +610,20 @@ impl ModelStore {
                 }
                 observed
             }
+            BoundaryKind::ProcessLifecycle => {
+                // Identity only: the disposition-driven recovery verdicts are
+                // produced by the REAL `DurableProcessWorker` sweep in
+                // `runtime_boundaries::run_process_lifecycle` and are not
+                // re-derivable from the boundary stream. The model carries the
+                // recorded real facts (threaded via `apply_observed_boundary` on
+                // replay, like `Worker`), and `runtime_process_lifecycle` is
+                // normalized away for cross-backend equality — so no path can make
+                // a lifecycle oracle pass without the real sweep producing them.
+                json!({
+                    "session": boundary_session_alias(event),
+                    "process_lifecycle": true,
+                })
+            }
             BoundaryKind::Observer => {
                 let turn_index = self
                     .sessions
@@ -825,6 +847,7 @@ struct ModelSession {
     backend_failure_count: usize,
     provider_mutation_count: usize,
     process_wake_count: usize,
+    process_lifecycle_count: usize,
     durable_effect_keys: Vec<String>,
     lease_time_ticks: Vec<u64>,
 }
@@ -849,6 +872,7 @@ impl ModelSession {
             backend_failure_count: 0,
             provider_mutation_count: 0,
             process_wake_count: 0,
+            process_lifecycle_count: 0,
             durable_effect_keys: Vec::new(),
             lease_time_ticks: Vec::new(),
         }
@@ -873,6 +897,7 @@ impl ModelSession {
             backend_failure_count: self.backend_failure_count,
             provider_mutation_count: self.provider_mutation_count,
             process_wake_count: self.process_wake_count,
+            process_lifecycle_count: self.process_lifecycle_count,
             durable_effect_keys: self.durable_effect_keys.clone(),
             lease_time_ticks: self.lease_time_ticks.clone(),
         }
