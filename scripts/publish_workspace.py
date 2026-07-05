@@ -261,7 +261,11 @@ def publish_package(package: dict, args: argparse.Namespace) -> None:
         print(f"already published: {name} {version}")
         return
 
-    command = ["cargo", "publish", "-p", name, "--no-verify", "--locked"]
+    # --allow-dirty: publish-time version stamping rewrites the manifests in
+    # the checkout on purpose, so the tree is always dirty here. The packaged
+    # .cargo_vcs_info.json keeps the release tag's sha plus a dirty marker,
+    # which is the honest provenance for a stamped tree.
+    command = ["cargo", "publish", "-p", name, "--no-verify", "--locked", "--allow-dirty"]
     deadline = time.monotonic() + args.publish_timeout_seconds
     last_output = ""
 
