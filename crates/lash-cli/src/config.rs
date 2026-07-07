@@ -617,7 +617,10 @@ mod tests {
     fn load_outcome_reports_missing_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.json");
-        assert!(matches!(LashConfig::load_outcome(&path), ConfigLoadOutcome::Missing));
+        assert!(matches!(
+            LashConfig::load_outcome(&path),
+            ConfigLoadOutcome::Missing
+        ));
         assert!(LashConfig::load(&path).is_none());
     }
 

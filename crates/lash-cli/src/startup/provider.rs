@@ -229,10 +229,7 @@ mod tests {
         let err = resolve_config_and_provider(
             &args,
             std::path::Path::new("/tmp/lash/config.json"),
-            ConfigLoadOutcome::Loaded(LashConfig::new(&openai_shortcut_provider(
-                "key".into(),
-                "",
-            ))),
+            ConfigLoadOutcome::Loaded(LashConfig::new(&openai_shortcut_provider("key".into(), ""))),
             None,
             false,
         )
