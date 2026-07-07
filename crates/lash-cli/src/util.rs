@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::io::IsTerminal;
 
 pub const MIN_VISIBLE_DURATION_MS: u64 = 1_000;
 
@@ -37,6 +38,16 @@ pub fn format_duration_ms_if_visible(ms: u64) -> Option<String> {
 
 pub fn manual_interrupt_message() -> &'static str {
     "Manually interrupted."
+}
+
+pub(crate) fn require_interactive_terminal(context: &str) -> anyhow::Result<()> {
+    if std::io::stdin().is_terminal() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "{context} requires an interactive terminal (stdin is not a TTY)"
+        ))
+    }
 }
 
 pub fn is_cancelled_error(message: &str, code: Option<&str>) -> bool {

@@ -85,6 +85,7 @@ impl SetupApp {
 }
 
 pub async fn run_setup_with_existing(existing: Option<&LashConfig>) -> anyhow::Result<LashConfig> {
+    crate::util::require_interactive_terminal("provider setup")?;
     let mut terminal = Terminal::enter()?;
     terminal.set_default_background(theme::terminal_background())?;
     let result = run_setup_inner(&mut terminal, existing).await;
