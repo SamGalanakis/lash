@@ -237,7 +237,9 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     // ── Stage 1: resolve config + provider credentials ──
-    let existing_config = LashConfig::load(&crate::paths::config_file());
+    let config_path = crate::paths::config_file();
+    let config_load = LashConfig::load_outcome(&config_path);
+    let existing_config = config_load.loaded().cloned();
     let shortcut_api_key = provider::shortcut_api_key(&args);
     if args.info && existing_config.is_none() && shortcut_api_key.is_none() {
         let execution_mode =
@@ -250,6 +252,9 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string());
+        if let Some(status) = config_load.status_line() {
+            println!("{status}");
+        }
         println!("{}", info_text_unconfigured(&execution_mode, &cwd));
         return Ok(());
     }
@@ -276,9 +281,14 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let interactive_startup =
         !args.info && args.print_prompt.is_none() && args.mode != crate::CliMode::Rpc;
     let startup_system_message: Option<String> = None;
-    let (mut lash_config, mut active_provider) =
-        provider::resolve_config_and_provider(&args, existing_config, shortcut_api_key.as_deref())
-            .await?;
+    let (mut lash_config, mut active_provider) = provider::resolve_config_and_provider(
+        &args,
+        &config_path,
+        config_load,
+        shortcut_api_key.as_deref(),
+        interactive_startup,
+    )
+    .await?;
     crate::theme::set_active_theme(lash_config.theme);
 
     // CLI env/flags override stored config
@@ -622,6 +632,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     }));
 
     // Initialize terminal
+    crate::util::require_interactive_terminal("the lash TUI")?;
     let terminal = Terminal::enter()?;
 
     run_app(

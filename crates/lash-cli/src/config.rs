@@ -71,6 +71,38 @@ pub struct ModelDefault {
     pub variant: Option<String>,
 }
 
+/// Result of attempting to read `config.json`.
+#[derive(Clone, Debug)]
+pub enum ConfigLoadOutcome {
+    Missing,
+    Invalid { reason: String },
+    Loaded(LashConfig),
+}
+
+impl ConfigLoadOutcome {
+    pub fn loaded(&self) -> Option<&LashConfig> {
+        match self {
+            Self::Loaded(config) => Some(config),
+            Self::Missing | Self::Invalid { .. } => None,
+        }
+    }
+
+    pub fn into_loaded(self) -> Option<LashConfig> {
+        match self {
+            Self::Loaded(config) => Some(config),
+            Self::Missing | Self::Invalid { .. } => None,
+        }
+    }
+
+    pub fn status_line(&self) -> Option<String> {
+        match self {
+            Self::Missing => Some("config: not found".to_string()),
+            Self::Invalid { reason } => Some(format!("config: present but invalid ({reason})")),
+            Self::Loaded(_) => None,
+        }
+    }
+}
+
 /// Stored configuration: provider credentials + service API keys + MCP
 /// servers + per-session defaults.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -199,14 +231,39 @@ impl LashConfig {
     /// Load from the given config path. Returns `None` if missing or
     /// malformed.
     pub fn load(path: &std::path::Path) -> Option<Self> {
-        if let Ok(data) = std::fs::read_to_string(path)
-            && let Ok(config) = serde_json::from_str::<Self>(&data)
-            && config.providers.contains_key(&config.active_provider)
-        {
-            return Some(config);
-        }
+        Self::load_outcome(path).into_loaded()
+    }
 
-        None
+    /// Load from the given config path with a diagnostic outcome.
+    pub fn load_outcome(path: &std::path::Path) -> ConfigLoadOutcome {
+        if !path.exists() {
+            return ConfigLoadOutcome::Missing;
+        }
+        let data = match std::fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(err) => {
+                return ConfigLoadOutcome::Invalid {
+                    reason: format!("could not read config: {err}"),
+                };
+            }
+        };
+        let config = match serde_json::from_str::<Self>(&data) {
+            Ok(config) => config,
+            Err(err) => {
+                return ConfigLoadOutcome::Invalid {
+                    reason: format!("invalid config JSON: {err}"),
+                };
+            }
+        };
+        if !config.providers.contains_key(&config.active_provider) {
+            return ConfigLoadOutcome::Invalid {
+                reason: format!(
+                    "active_provider `{}` is not configured in providers",
+                    config.active_provider
+                ),
+            };
+        }
+        ConfigLoadOutcome::Loaded(config)
     }
 
     /// Save to the given config path (mode 0o600 on Unix).
@@ -555,6 +612,76 @@ fn request_contains_subagent_prompt(request: &lash_core::LlmRequest) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_outcome_reports_missing_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        assert!(matches!(LashConfig::load_outcome(&path), ConfigLoadOutcome::Missing));
+        assert!(LashConfig::load(&path).is_none());
+    }
+
+    #[test]
+    fn load_outcome_reports_unknown_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "active_provider": "openai-compatible",
+                "unexpected_top_level_field": true,
+                "providers": {
+                    "openai-compatible": {
+                        "type": "openai-compatible",
+                        "api_key": "k",
+                        "base_url": "https://example.com/v1"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write config");
+
+        let outcome = LashConfig::load_outcome(&path);
+        assert!(matches!(outcome, ConfigLoadOutcome::Invalid { .. }));
+        let reason = match outcome {
+            ConfigLoadOutcome::Invalid { reason } => reason,
+            other => panic!("expected invalid config, got {other:?}"),
+        };
+        assert!(
+            reason.contains("unknown field `unexpected_top_level_field`"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn load_outcome_reports_active_provider_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "active_provider": "anthropic",
+                "providers": {
+                    "openai-compatible": {
+                        "type": "openai-compatible",
+                        "api_key": "k",
+                        "base_url": "https://example.com/v1"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write config");
+
+        let outcome = LashConfig::load_outcome(&path);
+        assert!(matches!(outcome, ConfigLoadOutcome::Invalid { .. }));
+        let reason = match outcome {
+            ConfigLoadOutcome::Invalid { reason } => reason,
+            other => panic!("expected invalid config, got {other:?}"),
+        };
+        assert!(reason.contains("active_provider `anthropic`"));
+    }
 
     #[test]
     fn lash_config_roundtrips_existing_shape() {
