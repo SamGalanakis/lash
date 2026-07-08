@@ -106,12 +106,12 @@ impl From<lash_core::TriggerEmitReport> for RemoteTriggerEmitReport {
     fn from(value: lash_core::TriggerEmitReport) -> Self {
         let lash_core::TriggerEmitReport {
             occurrence_id,
-            started_process_ids,
+            deliveries,
         } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             occurrence_id,
-            started_process_ids,
+            deliveries: deliveries.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -124,12 +124,66 @@ impl TryFrom<RemoteTriggerEmitReport> for lash_core::TriggerEmitReport {
         let RemoteTriggerEmitReport {
             protocol_version: _,
             occurrence_id,
-            started_process_ids,
+            deliveries,
         } = value;
         Ok(Self {
             occurrence_id,
-            started_process_ids,
+            deliveries: deliveries.into_iter().map(Into::into).collect(),
         })
+    }
+}
+
+impl From<lash_core::TriggerDeliveryEmitOutcome> for RemoteTriggerDeliveryEmitOutcome {
+    fn from(value: lash_core::TriggerDeliveryEmitOutcome) -> Self {
+        match value {
+            lash_core::TriggerDeliveryEmitOutcome::Started => Self::Started,
+            lash_core::TriggerDeliveryEmitOutcome::AlreadyReserved => Self::AlreadyReserved,
+            lash_core::TriggerDeliveryEmitOutcome::Failed { reason } => Self::Failed { reason },
+        }
+    }
+}
+
+impl From<RemoteTriggerDeliveryEmitOutcome> for lash_core::TriggerDeliveryEmitOutcome {
+    fn from(value: RemoteTriggerDeliveryEmitOutcome) -> Self {
+        match value {
+            RemoteTriggerDeliveryEmitOutcome::Started => Self::Started,
+            RemoteTriggerDeliveryEmitOutcome::AlreadyReserved => Self::AlreadyReserved,
+            RemoteTriggerDeliveryEmitOutcome::Failed { reason } => Self::Failed { reason },
+        }
+    }
+}
+
+impl From<lash_core::TriggerDeliveryEmitReport> for RemoteTriggerDeliveryEmitReport {
+    fn from(value: lash_core::TriggerDeliveryEmitReport) -> Self {
+        let lash_core::TriggerDeliveryEmitReport {
+            occurrence_id,
+            subscription_id,
+            process_id,
+            outcome,
+        } = value;
+        Self {
+            occurrence_id,
+            subscription_id,
+            process_id,
+            outcome: outcome.into(),
+        }
+    }
+}
+
+impl From<RemoteTriggerDeliveryEmitReport> for lash_core::TriggerDeliveryEmitReport {
+    fn from(value: RemoteTriggerDeliveryEmitReport) -> Self {
+        let RemoteTriggerDeliveryEmitReport {
+            occurrence_id,
+            subscription_id,
+            process_id,
+            outcome,
+        } = value;
+        Self {
+            occurrence_id,
+            subscription_id,
+            process_id,
+            outcome: outcome.into(),
+        }
     }
 }
 

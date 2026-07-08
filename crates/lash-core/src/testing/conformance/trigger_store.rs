@@ -336,6 +336,10 @@ async fn trigger_store_records_and_reserves_idempotently(store: Arc<dyn crate::T
     assert_eq!(first[0].subscription.handle, subscription.handle);
     assert_eq!(first[0].occurrence.occurrence_id, occurrence.occurrence_id);
     assert_eq!(
+        first[0].reservation_status,
+        crate::TriggerDeliveryReservationStatus::Reserved
+    );
+    assert_eq!(
         first[0].process_id,
         crate::deterministic_delivery_process_id(
             &occurrence.occurrence_id,
@@ -344,11 +348,49 @@ async fn trigger_store_records_and_reserves_idempotently(store: Arc<dyn crate::T
         .expect("deterministic delivery process id")
     );
 
+    let occurrence_matches = store
+        .list_occurrences({
+            let mut filter =
+                crate::TriggerOccurrenceFilter::for_source("ui.button.pressed", &source_key);
+            filter.occurred_at_start_ms = Some(occurrence.occurred_at_ms);
+            filter.occurred_at_end_ms = Some(occurrence.occurred_at_ms.saturating_add(1));
+            filter
+        })
+        .await
+        .expect("list occurrences");
+    assert_eq!(occurrence_matches, vec![occurrence.clone()]);
+
+    let by_occurrence = store
+        .list_deliveries_by_occurrence_id(&occurrence.occurrence_id)
+        .await
+        .expect("list deliveries by occurrence");
+    assert_eq!(by_occurrence.len(), 1);
+    assert_eq!(by_occurrence[0].process_id, first[0].process_id);
+    let by_subscription = store
+        .list_deliveries_by_subscription_id(&subscription.subscription_id)
+        .await
+        .expect("list deliveries by subscription");
+    assert_eq!(by_subscription.len(), 1);
+    assert_eq!(by_subscription[0].process_id, first[0].process_id);
+    let by_process = store
+        .list_deliveries_by_process_id(&first[0].process_id)
+        .await
+        .expect("list deliveries by process");
+    assert_eq!(by_process.len(), 1);
+    assert_eq!(
+        by_process[0].subscription.subscription_id,
+        subscription.subscription_id
+    );
+
     let duplicate = store
         .reserve_matching_deliveries(&occurrence.occurrence_id)
         .await
         .expect("reserve duplicate delivery");
-    assert!(duplicate.is_empty());
+    assert_eq!(duplicate.len(), 1);
+    assert_eq!(
+        duplicate[0].reservation_status,
+        crate::TriggerDeliveryReservationStatus::AlreadyReserved
+    );
 
     let replayed = store
         .record_occurrence(button_occurrence_request(
@@ -362,7 +404,11 @@ async fn trigger_store_records_and_reserves_idempotently(store: Arc<dyn crate::T
         .reserve_matching_deliveries(&replayed.occurrence_id)
         .await
         .expect("reserve replayed delivery");
-    assert!(replayed_delivery.is_empty());
+    assert_eq!(replayed_delivery.len(), 1);
+    assert_eq!(
+        replayed_delivery[0].reservation_status,
+        crate::TriggerDeliveryReservationStatus::AlreadyReserved
+    );
 
     assert!(
         store
@@ -433,7 +479,21 @@ async fn trigger_store_survives_reopen(factory: ReopenableTriggerStore) {
         .reserve_matching_deliveries(&replayed.occurrence_id)
         .await
         .expect("reserve replay after reopen");
-    assert!(replayed_delivery.is_empty());
+    assert_eq!(replayed_delivery.len(), 1);
+    assert_eq!(
+        replayed_delivery[0].reservation_status,
+        crate::TriggerDeliveryReservationStatus::AlreadyReserved
+    );
+    let reopened_deliveries = factory
+        .reopen
+        .list_deliveries_by_process_id(&first_delivery[0].process_id)
+        .await
+        .expect("list delivery after reopen");
+    assert_eq!(reopened_deliveries.len(), 1);
+    assert_eq!(
+        reopened_deliveries[0].subscription.subscription_id,
+        subscription.subscription_id
+    );
 
     let next = factory
         .reopen

@@ -165,11 +165,43 @@ impl TriggerStore for TierTriggerStore {
         self.inner.record_occurrence(request).await
     }
 
+    async fn list_occurrences(
+        &self,
+        filter: crate::TriggerOccurrenceFilter,
+    ) -> Result<Vec<crate::TriggerOccurrenceRecord>, PluginError> {
+        self.inner.list_occurrences(filter).await
+    }
+
     async fn reserve_matching_deliveries(
         &self,
         occurrence_id: &str,
     ) -> Result<Vec<crate::TriggerDeliveryReservation>, PluginError> {
         self.inner.reserve_matching_deliveries(occurrence_id).await
+    }
+
+    async fn list_deliveries_by_occurrence_id(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Vec<crate::TriggerDeliveryReservation>, PluginError> {
+        self.inner
+            .list_deliveries_by_occurrence_id(occurrence_id)
+            .await
+    }
+
+    async fn list_deliveries_by_subscription_id(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Vec<crate::TriggerDeliveryReservation>, PluginError> {
+        self.inner
+            .list_deliveries_by_subscription_id(subscription_id)
+            .await
+    }
+
+    async fn list_deliveries_by_process_id(
+        &self,
+        process_id: &str,
+    ) -> Result<Vec<crate::TriggerDeliveryReservation>, PluginError> {
+        self.inner.list_deliveries_by_process_id(process_id).await
     }
 }
 

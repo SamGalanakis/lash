@@ -32,9 +32,13 @@ impl From<lash_core::CausalRef> for RemoteCausalRef {
                 process_id,
                 sequence,
             },
-            lash_core::CausalRef::TriggerOccurrence { occurrence_id } => {
-                Self::TriggerOccurrence { occurrence_id }
-            }
+            lash_core::CausalRef::TriggerOccurrence {
+                occurrence_id,
+                subscription_id,
+            } => Self::TriggerOccurrence {
+                occurrence_id,
+                subscription_id,
+            },
             lash_core::CausalRef::SessionNode {
                 session_id,
                 node_id,
@@ -80,9 +84,13 @@ impl From<RemoteCausalRef> for lash_core::CausalRef {
                 process_id,
                 sequence,
             },
-            RemoteCausalRef::TriggerOccurrence { occurrence_id } => {
-                Self::TriggerOccurrence { occurrence_id }
-            }
+            RemoteCausalRef::TriggerOccurrence {
+                occurrence_id,
+                subscription_id,
+            } => Self::TriggerOccurrence {
+                occurrence_id,
+                subscription_id,
+            },
             RemoteCausalRef::SessionNode {
                 session_id,
                 node_id,

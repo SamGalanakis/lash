@@ -112,7 +112,8 @@ matched trigger delivery each do one thing: write a durable process record
 (carrying the captured execution-environment ref the worker will execute
 against — see `docs/adr/0011-self-contained-processes.md`) plus any handle
 grant to the registry. The rows survive restart. Turn starts carry turn
-causality; trigger deliveries carry `CausalRef::TriggerOccurrence { occurrence_id }`.
+causality; trigger deliveries carry
+`CausalRef::TriggerOccurrence { occurrence_id, subscription_id }`.
 Neither path carries a borrowed execution scope or a live session binding.
 The captured process environment is typed and closed: it contains Process
 Plugin Options plus policy, not product metadata. Before a Lashlang

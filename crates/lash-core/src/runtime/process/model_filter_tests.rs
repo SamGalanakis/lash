@@ -78,6 +78,7 @@ fn process_list_filter_matches_enriched_facets() {
     matching.provenance = ProcessProvenance::session(SessionScope::new("origin-session"))
         .with_caused_by(Some(crate::CausalRef::TriggerOccurrence {
             occurrence_id: "occurrence-target".to_string(),
+            subscription_id: Some("subscription-target".to_string()),
         }));
     let wrong = record("wrong", "other", 200);
 
@@ -97,7 +98,7 @@ fn process_list_filter_matches_enriched_facets() {
         "caused_by_subscription_id": "subscription-target"
     }))
     .expect("decode subscription filter");
-    assert!(!subscription_filter.matches_record(&matching));
+    assert!(subscription_filter.matches_record(&matching));
     assert!(
         ProcessListFilter::decode(&json!({ "identity_kind": true }))
             .expect_err("invalid identity kind")

@@ -193,13 +193,18 @@ fn remote_trigger_dtos_json_round_trip() {
     let report = RemoteTriggerEmitReport {
         protocol_version: REMOTE_PROTOCOL_VERSION,
         occurrence_id: "occurrence:1".to_string(),
-        started_process_ids: vec!["process:1".to_string()],
+        deliveries: vec![RemoteTriggerDeliveryEmitReport {
+            occurrence_id: "occurrence:1".to_string(),
+            subscription_id: "subscription:1".to_string(),
+            process_id: "process:1".to_string(),
+            outcome: RemoteTriggerDeliveryEmitOutcome::Started,
+        }],
     };
     report.validate().expect("valid report");
     let decoded: RemoteTriggerEmitReport =
         serde_json::from_value(serde_json::to_value(&report).expect("serialize report"))
             .expect("deserialize report");
-    assert_eq!(decoded.started_process_ids, vec!["process:1".to_string()]);
+    assert_eq!(decoded.deliveries[0].process_id, "process:1");
 
     let mut filter = RemoteTriggerSubscriptionFilter::for_source_type("ui.button.pressed");
     filter.source_key = Some("source-key".to_string());
@@ -241,6 +246,7 @@ fn remote_trigger_dtos_json_round_trip() {
 
     let cause = RemoteCausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
+        subscription_id: Some("subscription:1".to_string()),
     };
     let value = serde_json::to_value(&cause).expect("serialize cause");
     assert_eq!(value["type"], "trigger_occurrence");
@@ -683,7 +689,7 @@ fn wrong_protocol_versions_are_rejected() {
     let report = RemoteTriggerEmitReport {
         protocol_version: REMOTE_PROTOCOL_VERSION + 1,
         occurrence_id: "occurrence:1".to_string(),
-        started_process_ids: Vec::new(),
+        deliveries: Vec::new(),
     };
     assert!(matches!(
         report.validate(),

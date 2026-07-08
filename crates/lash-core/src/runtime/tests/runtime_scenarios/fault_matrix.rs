@@ -10,6 +10,7 @@ enum DurableFaultKind {
     ProviderFailureRetry,
     Cancellation,
     LeaseLoss,
+    TriggerDeliveryRecovery,
     BackendPermutation,
 }
 
@@ -108,6 +109,17 @@ const DURABLE_FAULT_MATRIX: &[DurableFaultMatrixRow] = &[
         },
     },
     DurableFaultMatrixRow {
+        id: "trigger-delivery-reserve-start-crash-window",
+        kind: DurableFaultKind::TriggerDeliveryRecovery,
+        contract: "A trigger delivery reserved before a crash but missing its process row is reconciled into exactly one deterministic process start.",
+        evidence: FaultEvidence::CargoTest(CargoTestEvidence {
+            package: "lash-core",
+            test_target: None,
+            filter: "sweep_reconciles_reserved_trigger_delivery_without_process",
+            required_env: None,
+        }),
+    },
+    DurableFaultMatrixRow {
         id: "sqlite-backend-conformance",
         kind: DurableFaultKind::BackendPermutation,
         contract: "Sqlite runs the backend conformance contract, including reopen, source-key, claim, lease, process change-feed, drainage, watermark-bounded prune, and effect replay cases.",
@@ -140,6 +152,7 @@ fn durable_fault_matrix_covers_required_fault_classes() {
         DurableFaultKind::ProviderFailureRetry,
         DurableFaultKind::Cancellation,
         DurableFaultKind::LeaseLoss,
+        DurableFaultKind::TriggerDeliveryRecovery,
         DurableFaultKind::BackendPermutation,
     ]);
     assert_eq!(observed, required);

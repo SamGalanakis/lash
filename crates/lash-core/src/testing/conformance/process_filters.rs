@@ -24,6 +24,7 @@ pub(super) async fn list_processes_filters_by_enriched_fields(registry: Arc<dyn 
                 .with_process_provenance(ProcessProvenance::session(scope).with_caused_by(Some(
                     CausalRef::TriggerOccurrence {
                         occurrence_id: "occurrence-target".to_string(),
+                        subscription_id: Some("subscription-target".to_string()),
                     },
                 ))),
         )
@@ -96,8 +97,7 @@ pub(super) async fn list_processes_filters_by_enriched_fields(registry: Arc<dyn 
             }
         )
         .await,
-        Vec::<String>::new(),
-        "subscription id filtering matches nothing until causal records carry subscription ids"
+        vec!["proc-filter-target".to_string()]
     );
     assert_eq!(
         filtered_ids(

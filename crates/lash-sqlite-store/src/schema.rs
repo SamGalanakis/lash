@@ -309,6 +309,9 @@ CREATE TABLE IF NOT EXISTS trigger_deliveries (
 
 CREATE INDEX IF NOT EXISTS idx_trigger_deliveries_process
     ON trigger_deliveries(process_id);
+
+CREATE INDEX IF NOT EXISTS idx_trigger_deliveries_subscription
+    ON trigger_deliveries(subscription_id);
 ";
 
 pub(crate) const TRIGGER_SCHEMA_VERSION: i32 = 1;

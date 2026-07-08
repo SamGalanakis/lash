@@ -196,7 +196,7 @@ fn causal_node_id(caused_by: &crate::CausalRef) -> String {
             process_id,
             sequence,
         } => format!("process:{process_id}:{sequence}"),
-        crate::CausalRef::TriggerOccurrence { occurrence_id } => {
+        crate::CausalRef::TriggerOccurrence { occurrence_id, .. } => {
             format!("trigger:{occurrence_id}")
         }
         crate::CausalRef::SessionNode {

@@ -80,12 +80,28 @@ pub struct RemoteTriggerOccurrenceRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteTriggerDeliveryEmitOutcome {
+    Started,
+    AlreadyReserved,
+    Failed { reason: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteTriggerDeliveryEmitReport {
+    pub occurrence_id: String,
+    pub subscription_id: String,
+    pub process_id: String,
+    pub outcome: RemoteTriggerDeliveryEmitOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteTriggerEmitReport {
     pub protocol_version: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub occurrence_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub started_process_ids: Vec<String>,
+    pub deliveries: Vec<RemoteTriggerDeliveryEmitReport>,
 }
 
 impl RemoteTriggerEmitReport {

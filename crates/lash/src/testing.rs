@@ -467,7 +467,7 @@ finish "registered"
             }),
         )
         .await;
-        assert_eq!(report.started_process_ids.len(), 1);
+        assert_eq!(report.started_process_ids().len(), 1);
     }
 
     async fn worker_runs_trigger_started_lashlang_process_after_restart(
@@ -494,8 +494,9 @@ finish "registered"
             }),
         )
         .await;
-        assert_eq!(report.started_process_ids.len(), 1);
-        await_success(&registry, &report.started_process_ids[0]).await;
+        let started_process_ids = report.started_process_ids();
+        assert_eq!(started_process_ids.len(), 1);
+        await_success(&registry, &started_process_ids[0]).await;
     }
 
     async fn trigger_triggered_process_wake_provenance_survives_restart(
@@ -535,8 +536,9 @@ finish "registered"
             )
             .await
             .expect("emit trigger occurrence");
-        assert_eq!(report.started_process_ids.len(), 1);
-        let process_id = report.started_process_ids[0].clone();
+        let started_process_ids = report.started_process_ids();
+        assert_eq!(started_process_ids.len(), 1);
+        let process_id = started_process_ids[0].clone();
         let record = registry
             .get_process(&process_id)
             .await
@@ -548,8 +550,10 @@ finish "registered"
             .expect("triggered process cause");
         assert!(matches!(
             &process_caused_by,
-            lash_core::CausalRef::TriggerOccurrence { occurrence_id }
+            lash_core::CausalRef::TriggerOccurrence { occurrence_id, subscription_id }
                 if occurrence_id == &report.occurrence_id
+                    && subscription_id.as_deref()
+                        == report.deliveries.first().map(|delivery| delivery.subscription_id.as_str())
         ));
 
         await_success(&registry, &process_id).await;

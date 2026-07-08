@@ -80,6 +80,8 @@ pub enum RemoteCausalRef {
     },
     TriggerOccurrence {
         occurrence_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription_id: Option<String>,
     },
     SessionNode {
         session_id: String,

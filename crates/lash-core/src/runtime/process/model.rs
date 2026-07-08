@@ -1408,7 +1408,9 @@ impl ProcessListFilter {
             && self
                 .caused_by_subscription_id
                 .as_ref()
-                .is_none_or(|_| false)
+                .is_none_or(|subscription_id| {
+                    caused_by_subscription_matches(record, subscription_id)
+                })
             && self
                 .created_at_start_ms
                 .is_none_or(|start_ms| record.created_at_ms >= start_ms)
@@ -1442,7 +1444,17 @@ fn optional_u64_filter(args: &serde_json::Value, key: &str) -> Result<Option<u64
 fn caused_by_occurrence_matches(record: &ProcessRecord, occurrence_id: &str) -> bool {
     matches!(
         record.provenance.caused_by.as_ref(),
-        Some(crate::CausalRef::TriggerOccurrence { occurrence_id: actual }) if actual == occurrence_id
+        Some(crate::CausalRef::TriggerOccurrence { occurrence_id: actual, .. }) if actual == occurrence_id
+    )
+}
+
+fn caused_by_subscription_matches(record: &ProcessRecord, subscription_id: &str) -> bool {
+    matches!(
+        record.provenance.caused_by.as_ref(),
+        Some(crate::CausalRef::TriggerOccurrence {
+            subscription_id: Some(actual),
+            ..
+        }) if actual == subscription_id
     )
 }
 

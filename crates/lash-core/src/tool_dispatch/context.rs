@@ -44,7 +44,7 @@ pub struct ToolTriggerEffectOutcome {
     pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<serde_json::Value>,
-    pub started_process_ids: Vec<String>,
+    pub deliveries: Vec<crate::TriggerDeliveryEmitReport>,
 }
 
 #[derive(Clone, Default)]

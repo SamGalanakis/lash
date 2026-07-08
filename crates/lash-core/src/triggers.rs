@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -134,11 +134,28 @@ impl TriggerEventCatalog {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerDeliveryEmitOutcome {
+    Started,
+    AlreadyReserved,
+    Failed { reason: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerDeliveryEmitReport {
+    pub occurrence_id: String,
+    pub subscription_id: String,
+    pub process_id: String,
+    pub outcome: TriggerDeliveryEmitOutcome,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerEmitReport {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub occurrence_id: String,
-    pub started_process_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliveries: Vec<TriggerDeliveryEmitReport>,
 }
 
 impl TriggerEmitReport {
@@ -146,11 +163,19 @@ impl TriggerEmitReport {
         Self::default()
     }
 
-    fn new(occurrence_id: String, started_process_ids: Vec<String>) -> Self {
+    fn new(occurrence_id: String, deliveries: Vec<TriggerDeliveryEmitReport>) -> Self {
         Self {
             occurrence_id,
-            started_process_ids,
+            deliveries,
         }
+    }
+
+    pub fn started_process_ids(&self) -> Vec<String> {
+        self.deliveries
+            .iter()
+            .filter(|delivery| delivery.outcome == TriggerDeliveryEmitOutcome::Started)
+            .map(|delivery| delivery.process_id.clone())
+            .collect()
     }
 }
 
@@ -198,6 +223,44 @@ pub struct TriggerOccurrenceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<serde_json::Value>,
     pub occurred_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerOccurrenceFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at_end_ms: Option<u64>,
+}
+
+impl TriggerOccurrenceFilter {
+    pub fn for_source(source_type: impl Into<String>, source_key: impl Into<String>) -> Self {
+        Self {
+            source_type: Some(source_type.into()),
+            source_key: Some(source_key.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn matches(&self, record: &TriggerOccurrenceRecord) -> bool {
+        self.source_type
+            .as_deref()
+            .is_none_or(|source_type| record.source_type == source_type)
+            && self
+                .source_key
+                .as_deref()
+                .is_none_or(|source_key| record.source_key == source_key)
+            && self
+                .occurred_at_start_ms
+                .is_none_or(|start_ms| record.occurred_at_ms >= start_ms)
+            && self
+                .occurred_at_end_ms
+                .is_none_or(|end_ms| record.occurred_at_ms < end_ms)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -519,11 +582,31 @@ impl TriggerSubscriptionFilter {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerDeliveryReservationStatus {
+    Reserved,
+    AlreadyReserved,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriggerDeliveryReservation {
     pub occurrence: TriggerOccurrenceRecord,
     pub subscription: TriggerSubscriptionRecord,
     pub process_id: String,
+    pub created_at_ms: u64,
+    pub reservation_status: TriggerDeliveryReservationStatus,
+}
+
+impl TriggerDeliveryReservation {
+    fn emit_report(&self, outcome: TriggerDeliveryEmitOutcome) -> TriggerDeliveryEmitReport {
+        TriggerDeliveryEmitReport {
+            occurrence_id: self.occurrence.occurrence_id.clone(),
+            subscription_id: self.subscription.subscription_id.clone(),
+            process_id: self.process_id.clone(),
+            outcome,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -563,9 +646,29 @@ pub trait TriggerStore: Send + Sync {
         request: TriggerOccurrenceRequest,
     ) -> Result<TriggerOccurrenceRecord, PluginError>;
 
+    async fn list_occurrences(
+        &self,
+        filter: TriggerOccurrenceFilter,
+    ) -> Result<Vec<TriggerOccurrenceRecord>, PluginError>;
+
     async fn reserve_matching_deliveries(
         &self,
         occurrence_id: &str,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError>;
+
+    async fn list_deliveries_by_occurrence_id(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError>;
+
+    async fn list_deliveries_by_subscription_id(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError>;
+
+    async fn list_deliveries_by_process_id(
+        &self,
+        process_id: &str,
     ) -> Result<Vec<TriggerDeliveryReservation>, PluginError>;
 }
 
@@ -585,6 +688,43 @@ impl InMemoryTriggerStore {
             state: Mutex::new(InMemoryTriggerEventState::default()),
         }
     }
+
+    fn list_deliveries(
+        &self,
+        matches: impl Fn(&InMemoryTriggerDeliveryRecord) -> bool,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
+        let mut deliveries = state
+            .deliveries
+            .values()
+            .filter(|delivery| matches(delivery))
+            .map(|delivery| {
+                in_memory_delivery_reservation(
+                    &state,
+                    delivery,
+                    TriggerDeliveryReservationStatus::AlreadyReserved,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        deliveries.sort_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| {
+                    left.occurrence
+                        .occurrence_id
+                        .cmp(&right.occurrence.occurrence_id)
+                })
+                .then_with(|| {
+                    left.subscription
+                        .subscription_id
+                        .cmp(&right.subscription.subscription_id)
+                })
+        });
+        Ok(deliveries)
+    }
 }
 
 impl Default for InMemoryTriggerStore {
@@ -600,7 +740,49 @@ struct InMemoryTriggerEventState {
     occurrences: BTreeMap<String, TriggerOccurrenceRecord>,
     occurrence_id_by_idempotency_key: BTreeMap<String, String>,
     occurrence_hashes: BTreeMap<String, String>,
-    deliveries: BTreeSet<(String, String)>,
+    deliveries: BTreeMap<(String, String), InMemoryTriggerDeliveryRecord>,
+}
+
+#[derive(Clone)]
+struct InMemoryTriggerDeliveryRecord {
+    occurrence_id: String,
+    subscription_id: String,
+    process_id: String,
+    created_at_ms: u64,
+}
+
+fn in_memory_delivery_reservation(
+    state: &InMemoryTriggerEventState,
+    delivery: &InMemoryTriggerDeliveryRecord,
+    reservation_status: TriggerDeliveryReservationStatus,
+) -> Result<TriggerDeliveryReservation, PluginError> {
+    let occurrence = state
+        .occurrences
+        .get(&delivery.occurrence_id)
+        .cloned()
+        .ok_or_else(|| {
+            PluginError::Session(format!(
+                "missing trigger occurrence `{}` for delivery",
+                delivery.occurrence_id
+            ))
+        })?;
+    let subscription = state
+        .subscriptions
+        .get(&delivery.subscription_id)
+        .cloned()
+        .ok_or_else(|| {
+            PluginError::Session(format!(
+                "missing trigger subscription `{}` for delivery",
+                delivery.subscription_id
+            ))
+        })?;
+    Ok(TriggerDeliveryReservation {
+        occurrence,
+        subscription,
+        process_id: delivery.process_id.clone(),
+        created_at_ms: delivery.created_at_ms,
+        reservation_status,
+    })
 }
 
 #[async_trait::async_trait]
@@ -749,6 +931,28 @@ impl TriggerStore for InMemoryTriggerStore {
         Ok(record)
     }
 
+    async fn list_occurrences(
+        &self,
+        filter: TriggerOccurrenceFilter,
+    ) -> Result<Vec<TriggerOccurrenceRecord>, PluginError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
+        let mut records = state
+            .occurrences
+            .values()
+            .filter(|record| filter.matches(record))
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.occurred_at_ms
+                .cmp(&right.occurred_at_ms)
+                .then_with(|| left.occurrence_id.cmp(&right.occurrence_id))
+        });
+        Ok(records)
+    }
+
     async fn reserve_matching_deliveries(
         &self,
         occurrence_id: &str,
@@ -776,24 +980,57 @@ impl TriggerStore for InMemoryTriggerStore {
             .collect::<Vec<_>>();
         let mut deliveries = Vec::new();
         for subscription in subscriptions {
-            let key = (
-                occurrence.occurrence_id.clone(),
-                subscription.subscription_id.clone(),
-            );
-            if !state.deliveries.insert(key) {
-                continue;
-            }
             let process_id = deterministic_delivery_process_id(
                 &occurrence.occurrence_id,
                 &subscription.subscription_id,
             )?;
+            let key = (
+                occurrence.occurrence_id.clone(),
+                subscription.subscription_id.clone(),
+            );
+            let (delivery, reservation_status) =
+                if let Some(delivery) = state.deliveries.get(&key).cloned() {
+                    (delivery, TriggerDeliveryReservationStatus::AlreadyReserved)
+                } else {
+                    let delivery = InMemoryTriggerDeliveryRecord {
+                        occurrence_id: occurrence.occurrence_id.clone(),
+                        subscription_id: subscription.subscription_id.clone(),
+                        process_id,
+                        created_at_ms: self.clock.timestamp_ms(),
+                    };
+                    state.deliveries.insert(key, delivery.clone());
+                    (delivery, TriggerDeliveryReservationStatus::Reserved)
+                };
             deliveries.push(TriggerDeliveryReservation {
                 occurrence: occurrence.clone(),
                 subscription,
-                process_id,
+                process_id: delivery.process_id,
+                created_at_ms: delivery.created_at_ms,
+                reservation_status,
             });
         }
         Ok(deliveries)
+    }
+
+    async fn list_deliveries_by_occurrence_id(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
+        self.list_deliveries(|delivery| delivery.occurrence_id == occurrence_id)
+    }
+
+    async fn list_deliveries_by_subscription_id(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
+        self.list_deliveries(|delivery| delivery.subscription_id == subscription_id)
+    }
+
+    async fn list_deliveries_by_process_id(
+        &self,
+        process_id: &str,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
+        self.list_deliveries(|delivery| delivery.process_id == process_id)
     }
 }
 
@@ -870,17 +1107,32 @@ impl TriggerRouter {
             .reserve_matching_deliveries(&occurrence.occurrence_id)
             .await?;
         let Some(process_registry) = self.process_registry.as_ref() else {
-            if reservations.is_empty() {
-                return Ok(TriggerEmitReport::new(occurrence.occurrence_id, Vec::new()));
-            }
-            return Err(PluginError::Session(
-                "trigger delivery requires a process registry".to_string(),
-            ));
+            let deliveries = reservations
+                .iter()
+                .map(|reservation| {
+                    let outcome = match reservation.reservation_status {
+                        TriggerDeliveryReservationStatus::Reserved => {
+                            TriggerDeliveryEmitOutcome::Failed {
+                                reason: "trigger delivery requires a process registry".to_string(),
+                            }
+                        }
+                        TriggerDeliveryReservationStatus::AlreadyReserved => {
+                            TriggerDeliveryEmitOutcome::AlreadyReserved
+                        }
+                    };
+                    reservation.emit_report(outcome)
+                })
+                .collect();
+            return Ok(TriggerEmitReport::new(occurrence.occurrence_id, deliveries));
         };
-        let mut started_process_ids = Vec::new();
-        let mut start_errors = Vec::new();
+        let mut deliveries = Vec::new();
+        let mut started_any = false;
         for reservation in reservations {
-            let process_id = reservation.process_id.clone();
+            if reservation.reservation_status == TriggerDeliveryReservationStatus::AlreadyReserved {
+                deliveries
+                    .push(reservation.emit_report(TriggerDeliveryEmitOutcome::AlreadyReserved));
+                continue;
+            }
             if let Err(err) = self
                 .start_delivery(
                     &reservation,
@@ -889,31 +1141,21 @@ impl TriggerRouter {
                 )
                 .await
             {
-                start_errors.push(format!(
-                    "{}: {err}",
-                    reservation.subscription.subscription_id
-                ));
+                deliveries.push(reservation.emit_report(TriggerDeliveryEmitOutcome::Failed {
+                    reason: err.to_string(),
+                }));
                 continue;
             }
-            started_process_ids.push(process_id);
+            started_any = true;
+            deliveries.push(reservation.emit_report(TriggerDeliveryEmitOutcome::Started));
         }
-        if !started_process_ids.is_empty()
-            && let Some(driver) = self.process_work_driver.as_ref()
-        {
+        if started_any && let Some(driver) = self.process_work_driver.as_ref() {
             driver.claim_and_run_pending("trigger_delivery").await?;
         }
-        if started_process_ids.is_empty()
-            && let Some(message) = trigger_delivery_failure_summary(&start_errors)
-        {
-            return Err(PluginError::Session(message));
-        }
-        Ok(TriggerEmitReport::new(
-            occurrence.occurrence_id,
-            started_process_ids,
-        ))
+        Ok(TriggerEmitReport::new(occurrence.occurrence_id, deliveries))
     }
 
-    async fn start_delivery(
+    pub(crate) async fn start_delivery(
         &self,
         reservation: &TriggerDeliveryReservation,
         process_registry: Arc<dyn crate::ProcessRegistry>,
@@ -934,6 +1176,10 @@ impl TriggerRouter {
             materialize_trigger_process_args(&subscription.input_template, &occurrence.payload)?;
         let target = apply_trigger_inputs(subscription.target.clone(), args)?;
         let originator_scope_id = subscription.registrant_scope_id();
+        let trigger_causal_ref = crate::CausalRef::TriggerOccurrence {
+            occurrence_id: occurrence.occurrence_id.clone(),
+            subscription_id: Some(subscription.subscription_id.clone()),
+        };
         let trigger_occurrence_invocation = crate::runtime::causal::trigger_occurrence_invocation(
             &originator_scope_id,
             &occurrence.occurrence_id,
@@ -945,7 +1191,7 @@ impl TriggerRouter {
             // process id, so recovery may re-execute them (ADR 0019).
             crate::RecoveryDisposition::Rerunnable,
             crate::ProcessProvenance::new(subscription.registrant.clone())
-                .with_caused_by(trigger_occurrence_invocation.causal_ref()),
+                .with_caused_by(Some(trigger_causal_ref.clone())),
         )
         .with_identity(subscription.target_identity.clone())
         .with_extra_event_types(subscription.event_types.clone())
@@ -980,9 +1226,7 @@ impl TriggerRouter {
                 occurrence.occurrence_id, subscription.subscription_id
             ),
         )
-        .with_caused_by(Some(crate::CausalRef::TriggerOccurrence {
-            occurrence_id: occurrence.occurrence_id.clone(),
-        }));
+        .with_caused_by(Some(trigger_causal_ref));
         let outcome = effect_controller
             .execute_effect(
                 crate::RuntimeEffectEnvelope::new(
@@ -1004,18 +1248,6 @@ impl TriggerRouter {
                 other.kind().as_str()
             ))),
         }
-    }
-}
-
-fn trigger_delivery_failure_summary(errors: &[String]) -> Option<String> {
-    match errors {
-        [] => None,
-        [only] => Some(format!("trigger delivery failed: {only}")),
-        [first, rest @ ..] => Some(format!(
-            "trigger delivery failed for {} matching subscriptions: {first}; {} more failed",
-            errors.len(),
-            rest.len()
-        )),
     }
 }
 
@@ -1096,6 +1328,33 @@ mod tests {
         crate::LashSchema::any()
     }
 
+    fn trigger_process_draft(source_key: &str, process_name: &str) -> TriggerSubscriptionDraft {
+        TriggerSubscriptionDraft::for_process(
+            crate::ProcessOriginator::host(),
+            crate::ProcessExecutionEnvRef::new(format!("process-env:{process_name}")),
+            "ui.button.pressed",
+            source_key,
+            crate::ProcessInput::Engine {
+                kind: "test-engine".to_string(),
+                payload: serde_json::json!({ "process": process_name }),
+            },
+            crate::ProcessIdentity::new("test-engine").with_label(Some(process_name)),
+        )
+        .with_payload_schema(crate::LashSchema::any())
+    }
+
+    fn button_occurrence(
+        source_key: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> TriggerOccurrenceRequest {
+        TriggerOccurrenceRequest::new(
+            "ui.button.pressed",
+            source_key,
+            serde_json::json!({ "button": "Blue" }),
+            idempotency_key,
+        )
+    }
+
     #[test]
     fn trigger_catalog_rejects_duplicate_trigger_source_identity() {
         let mut catalog = TriggerEventCatalog::new();
@@ -1140,5 +1399,86 @@ mod tests {
             .await
             .expect_err("mismatched target labels should be rejected");
         assert!(err.to_string().contains("target_label must match"));
+    }
+
+    #[tokio::test]
+    async fn trigger_emit_report_records_started_and_already_reserved_deliveries() {
+        let store = Arc::new(InMemoryTriggerStore::default());
+        let registry: Arc<dyn crate::ProcessRegistry> =
+            Arc::new(crate::TestLocalProcessRegistry::default());
+        let source_key = empty_trigger_source_key("ui.button.pressed").expect("source key");
+        let subscription = store
+            .register_subscription(trigger_process_draft(&source_key, "started"))
+            .await
+            .expect("register subscription");
+        let router = TriggerRouter::new(store, Some(Arc::clone(&registry)), None);
+        let controller = crate::InlineRuntimeEffectController;
+
+        let report = router
+            .emit(
+                button_occurrence(source_key.clone(), "button-blue-report"),
+                &controller,
+            )
+            .await
+            .expect("emit trigger");
+        assert_eq!(report.deliveries.len(), 1);
+        let delivery = &report.deliveries[0];
+        assert_eq!(delivery.occurrence_id, report.occurrence_id);
+        assert_eq!(delivery.subscription_id, subscription.subscription_id);
+        assert_eq!(delivery.outcome, TriggerDeliveryEmitOutcome::Started);
+        let record = registry
+            .get_process(&delivery.process_id)
+            .await
+            .expect("started process record");
+        assert!(matches!(
+            record.provenance.caused_by,
+            Some(crate::CausalRef::TriggerOccurrence {
+                occurrence_id,
+                subscription_id: Some(subscription_id),
+            }) if occurrence_id == report.occurrence_id
+                && subscription_id == subscription.subscription_id
+        ));
+
+        let replay = router
+            .emit(
+                button_occurrence(source_key, "button-blue-report"),
+                &controller,
+            )
+            .await
+            .expect("replay trigger");
+        assert_eq!(replay.deliveries.len(), 1);
+        assert_eq!(
+            replay.deliveries[0].outcome,
+            TriggerDeliveryEmitOutcome::AlreadyReserved
+        );
+        assert_eq!(replay.deliveries[0].process_id, delivery.process_id);
+    }
+
+    #[tokio::test]
+    async fn trigger_emit_report_records_failed_delivery_outcome() {
+        let store = Arc::new(InMemoryTriggerStore::default());
+        let source_key = empty_trigger_source_key("ui.button.pressed").expect("source key");
+        let subscription = store
+            .register_subscription(trigger_process_draft(&source_key, "failed"))
+            .await
+            .expect("register subscription");
+        let router = TriggerRouter::new(store, None, None);
+        let controller = crate::InlineRuntimeEffectController;
+
+        let report = router
+            .emit(
+                button_occurrence(source_key, "button-blue-failed"),
+                &controller,
+            )
+            .await
+            .expect("emit trigger");
+        assert_eq!(report.deliveries.len(), 1);
+        let delivery = &report.deliveries[0];
+        assert_eq!(delivery.subscription_id, subscription.subscription_id);
+        assert!(matches!(
+            &delivery.outcome,
+            TriggerDeliveryEmitOutcome::Failed { reason }
+                if reason.contains("process registry")
+        ));
     }
 }

@@ -235,6 +235,8 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             occurred_at_ms BIGINT NOT NULL,
             record_json TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_lash_trigger_occurrences_source
+            ON lash_trigger_occurrences(source_type, source_key, occurred_at_ms);
 
         CREATE TABLE IF NOT EXISTS lash_trigger_deliveries (
             occurrence_id TEXT NOT NULL REFERENCES lash_trigger_occurrences(occurrence_id) ON DELETE CASCADE,
@@ -243,6 +245,10 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             created_at_ms BIGINT NOT NULL,
             PRIMARY KEY (occurrence_id, subscription_id)
         );
+        CREATE INDEX IF NOT EXISTS idx_lash_trigger_deliveries_subscription
+            ON lash_trigger_deliveries(subscription_id);
+        CREATE INDEX IF NOT EXISTS idx_lash_trigger_deliveries_process
+            ON lash_trigger_deliveries(process_id);
 
         CREATE TABLE IF NOT EXISTS lash_lashlang_artifacts (
             namespace TEXT NOT NULL,

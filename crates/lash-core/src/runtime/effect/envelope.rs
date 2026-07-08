@@ -129,6 +129,7 @@ impl RuntimeInvocation {
             RuntimeSubject::TriggerOccurrence { occurrence_id } => {
                 Some(CausalRef::TriggerOccurrence {
                     occurrence_id: occurrence_id.clone(),
+                    subscription_id: None,
                 })
             }
             RuntimeSubject::SessionNode { node_id } => Some(CausalRef::SessionNode {

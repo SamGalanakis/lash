@@ -95,9 +95,12 @@ pub mod observe {
 /// [`LashCore::triggers`] and [`LashSession::triggers`].
 pub mod triggers {
     pub use lash_core::{
-        LashSchema, TriggerEmitReport, TriggerEvent, TriggerEventType, TriggerOccurrenceRequest,
-        TriggerRegistration, TriggerStore, TriggerSubscriptionDraft, TriggerSubscriptionFilter,
-        TriggerSubscriptionRecord, TriggerTargetSummary, empty_trigger_source_key,
+        LashSchema, TriggerDeliveryEmitOutcome, TriggerDeliveryEmitReport,
+        TriggerDeliveryReservation, TriggerDeliveryReservationStatus, TriggerEmitReport,
+        TriggerEvent, TriggerEventType, TriggerOccurrenceFilter, TriggerOccurrenceRecord,
+        TriggerOccurrenceRequest, TriggerRegistration, TriggerStore, TriggerSubscriptionDraft,
+        TriggerSubscriptionFilter, TriggerSubscriptionRecord, TriggerTargetSummary,
+        empty_trigger_source_key,
     };
 }
 
@@ -292,6 +295,7 @@ pub mod remote {
     pub mod triggers {
         pub use lash_remote_protocol::triggers::{
             RemoteTriggerCancelSubscriptionRequest, RemoteTriggerCancelSubscriptionResult,
+            RemoteTriggerDeliveryEmitOutcome, RemoteTriggerDeliveryEmitReport,
             RemoteTriggerEmitReport, RemoteTriggerInputBinding, RemoteTriggerInputTemplate,
             RemoteTriggerListSubscriptionsResponse, RemoteTriggerOccurrenceRecord,
             RemoteTriggerOccurrenceRequest, RemoteTriggerRegisterSubscriptionRequest,

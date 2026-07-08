@@ -426,6 +426,8 @@ run_state_machine_and_fault_matrix() {
     runtime_rebuild_and_worker_recovery_with_durable_stores
   # durable-fault-matrix: provider-retry-exhaustion
   run_cargo_tests -p lash-core --locked retryable_llm_failures_exhaust_and_fail_turn
+  # durable-fault-matrix: trigger-delivery-reserve-start-crash-window
+  run_cargo_tests -p lash-core --locked sweep_reconciles_reserved_trigger_delivery_without_process
   # durable-fault-matrix: protocol-provider-failure
   run_cargo_tests -p lash-protocol-standard --locked --test protocol_scenarios \
     standard_protocol_scenario_provider_error_stops_without_checkpoint

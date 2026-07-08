@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -310,6 +311,7 @@ impl DurableProcessWorker {
     /// detected after claiming and skipped, so re-running a recovery sweep does
     /// not double-execute completed work.
     pub async fn drive_pending_processes(&self) -> Result<(), PluginError> {
+        self.reconcile_trigger_deliveries().await?;
         let records = self.config.process_registry.list_non_terminal().await?;
         for record in records {
             // Run each claimed process on its OWN lease-fenced task. A sequential
@@ -324,6 +326,88 @@ impl DurableProcessWorker {
             // aborts the rest of the sweep.
             let worker = self.clone();
             tokio::spawn(async move { worker.recover_process(record).await });
+        }
+        Ok(())
+    }
+
+    async fn reconcile_trigger_deliveries(&self) -> Result<(), PluginError> {
+        let subscriptions = self
+            .config
+            .trigger_store
+            .list_subscriptions(crate::TriggerSubscriptionFilter::default())
+            .await?;
+        if subscriptions.is_empty() {
+            return Ok(());
+        }
+        let router = crate::TriggerRouter::new(
+            Arc::clone(&self.config.trigger_store),
+            Some(Arc::clone(&self.config.process_registry)),
+            self.config.process_work_driver.clone(),
+        );
+        let mut seen = BTreeSet::new();
+        let mut started_any = false;
+        for subscription in subscriptions {
+            let deliveries = self
+                .config
+                .trigger_store
+                .list_deliveries_by_subscription_id(&subscription.subscription_id)
+                .await?;
+            for delivery in deliveries {
+                let delivery_key = (
+                    delivery.occurrence.occurrence_id.clone(),
+                    delivery.subscription.subscription_id.clone(),
+                );
+                if !seen.insert(delivery_key) {
+                    continue;
+                }
+                if self
+                    .config
+                    .process_registry
+                    .get_process(&delivery.process_id)
+                    .await
+                    .is_some()
+                {
+                    continue;
+                }
+                let Some(scoped_effect_controller) = self
+                    .config
+                    .runtime_host
+                    .control
+                    .effect_host
+                    .scoped_static(crate::ExecutionScope::runtime_operation(format!(
+                        "trigger-delivery-reconcile:{}",
+                        delivery.process_id
+                    )))
+                    .map_err(|err| PluginError::Session(err.to_string()))?
+                else {
+                    return Err(PluginError::Session(
+                        "process worker effect host must provide a static trigger delivery reconcile scope"
+                            .to_string(),
+                    ));
+                };
+                match router
+                    .start_delivery(
+                        &delivery,
+                        Arc::clone(&self.config.process_registry),
+                        scoped_effect_controller.controller(),
+                    )
+                    .await
+                {
+                    Ok(()) => started_any = true,
+                    Err(err) => tracing::warn!(
+                        process_id = %delivery.process_id,
+                        occurrence_id = %delivery.occurrence.occurrence_id,
+                        subscription_id = %delivery.subscription.subscription_id,
+                        error = %err,
+                        "failed to reconcile trigger delivery",
+                    ),
+                }
+            }
+        }
+        if started_any && let Some(driver) = self.config.process_work_driver.as_ref() {
+            driver
+                .claim_and_run_pending("trigger_delivery_reconcile")
+                .await?;
         }
         Ok(())
     }

@@ -50,6 +50,68 @@ impl SqliteTriggerStore {
             ))
         })
     }
+
+    fn decode_delivery(
+        occurrence_json: String,
+        subscription_json: String,
+        process_id: String,
+        created_at_ms: i64,
+        reservation_status: lash_core::TriggerDeliveryReservationStatus,
+    ) -> Result<lash_core::TriggerDeliveryReservation, lash_core::PluginError> {
+        Ok(lash_core::TriggerDeliveryReservation {
+            occurrence: Self::decode_occurrence(occurrence_json)?,
+            subscription: Self::decode_subscription(subscription_json)?,
+            process_id,
+            created_at_ms: created_at_ms as u64,
+            reservation_status,
+        })
+    }
+
+    async fn list_deliveries_where(
+        &self,
+        where_clause: &'static str,
+        value: String,
+    ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
+        self.conn
+            .call(move |conn| {
+                Ok((|| {
+                    let sql = format!(
+                        "SELECT d.process_id, d.created_at_ms, o.record_json, s.record_json
+                         FROM trigger_deliveries d
+                         JOIN trigger_occurrences o ON o.occurrence_id = d.occurrence_id
+                         JOIN trigger_subscriptions s ON s.subscription_id = d.subscription_id
+                         WHERE {where_clause}
+                         ORDER BY d.created_at_ms ASC, d.occurrence_id ASC, d.subscription_id ASC"
+                    );
+                    let mut stmt = conn.prepare(&sql).map_err(process_sqlite_error)?;
+                    let rows = stmt
+                        .query_map(params![value.as_str()], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        })
+                        .map_err(process_sqlite_error)?;
+                    let mut deliveries = Vec::new();
+                    for row in rows {
+                        let (process_id, created_at_ms, occurrence_json, subscription_json) =
+                            row.map_err(process_sqlite_error)?;
+                        deliveries.push(Self::decode_delivery(
+                            occurrence_json,
+                            subscription_json,
+                            process_id,
+                            created_at_ms,
+                            lash_core::TriggerDeliveryReservationStatus::AlreadyReserved,
+                        )?);
+                    }
+                    Ok(deliveries)
+                })())
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
 }
 
 fn trigger_tx_outcome<T>(
@@ -375,6 +437,59 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
             .map_err(process_sqlite_error)?
     }
 
+    async fn list_occurrences(
+        &self,
+        filter: lash_core::TriggerOccurrenceFilter,
+    ) -> Result<Vec<lash_core::TriggerOccurrenceRecord>, lash_core::PluginError> {
+        self.conn
+            .call(move |conn| {
+                Ok((|| {
+                    let mut sql =
+                        "SELECT occurrence_id, record_json FROM trigger_occurrences WHERE 1 = 1"
+                            .to_string();
+                    let mut values = Vec::<rusqlite::types::Value>::new();
+                    if let Some(source_type) = filter.source_type.as_ref() {
+                        sql.push_str(" AND source_type = ?");
+                        values.push(source_type.clone().into());
+                    }
+                    if let Some(source_key) = filter.source_key.as_ref() {
+                        sql.push_str(" AND source_key = ?");
+                        values.push(source_key.clone().into());
+                    }
+                    if let Some(start_ms) = filter.occurred_at_start_ms {
+                        sql.push_str(" AND occurred_at_ms >= ?");
+                        values.push((start_ms as i64).into());
+                    }
+                    if let Some(end_ms) = filter.occurred_at_end_ms {
+                        sql.push_str(" AND occurred_at_ms < ?");
+                        values.push((end_ms as i64).into());
+                    }
+                    sql.push_str(" ORDER BY occurred_at_ms ASC, occurrence_id ASC");
+                    let mut stmt = conn.prepare(&sql).map_err(process_sqlite_error)?;
+                    let rows = stmt
+                        .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })
+                        .map_err(process_sqlite_error)?;
+                    let mut records = Vec::new();
+                    for row in rows {
+                        let (occurrence_id, json) = row.map_err(process_sqlite_error)?;
+                        match Self::decode_occurrence(json) {
+                            Ok(record) => records.push(record),
+                            Err(err) => tracing::warn!(
+                                error = %err,
+                                occurrence_id,
+                                "skipping malformed trigger occurrence during listing"
+                            ),
+                        }
+                    }
+                    Ok(records)
+                })())
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
     async fn reserve_matching_deliveries(
         &self,
         occurrence_id: &str,
@@ -440,6 +555,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                             &occurrence.occurrence_id,
                             &subscription.subscription_id,
                         )?;
+                        let created_at_ms = current_epoch_ms();
                         let inserted = tx
                             .execute(
                                 "INSERT OR IGNORE INTO trigger_deliveries (
@@ -450,17 +566,31 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                                     occurrence.occurrence_id.as_str(),
                                     subscription.subscription_id.as_str(),
                                     process_id.as_str(),
-                                    current_epoch_ms() as i64,
+                                    created_at_ms as i64,
                                 ],
                             )
                             .map_err(process_sqlite_error)?;
-                        if inserted == 0 {
-                            continue;
-                        }
+                        let stored_created_at_ms: i64 = tx
+                            .query_row(
+                                "SELECT created_at_ms FROM trigger_deliveries
+                                 WHERE occurrence_id = ?1 AND subscription_id = ?2",
+                                params![
+                                    occurrence.occurrence_id.as_str(),
+                                    subscription.subscription_id.as_str()
+                                ],
+                                |row| row.get(0),
+                            )
+                            .map_err(process_sqlite_error)?;
                         reservations.push(lash_core::TriggerDeliveryReservation {
                             occurrence: occurrence.clone(),
                             subscription,
                             process_id,
+                            created_at_ms: stored_created_at_ms as u64,
+                            reservation_status: if inserted == 0 {
+                                lash_core::TriggerDeliveryReservationStatus::AlreadyReserved
+                            } else {
+                                lash_core::TriggerDeliveryReservationStatus::Reserved
+                            },
                         });
                     }
                     Ok(reservations)
@@ -468,5 +598,29 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
             })
             .await
             .map_err(process_sqlite_error)?
+    }
+
+    async fn list_deliveries_by_occurrence_id(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
+        self.list_deliveries_where("d.occurrence_id = ?1", occurrence_id.to_string())
+            .await
+    }
+
+    async fn list_deliveries_by_subscription_id(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
+        self.list_deliveries_where("d.subscription_id = ?1", subscription_id.to_string())
+            .await
+    }
+
+    async fn list_deliveries_by_process_id(
+        &self,
+        process_id: &str,
+    ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
+        self.list_deliveries_where("d.process_id = ?1", process_id.to_string())
+            .await
     }
 }

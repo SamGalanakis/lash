@@ -123,7 +123,7 @@ impl TriggerStore for PostgresTriggerStore {
              WHERE registrant_scope_id = $1 AND handle = $2
              FOR UPDATE",
         )
-        .bind(&registrant_scope_id)
+        .bind(registrant_scope_id)
         .bind(handle)
         .fetch_optional(&mut *tx)
         .await
@@ -144,7 +144,7 @@ impl TriggerStore for PostgresTriggerStore {
                      SET enabled = $3, updated_at_ms = $4, record_json = $5
                      WHERE registrant_scope_id = $1 AND handle = $2",
                 )
-                .bind(&registrant_scope_id)
+                .bind(registrant_scope_id)
                 .bind(handle)
                 .bind(record.enabled)
                 .bind(record.updated_at_ms as i64)
@@ -165,7 +165,7 @@ impl TriggerStore for PostgresTriggerStore {
                      SET enabled = FALSE, updated_at_ms = $3
                      WHERE registrant_scope_id = $1 AND handle = $2",
                 )
-                .bind(&registrant_scope_id)
+                .bind(registrant_scope_id)
                 .bind(handle)
                 .bind(updated_at_ms as i64)
                 .execute(&mut *tx)
@@ -253,6 +253,51 @@ impl TriggerStore for PostgresTriggerStore {
         Ok(record)
     }
 
+    async fn list_occurrences(
+        &self,
+        filter: lash_core::TriggerOccurrenceFilter,
+    ) -> Result<Vec<TriggerOccurrenceRecord>, PluginError> {
+        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "SELECT occurrence_id, record_json FROM lash_trigger_occurrences WHERE TRUE",
+        );
+        if let Some(source_type) = filter.source_type.as_ref() {
+            query.push(" AND source_type = ").push_bind(source_type);
+        }
+        if let Some(source_key) = filter.source_key.as_ref() {
+            query.push(" AND source_key = ").push_bind(source_key);
+        }
+        if let Some(start_ms) = filter.occurred_at_start_ms {
+            query
+                .push(" AND occurred_at_ms >= ")
+                .push_bind(start_ms as i64);
+        }
+        if let Some(end_ms) = filter.occurred_at_end_ms {
+            query
+                .push(" AND occurred_at_ms < ")
+                .push_bind(end_ms as i64);
+        }
+        query.push(" ORDER BY occurred_at_ms ASC, occurrence_id ASC");
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(plugin_sqlx_error)?;
+        let mut records = Vec::new();
+        for row in rows {
+            let occurrence_id: String = row.get(0);
+            let json: String = row.get(1);
+            match serde_json::from_str(&json) {
+                Ok(record) => records.push(record),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    occurrence_id,
+                    "skipping malformed trigger occurrence during listing"
+                ),
+            }
+        }
+        Ok(records)
+    }
+
     async fn reserve_matching_deliveries(
         &self,
         occurrence_id: &str,
@@ -302,6 +347,7 @@ impl TriggerStore for PostgresTriggerStore {
                 &occurrence.occurrence_id,
                 &subscription.subscription_id,
             )?;
+            let created_at_ms = current_epoch_ms();
             let inserted = sqlx::query(
                 "INSERT INTO lash_trigger_deliveries (
                     occurrence_id, subscription_id, process_id, created_at_ms
@@ -312,23 +358,92 @@ impl TriggerStore for PostgresTriggerStore {
             .bind(&occurrence.occurrence_id)
             .bind(&subscription.subscription_id)
             .bind(&process_id)
-            .bind(current_epoch_ms() as i64)
+            .bind(created_at_ms as i64)
             .execute(&mut *tx)
             .await
             .map_err(plugin_sqlx_error)?
             .rows_affected();
-            if inserted == 0 {
-                continue;
-            }
+            let stored_created_at_ms: i64 = sqlx::query_scalar(
+                "SELECT created_at_ms FROM lash_trigger_deliveries
+                 WHERE occurrence_id = $1 AND subscription_id = $2",
+            )
+            .bind(&occurrence.occurrence_id)
+            .bind(&subscription.subscription_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(plugin_sqlx_error)?;
             deliveries.push(TriggerDeliveryReservation {
                 occurrence: occurrence.clone(),
                 subscription,
                 process_id,
+                created_at_ms: stored_created_at_ms as u64,
+                reservation_status: if inserted == 0 {
+                    lash_core::TriggerDeliveryReservationStatus::AlreadyReserved
+                } else {
+                    lash_core::TriggerDeliveryReservationStatus::Reserved
+                },
             });
         }
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(deliveries)
     }
+
+    async fn list_deliveries_by_occurrence_id(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
+        list_deliveries_where(&self.pool, "d.occurrence_id = $1", occurrence_id.to_string()).await
+    }
+
+    async fn list_deliveries_by_subscription_id(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
+        list_deliveries_where(&self.pool, "d.subscription_id = $1", subscription_id.to_string())
+            .await
+    }
+
+    async fn list_deliveries_by_process_id(
+        &self,
+        process_id: &str,
+    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
+        list_deliveries_where(&self.pool, "d.process_id = $1", process_id.to_string()).await
+    }
+}
+
+async fn list_deliveries_where(
+    pool: &sqlx::PgPool,
+    where_clause: &'static str,
+    value: String,
+) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
+    let sql = format!(
+        "SELECT d.process_id, d.created_at_ms, o.record_json, s.record_json
+         FROM lash_trigger_deliveries d
+         JOIN lash_trigger_occurrences o ON o.occurrence_id = d.occurrence_id
+         JOIN lash_trigger_subscriptions s ON s.subscription_id = d.subscription_id
+         WHERE {where_clause}
+         ORDER BY d.created_at_ms ASC, d.occurrence_id ASC, d.subscription_id ASC"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(value)
+        .fetch_all(pool)
+        .await
+        .map_err(plugin_sqlx_error)?;
+    let mut deliveries = Vec::new();
+    for row in rows {
+        let process_id: String = row.get(0);
+        let created_at_ms: i64 = row.get(1);
+        let occurrence_json: String = row.get(2);
+        let subscription_json: String = row.get(3);
+        deliveries.push(TriggerDeliveryReservation {
+            occurrence: serde_json::from_str(&occurrence_json).map_err(process_decode_error)?,
+            subscription: serde_json::from_str(&subscription_json).map_err(process_decode_error)?,
+            process_id,
+            created_at_ms: created_at_ms as u64,
+            reservation_status: lash_core::TriggerDeliveryReservationStatus::AlreadyReserved,
+        });
+    }
+    Ok(deliveries)
 }
 
 fn session_registrant_scope_id(session_id: &str) -> String {

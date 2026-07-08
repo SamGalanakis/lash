@@ -314,8 +314,9 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
             runtime_operation_scope("sessionless-trigger"),
         )
         .await?;
-    assert_eq!(report.started_process_ids.len(), 1);
-    let triggered_process_id = &report.started_process_ids[0];
+    let started_process_ids = report.started_process_ids();
+    assert_eq!(started_process_ids.len(), 1);
+    let triggered_process_id = &started_process_ids[0];
     let triggered = wait_for_waiting_signal(&core, triggered_process_id, "ready").await;
     assert!(matches!(
         triggered.originator,

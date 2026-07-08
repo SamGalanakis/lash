@@ -305,7 +305,11 @@ async fn sqlite_trigger_store_persists_subscriptions_and_reserves_idempotently_a
         .reserve_matching_deliveries(&replayed.occurrence_id)
         .await
         .expect("reserve duplicate delivery");
-    assert!(duplicate.is_empty());
+    assert_eq!(duplicate.len(), 1);
+    assert_eq!(
+        duplicate[0].reservation_status,
+        lash_core::TriggerDeliveryReservationStatus::AlreadyReserved
+    );
 }
 
 #[tokio::test]

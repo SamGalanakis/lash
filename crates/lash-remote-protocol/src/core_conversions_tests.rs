@@ -208,7 +208,12 @@ fn trigger_dtos_round_trip_core_values() {
 
     let report = lash_core::TriggerEmitReport {
         occurrence_id: "occurrence:1".to_string(),
-        started_process_ids: vec!["process:1".to_string()],
+        deliveries: vec![lash_core::TriggerDeliveryEmitReport {
+            occurrence_id: "occurrence:1".to_string(),
+            subscription_id: "subscription:1".to_string(),
+            process_id: "process:1".to_string(),
+            outcome: lash_core::TriggerDeliveryEmitOutcome::Started,
+        }],
     };
     let remote = RemoteTriggerEmitReport::from(report.clone());
     remote.validate().expect("valid remote report");
@@ -248,6 +253,7 @@ fn trigger_dtos_round_trip_core_values() {
 
     let cause = lash_core::CausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
+        subscription_id: Some("subscription:1".to_string()),
     };
     let remote = RemoteCausalRef::from(cause.clone());
     let core = lash_core::CausalRef::from(remote);
@@ -1006,6 +1012,7 @@ fn process_record(process_id: &str) -> lash_core::ProcessRecord {
         lash_core::ProcessProvenance::host().with_caused_by(Some(
             lash_core::CausalRef::TriggerOccurrence {
                 occurrence_id: "trigger:1".to_string(),
+                subscription_id: None,
             },
         )),
     )

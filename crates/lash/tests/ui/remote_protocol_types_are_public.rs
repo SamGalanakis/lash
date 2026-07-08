@@ -29,12 +29,18 @@ fn main() {
     let report = lash::remote::triggers::RemoteTriggerEmitReport {
         protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
         occurrence_id: "occurrence:1".to_string(),
-        started_process_ids: Vec::new(),
+        deliveries: vec![lash::remote::triggers::RemoteTriggerDeliveryEmitReport {
+            occurrence_id: "occurrence:1".to_string(),
+            subscription_id: "subscription:1".to_string(),
+            process_id: "process:1".to_string(),
+            outcome: lash::remote::triggers::RemoteTriggerDeliveryEmitOutcome::Started,
+        }],
     };
     report.validate().unwrap();
 
     let _cause = lash::remote::turn_result::RemoteCausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
+        subscription_id: None,
     };
 
     let _queue = lash::remote::observations::RemoteSessionObservationEventPayload::QueueChanged {

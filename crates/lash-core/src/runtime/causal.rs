@@ -276,7 +276,16 @@ fn causal_replay_discriminator(caused_by: &CausalRef) -> String {
             process_id,
             sequence,
         } => format!("cause:process_event:{process_id}:{sequence}:"),
-        CausalRef::TriggerOccurrence { occurrence_id } => format!("cause:trigger:{occurrence_id}:"),
+        CausalRef::TriggerOccurrence {
+            occurrence_id,
+            subscription_id,
+        } => {
+            if let Some(subscription_id) = subscription_id {
+                format!("cause:trigger:{occurrence_id}:{subscription_id}:")
+            } else {
+                format!("cause:trigger:{occurrence_id}:")
+            }
+        }
         CausalRef::SessionNode {
             session_id,
             node_id,

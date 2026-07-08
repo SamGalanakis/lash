@@ -33,7 +33,7 @@ impl<'run> ToolTriggerClient<'run> {
                 payload: outcome.payload,
                 idempotency_key: outcome.idempotency_key,
                 source: outcome.source,
-                started_process_ids: report.started_process_ids.clone(),
+                deliveries: report.deliveries.clone(),
             })
             .map_err(PluginError::Session)?;
         Ok(report)

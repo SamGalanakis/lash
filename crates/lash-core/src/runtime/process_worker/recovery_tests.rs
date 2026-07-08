@@ -3,12 +3,25 @@ use std::time::Duration;
 use super::*;
 use crate::{
     AbandonRequest, DurabilityTier, LeaseOwnerIdentity, LeaseOwnerLiveness, ProcessInput,
-    ProcessRegistration, ProcessStarted, ProcessStatus, TestLocalProcessRegistry,
+    ProcessListFilter, ProcessRegistration, ProcessStarted, ProcessStatus,
+    TestLocalProcessRegistry, TriggerStore,
 };
 
 fn inline_worker(
     registry: Arc<dyn ProcessRegistry>,
     lease_owner: LeaseOwnerIdentity,
+) -> DurableProcessWorker {
+    inline_worker_with_trigger_store(
+        registry,
+        lease_owner,
+        Arc::new(crate::InMemoryTriggerStore::default()),
+    )
+}
+
+fn inline_worker_with_trigger_store(
+    registry: Arc<dyn ProcessRegistry>,
+    lease_owner: LeaseOwnerIdentity,
+    trigger_store: Arc<dyn TriggerStore>,
 ) -> DurableProcessWorker {
     struct InlineSessionStoreFactory;
 
@@ -37,6 +50,7 @@ fn inline_worker(
             Arc::new(InlineSessionStoreFactory),
             registry,
         )
+        .with_trigger_store(trigger_store)
         .with_lease_owner(lease_owner),
     )
 }
@@ -88,6 +102,63 @@ fn local_owner(owner_id: &str, host_id: &str, process_start: &str) -> LeaseOwner
     }
 }
 
+async fn seed_reserved_trigger_delivery(
+    trigger_store: &Arc<dyn TriggerStore>,
+) -> crate::TriggerDeliveryReservation {
+    let source_type = "ui.button.pressed";
+    let source_key =
+        crate::empty_trigger_source_key(source_type).expect("empty trigger source key");
+    let subscription = trigger_store
+        .register_subscription(
+            crate::TriggerSubscriptionDraft::for_process(
+                crate::ProcessOriginator::host(),
+                crate::ProcessExecutionEnvRef::new("process-env:test"),
+                source_type,
+                source_key.clone(),
+                ProcessInput::Engine {
+                    kind: "test-engine".to_string(),
+                    payload: serde_json::json!({ "target": "reconcile" }),
+                },
+                crate::ProcessIdentity::new("test-engine"),
+            )
+            .with_payload_schema(crate::LashSchema::any()),
+        )
+        .await
+        .expect("register trigger subscription");
+    let occurrence = trigger_store
+        .record_occurrence(crate::TriggerOccurrenceRequest::new(
+            source_type,
+            source_key,
+            serde_json::json!({ "button": "Blue" }),
+            "button-blue-reconcile",
+        ))
+        .await
+        .expect("record trigger occurrence");
+    let deliveries = trigger_store
+        .reserve_matching_deliveries(&occurrence.occurrence_id)
+        .await
+        .expect("reserve trigger delivery");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(
+        deliveries[0].subscription.subscription_id,
+        subscription.subscription_id
+    );
+    deliveries[0].clone()
+}
+
+async fn process_count(registry: &Arc<dyn ProcessRegistry>, process_id: &str) -> usize {
+    registry
+        .list_processes(&ProcessListFilter {
+            status: crate::ProcessStatusFilter::Any,
+            ..ProcessListFilter::default()
+        })
+        .await
+        .expect("list processes")
+        .into_iter()
+        .filter(|record| record.id == process_id)
+        .count()
+}
+
 async fn await_terminal(registry: &Arc<dyn ProcessRegistry>, process_id: &str) {
     let awaiter = crate::ProcessAwaiter::polling(Arc::clone(registry));
     tokio::time::timeout(
@@ -97,6 +168,91 @@ async fn await_terminal(registry: &Arc<dyn ProcessRegistry>, process_id: &str) {
     .await
     .expect("recovered process reaches terminal within the sweep")
     .expect("recovered process terminal output");
+}
+
+#[tokio::test]
+async fn sweep_reconciles_reserved_trigger_delivery_without_process() {
+    let registry: Arc<dyn ProcessRegistry> = Arc::new(TestLocalProcessRegistry::default());
+    let trigger_store: Arc<dyn TriggerStore> = Arc::new(crate::InMemoryTriggerStore::default());
+    let delivery = seed_reserved_trigger_delivery(&trigger_store).await;
+    assert!(
+        registry.get_process(&delivery.process_id).await.is_none(),
+        "test starts in the reserve/start crash window"
+    );
+
+    let worker = inline_worker_with_trigger_store(
+        Arc::clone(&registry),
+        local_owner("trigger-worker", "host-a", "claimant-start"),
+        Arc::clone(&trigger_store),
+    );
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("sweep dispatches");
+
+    let record = registry
+        .get_process(&delivery.process_id)
+        .await
+        .expect("sweep registers missing trigger delivery process");
+    assert_eq!(record.id, delivery.process_id);
+    assert_eq!(process_count(&registry, &delivery.process_id).await, 1);
+    assert!(matches!(
+        record.provenance.caused_by,
+        Some(crate::CausalRef::TriggerOccurrence {
+            occurrence_id,
+            subscription_id: Some(subscription_id),
+        }) if occurrence_id == delivery.occurrence.occurrence_id
+            && subscription_id == delivery.subscription.subscription_id
+    ));
+
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("second sweep dispatches");
+    assert_eq!(
+        process_count(&registry, &delivery.process_id).await,
+        1,
+        "re-running the sweep must not create a duplicate process row"
+    );
+}
+
+#[tokio::test]
+async fn sweep_does_not_reconcile_trigger_delivery_when_process_exists() {
+    let registry: Arc<dyn ProcessRegistry> = Arc::new(TestLocalProcessRegistry::default());
+    let trigger_store: Arc<dyn TriggerStore> = Arc::new(crate::InMemoryTriggerStore::default());
+    let delivery = seed_reserved_trigger_delivery(&trigger_store).await;
+    registry
+        .register_process(ProcessRegistration::new(
+            delivery.process_id.clone(),
+            ProcessInput::External {
+                metadata: serde_json::json!({ "already": "registered" }),
+            },
+            RecoveryDisposition::Rerunnable,
+            crate::ProcessProvenance::host(),
+        ))
+        .await
+        .expect("pre-register delivery process");
+
+    let worker = inline_worker_with_trigger_store(
+        Arc::clone(&registry),
+        local_owner("trigger-worker", "host-a", "claimant-start"),
+        trigger_store,
+    );
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("sweep dispatches");
+
+    let record = registry
+        .get_process(&delivery.process_id)
+        .await
+        .expect("existing process remains");
+    assert_eq!(record.provenance.caused_by, None);
+    assert_eq!(
+        process_count(&registry, &delivery.process_id).await,
+        1,
+        "existing process row must be treated as already started"
+    );
 }
 
 /// ExternallyOwned rows are never claimed and never run: lash does not own

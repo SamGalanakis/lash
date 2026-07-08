@@ -522,7 +522,7 @@ async fn trigger_emit_does_not_append_session_node_or_queue_work() -> Result<()>
         )
         .await?;
     assert!(!report.occurrence_id.is_empty());
-    assert!(report.started_process_ids.is_empty());
+    assert!(report.deliveries.is_empty());
 
     assert!(session.queued_work().await?.is_empty());
     let persisted = session.admin().state().persist_current().await?;
