@@ -15,7 +15,17 @@ engine with native continue-as-new maps to that directly.
 
 Above the seam nothing changes: process identity, leases, durable waits, provenance, replay
 keys, and observation are segment-invariant, and no authoring construct or host projection
-ever sees a segment. We rejected author-visible chaining (a `continue`-as-successor terminal
+ever sees a segment. The seam itself needs exactly two expansions: a non-terminal
+segment-boundary outcome on the effect-controller/run path that the process worker treats as
+an ordinary reschedule (the process stays running; never terminal), and promotion of the
+inline tier's effect-replay persistence to a controller-accessible seam so cross-segment
+replay reads durable outcomes instead of carrying an ever-growing checkpoint. Boundary
+thresholds, next-segment self-submission, and checkpoint mechanics stay inside the controller
+crate. Open for the implementation pass: once outcomes write through to the replay store, the
+engine journal stops being the replay source of record — deciding how far to lean into that
+(engine as scheduler over lash-persisted replay) is the first design question, and durable-wait
+re-arming across a boundary needs deterministic-simulation and fault-matrix evidence either
+way. We rejected author-visible chaining (a `continue`-as-successor terminal
 that hosts stitch into lineages) because it exports a backend limitation into every authoring
 surface, host projection, and UI forever — and rejected a substrate-level incarnation
 primitive as duplicating what each engine already does natively. Consequence: the lash-restate
