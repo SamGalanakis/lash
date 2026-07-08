@@ -1002,7 +1002,7 @@ async fn emit_button_event(
         )
         .await?;
     report
-        .started_process_ids
+        .started_process_ids()
         .first()
         .cloned()
         .context("trigger occurrence did not start a process")

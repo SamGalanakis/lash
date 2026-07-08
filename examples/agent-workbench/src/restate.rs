@@ -680,7 +680,7 @@ async fn run_button_trigger(
         json!({
             "button": request.button,
             "occurrence_id": receipt.occurrence_id,
-            "started_process_ids": receipt.started_process_ids,
+            "started_process_ids": receipt.started_process_ids(),
         }),
     );
     state.push_message("event", "button trigger occurrence emitted");
@@ -724,7 +724,7 @@ async fn run_mail_received(
             "account": request.delivery.account,
             "title": request.delivery.title,
             "occurrence_id": receipt.occurrence_id,
-            "started_process_ids": receipt.started_process_ids,
+            "started_process_ids": receipt.started_process_ids(),
         }),
     );
     state.push_message("event", "mail received trigger occurrence queued");
@@ -1049,7 +1049,7 @@ async fn emit_cron_occurrence(
         .await
         .map_err(|err| HandlerError::from(TerminalError::new(err.to_string())))?;
     Ok(Json(CronEmitReport {
-        started_process_ids: report.started_process_ids,
+        started_process_ids: report.started_process_ids(),
     }))
 }
 
