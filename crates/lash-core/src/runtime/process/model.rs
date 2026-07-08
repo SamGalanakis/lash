@@ -1314,7 +1314,11 @@ pub struct ProcessListFilter {
     pub identity_label: Option<String>,
     pub caused_by_occurrence_id: Option<String>,
     pub caused_by_subscription_id: Option<String>,
+    /// Inclusive lower bound for `created_at_ms`; paired with
+    /// `created_at_end_ms` this is a half-open `[start, end)` range.
     pub created_at_start_ms: Option<u64>,
+    /// Exclusive upper bound for `created_at_ms`; paired with
+    /// `created_at_start_ms` this is a half-open `[start, end)` range.
     pub created_at_end_ms: Option<u64>,
 }
 

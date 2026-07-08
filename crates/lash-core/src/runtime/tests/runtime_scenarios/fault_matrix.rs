@@ -122,7 +122,7 @@ const DURABLE_FAULT_MATRIX: &[DurableFaultMatrixRow] = &[
     DurableFaultMatrixRow {
         id: "sqlite-backend-conformance",
         kind: DurableFaultKind::BackendPermutation,
-        contract: "Sqlite runs the backend conformance contract, including reopen, source-key, claim, lease, process change-feed, drainage, watermark-bounded prune, and effect replay cases.",
+        contract: "Sqlite runs the backend conformance contract, including reopen, source-key, claim, lease, process change-feed ordering, process_change_feed_never_misses_concurrent_terminal_writers, drainage, watermark-bounded prune, and effect replay cases.",
         evidence: FaultEvidence::CargoTest(CargoTestEvidence {
             package: "lash-sqlite-store",
             test_target: Some("conformance"),
@@ -133,9 +133,9 @@ const DURABLE_FAULT_MATRIX: &[DurableFaultMatrixRow] = &[
     DurableFaultMatrixRow {
         id: "postgres-backend-conformance",
         kind: DurableFaultKind::BackendPermutation,
-        contract: "Postgres runs the same backend conformance contract, including process change-feed, drainage, and watermark-bounded prune, against a durable service backend.",
+        contract: "When the env-gated Postgres lane is configured, Postgres runs the same backend conformance contract, including process_change_feed_never_misses_concurrent_terminal_writers, drainage, and watermark-bounded prune, against a durable service backend.",
         evidence: FaultEvidence::Blocked {
-            rationale: "Fast confidence cannot require an external Postgres service; the full lane executes Postgres conformance when LASH_POSTGRES_DATABASE_URL or Docker is available.",
+            rationale: "Fast confidence cannot require an external Postgres service; Postgres conformance remains blocked in fast and runs only when LASH_POSTGRES_DATABASE_URL or Docker is available.",
         },
     },
 ];
