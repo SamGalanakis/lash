@@ -140,6 +140,7 @@ impl TryFrom<RemoteTriggerSubscriptionFilter> for lash_core::TriggerSubscription
         value.validate()?;
         let RemoteTriggerSubscriptionFilter {
             protocol_version: _,
+            registrant_scope_id,
             session_id,
             handle,
             name,
@@ -149,6 +150,7 @@ impl TryFrom<RemoteTriggerSubscriptionFilter> for lash_core::TriggerSubscription
             enabled,
         } = value;
         Ok(Self {
+            registrant_scope_id,
             session_id,
             handle,
             name,
@@ -163,6 +165,7 @@ impl TryFrom<RemoteTriggerSubscriptionFilter> for lash_core::TriggerSubscription
 impl From<lash_core::TriggerSubscriptionFilter> for RemoteTriggerSubscriptionFilter {
     fn from(value: lash_core::TriggerSubscriptionFilter) -> Self {
         let lash_core::TriggerSubscriptionFilter {
+            registrant_scope_id,
             session_id,
             handle,
             name,
@@ -173,6 +176,7 @@ impl From<lash_core::TriggerSubscriptionFilter> for RemoteTriggerSubscriptionFil
         } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
+            registrant_scope_id,
             session_id,
             handle,
             name,

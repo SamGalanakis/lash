@@ -17,6 +17,8 @@ where
     trigger_store_reports_declared_tier(make(), expected_tier);
     trigger_source_key_is_stable(make()).await;
     trigger_store_registers_lists_and_cancels(make()).await;
+    trigger_store_lists_agent_frame_registrations_by_session(make()).await;
+    trigger_store_handles_host_scoped_lifecycle(make()).await;
     trigger_store_records_and_reserves_idempotently(make()).await;
 }
 
@@ -65,6 +67,22 @@ fn sample_trigger_subscription_draft(
         input_template: inputs,
         target_label: Some(process_name.to_string()),
     }
+}
+
+fn sample_host_trigger_subscription_draft(
+    originator: crate::ProcessOriginator,
+    source_key: &str,
+    process_name: &str,
+) -> crate::TriggerSubscriptionDraft {
+    let mut draft = sample_trigger_subscription_draft("host-template", source_key, process_name);
+    draft.registrant = originator;
+    draft.wake_target = None;
+    draft.env_ref = crate::ProcessExecutionEnvRef::new(format!("process-env:{process_name}"));
+    draft
+}
+
+fn session_scope_id(session_id: &str) -> String {
+    crate::ProcessOriginator::session(crate::SessionScope::new(session_id)).scope_id()
 }
 
 fn button_occurrence_request(
@@ -149,14 +167,14 @@ async fn trigger_store_registers_lists_and_cancels(store: Arc<dyn crate::Trigger
 
     assert!(
         !store
-            .cancel_subscription("session-b", &first.handle)
+            .cancel_subscription(&session_scope_id("session-b"), &first.handle)
             .await
             .expect("wrong-session cancel"),
         "cancel must be scoped by session"
     );
     assert!(
         store
-            .cancel_subscription("session-a", &first.handle)
+            .cancel_subscription(&session_scope_id("session-a"), &first.handle)
             .await
             .expect("cancel first")
     );
@@ -169,6 +187,120 @@ async fn trigger_store_registers_lists_and_cancels(store: Arc<dyn crate::Trigger
         .expect("list disabled");
     assert_eq!(disabled.len(), 1);
     assert!(!disabled[0].enabled);
+}
+
+async fn trigger_store_lists_agent_frame_registrations_by_session(
+    store: Arc<dyn crate::TriggerStore>,
+) {
+    let source_key = store
+        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
+        .await
+        .expect("source key");
+    let frame_scope = crate::SessionScope::for_agent_frame("session-a", "frame-a");
+    let mut draft = sample_trigger_subscription_draft("session-a", &source_key, "frame-route");
+    draft.registrant = crate::ProcessOriginator::session(frame_scope.clone());
+    draft.wake_target = Some(frame_scope);
+    let registration = store
+        .register_subscription(draft)
+        .await
+        .expect("register agent-frame subscription");
+
+    let by_session = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
+        .await
+        .expect("list session-wide registrations");
+    assert_eq!(by_session.len(), 1);
+    assert_eq!(by_session[0].handle, registration.handle);
+
+    let by_root_scope = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_registrant_scope(
+            session_scope_id("session-a"),
+        ))
+        .await
+        .expect("list exact root session scope");
+    assert!(
+        by_root_scope.is_empty(),
+        "exact root session scope must not match agent-frame registrations"
+    );
+
+    let by_frame_scope = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_registrant_scope(
+            registration.registrant_scope_id(),
+        ))
+        .await
+        .expect("list exact agent-frame scope");
+    assert_eq!(by_frame_scope.len(), 1);
+    assert_eq!(by_frame_scope[0].handle, registration.handle);
+
+    assert_eq!(
+        store
+            .delete_session_subscriptions("session-a")
+            .await
+            .expect("delete session registrations"),
+        1,
+        "session deletion must include agent-frame registrations"
+    );
+}
+
+async fn trigger_store_handles_host_scoped_lifecycle(store: Arc<dyn crate::TriggerStore>) {
+    let source_key = store
+        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
+        .await
+        .expect("source key");
+    let scoped = store
+        .register_subscription(sample_host_trigger_subscription_draft(
+            crate::ProcessOriginator::host_scoped("automation-a"),
+            &source_key,
+            "scoped-host",
+        ))
+        .await
+        .expect("register scoped host subscription");
+    let scopeless = store
+        .register_subscription(sample_host_trigger_subscription_draft(
+            crate::ProcessOriginator::host(),
+            &source_key,
+            "scopeless-host",
+        ))
+        .await
+        .expect("register scopeless host subscription");
+
+    let scoped_matches = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_registrant_scope(
+            "host:automation-a",
+        ))
+        .await
+        .expect("list scoped host subscriptions");
+    assert_eq!(scoped_matches.len(), 1);
+    assert_eq!(scoped_matches[0].handle, scoped.handle);
+
+    let scopeless_matches = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_registrant_scope(
+            "host",
+        ))
+        .await
+        .expect("list scopeless host subscriptions");
+    assert_eq!(scopeless_matches.len(), 1);
+    assert_eq!(scopeless_matches[0].handle, scopeless.handle);
+
+    assert!(
+        !store
+            .cancel_subscription("host", &scoped.handle)
+            .await
+            .expect("wrong-host-scope cancel"),
+        "cancel must be scoped by host scope id"
+    );
+    assert!(
+        store
+            .cancel_subscription("host:automation-a", &scoped.handle)
+            .await
+            .expect("cancel scoped host subscription")
+    );
+    assert!(
+        store
+            .cancel_subscription("host", &scopeless.handle)
+            .await
+            .expect("cancel scopeless host subscription")
+    );
 }
 
 async fn trigger_store_records_and_reserves_idempotently(store: Arc<dyn crate::TriggerStore>) {
@@ -234,7 +366,7 @@ async fn trigger_store_records_and_reserves_idempotently(store: Arc<dyn crate::T
 
     assert!(
         store
-            .cancel_subscription("session-a", &subscription.handle)
+            .cancel_subscription(&session_scope_id("session-a"), &subscription.handle)
             .await
             .expect("cancel subscription")
     );

@@ -98,6 +98,8 @@ impl RemoteTriggerEmitReport {
 pub struct RemoteTriggerSubscriptionFilter {
     pub protocol_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registrant_scope_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
@@ -117,6 +119,7 @@ impl Default for RemoteTriggerSubscriptionFilter {
     fn default() -> Self {
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
+            registrant_scope_id: None,
             session_id: None,
             handle: None,
             name: None,
@@ -133,6 +136,14 @@ impl RemoteTriggerSubscriptionFilter {
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             session_id: Some(session_id.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn for_registrant_scope(scope_id: impl Into<String>) -> Self {
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            registrant_scope_id: Some(scope_id.into()),
             ..Self::default()
         }
     }

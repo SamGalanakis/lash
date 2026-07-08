@@ -277,7 +277,8 @@ fn trigger_subscription_dtos_round_trip_core_values() {
     );
 
     let filter = lash_core::TriggerSubscriptionFilter {
-        session_id: Some("session-a".to_string()),
+        registrant_scope_id: Some("session:session-a".to_string()),
+        session_id: None,
         handle: Some("trigger:1".to_string()),
         name: Some("button watcher".to_string()),
         source_type: Some("ui.button.pressed".to_string()),

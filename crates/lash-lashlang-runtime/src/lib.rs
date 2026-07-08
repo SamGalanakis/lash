@@ -937,7 +937,7 @@ mod tests {
 
         let draft = input
             .remote_trigger_subscription_draft(
-                lash_remote_protocol::RemoteProcessOriginator::Host,
+                lash_remote_protocol::RemoteProcessOriginator::Host { scope: None },
                 "process-env:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .parse()
                     .expect("canonical env ref"),

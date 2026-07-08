@@ -399,7 +399,7 @@ fn remote_process_dtos_json_round_trip() {
                 input: RemoteProcessInput::External {
                     metadata: serde_json::json!({ "label": "Import" }),
                 },
-                originator: RemoteProcessOriginator::Host,
+                originator: RemoteProcessOriginator::Host { scope: None },
                 env_ref: None,
                 wake_target: Some(RemoteSessionScope::new("session")),
                 caused_by: None,
@@ -768,7 +768,7 @@ fn remote_process_env_persistence_dtos_validate() {
 #[test]
 fn trigger_target_label_must_match_identity_label() {
     let mut draft = RemoteTriggerSubscriptionDraft::for_process(
-        RemoteProcessOriginator::Host,
+        RemoteProcessOriginator::Host { scope: None },
         canonical_env_ref().parse().expect("canonical env ref"),
         "ui.button.pressed",
         "source-key",
@@ -940,7 +940,7 @@ fn remote_process_record() -> RemoteProcessRecord {
         },
         event_types: vec![remote_process_event_type()],
         provenance: RemoteProcessProvenance {
-            originator: RemoteProcessOriginator::Host,
+            originator: RemoteProcessOriginator::Host { scope: None },
             caused_by: None,
         },
         env_ref: Some(

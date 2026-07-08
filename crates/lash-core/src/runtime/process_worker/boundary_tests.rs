@@ -146,10 +146,12 @@ impl TriggerStore for TierTriggerStore {
 
     async fn cancel_subscription(
         &self,
-        session_id: &str,
+        registrant_scope_id: &str,
         handle: &str,
     ) -> Result<bool, PluginError> {
-        self.inner.cancel_subscription(session_id, handle).await
+        self.inner
+            .cancel_subscription(registrant_scope_id, handle)
+            .await
     }
 
     async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError> {

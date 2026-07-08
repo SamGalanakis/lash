@@ -595,13 +595,24 @@ impl ProcessProvenance {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProcessOriginator {
-    Host,
-    Session { scope: SessionScope },
+    Host {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
+    Session {
+        scope: SessionScope,
+    },
 }
 
 impl ProcessOriginator {
     pub fn host() -> Self {
-        Self::Host
+        Self::Host { scope: None }
+    }
+
+    pub fn host_scoped(scope: impl Into<String>) -> Self {
+        Self::Host {
+            scope: Some(scope.into()),
+        }
     }
 
     pub fn session(scope: SessionScope) -> Self {
@@ -610,7 +621,10 @@ impl ProcessOriginator {
 
     pub fn scope_id(&self) -> String {
         match self {
-            Self::Host => "host".to_string(),
+            Self::Host { scope } => scope
+                .as_ref()
+                .map(|scope| format!("host:{scope}"))
+                .unwrap_or_else(|| "host".to_string()),
             Self::Session { scope } => scope.id().to_string(),
         }
     }
@@ -1515,42 +1529,6 @@ mod tests {
             },
             record,
         )
-    }
-
-    #[test]
-    fn process_list_filter_matches_definition_and_status() {
-        let target_ref = process_value("target", 0, "target");
-        let other_ref = process_value("other", 1, "other");
-        let filter = ProcessListFilter::decode(&json!({
-            "definition": target_ref,
-            "status": "completed"
-        }))
-        .expect("decode filter");
-
-        let matching = engine_entry(
-            "matching",
-            target_ref,
-            "target",
-            ProcessStatus::Completed {
-                await_output: ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::success(
-                    json!(true),
-                )),
-            },
-        );
-        let wrong_definition = engine_entry(
-            "wrong-definition",
-            other_ref,
-            "other",
-            ProcessStatus::Completed {
-                await_output: ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::success(
-                    json!(true),
-                )),
-            },
-        );
-
-        assert_eq!(filter.list_mode(), ProcessListMode::All);
-        assert!(filter.matches_entry(&matching));
-        assert!(!filter.matches_entry(&wrong_definition));
     }
 
     #[test]

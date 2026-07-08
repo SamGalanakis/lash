@@ -87,7 +87,7 @@ fn main() {
                 ..Default::default()
             },
         }),
-        originator: lash::remote::processes::RemoteProcessOriginator::Host,
+        originator: lash::remote::processes::RemoteProcessOriginator::Host { scope: None },
         wake_target: None,
         grant: None,
         event_types: Vec::new(),

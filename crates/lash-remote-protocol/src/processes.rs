@@ -110,14 +110,19 @@ fn is_canonical_process_execution_env_ref(value: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RemoteProcessOriginator {
-    Host,
-    Session { scope: RemoteSessionScope },
+    Host {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
+    Session {
+        scope: RemoteSessionScope,
+    },
 }
 
 impl RemoteProcessOriginator {
     pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
         match self {
-            Self::Host => Ok(()),
+            Self::Host { .. } => Ok(()),
             Self::Session { scope } => scope.validate(type_name),
         }
     }

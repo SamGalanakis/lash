@@ -67,10 +67,10 @@ impl TriggerStore for PostgresTriggerStore {
         let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "SELECT subscription_id, record_json FROM lash_trigger_subscriptions WHERE TRUE",
         );
-        if let Some(session_id) = filter.session_id.as_ref() {
+        if let Some(registrant_scope_id) = filter.effective_registrant_scope_id() {
             query
                 .push(" AND registrant_scope_id = ")
-                .push_bind(session_registrant_scope_id(session_id));
+                .push_bind(registrant_scope_id);
         }
         if let Some(handle) = filter.handle.as_ref() {
             query.push(" AND handle = ").push_bind(handle);
@@ -114,11 +114,10 @@ impl TriggerStore for PostgresTriggerStore {
 
     async fn cancel_subscription(
         &self,
-        session_id: &str,
+        registrant_scope_id: &str,
         handle: &str,
     ) -> Result<bool, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
-        let registrant_scope_id = session_registrant_scope_id(session_id);
         let row = sqlx::query(
             "SELECT enabled, record_json FROM lash_trigger_subscriptions
              WHERE registrant_scope_id = $1 AND handle = $2

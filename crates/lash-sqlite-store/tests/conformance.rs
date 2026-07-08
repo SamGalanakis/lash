@@ -25,6 +25,10 @@ use lash_sqlite_store::{
 };
 use tempfile::TempDir;
 
+fn session_scope_id(session_id: &str) -> String {
+    ProcessOriginator::session(SessionScope::new(session_id)).scope_id()
+}
+
 fn fresh_db_path(dirs: &Arc<Mutex<Vec<TempDir>>>, file_name: &str) -> PathBuf {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(file_name);
@@ -363,7 +367,7 @@ async fn sqlite_trigger_store_skips_malformed_matching_subscription_during_reser
 }
 
 #[tokio::test]
-async fn sqlite_trigger_store_cancels_by_session_and_handle() {
+async fn sqlite_trigger_store_cancels_by_scope_and_handle() {
     let store = SqliteTriggerStore::memory()
         .await
         .expect("memory trigger store");
@@ -387,13 +391,13 @@ async fn sqlite_trigger_store_cancels_by_session_and_handle() {
 
     assert!(
         !store
-            .cancel_subscription("session-b", &first.handle)
+            .cancel_subscription(&session_scope_id("session-b"), &first.handle)
             .await
             .expect("wrong session cancel")
     );
     assert!(
         store
-            .cancel_subscription("session-b", &second.handle)
+            .cancel_subscription(&session_scope_id("session-b"), &second.handle)
             .await
             .expect("cancel second")
     );

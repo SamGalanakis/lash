@@ -403,7 +403,7 @@ impl TriggerSubscriptionRecord {
     pub fn registrant_session_id(&self) -> Option<&str> {
         match &self.registrant {
             crate::ProcessOriginator::Session { scope } => Some(scope.session_id.as_str()),
-            crate::ProcessOriginator::Host => None,
+            crate::ProcessOriginator::Host { .. } => None,
         }
     }
 }
@@ -445,6 +445,8 @@ impl From<&TriggerSubscriptionRecord> for TriggerRegistration {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TriggerSubscriptionFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registrant_scope_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
@@ -468,6 +470,13 @@ impl TriggerSubscriptionFilter {
         }
     }
 
+    pub fn for_registrant_scope(scope_id: impl Into<String>) -> Self {
+        Self {
+            registrant_scope_id: Some(scope_id.into()),
+            ..Self::default()
+        }
+    }
+
     pub fn for_source_type(source_type: impl Into<String>) -> Self {
         Self {
             source_type: Some(source_type.into()),
@@ -475,10 +484,17 @@ impl TriggerSubscriptionFilter {
         }
     }
 
+    pub fn effective_registrant_scope_id(&self) -> Option<String> {
+        self.registrant_scope_id.clone()
+    }
+
     pub fn matches(&self, record: &TriggerSubscriptionRecord) -> bool {
-        self.session_id
-            .as_deref()
-            .is_none_or(|session_id| record.registrant_session_id() == Some(session_id))
+        self.effective_registrant_scope_id()
+            .is_none_or(|scope_id| record.registrant_scope_id() == scope_id)
+            && self
+                .session_id
+                .as_deref()
+                .is_none_or(|session_id| record.registrant_session_id() == Some(session_id))
             && self
                 .handle
                 .as_deref()
@@ -536,7 +552,7 @@ pub trait TriggerStore: Send + Sync {
 
     async fn cancel_subscription(
         &self,
-        session_id: &str,
+        registrant_scope_id: &str,
         handle: &str,
     ) -> Result<bool, PluginError>;
 
@@ -650,7 +666,7 @@ impl TriggerStore for InMemoryTriggerStore {
 
     async fn cancel_subscription(
         &self,
-        session_id: &str,
+        registrant_scope_id: &str,
         handle: &str,
     ) -> Result<bool, PluginError> {
         let mut state = self
@@ -659,7 +675,7 @@ impl TriggerStore for InMemoryTriggerStore {
             .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
         let now = self.clock.timestamp_ms();
         let Some(record) = state.subscriptions.values_mut().find(|record| {
-            record.registrant_session_id() == Some(session_id) && record.handle == handle
+            record.registrant_scope_id() == registrant_scope_id && record.handle == handle
         }) else {
             return Ok(false);
         };

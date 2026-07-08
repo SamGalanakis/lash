@@ -269,7 +269,7 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
     let waiting = wait_for_waiting_signal(&core, "sessionless-direct", "ready").await;
     assert!(matches!(
         waiting.originator,
-        lash_core::ProcessOriginator::Host
+        lash_core::ProcessOriginator::Host { .. }
     ));
     let waiting_events = core.processes().events("sessionless-direct", 0).await?;
     assert!(
@@ -319,7 +319,7 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
     let triggered = wait_for_waiting_signal(&core, triggered_process_id, "ready").await;
     assert!(matches!(
         triggered.originator,
-        lash_core::ProcessOriginator::Host
+        lash_core::ProcessOriginator::Host { .. }
     ));
     let event = core
         .processes()
@@ -607,8 +607,10 @@ async fn process_starts_and_awaits_child_process() -> Result<()> {
         .await?;
     assert_eq!(all.len(), 2, "parent and child should both be completed");
     assert!(
-        all.iter()
-            .all(|process| matches!(process.originator, lash_core::ProcessOriginator::Host)),
+        all.iter().all(|process| matches!(
+            process.originator,
+            lash_core::ProcessOriginator::Host { .. }
+        )),
         "children of a host chain stay host-originated"
     );
     let child = all

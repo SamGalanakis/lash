@@ -138,6 +138,10 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         "SELECT subscription_id, record_json FROM trigger_subscriptions WHERE 1 = 1"
                             .to_string();
                     let mut values = Vec::<rusqlite::types::Value>::new();
+                    if let Some(registrant_scope_id) = filter.effective_registrant_scope_id() {
+                        sql.push_str(" AND registrant_scope_id = ?");
+                        values.push(registrant_scope_id.into());
+                    }
                     if let Some(handle) = filter.handle.as_ref() {
                         sql.push_str(" AND handle = ?");
                         values.push(handle.clone().into());
@@ -188,50 +192,24 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
 
     async fn cancel_subscription(
         &self,
-        session_id: &str,
+        registrant_scope_id: &str,
         handle: &str,
     ) -> Result<bool, lash_core::PluginError> {
-        let session_id = session_id.to_string();
+        let registrant_scope_id = registrant_scope_id.to_string();
         let handle = handle.to_string();
         self.conn
             .write_flow(move |tx| {
                 Ok(trigger_tx_outcome((|| {
-                    let mut stmt = tx
-                        .prepare(
+                    let selected: Option<(String, i64, String)> = tx
+                        .query_row(
                             "SELECT subscription_id, enabled, record_json
                              FROM trigger_subscriptions
-                             WHERE handle = ?1",
+                             WHERE registrant_scope_id = ?1 AND handle = ?2",
+                            params![registrant_scope_id.as_str(), handle.as_str()],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                         )
+                        .optional()
                         .map_err(process_sqlite_error)?;
-                    let rows = stmt
-                        .query_map(params![handle.as_str()], |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, String>(2)?,
-                            ))
-                        })
-                        .map_err(process_sqlite_error)?;
-                    let mut selected = None;
-                    for row in rows {
-                        let (subscription_id, enabled, json) = row.map_err(process_sqlite_error)?;
-                        let record = match Self::decode_subscription(json.clone()) {
-                            Ok(record) => record,
-                            Err(err) => {
-                                tracing::warn!(
-                                    error = %err,
-                                    subscription_id,
-                                    handle,
-                                    "skipping malformed trigger subscription during cancel"
-                                );
-                                continue;
-                            }
-                        };
-                        if record.registrant_session_id() == Some(session_id.as_str()) {
-                            selected = Some((subscription_id, enabled, json));
-                            break;
-                        }
-                    }
                     let Some((subscription_id, enabled, json)) = selected else {
                         return Ok(false);
                     };

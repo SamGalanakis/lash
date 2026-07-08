@@ -1,8 +1,9 @@
 use serde_json::json;
 
 use super::model::{
-    ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessListFilter, ProcessProvenance,
-    ProcessRecord, ProcessRegistration, RecoveryDisposition, SessionScope,
+    ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessListFilter, ProcessListMode,
+    ProcessOriginator, ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessStatus,
+    RecoveryDisposition, SessionScope,
 };
 
 fn record(process_id: &str, label: &str, created_at_ms: u64) -> ProcessRecord {
@@ -23,6 +24,52 @@ fn record(process_id: &str, label: &str, created_at_ms: u64) -> ProcessRecord {
     );
     record.created_at_ms = created_at_ms;
     record
+}
+
+#[test]
+fn process_originator_host_scope_is_serde_compatible() {
+    let old_host: ProcessOriginator =
+        serde_json::from_value(json!({ "type": "host" })).expect("old host originator");
+    assert_eq!(old_host, ProcessOriginator::host());
+    assert_eq!(old_host.scope_id(), "host");
+
+    let scoped = ProcessOriginator::host_scoped("automation-a");
+    assert_eq!(scoped.scope_id(), "host:automation-a");
+    assert_eq!(
+        serde_json::to_value(&scoped).expect("scoped host json"),
+        json!({ "type": "host", "scope": "automation-a" })
+    );
+
+    let round_tripped: ProcessOriginator =
+        serde_json::from_value(json!({ "type": "host", "scope": "automation-a" }))
+            .expect("scoped host originator");
+    assert_eq!(round_tripped, scoped);
+}
+
+#[test]
+fn process_list_filter_matches_definition_and_status() {
+    let target_ref = json!({ "component": "target", "pos": 0, "name": "target" });
+    let other_ref = json!({ "component": "other", "pos": 1, "name": "other" });
+    let filter = ProcessListFilter::decode(&json!({
+        "definition": target_ref,
+        "status": "completed"
+    }))
+    .expect("decode filter");
+
+    let mut matching = record("matching", "target", 100);
+    matching.identity.definition = Some(target_ref);
+    matching.status = ProcessStatus::Completed {
+        await_output: crate::ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::success(
+            json!(true),
+        )),
+    };
+    let mut wrong_definition = record("wrong-definition", "other", 100);
+    wrong_definition.identity.definition = Some(other_ref);
+    wrong_definition.status = matching.status.clone();
+
+    assert_eq!(filter.list_mode(), ProcessListMode::All);
+    assert!(filter.matches_record(&matching));
+    assert!(!filter.matches_record(&wrong_definition));
 }
 
 #[test]

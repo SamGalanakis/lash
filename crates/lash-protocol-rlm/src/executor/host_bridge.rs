@@ -539,8 +539,12 @@ impl HostBridge<'_> {
         let request = lashlang::TriggerCancelRequest::decode(&payload)
             .map_err(|err| ExecutionHostError::new(err.to_string()))?;
         let store = self.trigger_store()?;
+        let registrant_scope_id = lash_core::ProcessOriginator::session(
+            lash_core::SessionScope::new(self.ctx.session_id()),
+        )
+        .scope_id();
         let cancelled = store
-            .cancel_subscription(self.ctx.session_id(), &request.handle)
+            .cancel_subscription(&registrant_scope_id, &request.handle)
             .await
             .map_err(|err| ExecutionHostError::new(err.to_string()))?;
         Ok(FlowValue::Bool(cancelled))

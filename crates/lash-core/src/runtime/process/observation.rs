@@ -343,7 +343,7 @@ fn child_session_id(input: &ProcessInput) -> Option<String> {
 /// provenance filter captures every frame the session originated.
 fn originator_matches(originator: &ProcessOriginator, scope: &SessionScope) -> bool {
     match originator {
-        ProcessOriginator::Host => false,
+        ProcessOriginator::Host { .. } => false,
         ProcessOriginator::Session {
             scope: origin_scope,
         } => {
