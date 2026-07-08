@@ -725,6 +725,25 @@ impl InMemoryTriggerStore {
         });
         Ok(deliveries)
     }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn delete_deliveries_by_process_ids(
+        &self,
+        process_ids: &std::collections::HashSet<String>,
+    ) -> Result<usize, PluginError> {
+        if process_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
+        let before = state.deliveries.len();
+        state
+            .deliveries
+            .retain(|_, delivery| !process_ids.contains(&delivery.process_id));
+        Ok(before.saturating_sub(state.deliveries.len()))
+    }
 }
 
 impl Default for InMemoryTriggerStore {

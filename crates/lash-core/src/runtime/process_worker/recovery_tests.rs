@@ -217,6 +217,72 @@ async fn sweep_reconciles_reserved_trigger_delivery_without_process() {
 }
 
 #[tokio::test]
+async fn sweep_does_not_reconcile_trigger_delivery_pruned_with_terminal_process() {
+    let trigger_store = Arc::new(crate::InMemoryTriggerStore::default());
+    let registry: Arc<dyn ProcessRegistry> = Arc::new(
+        TestLocalProcessRegistry::default().with_trigger_store(Arc::clone(&trigger_store)),
+    );
+    let trigger_store_dyn: Arc<dyn TriggerStore> = trigger_store.clone();
+    let delivery = seed_reserved_trigger_delivery(&trigger_store_dyn).await;
+    assert!(
+        registry.get_process(&delivery.process_id).await.is_none(),
+        "test starts in the reserve/start crash window"
+    );
+
+    let worker = inline_worker_with_trigger_store(
+        Arc::clone(&registry),
+        local_owner("trigger-worker", "host-a", "claimant-start"),
+        Arc::clone(&trigger_store_dyn),
+    );
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("sweep dispatches");
+    registry
+        .get_process(&delivery.process_id)
+        .await
+        .expect("sweep registers missing trigger delivery process");
+
+    let terminal = registry
+        .complete_process(
+            &delivery.process_id,
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({ "done": true }),
+                control: None,
+            },
+        )
+        .await
+        .expect("complete trigger delivery process");
+    let report = registry
+        .prune_terminal_processes(terminal.updated_at_ms.saturating_add(1), None, None)
+        .await
+        .expect("prune completed trigger delivery process");
+    assert_eq!(report.pruned_processes, 1);
+    assert!(
+        registry.get_process(&delivery.process_id).await.is_none(),
+        "terminal trigger delivery process is pruned"
+    );
+    assert!(
+        trigger_store
+            .list_deliveries_by_process_id(&delivery.process_id)
+            .await
+            .expect("list trigger deliveries after prune")
+            .is_empty(),
+        "prune removes the delivery row together with the process"
+    );
+
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("post-prune sweep dispatches");
+    assert_eq!(
+        process_count(&registry, &delivery.process_id).await,
+        0,
+        "recovery sweep must not resurrect a delivery whose terminal process was pruned"
+    );
+}
+
+#[tokio::test]
 async fn sweep_does_not_reconcile_trigger_delivery_when_process_exists() {
     let registry: Arc<dyn ProcessRegistry> = Arc::new(TestLocalProcessRegistry::default());
     let trigger_store: Arc<dyn TriggerStore> = Arc::new(crate::InMemoryTriggerStore::default());

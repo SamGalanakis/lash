@@ -120,6 +120,17 @@ const DURABLE_FAULT_MATRIX: &[DurableFaultMatrixRow] = &[
         }),
     },
     DurableFaultMatrixRow {
+        id: "trigger-delivery-prune-orphan-retention",
+        kind: DurableFaultKind::TriggerDeliveryRecovery,
+        contract: "Retention prunes trigger delivery rows with their terminal process rows so recovery does not resurrect completed trigger work.",
+        evidence: FaultEvidence::CargoTest(CargoTestEvidence {
+            package: "lash-core",
+            test_target: None,
+            filter: "sweep_does_not_reconcile_trigger_delivery_pruned_with_terminal_process",
+            required_env: None,
+        }),
+    },
+    DurableFaultMatrixRow {
         id: "sqlite-backend-conformance",
         kind: DurableFaultKind::BackendPermutation,
         contract: "Sqlite runs the backend conformance contract, including reopen, source-key, claim, lease, process change-feed ordering, process_change_feed_never_misses_concurrent_terminal_writers, drainage, watermark-bounded prune, and effect replay cases.",

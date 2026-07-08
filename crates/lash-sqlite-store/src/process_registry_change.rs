@@ -38,6 +38,15 @@ pub(crate) fn prune_terminal_processes_conn(
     max_change_seq: Option<u64>,
 ) -> Result<ProcessPruneReport, lash_core::PluginError> {
     let max_change_seq = max_change_seq.map(|seq| seq as i64);
+    let trigger_deliveries_exists = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trigger_deliveries'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(process_sqlite_error)?
+        .is_some();
     let mut stmt = conn
         .prepare(
             "SELECT process_id, record_json FROM processes
@@ -90,6 +99,13 @@ pub(crate) fn prune_terminal_processes_conn(
             params![process_id],
         )
         .map_err(process_sqlite_error)?;
+        if trigger_deliveries_exists {
+            conn.execute(
+                "DELETE FROM trigger_deliveries WHERE process_id = ?1",
+                params![process_id],
+            )
+            .map_err(process_sqlite_error)?;
+        }
         pruned_processes += conn
             .execute(
                 "DELETE FROM processes WHERE process_id = ?1",

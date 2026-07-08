@@ -314,12 +314,17 @@ pub trait ProcessRegistry: Send + Sync {
     /// Physically delete terminal process rows whose `updated_at_ms` is older
     /// than `cutoff_epoch_ms`, match `filter` when one is supplied, and have a
     /// process change sequence no later than `up_to_change_seq` when supplied,
-    /// together with their events, wake acks, handle grants, and lease rows.
+    /// together with their events, wake acks, handle grants, lease rows, and
+    /// trigger-delivery reservations whose deterministic process id points at a
+    /// pruned row.
     /// Host-scheduled retention: hosts that project results/events into their
     /// own store call this to keep the registry bounded. Non-terminal rows are
     /// never touched. Callers must choose a retention window comfortably longer
     /// than any waiter lifetime — a pruned process id becomes "unknown process"
-    /// to late awaits.
+    /// to late awaits. Re-emitting the same trigger occurrence id after its
+    /// process has aged out of retention may reserve a fresh delivery process
+    /// id; occurrence-level idempotency still holds, and ordinary emit replays
+    /// do not straddle a retention window in practice.
     ///
     /// ```no_run
     /// use std::time::{Duration, SystemTime, UNIX_EPOCH};

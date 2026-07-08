@@ -33,6 +33,7 @@ pub struct TestLocalProcessRegistry {
     next_change_seq: Arc<Mutex<u64>>,
     grants: Arc<Mutex<ManagedGrantMap>>,
     leases: Arc<Mutex<ManagedLeaseMap>>,
+    trigger_store: Option<Arc<crate::InMemoryTriggerStore>>,
 }
 
 impl Default for TestLocalProcessRegistry {
@@ -43,6 +44,7 @@ impl Default for TestLocalProcessRegistry {
             next_change_seq: Arc::new(Mutex::new(0)),
             grants: Arc::new(Mutex::new(HashMap::new())),
             leases: Arc::new(Mutex::new(HashMap::new())),
+            trigger_store: None,
         }
     }
 }
@@ -62,6 +64,11 @@ struct ManagedProcessRecord {
 impl TestLocalProcessRegistry {
     pub fn with_durability_tier(mut self, durability_tier: crate::DurabilityTier) -> Self {
         self.durability_tier = durability_tier;
+        self
+    }
+
+    pub fn with_trigger_store(mut self, trigger_store: Arc<crate::InMemoryTriggerStore>) -> Self {
+        self.trigger_store = Some(trigger_store);
         self
     }
 
@@ -845,6 +852,9 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             .lock()
             .await
             .retain(|process_id, _| !prunable.contains(process_id));
+        if let Some(trigger_store) = self.trigger_store.as_ref() {
+            trigger_store.delete_deliveries_by_process_ids(&prunable)?;
+        }
         Ok(ProcessPruneReport {
             pruned_processes: prunable.len(),
             pruned_events,
