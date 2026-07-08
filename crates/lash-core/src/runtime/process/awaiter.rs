@@ -563,6 +563,12 @@ impl ProcessRegistry for WatchedProcessRegistry {
         self.inner.list_non_terminal().await
     }
 
+    async fn live_reference_summary(
+        &self,
+    ) -> Result<Vec<super::references::ProcessLiveReferenceSummary>, PluginError> {
+        self.inner.live_reference_summary().await
+    }
+
     async fn claim_process_lease(
         &self,
         process_id: &str,

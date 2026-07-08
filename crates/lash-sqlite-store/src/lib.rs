@@ -61,12 +61,13 @@ use lash_core::{
     MergeKey, PROCESS_LEASE_SCHEMA_VERSION, ProcessAwaitOutput, ProcessChangeCursor, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseClaimOutcome,
-    ProcessLeaseCompletion, ProcessListFilter, ProcessPruneReport, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessStarted, QueuedWorkStore, RuntimePersistence,
-    SessionCommitStore, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
-    SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionExecutionLeaseStore,
-    SessionMeta, SessionPickerInfo, SessionReadScope, SessionScope, SessionStoreCreateRequest,
-    SessionStoreFactory, SlotPolicy, StoreError, StoreMaintenance, TurnInputStore, VacuumReport,
+    ProcessLeaseCompletion, ProcessListFilter, ProcessLiveReferenceSummary, ProcessPruneReport,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted, QueuedWorkStore,
+    RuntimePersistence, SessionCommitStore, SessionExecutionLease,
+    SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
+    SessionExecutionLeaseStore, SessionMeta, SessionPickerInfo, SessionReadScope, SessionScope,
+    SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, StoreMaintenance,
+    TurnInputStore, VacuumReport,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};

@@ -340,14 +340,15 @@ pub mod process {
         ProcessExecutionEnvRef, ProcessExecutionEnvSpec, ProcessExternalRef,
         ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary, ProcessIdentity,
         ProcessInput, ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion,
-        ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope,
-        ProcessProvenance, ProcessPruneReport, ProcessRecord, ProcessRegistration, ProcessRegistry,
-        ProcessRunHandle, ProcessRuntimeHost, ProcessService, ProcessSessionDeleteReport,
-        ProcessStartOptions, ProcessStartRequest, ProcessStarted, ProcessStatus,
-        ProcessStatusFilter, ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey,
-        ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver,
-        ProcessWorkSnapshot, RecoveryDisposition, SessionScope, SessionScopeId,
-        ToolSessionProcessAdmin, watch_process_registry, watch_process_registry_with_sink,
+        ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessLiveReferenceSummary,
+        ProcessOpScope, ProcessProvenance, ProcessPruneReport, ProcessRecord, ProcessRegistration,
+        ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessService,
+        ProcessSessionDeleteReport, ProcessStartOptions, ProcessStartRequest, ProcessStarted,
+        ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessWake,
+        ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver,
+        ProcessWorkObserver, ProcessWorkSnapshot, RecoveryDisposition, SessionScope,
+        SessionScopeId, ToolSessionProcessAdmin, watch_process_registry,
+        watch_process_registry_with_sink,
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{

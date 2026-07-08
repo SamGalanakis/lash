@@ -9,6 +9,7 @@ use super::process_coordination::{
     watched_decorator_preserves_registry_semantics,
 };
 use super::process_filters::list_processes_filters_by_enriched_fields;
+use super::process_references::live_reference_summary_tracks_non_terminal_reference_counts;
 use super::*;
 
 /// Run the full [`ProcessRegistry`] conformance suite against the backend
@@ -53,6 +54,7 @@ pub async fn process_registry_with_expected_durability<F>(
     wait_state_round_trips_filters_and_clears_on_terminal(make()).await;
     list_processes_filters_by_status_and_waiting(make()).await;
     list_processes_filters_by_enriched_fields(make()).await;
+    live_reference_summary_tracks_non_terminal_reference_counts(make()).await;
     process_change_feed_orders_resumes_and_includes_terminal_transitions(make()).await;
     count_and_recent_events_match_the_log(make()).await;
     transfer_handle_grants_moves_addressability(make()).await;

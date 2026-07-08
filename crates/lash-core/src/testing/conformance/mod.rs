@@ -17,6 +17,7 @@ mod helpers;
 mod live_replay;
 mod process_coordination;
 mod process_filters;
+mod process_references;
 mod process_registry;
 mod runtime_persistence;
 mod session_store_factory;
@@ -39,11 +40,12 @@ use std::time::Duration;
 use crate::{
     AbandonEvidence, AbandonRequest, AbandonWriter, LashSchema, ProcessAwaitOutput,
     ProcessChangeCursor, ProcessEventAppendRequest, ProcessEventSemanticsSpec, ProcessEventType,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessIdentity, ProcessInput,
-    ProcessLeaseCompletion, ProcessListFilter, ProcessProvenance, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessStarted, ProcessStatus, ProcessStatusFilter,
-    ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeDelivery,
-    ProcessWakeSpec, RecoveryDisposition, SessionScope, SessionScopeId, WaitKind, WaitState,
+    ProcessExecutionEnvRef, ProcessExternalRef, ProcessHandleDescriptor, ProcessIdentity,
+    ProcessInput, ProcessLeaseCompletion, ProcessListFilter, ProcessLiveReferenceSummary,
+    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted,
+    ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessValueSelector,
+    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition, SessionScope,
+    SessionScopeId, WaitKind, WaitState,
 };
 use crate::{
     AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, AwaitEventWaitIdentity,

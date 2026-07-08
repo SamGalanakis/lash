@@ -18,6 +18,7 @@ use super::model::{
     ProcessRegistration, ProcessSessionDeleteReport, ProcessStarted, SessionScope, SessionScopeId,
     WaitState,
 };
+use super::references::ProcessLiveReferenceSummary;
 use super::registry::{ProcessPruneReport, ProcessRegistry};
 use super::time::current_epoch_ms;
 use super::validation::{
@@ -652,6 +653,15 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             .collect();
         records.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(records)
+    }
+
+    async fn live_reference_summary(
+        &self,
+    ) -> Result<Vec<ProcessLiveReferenceSummary>, PluginError> {
+        let managed = self.managed.lock().await;
+        Ok(ProcessLiveReferenceSummary::from_records(
+            managed.values().map(|record| &record.record),
+        ))
     }
 
     async fn claim_process_lease(

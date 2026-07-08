@@ -6,6 +6,7 @@ mod model;
 #[cfg(test)]
 mod model_filter_tests;
 mod observation;
+mod references;
 mod registry;
 mod service;
 #[cfg(any(test, feature = "testing"))]
@@ -49,6 +50,7 @@ pub use observation::{
     ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessWorkObserver,
     ProcessWorkSnapshot,
 };
+pub use references::ProcessLiveReferenceSummary;
 pub use registry::{ProcessPruneReport, ProcessRegistry};
 pub use service::{
     DefaultProcessCancelAbility, ProcessCancelAbility, ProcessCancelAllRequest,

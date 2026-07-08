@@ -1220,6 +1220,13 @@ impl ProcessRegistry for SqliteProcessRegistry {
             .map_err(process_sqlite_error)?
     }
 
+    async fn live_reference_summary(
+        &self,
+    ) -> Result<Vec<ProcessLiveReferenceSummary>, lash_core::PluginError> {
+        let records = self.list_non_terminal().await?;
+        Ok(ProcessLiveReferenceSummary::from_records(records.iter()))
+    }
+
     async fn claim_process_lease(
         &self,
         process_id: &str,

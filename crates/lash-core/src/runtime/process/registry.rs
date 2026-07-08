@@ -9,6 +9,7 @@ use super::model::{
     ProcessLeaseCompletion, ProcessListFilter, ProcessRecord, ProcessRegistration,
     ProcessSessionDeleteReport, ProcessStarted, SessionScope, WaitState,
 };
+use super::references::ProcessLiveReferenceSummary;
 
 /// Outcome of [`ProcessRegistry::prune_terminal_processes`]: how many terminal
 /// process rows and event rows were physically deleted.
@@ -234,6 +235,11 @@ pub trait ProcessRegistry: Send + Sync {
     /// Terminal processes are excluded — they are already done and idempotent by
     /// `process_id`, so re-running them would be wasted work.
     async fn list_non_terminal(&self) -> Result<Vec<ProcessRecord>, PluginError>;
+
+    /// Count non-terminal process rows by their captured definition and
+    /// execution-environment references.
+    async fn live_reference_summary(&self)
+    -> Result<Vec<ProcessLiveReferenceSummary>, PluginError>;
 
     /// Claim the durable single-owner lease over a non-terminal process.
     ///
