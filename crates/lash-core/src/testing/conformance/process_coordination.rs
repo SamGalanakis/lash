@@ -402,7 +402,7 @@ pub(super) async fn prune_respects_leases_grants_and_wake_acks(registry: Arc<dyn
     );
 
     let report = registry
-        .prune_terminal_processes(recent_updated)
+        .prune_terminal_processes(recent_updated, None, None)
         .await
         .expect("prune");
     assert_eq!(
@@ -460,7 +460,7 @@ pub(super) async fn prune_respects_leases_grants_and_wake_acks(registry: Arc<dyn
     // Prune is idempotent: a second call over the same cutoff removes nothing.
     assert_eq!(
         registry
-            .prune_terminal_processes(recent_updated)
+            .prune_terminal_processes(recent_updated, None, None)
             .await
             .expect("second prune"),
         crate::ProcessPruneReport::default(),
@@ -488,6 +488,125 @@ pub(super) async fn prune_respects_leases_grants_and_wake_acks(registry: Arc<dyn
     assert_eq!(
         reclaimed.fencing_token, pre_prune_fencing,
         "a pruned lease row is physically gone, so the fresh claim restarts the fencing token"
+    );
+}
+
+pub(super) async fn prune_respects_filter(registry: Arc<dyn ProcessRegistry>) {
+    const FAR_FUTURE_CUTOFF: u64 = i64::MAX as u64;
+
+    registry
+        .register_process(
+            registration("proc-filter-prune").with_identity(ProcessIdentity::new("prunable-kind")),
+        )
+        .await
+        .expect("register prunable");
+    registry
+        .register_process(
+            registration("proc-filter-keep").with_identity(ProcessIdentity::new("retained-kind")),
+        )
+        .await
+        .expect("register retained");
+    for process_id in ["proc-filter-prune", "proc-filter-keep"] {
+        registry
+            .complete_process(
+                process_id,
+                ProcessAwaitOutput::Success {
+                    value: serde_json::Value::Null,
+                    control: None,
+                },
+            )
+            .await
+            .expect("complete process");
+    }
+    let pruned_events = registry
+        .events_after("proc-filter-prune", 0)
+        .await
+        .expect("events")
+        .len();
+
+    let report = registry
+        .prune_terminal_processes(
+            FAR_FUTURE_CUTOFF,
+            Some(ProcessListFilter {
+                status: ProcessStatusFilter::Any,
+                identity_kind: Some("prunable-kind".to_string()),
+                ..ProcessListFilter::default()
+            }),
+            None,
+        )
+        .await
+        .expect("filtered prune");
+    assert_eq!(report.pruned_processes, 1);
+    assert_eq!(report.pruned_events, pruned_events);
+    assert!(registry.get_process("proc-filter-prune").await.is_none());
+    assert!(
+        registry
+            .get_process("proc-filter-keep")
+            .await
+            .expect("filtered-out process survives")
+            .is_terminal()
+    );
+}
+
+pub(super) async fn prune_respects_watermark(registry: Arc<dyn ProcessRegistry>) {
+    const FAR_FUTURE_CUTOFF: u64 = i64::MAX as u64;
+
+    registry
+        .register_process(registration("proc-watermark-before"))
+        .await
+        .expect("register before");
+    registry
+        .register_process(registration("proc-watermark-after"))
+        .await
+        .expect("register after");
+    registry
+        .complete_process(
+            "proc-watermark-before",
+            ProcessAwaitOutput::Success {
+                value: serde_json::Value::Null,
+                control: None,
+            },
+        )
+        .await
+        .expect("complete before");
+    let (_records, cursor_after_before) = registry
+        .processes_changed_since(ProcessChangeCursor::initial(), 100)
+        .await
+        .expect("read change feed");
+    let before_events = registry
+        .events_after("proc-watermark-before", 0)
+        .await
+        .expect("before events")
+        .len();
+    registry
+        .complete_process(
+            "proc-watermark-after",
+            ProcessAwaitOutput::Success {
+                value: serde_json::Value::Null,
+                control: None,
+            },
+        )
+        .await
+        .expect("complete after");
+
+    let report = registry
+        .prune_terminal_processes(FAR_FUTURE_CUTOFF, None, Some(cursor_after_before))
+        .await
+        .expect("watermark prune");
+    assert_eq!(report.pruned_processes, 1);
+    assert_eq!(report.pruned_events, before_events);
+    assert!(
+        registry
+            .get_process("proc-watermark-before")
+            .await
+            .is_none()
+    );
+    assert!(
+        registry
+            .get_process("proc-watermark-after")
+            .await
+            .expect("post-watermark terminal survives")
+            .is_terminal()
     );
 }
 
@@ -520,7 +639,7 @@ pub(super) async fn prune_never_touches_non_terminal_rows(registry: Arc<dyn Proc
         .expect("complete terminal");
 
     let report = registry
-        .prune_terminal_processes(FAR_FUTURE_CUTOFF)
+        .prune_terminal_processes(FAR_FUTURE_CUTOFF, None, None)
         .await
         .expect("prune with a far-future cutoff");
     assert_eq!(
@@ -611,7 +730,7 @@ pub(super) async fn prune_removes_terminal_processes_older_than_cutoff(
     // Cutoff between the two terminals: prunes the old terminal, keeps the fresh
     // terminal and the live process (`updated_at_ms < cutoff` is exclusive).
     let report = registry
-        .prune_terminal_processes(fresh_updated)
+        .prune_terminal_processes(fresh_updated, None, None)
         .await
         .expect("prune terminal processes");
     assert_eq!(

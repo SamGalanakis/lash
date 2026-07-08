@@ -951,54 +951,68 @@ impl ProcessRegistry for PostgresProcessRegistry {
     async fn prune_terminal_processes(
         &self,
         cutoff_epoch_ms: u64,
+        filter: Option<lash_core::ProcessListFilter>,
+        up_to_change_seq: Option<ProcessChangeCursor>,
     ) -> Result<ProcessPruneReport, PluginError> {
         let cutoff = cutoff_epoch_ms as i64;
+        let max_change_seq = up_to_change_seq.map(|cursor| cursor.store_sequence() as i64);
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
-        // The child deletes select from `lash_processes` (still present until the
-        // final delete) so they resolve the same terminal, older-than-cutoff
-        // set. Delete children first, then the parent rows.
-        const SELECTOR: &str = "process_id IN (
-            SELECT process_id FROM lash_processes
-            WHERE status != 'running' AND updated_at_ms < $1
-        )";
-        let pruned_events = sqlx::query(&format!(
-            "DELETE FROM lash_process_events WHERE {SELECTOR}"
-        ))
-        .bind(cutoff)
-        .execute(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?
-        .rows_affected() as usize;
-        sqlx::query(&format!(
-            "DELETE FROM lash_process_wake_acks WHERE {SELECTOR}"
-        ))
-        .bind(cutoff)
-        .execute(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
-        sqlx::query(&format!(
-            "DELETE FROM lash_process_handle_grants WHERE {SELECTOR}"
-        ))
-        .bind(cutoff)
-        .execute(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
-        sqlx::query(&format!(
-            "DELETE FROM lash_process_leases WHERE {SELECTOR}"
-        ))
-        .bind(cutoff)
-        .execute(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
-        let pruned_processes = sqlx::query(
-            "DELETE FROM lash_processes
-             WHERE status != 'running' AND updated_at_ms < $1",
+        let rows = sqlx::query(
+            "SELECT process_id, record_json FROM lash_processes
+             WHERE status != 'running'
+               AND updated_at_ms < $1
+               AND ($2::BIGINT IS NULL OR change_seq <= $2)
+             ORDER BY process_id ASC
+             FOR UPDATE",
         )
         .bind(cutoff)
-        .execute(&mut *tx)
+        .bind(max_change_seq)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(plugin_sqlx_error)?
-        .rows_affected() as usize;
+        .map_err(plugin_sqlx_error)?;
+        let mut prunable = Vec::new();
+        for row in rows {
+            let process_id: String = row.get(0);
+            let record_json: String = row.get(1);
+            let record: ProcessRecord =
+                serde_json::from_str(&record_json).map_err(process_decode_error)?;
+            if filter.as_ref().is_none_or(|filter| filter.matches_record(&record)) {
+                prunable.push(process_id);
+            }
+        }
+
+        let mut pruned_events = 0;
+        let mut pruned_processes = 0;
+        for process_id in prunable {
+            pruned_events +=
+                sqlx::query("DELETE FROM lash_process_events WHERE process_id = $1")
+                    .bind(&process_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(plugin_sqlx_error)?
+                    .rows_affected() as usize;
+            sqlx::query("DELETE FROM lash_process_wake_acks WHERE process_id = $1")
+                .bind(&process_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?;
+            sqlx::query("DELETE FROM lash_process_handle_grants WHERE process_id = $1")
+                .bind(&process_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?;
+            sqlx::query("DELETE FROM lash_process_leases WHERE process_id = $1")
+                .bind(&process_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?;
+            pruned_processes += sqlx::query("DELETE FROM lash_processes WHERE process_id = $1")
+                .bind(&process_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?
+                .rows_affected() as usize;
+        }
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(ProcessPruneReport {
             pruned_processes,

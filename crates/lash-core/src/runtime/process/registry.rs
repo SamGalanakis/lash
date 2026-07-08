@@ -306,12 +306,14 @@ pub trait ProcessRegistry: Send + Sync {
     ) -> Result<(), PluginError>;
 
     /// Physically delete terminal process rows whose `updated_at_ms` is older
-    /// than `cutoff_epoch_ms`, together with their events, wake acks, handle
-    /// grants, and lease rows. Host-scheduled retention: hosts that project
-    /// results/events into their own store call this to keep the registry
-    /// bounded. Non-terminal rows are never touched. Callers must choose a
-    /// retention window comfortably longer than any waiter lifetime — a
-    /// pruned process id becomes "unknown process" to late awaits.
+    /// than `cutoff_epoch_ms`, match `filter` when one is supplied, and have a
+    /// process change sequence no later than `up_to_change_seq` when supplied,
+    /// together with their events, wake acks, handle grants, and lease rows.
+    /// Host-scheduled retention: hosts that project results/events into their
+    /// own store call this to keep the registry bounded. Non-terminal rows are
+    /// never touched. Callers must choose a retention window comfortably longer
+    /// than any waiter lifetime — a pruned process id becomes "unknown process"
+    /// to late awaits.
     ///
     /// ```no_run
     /// use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -324,7 +326,7 @@ pub trait ProcessRegistry: Send + Sync {
     ///         .as_millis() as u64;
     ///     // Window must exceed any in-flight await's lifetime (ADR 0017).
     ///     let cutoff = now_ms - Duration::from_secs(7 * 24 * 60 * 60).as_millis() as u64;
-    ///     let report = registry.prune_terminal_processes(cutoff).await?;
+    ///     let report = registry.prune_terminal_processes(cutoff, None, None).await?;
     ///     eprintln!(
     ///         "pruned {} processes, {} events",
     ///         report.pruned_processes, report.pruned_events
@@ -335,5 +337,7 @@ pub trait ProcessRegistry: Send + Sync {
     async fn prune_terminal_processes(
         &self,
         cutoff_epoch_ms: u64,
+        filter: Option<ProcessListFilter>,
+        up_to_change_seq: Option<ProcessChangeCursor>,
     ) -> Result<ProcessPruneReport, PluginError>;
 }

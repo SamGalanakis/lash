@@ -611,10 +611,14 @@ impl ProcessRegistry for WatchedProcessRegistry {
     async fn prune_terminal_processes(
         &self,
         cutoff_epoch_ms: u64,
+        filter: Option<ProcessListFilter>,
+        up_to_change_seq: Option<ProcessChangeCursor>,
     ) -> Result<ProcessPruneReport, PluginError> {
         // No hub bump: pruned rows are terminal, so any waiter on them resolved
         // long ago (terminal state is durable and observed via the await seam).
-        self.inner.prune_terminal_processes(cutoff_epoch_ms).await
+        self.inner
+            .prune_terminal_processes(cutoff_epoch_ms, filter, up_to_change_seq)
+            .await
     }
 }
 
@@ -737,7 +741,7 @@ mod tests {
         live_rx.mark_unchanged();
 
         let report = registry
-            .prune_terminal_processes(u64::MAX)
+            .prune_terminal_processes(u64::MAX, None, None)
             .await
             .expect("prune");
         assert_eq!(report.pruned_processes, 1, "the terminal process pruned");

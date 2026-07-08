@@ -797,7 +797,10 @@ impl ProcessRegistry for TestLocalProcessRegistry {
     async fn prune_terminal_processes(
         &self,
         cutoff_epoch_ms: u64,
+        filter: Option<ProcessListFilter>,
+        up_to_change_seq: Option<ProcessChangeCursor>,
     ) -> Result<ProcessPruneReport, PluginError> {
+        let max_change_seq = up_to_change_seq.map(ProcessChangeCursor::store_sequence);
         let mut pruned_events = 0;
         let prunable: HashSet<String> = {
             let mut managed = self.managed.lock().await;
@@ -806,6 +809,12 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                 .filter(|(_, record)| {
                     record.record.is_terminal() && record.record.updated_at_ms < cutoff_epoch_ms
                 })
+                .filter(|(_, record)| {
+                    filter
+                        .as_ref()
+                        .is_none_or(|filter| filter.matches_record(&record.record))
+                })
+                .filter(|(_, record)| max_change_seq.is_none_or(|max| record.change_seq <= max))
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in &prunable {

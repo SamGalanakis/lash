@@ -1502,52 +1502,21 @@ impl ProcessRegistry for SqliteProcessRegistry {
     async fn prune_terminal_processes(
         &self,
         cutoff_epoch_ms: u64,
+        filter: Option<ProcessListFilter>,
+        up_to_change_seq: Option<ProcessChangeCursor>,
     ) -> Result<ProcessPruneReport, lash_core::PluginError> {
         let cutoff = cutoff_epoch_ms as i64;
+        let max_change_seq = up_to_change_seq.map(ProcessChangeCursor::store_sequence);
         self.conn
             .write_flow(move |tx| {
-                Ok(tx_outcome((|| {
-                    // The child deletes select from `processes` (still present
-                    // until the final delete) so they resolve the same terminal,
-                    // older-than-cutoff set. Delete children first, then the
-                    // parent rows.
-                    const SELECTOR: &str = "process_id IN (
-                        SELECT process_id FROM processes
-                        WHERE status != 'running' AND updated_at_ms < ?1
-                    )";
-                    let pruned_events = tx
-                        .execute(
-                            &format!("DELETE FROM process_events WHERE {SELECTOR}"),
-                            params![cutoff],
-                        )
-                        .map_err(process_sqlite_error)?;
-                    tx.execute(
-                        &format!("DELETE FROM process_wake_acks WHERE {SELECTOR}"),
-                        params![cutoff],
-                    )
-                    .map_err(process_sqlite_error)?;
-                    tx.execute(
-                        &format!("DELETE FROM process_handle_grants WHERE {SELECTOR}"),
-                        params![cutoff],
-                    )
-                    .map_err(process_sqlite_error)?;
-                    tx.execute(
-                        &format!("DELETE FROM process_leases WHERE {SELECTOR}"),
-                        params![cutoff],
-                    )
-                    .map_err(process_sqlite_error)?;
-                    let pruned_processes = tx
-                        .execute(
-                            "DELETE FROM processes
-                             WHERE status != 'running' AND updated_at_ms < ?1",
-                            params![cutoff],
-                        )
-                        .map_err(process_sqlite_error)?;
-                    Ok(ProcessPruneReport {
-                        pruned_processes,
-                        pruned_events,
-                    })
-                })()))
+                Ok(tx_outcome(
+                    crate::process_registry_change::prune_terminal_processes_conn(
+                        tx,
+                        cutoff,
+                        filter,
+                        max_change_seq,
+                    ),
+                ))
             })
             .await
             .map_err(process_sqlite_error)?

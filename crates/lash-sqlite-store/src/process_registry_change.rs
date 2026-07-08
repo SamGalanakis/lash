@@ -30,3 +30,75 @@ pub(crate) fn processes_changed_since_conn(
     }
     Ok((records, next_cursor))
 }
+
+pub(crate) fn prune_terminal_processes_conn(
+    conn: &Connection,
+    cutoff: i64,
+    filter: Option<ProcessListFilter>,
+    max_change_seq: Option<u64>,
+) -> Result<ProcessPruneReport, lash_core::PluginError> {
+    let max_change_seq = max_change_seq.map(|seq| seq as i64);
+    let mut stmt = conn
+        .prepare(
+            "SELECT process_id, record_json FROM processes
+             WHERE status != 'running'
+               AND updated_at_ms < ?1
+               AND (?2 IS NULL OR change_seq <= ?2)
+             ORDER BY process_id ASC",
+        )
+        .map_err(process_sqlite_error)?;
+    let rows = stmt
+        .query_map(params![cutoff, max_change_seq], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(process_sqlite_error)?;
+    let mut prunable = Vec::new();
+    for row in rows {
+        let (process_id, record_json) = row.map_err(process_sqlite_error)?;
+        let record: ProcessRecord =
+            serde_json::from_str(&record_json).map_err(process_decode_error)?;
+        if filter
+            .as_ref()
+            .is_none_or(|filter| filter.matches_record(&record))
+        {
+            prunable.push(process_id);
+        }
+    }
+
+    let mut pruned_events = 0;
+    let mut pruned_processes = 0;
+    for process_id in prunable {
+        let process_id = process_id.as_str();
+        pruned_events += conn
+            .execute(
+                "DELETE FROM process_events WHERE process_id = ?1",
+                params![process_id],
+            )
+            .map_err(process_sqlite_error)?;
+        conn.execute(
+            "DELETE FROM process_wake_acks WHERE process_id = ?1",
+            params![process_id],
+        )
+        .map_err(process_sqlite_error)?;
+        conn.execute(
+            "DELETE FROM process_handle_grants WHERE process_id = ?1",
+            params![process_id],
+        )
+        .map_err(process_sqlite_error)?;
+        conn.execute(
+            "DELETE FROM process_leases WHERE process_id = ?1",
+            params![process_id],
+        )
+        .map_err(process_sqlite_error)?;
+        pruned_processes += conn
+            .execute(
+                "DELETE FROM processes WHERE process_id = ?1",
+                params![process_id],
+            )
+            .map_err(process_sqlite_error)?;
+    }
+    Ok(ProcessPruneReport {
+        pruned_processes,
+        pruned_events,
+    })
+}

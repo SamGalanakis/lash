@@ -1003,7 +1003,7 @@ async fn inline_process_await_sink_and_prune_end_to_end() -> Result<()> {
     // process, but the host's projected copies (the sink log) remain intact.
     let projected_before_prune = sink.collected();
     let report = registry
-        .prune_terminal_processes(i64::MAX as u64)
+        .prune_terminal_processes(i64::MAX as u64, None, None)
         .await
         .expect("prune terminal process");
     assert_eq!(

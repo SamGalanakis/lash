@@ -327,7 +327,7 @@ impl Processes {
     /// never touched. Choose a cutoff comfortably longer than any live await.
     pub async fn prune(&self, cutoff_epoch_ms: u64) -> Result<lash_core::ProcessPruneReport> {
         self.registry()?
-            .prune_terminal_processes(cutoff_epoch_ms)
+            .prune_terminal_processes(cutoff_epoch_ms, None, None)
             .await
             .map_err(Into::into)
     }

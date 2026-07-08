@@ -4,7 +4,8 @@
 use super::process_coordination::{
     awaiter_await_event_never_returns_events_at_or_before_cursor,
     awaiter_cross_task_completion_resolves_promptly, prune_never_touches_non_terminal_rows,
-    prune_removes_terminal_processes_older_than_cutoff, prune_respects_leases_grants_and_wake_acks,
+    prune_removes_terminal_processes_older_than_cutoff, prune_respects_filter,
+    prune_respects_leases_grants_and_wake_acks, prune_respects_watermark,
     watched_decorator_preserves_registry_semantics,
 };
 use super::process_filters::list_processes_filters_by_enriched_fields;
@@ -71,6 +72,8 @@ pub async fn process_registry_with_expected_durability<F>(
     awaiter_await_event_never_returns_events_at_or_before_cursor(make()).await;
     watched_decorator_preserves_registry_semantics(make()).await;
     prune_respects_leases_grants_and_wake_acks(make()).await;
+    prune_respects_filter(make()).await;
+    prune_respects_watermark(make()).await;
     prune_never_touches_non_terminal_rows(make()).await;
 }
 
@@ -1305,7 +1308,7 @@ async fn abandoned_terminal_round_trips_and_pins_writer_rules(registry: Arc<dyn 
     // A far-future cutoff (kept within i64 range for SQL backends that bind the
     // cutoff as a signed integer) prunes every terminal row.
     let report = registry
-        .prune_terminal_processes(i64::MAX as u64)
+        .prune_terminal_processes(i64::MAX as u64, None, None)
         .await
         .expect("prune");
     assert!(
