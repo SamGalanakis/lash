@@ -240,6 +240,45 @@ async fn trigger_store_lists_agent_frame_registrations_by_session(
         1,
         "session deletion must include agent-frame registrations"
     );
+
+    let special_session_id = "session-%_\\special";
+    let guard_session_id = "session-abcX\\special";
+    let special_frame_scope = crate::SessionScope::for_agent_frame(special_session_id, "frame-a");
+    let mut special_draft =
+        sample_trigger_subscription_draft(special_session_id, &source_key, "special-frame-route");
+    special_draft.registrant = crate::ProcessOriginator::session(special_frame_scope.clone());
+    special_draft.wake_target = Some(special_frame_scope);
+    store
+        .register_subscription(special_draft)
+        .await
+        .expect("register special-character session subscription");
+
+    let guard_frame_scope = crate::SessionScope::for_agent_frame(guard_session_id, "frame-a");
+    let mut guard_draft =
+        sample_trigger_subscription_draft(guard_session_id, &source_key, "guard-frame-route");
+    guard_draft.registrant = crate::ProcessOriginator::session(guard_frame_scope.clone());
+    guard_draft.wake_target = Some(guard_frame_scope);
+    let guard = store
+        .register_subscription(guard_draft)
+        .await
+        .expect("register wildcard guard subscription");
+
+    assert_eq!(
+        store
+            .delete_session_subscriptions(special_session_id)
+            .await
+            .expect("delete special-character session registrations"),
+        1,
+        "session deletion must treat LIKE metacharacters in session ids literally"
+    );
+    let guard_by_session = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session(
+            guard_session_id,
+        ))
+        .await
+        .expect("list wildcard guard session registrations");
+    assert_eq!(guard_by_session.len(), 1);
+    assert_eq!(guard_by_session[0].handle, guard.handle);
 }
 
 async fn trigger_store_handles_host_scoped_lifecycle(store: Arc<dyn crate::TriggerStore>) {
