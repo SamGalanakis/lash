@@ -1737,11 +1737,25 @@ impl TryFrom<RemoteProcessListFilter> for lash_core::ProcessListFilter {
             definition,
             status,
             waiting,
+            originator_scope_id,
+            identity_kind,
+            identity_label,
+            caused_by_occurrence_id,
+            caused_by_subscription_id,
+            created_at_start_ms,
+            created_at_end_ms,
         } = value;
         Ok(Self {
             definition: definition.map(Into::into),
             status: status.into(),
             waiting,
+            originator_scope_id,
+            identity_kind,
+            identity_label,
+            caused_by_occurrence_id,
+            caused_by_subscription_id,
+            created_at_start_ms,
+            created_at_end_ms,
         })
     }
 }
@@ -1752,12 +1766,26 @@ impl From<lash_core::ProcessListFilter> for RemoteProcessListFilter {
             definition,
             status,
             waiting,
+            originator_scope_id,
+            identity_kind,
+            identity_label,
+            caused_by_occurrence_id,
+            caused_by_subscription_id,
+            created_at_start_ms,
+            created_at_end_ms,
         } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             definition: definition.map(Into::into),
             status: status.into(),
             waiting,
+            originator_scope_id,
+            identity_kind,
+            identity_label,
+            caused_by_occurrence_id,
+            caused_by_subscription_id,
+            created_at_start_ms,
+            created_at_end_ms,
         }
     }
 }

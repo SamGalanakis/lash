@@ -1206,6 +1206,20 @@ pub struct RemoteProcessListFilter {
     pub status: RemoteProcessStatusFilter,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub originator_scope_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by_occurrence_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by_subscription_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_end_ms: Option<u64>,
 }
 
 impl Default for RemoteProcessListFilter {
@@ -1215,6 +1229,13 @@ impl Default for RemoteProcessListFilter {
             definition: None,
             status: RemoteProcessStatusFilter::Running,
             waiting: None,
+            originator_scope_id: None,
+            identity_kind: None,
+            identity_label: None,
+            caused_by_occurrence_id: None,
+            caused_by_subscription_id: None,
+            created_at_start_ms: None,
+            created_at_end_ms: None,
         }
     }
 }

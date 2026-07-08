@@ -3,6 +3,8 @@ mod engine;
 mod events;
 mod materialization;
 mod model;
+#[cfg(test)]
+mod model_filter_tests;
 mod observation;
 mod registry;
 mod service;

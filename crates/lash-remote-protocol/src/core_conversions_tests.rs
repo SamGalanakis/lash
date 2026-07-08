@@ -510,12 +510,29 @@ fn process_list_cancel_signal_and_await_requests_convert_to_core_commands() {
         definition: Some(process_definition_identity("main")),
         status: lash_core::ProcessStatusFilter::Any,
         waiting: Some(true),
+        originator_scope_id: Some("session:test".to_string()),
+        identity_kind: Some("engine".to_string()),
+        identity_label: Some("Main".to_string()),
+        caused_by_occurrence_id: Some("occurrence-1".to_string()),
+        caused_by_subscription_id: Some("subscription-1".to_string()),
+        created_at_start_ms: Some(10),
+        created_at_end_ms: Some(20),
     };
     let remote = RemoteProcessListFilter::from(filter.clone());
     remote.validate().expect("valid list filter");
     let core = lash_core::ProcessListFilter::try_from(remote).expect("core filter");
     assert_eq!(core.status, filter.status);
     assert_eq!(core.waiting, filter.waiting);
+    assert_eq!(core.originator_scope_id, filter.originator_scope_id);
+    assert_eq!(core.identity_kind, filter.identity_kind);
+    assert_eq!(core.identity_label, filter.identity_label);
+    assert_eq!(core.caused_by_occurrence_id, filter.caused_by_occurrence_id);
+    assert_eq!(
+        core.caused_by_subscription_id,
+        filter.caused_by_subscription_id
+    );
+    assert_eq!(core.created_at_start_ms, filter.created_at_start_ms);
+    assert_eq!(core.created_at_end_ms, filter.created_at_end_ms);
     assert!(core.definition.is_some());
 
     let cancel = RemoteProcessCancelRequest {

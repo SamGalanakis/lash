@@ -1295,6 +1295,13 @@ pub struct ProcessListFilter {
     pub definition: Option<serde_json::Value>,
     pub status: ProcessStatusFilter,
     pub waiting: Option<bool>,
+    pub originator_scope_id: Option<String>,
+    pub identity_kind: Option<String>,
+    pub identity_label: Option<String>,
+    pub caused_by_occurrence_id: Option<String>,
+    pub caused_by_subscription_id: Option<String>,
+    pub created_at_start_ms: Option<u64>,
+    pub created_at_end_ms: Option<u64>,
 }
 
 impl ProcessListFilter {
@@ -1304,7 +1311,16 @@ impl ProcessListFilter {
             .ok_or_else(|| "processes.list expects a record of process filters".to_string())?;
         for key in map.keys() {
             match key.as_str() {
-                "definition" | "status" | "waiting" => {}
+                "definition"
+                | "status"
+                | "waiting"
+                | "originator_scope_id"
+                | "identity_kind"
+                | "identity_label"
+                | "caused_by_occurrence_id"
+                | "caused_by_subscription_id"
+                | "created_at_start_ms"
+                | "created_at_end_ms" => {}
                 _ => return Err(format!("processes.list unknown filter `{key}`")),
             }
         }
@@ -1319,10 +1335,24 @@ impl ProcessListFilter {
                     .ok_or_else(|| "processes.list `waiting` filter must be a boolean".to_string())
             })
             .transpose()?;
+        let originator_scope_id = optional_string_filter(args, "originator_scope_id")?;
+        let identity_kind = optional_string_filter(args, "identity_kind")?;
+        let identity_label = optional_string_filter(args, "identity_label")?;
+        let caused_by_occurrence_id = optional_string_filter(args, "caused_by_occurrence_id")?;
+        let caused_by_subscription_id = optional_string_filter(args, "caused_by_subscription_id")?;
+        let created_at_start_ms = optional_u64_filter(args, "created_at_start_ms")?;
+        let created_at_end_ms = optional_u64_filter(args, "created_at_end_ms")?;
         Ok(Self {
             definition,
             status,
             waiting,
+            originator_scope_id,
+            identity_kind,
+            identity_label,
+            caused_by_occurrence_id,
+            caused_by_subscription_id,
+            created_at_start_ms,
+            created_at_end_ms,
         })
     }
 
@@ -1345,7 +1375,61 @@ impl ProcessListFilter {
             && self
                 .waiting
                 .is_none_or(|waiting| record.wait.is_some() == waiting)
+            && self
+                .originator_scope_id
+                .as_ref()
+                .is_none_or(|scope_id| record.originator_scope_id() == scope_id.as_str())
+            && self
+                .identity_kind
+                .as_ref()
+                .is_none_or(|kind| record.identity.kind.as_str() == kind.as_str())
+            && self
+                .identity_label
+                .as_ref()
+                .is_none_or(|label| record.identity.label.as_deref() == Some(label.as_str()))
+            && self
+                .caused_by_occurrence_id
+                .as_ref()
+                .is_none_or(|occurrence_id| caused_by_occurrence_matches(record, occurrence_id))
+            && self
+                .caused_by_subscription_id
+                .as_ref()
+                .is_none_or(|_| false)
+            && self
+                .created_at_start_ms
+                .is_none_or(|start_ms| record.created_at_ms >= start_ms)
+            && self
+                .created_at_end_ms
+                .is_none_or(|end_ms| record.created_at_ms < end_ms)
     }
+}
+
+fn optional_string_filter(args: &serde_json::Value, key: &str) -> Result<Option<String>, String> {
+    args.get(key)
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("processes.list `{key}` filter must be a string"))
+        })
+        .transpose()
+}
+
+fn optional_u64_filter(args: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
+    args.get(key)
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| format!("processes.list `{key}` filter must be an integer"))
+        })
+        .transpose()
+}
+
+fn caused_by_occurrence_matches(record: &ProcessRecord, occurrence_id: &str) -> bool {
+    matches!(
+        record.provenance.caused_by.as_ref(),
+        Some(crate::CausalRef::TriggerOccurrence { occurrence_id: actual }) if actual == occurrence_id
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

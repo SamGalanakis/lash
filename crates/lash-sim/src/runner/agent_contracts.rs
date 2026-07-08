@@ -1021,6 +1021,7 @@ async fn agent_contract_process_observations(
             definition: None,
             status: lash_core::ProcessStatusFilter::Any,
             waiting: None,
+            ..lash_core::ProcessListFilter::default()
         })
         .await
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?

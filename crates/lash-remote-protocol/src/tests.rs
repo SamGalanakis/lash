@@ -429,6 +429,7 @@ fn remote_process_dtos_json_round_trip() {
         definition: Some(remote_process_definition_identity()),
         status: RemoteProcessStatusFilter::Any,
         waiting: Some(false),
+        ..RemoteProcessListFilter::default()
     };
     list_filter.validate().expect("valid process list filter");
     let list_response = RemoteProcessListResponse {

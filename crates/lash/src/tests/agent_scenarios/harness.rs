@@ -325,6 +325,7 @@ async fn all_host_process_summaries(
             definition: None,
             status: lash_core::ProcessStatusFilter::Any,
             waiting: None,
+            ..lash_core::ProcessListFilter::default()
         })
         .await?;
     Ok(processes
@@ -353,6 +354,7 @@ async fn assert_remote_process_dto_surface(
         definition: None,
         status: lash_core::ProcessStatusFilter::Any,
         waiting: None,
+        ..lash_core::ProcessListFilter::default()
     };
 
     let observed = core
