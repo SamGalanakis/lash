@@ -5,22 +5,11 @@
 //! to [`SqliteConnection::call`] (reads) or [`SqliteConnection::write_flow`]
 //! (read-then-write).
 //!
-//! ## Why `write_flow`, not `write`
-//!
-//! The registry's transactional methods produce a [`lash_core::PluginError`],
-//! not a `rusqlite::Error`. `SqliteConnection::write` rolls back only when the
-//! closure returns `Err(rusqlite::Error)`, so a logical `PluginError` (e.g. a
-//! registration-hash conflict) would otherwise *commit* the partial work. Each
-//! such method therefore runs its synchronous body returning
-//! `Result<T, PluginError>` and maps it to a [`TxOutcome`]: `Ok` ⇒
-//! `Commit(Ok(value))`, `Err` ⇒ `Rollback(Err(error))`. That preserves the
-//! prior behaviour of rolling back on every error while still carrying the
-//! `PluginError` back to the caller. The outer `rusqlite::Error` channel only
-//! carries genuine SQLite/connection failures, mapped via `process_sqlite_error`.
-//!
-//! The `*_conn` helpers are synchronous and take a `&rusqlite::Connection` so
-//! they compose inside either closure — including from within a `&Transaction`,
-//! which derefs to `&Connection`.
+//! Transactional methods use `write_flow` so logical [`lash_core::PluginError`]
+//! failures roll back instead of committing partial writes through rusqlite's
+//! error channel. The `*_conn` helpers are synchronous and accept
+//! `&rusqlite::Connection`, so they compose inside connection and transaction
+//! closures.
 
 use super::*;
 
@@ -63,19 +52,38 @@ impl SqliteProcessRegistry {
         conn: &Connection,
         record: &ProcessRecord,
     ) -> Result<(), lash_core::PluginError> {
+        let change_seq = Self::next_change_seq_conn(conn)?;
         conn.execute(
             "UPDATE processes
-             SET updated_at_ms = ?2, status = ?3, record_json = ?4
+             SET updated_at_ms = ?2, change_seq = ?3, status = ?4, record_json = ?5
              WHERE process_id = ?1",
             params![
                 record.id.as_str(),
                 record.updated_at_ms as i64,
+                change_seq as i64,
                 process_status_label(record),
                 process_encode_json(record)?
             ],
         )
         .map_err(process_sqlite_error)?;
         Ok(())
+    }
+
+    fn next_change_seq_conn(conn: &Connection) -> Result<u64, lash_core::PluginError> {
+        conn.execute(
+            "UPDATE process_change_clock
+             SET current_seq = current_seq + 1
+             WHERE singleton = 1",
+            [],
+        )
+        .map_err(process_sqlite_error)?;
+        conn.query_row(
+            "SELECT current_seq FROM process_change_clock WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|seq| seq as u64)
+        .map_err(process_sqlite_error)
     }
 
     fn load_event_by_key_conn(
@@ -291,18 +299,20 @@ impl ProcessRegistry for SqliteProcessRegistry {
                         now,
                     );
                     let originator_scope_id = record.originator_scope_id();
+                    let change_seq = Self::next_change_seq_conn(tx)?;
                     tx.execute(
                         "INSERT INTO processes (
                             process_id, registration_hash, owner_scope_id,
-                            created_at_ms, updated_at_ms, status, record_json
+                            created_at_ms, updated_at_ms, change_seq, status, record_json
                          )
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![
                             record.id.as_str(),
                             record.registration_hash.as_str(),
                             originator_scope_id.as_str(),
                             record.created_at_ms as i64,
                             record.updated_at_ms as i64,
+                            change_seq as i64,
                             process_status_label(&record),
                             process_encode_json(&record)?,
                         ],
@@ -1131,6 +1141,26 @@ impl ProcessRegistry for SqliteProcessRegistry {
                     }
                     Ok(records)
                 })())
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
+    async fn processes_changed_since(
+        &self,
+        cursor: ProcessChangeCursor,
+        limit: usize,
+    ) -> Result<(Vec<ProcessRecord>, ProcessChangeCursor), lash_core::PluginError> {
+        if limit == 0 {
+            return Ok((Vec::new(), cursor));
+        }
+        self.conn
+            .call(move |conn| {
+                Ok(
+                    crate::process_registry_change::processes_changed_since_conn(
+                        conn, cursor, limit,
+                    ),
+                )
             })
             .await
             .map_err(process_sqlite_error)?

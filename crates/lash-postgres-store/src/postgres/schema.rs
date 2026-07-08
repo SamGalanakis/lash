@@ -130,17 +130,22 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             ON lash_attachment_manifest(committed_at_ms)
             WHERE committed_at_ms IS NULL;
 
+        CREATE SEQUENCE IF NOT EXISTS lash_process_change_seq;
+
         CREATE TABLE IF NOT EXISTS lash_processes (
             process_id TEXT PRIMARY KEY,
             registration_hash TEXT NOT NULL,
             owner_scope_id TEXT NOT NULL,
             created_at_ms BIGINT NOT NULL,
             updated_at_ms BIGINT NOT NULL,
+            change_seq BIGINT NOT NULL,
             status TEXT NOT NULL,
             record_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_lash_processes_status
             ON lash_processes(status);
+        CREATE INDEX IF NOT EXISTS idx_lash_processes_change_seq
+            ON lash_processes(change_seq);
 
         CREATE TABLE IF NOT EXISTS lash_process_events (
             process_id TEXT NOT NULL REFERENCES lash_processes(process_id) ON DELETE CASCADE,

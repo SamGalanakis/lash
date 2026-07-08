@@ -24,13 +24,14 @@ use lash_core::store::{
 use lash_core::{
     AbandonRequest, AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
     AwaitEventResolver, BlobRef, DeliveryPolicy, DurabilityTier, EffectHost, ExecutionScope,
-    GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey, ProcessAwaitOutput, ProcessEvent,
-    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseCompletion,
-    ProcessPruneReport, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted,
-    QueuedWorkStore, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
-    RuntimePersistence, ScopedEffectController, SessionCommitStore, SessionExecutionLease,
+    GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey, ProcessAwaitOutput,
+    ProcessChangeCursor, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
+    ProcessLeaseCompletion, ProcessPruneReport, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessStarted, QueuedWorkStore, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimePersistence,
+    ScopedEffectController, SessionCommitStore, SessionExecutionLease,
     SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
     SessionExecutionLeaseStore, SessionMeta, SessionNodeRecord, SessionReadScope, SessionScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, StoreMaintenance,
@@ -45,12 +46,10 @@ use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::{Executor, Row};
 
 const SCHEMA_COMPONENT: &str = "lash-postgres-store";
-// Bumped to 7: `ProcessRecord` gained a required `disposition` field (plus
-// optional `first_started`/`abandon_request`) inside `record_json` (ADR 0019).
-// The schema is a reject-and-recreate boundary — a pre-7 database's rows predate
-// the column and cannot deserialize, so the version mismatch is rejected at open
-// rather than backfilled; new rows always carry the disposition.
-const SCHEMA_VERSION: i32 = 7;
+// Bumped to 8: ADR 0020 added a per-store process-row `change_seq` and backing
+// sequence. The schema is a reject-and-recreate boundary; pre-8 databases are
+// rejected at open rather than migrated.
+const SCHEMA_VERSION: i32 = 8;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]

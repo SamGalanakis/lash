@@ -25,18 +25,20 @@ impl ProcessRegistry for PostgresProcessRegistry {
         let record =
             ProcessRecord::from_prepared_registration(registration, registration_hash, now);
         let record_json = serde_json::to_string(&record).map_err(process_decode_error)?;
+        let change_seq = next_process_change_seq_tx(&mut tx).await?;
         sqlx::query(
             "INSERT INTO lash_processes (
                 process_id, registration_hash, owner_scope_id,
-                created_at_ms, updated_at_ms, status, record_json
+                created_at_ms, updated_at_ms, change_seq, status, record_json
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&record.id)
         .bind(&record.registration_hash)
         .bind(record.originator_scope_id().as_str())
         .bind(record.created_at_ms as i64)
         .bind(record.updated_at_ms as i64)
+        .bind(change_seq as i64)
         .bind(process_status_label(&record))
         .bind(record_json)
         .execute(&mut *tx)
@@ -639,6 +641,36 @@ impl ProcessRegistry for PostgresProcessRegistry {
             }
         }
         Ok(records)
+    }
+
+    async fn processes_changed_since(
+        &self,
+        cursor: ProcessChangeCursor,
+        limit: usize,
+    ) -> Result<(Vec<ProcessRecord>, ProcessChangeCursor), PluginError> {
+        if limit == 0 {
+            return Ok((Vec::new(), cursor));
+        }
+        let rows = sqlx::query(
+            "SELECT change_seq, record_json FROM lash_processes
+             WHERE change_seq > $1
+             ORDER BY change_seq ASC, process_id ASC
+             LIMIT $2",
+        )
+        .bind(cursor.store_sequence() as i64)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        let mut records = Vec::new();
+        let mut next_cursor = cursor;
+        for row in rows {
+            let change_seq: i64 = row.get(0);
+            let json: String = row.get(1);
+            records.push(serde_json::from_str(&json).map_err(process_decode_error)?);
+            next_cursor = ProcessChangeCursor::from_store_sequence(change_seq as u64);
+        }
+        Ok((records, next_cursor))
     }
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError> {

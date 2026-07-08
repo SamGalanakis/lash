@@ -38,19 +38,31 @@ async fn save_process_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     record: &ProcessRecord,
 ) -> Result<(), PluginError> {
+    let change_seq = next_process_change_seq_tx(tx).await?;
     sqlx::query(
         "UPDATE lash_processes
-         SET updated_at_ms = $2, status = $3, record_json = $4
+         SET updated_at_ms = $2, change_seq = $3, status = $4, record_json = $5
          WHERE process_id = $1",
     )
     .bind(&record.id)
     .bind(record.updated_at_ms as i64)
+    .bind(change_seq as i64)
     .bind(process_status_label(record))
     .bind(serde_json::to_string(record).map_err(process_decode_error)?)
     .execute(&mut **tx)
     .await
     .map_err(plugin_sqlx_error)?;
     Ok(())
+}
+
+async fn next_process_change_seq_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<u64, PluginError> {
+    let seq: i64 = sqlx::query_scalar("SELECT nextval('lash_process_change_seq')")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+    Ok(seq as u64)
 }
 
 async fn load_event_by_key_tx(

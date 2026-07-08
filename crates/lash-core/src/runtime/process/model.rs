@@ -15,6 +15,30 @@ use super::validation::{
 
 pub type ProcessId = String;
 
+/// Opaque position in a store's Process Change Feed.
+///
+/// The wrapped sequence is meaningful only to the registry backend that issued
+/// it. Backends expose constructors/accessors so external store implementations
+/// can persist and bind the position, but consumers should treat values as
+/// cursors, not comparable timestamps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProcessChangeCursor(u64);
+
+impl ProcessChangeCursor {
+    pub fn initial() -> Self {
+        Self(0)
+    }
+
+    pub fn from_store_sequence(sequence: u64) -> Self {
+        Self(sequence)
+    }
+
+    pub fn store_sequence(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionScopeId(String);

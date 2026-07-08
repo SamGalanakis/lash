@@ -50,6 +50,7 @@ pub async fn process_registry_with_expected_durability<F>(
     abandoned_terminal_round_trips_and_pins_writer_rules(make()).await;
     wait_state_round_trips_filters_and_clears_on_terminal(make()).await;
     list_processes_filters_by_status_and_waiting(make()).await;
+    process_change_feed_orders_resumes_and_includes_terminal_transitions(make()).await;
     count_and_recent_events_match_the_log(make()).await;
     transfer_handle_grants_moves_addressability(make()).await;
     multiple_sessions_can_hold_grants(make()).await;
@@ -1500,6 +1501,134 @@ async fn list_processes_filters_by_status_and_waiting(registry: Arc<dyn ProcessR
         .await
         .expect("list not waiting");
     assert_eq!(ids(not_waiting), vec!["proc-list-running".to_string()]);
+}
+
+async fn process_change_feed_orders_resumes_and_includes_terminal_transitions(
+    registry: Arc<dyn ProcessRegistry>,
+) {
+    let ids = |records: Vec<ProcessRecord>| {
+        records
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>()
+    };
+    let initial = ProcessChangeCursor::initial();
+
+    let (empty, empty_cursor) = registry
+        .processes_changed_since(initial, 10)
+        .await
+        .expect("empty feed");
+    assert!(empty.is_empty(), "a fresh registry has no changed records");
+    assert_eq!(
+        empty_cursor, initial,
+        "an empty page keeps the caller's cursor unchanged"
+    );
+    let (zero_limit, zero_cursor) = registry
+        .processes_changed_since(initial, 0)
+        .await
+        .expect("zero-limit feed");
+    assert!(zero_limit.is_empty(), "limit zero returns no records");
+    assert_eq!(
+        zero_cursor, initial,
+        "limit zero keeps the caller's cursor unchanged"
+    );
+
+    registry
+        .register_process(
+            registration("proc-change-a")
+                .with_extra_event_types([plain_event_type("producer.tick")]),
+        )
+        .await
+        .expect("register a");
+    registry
+        .register_process(registration("proc-change-b"))
+        .await
+        .expect("register b");
+
+    let (first_page, cursor_after_a) = registry
+        .processes_changed_since(initial, 1)
+        .await
+        .expect("first feed page");
+    assert_eq!(
+        ids(first_page),
+        vec!["proc-change-a".to_string()],
+        "the first page follows registration change order"
+    );
+    let (reread_first_page, reread_cursor_after_a) = registry
+        .processes_changed_since(initial, 1)
+        .await
+        .expect("reread first feed page");
+    assert_eq!(
+        ids(reread_first_page),
+        vec!["proc-change-a".to_string()],
+        "re-reading from the same cursor is idempotent"
+    );
+    assert_eq!(
+        reread_cursor_after_a, cursor_after_a,
+        "re-reading from the same cursor returns the same next cursor"
+    );
+    let (second_page, cursor_after_b) = registry
+        .processes_changed_since(cursor_after_a, 1)
+        .await
+        .expect("second feed page");
+    assert_eq!(
+        ids(second_page),
+        vec!["proc-change-b".to_string()],
+        "resuming from the first page reaches the next changed record"
+    );
+    let (no_new_records, same_cursor) = registry
+        .processes_changed_since(cursor_after_b, 10)
+        .await
+        .expect("empty resumed feed");
+    assert!(no_new_records.is_empty());
+    assert_eq!(
+        same_cursor, cursor_after_b,
+        "an empty resumed page keeps the cursor unchanged"
+    );
+
+    registry
+        .append_event(
+            "proc-change-a",
+            ProcessEventAppendRequest::new("producer.tick", serde_json::json!({"n": 1})),
+        )
+        .await
+        .expect("append a event");
+    registry
+        .complete_process(
+            "proc-change-b",
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!("done"),
+                control: None,
+            },
+        )
+        .await
+        .expect("complete b");
+
+    let (changed_after_b, cursor_after_a_update) = registry
+        .processes_changed_since(cursor_after_b, 1)
+        .await
+        .expect("changed after registration cursor");
+    assert_eq!(
+        ids(changed_after_b),
+        vec!["proc-change-a".to_string()],
+        "later row mutations appear after the saved cursor"
+    );
+    let (terminal_page, cursor_after_terminal) = registry
+        .processes_changed_since(cursor_after_a_update, 1)
+        .await
+        .expect("terminal change page");
+    assert_eq!(terminal_page.len(), 1);
+    assert_eq!(terminal_page[0].id, "proc-change-b");
+    assert!(
+        terminal_page[0].is_terminal(),
+        "terminal transitions appear in the process change feed"
+    );
+    let (empty_after_terminal, stable_terminal_cursor) = registry
+        .processes_changed_since(cursor_after_terminal, 10)
+        .await
+        .expect("empty after terminal page");
+    assert!(empty_after_terminal.is_empty());
+    assert_eq!(stable_terminal_cursor, cursor_after_terminal);
 }
 
 async fn wait_state_round_trips_filters_and_clears_on_terminal(registry: Arc<dyn ProcessRegistry>) {

@@ -37,10 +37,10 @@ use std::time::Duration;
 
 use crate::{
     AbandonEvidence, AbandonRequest, AbandonWriter, LashSchema, ProcessAwaitOutput,
-    ProcessEventAppendRequest, ProcessEventSemanticsSpec, ProcessEventType, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessInput, ProcessLeaseCompletion, ProcessListFilter,
-    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted,
-    ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessValueSelector,
+    ProcessChangeCursor, ProcessEventAppendRequest, ProcessEventSemanticsSpec, ProcessEventType,
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessInput, ProcessLeaseCompletion,
+    ProcessListFilter, ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    ProcessStarted, ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessValueSelector,
     ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition, SessionScope,
     SessionScopeId, WaitKind, WaitState,
 };

@@ -184,12 +184,24 @@ CREATE TABLE IF NOT EXISTS processes (
     owner_scope_id       TEXT NOT NULL,
     created_at_ms         INTEGER NOT NULL,
     updated_at_ms         INTEGER NOT NULL,
+    change_seq            INTEGER NOT NULL,
     status                TEXT NOT NULL,
     record_json           TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_processes_status
     ON processes(status);
+
+CREATE INDEX IF NOT EXISTS idx_processes_change_seq
+    ON processes(change_seq);
+
+CREATE TABLE IF NOT EXISTS process_change_clock (
+    singleton    INTEGER PRIMARY KEY CHECK (singleton = 1),
+    current_seq  INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT OR IGNORE INTO process_change_clock (singleton, current_seq)
+VALUES (1, 0);
 
 CREATE TABLE IF NOT EXISTS process_events (
     process_id        TEXT NOT NULL,
@@ -243,12 +255,10 @@ CREATE TABLE IF NOT EXISTS process_leases (
 
 ";
 
-// Bumped to 9: `ProcessRecord` gained a required `disposition` field (plus
-// optional `first_started`/`abandon_request`) inside `record_json` (ADR 0019).
-// There is no migration chain — a pre-9 database's rows predate the column and
-// cannot deserialize, so the version bump rejects them at open (delete and start
-// fresh). New rows always carry the disposition; nothing survives to backfill.
-pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 9;
+// Bumped to 10: ADR 0020 added a per-store process-row `change_seq` plus the
+// process change clock. There is no migration chain — pre-10 process databases
+// are rejected at open and must be recreated.
+pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 10;
 
 pub(crate) const TRIGGER_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS trigger_subscription_seq (

@@ -12,10 +12,11 @@ use super::events::{
     ProcessTerminalState,
 };
 use super::model::{
-    AbandonRequest, PROCESS_LEASE_SCHEMA_VERSION, ProcessExternalRef, ProcessHandleDescriptor,
-    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome,
-    ProcessLeaseCompletion, ProcessListFilter, ProcessRecord, ProcessRegistration,
-    ProcessSessionDeleteReport, ProcessStarted, SessionScope, SessionScopeId, WaitState,
+    AbandonRequest, PROCESS_LEASE_SCHEMA_VERSION, ProcessChangeCursor, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessLease,
+    ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessListFilter, ProcessRecord,
+    ProcessRegistration, ProcessSessionDeleteReport, ProcessStarted, SessionScope, SessionScopeId,
+    WaitState,
 };
 use super::registry::{ProcessPruneReport, ProcessRegistry};
 use super::time::current_epoch_ms;
@@ -28,6 +29,7 @@ use super::validation::{
 pub struct TestLocalProcessRegistry {
     durability_tier: crate::DurabilityTier,
     managed: Arc<Mutex<ManagedProcessMap>>,
+    next_change_seq: Arc<Mutex<u64>>,
     grants: Arc<Mutex<ManagedGrantMap>>,
     leases: Arc<Mutex<ManagedLeaseMap>>,
 }
@@ -37,6 +39,7 @@ impl Default for TestLocalProcessRegistry {
         Self {
             durability_tier: crate::DurabilityTier::Inline,
             managed: Arc::new(Mutex::new(HashMap::new())),
+            next_change_seq: Arc::new(Mutex::new(0)),
             grants: Arc::new(Mutex::new(HashMap::new())),
             leases: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -49,6 +52,7 @@ type ManagedLeaseMap = HashMap<String, ProcessLease>;
 
 struct ManagedProcessRecord {
     record: ProcessRecord,
+    change_seq: u64,
     events: Vec<ProcessEvent>,
     keyed_events: HashMap<String, (String, ProcessEvent)>,
     acked_wakes: HashSet<u64>,
@@ -62,6 +66,12 @@ impl TestLocalProcessRegistry {
 
     pub fn durable() -> Self {
         Self::default().with_durability_tier(crate::DurabilityTier::Durable)
+    }
+
+    async fn next_change_seq(&self) -> u64 {
+        let mut next = self.next_change_seq.lock().await;
+        *next = next.saturating_add(1);
+        *next
     }
 
     async fn insert_process(
@@ -87,10 +97,12 @@ impl TestLocalProcessRegistry {
             registration_hash,
             current_epoch_ms(),
         );
+        let change_seq = self.next_change_seq().await;
         managed.insert(
             id.clone(),
             ManagedProcessRecord {
                 record: record.clone(),
+                change_seq,
                 events: Vec::new(),
                 keyed_events: HashMap::new(),
                 acked_wakes: HashSet::new(),
@@ -136,6 +148,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         }
         record.record.external_ref = Some(external_ref);
         record.record.updated_at_ms = current_epoch_ms();
+        record.change_seq = self.next_change_seq().await;
         Ok(record.record.clone())
     }
 
@@ -333,7 +346,9 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             }
         }
         for record in managed.values_mut() {
-            let _ = record.record.clear_wake_target_for_session(session_id);
+            if record.record.clear_wake_target_for_session(session_id) {
+                record.change_seq = self.next_change_seq().await;
+            }
         }
         orphaned_process_ids.sort();
         orphaned_process_ids.dedup();
@@ -385,6 +400,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                         status,
                         occurred_at_ms,
                     );
+                    record.change_seq = self.next_change_seq().await;
                 }
                 Ok(ProcessEventAppendResult {
                     event,
@@ -407,6 +423,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                 } else {
                     record.record.updated_at_ms = occurred_at_ms;
                 }
+                record.change_seq = self.next_change_seq().await;
                 record.events.push(event.clone());
                 if let Some(replay) = event.invocation.replay.clone() {
                     record
@@ -503,6 +520,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         if record.record.first_started.is_none() {
             record.record.first_started = Some(Box::new(started));
             record.record.updated_at_ms = current_epoch_ms();
+            record.change_seq = self.next_change_seq().await;
         }
         Ok(record.record.clone())
     }
@@ -527,6 +545,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         if record.record.abandon_request.is_none() {
             record.record.abandon_request = Some(Box::new(request));
             record.record.updated_at_ms = current_epoch_ms();
+            record.change_seq = self.next_change_seq().await;
         }
         Ok(record.record.clone())
     }
@@ -549,6 +568,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         }
         record.record.wait = Some(wait);
         record.record.updated_at_ms = current_epoch_ms();
+        record.change_seq = self.next_change_seq().await;
         Ok(record.record.clone())
     }
 
@@ -561,6 +581,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         };
         record.record.wait = None;
         record.record.updated_at_ms = current_epoch_ms();
+        record.change_seq = self.next_change_seq().await;
         Ok(record.record.clone())
     }
 
@@ -581,6 +602,34 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             .collect::<Vec<_>>();
         records.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(records)
+    }
+
+    async fn processes_changed_since(
+        &self,
+        cursor: ProcessChangeCursor,
+        limit: usize,
+    ) -> Result<(Vec<ProcessRecord>, ProcessChangeCursor), PluginError> {
+        if limit == 0 {
+            return Ok((Vec::new(), cursor));
+        }
+        let managed = self.managed.lock().await;
+        let mut rows = managed
+            .values()
+            .filter(|record| record.change_seq > cursor.store_sequence())
+            .map(|record| (record.change_seq, record.record.clone()))
+            .collect::<Vec<_>>();
+        rows.sort_by(|(left_seq, left), (right_seq, right)| {
+            left_seq.cmp(right_seq).then_with(|| left.id.cmp(&right.id))
+        });
+        rows.truncate(limit);
+        let next_cursor = rows
+            .last()
+            .map(|(change_seq, _)| ProcessChangeCursor::from_store_sequence(*change_seq))
+            .unwrap_or(cursor);
+        Ok((
+            rows.into_iter().map(|(_, record)| record).collect(),
+            next_cursor,
+        ))
     }
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError> {

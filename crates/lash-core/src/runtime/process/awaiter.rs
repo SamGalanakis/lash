@@ -8,10 +8,10 @@ use super::events::{
     ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
 };
 use super::model::{
-    AbandonRequest, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion,
-    ProcessListFilter, ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport,
-    ProcessStarted, SessionScope, WaitState,
+    AbandonRequest, ProcessChangeCursor, ProcessExternalRef, ProcessHandleDescriptor,
+    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome,
+    ProcessLeaseCompletion, ProcessListFilter, ProcessRecord, ProcessRegistration,
+    ProcessSessionDeleteReport, ProcessStarted, SessionScope, WaitState,
 };
 use super::registry::{ProcessPruneReport, ProcessRegistry};
 use crate::PluginError;
@@ -543,6 +543,14 @@ impl ProcessRegistry for WatchedProcessRegistry {
         filter: &ProcessListFilter,
     ) -> Result<Vec<ProcessRecord>, PluginError> {
         self.inner.list_processes(filter).await
+    }
+
+    async fn processes_changed_since(
+        &self,
+        cursor: ProcessChangeCursor,
+        limit: usize,
+    ) -> Result<(Vec<ProcessRecord>, ProcessChangeCursor), PluginError> {
+        self.inner.processes_changed_since(cursor, limit).await
     }
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError> {

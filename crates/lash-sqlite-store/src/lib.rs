@@ -58,7 +58,7 @@ use lash_core::store::{
 use lash_core::{
     AbandonRequest, AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
     BlobRef, DeliveryPolicy, DurabilityTier, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness,
-    MergeKey, PROCESS_LEASE_SCHEMA_VERSION, ProcessAwaitOutput, ProcessEvent,
+    MergeKey, PROCESS_LEASE_SCHEMA_VERSION, ProcessAwaitOutput, ProcessChangeCursor, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseClaimOutcome,
     ProcessLeaseCompletion, ProcessPruneReport, ProcessRecord, ProcessRegistration,
@@ -83,6 +83,7 @@ mod lifecycle;
 mod pending_turn_inputs;
 mod persistence;
 mod process_registry;
+mod process_registry_change;
 mod queued_work;
 mod schema;
 mod triggers;

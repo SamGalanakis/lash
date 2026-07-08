@@ -33,15 +33,15 @@ pub use events::{
 pub use materialization::materialize_process_event_semantics;
 pub use model::{
     AbandonRequest, InMemoryProcessExecutionEnvStore, PROCESS_LEASE_SCHEMA_VERSION,
-    ProcessCancelSummary, ProcessExecutionContext, ProcessExecutionEnvRef, ProcessExecutionEnvSpec,
-    ProcessExecutionEnvStore, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessIdentity, ProcessInput,
-    ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessLifecycleStatus,
-    ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessOriginator, ProcessProvenance,
-    ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport, ProcessSpawnProvenance,
-    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStarted, ProcessStatus,
-    ProcessStatusFilter, RecoveryDisposition, SessionScope, SessionScopeId, WaitKind, WaitState,
-    load_process_execution_env, persist_process_execution_env,
+    ProcessCancelSummary, ProcessChangeCursor, ProcessExecutionContext, ProcessExecutionEnvRef,
+    ProcessExecutionEnvSpec, ProcessExecutionEnvStore, ProcessExternalRef, ProcessHandleDescriptor,
+    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessIdentity,
+    ProcessInput, ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion,
+    ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessOriginator,
+    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport,
+    ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
+    ProcessStarted, ProcessStatus, ProcessStatusFilter, RecoveryDisposition, SessionScope,
+    SessionScopeId, WaitKind, WaitState, load_process_execution_env, persist_process_execution_env,
 };
 pub use observation::{
     ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessWorkObserver,

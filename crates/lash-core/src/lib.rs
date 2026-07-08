@@ -341,7 +341,7 @@ pub use runtime::{
     PendingTurnInputCancelTarget, PendingTurnInputClaimDiagnostics, PendingTurnInputDraft,
     PendingTurnInputSuffixCancelOutcome, ProcessAttach, ProcessAwaitOutput, ProcessAwaiter,
     ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
-    ProcessCancelSummary, ProcessChangeHub, ProcessDrainReport, ProcessEngine,
+    ProcessCancelSummary, ProcessChangeCursor, ProcessChangeHub, ProcessDrainReport, ProcessEngine,
     ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
     ProcessEngineRuntimeContext, ProcessEngineValidationContext, ProcessEvent,
     ProcessEventAppendPlan, ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSink,

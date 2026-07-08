@@ -4,10 +4,10 @@ use super::events::{
     ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
 };
 use super::model::{
-    AbandonRequest, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion,
-    ProcessListFilter, ProcessRecord, ProcessRegistration, ProcessSessionDeleteReport,
-    ProcessStarted, SessionScope, WaitState,
+    AbandonRequest, ProcessChangeCursor, ProcessExternalRef, ProcessHandleDescriptor,
+    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessLease, ProcessLeaseClaimOutcome,
+    ProcessLeaseCompletion, ProcessListFilter, ProcessRecord, ProcessRegistration,
+    ProcessSessionDeleteReport, ProcessStarted, SessionScope, WaitState,
 };
 
 /// Outcome of [`ProcessRegistry::prune_terminal_processes`]: how many terminal
@@ -211,6 +211,18 @@ pub trait ProcessRegistry: Send + Sync {
         &self,
         filter: &ProcessListFilter,
     ) -> Result<Vec<ProcessRecord>, PluginError>;
+
+    /// Return process records whose persisted row changed strictly after
+    /// `cursor`, ordered by the backend's per-store change sequence.
+    ///
+    /// This is a host-level completeness read for trusted projectors. It is not
+    /// scoped by handle grants, and the cursor must be treated as opaque outside
+    /// the store that issued it.
+    async fn processes_changed_since(
+        &self,
+        cursor: ProcessChangeCursor,
+        limit: usize,
+    ) -> Result<(Vec<ProcessRecord>, ProcessChangeCursor), PluginError>;
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError>;
 
