@@ -46,10 +46,10 @@ use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::{Executor, Row};
 
 const SCHEMA_COMPONENT: &str = "lash-postgres-store";
-// Bumped to 8: ADR 0020 added a per-store process-row `change_seq` and backing
-// sequence. The schema is a reject-and-recreate boundary; pre-8 databases are
-// rejected at open rather than migrated.
-const SCHEMA_VERSION: i32 = 8;
+// Bumped to 9: ADR 0020 process-row `change_seq` now uses a transactional
+// clock row instead of a sequence. The schema is a reject-and-recreate
+// boundary; pre-9 databases are rejected at open rather than migrated.
+const SCHEMA_VERSION: i32 = 9;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]

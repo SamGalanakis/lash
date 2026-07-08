@@ -130,7 +130,16 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             ON lash_attachment_manifest(committed_at_ms)
             WHERE committed_at_ms IS NULL;
 
-        CREATE SEQUENCE IF NOT EXISTS lash_process_change_seq;
+        DROP SEQUENCE IF EXISTS lash_process_change_seq;
+
+        CREATE TABLE IF NOT EXISTS lash_process_change_clock (
+            singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
+            current_seq BIGINT NOT NULL,
+            CHECK (singleton)
+        );
+        INSERT INTO lash_process_change_clock (singleton, current_seq)
+        VALUES (TRUE, 0)
+        ON CONFLICT (singleton) DO NOTHING;
 
         CREATE TABLE IF NOT EXISTS lash_processes (
             process_id TEXT PRIMARY KEY,

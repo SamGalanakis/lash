@@ -58,10 +58,15 @@ async fn save_process_tx(
 async fn next_process_change_seq_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<u64, PluginError> {
-    let seq: i64 = sqlx::query_scalar("SELECT nextval('lash_process_change_seq')")
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
+    let seq: i64 = sqlx::query_scalar(
+        "UPDATE lash_process_change_clock
+         SET current_seq = current_seq + 1
+         WHERE singleton = TRUE
+         RETURNING current_seq",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(plugin_sqlx_error)?;
     Ok(seq as u64)
 }
 

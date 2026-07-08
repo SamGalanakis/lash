@@ -67,6 +67,14 @@ async fn reset(storage: &PostgresStorage) {
         .execute(pool)
         .await
         .expect("reset postgres conformance tables");
+    sqlx::query(
+        "INSERT INTO lash_process_change_clock (singleton, current_seq)
+         VALUES (TRUE, 0)
+         ON CONFLICT (singleton) DO UPDATE SET current_seq = EXCLUDED.current_seq",
+    )
+    .execute(pool)
+    .await
+    .expect("reset postgres process change clock");
     // `lash_trigger_subscription_seq` is a standalone sequence (not owned by a
     // truncated table), so RESTART IDENTITY does not reset it. Reset it in a
     // separate statement — sqlx's prepared protocol rejects multiple commands in
