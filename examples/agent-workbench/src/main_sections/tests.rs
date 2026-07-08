@@ -1059,11 +1059,11 @@ finish initial
         let report = emit_test_button_trigger(&core, ButtonChoice::Red).await;
         assert_remote_trigger_emit_report_round_trip(&report);
 
-        assert_eq!(report.started_process_ids.len(), 1);
+        assert_eq!(report.started_process_ids().len(), 1);
         let awaiter = lash::process::ProcessAwaiter::polling(Arc::clone(&process_registry));
         tokio::time::timeout(
             Duration::from_secs(5),
-            awaiter.await_terminal(&report.started_process_ids[0]),
+            awaiter.await_terminal(&report.started_process_ids()[0]),
         )
         .await
         .expect("trigger process should finish promptly")
@@ -1097,7 +1097,7 @@ finish initial
             &core,
             process_registry.as_ref(),
             &session_id,
-            &report.started_process_ids,
+            &report.started_process_ids(),
         )
         .await;
 
@@ -1473,7 +1473,7 @@ finish initial
             assert_remote_trigger_subscription_records_round_trip(&data_dir, &old_session_id)
                 .await;
         assert_eq!(trigger_records.len(), 1);
-        assert_eq!(started.started_process_ids.len(), 1);
+        assert_eq!(started.started_process_ids().len(), 1);
         let old_work_before_reset = state
             .process_observer
             .snapshot_for_session(&old_session_id)
@@ -1481,7 +1481,7 @@ finish initial
             .expect("old work before reset");
         assert_eq!(
             old_work_before_reset.visible_process_ids,
-            started.started_process_ids
+            started.started_process_ids()
         );
         append_started_graph(
             &state.lashlang_execution,
@@ -1499,7 +1499,7 @@ finish initial
             &state.core,
             process_registry.as_ref(),
             &old_session_id,
-            &started.started_process_ids,
+            &started.started_process_ids(),
         )
         .await;
         state
@@ -1544,7 +1544,7 @@ finish initial
             .expect("old work after reset submission");
         assert_eq!(
             old_work_after_reset.visible_process_ids,
-            started.started_process_ids,
+            started.started_process_ids(),
             "mock Restate ingress must not consume deletion work inline"
         );
         assert!(
@@ -2116,9 +2116,9 @@ finish initial
             .await
             .expect("reopen session");
         let report = emit_test_button_trigger(&core, ButtonChoice::Blue).await;
-        assert_eq!(report.started_process_ids.len(), 1);
+        assert_eq!(report.started_process_ids().len(), 1);
         lash::process::ProcessAwaiter::polling(Arc::clone(&process_registry))
-            .await_terminal(&report.started_process_ids[0])
+            .await_terminal(&report.started_process_ids()[0])
             .await
             .expect("trigger process should finish");
 
@@ -2304,6 +2304,7 @@ finish initial
             definition: None,
             status: lash::process::ProcessStatusFilter::Any,
             waiting: None,
+            ..Default::default()
         };
         let observed = core
             .processes()
