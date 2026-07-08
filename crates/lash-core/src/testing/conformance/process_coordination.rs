@@ -496,7 +496,15 @@ pub(super) async fn prune_respects_filter(registry: Arc<dyn ProcessRegistry>) {
 
     registry
         .register_process(
-            registration("proc-filter-prune").with_identity(ProcessIdentity::new("prunable-kind")),
+            registration("proc-filter-prune")
+                .with_process_provenance(
+                    ProcessProvenance::session(SessionScope::new("filter-prune-session"))
+                        .with_caused_by(Some(CausalRef::TriggerOccurrence {
+                            occurrence_id: "occurrence-prune".to_string(),
+                            subscription_id: Some("subscription-prune".to_string()),
+                        })),
+                )
+                .with_identity(ProcessIdentity::new("prunable-kind")),
         )
         .await
         .expect("register prunable");
@@ -529,7 +537,7 @@ pub(super) async fn prune_respects_filter(registry: Arc<dyn ProcessRegistry>) {
             FAR_FUTURE_CUTOFF,
             Some(ProcessListFilter {
                 status: ProcessStatusFilter::Any,
-                identity_kind: Some("prunable-kind".to_string()),
+                caused_by_subscription_id: Some("subscription-prune".to_string()),
                 ..ProcessListFilter::default()
             }),
             None,
