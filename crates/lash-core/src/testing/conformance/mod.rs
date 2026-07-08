@@ -15,6 +15,7 @@ mod attachment_store;
 mod effect_host;
 mod helpers;
 mod live_replay;
+mod process_change_feed;
 mod process_coordination;
 mod process_filters;
 mod process_references;
@@ -124,7 +125,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn in_memory_process_registry_satisfies_conformance() {
         process_registry(|| {
             Arc::new(crate::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>

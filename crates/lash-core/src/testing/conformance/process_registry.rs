@@ -1,6 +1,7 @@
 //! [`ProcessRegistry`] conformance: registration, events, wakes, grants,
 //! and lease fencing.
 
+use super::process_change_feed::process_change_feed_never_misses_concurrent_terminal_writers;
 use super::process_coordination::{
     awaiter_await_event_never_returns_events_at_or_before_cursor,
     awaiter_cross_task_completion_resolves_promptly, prune_never_touches_non_terminal_rows,
@@ -56,6 +57,7 @@ pub async fn process_registry_with_expected_durability<F>(
     list_processes_filters_by_enriched_fields(make()).await;
     live_reference_summary_tracks_non_terminal_reference_counts(make()).await;
     process_change_feed_orders_resumes_and_includes_terminal_transitions(make()).await;
+    process_change_feed_never_misses_concurrent_terminal_writers(make()).await;
     count_and_recent_events_match_the_log(make()).await;
     transfer_handle_grants_moves_addressability(make()).await;
     multiple_sessions_can_hold_grants(make()).await;

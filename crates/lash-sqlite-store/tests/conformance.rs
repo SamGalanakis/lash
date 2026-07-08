@@ -198,7 +198,7 @@ fn current_epoch_ms_for_test() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sqlite_process_registry_satisfies_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
     lash_core::testing::conformance::process_registry_reopenable(|| {
