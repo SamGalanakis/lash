@@ -179,15 +179,41 @@ impl TriggerStore for PostgresTriggerStore {
 
     async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
-        let registrant_scope_id = session_registrant_scope_id(session_id);
-        let deleted = sqlx::query(
-            "DELETE FROM lash_trigger_subscriptions WHERE registrant_scope_id = $1",
-        )
-        .bind(&registrant_scope_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?
-        .rows_affected() as usize;
+        let rows = sqlx::query("SELECT subscription_id, record_json FROM lash_trigger_subscriptions")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(plugin_sqlx_error)?;
+        let mut subscription_ids = Vec::new();
+        for row in rows {
+            let subscription_id: String = row.get(0);
+            let json: String = row.get(1);
+            let record = match serde_json::from_str::<TriggerSubscriptionRecord>(&json) {
+                Ok(record) => record,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        subscription_id,
+                        "skipping malformed trigger subscription during session delete"
+                    );
+                    continue;
+                }
+            };
+            if record.registrant_session_id() == Some(session_id) {
+                subscription_ids.push(subscription_id);
+            }
+        }
+
+        let mut deleted = 0usize;
+        for subscription_id in subscription_ids {
+            deleted = deleted.saturating_add(
+                sqlx::query("DELETE FROM lash_trigger_subscriptions WHERE subscription_id = $1")
+                    .bind(&subscription_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(plugin_sqlx_error)?
+                    .rows_affected() as usize,
+            );
+        }
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(deleted)
     }
@@ -444,8 +470,4 @@ async fn list_deliveries_where(
         });
     }
     Ok(deliveries)
-}
-
-fn session_registrant_scope_id(session_id: &str) -> String {
-    lash_core::ProcessOriginator::session(lash_core::SessionScope::new(session_id)).scope_id()
 }
