@@ -1,6 +1,34 @@
 use super::support::*;
 use crate::LlmTerminalReason;
 
+/// Capability metadata for model reasoning / effort controls.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelReasoningCapability {
+    /// Open-ended provider effort values accepted for this model.
+    #[serde(default)]
+    pub supported_efforts: Vec<String>,
+    /// Provider default effort for this model, if declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    /// Whether this model requires an explicit effort to be valid.
+    #[serde(default)]
+    pub mandatory: bool,
+    /// Whether the model supports max-token style effort controls.
+    #[serde(default)]
+    pub supports_max_tokens: bool,
+    /// Provider default enablement state for reasoning controls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_enabled: Option<bool>,
+}
+
+/// Structured capabilities for a specific provider model.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCapability {
+    /// Reasoning / effort controls advertised by the provider for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ModelReasoningCapability>,
+}
+
 /// A configured LLM backend: its identity, host-config serialization, its
 /// generation options, and the request transport.
 #[async_trait]
@@ -40,6 +68,26 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
 
 pub trait ProviderModelPolicy: Send + Sync + std::fmt::Debug {
     fn supported_variants(&self, model: &str) -> &'static [&'static str];
+
+    /// Return structured capability metadata for a model.
+    ///
+    /// Default behaviour bridges legacy static variant lists into the
+    /// capability contract so providers can migrate incrementally.
+    fn model_capability(&self, model: &str) -> ModelCapability {
+        let supported_variants = self.supported_variants(model);
+        if supported_variants.is_empty() {
+            return ModelCapability::default();
+        }
+        ModelCapability {
+            reasoning: Some(ModelReasoningCapability {
+                supported_efforts: supported_variants
+                    .iter()
+                    .map(|effort| (*effort).to_string())
+                    .collect(),
+                ..ModelReasoningCapability::default()
+            }),
+        }
+    }
 }
 
 pub trait ProviderFailureClassifier: Send + Sync + std::fmt::Debug {

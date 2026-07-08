@@ -94,6 +94,10 @@ impl ProviderHandle {
         self.components.model_policy.supported_variants(model)
     }
 
+    pub fn model_capability(&self, model: &str) -> ModelCapability {
+        self.components.model_policy.model_capability(model)
+    }
+
     pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
         let variants = self.supported_variants(model);
         if variants.is_empty() {

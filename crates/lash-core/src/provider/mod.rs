@@ -37,6 +37,6 @@ pub use resolver::{
 };
 pub use spec::ProviderSpec;
 pub use traits::{
-    DefaultProviderFailureClassifier, Provider, ProviderFailureClassifier, ProviderModelPolicy,
-    is_context_overflow_text,
+    DefaultProviderFailureClassifier, ModelCapability, ModelReasoningCapability, Provider,
+    ProviderFailureClassifier, ProviderModelPolicy, is_context_overflow_text,
 };

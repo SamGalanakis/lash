@@ -31,6 +31,20 @@ impl MutatingProvider {
     }
 }
 
+#[derive(Debug)]
+struct LegacyOnlyPolicy;
+
+impl ProviderModelPolicy for LegacyOnlyPolicy {
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        static VARIANTS: &[&str] = &["low", "high"];
+        if model == "legacy-model" {
+            VARIANTS
+        } else {
+            &[]
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for MutatingProvider {
     fn kind(&self) -> &'static str {
@@ -401,6 +415,87 @@ fn provider_handle_delegates_variant_policy() {
     assert_eq!(handle.supported_variants("model-a"), VARIANTS);
     assert!(handle.validate_variant("model-a", "low").is_ok());
     assert!(handle.validate_variant("model-a", "medium").is_err());
+}
+
+#[test]
+fn provider_handle_returns_model_capability_for_known_model() {
+    let capability = ModelCapability {
+        reasoning: Some(ModelReasoningCapability {
+            supported_efforts: vec!["minimal".to_string(), "very_high".to_string()],
+            default_effort: Some("minimal".to_string()),
+            mandatory: false,
+            supports_max_tokens: true,
+            default_enabled: Some(true),
+        }),
+    };
+    let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
+        StaticModelPolicy::new().with_model_capability("model-a", capability.clone()),
+    )));
+
+    assert_eq!(handle.model_capability("model-a"), capability);
+}
+
+#[test]
+fn provider_handle_returns_empty_model_capability_for_unknown_model() {
+    let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
+        StaticModelPolicy::new().with_model_capability(
+            "model-a",
+            ModelCapability {
+                reasoning: Some(ModelReasoningCapability {
+                    supported_efforts: vec!["low".to_string()],
+                    ..ModelReasoningCapability::default()
+                }),
+            },
+        ),
+    )));
+
+    assert_eq!(handle.model_capability("model-b"), ModelCapability::default());
+}
+
+#[test]
+fn provider_handle_preserves_open_ended_effort_values() {
+    let open_ended_efforts = vec![
+        "tier.custom-alpha".to_string(),
+        "reasoning/v2-max".to_string(),
+        "ultra_9000".to_string(),
+    ];
+    let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
+        StaticModelPolicy::new().with_model_capability(
+            "model-a",
+            ModelCapability {
+                reasoning: Some(ModelReasoningCapability {
+                    supported_efforts: open_ended_efforts.clone(),
+                    ..ModelReasoningCapability::default()
+                }),
+            },
+        ),
+    )));
+
+    assert_eq!(
+        handle
+            .model_capability("model-a")
+            .reasoning
+            .expect("reasoning capability")
+            .supported_efforts,
+        open_ended_efforts
+    );
+}
+
+#[test]
+fn provider_model_policy_default_bridge_derives_capability_from_supported_variants() {
+    let handle = ProviderHandle::new(
+        MutatingProvider::default().into_components(Arc::new(LegacyOnlyPolicy)),
+    );
+
+    let capability = handle.model_capability("legacy-model");
+    assert_eq!(
+        capability
+            .reasoning
+            .expect("reasoning capability for legacy model")
+            .supported_efforts,
+        vec!["low".to_string(), "high".to_string()]
+    );
+    assert_eq!(handle.model_capability("unknown-model"), ModelCapability::default());
 }
 
 #[tokio::test]
