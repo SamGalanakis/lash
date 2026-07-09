@@ -143,10 +143,9 @@ pub(super) fn text_preview_artifact(
 ) -> Option<ActivityArtifact> {
     let text = if let Some(text) = result.as_str() {
         text.to_string()
-    } else if let Some(text) = result.get("answer").and_then(|value| value.as_str()) {
-        text.to_string()
     } else {
-        return None;
+        let text = result.get("answer").and_then(|value| value.as_str())?;
+        text.to_string()
     };
 
     if text.trim().is_empty() {
