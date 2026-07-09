@@ -7,8 +7,7 @@ impl AttachmentManifest for PostgresSessionStore {
                     attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms
                  )
                  VALUES ($1, $2, $3, $4, NULL)
-                 ON CONFLICT (attachment_id) DO UPDATE SET
-                    session_id = EXCLUDED.session_id,
+                 ON CONFLICT (session_id, attachment_id) DO UPDATE SET
                     canonical_uri = EXCLUDED.canonical_uri,
                     intent_at_ms = EXCLUDED.intent_at_ms",
             )
@@ -67,11 +66,16 @@ impl AttachmentManifest for PostgresSessionStore {
         })
     }
 
-    fn forget(&self, attachment_id: &AttachmentId) -> Result<(), StoreError> {
+    fn forget(&self, session_id: &str, attachment_id: &AttachmentId) -> Result<(), StoreError> {
         let pool = self.pool.clone();
+        let session_id = session_id.to_string();
         let attachment_id = attachment_id.to_string();
         block_on_detached(async move {
-            sqlx::query("DELETE FROM lash_attachment_manifest WHERE attachment_id = $1")
+            sqlx::query(
+                "DELETE FROM lash_attachment_manifest
+                 WHERE session_id = $1 AND attachment_id = $2",
+            )
+                .bind(session_id)
                 .bind(attachment_id)
                 .execute(&pool)
                 .await

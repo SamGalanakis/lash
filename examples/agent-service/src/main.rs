@@ -37,7 +37,10 @@ use crate::state::{AgentServiceDurability, AppStateData, anyhow_like};
 #[cfg(feature = "restate")]
 use lash::durability::DurableProcessWorker;
 #[cfg(feature = "restate")]
-use lash_restate::{LashProcessWorkflow, RestateEffectHost, RestateProcessDeployment};
+use lash_restate::{
+    LashDurableWaitIndex, LashDurableWaitIndexImpl, LashDurableWaitWorkflow,
+    LashDurableWaitWorkflowImpl, LashProcessWorkflow, RestateEffectHost, RestateProcessDeployment,
+};
 
 const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
@@ -266,6 +269,8 @@ async fn async_main() -> anyhow_like::Result<()> {
                     .workflow(process_worker.expect("process worker configured for Restate"))
                     .serve(),
             )
+            .bind(LashDurableWaitWorkflowImpl.serve())
+            .bind(LashDurableWaitIndexImpl.serve())
             .build();
         tokio::spawn(async move {
             restate_sdk::http_server::HttpServer::new(endpoint)

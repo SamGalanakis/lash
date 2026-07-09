@@ -205,8 +205,9 @@ A generalization of code that already existed for turns — not a new subsystem:
   each row by its declared `RecoveryDisposition` (ADR 0019). A `Rerunnable` row —
   or a not-yet-started `OwnerBound` one, since a first execution is not a
   re-execution — is run on the worker's wired controller while renewing the lease
-  across the execution, then has its terminal outcome written and its lease
-  released. A started `OwnerBound` row whose holder is provably dead is
+  across the execution, then atomically validates the current fence, writes its
+  terminal outcome, and releases the lease via
+  `complete_process_with_lease`. A started `OwnerBound` row whose holder is provably dead is
   terminalized `Abandoned{Sweep}` rather than re-run; a merely silent one is left
   non-terminal. An `ExternallyOwned` row is never claimed. Idempotent by
   `process_id`: terminal processes are never on the worklist, and a process that
@@ -263,9 +264,11 @@ every registration:
   executing, any worker may claim the row; once execution has started, no other
   owner may ever re-execute it, and abandonment is the only recovery. `shell.start`
   declares it.
-- **`ExternallyOwned`** — lash never executes the row. Closure comes from an
-  external `complete_process` call or a reconciled Abandon Request; recovery never
-  claims it. External placeholders and detached commands declare it.
+- **`ExternallyOwned`** — lash never executes the row. Closure can come from the
+  explicitly unleased `complete_process` path when an external actor or a
+  process-keyed workflow supplies its own single-writer authority; Lash-owned
+  workers always use `complete_process_with_lease`. Recovery never claims the
+  external work itself. External placeholders and detached commands declare it.
 
 Deriving the disposition from the input class was rejected (it re-hides the
 contract in a heuristic) and defaulting to `Rerunnable` was rejected (a producer

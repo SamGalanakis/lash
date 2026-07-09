@@ -1454,7 +1454,14 @@ finish validate(img, Type {
     let mut state = State::new();
     state.globals.insert_str(
         "img",
-        Value::Image(ImageValue::new("img-1", "chart.png", 1234, Some(640), None)),
+        Value::Image(ImageValue::new(
+            "img-1",
+            "image/png",
+            "chart.png",
+            1234,
+            Some(640),
+            None,
+        )),
     );
 
     let outcome = execute_program(&program, &mut state, &Host)
@@ -1464,6 +1471,7 @@ finish validate(img, Type {
         outcome,
         ExecutionOutcome::Finished(Value::Image(ImageValue::new(
             "img-1",
+            "image/png",
             "chart.png",
             1234,
             Some(640),

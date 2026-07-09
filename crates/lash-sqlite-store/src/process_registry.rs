@@ -32,7 +32,7 @@ impl SqliteProcessRegistry {
         Ok(Self { conn })
     }
 
-    fn load_process_conn(
+    pub(super) fn load_process_conn(
         conn: &Connection,
         process_id: &str,
     ) -> Result<Option<ProcessRecord>, lash_core::PluginError> {
@@ -48,7 +48,7 @@ impl SqliteProcessRegistry {
             .transpose()
     }
 
-    fn save_process_conn(
+    pub(super) fn save_process_conn(
         conn: &Connection,
         record: &ProcessRecord,
     ) -> Result<(), lash_core::PluginError> {
@@ -86,7 +86,7 @@ impl SqliteProcessRegistry {
         .map_err(process_sqlite_error)
     }
 
-    fn load_event_by_key_conn(
+    pub(super) fn load_event_by_key_conn(
         conn: &Connection,
         process_id: &str,
         replay_key: &str,
@@ -109,7 +109,7 @@ impl SqliteProcessRegistry {
         .transpose()
     }
 
-    fn load_process_lease_conn(
+    pub(super) fn load_process_lease_conn(
         conn: &Connection,
         process_id: &str,
     ) -> Result<Option<ProcessLease>, lash_core::PluginError> {
@@ -259,7 +259,7 @@ impl SqliteProcessRegistry {
 /// a [`TxOutcome`]: commit on success, roll back on logical error. Both arms
 /// carry the inner `Result` back so the caller recovers the value or the
 /// `PluginError` after the transaction resolves.
-fn tx_outcome<T>(
+pub(super) fn tx_outcome<T>(
     result: Result<T, lash_core::PluginError>,
 ) -> TxOutcome<Result<T, lash_core::PluginError>> {
     match result {
@@ -989,6 +989,15 @@ impl ProcessRegistry for SqliteProcessRegistry {
         })
     }
 
+    async fn complete_process_with_lease(
+        &self,
+        lease: &ProcessLease,
+        await_output: ProcessAwaitOutput,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        super::process_registry_completion::complete_process_with_lease(self, lease, await_output)
+            .await
+    }
+
     async fn record_first_started(
         &self,
         process_id: &str,
@@ -1531,7 +1540,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
 }
 
 /// Loud, stable error for a superseded or expired process lease.
-fn process_lease_expired(process_id: &str) -> lash_core::PluginError {
+pub(super) fn process_lease_expired(process_id: &str) -> lash_core::PluginError {
     lash_core::PluginError::Session(format!(
         "process lease for `{process_id}` is missing or expired"
     ))

@@ -339,7 +339,10 @@ mod restate_tests {
     use lash::PluginBinding;
     use lash::direct::LlmOutputPart;
     use lash::provider::LlmResponse;
-    use lash_restate::LashProcessWorkflow;
+    use lash_restate::{
+        LashDurableWaitIndex, LashDurableWaitIndexImpl, LashDurableWaitWorkflow,
+        LashDurableWaitWorkflowImpl, LashProcessWorkflow,
+    };
 
     const STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
 
@@ -399,6 +402,8 @@ mod restate_tests {
                     .workflow(harness.process_worker.clone())
                     .serve(),
             )
+            .bind(LashDurableWaitWorkflowImpl.serve())
+            .bind(LashDurableWaitIndexImpl.serve())
             .build();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {

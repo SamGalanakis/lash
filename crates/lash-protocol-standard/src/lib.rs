@@ -928,6 +928,31 @@ mod tests {
         ) -> Result<(), lash_core::AttachmentStoreError> {
             self.inner.delete(id).await
         }
+
+        async fn put_for_session(
+            &self,
+            session_id: &str,
+            bytes: Vec<u8>,
+            meta: lash_core::AttachmentCreateMeta,
+        ) -> Result<lash_core::AttachmentRef, lash_core::AttachmentStoreError> {
+            self.inner.put_for_session(session_id, bytes, meta).await
+        }
+
+        async fn get_for_session(
+            &self,
+            session_id: &str,
+            id: &lash_core::AttachmentId,
+        ) -> Result<lash_core::StoredAttachment, lash_core::AttachmentStoreError> {
+            self.inner.get_for_session(session_id, id).await
+        }
+
+        async fn delete_for_session(
+            &self,
+            session_id: &str,
+            id: &lash_core::AttachmentId,
+        ) -> Result<(), lash_core::AttachmentStoreError> {
+            self.inner.delete_for_session(session_id, id).await
+        }
     }
 
     #[derive(Default)]

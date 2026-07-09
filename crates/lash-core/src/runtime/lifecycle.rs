@@ -68,11 +68,26 @@ impl LashRuntime {
         if let Some(store) = services.store.clone() {
             let manifest: Arc<dyn crate::AttachmentManifest> =
                 Arc::new(crate::attachments::PersistenceManifestAdapter(store));
+            // `host` can come from a live runtime during same-session rebuilds
+            // and managed-child materialization. In both cases its attachment
+            // store is already session-scoped. Rebind from the raw physical
+            // backend so decorators never stack and a child cannot inherit the
+            // parent's namespace guard.
+            let previous_attachment_store = Arc::clone(&host.core.durability.attachment_store);
+            let inherited_pending_attachment_ids = previous_attachment_store
+                .bound_session_id()
+                .filter(|session_id| *session_id == state.session_id)
+                .map(|_| previous_attachment_store.pending_manifest_commit_ids())
+                .unwrap_or_default();
+            let attachment_backend = previous_attachment_store
+                .unscoped_backend()
+                .unwrap_or(previous_attachment_store);
             let scoped: Arc<dyn crate::AttachmentStore> =
-                Arc::new(crate::SessionScopedAttachmentStore::new(
-                    Arc::clone(&host.core.durability.attachment_store),
+                Arc::new(crate::SessionScopedAttachmentStore::new_with_pending(
+                    attachment_backend,
                     manifest,
                     state.session_id.clone(),
+                    inherited_pending_attachment_ids,
                 ));
             host.core.durability.attachment_store = scoped;
         }

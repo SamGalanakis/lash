@@ -10,6 +10,7 @@ max_boundaries="${LASH_FOCUSED_SQLITE_REPRO_MAX_BOUNDARIES:-384}"
 
 focused_single_seed="4101155038242989457"
 focused_tail_previous_seed="17785827714152183977"
+absolute_fence_drift_seed="14526660659617982248"
 artifact="${out_dir}/focused-sqlite-seed-tail.json"
 
 usage() {
@@ -19,6 +20,7 @@ Usage: scripts/lash-sim-focused-sqlite-repro.sh [artifact-dir]
 Runs the focused generated-simulation SQLite cross-backend repro gate:
   1. single seed 4101155038242989457
   2. two-seed tail 17785827714152183977, 4101155038242989457
+  3. absolute-fence drift seed 14526660659617982248
 
 Environment:
   LASH_FOCUSED_SQLITE_REPRO_OUT_DIR         default artifact dir
@@ -64,6 +66,8 @@ run_case() {
 run_case "single-seed-4101155038242989457" "$focused_single_seed"
 run_case "tail-seeds-17785827714152183977-4101155038242989457" \
   "$focused_tail_previous_seed" "$focused_single_seed"
+run_case "absolute-fence-drift-seed-14526660659617982248" \
+  "$absolute_fence_drift_seed"
 
 python3 - "$out_dir" "$artifact" "$profile" "$max_boundaries" <<'PY'
 import json
@@ -85,6 +89,11 @@ cases = [
         "two_seed_tail",
         "tail-seeds-17785827714152183977-4101155038242989457",
         [17785827714152183977, 4101155038242989457],
+    ),
+    (
+        "absolute_fence_drift",
+        "absolute-fence-drift-seed-14526660659617982248",
+        [14526660659617982248],
     ),
 ]
 
@@ -146,6 +155,7 @@ payload = {
     "required_cases": [
         "single_seed_4101155038242989457",
         "tail_17785827714152183977_then_4101155038242989457",
+        "absolute_fence_drift_seed_14526660659617982248",
     ],
     "runs": runs,
 }

@@ -125,6 +125,7 @@ where
     match options.attachment_manifest {
         AttachmentManifestConformance::Persistent => {
             attachment_manifest_records_intent_and_commit_stamps(make()).await;
+            attachment_manifest_keeps_same_content_ownership_per_session(make()).await;
             attachment_orphan_reclamation_reclaims_aged_and_spares_committed_and_recent(make())
                 .await;
         }
@@ -1098,12 +1099,64 @@ async fn attachment_manifest_records_intent_and_commit_stamps(store: Arc<dyn Run
     assert_eq!(still_uncommitted[0].attachment_id, orphan);
     assert!(still_uncommitted[0].committed_at_epoch_ms.is_none());
 
-    store.forget(&orphan).expect("forget orphan attachment");
+    store
+        .forget("root", &orphan)
+        .expect("forget orphan attachment");
     assert!(
         store
             .list_uncommitted(200)
             .expect("list after forget")
             .is_empty()
+    );
+}
+
+async fn attachment_manifest_keeps_same_content_ownership_per_session(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let attachment = AttachmentId::new("same-content");
+    for session_id in ["committed-owner", "orphan-owner"] {
+        store
+            .record_intent(AttachmentIntent {
+                attachment_id: attachment.clone(),
+                session_id: session_id.to_string(),
+                canonical_uri: format!("session:{session_id}:sha256:{attachment}"),
+                intent_at_epoch_ms: 100,
+            })
+            .expect("record independent owner intent");
+    }
+    store
+        .commit_refs("committed-owner", std::slice::from_ref(&attachment))
+        .expect("commit first owner");
+
+    let uncommitted = store.list_uncommitted(200).expect("list owner orphan");
+    assert!(
+        uncommitted.iter().any(|entry| {
+            entry.session_id == "orphan-owner" && entry.attachment_id == attachment
+        })
+    );
+    assert!(!uncommitted.iter().any(|entry| {
+        entry.session_id == "committed-owner" && entry.attachment_id == attachment
+    }));
+
+    store
+        .forget("orphan-owner", &attachment)
+        .expect("forget only orphan owner");
+    store
+        .record_intent(AttachmentIntent {
+            attachment_id: attachment.clone(),
+            session_id: "committed-owner".to_string(),
+            canonical_uri: format!("session:committed-owner:sha256:{attachment}"),
+            intent_at_epoch_ms: 150,
+        })
+        .expect("repeat committed owner intent");
+    assert!(
+        !store
+            .list_uncommitted(200)
+            .expect("committed ownership remains stamped")
+            .iter()
+            .any(|entry| entry.session_id == "committed-owner"
+                && entry.attachment_id == attachment),
+        "a colliding owner or repeated put must not erase another session's commit stamp"
     );
 }
 
@@ -1122,7 +1175,9 @@ async fn noop_attachment_manifest_is_explicit_and_empty(store: Arc<dyn RuntimePe
             .is_empty(),
         "declared no-op attachment manifests must not retain intent rows"
     );
-    store.forget(&attachment).expect("noop forget succeeds");
+    store
+        .forget("noop-session", &attachment)
+        .expect("noop forget succeeds");
 }
 
 async fn queued_work_source_keys_are_idempotent_and_list_ordered(
@@ -3101,12 +3156,18 @@ async fn attachment_orphan_reclamation_reclaims_aged_and_spares_committed_and_re
     };
     // Content ids are the sha256 of the bytes, so the ids recorded as intents
     // match what the byte store holds.
-    let aged = bytes_store.put(vec![10], meta()).await.expect("put aged");
+    let aged = bytes_store
+        .put_for_session("root", vec![10], meta())
+        .await
+        .expect("put aged");
     let committed = bytes_store
-        .put(vec![20], meta())
+        .put_for_session("root", vec![20], meta())
         .await
         .expect("put committed");
-    let recent = bytes_store.put(vec![30], meta()).await.expect("put recent");
+    let recent = bytes_store
+        .put_for_session("root", vec![30], meta())
+        .await
+        .expect("put recent");
 
     let intent = |id: &AttachmentId, at: u64| AttachmentIntent {
         attachment_id: id.clone(),
@@ -3145,17 +3206,17 @@ async fn attachment_orphan_reclamation_reclaims_aged_and_spares_committed_and_re
 
     assert!(
         matches!(
-            bytes_store.get(&aged.id).await,
+            bytes_store.get_for_session("root", &aged.id).await,
             Err(AttachmentStoreError::NotFound(_))
         ),
         "aged orphan bytes must be deleted"
     );
     bytes_store
-        .get(&committed.id)
+        .get_for_session("root", &committed.id)
         .await
         .expect("committed content retained");
     bytes_store
-        .get(&recent.id)
+        .get_for_session("root", &recent.id)
         .await
         .expect("recent content retained");
 

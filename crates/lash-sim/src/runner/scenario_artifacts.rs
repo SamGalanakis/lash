@@ -292,7 +292,7 @@ pub(super) fn write_generated_backend_regression_fixtures(
                 "sim.oracle.state-machine-semantic-invariants.v1",
                 "sim.oracle.scenario-mini.runtime.stale-lease-commit-rejected.v1",
             ],
-            regression_contract: "stale worker completion carries an older fence and is rejected while the live incarnation remains active",
+            regression_contract: "worker A loses its process lease to worker B; A's stale terminal output is rejected and absent, while B terminalizes the process exactly once",
             predicate: trace_has_worker_stale_completion,
         },
         BackendRegressionSpec {

@@ -387,6 +387,31 @@ impl crate::AttachmentStore for DurableInMemoryAttachmentStore {
     ) -> Result<(), crate::AttachmentStoreError> {
         self.inner.delete(id).await
     }
+
+    async fn put_for_session(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        meta: lash_sansio::AttachmentCreateMeta,
+    ) -> Result<lash_sansio::AttachmentRef, crate::AttachmentStoreError> {
+        self.inner.put_for_session(session_id, bytes, meta).await
+    }
+
+    async fn get_for_session(
+        &self,
+        session_id: &str,
+        id: &lash_sansio::AttachmentId,
+    ) -> Result<crate::StoredAttachment, crate::AttachmentStoreError> {
+        self.inner.get_for_session(session_id, id).await
+    }
+
+    async fn delete_for_session(
+        &self,
+        session_id: &str,
+        id: &lash_sansio::AttachmentId,
+    ) -> Result<(), crate::AttachmentStoreError> {
+        self.inner.delete_for_session(session_id, id).await
+    }
 }
 
 /// A process env store that reports a durable tier over in-memory storage.

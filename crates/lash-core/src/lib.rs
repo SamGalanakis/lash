@@ -20,7 +20,6 @@ mod plugin_stack;
 mod protocol_build;
 pub mod provider;
 pub mod runtime;
-pub mod search;
 pub mod session;
 pub mod session_graph;
 pub mod session_model;
@@ -399,10 +398,10 @@ pub use session_model::{
 // surface; the rest of the runtime block above stays crate-internal.
 pub use runtime::{
     LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, ProcessEventSemanticsSpec,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimeSessionState, ToolAttemptEffectOutcome, ToolAttemptLaunch,
-    ToolBatchEffectOutcome,
+    RuntimeAwaitEventOptions, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeSessionState,
+    ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome,
 };
 pub use schemars::JsonSchema;
 pub(crate) use session::RuntimeExecutionTracing;

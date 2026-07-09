@@ -304,7 +304,7 @@ impl DurableProcessWorker {
     /// 3. runs the claimed process on this worker's wired controller, renewing
     ///    the lease across the long-running execution so a healthy recovery is
     ///    not swept out from under itself;
-    /// 4. writes the terminal outcome and releases the lease.
+    /// 4. atomically writes the terminal outcome and releases the validated lease.
     ///
     /// Idempotent by `process_id`: terminal processes are never in the worklist,
     /// and a process that became terminal between the list and the claim is
@@ -545,9 +545,9 @@ impl DurableProcessWorker {
     ///   yields `Abandoned{reconciled_request}`. Elapsed time alone never
     ///   terminalizes.
     ///
-    /// Every Abandoned write goes through `complete_process` under this sweep's
-    /// own fenced lease, so the sweep stays the single writer and a revenant's
-    /// stale token is rejected.
+    /// Every Abandoned write goes through `complete_process_with_lease`, which
+    /// atomically validates this sweep's fence, appends the terminal, and clears
+    /// the lease so a revenant's stale token is rejected.
     async fn recover_process(&self, record: ProcessRecord) {
         let process_id = record.id.clone();
         // ExternallyOwned: lash never executes the row. The only recovery action
@@ -683,8 +683,8 @@ impl DurableProcessWorker {
 
     /// Reconcile a pending Abandon Request on an externally-owned row into an
     /// `Abandoned{reconciled_request}` terminal. Lash never executed the row, so
-    /// there is no owner lease to wait out — but the terminal still goes through
-    /// the sweep's own fenced lease so the sweep stays the single writer.
+    /// there is no owner lease to wait out — but the sweep claims its own lease
+    /// and completes through the atomic fenced path so it stays the single writer.
     async fn reconcile_externally_owned_abandon(&self, process_id: &str) {
         let lease_ttl_ms = self.lease_timings().ttl_ms();
         let owner = self.recovery_lease_owner();
@@ -765,21 +765,18 @@ impl DurableProcessWorker {
         }
     }
 
-    /// Write a recovered process's terminal outcome (the running lease owner is
-    /// the single writer) and then release the lease, logging either failure
-    /// rather than aborting — the lease's TTL is the backstop.
+    /// Write a recovered process's terminal outcome and release its lease in one
+    /// atomic fenced registry operation.
     async fn complete_and_release(
         &self,
         lease: &ProcessLease,
         process_id: &str,
         output: ProcessAwaitOutput,
     ) {
-        // Fence the terminal write: re-confirm the lease immediately before
-        // writing. `renew_process_lease` is rejected (by owner/lease_token/
-        // fencing_token) if another owner has reclaimed an expired lease, and on
-        // success extends the window so the back-to-back write lands inside the
-        // owned interval. A worker that stalled past its TTL therefore cannot
-        // overwrite the new owner's outcome — it defers instead.
+        // Refresh first so a healthy long-running worker has a full completion
+        // window. The registry then validates this exact fence, appends the
+        // terminal event, and clears the lease in one transaction. There is no
+        // renew-then-unfenced-write gap for a stalled worker to cross.
         let fenced = match self
             .config
             .process_registry
@@ -799,7 +796,7 @@ impl DurableProcessWorker {
         if let Err(err) = self
             .config
             .process_registry
-            .complete_process(process_id, output)
+            .complete_process_with_lease(&fenced, output)
             .await
         {
             tracing::warn!(
@@ -808,7 +805,6 @@ impl DurableProcessWorker {
                 "failed to write recovered process terminal outcome",
             );
         }
-        self.release_or_log(&fenced).await;
     }
 
     async fn release_or_log(&self, lease: &ProcessLease) {

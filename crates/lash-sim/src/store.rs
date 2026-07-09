@@ -950,6 +950,10 @@ struct ModelWorker {
     active_fencing_token: u64,
     lease_owner_changes: usize,
     stale_completion_rejections: usize,
+    process_stale_completion_rejected: bool,
+    process_stale_output_absent: bool,
+    process_terminal_writer: String,
+    process_terminal_event_count: usize,
 }
 
 impl ModelWorker {
@@ -983,6 +987,23 @@ impl ModelWorker {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             ),
+            process_stale_completion_rejected: observed
+                .get("process_stale_completion_rejected")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            process_stale_output_absent: observed
+                .get("process_stale_output_absent")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            process_terminal_writer: observed
+                .get("process_terminal_writer")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            process_terminal_event_count: observed
+                .get("process_terminal_event_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize,
         }
     }
 
@@ -994,6 +1015,10 @@ impl ModelWorker {
             active_fencing_token: self.active_fencing_token,
             lease_owner_changes: self.lease_owner_changes,
             stale_completion_rejections: self.stale_completion_rejections,
+            process_stale_completion_rejected: self.process_stale_completion_rejected,
+            process_stale_output_absent: self.process_stale_output_absent,
+            process_terminal_writer: self.process_terminal_writer.clone(),
+            process_terminal_event_count: self.process_terminal_event_count,
         }
     }
 }

@@ -10,7 +10,10 @@ use croner::parser::{CronParser, Seconds};
 use futures_util::FutureExt as _;
 use lash::TurnInput;
 use lash::rlm::RlmTurnBuilderExt as _;
-use lash_restate::LashProcessWorkflow;
+use lash_restate::{
+    LashDurableWaitIndex, LashDurableWaitIndexImpl, LashDurableWaitWorkflow,
+    LashDurableWaitWorkflowImpl, LashProcessWorkflow,
+};
 use restate_sdk::context::{
     ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, InvocationHandle,
     RunFuture,
@@ -448,6 +451,8 @@ pub(crate) fn spawn_restate_endpoint(
         .bind(WorkbenchSessionDeleteWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchCronJobImpl::new(state).serve())
         .bind(process_deployment.workflow(process_worker).serve())
+        .bind(LashDurableWaitWorkflowImpl.serve())
+        .bind(LashDurableWaitIndexImpl.serve())
         .build();
     tokio::spawn(async move {
         restate_sdk::http_server::HttpServer::new(endpoint)

@@ -955,15 +955,19 @@ pub fn worker_stale_completion_rejected(summary: &AbstractWorldSummary) -> Oracl
             && worker.stale_completion_rejections > 0
             && !worker.active_incarnation_id.is_empty()
             && worker.active_fencing_token > 1
+            && worker.process_stale_completion_rejected
+            && worker.process_stale_output_absent
+            && worker.process_terminal_writer == "successor"
+            && worker.process_terminal_event_count == 1
     }) {
         return OracleVerdict::passed(
             WORKER_STALE_COMPLETION_ORACLE,
-            "worker topology rejected a stale completion after an incarnation change",
+            "worker topology rejected stale process terminal output and persisted the successor terminal exactly once after an incarnation change",
         );
     }
     OracleVerdict::failed(
         WORKER_STALE_COMPLETION_ORACLE,
-        "no worker boundary proved stale completion rejection after lease owner change",
+        "no worker boundary proved stale process-terminal rejection, stale-output absence, and exactly one successor terminal after lease owner change",
     )
 }
 
@@ -1118,7 +1122,20 @@ fn worker_owned_work_continued_by_successor(event: &DeliveredBoundary) -> bool {
         return false;
     };
     let flag = |key: &str| work.get(key).and_then(Value::as_bool).unwrap_or(false);
-    flag("first_owner_claimed_work")
+    let process = event
+        .observed
+        .pointer("/runtime_worker_store/process_completion");
+    let process_is_fenced = process.is_some_and(|process| {
+        process
+            .get("stale_completion_rejected")
+            .and_then(Value::as_bool)
+            == Some(true)
+            && process.get("stale_output_absent").and_then(Value::as_bool) == Some(true)
+            && process.get("terminal_writer").and_then(Value::as_str) == Some("successor")
+            && process.get("terminal_event_count").and_then(Value::as_u64) == Some(1)
+    });
+    process_is_fenced
+        && flag("first_owner_claimed_work")
         && flag("second_owner_resumed_work")
         && flag("second_owner_outranks_first")
         && flag("stale_work_completion_rejected")
@@ -6046,10 +6063,36 @@ pub fn replay_determinism(
     expected: &AbstractWorldSummary,
     actual: &AbstractWorldSummary,
 ) -> OracleVerdict {
-    if expected == actual {
+    // Fencing tokens are monotonic backend implementation details, not semantic
+    // output. A durable backend may consume an extra token while preserving the
+    // same ownership transitions and stale-writer rejection. Keep the raw values
+    // in artifacts for diagnosis, but compare the behavior they protect.
+    let workers_match = expected.workers.len() == actual.workers.len()
+        && expected
+            .workers
+            .iter()
+            .zip(&actual.workers)
+            .all(|(expected, actual)| {
+                expected.worker_alias == actual.worker_alias
+                    && expected.session_alias == actual.session_alias
+                    && expected.active_incarnation_id == actual.active_incarnation_id
+                    && expected.lease_owner_changes == actual.lease_owner_changes
+                    && expected.stale_completion_rejections == actual.stale_completion_rejections
+                    && expected.process_stale_completion_rejected
+                        == actual.process_stale_completion_rejected
+                    && expected.process_stale_output_absent == actual.process_stale_output_absent
+                    && expected.process_terminal_writer == actual.process_terminal_writer
+                    && expected.process_terminal_event_count == actual.process_terminal_event_count
+            });
+    let semantic_match = expected.session_count == actual.session_count
+        && expected.total_events == actual.total_events
+        && expected.sessions == actual.sessions
+        && expected.durable_effects == actual.durable_effects
+        && workers_match;
+    if semantic_match {
         OracleVerdict::passed(
             REPLAY_DETERMINISM_ORACLE,
-            "replay reproduced the delivered boundary sequence and final abstract summary",
+            "replay reproduced the delivered boundary sequence and semantic final abstract summary",
         )
     } else {
         OracleVerdict::failed(
@@ -7255,6 +7298,10 @@ mod tests {
                 active_fencing_token: 1,
                 lease_owner_changes: 0,
                 stale_completion_rejections: 0,
+                process_stale_completion_rejected: false,
+                process_stale_output_absent: false,
+                process_terminal_writer: String::new(),
+                process_terminal_event_count: 0,
             }],
         );
         assert!(!worker_stale_completion_rejected(&not_fenced).is_passed());
@@ -7273,9 +7320,73 @@ mod tests {
                 active_fencing_token: 2,
                 lease_owner_changes: 1,
                 stale_completion_rejections: 1,
+                process_stale_completion_rejected: true,
+                process_stale_output_absent: true,
+                process_terminal_writer: "successor".to_string(),
+                process_terminal_event_count: 1,
             }],
         );
         assert!(worker_stale_completion_rejected(&fenced).is_passed());
+
+        let mut stale_output_present = fenced.clone();
+        stale_output_present.workers[0].process_stale_output_absent = false;
+        assert!(
+            !worker_stale_completion_rejected(&stale_output_present).is_passed(),
+            "the oracle must reject a trace where stale semantic output persisted"
+        );
+        let mut duplicate_terminal = fenced.clone();
+        duplicate_terminal.workers[0].process_terminal_event_count = 2;
+        assert!(
+            !worker_stale_completion_rejected(&duplicate_terminal).is_passed(),
+            "the oracle must reject duplicate successor terminals"
+        );
+        let mut stale_writer_won = fenced;
+        stale_writer_won.workers[0].process_terminal_writer = "stale".to_string();
+        assert!(
+            !worker_stale_completion_rejected(&stale_writer_won).is_passed(),
+            "the oracle must inspect the semantic terminal writer"
+        );
+    }
+
+    #[test]
+    fn replay_determinism_ignores_only_opaque_fence_values() {
+        let summary = |fence, stale_rejections| {
+            AbstractWorldSummary::with_digest(
+                1,
+                1,
+                vec![],
+                vec![],
+                vec![WorkerAbstractSummary {
+                    worker_alias: "worker-001".to_string(),
+                    session_alias: "session-001".to_string(),
+                    active_incarnation_id: "worker-001:incarnation-002".to_string(),
+                    active_fencing_token: fence,
+                    lease_owner_changes: 1,
+                    stale_completion_rejections: stale_rejections,
+                    process_stale_completion_rejected: true,
+                    process_stale_output_absent: true,
+                    process_terminal_writer: "successor".to_string(),
+                    process_terminal_event_count: 1,
+                }],
+            )
+        };
+
+        assert!(replay_determinism(&summary(12, 1), &summary(13, 1)).is_passed());
+        assert!(!replay_determinism(&summary(12, 1), &summary(13, 0)).is_passed());
+
+        let expected = summary(12, 1);
+        let mut mutated = summary(13, 1);
+        mutated.workers[0].process_stale_completion_rejected = false;
+        assert!(!replay_determinism(&expected, &mutated).is_passed());
+        let mut mutated = summary(13, 1);
+        mutated.workers[0].process_stale_output_absent = false;
+        assert!(!replay_determinism(&expected, &mutated).is_passed());
+        let mut mutated = summary(13, 1);
+        mutated.workers[0].process_terminal_writer = "stale".to_string();
+        assert!(!replay_determinism(&expected, &mutated).is_passed());
+        let mut mutated = summary(13, 1);
+        mutated.workers[0].process_terminal_event_count = 2;
+        assert!(!replay_determinism(&expected, &mutated).is_passed());
     }
 
     #[test]
@@ -7287,7 +7398,17 @@ mod tests {
                 "worker-001",
                 BoundaryKind::Worker,
                 json!({ "session": "session-001" }),
-                json!({ "runtime_worker_store": { "worker_owned_work": work } }),
+                json!({
+                    "runtime_worker_store": {
+                        "worker_owned_work": work,
+                        "process_completion": {
+                            "stale_completion_rejected": true,
+                            "stale_output_absent": true,
+                            "terminal_writer": "successor",
+                            "terminal_event_count": 1,
+                        }
+                    }
+                }),
             )
         };
         let full = json!({
@@ -8016,6 +8137,10 @@ mod tests {
                 active_fencing_token: 2,
                 lease_owner_changes: 1,
                 stale_completion_rejections: 1,
+                process_stale_completion_rejected: true,
+                process_stale_output_absent: true,
+                process_terminal_writer: "successor".to_string(),
+                process_terminal_event_count: 1,
             }],
         )
     }

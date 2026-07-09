@@ -139,6 +139,30 @@ pub(super) fn trace_has_worker_stale_completion(lines: &[&TraceEventLine]) -> bo
                 .get("stale_completion_rejected")
                 .and_then(Value::as_bool)
                 == Some(true)
+                && line
+                    .event
+                    .observed
+                    .get("process_stale_completion_rejected")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .get("process_stale_output_absent")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && line
+                    .event
+                    .observed
+                    .get("process_terminal_writer")
+                    .and_then(Value::as_str)
+                    == Some("successor")
+                && line
+                    .event
+                    .observed
+                    .get("process_terminal_event_count")
+                    .and_then(Value::as_u64)
+                    == Some(1)
                 && line.event.observed.get("runtime_active_lease").is_some()
                 && line
                     .event
@@ -1133,6 +1157,26 @@ fn event_satisfies_scenario_evidence(
                     .get("stale_completion_rejected")
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
+                && event
+                    .observed
+                    .get("process_stale_completion_rejected")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && event
+                    .observed
+                    .get("process_stale_output_absent")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && event
+                    .observed
+                    .get("process_terminal_writer")
+                    .and_then(Value::as_str)
+                    == Some("successor")
+                && event
+                    .observed
+                    .get("process_terminal_event_count")
+                    .and_then(Value::as_u64)
+                    == Some(1)
         }
         "lease_time" => event.kind == BoundaryKind::LeaseTime,
         "provider_turn" => event.kind == BoundaryKind::Provider,

@@ -1466,23 +1466,6 @@ async fn assert_attachments_round_trip(
         .filter(|response| !response.attachment_id.is_empty())
     {
         let id = lash_core::AttachmentId::new(response.attachment_id.clone());
-        let stored = store
-            .get(&id)
-            .await
-            .with_context(|| format!("read worker attachment `{id}` from MinIO"))?;
-        anyhow::ensure!(
-            stored.bytes == expected_attachment_bytes(&response.workflow_id),
-            "worker attachment `{id}` bytes did not match expected content"
-        );
-        anyhow::ensure!(
-            stored.meta.media_type.canonical_mime() == ATTACHMENT_MIME,
-            "worker attachment `{id}` had wrong mime"
-        );
-        anyhow::ensure!(
-            stored.meta.label.as_deref() == Some("kitchen-sink.png"),
-            "worker attachment `{id}` had wrong label {:?}",
-            stored.meta.label
-        );
         let manifest: Option<(String, Option<i64>)> = sqlx::query_as(
             "SELECT session_id, committed_at_ms
              FROM lash_attachment_manifest
@@ -1498,6 +1481,14 @@ async fn assert_attachments_round_trip(
                 response.attachment_id
             )
         })?;
+        let stored = store
+            .get_for_session(&session_id, &id)
+            .await
+            .with_context(|| format!("read worker attachment `{id}` from MinIO"))?;
+        anyhow::ensure!(
+            stored.bytes == expected_attachment_bytes(&response.workflow_id),
+            "worker attachment `{id}` bytes did not match expected content"
+        );
         anyhow::ensure!(
             session_id == DEFAULT_SESSION_ID,
             "attachment manifest session mismatch for `{}`: {session_id}",

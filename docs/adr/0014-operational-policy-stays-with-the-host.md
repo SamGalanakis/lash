@@ -63,18 +63,13 @@ host.
   must decide how wait revocation maps onto their engine rather than silently
   ignoring it. The inline registry (and the SQLite/Postgres boundaries that
   reuse it) resolves every outstanding wait for the session as `Cancelled`
-  while leaving the session usable. The Restate boundary cannot honor the
-  session-wide lever honestly: Restate models each Durable Wait as a promise
-  addressable only by its exact per-wait key, those keys are process-scoped and
-  carry no session id, and the SDK exposes no session→promise enumeration, so
-  cancelling a whole session's waits would require an engine-side index Restate
-  does not provide. Rather than fake success, the three Restate resolvers
-  (`RestateEffectHost`, its controller, and `RestateRuntimeEffectController`)
-  reject the call with a specific
-  `restate_await_event_cancel_by_session_unsupported` error that names the
-  limitation and the workaround: cancel each known wait individually via
-  `resolve_await_event(key, Resolution::Cancelled)`, which the process workflow
-  handler resolves durably by its exact promise key.
+  while leaving the session usable. Restate deployments bind
+  `LashDurableWaitWorkflow` for exact-address promise resolution and
+  `LashDurableWaitIndex` for the durable session-to-wait index. `cancel_all`
+  drains the current index while permitting later registration; `revoke_all`
+  drains it and persists a tombstone so session deletion also rejects future
+  waits. All execution scopes use the exact workflow address, while scopes
+  carrying a session id additionally participate in the session index.
 - Anything lash cannot expose as a lever without becoming an orchestrator
   (signal handling, drain deadlines, readiness endpoints) is documented as host
   territory in the production guide instead of API surface.

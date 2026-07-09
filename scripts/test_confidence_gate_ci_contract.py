@@ -10,7 +10,6 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 CONFIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "confidence.yml"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
-STAGING_GUARD_WORKFLOW = ROOT / ".github" / "workflows" / "staging-guard.yml"
 GATE = ROOT / "scripts" / "confidence-gate.sh"
 CARGO_TOML = ROOT / "Cargo.toml"
 FOCUSED_SQLITE_REPRO = ROOT / "scripts" / "lash-sim-focused-sqlite-repro.sh"
@@ -55,7 +54,8 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         self.assertIn("bash scripts/confidence-gate.sh fast:summary", workflow)
         self.assertIn("pattern: confidence-fast-*", workflow)
         self.assertIn("name: confidence-fast-summary", workflow)
-        self.assertIn("- confidence-fast-summary", workflow)
+        summary = workflow_job_block(workflow, "confidence-fast-summary")
+        self.assertIn("- confidence-fast\n", summary)
         self.assertNotIn("Confidence gate fast lane", workflow)
         self.assertNotIn("bash scripts/confidence-gate.sh fast\n", workflow)
         for shard in FAST_SHARDS:
@@ -72,16 +72,11 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         self.assertGreaterEqual(min_seeds, 4)
         self.assertGreaterEqual(min_boundaries, 256)
 
-    def test_lint_job_is_release_gate_and_runs_clippy_fmt_and_boundary_guards(self) -> None:
+    def test_lint_job_runs_clippy_fmt_and_boundary_guards(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
         # The server-side lint gate is a first-class CI job.
         self.assertIn("  lint:\n", workflow)
-
-        # It must block the release: `prepare-release` depends on it, exactly
-        # like every other quality job.
-        prepare_release = workflow_job_block(workflow, "prepare-release")
-        self.assertIn("- lint\n", prepare_release)
 
         # The lint job runs the same four checks the local push gate runs, so a
         # green local gate implies a green CI lint job (and vice versa): fmt
@@ -115,7 +110,7 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         for snippet in required_gate_snippets:
             self.assertIn(snippet, gate)
 
-        # The fast lane is the release gate: its generated sim lane keeps the
+        # The fast lane is the merge gate: its generated sim lane keeps the
         # binary's fast-random defaults and never runs the search lane.
         self.assertIn('if [ "$lane" = "fast" ]; then\n    return\n  fi', gate)
         self.assertNotIn("scheduled-depth", gate)
@@ -133,7 +128,7 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         for snippet in required_confidence_snippets:
             self.assertIn(snippet, confidence_workflow)
 
-        # The per-merge CI workflow (the release gate) must not run search
+        # The per-merge CI workflow must not run search
         # shards or override sim budgets.
         self.assertNotIn("sim-search", workflow)
         self.assertNotIn("LASH_SIM_SHARD", workflow)
@@ -168,20 +163,24 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         for shard in FAST_SHARDS:
             self.assertIn(f"fast:{shard}", gate)
 
-    def test_release_dispatch_recovers_when_github_creates_run_after_500(self) -> None:
-        workflow = WORKFLOW.read_text(encoding="utf-8")
+    def test_release_is_manual_and_requires_a_green_main_commit(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
         required_snippets = [
-            'release_sha="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" | awk',
-            'dispatch_output="$(gh workflow run release.yml --ref main -f release_tag="${tag}" 2>&1)"',
-            "Release workflow dispatch failed; checking whether GitHub created the run anyway.",
-            "gh run list --workflow release.yml --event workflow_dispatch --branch main --limit 20",
-            'if run.get("headSha") == release_sha:',
-            "Found release workflow run",
-            'exit "$dispatch_status"',
+            "workflow_dispatch:",
+            "release_sha:",
+            'requested="${REQUESTED_SHA:-origin/main}"',
+            'git merge-base --is-ancestor "${sha}" origin/main',
+            'gh run list --workflow ci.yml --commit "${sha}"',
+            'run.get("event") == "push"',
+            'run.get("conclusion") == "success"',
+            "release_notes.py collect --require",
+            "release_version.py print-next",
+            'git tag "${tag}" "${sha}"',
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, workflow)
+        self.assertNotIn("\n  push:\n", workflow)
 
     def test_release_asset_builds_overlap_full_perf_guard(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -191,11 +190,14 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         publish = workflow_job_block(workflow, "publish")
         publish_crates = workflow_job_block(workflow, "publish-crates")
 
-        self.assertIn("needs: validate-release-ref", perf_guard)
-        self.assertIn("needs: validate-release-ref", build_assets)
+        self.assertIn("needs: [prepare-release, validate-release-ref]", perf_guard)
+        self.assertIn("needs: [prepare-release, validate-release-ref]", build_assets)
         self.assertNotIn("perf-guard-full", build_assets)
-        self.assertIn("needs: [build-release-assets, perf-guard-full]", publish)
-        self.assertIn("needs: [validate-release-ref, perf-guard-full]", publish_crates)
+        self.assertIn("needs: [prepare-release, build-release-assets, perf-guard-full]", publish)
+        self.assertIn(
+            "needs: [prepare-release, validate-release-ref, perf-guard-full]",
+            publish_crates,
+        )
 
     def test_broad_lane_is_manual_or_scheduled_confidence_not_ci_cd(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -346,8 +348,8 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         cargo = CARGO_TOML.read_text(encoding="utf-8")
 
-        # The bump commit + pass-1/pass-2 re-run chain + staging version sync
-        # are all gone: a green main push cuts the release from that sha.
+        # The bump commit and pass-1/pass-2 re-run chain are gone. A green main
+        # push only validates; a manual release stamps an ephemeral checkout.
         self.assertNotIn("release_version.py set", workflow)
         self.assertNotIn("Commit release version", workflow)
         self.assertNotIn("Dispatch validation pass", workflow)
@@ -356,6 +358,8 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         # ci.yml is no longer workflow_dispatch-triggered (that trigger only
         # existed to re-validate the bump commit as pass 2).
         self.assertNotIn("workflow_dispatch:", workflow)
+        self.assertNotIn("prepare-release:", workflow)
+        self.assertIn("workflow_dispatch:", release)
 
         # main carries the honest dev placeholder; the channel is the source of
         # truth for which release series a cut belongs to.
@@ -369,20 +373,14 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         self.assertIn("release_version.py stamp", release)
         self.assertIn("publish_workspace.py --version", release)
 
-    def test_release_notes_gate_is_fail_early_and_cut_relies_on_it(self) -> None:
+    def test_release_notes_are_gated_only_when_a_manual_release_is_cut(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
+        release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertIn("  release-notes-gate:\n", workflow)
-        gate_block = workflow_job_block(workflow, "release-notes-gate")
-        # No cargo, no cache, no `needs`: it runs at t=0 and fails in <1 min.
-        self.assertIn("release_notes.py collect --require", gate_block)
-        self.assertNotIn("rust-cache", gate_block)
-        self.assertNotIn("needs:", gate_block)
-
-        # The cut job relies on the gate instead of re-checking notes.
-        prepare_release = workflow_job_block(workflow, "prepare-release")
-        self.assertIn("- release-notes-gate\n", prepare_release)
-        self.assertNotIn("collect --require", prepare_release)
+        self.assertNotIn("release-notes-gate", workflow)
+        self.assertNotIn("release_notes.py collect --require", workflow)
+        prepare_release = workflow_job_block(release, "prepare-release")
+        self.assertIn("release_notes.py collect --require", prepare_release)
 
     def test_workspace_tests_are_sharded_off_the_critical_path(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -396,10 +394,6 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         # --no-fail-fast so one failure never hides the rest (alpha.82 lesson).
         self.assertIn("--no-fail-fast", workflow)
 
-        prepare_release = workflow_job_block(workflow, "prepare-release")
-        self.assertIn("- test-doc\n", prepare_release)
-        self.assertIn("- test-shard\n", prepare_release)
-
     def test_heavy_compile_jobs_route_through_sccache(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -409,18 +403,13 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
             self.assertIn("./.github/actions/setup-sccache", block)
         self.assertIn("./.github/actions/setup-sccache", release)
 
-    def test_staging_guard_runs_notes_and_lint_mirror(self) -> None:
-        guard = STAGING_GUARD_WORKFLOW.read_text(encoding="utf-8")
+    def test_ci_has_no_staging_or_automatic_release_path(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertIn("branches:\n      - staging", guard)
-        self.assertIn("release_notes.py collect --require", guard)
-        self.assertIn("cargo fmt --all --check", guard)
-        self.assertIn("cargo clippy --workspace --all-targets --locked", guard)
-        self.assertIn("-- -D warnings", guard)
-        self.assertIn("bash scripts/check-core-ui-boundary.sh", guard)
-        self.assertIn("bash scripts/check-production-file-size.sh", guard)
-        # Restore-only: staging is never a second writer of the shared cache.
-        self.assertIn("save-if: false", guard)
+        self.assertNotIn("staging", workflow)
+        self.assertNotIn("prepare-release", workflow)
+        self.assertNotIn("git tag", workflow)
+        self.assertNotIn("gh workflow run release.yml", workflow)
 
 
 if __name__ == "__main__":

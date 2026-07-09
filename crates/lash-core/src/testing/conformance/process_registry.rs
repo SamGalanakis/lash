@@ -13,6 +13,8 @@ use super::process_filters::list_processes_filters_by_enriched_fields;
 use super::process_references::live_reference_summary_tracks_non_terminal_reference_counts;
 use super::*;
 
+mod lease_reclaim;
+
 /// Run the full [`ProcessRegistry`] conformance suite against the backend
 /// produced by `make`. `make` must return a fresh, empty registry on each call.
 pub async fn process_registry<F>(make: F)
@@ -70,7 +72,8 @@ pub async fn process_registry_with_expected_durability<F>(
     renewed_process_lease_survives_original_expiry(make()).await;
     completed_lease_releases_and_reclaim_bumps_fencing(make()).await;
     stale_lease_completion_cannot_release_live_lease(make()).await;
-    process_lease_reclaim_contract(make()).await;
+    leased_terminal_completion_is_atomic_and_fenced(make()).await;
+    lease_reclaim::process_lease_reclaim_contract(make()).await;
     prune_removes_terminal_processes_older_than_cutoff(make()).await;
     awaiter_cross_task_completion_resolves_promptly(make()).await;
     awaiter_await_event_never_returns_events_at_or_before_cursor(make()).await;
@@ -2261,206 +2264,76 @@ async fn stale_lease_completion_cannot_release_live_lease(registry: Arc<dyn Proc
         .expect("the live owner can still renew");
 }
 
-/// Fenced reclaim of a dead holder's process lease, mirroring the session
-/// execution lane's `session_execution_lease_reclaim_contract`:
-///
-/// - a plain claim against a live-but-dead holder reports busy; the fenced
-///   reclaim acquires and advances the fencing token;
-/// - a stale observed holder must not clear the newer lease;
-/// - a fenced reclaim race has exactly one winner;
-/// - a holder on another host (or with opaque liveness) is never provably
-///   dead and stays busy.
-async fn process_lease_reclaim_contract(registry: Arc<dyn ProcessRegistry>) {
-    let pid = std::process::id();
-    let dead_holder = local_process_lease_owner(
-        "dead-holder",
-        "host-a",
-        "boot-a",
-        pid,
-        "not-the-current-process-start",
-    );
-    let claimant = local_process_lease_owner("claimant", "host-a", "boot-a", pid, "claimant-start");
-
+async fn leased_terminal_completion_is_atomic_and_fenced(registry: Arc<dyn ProcessRegistry>) {
+    let process_id = "proc-lease-terminal-fence";
     registry
-        .register_process(registration("proc-lease-reclaim-dead"))
+        .register_process(registration(process_id))
         .await
-        .expect("register reclaim-dead");
-    let holder = registry
-        .claim_process_lease("proc-lease-reclaim-dead", &dead_holder, 60_000)
+        .expect("register");
+    let stale = registry
+        .claim_process_lease(process_id, &process_lease_owner("stale-owner"), 0)
         .await
-        .expect("claim dead-holder lease")
+        .expect("stale lease")
         .acquired()
-        .expect("dead-holder lease acquired");
-    assert!(
-        matches!(
-            registry
-                .claim_process_lease("proc-lease-reclaim-dead", &claimant, 60_000)
-                .await
-                .expect("try claimant against dead holder"),
-            crate::ProcessLeaseClaimOutcome::Busy { .. }
-        ),
-        "plain claim must report busy before the caller performs fenced reclaim"
-    );
-    let reclaimed = registry
-        .reclaim_process_lease("proc-lease-reclaim-dead", &claimant, &holder, 60_000)
+        .expect("stale lease acquired");
+    let current = registry
+        .claim_process_lease(process_id, &process_lease_owner("current-owner"), 60_000)
         .await
-        .expect("reclaim dead holder")
+        .expect("current lease")
         .acquired()
-        .expect("dead holder is reclaimable before ttl");
-    assert!(
-        reclaimed.fencing_token > holder.fencing_token,
-        "fenced reclaim must advance the fencing token"
-    );
-    let stale_reclaim = registry
-        .reclaim_process_lease(
-            "proc-lease-reclaim-dead",
-            &local_process_lease_owner(
-                "late-claimant",
-                "host-a",
-                "boot-a",
-                pid,
-                "late-claimant-start",
-            ),
-            &holder,
-            60_000,
+        .expect("current lease acquired");
+    let stale_result = registry
+        .complete_process_with_lease(
+            &stale,
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({"writer": "stale"}),
+                control: None,
+            },
         )
-        .await
-        .expect("stale observed-holder reclaim");
+        .await;
     assert!(
-        matches!(stale_reclaim, crate::ProcessLeaseClaimOutcome::Busy { .. }),
-        "a stale observed holder must not clear the newer lease"
+        stale_result.is_err(),
+        "a superseded lease must not append a terminal event"
+    );
+    assert!(
+        !registry
+            .get_process(process_id)
+            .await
+            .expect("process exists")
+            .is_terminal(),
+        "stale completion must leave the process non-terminal"
+    );
+
+    let output = ProcessAwaitOutput::Success {
+        value: serde_json::json!({"writer": "current"}),
+        control: None,
+    };
+    let completed = registry
+        .complete_process_with_lease(&current, output.clone())
+        .await
+        .expect("current lease completes");
+    assert!(completed.is_terminal());
+    assert!(
+        registry
+            .get_process_lease(process_id)
+            .await
+            .expect("read released lease")
+            .is_none(),
+        "terminal append and lease release must commit together"
     );
     registry
-        .complete_process_lease(&ProcessLeaseCompletion::from_lease(&reclaimed))
+        .complete_process_with_lease(&current, output)
         .await
-        .expect("release reclaimed lease");
-
-    registry
-        .register_process(registration("proc-lease-reclaim-race"))
+        .expect("same leased terminal replay is idempotent");
+    let terminal_events = registry
+        .events_after(process_id, 0)
         .await
-        .expect("register reclaim-race");
-    let race_holder = registry
-        .claim_process_lease("proc-lease-reclaim-race", &dead_holder, 60_000)
-        .await
-        .expect("claim race holder")
-        .acquired()
-        .expect("race holder acquired");
-    let barrier = Arc::new(tokio::sync::Barrier::new(3));
-    let left_registry = Arc::clone(&registry);
-    let right_registry = Arc::clone(&registry);
-    let left_barrier = Arc::clone(&barrier);
-    let right_barrier = Arc::clone(&barrier);
-    let left_holder = race_holder.clone();
-    let right_holder = race_holder.clone();
-    let left_claimant =
-        local_process_lease_owner("race-left", "host-a", "boot-a", pid, "race-left-start");
-    let right_claimant =
-        local_process_lease_owner("race-right", "host-a", "boot-a", pid, "race-right-start");
-    let left = tokio::spawn(async move {
-        left_barrier.wait().await;
-        left_registry
-            .reclaim_process_lease(
-                "proc-lease-reclaim-race",
-                &left_claimant,
-                &left_holder,
-                60_000,
-            )
-            .await
-    });
-    let right = tokio::spawn(async move {
-        right_barrier.wait().await;
-        right_registry
-            .reclaim_process_lease(
-                "proc-lease-reclaim-race",
-                &right_claimant,
-                &right_holder,
-                60_000,
-            )
-            .await
-    });
-    barrier.wait().await;
-    let left = left
-        .await
-        .expect("join left reclaim race")
-        .expect("left reclaim race");
-    let right = right
-        .await
-        .expect("join right reclaim race")
-        .expect("right reclaim race");
-    let mut race_winners = [left, right]
+        .expect("terminal events")
         .into_iter()
-        .filter_map(crate::ProcessLeaseClaimOutcome::acquired)
-        .collect::<Vec<_>>();
+        .filter(|event| event.semantics.terminal.is_some())
+        .count();
     assert_eq!(
-        race_winners.len(),
-        1,
-        "exactly one claimant may win a fenced reclaim race"
-    );
-    let race_winner = race_winners.pop().expect("race winner");
-    assert!(race_winner.fencing_token > race_holder.fencing_token);
-    registry
-        .complete_process_lease(&ProcessLeaseCompletion::from_lease(&race_winner))
-        .await
-        .expect("release race winner");
-
-    registry
-        .register_process(registration("proc-lease-reclaim-cross-host"))
-        .await
-        .expect("register reclaim-cross-host");
-    let cross_host_holder = registry
-        .claim_process_lease("proc-lease-reclaim-cross-host", &dead_holder, 60_000)
-        .await
-        .expect("claim cross-host holder")
-        .acquired()
-        .expect("cross-host holder acquired");
-    let cross_host_result = registry
-        .reclaim_process_lease(
-            "proc-lease-reclaim-cross-host",
-            &local_process_lease_owner(
-                "cross-host-claimant",
-                "host-b",
-                "boot-a",
-                pid,
-                "claimant-start",
-            ),
-            &cross_host_holder,
-            60_000,
-        )
-        .await
-        .expect("cross-host reclaim resolves");
-    assert!(
-        matches!(
-            cross_host_result,
-            crate::ProcessLeaseClaimOutcome::Busy { .. }
-        ),
-        "a holder on another host is never provably dead and must stay busy"
-    );
-
-    registry
-        .register_process(registration("proc-lease-reclaim-opaque"))
-        .await
-        .expect("register reclaim-opaque");
-    let opaque_holder = registry
-        .claim_process_lease(
-            "proc-lease-reclaim-opaque",
-            &process_lease_owner("opaque-holder"),
-            60_000,
-        )
-        .await
-        .expect("claim opaque holder")
-        .acquired()
-        .expect("opaque holder acquired");
-    let opaque_result = registry
-        .reclaim_process_lease(
-            "proc-lease-reclaim-opaque",
-            &claimant,
-            &opaque_holder,
-            60_000,
-        )
-        .await
-        .expect("opaque reclaim resolves");
-    assert!(
-        matches!(opaque_result, crate::ProcessLeaseClaimOutcome::Busy { .. }),
-        "an opaque holder carries no liveness proof and must stay busy"
+        terminal_events, 1,
+        "terminal output must append exactly once"
     );
 }

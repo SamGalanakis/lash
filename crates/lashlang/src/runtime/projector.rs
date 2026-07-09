@@ -345,12 +345,13 @@ mod tests {
         assert_eq!(
             default_project(&Value::Image(ImageValue::new(
                 "img-1",
+                "image/png",
                 "plot.png",
                 123,
                 Some(10),
                 Some(20),
             ))),
-            r#"{"type":"image","id":"img-1","label":"plot.png","size":123,"width":10,"height":20}"#
+            r#"{"type":"image","id":"img-1","mime":"image/png","label":"plot.png","size":123,"width":10,"height":20}"#
         );
         assert_eq!(
             default_project(&Value::Resource(ResourceHandle::new("files", "workspace"))),

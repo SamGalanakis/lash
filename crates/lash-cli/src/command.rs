@@ -579,8 +579,8 @@ mod tests {
             Some("/yolopush")
         );
         assert_eq!(
-            slash_skill_prompt("/yolopush merge staging", &skills).as_deref(),
-            Some("/yolopush merge staging")
+            slash_skill_prompt("/yolopush ship current changes", &skills).as_deref(),
+            Some("/yolopush ship current changes")
         );
         assert!(slash_skill_prompt("/skills", &skills).is_none());
     }

@@ -84,6 +84,18 @@ pub struct WorkerAbstractSummary {
     pub active_fencing_token: u64,
     pub lease_owner_changes: usize,
     pub stale_completion_rejections: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub process_stale_completion_rejected: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub process_stale_output_absent: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub process_terminal_writer: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub process_terminal_event_count: usize,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -8,7 +8,7 @@
 //! Every public name has exactly one home. The crate root carries the daily
 //! core/session/turn path; each domain module ([`tools`], [`persistence`],
 //! [`plugins`], [`observe`], [`triggers`], ...) carries its own
-//! vocabulary. [`prelude`] mirrors the crate root exactly.
+//! vocabulary. [`prelude`] is the curated daily-use subset of that root.
 
 pub mod admin;
 mod core;
@@ -56,9 +56,9 @@ pub use lash_core::{
 /// embedders cancel turns without depending on `tokio-util` themselves.
 pub use tokio_util::sync::CancellationToken;
 
-/// The prelude is exactly the crate root: `use lash::prelude::*;` brings in
-/// the daily core/session/turn vocabulary and nothing from the domain
-/// modules.
+/// `use lash::prelude::*;` brings in the daily core/session/turn vocabulary
+/// without the lower-level integration types or domain modules also exposed
+/// from the crate root.
 pub mod prelude {
     pub use crate::{
         AdvancedToolAdmin, CoreTriggerAdmin, EmbedError, EnqueueTurnBuilder, ExecutionSummary,
@@ -417,7 +417,7 @@ pub mod tracing {
 
 /// Test helpers for embedders. Enable with `lash = { ..., features = ["testing"] }`
 /// to script model responses in integration tests without a live provider.
-#[cfg(all(any(test, feature = "testing"), feature = "rlm"))]
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 pub mod provider {

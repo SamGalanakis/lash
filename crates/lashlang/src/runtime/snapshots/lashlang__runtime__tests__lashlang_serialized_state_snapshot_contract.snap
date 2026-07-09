@@ -26,6 +26,7 @@ expression: "serde_json::to_string_pretty(&state.snapshot()).expect(\"snapshot s
     "cover": {
       "height": 480,
       "id": "img_1",
+      "mime": "image/png",
       "label": "cover",
       "size": 42,
       "type": "image",

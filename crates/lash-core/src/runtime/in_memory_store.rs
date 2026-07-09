@@ -148,6 +148,8 @@ pub struct InMemorySessionStore {
     queued_work_next_seq: Mutex<u64>,
     pending_turn_inputs: Mutex<Vec<InMemoryPendingTurnInput>>,
     pending_turn_input_next_seq: Mutex<u64>,
+    attachment_manifest:
+        Mutex<HashMap<(String, crate::AttachmentId), crate::AttachmentManifestEntry>>,
 }
 
 impl InMemorySessionStore {
@@ -171,6 +173,7 @@ impl InMemorySessionStore {
             queued_work_next_seq: Mutex::new(0),
             pending_turn_inputs: Mutex::new(Vec::new()),
             pending_turn_input_next_seq: Mutex::new(0),
+            attachment_manifest: Mutex::new(HashMap::new()),
         }
     }
 
@@ -477,7 +480,92 @@ impl Default for InMemorySessionStore {
     }
 }
 
-crate::impl_noop_attachment_manifest!(InMemorySessionStore);
+impl crate::AttachmentManifest for InMemorySessionStore {
+    fn record_intent(
+        &self,
+        intent: crate::AttachmentIntent,
+    ) -> Result<(), crate::store::StoreError> {
+        let key = (intent.session_id.clone(), intent.attachment_id.clone());
+        let mut manifest = self
+            .attachment_manifest
+            .lock()
+            .expect("lock attachment manifest");
+        match manifest.get_mut(&key) {
+            Some(existing) => {
+                existing.canonical_uri = intent.canonical_uri;
+                existing.intent_at_epoch_ms = intent.intent_at_epoch_ms;
+            }
+            None => {
+                manifest.insert(
+                    key,
+                    crate::AttachmentManifestEntry {
+                        attachment_id: intent.attachment_id,
+                        session_id: intent.session_id,
+                        canonical_uri: intent.canonical_uri,
+                        intent_at_epoch_ms: intent.intent_at_epoch_ms,
+                        committed_at_epoch_ms: None,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_refs(
+        &self,
+        session_id: &str,
+        attachment_ids: &[crate::AttachmentId],
+    ) -> Result<(), crate::store::StoreError> {
+        let now = self.clock.timestamp_ms();
+        let mut manifest = self
+            .attachment_manifest
+            .lock()
+            .expect("lock attachment manifest");
+        for attachment_id in attachment_ids {
+            if let Some(entry) = manifest.get_mut(&(session_id.to_string(), attachment_id.clone()))
+            {
+                entry.committed_at_epoch_ms.get_or_insert(now);
+            }
+        }
+        Ok(())
+    }
+
+    fn list_uncommitted(
+        &self,
+        older_than_epoch_ms: u64,
+    ) -> Result<Vec<crate::AttachmentManifestEntry>, crate::store::StoreError> {
+        let mut entries = self
+            .attachment_manifest
+            .lock()
+            .expect("lock attachment manifest")
+            .values()
+            .filter(|entry| {
+                entry.committed_at_epoch_ms.is_none()
+                    && entry.intent_at_epoch_ms <= older_than_epoch_ms
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.intent_at_epoch_ms
+                .cmp(&right.intent_at_epoch_ms)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+                .then_with(|| left.attachment_id.cmp(&right.attachment_id))
+        });
+        Ok(entries)
+    }
+
+    fn forget(
+        &self,
+        session_id: &str,
+        attachment_id: &crate::AttachmentId,
+    ) -> Result<(), crate::store::StoreError> {
+        self.attachment_manifest
+            .lock()
+            .expect("lock attachment manifest")
+            .remove(&(session_id.to_string(), attachment_id.clone()));
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 impl crate::store::SessionCommitStore for InMemorySessionStore {
@@ -722,6 +810,11 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
             commit.checkpoint.execution_state_ref.clone(),
         );
         *self.checkpoint.lock().expect("lock checkpoint") = Some(commit.checkpoint);
+        crate::AttachmentManifest::commit_refs(
+            self,
+            &commit.session_id,
+            &commit.committed_attachment_ids,
+        )?;
         let head_revision = actual + 1;
         *meta = Some(crate::SessionHeadMeta {
             schema_version: crate::store::SESSION_HEAD_META_SCHEMA_VERSION,

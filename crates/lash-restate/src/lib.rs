@@ -55,6 +55,12 @@
 //! scheduling directly through idempotent registry/workflow operations.
 //! Substrate-native Restate turns do not use store-side in-flight replay rows;
 //! Lash only commits final session state through turn-commit idempotency.
+//!
+//! Endpoints using this controller must also bind
+//! [`LashDurableWaitWorkflowImpl`] and [`LashDurableWaitIndexImpl`]. The first
+//! owns exact-address promises and durable deadline timers for every
+//! [`ExecutionScope`]; the second indexes session-owned waits so cancellation
+//! and deletion can resolve them durably.
 
 use std::fmt;
 use std::future::Future;
@@ -69,18 +75,23 @@ use lash_core::{
     ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome, ProcessEventSink,
     ProcessExecutionContext, ProcessExternalRef, ProcessRecord, ProcessRegistration,
     ProcessRegistry, ProcessRunHandle, ProcessWorkDriver, RecoveryDisposition, Resolution,
-    ResolveOutcome, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeError, RuntimeInvocation, ScopedEffectController, watch_process_registry_with_sink,
+    ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimeInvocation,
+    ScopedEffectController, watch_process_registry_with_sink,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
     SharedWorkflowContext, WorkflowContext,
 };
-use restate_sdk::context::{ContextClient, ContextPromises, InvocationHandle, RequestTarget};
+use restate_sdk::context::{
+    ContextClient, ContextPromises, ContextReadState, ContextWriteState, InvocationHandle,
+    RequestTarget,
+};
 use restate_sdk::errors::{HandlerError, HandlerResult, TerminalError};
 use restate_sdk::serde::Json;
 use serde::{Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 
 pub use restate_sdk;
 
@@ -102,12 +113,8 @@ fn restate_await_event_key(
     })
 }
 
-fn restate_await_event_process_id(key: &AwaitEventKey) -> Option<&str> {
-    match &key.scope {
-        ExecutionScope::Process { process_id } => Some(process_id.as_str()),
-        _ => None,
-    }
-}
+const DURABLE_WAIT_PROMISE_KEY: &str = "resolution";
+const DURABLE_WAIT_INDEX_STATE_KEY: &str = "waits";
 
 /// Wall-clock epoch milliseconds for terminal evidence written at the Restate
 /// tier (ADR 0019 recovery enforcement). The Restate boundary carries no
@@ -120,28 +127,57 @@ fn restate_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Error raised when a caller asks a Restate boundary to cancel *every*
-/// outstanding Durable Wait for a session (the `revoke_durable_waits` lever).
-///
-/// Restate models each Durable Wait as a promise addressable only by its exact
-/// per-wait key ([`AwaitEventKey::promise_key`]): await-event keys are
-/// process-scoped, carry no session id, and the Restate SDK exposes no way to
-/// enumerate a session's outstanding promises. Cancelling a whole session's
-/// waits would therefore require an engine-side session→promise index that
-/// Restate does not provide, so this boundary refuses loudly rather than faking
-/// success or silently ignoring the lever. The honest workaround is to cancel
-/// each known wait individually via
-/// [`AwaitEventResolver::resolve_await_event`] with [`Resolution::Cancelled`],
-/// which the process workflow handler resolves durably by its exact promise key.
-fn restate_cancel_await_events_for_session_unsupported() -> RuntimeError {
+fn restate_await_event_ingress_required() -> RuntimeError {
     RuntimeError::new(
-        "restate_await_event_cancel_by_session_unsupported",
-        "Restate resolves Durable Waits only by exact per-wait promise key and \
-         exposes no session-to-promise enumeration, so cancelling every \
-         outstanding wait for a session is unsupported on the Restate boundary; \
-         cancel each wait individually via \
-         resolve_await_event(key, Resolution::Cancelled)",
+        "restate_await_event_ingress_required",
+        "Restate durable-wait resolution and session revocation require an ingress URL; construct RestateEffectHost with RestateEffectHost::with_ingress_url",
     )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+pub struct RestateDurableWaitAddress {
+    pub workflow_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+impl RestateDurableWaitAddress {
+    fn for_key(key: &AwaitEventKey) -> Self {
+        Self {
+            workflow_key: format!("{:x}", Sha256::digest(key.key_id.as_bytes())),
+            session_id: key.scope.session_id().map(str::to_string),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct RestateDurableWaitAwaitRequest {
+    pub address: RestateDurableWaitAddress,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct RestateDurableWaitResolveRequest {
+    pub address: RestateDurableWaitAddress,
+    pub resolution: Resolution,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct RestateDurableWaitIndexRequest {
+    pub address: RestateDurableWaitAddress,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum RestateDurableWaitRegistration {
+    Registered,
+    Revoked,
+}
+
+#[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
+struct RestateDurableWaitIndexState {
+    revoked: bool,
+    waits: Vec<RestateDurableWaitAddress>,
 }
 
 fn restate_process_terminal_await_key(process_id: &str) -> Result<AwaitEventKey, RuntimeError> {
@@ -195,7 +231,7 @@ fn restate_process_terminal_output(
     }
 }
 
-async fn resolve_restate_process_await_event<'ctx, C>(
+async fn resolve_restate_await_event<'ctx, C>(
     context: &C,
     key: &AwaitEventKey,
     resolution: Resolution,
@@ -203,18 +239,28 @@ async fn resolve_restate_process_await_event<'ctx, C>(
 where
     C: RestateControllerContext<'ctx> + ?Sized,
 {
-    let Some(process_id) = restate_await_event_process_id(key) else {
-        return Ok(ResolveOutcome::UnknownOrRevoked);
-    };
     context
-        .resolve_event(RestateProcessEventResolveRequest {
-            process_id: process_id.to_string(),
-            key: key.promise_key(),
+        .resolve_event(RestateDurableWaitResolveRequest {
+            address: RestateDurableWaitAddress::for_key(key),
             resolution,
         })
         .await
-        .map_err(|err| RuntimeError::new("restate_await_event_resolve", err.to_string()))?;
-    Ok(ResolveOutcome::Accepted)
+        .map_err(|err| RuntimeError::new("restate_await_event_resolve", err.to_string()))
+}
+
+fn restate_durable_wait_request(
+    key: &AwaitEventKey,
+    deadline: Option<std::time::Instant>,
+    clock: &dyn lash_core::Clock,
+) -> RestateDurableWaitAwaitRequest {
+    let timeout_ms = deadline.map(|deadline| {
+        u64::try_from(deadline.saturating_duration_since(clock.now()).as_millis())
+            .unwrap_or(u64::MAX)
+    });
+    RestateDurableWaitAwaitRequest {
+        address: RestateDurableWaitAddress::for_key(key),
+        timeout_ms,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -404,6 +450,43 @@ impl RestateIngressClient {
             .await
             .map_err(|source| RestateHttpError::Decode {
                 operation: "Restate workflow call",
+                url,
+                source,
+            })
+    }
+
+    pub async fn call_object_json<T, R>(
+        &self,
+        object: &str,
+        object_key: &str,
+        handler: &str,
+        body: &T,
+    ) -> Result<R, RestateHttpError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let path = format!("{object}/{object_key}/{handler}");
+        let url = format_restate_url(&self.ingress_url, &path);
+        let response = self
+            .http
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|source| RestateHttpError::Request {
+                operation: "Restate object call",
+                url: url.clone(),
+                source,
+            })?;
+        if !response.status().is_success() {
+            return Err(status_error("Restate object call", url, response).await);
+        }
+        response
+            .json::<R>()
+            .await
+            .map_err(|source| RestateHttpError::Decode {
+                operation: "Restate object call",
                 url,
                 source,
             })
@@ -733,8 +816,7 @@ impl RestateEffectHost {
         Self {
             controller: Arc::new(RestateEffectHostController {
                 await_event_ingress: Some(RestateAwaitEventIngress {
-                    http: reqwest::Client::new(),
-                    ingress_url: ingress_url.into(),
+                    ingress: RestateIngressClient::new(ingress_url),
                 }),
             }),
         }
@@ -783,8 +865,10 @@ impl AwaitEventResolver for RestateEffectHost {
         ))
     }
 
-    async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
-        Ok(())
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.controller
+            .revoke_await_events_for_session(session_id)
+            .await
     }
 
     async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
@@ -815,48 +899,71 @@ impl EffectHost for RestateEffectHost {
 
 #[derive(Clone)]
 struct RestateAwaitEventIngress {
-    http: reqwest::Client,
-    ingress_url: String,
+    ingress: RestateIngressClient,
 }
 
-async fn resolve_restate_process_await_event_via_ingress(
+async fn resolve_restate_await_event_via_ingress(
     ingress: &RestateAwaitEventIngress,
     key: &AwaitEventKey,
     resolution: Resolution,
 ) -> Result<ResolveOutcome, RuntimeError> {
-    let Some(process_id) = restate_await_event_process_id(key) else {
-        return Ok(ResolveOutcome::UnknownOrRevoked);
+    let address = RestateDurableWaitAddress::for_key(key);
+    let workflow_key = address.workflow_key.clone();
+    let request = RestateDurableWaitResolveRequest {
+        address,
+        resolution,
     };
-    let url = format!(
-        "{}/LashProcessWorkflow/{}/resolve_event",
-        ingress.ingress_url.trim_end_matches('/'),
-        process_id
-    );
-    let response = ingress
-        .http
-        .post(url)
-        .json(&RestateProcessEventResolveRequest {
-            process_id: process_id.to_string(),
-            key: key.promise_key(),
-            resolution,
-        })
-        .send()
+    let outcome = match request.address.session_id.as_deref() {
+        Some(session_id) => {
+            ingress
+                .ingress
+                .call_object_json::<_, ResolveOutcome>(
+                    "LashDurableWaitIndex",
+                    session_id,
+                    "resolve",
+                    &request,
+                )
+                .await
+        }
+        None => {
+            ingress
+                .ingress
+                .send_workflow_json(
+                    "LashDurableWaitWorkflow",
+                    &workflow_key,
+                    "await_resolution",
+                    &RestateDurableWaitAwaitRequest {
+                        address: request.address.clone(),
+                        timeout_ms: None,
+                    },
+                )
+                .await
+                .map_err(|err| RuntimeError::new("restate_await_event_start", err.to_string()))?;
+            ingress
+                .ingress
+                .call_workflow_json::<_, ResolveOutcome>(
+                    "LashDurableWaitWorkflow",
+                    &workflow_key,
+                    "resolve",
+                    &request,
+                )
+                .await
+        }
+    };
+    outcome.map_err(|err| RuntimeError::new("restate_await_event_resolve", err.to_string()))
+}
+
+async fn update_restate_session_waits_via_ingress(
+    ingress: &RestateAwaitEventIngress,
+    session_id: &str,
+    revoke: bool,
+) -> Result<(), RuntimeError> {
+    let handler = if revoke { "revoke_all" } else { "cancel_all" };
+    ingress
+        .ingress
+        .call_object_json::<_, ()>("LashDurableWaitIndex", session_id, handler, &())
         .await
-        .map_err(|err| RuntimeError::new("restate_await_event_resolve", err.to_string()))?;
-    if response.status().is_success() {
-        return Ok(ResolveOutcome::Accepted);
-    }
-    if response.status() == reqwest::StatusCode::NOT_FOUND
-        || response.status() == reqwest::StatusCode::GONE
-    {
-        return Ok(ResolveOutcome::UnknownOrRevoked);
-    }
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    Err(RuntimeError::new(
-        "restate_await_event_resolve",
-        format!("Restate await-event resolve returned status {status}: {body}"),
-    ))
+        .map_err(|err| RuntimeError::new("restate_await_event_session_update", err.to_string()))
 }
 
 #[derive(Default)]
@@ -881,14 +988,24 @@ impl AwaitEventResolver for RestateEffectHostController {
     ) -> Result<ResolveOutcome, RuntimeError> {
         match &self.await_event_ingress {
             Some(ingress) => {
-                resolve_restate_process_await_event_via_ingress(ingress, key, resolution).await
+                resolve_restate_await_event_via_ingress(ingress, key, resolution).await
             }
             None => Ok(ResolveOutcome::UnknownOrRevoked),
         }
     }
 
-    async fn cancel_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
-        Err(restate_cancel_await_events_for_session_unsupported())
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        let Some(ingress) = &self.await_event_ingress else {
+            return Err(restate_await_event_ingress_required());
+        };
+        update_restate_session_waits_via_ingress(ingress, session_id, true).await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        let Some(ingress) = &self.await_event_ingress else {
+            return Err(restate_await_event_ingress_required());
+        };
+        update_restate_session_waits_via_ingress(ingress, session_id, false).await
     }
 }
 
@@ -1151,11 +1268,6 @@ pub trait LashProcessWorkflow {
 
     #[shared]
     async fn cancel(request: Json<RestateProcessCancelRequest>) -> HandlerResult<Json<()>>;
-
-    #[shared]
-    async fn resolve_event(
-        request: Json<RestateProcessEventResolveRequest>,
-    ) -> HandlerResult<Json<()>>;
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -1163,13 +1275,6 @@ pub struct RestateProcessWorkflowInput {
     pub registration: ProcessRegistration,
     #[serde(default, skip_serializing_if = "ProcessExecutionContext::is_empty")]
     pub execution_context: ProcessExecutionContext,
-}
-
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
-pub struct RestateProcessEventResolveRequest {
-    pub process_id: String,
-    pub key: String,
-    pub resolution: Resolution,
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -1340,15 +1445,254 @@ where
             .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
         Ok(Json(output))
     }
+}
 
-    async fn resolve_event(
+/// One durable Restate workflow per Lash await-event identity.
+///
+/// Bind [`LashDurableWaitWorkflowImpl::serve`] on every endpoint that runs a
+/// [`RestateRuntimeEffectController`]. The workflow key is a stable digest of
+/// the full Lash [`AwaitEventKey`], so all execution-scope variants share the
+/// same exact-address resolution path.
+#[restate_sdk::workflow]
+pub trait LashDurableWaitWorkflow {
+    async fn await_resolution(
+        request: Json<RestateDurableWaitAwaitRequest>,
+    ) -> HandlerResult<Json<Resolution>>;
+
+    #[shared]
+    async fn resolve(
+        request: Json<RestateDurableWaitResolveRequest>,
+    ) -> HandlerResult<Json<ResolveOutcome>>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LashDurableWaitWorkflowImpl;
+
+impl LashDurableWaitWorkflow for LashDurableWaitWorkflowImpl {
+    async fn await_resolution(
+        &self,
+        ctx: WorkflowContext<'_>,
+        Json(request): Json<RestateDurableWaitAwaitRequest>,
+    ) -> HandlerResult<Json<Resolution>> {
+        if let Some(session_id) = request.address.session_id.as_deref() {
+            let registration: restate_sdk::context::Request<
+                '_,
+                Json<RestateDurableWaitIndexRequest>,
+                Json<RestateDurableWaitRegistration>,
+            > = ContextClient::request(
+                &ctx,
+                RequestTarget::object("LashDurableWaitIndex", session_id, "register"),
+                Json(RestateDurableWaitIndexRequest {
+                    address: request.address.clone(),
+                }),
+            );
+            let Json(registration) = registration.call().await?;
+            if registration == RestateDurableWaitRegistration::Revoked {
+                let payload = serde_json::to_string(&Resolution::Cancelled)
+                    .map_err(TerminalError::from_error)?;
+                ctx.resolve_promise(DURABLE_WAIT_PROMISE_KEY, payload);
+                return Ok(Json(Resolution::Cancelled));
+            }
+        }
+
+        let resolution = if let Some(payload) =
+            ctx.peek_promise::<String>(DURABLE_WAIT_PROMISE_KEY).await?
+        {
+            serde_json::from_str(&payload).map_err(TerminalError::from_error)?
+        } else if let Some(timeout_ms) = request.timeout_ms {
+            let promise = ctx.promise::<String>(DURABLE_WAIT_PROMISE_KEY);
+            let timer =
+                restate_sdk::context::ContextTimers::sleep(&ctx, Duration::from_millis(timeout_ms));
+            restate_sdk::select! {
+                payload = promise => {
+                    let payload = payload?;
+                    serde_json::from_str(&payload).map_err(TerminalError::from_error)?
+                },
+                _ = timer => {
+                    let payload = serde_json::to_string(&Resolution::Timeout)
+                        .map_err(TerminalError::from_error)?;
+                    ctx.resolve_promise(DURABLE_WAIT_PROMISE_KEY, payload);
+                    Resolution::Timeout
+                },
+                on_cancel => {
+                    let payload = serde_json::to_string(&Resolution::Cancelled)
+                        .map_err(TerminalError::from_error)?;
+                    ctx.resolve_promise(DURABLE_WAIT_PROMISE_KEY, payload);
+                    Resolution::Cancelled
+                }
+            }
+        } else {
+            let payload = ctx.promise::<String>(DURABLE_WAIT_PROMISE_KEY).await?;
+            serde_json::from_str(&payload).map_err(TerminalError::from_error)?
+        };
+
+        if let Some(session_id) = request.address.session_id.as_deref() {
+            let settle: restate_sdk::context::Request<
+                '_,
+                Json<RestateDurableWaitIndexRequest>,
+                Json<()>,
+            > = ContextClient::request(
+                &ctx,
+                RequestTarget::object("LashDurableWaitIndex", session_id, "settle"),
+                Json(RestateDurableWaitIndexRequest {
+                    address: request.address,
+                }),
+            );
+            let Json(()) = settle.call().await?;
+        }
+        Ok(Json(resolution))
+    }
+
+    async fn resolve(
         &self,
         ctx: SharedWorkflowContext<'_>,
-        Json(request): Json<RestateProcessEventResolveRequest>,
+        Json(request): Json<RestateDurableWaitResolveRequest>,
+    ) -> HandlerResult<Json<ResolveOutcome>> {
+        if let Some(payload) = ctx.peek_promise::<String>(DURABLE_WAIT_PROMISE_KEY).await? {
+            let terminal = serde_json::from_str(&payload).map_err(TerminalError::from_error)?;
+            return Ok(Json(ResolveOutcome::AlreadyResolved { terminal }));
+        }
+        let payload =
+            serde_json::to_string(&request.resolution).map_err(TerminalError::from_error)?;
+        ctx.resolve_promise(DURABLE_WAIT_PROMISE_KEY, payload);
+        Ok(Json(ResolveOutcome::Accepted))
+    }
+}
+
+/// Durable session-to-wait index used by cancellation and session deletion.
+///
+/// Bind [`LashDurableWaitIndexImpl::serve`] alongside
+/// [`LashDurableWaitWorkflowImpl`]. Object serialization makes registration,
+/// cancellation, and revocation atomic for one session.
+#[restate_sdk::object]
+pub trait LashDurableWaitIndex {
+    async fn register(
+        request: Json<RestateDurableWaitIndexRequest>,
+    ) -> HandlerResult<Json<RestateDurableWaitRegistration>>;
+    async fn settle(request: Json<RestateDurableWaitIndexRequest>) -> HandlerResult<Json<()>>;
+    async fn resolve(
+        request: Json<RestateDurableWaitResolveRequest>,
+    ) -> HandlerResult<Json<ResolveOutcome>>;
+    async fn cancel_all() -> HandlerResult<Json<()>>;
+    async fn revoke_all() -> HandlerResult<Json<()>>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LashDurableWaitIndexImpl;
+
+async fn load_durable_wait_index(
+    ctx: &ObjectContext<'_>,
+) -> Result<RestateDurableWaitIndexState, TerminalError> {
+    Ok(ctx
+        .get::<Json<RestateDurableWaitIndexState>>(DURABLE_WAIT_INDEX_STATE_KEY)
+        .await?
+        .map(|Json(state)| state)
+        .unwrap_or_default())
+}
+
+async fn resolve_indexed_waits(
+    ctx: &ObjectContext<'_>,
+    waits: Vec<RestateDurableWaitAddress>,
+) -> HandlerResult<()> {
+    for address in waits {
+        let workflow_key = address.workflow_key.clone();
+        let resolve: restate_sdk::context::Request<
+            '_,
+            Json<RestateDurableWaitResolveRequest>,
+            Json<ResolveOutcome>,
+        > = ContextClient::request(
+            ctx,
+            RequestTarget::workflow("LashDurableWaitWorkflow", workflow_key, "resolve"),
+            Json(RestateDurableWaitResolveRequest {
+                address,
+                resolution: Resolution::Cancelled,
+            }),
+        );
+        let _ = resolve.call().await?;
+    }
+    Ok(())
+}
+
+impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
+    async fn register(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(request): Json<RestateDurableWaitIndexRequest>,
+    ) -> HandlerResult<Json<RestateDurableWaitRegistration>> {
+        let mut state = load_durable_wait_index(&ctx).await?;
+        if state.revoked {
+            return Ok(Json(RestateDurableWaitRegistration::Revoked));
+        }
+        if !state.waits.contains(&request.address) {
+            state.waits.push(request.address);
+            ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        }
+        Ok(Json(RestateDurableWaitRegistration::Registered))
+    }
+
+    async fn settle(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(request): Json<RestateDurableWaitIndexRequest>,
     ) -> HandlerResult<Json<()>> {
-        let payload = serde_json::to_string(&request.resolution)
-            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
-        ctx.resolve_promise(&request.key, payload);
+        let mut state = load_durable_wait_index(&ctx).await?;
+        state.waits.retain(|wait| wait != &request.address);
+        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        Ok(Json(()))
+    }
+
+    async fn resolve(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(request): Json<RestateDurableWaitResolveRequest>,
+    ) -> HandlerResult<Json<ResolveOutcome>> {
+        if load_durable_wait_index(&ctx).await?.revoked {
+            return Ok(Json(ResolveOutcome::UnknownOrRevoked));
+        }
+        let workflow_key = request.address.workflow_key.clone();
+        let start: restate_sdk::context::Request<
+            '_,
+            Json<RestateDurableWaitAwaitRequest>,
+            Json<Resolution>,
+        > = ContextClient::request(
+            &ctx,
+            RequestTarget::workflow(
+                "LashDurableWaitWorkflow",
+                workflow_key.clone(),
+                "await_resolution",
+            ),
+            Json(RestateDurableWaitAwaitRequest {
+                address: request.address.clone(),
+                timeout_ms: None,
+            }),
+        );
+        let _ = start.send().invocation_id().await?;
+        let resolve: restate_sdk::context::Request<
+            '_,
+            Json<RestateDurableWaitResolveRequest>,
+            Json<ResolveOutcome>,
+        > = ContextClient::request(
+            &ctx,
+            RequestTarget::workflow("LashDurableWaitWorkflow", workflow_key, "resolve"),
+            Json(request),
+        );
+        Ok(resolve.call().await?)
+    }
+
+    async fn cancel_all(&self, ctx: ObjectContext<'_>) -> HandlerResult<Json<()>> {
+        let mut state = load_durable_wait_index(&ctx).await?;
+        let waits = std::mem::take(&mut state.waits);
+        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        resolve_indexed_waits(&ctx, waits).await?;
+        Ok(Json(()))
+    }
+
+    async fn revoke_all(&self, ctx: ObjectContext<'_>) -> HandlerResult<Json<()>> {
+        let mut state = load_durable_wait_index(&ctx).await?;
+        state.revoked = true;
+        let waits = std::mem::take(&mut state.waits);
+        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        resolve_indexed_waits(&ctx, waits).await?;
         Ok(Json(()))
     }
 }
@@ -1420,7 +1764,8 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
 
     fn await_event<'run>(
         &'run self,
-        key: String,
+        request: RestateDurableWaitAwaitRequest,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
@@ -1434,63 +1779,19 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
 
     fn resolve_event<'run>(
         &'run self,
-        request: RestateProcessEventResolveRequest,
+        request: RestateDurableWaitResolveRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolveOutcome, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run;
+
+    fn update_session_waits<'run>(
+        &'run self,
+        session_id: String,
+        revoke: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
 }
-
-trait RestateAwaitEventContext {
-    fn await_event_json<'run>(
-        &'run self,
-        key: String,
-    ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>;
-}
-
-macro_rules! impl_unsupported_await_event_context {
-    ($($context:ident),+ $(,)?) => {
-        $(
-            impl<'ctx> RestateAwaitEventContext for $context<'ctx> {
-                fn await_event_json<'run>(
-                    &'run self,
-                    _key: String,
-                ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>> {
-                    Box::pin(async move {
-                        Err(TerminalError::from_error(
-                            RestateEffectError::BackgroundScheduler(
-                                "AwaitEvent requires a Restate workflow context".to_string(),
-                            ),
-                        ))
-                    })
-                }
-            }
-        )+
-    };
-}
-
-macro_rules! impl_workflow_await_event_context {
-    ($($context:ident),+ $(,)?) => {
-        $(
-            impl<'ctx> RestateAwaitEventContext for $context<'ctx> {
-                fn await_event_json<'run>(
-                    &'run self,
-                    key: String,
-                ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>> {
-                    Box::pin(async move {
-                        let payload =
-                            restate_sdk::context::ContextPromises::promise::<String>(self, &key)
-                                .await?;
-                        serde_json::from_str(&payload)
-                            .map_err(|err| TerminalError::from_error(err))
-                    })
-                }
-            }
-        )+
-    };
-}
-
-impl_unsupported_await_event_context!(RestateContext, SharedObjectContext, ObjectContext);
-impl_workflow_await_event_context!(SharedWorkflowContext, WorkflowContext);
 
 macro_rules! impl_restate_controller_context {
     ($($context:ident),+ $(,)?) => {
@@ -1591,12 +1892,68 @@ macro_rules! impl_restate_controller_context {
 
                 fn await_event<'run>(
                     &'run self,
-                    key: String,
+                    request: RestateDurableWaitAwaitRequest,
+                    cancellation: tokio_util::sync::CancellationToken,
                 ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
                 where
                     'ctx: 'run,
                 {
-                    RestateAwaitEventContext::await_event_json(self, key)
+                    Box::pin(async move {
+                        let workflow_key = request.address.workflow_key.clone();
+                        let await_request: restate_sdk::context::Request<
+                            '_,
+                            Json<RestateDurableWaitAwaitRequest>,
+                            Json<Resolution>,
+                        > = ContextClient::request(
+                            self,
+                            RequestTarget::workflow(
+                                "LashDurableWaitWorkflow",
+                                workflow_key.clone(),
+                                "await_resolution",
+                            ),
+                            Json(request.clone()),
+                        );
+                        tokio::select! {
+                            result = await_request.call() => {
+                                let Json(resolution) = result?;
+                                Ok(resolution)
+                            }
+                            _ = cancellation.cancelled() => {
+                                let address = request.address;
+                                let target = match address.session_id.clone() {
+                                    Some(session_id) => RequestTarget::object(
+                                        "LashDurableWaitIndex",
+                                        session_id,
+                                        "resolve",
+                                    ),
+                                    None => RequestTarget::workflow(
+                                        "LashDurableWaitWorkflow",
+                                        workflow_key,
+                                        "resolve",
+                                    ),
+                                };
+                                let resolve_request: restate_sdk::context::Request<
+                                    '_,
+                                    Json<RestateDurableWaitResolveRequest>,
+                                    Json<ResolveOutcome>,
+                                > = ContextClient::request(
+                                    self,
+                                    target,
+                                    Json(RestateDurableWaitResolveRequest {
+                                        address,
+                                        resolution: Resolution::Cancelled,
+                                    }),
+                                );
+                                let Json(outcome) = resolve_request.call().await?;
+                                Ok(match outcome {
+                                    ResolveOutcome::AlreadyResolved { terminal } => terminal,
+                                    ResolveOutcome::Accepted | ResolveOutcome::UnknownOrRevoked => {
+                                        Resolution::Cancelled
+                                    }
+                                })
+                            }
+                        }
+                    })
                 }
 
                 fn await_process_terminal<'run>(
@@ -1628,25 +1985,73 @@ macro_rules! impl_restate_controller_context {
 
                 fn resolve_event<'run>(
                     &'run self,
-                    request: RestateProcessEventResolveRequest,
+                    request: RestateDurableWaitResolveRequest,
+                ) -> Pin<Box<dyn Future<Output = Result<ResolveOutcome, TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    Box::pin(async move {
+                        let workflow_key = request.address.workflow_key.clone();
+                        let target = match request.address.session_id.clone() {
+                            Some(session_id) => RequestTarget::object(
+                                "LashDurableWaitIndex",
+                                session_id,
+                                "resolve",
+                            ),
+                            None => {
+                                let start: restate_sdk::context::Request<
+                                    '_,
+                                    Json<RestateDurableWaitAwaitRequest>,
+                                    Json<Resolution>,
+                                > = ContextClient::request(
+                                    self,
+                                    RequestTarget::workflow(
+                                        "LashDurableWaitWorkflow",
+                                        workflow_key.clone(),
+                                        "await_resolution",
+                                    ),
+                                    Json(RestateDurableWaitAwaitRequest {
+                                        address: request.address.clone(),
+                                        timeout_ms: None,
+                                    }),
+                                );
+                                let _ = start.send().invocation_id().await?;
+                                RequestTarget::workflow(
+                                    "LashDurableWaitWorkflow",
+                                    workflow_key,
+                                    "resolve",
+                                )
+                            }
+                        };
+                        let resolve: restate_sdk::context::Request<
+                            '_,
+                            Json<RestateDurableWaitResolveRequest>,
+                            Json<ResolveOutcome>,
+                        > = ContextClient::request(self, target, Json(request));
+                        let Json(outcome) = resolve.call().await?;
+                        Ok(outcome)
+                    })
+                }
+
+                fn update_session_waits<'run>(
+                    &'run self,
+                    session_id: String,
+                    revoke: bool,
                 ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
                 where
                     'ctx: 'run,
                 {
-                    let workflow_key = request.process_id.clone();
-                    let request: restate_sdk::context::Request<
-                        '_,
-                        Json<RestateProcessEventResolveRequest>,
-                        Json<()>,
-                    > = ContextClient::request(
-                        self,
-                        RequestTarget::workflow(
-                            "LashProcessWorkflow",
-                            workflow_key,
-                            "resolve_event",
-                        ),
-                        Json(request),
-                    );
+                    let handler = if revoke { "revoke_all" } else { "cancel_all" };
+                    let request: restate_sdk::context::Request<'_, Json<()>, Json<()>> =
+                        ContextClient::request(
+                            self,
+                            RequestTarget::object(
+                                "LashDurableWaitIndex",
+                                session_id,
+                                handler,
+                            ),
+                            Json(()),
+                        );
                     let call = request.call();
                     Box::pin(async move {
                         let Json(()) = call.await?;
@@ -1773,27 +2178,34 @@ where
         key: &AwaitEventKey,
         resolution: Resolution,
     ) -> Result<ResolveOutcome, RuntimeError> {
-        resolve_restate_process_await_event(&self.context, key, resolution).await
+        resolve_restate_await_event(&self.context, key, resolution).await
     }
 
     async fn await_await_event(
         &self,
         key: &AwaitEventKey,
-        _cancel: tokio_util::sync::CancellationToken,
-        _deadline: Option<std::time::Instant>,
+        cancel: tokio_util::sync::CancellationToken,
+        deadline: Option<std::time::Instant>,
     ) -> Result<Resolution, RuntimeError> {
+        let clock = lash_core::SystemClock;
         self.context
-            .await_event(key.promise_key())
+            .await_event(restate_durable_wait_request(key, deadline, &clock), cancel)
             .await
             .map_err(|err| RuntimeError::new("restate_effect_controller", err.to_string()))
     }
 
-    async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
-        Ok(())
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.context
+            .update_session_waits(session_id.to_string(), true)
+            .await
+            .map_err(|err| RuntimeError::new("restate_await_event_revoke", err.to_string()))
     }
 
-    async fn cancel_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
-        Err(restate_cancel_await_events_for_session_unsupported())
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.context
+            .update_session_waits(session_id.to_string(), false)
+            .await
+            .map_err(|err| RuntimeError::new("restate_await_event_cancel", err.to_string()))
     }
 }
 
@@ -1851,8 +2263,16 @@ where
                 let RuntimeEffectCommand::AwaitEvent { key } = envelope.command else {
                     unreachable!("await-event execution is only selected for event waits");
                 };
+                let RuntimeAwaitEventOptions {
+                    cancellation,
+                    deadline,
+                    clock,
+                } = local_executor.into_await_event_options()?;
                 self.context
-                    .await_event(key.promise_key())
+                    .await_event(
+                        restate_durable_wait_request(&key, deadline, clock.as_ref()),
+                        cancellation,
+                    )
                     .await
                     .map(|resolution| RuntimeEffectOutcome::AwaitEvent { resolution })
                     .map_err(|err| {
@@ -1993,11 +2413,14 @@ where
                 result.event.sequence,
             )
             .await?;
-            let key = lash_core::process_signal_wait_key(&process_id, &signal_name, ordinal);
+            let key = restate_await_event_key(
+                &ExecutionScope::process(process_id.clone()),
+                AwaitEventWaitIdentity::process_signal(process_id.clone(), signal_name, ordinal),
+            )
+            .map_err(|err| PluginError::Session(err.to_string()))?;
             context
-                .resolve_event(RestateProcessEventResolveRequest {
-                    process_id: process_id.clone(),
-                    key,
+                .resolve_event(RestateDurableWaitResolveRequest {
+                    address: RestateDurableWaitAddress::for_key(&key),
                     resolution: Resolution::Ok(result.event.payload.clone()),
                 })
                 .await

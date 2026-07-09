@@ -3,13 +3,9 @@ name: CI
 # GitHub natively skips push/PR runs when the head commit requests a CI skip,
 # so no per-job guards are needed for that.
 #
-# A green push to main cuts a release directly from that commit. There is no
-# version-bump commit and no second validation pass: the release-notes-gate
-# fails fast when the range carries no curated notes, the full matrix validates
-# the pushed commit, and `prepare-release` tags that exact commit and dispatches
-# release.yml. The release version is never written to main — it is stamped into
-# the manifests at packaging time inside release.yml's ephemeral tag checkout
-# (scripts/release_version.py stamp, scripts/publish_workspace.py --version).
+# CI validates pull requests and the resulting commits on the main trunk.
+# Releases are separate: a maintainer manually dispatches release.yml for a
+# green commit on main. Ordinary merges never tag or publish.
 
 on:
   pull_request:
@@ -36,25 +32,6 @@ env:
     -F lash-cli/bench
 
 jobs:
-  # Fail-early release-notes gate: no cargo, no cache, no `needs`, so a main
-  # push with no curated notes in its range fails in under a minute instead of
-  # after the full matrix. The release-cut job relies on this gate rather than
-  # re-running the check.
-  release-notes-gate:
-    name: Release notes gate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip release]')
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          # Full history + tags: release_notes.py walks previous-tag..HEAD.
-          fetch-depth: 0
-
-      - name: Require release notes
-        run: python3 scripts/release_notes.py collect --require
-
   # Sole writer of the shared linux-debug cache and the doctest gate. It builds
   # the superset (`cargo check --workspace --all-targets` plus the doctest
   # link) that every read-only debug-profile job restores. The nextest run is
@@ -118,6 +95,7 @@ jobs:
       - name: Check lash-runtime feature boundary
         run: |
           cargo check -p lash-runtime --no-default-features --locked
+          cargo check -p lash-runtime --no-default-features --features testing --locked
 
           if cargo tree -p lash-runtime -e normal --no-default-features --locked | grep -E 'lash-protocol-rlm|lash-lashlang-runtime|lashlang'; then
             echo "default-off lash-runtime pulled RLM/Lashlang dependencies"
@@ -126,6 +104,11 @@ jobs:
 
           if cargo tree -p lash-runtime -e normal --locked | grep -E 'lash-protocol-rlm|lash-lashlang-runtime|lashlang'; then
             echo "default lash-runtime pulled RLM/Lashlang dependencies"
+            exit 1
+          fi
+
+          if cargo tree -p lash-runtime -e normal --no-default-features --features testing --locked | grep -E 'lash-protocol-rlm|lash-lashlang-runtime|lashlang'; then
+            echo "testing-only lash-runtime pulled RLM/Lashlang dependencies"
             exit 1
           fi
 
@@ -560,126 +543,3 @@ jobs:
 
       - name: Run distributed backend E2E
         run: bash scripts/restate-postgres-workers-e2e.sh
-
-  # Cuts the release straight from the validated commit: compute the next
-  # version from the release channel + tags, tag this exact commit, and dispatch
-  # release.yml. No version-bump commit, no second CI pass — release.yml stamps
-  # the version into its ephemeral tag checkout at packaging time.
-  prepare-release:
-    name: Cut release
-    # Allows release-automation-only fixes to run the full CI matrix without
-    # cutting the next version (push with [skip release]).
-    if: >
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
-      !contains(github.event.head_commit.message, '[skip release]')
-    needs:
-      - test-doc
-      - test-shard
-      - lint
-      - confidence-fast-summary
-      - postgres-store
-      - stack-budget
-      - cross-check
-      - linux-release-cache
-      - restate-e2e
-      - restate-postgres-workers
-      - release-notes-gate
-    runs-on: ubuntu-latest
-    concurrency:
-      group: lash-release-main
-      cancel-in-progress: false
-    permissions:
-      contents: write
-      actions: write
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          # Full history INCLUDING TAGS: release_version.py computes the next
-          # version from `git tag --list`. A shallow checkout with fetch-tags
-          # does NOT deliver the tags (tag-following only covers fetched
-          # commits), which silently re-releases the current version forever.
-          fetch-depth: 0
-
-      - name: Compute next release version
-        id: version
-        run: |
-          version="$(python3 scripts/release_version.py print-next)"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-
-      - name: Tag the validated commit
-        id: tag
-        run: |
-          tag="v${{ steps.version.outputs.version }}"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "Tag ${tag} already exists on origin; skipping tag creation."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Tag the exact validated commit (this run's HEAD). Pushing with
-          # GITHUB_TOKEN does not start release.yml's `on: push tags` run, so
-          # the next step dispatches it explicitly.
-          git tag "${tag}"
-          git push origin "${tag}"
-
-      - name: Trigger release workflow
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="${{ steps.tag.outputs.tag }}"
-          for _ in 1 2 3 4 5; do
-            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
-          git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1
-          release_sha="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" | awk '{print $1}')"
-
-          set +e
-          dispatch_output="$(gh workflow run release.yml --ref main -f release_tag="${tag}" 2>&1)"
-          dispatch_status=$?
-          set -e
-
-          if [ "$dispatch_status" -eq 0 ]; then
-            printf '%s\n' "$dispatch_output"
-            exit 0
-          fi
-
-          printf '%s\n' "$dispatch_output" >&2
-          echo "Release workflow dispatch failed; checking whether GitHub created the run anyway." >&2
-
-          runs_file="$(mktemp)"
-          if ! gh run list --workflow release.yml --event workflow_dispatch --branch main --limit 20 \
-            --json databaseId,status,headSha,createdAt > "$runs_file"; then
-            echo "Could not list release workflow runs after dispatch failure." >&2
-            exit "$dispatch_status"
-          fi
-
-          if python3 - "$release_sha" "$runs_file" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          release_sha = sys.argv[1]
-          runs_file = pathlib.Path(sys.argv[2])
-          for run in json.loads(runs_file.read_text(encoding="utf-8")):
-              if run.get("headSha") == release_sha:
-                  print(
-                      "Found release workflow run "
-                      f"{run.get('databaseId')} for release SHA {release_sha} "
-                      f"({run.get('status')}, created {run.get('createdAt')})."
-                  )
-                  raise SystemExit(0)
-
-          raise SystemExit(1)
-          PY
-          then
-            exit 0
-          fi
-
-          exit "$dispatch_status"

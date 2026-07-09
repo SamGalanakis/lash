@@ -87,9 +87,10 @@ impl ProcessChangeHub {
 ///   from `events_after` — the durable log is authoritative — typically at
 ///   terminal time.
 /// - **Terminal events are deliberately NOT emitted through the sink.**
-///   [`ProcessRegistry::complete_process`] appends its terminal event via the
-///   *inner* registry internally, so the decorator never observes it as an
-///   `append_event` and never emits it. Do not wait on the sink for
+///   [`ProcessRegistry::complete_process`] and
+///   [`ProcessRegistry::complete_process_with_lease`] append terminal events via
+///   the *inner* registry internally, so the decorator never observes them as
+///   `append_event` calls and never emits them. Do not wait on the sink for
 ///   completion: terminal observation rides
 ///   [`ProcessWorkDriver::await_terminal`](crate::ProcessWorkDriver::await_terminal)
 ///   (see ADR 0016), which reads the durable terminal state.
@@ -492,6 +493,19 @@ impl ProcessRegistry for WatchedProcessRegistry {
             .complete_process(process_id, await_output)
             .await?;
         self.hub.notify(process_id);
+        Ok(record)
+    }
+
+    async fn complete_process_with_lease(
+        &self,
+        lease: &ProcessLease,
+        await_output: ProcessAwaitOutput,
+    ) -> Result<ProcessRecord, PluginError> {
+        let record = self
+            .inner
+            .complete_process_with_lease(lease, await_output)
+            .await?;
+        self.hub.notify(&lease.process_id);
         Ok(record)
     }
 

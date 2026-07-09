@@ -1,4 +1,50 @@
 use super::*;
+use crate::AttachmentStore as _;
+
+struct AttachmentWritingTool;
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for AttachmentWritingTool {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        vec![attachment_writing_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == "write_attachment")
+            .then(|| Arc::new(attachment_writing_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        let reference = match call
+            .context
+            .attachments()
+            .put(
+                vec![4, 2, 4, 2],
+                crate::AttachmentCreateMeta::new(
+                    crate::MediaType::Image(crate::ImageMediaType::Png),
+                    Some(2),
+                    Some(2),
+                    Some("child.png".to_string()),
+                ),
+            )
+            .await
+        {
+            Ok(reference) => reference,
+            Err(err) => return crate::ToolResult::err_fmt(err),
+        };
+        crate::ToolResult::ok(json!({ "attachment_id": reference.id }))
+    }
+}
+
+fn attachment_writing_tool_definition() -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        "tool:write_attachment",
+        "write_attachment",
+        "write a test attachment",
+        crate::ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+}
 
 #[tokio::test]
 async fn session_manager_create_session_accepts_custom_context_overlay() {
@@ -93,6 +139,214 @@ async fn inherited_child_session_carries_parent_tool_state() {
     assert!(
         !tool_names.contains(&"memory_probe"),
         "inherited child should receive the parent's dynamic snapshot, got {tool_names:?}"
+    );
+}
+
+#[tokio::test]
+async fn durable_managed_child_writes_to_its_own_attachment_namespace() {
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: vec![LlmStreamEvent::Part(LlmOutputPart::ToolCall {
+                call_id: "child-attachment-call".to_string(),
+                tool_name: "write_attachment".to_string(),
+                input_json: "{}".to_string(),
+                replay: None,
+            })],
+            response: Ok(LlmResponse::default()),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "done".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "done".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let child_factory = RecordingSessionStoreFactory::default();
+    let root_store = Arc::new(RecordingStore::default());
+    let bytes = Arc::new(crate::InMemoryAttachmentStore::new());
+    let mut host_config = crate::RuntimeHostConfig::in_memory();
+    host_config.durability.attachment_store = bytes.clone();
+    let host = crate::EmbeddedRuntimeHost::new(host_config)
+        .with_session_store_factory(Arc::new(child_factory.clone()));
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let mut runtime = LashRuntime::from_persistent_embedded_state(
+        standard_test_policy(),
+        host,
+        crate::PersistentRuntimeServices::new(
+            plugin_session_with_tools("root", Arc::new(AttachmentWritingTool)),
+            root_store,
+        ),
+        state,
+    )
+    .await
+    .expect("durable root runtime");
+    set_runtime_provider(&mut runtime, transport.into_handle());
+
+    let lifecycle = runtime
+        .session_lifecycle_service()
+        .expect("session lifecycle");
+    let child = lifecycle
+        .create_session(
+            crate::SessionCreateRequest::child_session(
+                "root",
+                crate::SessionStartPoint::Empty,
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("attachment-child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
+        )
+        .await
+        .expect("durable child session");
+    let turn_id = "attachment-child-turn";
+    let controller = crate::ScopedEffectController::shared(
+        Arc::new(crate::InlineRuntimeEffectController),
+        crate::ExecutionScope::turn(&child.session_id, turn_id),
+    )
+    .expect("child effect controller");
+    let request = crate::SessionTurnRequest::new(
+        &child.session_id,
+        turn_id,
+        TurnInput::text("write the attachment"),
+        controller,
+    )
+    .expect("child turn request");
+    lifecycle.start_turn(request).await.expect("child turn");
+
+    let id = crate::attachments::content_id(&[4, 2, 4, 2]);
+    assert_eq!(
+        bytes
+            .get_for_session("attachment-child", &id)
+            .await
+            .expect("child attachment bytes")
+            .bytes,
+        vec![4, 2, 4, 2]
+    );
+    assert!(matches!(
+        bytes.get_for_session("root", &id).await,
+        Err(crate::AttachmentStoreError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn same_session_rebuild_preserves_only_that_sessions_pending_attachment_ids() {
+    let root_store = Arc::new(RecordingStore::default());
+    let bytes = Arc::new(crate::InMemoryAttachmentStore::new());
+    let mut host_config = crate::RuntimeHostConfig::in_memory();
+    host_config.durability.attachment_store = bytes.clone();
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let mut runtime = LashRuntime::from_persistent_embedded_state(
+        standard_test_policy(),
+        crate::EmbeddedRuntimeHost::new(host_config),
+        crate::PersistentRuntimeServices::new(
+            plugin_session_with_tools("root", Arc::new(EmptyTools)),
+            root_store,
+        ),
+        state,
+    )
+    .await
+    .expect("durable root runtime");
+
+    let first = runtime
+        .host
+        .core
+        .durability
+        .attachment_store
+        .put(
+            vec![1, 2, 3],
+            crate::AttachmentCreateMeta::new(
+                crate::MediaType::Image(crate::ImageMediaType::Png),
+                Some(1),
+                Some(1),
+                Some("before-rebuild.png".to_string()),
+            ),
+        )
+        .await
+        .expect("attachment before rebuild");
+    assert_eq!(
+        runtime
+            .host
+            .core
+            .durability
+            .attachment_store
+            .pending_manifest_commit_ids(),
+        vec![first.id.clone()]
+    );
+
+    runtime
+        .branch_to_node(None)
+        .await
+        .expect("same-session rebuild");
+    assert_eq!(
+        runtime
+            .host
+            .core
+            .durability
+            .attachment_store
+            .pending_manifest_commit_ids(),
+        vec![first.id.clone()],
+        "same-session rebinding must carry uncommitted attachment intents"
+    );
+
+    let second = runtime
+        .host
+        .core
+        .durability
+        .attachment_store
+        .put(
+            vec![4, 5, 6],
+            crate::AttachmentCreateMeta::new(
+                crate::MediaType::Image(crate::ImageMediaType::Png),
+                Some(1),
+                Some(1),
+                Some("after-rebuild.png".to_string()),
+            ),
+        )
+        .await
+        .expect("attachment after rebuild");
+    let mut expected = vec![first.id.clone(), second.id.clone()];
+    expected.sort();
+    assert_eq!(
+        runtime
+            .host
+            .core
+            .durability
+            .attachment_store
+            .pending_manifest_commit_ids(),
+        expected
+    );
+    runtime
+        .host
+        .core
+        .durability
+        .attachment_store
+        .mark_manifest_committed(&[first.id.clone(), second.id.clone()]);
+    assert!(
+        runtime
+            .host
+            .core
+            .durability
+            .attachment_store
+            .pending_manifest_commit_ids()
+            .is_empty()
+    );
+    assert_eq!(
+        bytes
+            .get_for_session("root", &second.id)
+            .await
+            .expect("rebuilt runtime uses root physical namespace")
+            .bytes,
+        vec![4, 5, 6]
     );
 }
 

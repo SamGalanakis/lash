@@ -547,11 +547,11 @@ pub(crate) fn model_only_boundary_reviews() -> Vec<ModelOnlyBoundaryReview> {
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "worker",
-            status: "runtime_persistence_lease_backed_with_reviewed_worker_task_ceiling",
-            production_abstraction_used: "SessionExecutionLeaseStore claim/reclaim/renew/release, SessionExecutionLease, LeaseOwnerIdentity, and SessionExecutionLeaseCompletion",
-            model_only_scope: "DurableProcessWorker task body launch remains excluded; generated memory runs, generated SQLite dynamic reruns, and Postgres backend contention validate stale completion rejection through real backend lease stores",
+            status: "runtime_session_and_process_registry_backed_with_reviewed_worker_task_ceiling",
+            production_abstraction_used: "SessionExecutionLeaseStore claim/reclaim/renew/release plus ProcessRegistry claim_process_lease and complete_process_with_lease",
+            model_only_scope: "DurableProcessWorker task body launch remains excluded; generated memory runs and generated SQLite dynamic reruns execute production ProcessRegistry fencing, while Postgres backend contention covers the session-lease boundary",
             oracle_id: "sim.oracle.worker-stale-completion-rejected.v1",
-            artifact_evidence: "worker observed payload records runtime_active_lease, runtime_stale_completion, runtime_worker_store.session_execution_lease_reclaimed=true, and stale_completion_rejected=true",
+            artifact_evidence: "worker observed payload records session lease takeover plus process_stale_completion_rejected=true, process_stale_output_absent=true, process_terminal_writer=successor, and process_terminal_event_count=1",
         },
         ModelOnlyBoundaryReview {
             boundary_kind: "backend_failure",

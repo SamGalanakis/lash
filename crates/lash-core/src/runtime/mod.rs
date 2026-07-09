@@ -98,10 +98,11 @@ pub use effect::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, CausalRef, EffectHost,
     ExecutionScope, ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController,
     LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, Resolution,
-    ResolveOutcome, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
-    ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome, ToolCallLaunch,
+    ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeReplay,
+    RuntimeScope, RuntimeSubject, ScopedEffectController, ToolAttemptEffectOutcome,
+    ToolAttemptLaunch, ToolBatchEffectOutcome, ToolCallLaunch,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};

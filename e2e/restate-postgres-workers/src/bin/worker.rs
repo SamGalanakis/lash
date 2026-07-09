@@ -4,7 +4,11 @@ use lash::observe::SessionResume;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput};
 use lash_core::{ExecutionScope, LeaseOwnerIdentity, ProcessEventAppendRequest};
 use lash_postgres_store::PostgresStorage;
-use lash_restate::{LashProcessWorkflow, RestateProcessDeployment, RestateRuntimeEffectController};
+use lash_restate::{
+    LashDurableWaitIndex, LashDurableWaitIndexImpl, LashDurableWaitWorkflow,
+    LashDurableWaitWorkflowImpl, LashProcessWorkflow, RestateProcessDeployment,
+    RestateRuntimeEffectController,
+};
 use restate_sdk::errors::{HandlerResult, TerminalError};
 use restate_sdk::prelude::{Endpoint, WorkflowContext};
 use restate_sdk::serde::Json;
@@ -574,6 +578,8 @@ async fn async_main() -> Result<()> {
     let endpoint = Endpoint::builder()
         .bind(E2eTurnWorkflowImpl::new(state).serve())
         .bind(process_workflow.serve())
+        .bind(LashDurableWaitWorkflowImpl.serve())
+        .bind(LashDurableWaitIndexImpl.serve())
         .build();
     restate_sdk::http_server::HttpServer::new(endpoint)
         .listen_and_serve(addr)

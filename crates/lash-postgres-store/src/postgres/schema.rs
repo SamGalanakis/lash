@@ -120,11 +120,12 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             ON lash_pending_turn_inputs(session_id, claim_id, claim_token);
 
         CREATE TABLE IF NOT EXISTS lash_attachment_manifest (
-            attachment_id TEXT PRIMARY KEY,
+            attachment_id TEXT NOT NULL,
             session_id TEXT NOT NULL,
             canonical_uri TEXT NOT NULL,
             intent_at_ms BIGINT NOT NULL,
-            committed_at_ms BIGINT
+            committed_at_ms BIGINT,
+            PRIMARY KEY (session_id, attachment_id)
         );
         CREATE INDEX IF NOT EXISTS idx_lash_attachment_manifest_uncommitted
             ON lash_attachment_manifest(committed_at_ms)

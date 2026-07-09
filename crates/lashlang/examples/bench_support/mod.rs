@@ -156,6 +156,7 @@ pub fn seeded_state_for(scenario: Scenario) -> State {
             "img".to_string(),
             Value::Image(ImageValue::new(
                 "img-1",
+                "image/png",
                 "chart.png",
                 1234,
                 Some(640),

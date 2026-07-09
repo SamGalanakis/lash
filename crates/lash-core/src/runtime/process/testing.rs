@@ -513,6 +513,88 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         })
     }
 
+    async fn complete_process_with_lease(
+        &self,
+        lease: &ProcessLease,
+        await_output: ProcessAwaitOutput,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(&lease.process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{}`",
+                lease.process_id
+            )));
+        };
+        let now = current_epoch_ms();
+        let event_type = match await_output.terminal_state() {
+            ProcessTerminalState::Completed => "process.completed",
+            ProcessTerminalState::Failed => "process.failed",
+            ProcessTerminalState::Cancelled => "process.cancelled",
+            ProcessTerminalState::Abandoned => "process.abandoned",
+        };
+        let request = ProcessEventAppendRequest::new(
+            event_type,
+            serde_json::json!({ "await_output": await_output }),
+        )
+        .with_replay_key(format!(
+            "process:{}:terminal:{event_type}",
+            lease.process_id
+        ));
+        let replay_lookup = request
+            .replay
+            .as_ref()
+            .and_then(|replay| record.keyed_events.get(replay.key.as_str()))
+            .map(|(hash, event)| (hash.clone(), event.clone()));
+        let sequence = record.events.len() as u64 + 1;
+        let prepared =
+            prepare_process_event_append(&record.record, request, sequence, replay_lookup, now)?;
+        if matches!(prepared, super::ProcessEventAppendPlan::Replay { .. }) {
+            return Ok(record.record.clone());
+        }
+
+        let mut leases = self.leases.lock().await;
+        let current = leases
+            .get_mut(&lease.process_id)
+            .filter(|current| {
+                !current.lease_token.is_empty()
+                    && current.owner.same_incarnation(&lease.owner)
+                    && current.lease_token == lease.lease_token
+                    && current.fencing_token == lease.fencing_token
+                    && current.expires_at_epoch_ms > now
+            })
+            .ok_or_else(|| process_lease_expired(&lease.process_id))?;
+        match prepared {
+            super::ProcessEventAppendPlan::Replay { .. } => unreachable!("replay returned above"),
+            super::ProcessEventAppendPlan::Insert {
+                event,
+                payload_hash,
+                status_update,
+                occurred_at_ms,
+                ..
+            } => {
+                if let Some(status) = status_update {
+                    super::apply_process_status_projection(
+                        &mut record.record,
+                        status,
+                        occurred_at_ms,
+                    );
+                }
+                if let Some(replay) = event.invocation.replay.clone() {
+                    record
+                        .keyed_events
+                        .insert(replay.key, (payload_hash, event.clone()));
+                }
+                record.events.push(event);
+            }
+        }
+        record.change_seq = self.next_change_seq().await;
+        current.owner = crate::LeaseOwnerIdentity::opaque("", "");
+        current.lease_token.clear();
+        current.claimed_at_epoch_ms = 0;
+        current.expires_at_epoch_ms = 0;
+        Ok(record.record.clone())
+    }
+
     async fn record_first_started(
         &self,
         process_id: &str,
