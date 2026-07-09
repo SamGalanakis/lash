@@ -94,10 +94,6 @@ impl ProviderHandle {
         self.components.model_policy.model_capability(model)
     }
 
-    pub fn model_capability(&self, model: &str) -> ModelCapability {
-        self.components.model_policy.model_capability(model)
-    }
-
     pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
         let capability = self.model_capability(model);
         let Some(reasoning) = capability.reasoning else {
