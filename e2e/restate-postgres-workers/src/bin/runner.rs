@@ -1206,6 +1206,10 @@ async fn assert_worker_distribution(pool: &sqlx::PgPool) -> Result<()> {
 
 async fn assert_failover(pool: &sqlx::PgPool) -> Result<()> {
     for workflow_id in ["e2e-failover", "e2e-tool-batch-failover"] {
+        // The crash injector keeps the marker's logical worker unavailable for
+        // this workflow even after Compose restarts its container. Completion
+        // therefore proves takeover by the healthy peer rather than depending
+        // on whether the crashed container wins the restart/retry race.
         let exit_worker: String = sqlx::query_scalar(
             "SELECT worker_id
              FROM lash_e2e_failover_markers

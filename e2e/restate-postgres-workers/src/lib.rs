@@ -1143,7 +1143,12 @@ impl E2eTools {
             result.clone(),
         )
         .await;
-        if self.fail_once && claim_failover_marker(&self.pool, &workflow_id, &self.worker_id).await
+        // This scenario proves peer takeover, not merely container restart.
+        // Once a logical worker claims the crash marker, every reincarnation
+        // of that same worker keeps exiting for this workflow until the proxy
+        // sends Restate's retry to the other worker.
+        if self.fail_once
+            && should_exit_for_peer_failover(&self.pool, &workflow_id, &self.worker_id).await
         {
             let _ = record_worker_event(
                 &self.pool,
@@ -1332,8 +1337,8 @@ async fn record_durable_step(
     Ok(count)
 }
 
-async fn claim_failover_marker(pool: &PgPool, workflow_id: &str, worker_id: &str) -> bool {
-    match sqlx::query(
+async fn should_exit_for_peer_failover(pool: &PgPool, workflow_id: &str, worker_id: &str) -> bool {
+    let inserted = match sqlx::query(
         "INSERT INTO lash_e2e_failover_markers (workflow_id, worker_id, created_at_ms)
          VALUES ($1, $2, $3)
          ON CONFLICT (workflow_id) DO NOTHING",
@@ -1347,6 +1352,24 @@ async fn claim_failover_marker(pool: &PgPool, workflow_id: &str, worker_id: &str
         Ok(result) => result.rows_affected() == 1,
         Err(err) => {
             tracing::error!(workflow_id, worker_id, error = %err, "failed to claim failover marker");
+            return false;
+        }
+    };
+    if inserted {
+        return true;
+    }
+
+    match sqlx::query_scalar::<_, String>(
+        "SELECT worker_id FROM lash_e2e_failover_markers WHERE workflow_id = $1",
+    )
+    .bind(workflow_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(exit_worker)) => exit_worker == worker_id,
+        Ok(None) => false,
+        Err(err) => {
+            tracing::error!(workflow_id, worker_id, error = %err, "failed to read failover marker");
             false
         }
     }
