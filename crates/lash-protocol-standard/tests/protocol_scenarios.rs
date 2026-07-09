@@ -448,6 +448,7 @@ fn standard_config() -> TurnMachineConfig {
         max_context_tokens: None,
         max_turns: None,
         model_variant: None,
+        model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         autonomous: false,
         tool_specs: Vec::new().into(),

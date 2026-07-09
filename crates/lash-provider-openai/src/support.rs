@@ -15,12 +15,12 @@ pub(crate) use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
 // assertions (the request/response shapes that exercise the shared Responses
 // input builder), so gate the re-export to test builds to keep the non-test
 // lib free of unused-import warnings.
-pub(crate) use crate::schema::{model_id, responses_error_is_retryable};
+pub(crate) use crate::schema::responses_error_is_retryable;
 #[cfg(test)]
 pub(crate) use lash_core::llm::types::{LlmRequestScope, ResponseTextMeta};
 pub(crate) use lash_core::provider::{
-    CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy,
-    ProviderOptions, resolve_generation_policy,
+    CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderOptions,
+    resolve_generation_policy,
 };
 pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 pub(crate) use lash_llm_transport::timeouts::response_start_timeout;
@@ -36,5 +36,4 @@ pub(crate) use crate::chat::*;
 pub(crate) use crate::common::*;
 pub(crate) use crate::config::*;
 pub(crate) use crate::driver::*;
-pub(crate) use crate::policy::*;
 pub(crate) use crate::responses_shared::{ResponsesStreamState, role_name, tool_choice_value};

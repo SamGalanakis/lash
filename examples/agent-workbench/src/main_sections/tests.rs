@@ -27,7 +27,9 @@ mod tests {
         .expect("runtime thread")
     }
 
-    pub(super) fn explicit_durable_test_facets(data_dir: &std::path::Path) -> lash::LashCoreBuilder {
+    pub(super) fn explicit_durable_test_facets(
+        data_dir: &std::path::Path,
+    ) -> lash::LashCoreBuilder {
         let artifact_store = Arc::new(sync_await({
             let path = data_dir.join("artifacts.db");
             async move {
@@ -492,7 +494,10 @@ finish "observed through live replay"
                         saw_final_value_observation = true;
                     }
                 }
-                StreamItem::ReplayGap { .. } | StreamItem::Message { .. } | StreamItem::Error { .. } | StreamItem::Done => {}
+                StreamItem::ReplayGap { .. }
+                | StreamItem::Message { .. }
+                | StreamItem::Error { .. }
+                | StreamItem::Done => {}
             }
             if saw_cursor && saw_final_value_observation {
                 break;
@@ -669,7 +674,9 @@ finish "gap source"
             lash_restate::RestateInvocationId::new("inv_cancel"),
         );
 
-        let Json(accepted) = cancel_turn(State(state.clone())).await.expect("cancel turn");
+        let Json(accepted) = cancel_turn(State(state.clone()))
+            .await
+            .expect("cancel turn");
 
         assert!(accepted.accepted);
         assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
@@ -731,11 +738,7 @@ finish "gap source"
             .process_registry(Arc::clone(&process_registry))
             .build()
             .expect("build core");
-        let session = core
-            .session(session_id)
-            .open()
-            .await
-            .expect("open session");
+        let session = core.session(session_id).open().await.expect("open session");
 
         let tool_names = session
             .tools()
@@ -815,11 +818,7 @@ finish initial
             .process_registry(Arc::clone(&process_registry))
             .build()
             .expect("build core");
-        let session = core
-            .session(session_id)
-            .open()
-            .await
-            .expect("open session");
+        let session = core.session(session_id).open().await.expect("open session");
 
         let output = tokio::time::timeout(
             Duration::from_secs(5),
@@ -1086,8 +1085,7 @@ finish initial
             .expect("list handles after reopen");
         assert_eq!(reopened_handles.len(), 1);
         assert_eq!(
-            reopened_handles[0].status_label,
-            "completed",
+            reopened_handles[0].status_label, "completed",
             "{:?}",
             reopened_handles[0].lifecycle
         );
@@ -1146,7 +1144,9 @@ finish initial
         assert!(wake.input.contains("button_pressed"));
         assert!(wake.input.contains("Red"));
         assert!(
-            wake.target_scope_id.as_str().starts_with(&target_scope_prefix),
+            wake.target_scope_id
+                .as_str()
+                .starts_with(&target_scope_prefix),
             "process wake should target the current session's active frame, got {}",
             wake.target_scope_id
         );
@@ -1210,12 +1210,12 @@ finish initial
         );
         let provider = lash::testing::TestProvider::builder()
             .kind("workbench-test")
-            .supported_variants(|_| &["low", "medium", "high"])
             .complete(|_| async { Ok(trigger_registration_response()) })
             .build()
             .into_handle();
         let model =
             lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+        let model = with_workbench_model_capability(model);
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let (event_tx, _) = broadcast::channel(1024);
         let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
@@ -1289,12 +1289,9 @@ finish initial
         assert_eq!(selected_model.model, "button-model");
         assert_eq!(selected_model.model_variant.as_deref(), Some("high"));
         assert!(
-            state
-                .messages_snapshot()
-                .iter()
-                .any(|message| {
-                    message.role == "event" && message.text == "blue button trigger occurrence"
-                }),
+            state.messages_snapshot().iter().any(|message| {
+                message.role == "event" && message.text == "blue button trigger occurrence"
+            }),
             "button click should publish the local accepted event"
         );
 
@@ -1359,7 +1356,10 @@ finish initial
             .expect("bind mock Restate admin");
         let addr = listener.local_addr().expect("mock Restate admin addr");
         let app = Router::new()
-            .route("/{*path}", axum::routing::patch(capture_restate_admin_patch))
+            .route(
+                "/{*path}",
+                axum::routing::patch(capture_restate_admin_patch),
+            )
             .with_state(tx);
         tokio::spawn(async move {
             if let Err(err) = axum::serve(listener, app).await {
@@ -1470,8 +1470,7 @@ finish initial
         let started = emit_test_button_trigger(&state.core, ButtonChoice::Red).await;
         assert_remote_trigger_emit_report_round_trip(&started);
         let trigger_records =
-            assert_remote_trigger_subscription_records_round_trip(&data_dir, &old_session_id)
-                .await;
+            assert_remote_trigger_subscription_records_round_trip(&data_dir, &old_session_id).await;
         assert_eq!(trigger_records.len(), 1);
         assert_eq!(started.started_process_ids().len(), 1);
         let old_work_before_reset = state
@@ -1686,9 +1685,13 @@ finish initial
             restate::submit_user_turn(state, request),
         )
         .await
-            .expect("Restate-backed workbench turn timed out")
-            .expect("finish Restate-backed workbench turn");
-        state.track_restate_invocation(&state.current_session_id(), &turn_id, invocation_id.clone());
+        .expect("Restate-backed workbench turn timed out")
+        .expect("finish Restate-backed workbench turn");
+        state.track_restate_invocation(
+            &state.current_session_id(),
+            &turn_id,
+            invocation_id.clone(),
+        );
         invocation_id
     }
 
@@ -1710,7 +1713,9 @@ finish initial
             {
                 Some(status) if status.completed_successfully() => return,
                 Some(status) if status.status == "completed" => {
-                    panic!("Restate invocation {invocation_id} completed unsuccessfully: {status:#?}")
+                    panic!(
+                        "Restate invocation {invocation_id} completed unsuccessfully: {status:#?}"
+                    )
                 }
                 Some(status) => {
                     assert!(
@@ -1737,10 +1742,7 @@ finish initial
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let active = admin
-                .unfinished_invocations_for_service_prefixes(&[
-                    "Workbench",
-                    "LashProcessWorkflow",
-                ])
+                .unfinished_invocations_for_service_prefixes(&["Workbench", "LashProcessWorkflow"])
                 .await
                 .expect("query active Lash Restate invocations");
             if active.is_empty() {
@@ -1802,7 +1804,6 @@ finish initial
         let response_index_for_provider = Arc::clone(&response_index);
         let provider = lash::testing::TestProvider::builder()
             .kind("workbench-restate-e2e")
-            .supported_variants(|_| &["high"])
             .complete(move |_| {
                 let response_index = Arc::clone(&response_index_for_provider);
                 async move {
@@ -1823,6 +1824,7 @@ finish initial
         let model =
             lash::ModelSpec::from_token_limits("mock-model", Some("high".to_string()), 4096, None)
                 .expect("model spec");
+        let model = with_workbench_model_capability(model);
         let process_deployment = lash_restate::RestateProcessDeployment::new(
             restate_ingress_url.clone(),
             Arc::clone(&process_registry),
@@ -2213,10 +2215,7 @@ finish initial
             .run()
             .await
             .expect("register trigger route");
-        assert_eq!(
-            output.final_value(),
-            Some(&serde_json::json!("registered"))
-        );
+        assert_eq!(output.final_value(), Some(&serde_json::json!("registered")));
     }
 
     async fn assert_remote_trigger_subscription_records_round_trip(
@@ -2227,9 +2226,8 @@ finish initial
             .await
             .expect("open trigger store for remote DTO round trip");
         let filter = lash::triggers::TriggerSubscriptionFilter::for_session(session_id);
-        let remote_filter = lash_remote_protocol::RemoteTriggerSubscriptionFilter::from(
-            filter.clone(),
-        );
+        let remote_filter =
+            lash_remote_protocol::RemoteTriggerSubscriptionFilter::from(filter.clone());
         remote_filter
             .validate()
             .expect("remote trigger subscription filter should validate");
@@ -2281,9 +2279,7 @@ finish initial
         records
     }
 
-    fn assert_remote_trigger_emit_report_round_trip(
-        report: &lash::triggers::TriggerEmitReport,
-    ) {
+    fn assert_remote_trigger_emit_report_round_trip(report: &lash::triggers::TriggerEmitReport) {
         let remote = lash_remote_protocol::RemoteTriggerEmitReport::from(report.clone());
         remote
             .validate()
@@ -2334,9 +2330,8 @@ finish initial
             .session_snapshot(session_id)
             .await
             .expect("capture process work snapshot for remote DTO round trip");
-        let remote_snapshot =
-            lash_remote_protocol::RemoteProcessWorkSnapshot::try_from(snapshot)
-                .expect("process work snapshot should convert to remote DTO");
+        let remote_snapshot = lash_remote_protocol::RemoteProcessWorkSnapshot::try_from(snapshot)
+            .expect("process work snapshot should convert to remote DTO");
         remote_snapshot
             .validate()
             .expect("remote process work snapshot should validate");

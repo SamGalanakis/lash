@@ -400,7 +400,6 @@ fn command_palette_items_include_current_settings_and_theme_choices() {
     crate::theme::set_active_theme(crate::config::ThemeName::Lash);
     let provider = lash_core::testing::TestProvider::builder()
         .kind("codex")
-        .supported_variants(|_| &["low", "xhigh"])
         .build()
         .into_handle();
     let mut app = App::new("gpt-5.5".into(), "test".into(), "test-session-id".into());

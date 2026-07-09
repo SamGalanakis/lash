@@ -19,6 +19,10 @@ pub use attachment::{
     AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType,
 };
 pub use causal::CausalRef;
+pub use llm::capability::{
+    ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError,
+    ReasoningCapability, ReasoningEncoding,
+};
 pub use llm::types::{LlmTerminalReason, ProviderFailureKind};
 pub use plugin::{
     CheckpointKind, PluginMessage, PluginRuntimeEvent, PromptContribution, PromptContributionGate,

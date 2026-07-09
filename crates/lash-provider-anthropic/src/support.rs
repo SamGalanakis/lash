@@ -15,8 +15,8 @@ pub(crate) use lash_core::llm::types::{
     LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay,
 };
 pub(crate) use lash_core::provider::{
-    CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy,
-    ProviderOptions, resolve_generation_policy,
+    CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderOptions,
+    ReasoningEncoding, resolve_generation_policy,
 };
 pub(crate) use lash_core::{
     ProviderSchemaCapabilities, SchemaPurpose, SchemaResolutionError, SchemaResolutionRequest,

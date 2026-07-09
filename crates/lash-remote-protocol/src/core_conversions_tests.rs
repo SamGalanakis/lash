@@ -116,6 +116,20 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         }]),
         tool_choice: core_llm::LlmToolChoice::Auto,
         model_variant: Some("fast".to_string()),
+        model_capability: core_llm::ModelCapability {
+            reasoning: Some(core_llm::ReasoningCapability {
+                efforts: vec!["fast".to_string(), "slow".to_string()],
+                default_effort: Some("fast".to_string()),
+                aliases: std::collections::BTreeMap::from([(
+                    "quick".to_string(),
+                    "fast".to_string(),
+                )]),
+                encoding: core_llm::ReasoningEncoding::Budget(std::collections::BTreeMap::from([
+                    ("slow".to_string(), 2048u32),
+                ])),
+                mandatory: false,
+            }),
+        },
         generation: core_llm::GenerationOptions {
             output_token_cap: NonZeroUsize::new(42),
         },
@@ -137,6 +151,24 @@ fn llm_request_and_response_round_trip_owned_dtos() {
     let core = core_llm::LlmRequest::try_from(remote).expect("core request");
     assert_eq!(core.model, "gpt-test");
     assert_eq!(core.model_variant.as_deref(), Some("fast"));
+    let reasoning = core
+        .model_capability
+        .reasoning
+        .as_ref()
+        .expect("capability must round-trip");
+    assert_eq!(reasoning.efforts, vec!["fast", "slow"]);
+    assert_eq!(reasoning.default_effort.as_deref(), Some("fast"));
+    assert_eq!(
+        reasoning.aliases.get("quick").map(String::as_str),
+        Some("fast")
+    );
+    assert_eq!(
+        reasoning.encoding,
+        core_llm::ReasoningEncoding::Budget(std::collections::BTreeMap::from([(
+            "slow".to_string(),
+            2048u32
+        )]))
+    );
     assert_eq!(core.session_id(), "session-1");
     assert_eq!(core.agent_frame_id(), "session-1:frame:test");
     assert_eq!(core.request_id(), "session-1:request:test");

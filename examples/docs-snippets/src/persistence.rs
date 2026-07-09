@@ -177,7 +177,8 @@ async fn shared_factory(
                 200_000,
                 None,
             )
-            .expect("valid model metadata"),
+            .expect("valid model metadata")
+            .with_capability(adaptive_reasoning_capability()),
         )
         .store_factory(store_factory)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
@@ -190,4 +191,19 @@ async fn shared_factory(
     let session = core.session(chat_id).open().await?;
     // docs:end:shared-factory
     Ok(())
+}
+
+fn adaptive_reasoning_capability() -> lash::provider::ModelCapability {
+    lash::provider::ModelCapability {
+        reasoning: Some(lash::provider::ReasoningCapability {
+            efforts: ["low", "medium", "high"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            default_effort: Some("medium".to_string()),
+            aliases: Default::default(),
+            encoding: lash::provider::ReasoningEncoding::Effort,
+            mandatory: false,
+        }),
+    }
 }

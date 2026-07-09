@@ -124,6 +124,7 @@ impl RuntimeTurnDriver<'_> {
             prepared_prompt,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model.variant.clone(),
+            model_capability: session_policy.model.capability.clone(),
             generation: generation_options_from_provider(session_policy.provider()),
             emit_llm_trace: false,
             termination: self.protocol_turn_options.clone(),
@@ -285,15 +286,24 @@ impl RuntimeTurnDriver<'_> {
         policy: &mut RuntimeSessionPolicy,
     ) -> Result<String, SessionEvent> {
         let model = policy.model.id.clone();
-        if let Some(variant) = policy.model.variant.as_deref()
-            && let Err(message) = policy.provider().validate_variant(&model, variant)
-        {
-            return Err(make_error_event(
-                "llm_provider",
-                Some("invalid_model_variant"),
-                message.clone(),
-                Some(message),
-            ));
+        let provider_kind = policy.provider().kind();
+        // Validate the requested effort against the host-supplied capability
+        // and normalize (alias-clamp) it back onto the spec so the outgoing
+        // request carries the canonical effort the provider expects.
+        match policy.model.capability.validate_effort(
+            &model,
+            provider_kind,
+            policy.model.variant.as_deref(),
+        ) {
+            Ok(resolved) => policy.model.variant = resolved,
+            Err(error) => {
+                return Err(make_error_event(
+                    "llm_provider",
+                    Some(error.category.code()),
+                    error.message.clone(),
+                    Some(error.message),
+                ));
+            }
         }
         Ok(model)
     }

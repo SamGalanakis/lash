@@ -1,9 +1,10 @@
 //! Provider components for pluggable LLM backends.
 //!
 //! A provider is split into narrow capabilities: configured state,
-//! request transport, failure classification, and model policy.
-//! [`ProviderHandle`] owns those components and is the executable handle
-//! installed by the host for a running session.
+//! request transport, and failure classification. [`ProviderHandle`] owns
+//! those components and is the executable handle installed by the host for a
+//! running session. Model capability metadata is host-supplied data that
+//! travels with each request; the provider does not produce it.
 //!
 //! [`ProviderSpec`] is only a host/config-file data shape. Runtime
 //! persistence records provider identity separately and never rebuilds a
@@ -11,7 +12,6 @@
 
 mod factory;
 mod handle;
-mod model_policy;
 mod options;
 mod rate_limit;
 mod resolver;
@@ -23,7 +23,10 @@ mod traits;
 
 pub use factory::ProviderFactory;
 pub use handle::{ProviderComponents, ProviderHandle, UnconfiguredProvider};
-pub use model_policy::StaticModelPolicy;
+pub use lash_sansio::llm::capability::{
+    ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError,
+    ReasoningCapability, ReasoningEncoding,
+};
 pub use options::{
     CacheRetention, DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS,
     DEFAULT_THROTTLE_WAIT_BUDGET_MS, LlmTimeouts, ProviderOptions, ProviderRateLimitPolicy,
@@ -37,6 +40,5 @@ pub use resolver::{
 };
 pub use spec::ProviderSpec;
 pub use traits::{
-    DefaultProviderFailureClassifier, Provider, ProviderFailureClassifier, ProviderModelPolicy,
-    is_context_overflow_text,
+    DefaultProviderFailureClassifier, Provider, ProviderFailureClassifier, is_context_overflow_text,
 };

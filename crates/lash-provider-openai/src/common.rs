@@ -17,9 +17,6 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 
-pub(crate) const OPENROUTER_REASONING_VARIANTS: &[&str] =
-    &["none", "minimal", "low", "medium", "high", "xhigh"];
-
 pub(crate) static DEFAULT_HTTP_TRANSPORT: LazyLock<Arc<dyn LlmHttpTransport>> =
     LazyLock::new(|| Arc::new(ReqwestLlmHttpTransport::new()));
 

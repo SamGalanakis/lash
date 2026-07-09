@@ -1075,11 +1075,13 @@ impl From<lash_core::ModelSpec> for RemoteProcessModelSpec {
         let lash_core::ModelSpec {
             id,
             variant,
+            capability,
             limits,
         } = value;
         Self {
             id,
             variant,
+            capability: capability.into(),
             limits: limits.into(),
         }
     }
@@ -1092,9 +1094,10 @@ impl TryFrom<RemoteProcessModelSpec> for lash_core::ModelSpec {
         let RemoteProcessModelSpec {
             id,
             variant,
+            capability,
             limits,
         } = value;
-        lash_core::ModelSpec::from_token_limits(
+        Ok(lash_core::ModelSpec::from_token_limits(
             id,
             variant,
             limits.context_window_tokens,
@@ -1103,7 +1106,8 @@ impl TryFrom<RemoteProcessModelSpec> for lash_core::ModelSpec {
         .map_err(|err| RemoteProtocolError::InvalidEnvelope {
             type_name: "RemoteProcessExecutionPolicy",
             message: err,
-        })
+        })?
+        .with_capability(capability.into()))
     }
 }
 

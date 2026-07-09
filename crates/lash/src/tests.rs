@@ -1533,15 +1533,6 @@ fn recording_text_provider(
 ) -> ProviderHandle {
     crate::testing::TestProvider::builder()
         .kind(kind)
-        .supported_variants(|_| {
-            &[
-                "core-variant",
-                "session-variant",
-                "turn-variant",
-                "updated-variant",
-                "manual-variant",
-            ]
-        })
         .complete(move |request| {
             let seen = Arc::clone(&seen);
             async move {
@@ -1809,7 +1800,9 @@ fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message 
 mod control_admin;
 mod core_session_builder;
 mod harness;
-use harness::{mock_model_spec, model_spec, run_async_test_on_stack_budget};
+use harness::{
+    mock_model_spec, model_spec, run_async_test_on_stack_budget, run_async_test_on_stack_size,
+};
 mod agent_scenarios;
 mod plugin_stack;
 mod processes_endstate;

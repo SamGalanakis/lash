@@ -2,6 +2,7 @@ mod activity;
 mod app;
 mod assistant_text;
 mod autonomous;
+mod capability_catalog;
 mod chrome_ui;
 mod clipboard;
 mod command;

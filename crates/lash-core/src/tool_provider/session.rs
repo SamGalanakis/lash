@@ -8,6 +8,7 @@ use crate::plugin::{
 pub struct ToolSessionModel {
     pub model: String,
     pub model_variant: Option<String>,
+    pub model_capability: crate::provider::ModelCapability,
 }
 
 #[derive(Clone)]
@@ -24,6 +25,7 @@ impl<'run> ToolSessionAdmin<'run> {
         Ok(ToolSessionModel {
             model: snapshot.policy.model.id,
             model_variant: snapshot.policy.model.variant,
+            model_capability: snapshot.policy.model.capability,
         })
     }
 

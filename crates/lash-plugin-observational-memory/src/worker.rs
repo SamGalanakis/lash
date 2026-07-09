@@ -67,6 +67,7 @@ async fn run_worker_turn(
             DirectRequest {
                 model: policy.model.id,
                 model_variant: policy.model.variant,
+                model_capability: policy.model.capability,
                 messages: vec![
                     DirectMessage {
                         role: DirectRole::System,

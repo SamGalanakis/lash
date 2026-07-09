@@ -112,11 +112,21 @@ async fn restore_model_from_graph_config(
     app.model = restored_model.to_string();
     app.usage.context_window = Some(restored_context_window);
     if let Some(rt) = runtime.as_mut() {
+        // Re-attach host capability from the current catalog: persisted specs
+        // predating the capability field carry an empty one.
+        let restored_spec =
+            config
+                .model
+                .clone()
+                .with_capability(crate::capability_catalog::capability_for(
+                    provider.kind(),
+                    restored_model,
+                ));
         let _ = rt
             .admin()
             .config()
             .update(SessionConfigPatch {
-                model: Some(config.model.clone()),
+                model: Some(restored_spec),
                 ..SessionConfigPatch::default()
             })
             .await;
@@ -192,14 +202,7 @@ async fn apply_graph_resume_state(
     *current_model_variant = config
         .as_ref()
         .and_then(|state| state.model.variant.clone())
-        .or_else(|| {
-            crate::provider_metadata::default_model_variant_for_provider(
-                provider.kind(),
-                &app.model,
-                provider.supported_variants(&app.model),
-            )
-            .map(str::to_string)
-        });
+        .or_else(|| crate::model_selection::default_variant(provider, &app.model));
     app.set_model_variant(current_model_variant.clone());
 
     let _ = execution_mode;

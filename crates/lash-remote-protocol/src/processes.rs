@@ -1019,6 +1019,11 @@ pub struct RemoteProcessModelSpec {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::llm::RemoteModelCapability::is_empty"
+    )]
+    pub capability: crate::llm::RemoteModelCapability,
     #[serde(default)]
     pub limits: RemoteProcessModelLimits,
 }

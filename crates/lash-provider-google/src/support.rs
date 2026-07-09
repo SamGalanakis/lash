@@ -14,7 +14,7 @@ pub(crate) use lash_core::llm::types::{
     ResponseTextMeta,
 };
 pub(crate) use lash_core::provider::{
-    Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
+    Provider, ProviderComponents, ProviderFactory, ProviderOptions, ReasoningEncoding,
     resolve_generation_policy,
 };
 pub(crate) use lash_llm_transport::normalize::{

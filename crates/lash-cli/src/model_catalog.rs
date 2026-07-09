@@ -63,8 +63,20 @@ impl ResolvedModelSpec {
         self.info.prompt_budget_tokens()
     }
 
-    pub(crate) fn into_model_spec(self, variant: Option<String>) -> Result<ModelSpec, String> {
-        self.info.to_model_spec(self.provider_model, variant)
+    /// Build the runtime [`ModelSpec`], attaching the host-supplied capability
+    /// for `(provider_kind, model)` so lash-core can validate the variant and
+    /// the provider can consume it.
+    pub(crate) fn into_model_spec(
+        self,
+        provider_kind: &str,
+        variant: Option<String>,
+    ) -> Result<ModelSpec, String> {
+        let capability =
+            crate::capability_catalog::capability_for(provider_kind, &self.provider_model);
+        Ok(self
+            .info
+            .to_model_spec(self.provider_model, variant)?
+            .with_capability(capability))
     }
 }
 

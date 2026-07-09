@@ -80,7 +80,11 @@ fn fallback_policy_for_session_switch(
         app.usage.context_window.unwrap_or(1) as usize,
         None,
     )
-    .unwrap_or_else(|_| lash_core::ModelSpec::default());
+    .unwrap_or_else(|_| lash_core::ModelSpec::default())
+    .with_capability(crate::capability_catalog::capability_for(
+        provider.kind(),
+        &app.model,
+    ));
     SessionPolicy {
         provider_id: provider.kind().to_string(),
         model,

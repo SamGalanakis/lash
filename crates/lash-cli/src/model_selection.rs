@@ -119,34 +119,44 @@ pub(crate) fn resolve_model_selection(
     })
 }
 
+/// The catalog's recommended default variant for `model` on this provider, or
+/// `None` when the model exposes no configurable effort.
+pub(crate) fn default_variant(provider: &ProviderHandle, model: &str) -> Option<String> {
+    crate::capability_catalog::capability_for(provider.kind(), model)
+        .reasoning
+        .and_then(|reasoning| reasoning.default_effort)
+}
+
+/// The effort levels `model` exposes on this provider (empty when none).
+pub(crate) fn supported_efforts(provider: &ProviderHandle, model: &str) -> Vec<String> {
+    crate::capability_catalog::capability_for(provider.kind(), model)
+        .reasoning
+        .map(|reasoning| reasoning.efforts)
+        .unwrap_or_default()
+}
+
 pub(crate) fn resolve_model_variant(
     provider: &ProviderHandle,
     model: &str,
     requested: Option<&str>,
 ) -> Result<Option<String>, String> {
+    let capability = crate::capability_catalog::capability_for(provider.kind(), model);
     let Some(raw) = requested else {
-        return Ok(
-            crate::provider_metadata::default_model_variant_for_provider(
-                provider.kind(),
-                model,
-                provider.supported_variants(model),
-            )
-            .map(str::to_string),
-        );
+        return Ok(capability
+            .reasoning
+            .and_then(|reasoning| reasoning.default_effort));
     };
     let variant = parse_variant_input(raw)?;
     if variant == "default" {
-        return Ok(
-            crate::provider_metadata::default_model_variant_for_provider(
-                provider.kind(),
-                model,
-                provider.supported_variants(model),
-            )
-            .map(str::to_string),
-        );
+        return Ok(capability
+            .reasoning
+            .and_then(|reasoning| reasoning.default_effort));
     }
-    provider.validate_variant(model, &variant)?;
-    Ok(Some(variant))
+    // Validate through the same seam the runtime uses; the returned effort is
+    // alias-normalized (e.g. `minimal` -> `low`).
+    capability
+        .validate_effort(model, provider.kind(), Some(&variant))
+        .map_err(|err| err.to_string())
 }
 
 pub(crate) fn variant_lines(
@@ -154,7 +164,7 @@ pub(crate) fn variant_lines(
     model: &str,
     current_variant: Option<&str>,
 ) -> Vec<String> {
-    let supported = provider.supported_variants(model);
+    let supported = supported_efforts(provider, model);
     let mut lines = Vec::new();
     if supported.is_empty() {
         lines.push(format!(
@@ -168,11 +178,7 @@ pub(crate) fn variant_lines(
         "Current variant: `{}`",
         current_variant.unwrap_or("(none)")
     ));
-    if let Some(default_variant) = crate::provider_metadata::default_model_variant_for_provider(
-        provider.kind(),
-        model,
-        supported,
-    ) {
+    if let Some(default_variant) = default_variant(provider, model) {
         lines.push(format!("Recommended default: `{}`", default_variant));
     }
     lines.push(format!("Available variants: {}", supported.join(", ")));
@@ -193,6 +199,101 @@ pub(crate) fn expose_provider_thinking(provider: &mut ProviderHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash_core::testing::TestProvider;
+
+    fn provider(kind: &'static str) -> ProviderHandle {
+        TestProvider::builder().kind(kind).build().into_handle()
+    }
+
+    fn resolved(configured: &str, wire: &str) -> ResolvedModelSpec {
+        ResolvedModelSpec {
+            configured_model: configured.to_string(),
+            provider_model: wire.to_string(),
+            catalog_model_id: format!("catalog/{configured}"),
+            info: ModelInfo {
+                context_window: 200_000,
+                max_input_tokens: Some(200_000),
+                max_output_tokens: None,
+            },
+        }
+    }
+
+    #[test]
+    fn selecting_a_model_attaches_the_matching_capability_to_the_spec() {
+        let spec = resolved("claude-opus-4-7", "claude-opus-4-7")
+            .into_model_spec("anthropic", Some("xhigh".to_string()))
+            .expect("spec");
+        assert_eq!(spec.variant.as_deref(), Some("xhigh"));
+        assert_eq!(
+            spec.capability,
+            crate::capability_catalog::capability_for("anthropic", "claude-opus-4-7")
+        );
+        let reasoning = spec.capability.reasoning.expect("reasoning attached");
+        assert_eq!(reasoning.default_effort.as_deref(), Some("xhigh"));
+        assert!(reasoning.efforts.contains(&"xhigh".to_string()));
+    }
+
+    #[test]
+    fn unmatched_model_attaches_empty_capability() {
+        let spec = resolved("mystery-model", "mystery-model")
+            .into_model_spec("anthropic", None)
+            .expect("spec");
+        assert!(spec.capability.is_empty());
+    }
+
+    #[test]
+    fn default_variant_matches_the_catalog_row() {
+        assert_eq!(
+            default_variant(&provider("anthropic"), "claude-opus-4-7").as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            default_variant(&provider("codex"), "gpt-5.5").as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            default_variant(&provider("openai"), "gpt-5.4").as_deref(),
+            Some("medium")
+        );
+    }
+
+    #[test]
+    fn resolve_default_variant_falls_back_to_catalog_default() {
+        assert_eq!(
+            resolve_model_variant(&provider("openai"), "gpt-5.4", None).expect("ok"),
+            Some("medium".to_string())
+        );
+        assert_eq!(
+            resolve_model_variant(&provider("openai"), "gpt-5.4", Some("default")).expect("ok"),
+            Some("medium".to_string())
+        );
+    }
+
+    #[test]
+    fn unsupported_variant_is_rejected_with_unsupported_effort_message() {
+        let err = resolve_model_variant(&provider("openai"), "gpt-5.4", Some("turbo"))
+            .expect_err("turbo is not an exposed effort");
+        assert!(err.contains("Unsupported effort `turbo`"), "message: {err}");
+        assert!(err.contains("gpt-5.4"), "names the model: {err}");
+    }
+
+    #[test]
+    fn minimal_on_openai_gpt_5_4_resolves_to_low_via_alias() {
+        assert_eq!(
+            resolve_model_variant(&provider("openai"), "gpt-5.4", Some("minimal")).expect("ok"),
+            Some("low".to_string())
+        );
+    }
+
+    #[test]
+    fn variant_on_a_model_without_efforts_is_not_configurable() {
+        let err = resolve_model_variant(&provider("anthropic"), "mystery-model", Some("high"))
+            .expect_err("no efforts exposed");
+        assert!(
+            err.contains("does not expose configurable effort"),
+            "message: {err}"
+        );
+    }
 
     #[test]
     fn codex_route_clamps_prompt_budget_to_input_ceiling() {

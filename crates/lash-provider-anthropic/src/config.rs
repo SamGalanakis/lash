@@ -3,7 +3,6 @@
 
 use std::sync::{Arc, LazyLock};
 
-use crate::policy::AnthropicModelPolicy;
 use crate::support::*;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -55,7 +54,7 @@ impl AnthropicProvider {
     }
 
     pub fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(Box::new(self), Arc::new(AnthropicModelPolicy))
+        ProviderComponents::new(Box::new(self))
     }
 }
 

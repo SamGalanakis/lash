@@ -301,6 +301,7 @@ fn checkpoint_config(
         max_context_tokens: None,
         max_turns: Some(8),
         model_variant: None,
+        model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         autonomous: false,
         tool_specs: Arc::new(Vec::new()),

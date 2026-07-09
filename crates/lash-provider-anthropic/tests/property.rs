@@ -100,6 +100,7 @@ fn request(deltas: Arc<Mutex<Vec<String>>>) -> LlmRequest {
         tools: Arc::new(Vec::<LlmToolSpec>::new()),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
+        model_capability: Default::default(),
         scope: lash_core::LlmRequestScope::new(
             "session-1",
             "session-1:frame:test",

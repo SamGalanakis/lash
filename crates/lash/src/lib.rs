@@ -432,7 +432,8 @@ pub mod provider {
     /// gates, metrics taps) against the facade alone.
     pub use lash_core::{LlmRequest, LlmRequestScope, LlmResponse, LlmTransportError};
     pub use lash_core::{
-        LlmTimeouts, Provider, ProviderComponents, ProviderFactory, ProviderHandle,
-        ProviderModelPolicy, ProviderOptions, ProviderSpec, RequestTimeout, StaticModelPolicy,
+        LlmTimeouts, ModelCapability, Provider, ProviderComponents, ProviderFactory,
+        ProviderHandle, ProviderOptions, ProviderSpec, ReasoningCapability, ReasoningEncoding,
+        RequestTimeout,
     };
 }

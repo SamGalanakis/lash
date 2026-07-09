@@ -49,7 +49,8 @@ async fn service_core(
                 200_000,
                 None,
             )
-            .expect("valid model metadata"),
+            .expect("valid model metadata")
+            .with_capability(adaptive_reasoning_capability()),
         )
         .store_factory(store_factory)
         .effect_host(std::sync::Arc::new(
@@ -114,7 +115,8 @@ async fn service_turn(
                 200_000,
                 None,
             )
-            .expect("valid model metadata"),
+            .expect("valid model metadata")
+            .with_capability(adaptive_reasoning_capability()),
         )
         .require_finish()?;
 
@@ -126,4 +128,19 @@ async fn service_turn(
     // docs:end:service-turn
     let _ = replay_cursor;
     Ok(())
+}
+
+fn adaptive_reasoning_capability() -> lash::provider::ModelCapability {
+    lash::provider::ModelCapability {
+        reasoning: Some(lash::provider::ReasoningCapability {
+            efforts: ["low", "medium", "high"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            default_effort: Some("medium".to_string()),
+            aliases: Default::default(),
+            encoding: lash::provider::ReasoningEncoding::Effort,
+            mandatory: false,
+        }),
+    }
 }

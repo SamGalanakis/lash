@@ -1,15 +1,5 @@
 use serde_json::Value;
 
-/// Strip a leading `vendor/` prefix from a model id (e.g. `openai/gpt-4o` to
-/// `gpt-4o`). Used by the OpenAI-flavored providers when matching model
-/// families.
-pub fn model_id(model: &str) -> &str {
-    model
-        .rsplit_once('/')
-        .map(|(_, tail)| tail)
-        .unwrap_or(model)
-}
-
 /// Decide whether an error object embedded in a Responses SSE event (or a
 /// non-2xx Responses body) is retryable.
 pub fn responses_error_is_retryable(value: &Value) -> bool {

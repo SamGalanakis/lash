@@ -14,13 +14,12 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::common::{DEFAULT_HTTP_TRANSPORT, DEFAULT_MAX_OUTPUT_TOKENS};
 use crate::responses_shared as shared;
-use crate::schema::model_id;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash_core::llm::types::{LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 use lash_core::provider::{
     CacheRetention, DefaultProviderFailureClassifier, Provider, ProviderComponents,
-    ProviderFactory, ProviderFailureClassifier, ProviderModelPolicy, ProviderOptions,
-    ProviderReliability, resolve_generation_policy,
+    ProviderFactory, ProviderFailureClassifier, ProviderOptions, ProviderReliability,
+    resolve_generation_policy,
 };
 use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
@@ -39,11 +38,6 @@ pub mod ws_testing;
 /// Provider name used in shared-machinery error messages and trace events.
 const PROVIDER: &str = "Codex";
 
-const OPENAI_GPT5_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"];
-const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
-const OPENAI_GPT55_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
-const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
-const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const SESSION_WEBSOCKET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const SESSION_WEBSOCKET_FALLBACK_TTL: Duration = Duration::from_secs(60);
 const MAX_SESSION_WEBSOCKET_CACHE_ENTRIES: usize = 32;
@@ -176,11 +170,6 @@ struct CodexWebsocketRetryState {
     after_dead_reused_connection: bool,
 }
 
-fn has_xhigh_suffix(model: &str) -> bool {
-    let lower = model.to_ascii_lowercase();
-    lower.contains("5.2") || lower.contains("5.3") || lower.contains("5.4")
-}
-
 /// OpenAI Codex OAuth provider (ChatGPT Plus/Pro/Team via device-code flow).
 ///
 /// Codex speaks the OpenAI Responses streaming protocol, so the request/stream
@@ -188,8 +177,7 @@ fn has_xhigh_suffix(model: &str) -> bool {
 /// This module owns only the Codex-specific surface: the
 /// `chatgpt.com/backend-api/codex/responses` endpoint, the `codex_cli_rs`
 /// originator/User-Agent headers, the system→`instructions` request shape with
-/// tool-result image folding, `clamp_reasoning_effort`, and Codex error/quota
-/// classification.
+/// tool-result image folding, and Codex error/quota classification.
 #[derive(Clone, Debug)]
 pub struct CodexProvider {
     pub access_token: String,
@@ -203,9 +191,6 @@ pub struct CodexProvider {
     websocket_url: String,
     http_transport: Arc<dyn LlmHttpTransport>,
 }
-
-#[derive(Clone, Debug)]
-struct CodexModelPolicy;
 
 impl CodexProvider {
     const CODEX_ORIGINATOR: &'static str = "codex_cli_rs";
@@ -397,33 +382,6 @@ impl CodexProvider {
         )
     }
 
-    /// Clamp an incoming reasoning effort string to a value the Codex
-    /// Responses API will accept for the given model. Mirrors the
-    /// `clampReasoningEffort` helper in pi-mono's
-    /// `openai-codex-responses.ts` so that invalid combinations like
-    /// `minimal` on gpt-5.4 or `xhigh` on gpt-5.1-codex-mini don't 4xx.
-    fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
-        // Strip any provider prefix (e.g. "openai/gpt-5.4").
-        let id = model_id(model);
-
-        if (id.starts_with("gpt-5.2") || id.starts_with("gpt-5.3") || id.starts_with("gpt-5.4"))
-            && effort == "minimal"
-        {
-            return "low".to_string();
-        }
-        if id == "gpt-5.1" && effort == "xhigh" {
-            return "high".to_string();
-        }
-        if id == "gpt-5.1-codex-mini" {
-            return if effort == "high" || effort == "xhigh" {
-                "high".to_string()
-            } else {
-                "medium".to_string()
-            };
-        }
-        effort.to_string()
-    }
-
     fn build_request_body(
         &self,
         req: &LlmRequest,
@@ -432,15 +390,16 @@ impl CodexProvider {
         let tools = Self::build_tools(req)?;
         let (instructions, input) =
             shared::build_responses_input(req, shared::ResponsesInputOptions::CODEX);
-        let reasoning_effort = req
+        let requested_effort = req
             .model_variant
             .as_deref()
-            .and_then(|variant| CodexModelPolicy.reasoning_effort(&req.model, variant));
+            .filter(|_| req.model_capability.reasoning.is_some())
+            .map(str::to_owned);
         let policy = resolve_generation_policy(
             &req.generation,
             &self.options,
             DEFAULT_MAX_OUTPUT_TOKENS,
-            reasoning_effort,
+            requested_effort,
         );
         let mut body = json!({
             "model": req.model,
@@ -460,14 +419,14 @@ impl CodexProvider {
         // documented in the prompt body and invoked via `lashlang`, not the
         // native tool-call envelope. Sending `tool_choice: "none"` on top of
         // an empty tool list adds a second "definitely don't call any
-        // function" signal that gpt-5.x reasoning models take literally,
+        // function" signal that reasoning-capable Codex models take literally,
         // causing them to refuse to emit `call` expressions in lashlang.
         if !req.tools.is_empty() {
             body["tool_choice"] = json!(shared::tool_choice_value(&req.tool_choice));
         }
         if let Some(effort) = policy.thinking {
             let mut reasoning = json!({
-                "effort": Self::clamp_reasoning_effort(&req.model, &effort),
+                "effort": effort,
             });
             if policy.expose_thinking {
                 reasoning["summary"] = json!("auto");
@@ -1386,7 +1345,7 @@ impl CodexProvider {
 
 impl CodexProvider {
     pub fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(Box::new(self), std::sync::Arc::new(CodexModelPolicy))
+        ProviderComponents::new(Box::new(self))
             .with_failure_classifier(std::sync::Arc::new(CodexFailureClassifier))
     }
 }
@@ -1412,37 +1371,6 @@ impl ProviderFailureClassifier for CodexFailureClassifier {
             failure.message = summary;
         }
         failure
-    }
-}
-
-impl ProviderModelPolicy for CodexModelPolicy {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        let lower = model.to_ascii_lowercase();
-        if !lower.contains("gpt-5") {
-            return &[];
-        }
-        if model_id(&lower) == "gpt-5.5" {
-            return OPENAI_GPT55_VARIANTS;
-        }
-        if lower.contains("codex") {
-            if has_xhigh_suffix(&lower) {
-                CODEX_XHIGH_VARIANTS
-            } else {
-                CODEX_VARIANTS
-            }
-        } else if has_xhigh_suffix(&lower) {
-            OPENAI_GPT5_XHIGH_VARIANTS
-        } else {
-            OPENAI_GPT5_VARIANTS
-        }
-    }
-}
-
-impl CodexModelPolicy {
-    fn reasoning_effort(&self, model: &str, variant: &str) -> Option<String> {
-        self.supported_variants(model)
-            .contains(&variant)
-            .then(|| variant.to_string())
     }
 }
 
@@ -1852,7 +1780,7 @@ mod tests {
         LlmJsonSchema, LlmMessage, LlmOutputPart, LlmProviderTraceSender, LlmRequestScope, LlmRole,
         LlmTerminalReason, LlmToolChoice, LlmToolSpec, ResponseTextMeta,
     };
-    use lash_core::provider::{Provider, ProviderModelPolicy, RequestTimeout};
+    use lash_core::provider::{ModelCapability, Provider, ReasoningCapability, RequestTimeout};
     use shared::ResponsesStreamState as CodexStreamState;
     use std::num::NonZeroUsize;
     use std::sync::{Arc, Mutex};
@@ -1877,6 +1805,16 @@ mod tests {
         shared::response_from_stream_state(state, None, "test".to_string())
     }
 
+    fn reasoning_capability() -> ModelCapability {
+        ModelCapability {
+            reasoning: Some(ReasoningCapability {
+                efforts: vec!["medium".to_string(), "high".to_string()],
+                default_effort: Some("medium".to_string()),
+                ..ReasoningCapability::default()
+            }),
+        }
+    }
+
     fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         LlmRequest {
             model: "gpt-5.4".to_string(),
@@ -1885,6 +1823,7 @@ mod tests {
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: None,
+            model_capability: ModelCapability::default(),
             scope: LlmRequestScope::new(
                 "session-1",
                 "session-1:frame:test",
@@ -2047,21 +1986,6 @@ mod tests {
     }
 
     #[test]
-    fn gpt_55_variants_match_codex_catalog() {
-        let provider = CodexModelPolicy;
-
-        assert_eq!(
-            provider.supported_variants("gpt-5.5"),
-            ["low", "medium", "high", "xhigh"]
-        );
-        assert_eq!(
-            provider.reasoning_effort("gpt-5.5", "xhigh").as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(provider.reasoning_effort("gpt-5.5", "minimal"), None);
-    }
-
-    #[test]
     fn codex_null_incomplete_details_does_not_map_to_output_limit() {
         let terminal_reason = openai_terminal_reason_from_response_value(
             &json!({"status":"completed","incomplete_details":null}),
@@ -2085,9 +2009,37 @@ mod tests {
     }
 
     #[test]
+    fn codex_request_body_emits_reasoning_from_capability_variant() {
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.model = "custom-codex-model".to_string();
+        req.model_variant = Some("high".to_string());
+        req.model_capability = reasoning_capability();
+
+        let body = CodexProvider::new("access", "refresh", 0)
+            .build_request_body(&req, true)
+            .unwrap();
+
+        assert_eq!(body["reasoning"], json!({ "effort": "high" }));
+    }
+
+    #[test]
+    fn codex_request_body_omits_reasoning_without_capability() {
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.model = "custom-codex-model".to_string();
+        req.model_variant = Some("high".to_string());
+
+        let body = CodexProvider::new("access", "refresh", 0)
+            .build_request_body(&req, true)
+            .unwrap();
+
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
     fn codex_request_body_exposes_reasoning_summary_only_when_configured() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
         req.model_variant = Some("medium".to_string());
+        req.model_capability = reasoning_capability();
 
         let hidden = CodexProvider::new("access", "refresh", 0)
             .build_request_body(&req, true)
@@ -2146,16 +2098,6 @@ mod tests {
 
         assert!(err.retryable);
         assert_eq!(err.message, "internal stream ended unexpectedly");
-    }
-
-    #[test]
-    fn gpt_55_variant_match_ignores_provider_prefix() {
-        let provider = CodexModelPolicy;
-
-        assert_eq!(
-            provider.supported_variants("openai/gpt-5.5"),
-            ["low", "medium", "high", "xhigh"]
-        );
     }
 
     #[test]

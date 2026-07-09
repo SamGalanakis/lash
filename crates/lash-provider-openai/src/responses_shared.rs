@@ -18,9 +18,8 @@
 //! Each provider keeps only its genuine specifics: the OpenAI provider owns
 //! `build_responses_request_body` (surrogate sanitisation, OpenRouter/local
 //! field gating, assistant-message id flushing); Codex owns its request body
-//! (system→`instructions` hoisting, tool-result image folding,
-//! `clamp_reasoning_effort`), its endpoint/headers, and its failure
-//! classification.
+//! (system→`instructions` hoisting and tool-result image folding), its
+//! endpoint/headers, and its failure classification.
 
 use base64::Engine;
 use serde_json::{Value, json};

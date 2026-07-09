@@ -987,10 +987,8 @@ mod tests {
             calls: Arc::clone(&provider_calls),
             saw_batch_result: Arc::clone(&saw_batch_result),
         };
-        let provider_handle = lash_core::ProviderHandle::new(lash_core::ProviderComponents::new(
-            Box::new(provider),
-            Arc::new(lash_core::StaticModelPolicy::new()),
-        ));
+        let provider_handle =
+            lash_core::ProviderHandle::new(lash_core::ProviderComponents::new(Box::new(provider)));
         let mut host = lash_core::RuntimeHostConfig::in_memory();
         host.providers.provider_resolver =
             Arc::new(lash_core::SingleProviderResolver::new(provider_handle));

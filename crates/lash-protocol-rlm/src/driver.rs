@@ -287,6 +287,7 @@ impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::None,
             model_variant: ctx.config.model_variant.clone(),
+            model_capability: ctx.config.model_capability.clone(),
             scope: LlmRequestScope::new(
                 ctx.config.session_id.clone(),
                 format!("{}:frame:sansio", ctx.config.session_id),

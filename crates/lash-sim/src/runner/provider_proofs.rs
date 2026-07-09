@@ -104,6 +104,7 @@ fn codex_request(tools: bool, stream_events: Option<LlmEventSender>) -> LlmReque
         tools: Arc::new(tool_specs),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
+        model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
             "session-1",
@@ -805,6 +806,7 @@ fn openai_compatible_request_with_events(stream_events: Option<LlmEventSender>) 
         }]),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
+        model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
             "session-1",
@@ -834,6 +836,7 @@ fn openai_responses_request() -> LlmRequest {
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
+        model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
             "session-1",
@@ -854,6 +857,7 @@ fn anthropic_messages_request() -> LlmRequest {
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
+        model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
             "session-1",
@@ -874,6 +878,7 @@ fn google_request(stream: bool) -> LlmRequest {
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
+        model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
             "session-1",

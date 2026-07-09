@@ -1842,6 +1842,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
         model_variant: None,
+        model_capability: crate::ModelCapability::default(),
         scope: crate::LlmRequestScope::new(
             "direct-llm-test",
             "direct-llm-test:frame",
@@ -1890,6 +1891,7 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
         model_variant: None,
+        model_capability: crate::ModelCapability::default(),
         scope: crate::LlmRequestScope::new(
             "direct-attachment-test",
             "direct-attachment-test:frame",

@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 pub struct LlmToolsPluginFactory {
     model: Option<String>,
     model_variant: Option<String>,
+    model_capability: Option<lash_core::ModelCapability>,
 }
 
 impl LlmToolsPluginFactory {
@@ -27,6 +28,13 @@ impl LlmToolsPluginFactory {
 
     pub fn with_model_variant(mut self, model_variant: impl Into<String>) -> Self {
         self.model_variant = Some(model_variant.into());
+        self
+    }
+
+    /// Capability metadata for an overridden model. Without it an override
+    /// model has no effort controls, so an explicit variant will be rejected.
+    pub fn with_model_capability(mut self, capability: lash_core::ModelCapability) -> Self {
+        self.model_capability = Some(capability);
         self
     }
 }
@@ -43,6 +51,7 @@ impl PluginFactory for LlmToolsPluginFactory {
         let provider: Arc<dyn ToolProvider> = Arc::new(llm_query_provider(
             self.model.clone(),
             self.model_variant.clone(),
+            self.model_capability.clone(),
         ));
 
         PluginSpecFactory::new(
@@ -56,18 +65,21 @@ impl PluginFactory for LlmToolsPluginFactory {
 pub struct LlmToolsProvider {
     model: Option<String>,
     model_variant: Option<String>,
+    model_capability: Option<lash_core::ModelCapability>,
 }
 
 /// Build the `llm_query` tool provider for the given optional model override.
 pub fn llm_query_provider(
     model: Option<String>,
     model_variant: Option<String>,
+    model_capability: Option<lash_core::ModelCapability>,
 ) -> StaticToolProvider<LlmToolsProvider> {
     StaticToolProvider::new(
         vec![llm_query_tool_definition()],
         LlmToolsProvider {
             model,
             model_variant,
+            model_capability,
         },
     )
 }
@@ -82,7 +94,12 @@ impl LlmToolsProvider {
             .model()
             .await
             .map_err(|err| format!("failed to read current session model: {err}"))?;
-        let model = self.model.clone().unwrap_or(session_model.model);
+        // An override model carries the override capability (empty when the
+        // host supplied none); the session model carries the session's.
+        let (model, model_capability) = match self.model.clone() {
+            Some(model) => (model, self.model_capability.clone().unwrap_or_default()),
+            None => (session_model.model, session_model.model_capability),
+        };
         let model_variant = self.model_variant.clone().or(session_model.model_variant);
         let response_schema = llm_query_response_schema(output_schema.as_ref());
         let prompt = llm_query_prompt(&task, &inputs, output_schema.as_ref());
@@ -99,6 +116,7 @@ impl LlmToolsProvider {
                 DirectRequest {
                     model,
                     model_variant,
+                    model_capability,
                     messages: vec![
                         DirectMessage {
                             role: DirectRole::System,
@@ -375,7 +393,7 @@ mod tests {
 
     #[test]
     fn llm_definitions_include_llm_query_only() {
-        let provider = llm_query_provider(None, None);
+        let provider = llm_query_provider(None, None, None);
         let manifests = provider.tool_manifests();
         let names = manifests
             .iter()
@@ -417,7 +435,7 @@ mod tests {
                 r#"{"kind":"value","value":{"root_cause":"missing config","confidence":0.8},"error":null}"#
                     .to_string(),
         });
-        let provider = llm_query_provider(None, None);
+        let provider = llm_query_provider(None, None, None);
         let context = direct_completion_context(manager.clone());
 
         let args = json!({
@@ -478,7 +496,8 @@ mod tests {
             requests: Mutex::new(Vec::new()),
             response_text: r#"{"kind":"value","value":"done","error":null}"#.to_string(),
         });
-        let provider = llm_query_provider(Some("gpt-5.5".to_string()), Some("low".to_string()));
+        let provider =
+            llm_query_provider(Some("gpt-5.5".to_string()), Some("low".to_string()), None);
         let context = direct_completion_context(manager.clone());
 
         let args = json!({ "task": "answer directly" });
@@ -511,7 +530,7 @@ mod tests {
             response_text: r#"{"kind":"error","value":null,"error":"missing required evidence"}"#
                 .to_string(),
         });
-        let provider = llm_query_provider(None, None);
+        let provider = llm_query_provider(None, None, None);
         let context = direct_completion_context(manager);
 
         let args = json!({ "task": "answer from missing evidence" });

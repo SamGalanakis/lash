@@ -201,6 +201,7 @@ fn model_spec_for_request(
         .to_string();
     let model_variant = model_variant_for_request(&selected_model, model_variant);
     lash::ModelSpec::from_token_limits(model, model_variant, DEFAULT_CONTEXT_WINDOW_TOKENS, None)
+        .map(with_workbench_model_capability)
         .map_err(AppError::bad_request)
 }
 
@@ -229,6 +230,26 @@ fn model_spec_from_selection(selection: ModelSelection) -> lash::ModelSpec {
         None,
     )
     .expect("workbench model selection should use a valid token limit")
+    .with_capability(workbench_model_capability())
+}
+
+fn with_workbench_model_capability(model: lash::ModelSpec) -> lash::ModelSpec {
+    model.with_capability(workbench_model_capability())
+}
+
+fn workbench_model_capability() -> lash::provider::ModelCapability {
+    lash::provider::ModelCapability {
+        reasoning: Some(lash::provider::ReasoningCapability {
+            efforts: ["low", "medium", "high"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            default_effort: Some("medium".to_string()),
+            aliases: Default::default(),
+            encoding: lash::provider::ReasoningEncoding::Effort,
+            mandatory: false,
+        }),
+    }
 }
 
 async fn apply_model_selection_to_session(
@@ -256,14 +277,11 @@ async fn apply_model_selection_to_session(
 }
 
 fn assistant_text_for_display(output: &TurnResult, streamed_prose: &str) -> String {
-    let terminal = output
-        .final_value()
-        .map(terminal_value_text)
-        .or_else(|| {
-            output
-                .tool_value()
-                .map(|(_tool_name, value)| terminal_value_text(value))
-        });
+    let terminal = output.final_value().map(terminal_value_text).or_else(|| {
+        output
+            .tool_value()
+            .map(|(_tool_name, value)| terminal_value_text(value))
+    });
     let assistant = (!streamed_prose.trim().is_empty())
         .then(|| streamed_prose.to_string())
         .or_else(|| {

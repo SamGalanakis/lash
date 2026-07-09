@@ -1,7 +1,7 @@
 //! LLM request/response envelopes: messages, attachments, tool specs, output
 //! specs, provider metadata, and schema-projection contracts.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -163,10 +163,53 @@ pub struct RemoteModelIntent {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    /// Host-supplied capability metadata for the model (mirrors the core
+    /// `ModelCapability` contract).
+    #[serde(default, skip_serializing_if = "RemoteModelCapability::is_empty")]
+    pub capability: RemoteModelCapability,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
+}
+
+/// Mirror of the core `ModelCapability`: host-supplied model capability
+/// metadata carried with the model intent so remote workers validate and
+/// encode effort exactly like a local runtime.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteModelCapability {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<RemoteReasoningCapability>,
+}
+
+impl RemoteModelCapability {
+    pub fn is_empty(&self) -> bool {
+        self.reasoning.is_none()
+    }
+}
+
+/// Mirror of the core `ReasoningCapability`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteReasoningCapability {
+    #[serde(default)]
+    pub efforts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    pub encoding: RemoteReasoningEncoding,
+    #[serde(default)]
+    pub mandatory: bool,
+}
+
+/// Mirror of the core `ReasoningEncoding`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteReasoningEncoding {
+    #[default]
+    Effort,
+    Budget(BTreeMap<String, u32>),
 }
 
 impl RemoteModelIntent {
@@ -174,6 +217,7 @@ impl RemoteModelIntent {
         Self {
             model: model.into(),
             variant: None,
+            capability: RemoteModelCapability::default(),
             provider: None,
             metadata: HashMap::new(),
         }

@@ -44,13 +44,12 @@ impl OpenAiCompatibleProvider {
         if compat.store {
             body["store"] = json!(false);
         }
-        if let Some(variant) = req.model_variant.as_deref()
-            && let Some(effort) = OpenAiDirectModelPolicy.reasoning_effort(&req.model, variant)
-            && effort != "none"
+        if let Some(effort) = req.model_variant.as_deref()
+            && req.model_capability.reasoning.is_some()
             && compat.reasoning_format != OpenAiCompatReasoningFormat::None
         {
             let mut reasoning = json!({
-                "effort": clamp_reasoning_effort(&req.model, &effort),
+                "effort": effort,
             });
             if policy.expose_thinking {
                 reasoning["summary"] = json!("auto");

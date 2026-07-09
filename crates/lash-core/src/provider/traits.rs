@@ -38,10 +38,6 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
     fn clone_boxed(&self) -> Box<dyn Provider>;
 }
 
-pub trait ProviderModelPolicy: Send + Sync + std::fmt::Debug {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str];
-}
-
 pub trait ProviderFailureClassifier: Send + Sync + std::fmt::Debug {
     fn classify(&self, failure: ProviderFailure) -> ProviderFailure;
 }

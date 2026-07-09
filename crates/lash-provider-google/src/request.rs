@@ -2,7 +2,6 @@
 //! Code (Gemini) wire shape (contents, systemInstruction, tools, generation
 //! and thinking config), plus the inline-attachment-part helpers.
 
-use crate::policy::{GoogleModelPolicy, GoogleThinkingConfig};
 use crate::support::*;
 
 /// Pi-mono sentinel: Gemini 3 refuses to run when a function_call is
@@ -11,6 +10,12 @@ use crate::support::*;
 /// trip tool calls captured from non-Gemini models without crashing the
 /// turn. Matches `google-shared.ts:51`.
 const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GoogleThinkingConfig {
+    Level { level: String },
+    Budget { budget_tokens: u32 },
+}
 
 impl GoogleOAuthProvider {
     pub(crate) const PROVIDER_KIND: &'static str = "google_oauth";
@@ -57,6 +62,7 @@ impl GoogleOAuthProvider {
         attachment_parts: &[Value],
     ) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
+        // Wire-protocol dialect fact, not a model-catalog capability fact.
         let is_gemini_3 = req.model.to_ascii_lowercase().contains("gemini-3");
 
         for msg in &req.messages {
@@ -187,6 +193,7 @@ impl GoogleOAuthProvider {
     /// instead of the Gemini-native `parametersJsonSchema`. This is a live,
     /// always-on special case for `claude-*` on Vertex, not deprecated behavior.
     fn uses_claude_on_vertex_tool_parameters(model: &str) -> bool {
+        // Wire-protocol dialect fact, not a model-catalog capability fact.
         model.starts_with("claude-")
     }
 
@@ -246,16 +253,29 @@ impl GoogleOAuthProvider {
         }
     }
 
+    fn thinking_config_from_capability(req: &LlmRequest) -> Option<GoogleThinkingConfig> {
+        let variant = req.model_variant.as_ref()?;
+        let reasoning = req.model_capability.reasoning.as_ref()?;
+        match &reasoning.encoding {
+            ReasoningEncoding::Effort => Some(GoogleThinkingConfig::Level {
+                level: variant.clone(),
+            }),
+            ReasoningEncoding::Budget(map) => {
+                map.get(variant)
+                    .map(|budget_tokens| GoogleThinkingConfig::Budget {
+                        budget_tokens: *budget_tokens,
+                    })
+            }
+        }
+    }
+
     pub(crate) fn build_request(
         provider: &GoogleOAuthProvider,
         req: &LlmRequest,
         contents: Vec<Value>,
         project_id: Option<&str>,
     ) -> Value {
-        let thinking_config = req
-            .model_variant
-            .as_deref()
-            .and_then(|variant| GoogleModelPolicy.thinking_config(&req.model, variant));
+        let thinking_config = Self::thinking_config_from_capability(req);
         let policy =
             resolve_generation_policy(&req.generation, &provider.options, 32_768, thinking_config);
         let mut request = json!({

@@ -125,6 +125,7 @@ fn llm_spec() -> lash_core::LlmRequestSpec {
         tools: Arc::new(Vec::new()),
         tool_choice: Default::default(),
         model_variant: None,
+        model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
             "session".to_string(),

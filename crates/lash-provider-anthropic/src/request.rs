@@ -2,7 +2,7 @@
 //! Messages wire shape (messages, tools, cache control, thinking config,
 //! structured output).
 
-use crate::policy::{AnthropicModelPolicy, AnthropicThinkingConfig, clamp_effort};
+use crate::policy::AnthropicThinkingConfig;
 use crate::support::*;
 
 impl AnthropicProvider {
@@ -294,15 +294,33 @@ impl AnthropicProvider {
         }
     }
 
+    /// Derive the Anthropic thinking config from the request's already-resolved
+    /// variant and the host-supplied model capability. Returns `None` when there
+    /// is no variant, no reasoning capability, or (for budget encoding) the
+    /// variant carries no token budget (e.g. an explicit "none").
+    fn thinking_config(req: &LlmRequest) -> Option<AnthropicThinkingConfig> {
+        let variant = req.model_variant.as_deref()?;
+        let reasoning = req.model_capability.reasoning.as_ref()?;
+        match &reasoning.encoding {
+            ReasoningEncoding::Effort => Some(AnthropicThinkingConfig::Adaptive {
+                effort: variant.to_string(),
+            }),
+            ReasoningEncoding::Budget(budgets) => {
+                budgets
+                    .get(variant)
+                    .map(|&budget_tokens| AnthropicThinkingConfig::Budget {
+                        budget_tokens: budget_tokens as i32,
+                    })
+            }
+        }
+    }
+
     pub(crate) fn build_request_body(&self, req: &LlmRequest) -> Result<Value, LlmTransportError> {
         validate_image_attachments(req, OPENAI_IMAGE_MIMES, "Anthropic")?;
         let (system_text, mut messages) = self.build_messages(req);
         let mut tools = self.build_tools(req)?;
 
-        let thinking_config = req
-            .model_variant
-            .as_deref()
-            .and_then(|variant| AnthropicModelPolicy.thinking_config(&req.model, variant));
+        let thinking_config = Self::thinking_config(req);
         let policy = resolve_generation_policy(
             &req.generation,
             &self.options,
@@ -356,12 +374,14 @@ impl AnthropicProvider {
             };
             match cfg {
                 AnthropicThinkingConfig::Adaptive { effort } => {
-                    let clamped = clamp_effort(&req.model, &effort);
+                    // The variant is already validated and alias-normalized by
+                    // lash-core against the host-supplied capability, so it is
+                    // sent verbatim as the wire effort.
                     body["thinking"] = json!({
                         "type": "adaptive",
                         "display": display,
                     });
-                    body["output_config"] = json!({ "effort": clamped });
+                    body["output_config"] = json!({ "effort": effort });
                 }
                 AnthropicThinkingConfig::Budget { budget_tokens } => {
                     body["thinking"] = json!({

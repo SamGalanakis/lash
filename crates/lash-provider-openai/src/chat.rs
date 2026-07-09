@@ -7,6 +7,7 @@ const PROVIDER: &str = "OpenAI-compatible";
 impl OpenAiCompatibleProvider {
     fn model_is_anthropic_claude(model: &str) -> bool {
         let model = model.to_ascii_lowercase();
+        // Protocol dialect: OpenRouter-served Anthropic models use Anthropic payload shape.
         model.contains("claude") || model.contains("anthropic/")
     }
 
@@ -315,14 +316,12 @@ impl OpenAiCompatibleProvider {
         if stream && compat.streaming_usage {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        if let Some(variant) = req.model_variant.as_deref()
-            && let Some(effort) =
-                OpenAiModelPolicy::new(self.base_url.clone()).reasoning_effort(&req.model, variant)
-            && effort != "none"
+        if let Some(effort) = req.model_variant.as_deref()
+            && req.model_capability.reasoning.is_some()
             && compat.reasoning_format != OpenAiCompatReasoningFormat::None
         {
             body["reasoning"] = json!({
-                "effort": clamp_reasoning_effort(&req.model, &effort),
+                "effort": effort,
             });
         }
         if let Some(output_spec) = &req.output_spec {

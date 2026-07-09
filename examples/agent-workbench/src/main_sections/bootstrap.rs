@@ -24,8 +24,8 @@ async fn async_main() -> AnyhowResult<()> {
         .context("invalid AGENT_WORKBENCH_RESTATE_ADDR")?;
     let restate_ingress_url = std::env::var("RESTATE_INGRESS_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
-    let restate_admin_url = std::env::var("RESTATE_ADMIN_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:19070".to_string());
+    let restate_admin_url =
+        std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:19070".to_string());
     let data_dir = std::env::var("AGENT_WORKBENCH_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".agent-workbench"));
@@ -80,6 +80,7 @@ async fn async_main() -> AnyhowResult<()> {
         None,
     )
     .map_err(|err| anyhow!("invalid OPENROUTER_MODEL metadata: {err}"))?;
+    let model_spec = with_workbench_model_capability(model_spec);
     let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         data_dir.join("lash-sessions"),
     ));

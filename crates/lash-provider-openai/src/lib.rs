@@ -6,7 +6,6 @@ mod common;
 mod config;
 mod driver;
 mod factory;
-mod policy;
 mod provider;
 mod responses;
 pub mod responses_shared;

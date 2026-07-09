@@ -91,15 +91,10 @@ pub(super) async fn handle_model(
             return Ok(false);
         }
     };
-    let model_variant = crate::provider_metadata::default_model_variant_for_provider(
-        provider.kind(),
-        &selection.model,
-        provider.supported_variants(&selection.model),
-    )
-    .map(str::to_string);
+    let model_variant = crate::model_selection::default_variant(provider, &selection.model);
     let model_spec = match resolved_model_spec
         .clone()
-        .into_model_spec(model_variant.clone())
+        .into_model_spec(provider.kind(), model_variant.clone())
     {
         Ok(spec) => spec,
         Err(err) => {
@@ -387,16 +382,11 @@ pub(super) async fn handle_change_provider(
                         }
                     }
                 }
-                None => crate::provider_metadata::default_model_variant_for_provider(
-                    provider.kind(),
-                    &selection.model,
-                    provider.supported_variants(&selection.model),
-                )
-                .map(str::to_string),
+                None => crate::model_selection::default_variant(provider, &selection.model),
             };
             let model_spec = match resolved_model_spec
                 .clone()
-                .into_model_spec(model_variant.clone())
+                .into_model_spec(provider.kind(), model_variant.clone())
             {
                 Ok(spec) => spec,
                 Err(err) => {

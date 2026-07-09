@@ -320,10 +320,11 @@ pub use plugin::{
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
-    CacheRetention, EmptyProviderResolver, LlmTimeouts, MapProviderResolver, Provider,
-    ProviderBinding, ProviderComponents, ProviderFactory, ProviderHandle, ProviderModelPolicy,
-    ProviderOptions, ProviderResolutionError, ProviderSpec, RequestTimeout,
-    RuntimeProviderResolver, SingleProviderResolver, StaticModelPolicy,
+    CacheRetention, EmptyProviderResolver, LlmTimeouts, MapProviderResolver, ModelCapability,
+    ModelEffortValidationCategory, ModelEffortValidationError, Provider, ProviderBinding,
+    ProviderComponents, ProviderFactory, ProviderHandle, ProviderOptions, ProviderResolutionError,
+    ProviderSpec, ReasoningCapability, ReasoningEncoding, RequestTimeout, RuntimeProviderResolver,
+    SingleProviderResolver,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;

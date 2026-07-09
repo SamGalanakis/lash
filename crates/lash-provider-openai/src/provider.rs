@@ -32,8 +32,7 @@ impl OpenAiCompatibleProvider {
     }
 
     pub fn into_components(self) -> ProviderComponents {
-        let model_policy = std::sync::Arc::new(OpenAiModelPolicy::new(self.base_url.clone()));
-        ProviderComponents::new(Box::new(self), model_policy)
+        ProviderComponents::new(Box::new(self))
     }
 }
 
@@ -55,7 +54,7 @@ impl OpenAiProvider {
     }
 
     pub fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(Box::new(self), std::sync::Arc::new(OpenAiDirectModelPolicy))
+        ProviderComponents::new(Box::new(self))
     }
 
     #[cfg(test)]

@@ -254,8 +254,8 @@ pub(crate) fn command_palette_items(
         .current(true),
     );
 
-    let supported_variants = provider.supported_variants(&app.model);
-    if supported_variants.is_empty() {
+    let supported_efforts = crate::model_selection::supported_efforts(provider, &app.model);
+    if supported_efforts.is_empty() {
         items.push(
             CommandPaletteItem::new(
                 "Settings",
@@ -279,18 +279,16 @@ pub(crate) fn command_palette_items(
             .footer("/variant default")
             .current(app.model_variant.is_none()),
         );
-        for variant in supported_variants {
+        for variant in &supported_efforts {
             items.push(
                 CommandPaletteItem::new(
                     "Settings",
                     format!("Variant: {variant}"),
                     format!("Set `{}` to `{variant}`.", app.model),
-                    CommandPaletteAction::Builtin(command::Command::Variant(Some(
-                        (*variant).to_string(),
-                    ))),
+                    CommandPaletteAction::Builtin(command::Command::Variant(Some(variant.clone()))),
                 )
                 .footer(format!("/variant {variant}"))
-                .current(app.model_variant.as_deref() == Some(*variant)),
+                .current(app.model_variant.as_deref() == Some(variant.as_str())),
             );
         }
     }

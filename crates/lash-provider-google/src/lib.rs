@@ -2,7 +2,6 @@
 
 mod config;
 pub mod oauth;
-mod policy;
 mod provider;
 mod request;
 mod stream;
@@ -23,10 +22,15 @@ mod tests {
         LlmContentBlock, LlmEventSender, LlmMessage, LlmOutputPart, LlmRequest, LlmRole,
         LlmTerminalReason, LlmToolChoice, LlmToolSpec, LlmUsage, ResponseTextMeta,
     };
-    use lash_core::provider::ProviderOptions;
+    use lash_core::provider::{
+        ModelCapability, ProviderOptions, ReasoningCapability, ReasoningEncoding,
+    };
     use serde_json::{Value, json};
 
-    fn request(model_variant: Option<&str>) -> LlmRequest {
+    fn request_with_capability(
+        model_variant: Option<&str>,
+        model_capability: ModelCapability,
+    ) -> LlmRequest {
         LlmRequest {
             model: "gemini-3.1-pro-preview".to_string(),
             messages: vec![LlmMessage::text(LlmRole::User, "hello")],
@@ -34,6 +38,7 @@ mod tests {
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: model_variant.map(str::to_string),
+            model_capability,
             scope: lash_core::LlmRequestScope::new(
                 "session-1",
                 "session-1:frame:test",
@@ -43,6 +48,42 @@ mod tests {
             stream_events: None::<LlmEventSender>,
             generation: lash_core::GenerationOptions::default(),
             provider_trace: None,
+        }
+    }
+
+    fn request(model_variant: Option<&str>) -> LlmRequest {
+        request_with_capability(model_variant, ModelCapability::default())
+    }
+
+    fn effort_capability(efforts: &[&str]) -> ModelCapability {
+        ModelCapability {
+            reasoning: Some(ReasoningCapability {
+                efforts: efforts.iter().copied().map(str::to_string).collect(),
+                default_effort: None,
+                aliases: Default::default(),
+                encoding: ReasoningEncoding::Effort,
+                mandatory: false,
+            }),
+        }
+    }
+
+    fn budget_capability(entries: &[(&str, u32)]) -> ModelCapability {
+        ModelCapability {
+            reasoning: Some(ReasoningCapability {
+                efforts: entries
+                    .iter()
+                    .map(|(effort, _)| (*effort).to_string())
+                    .collect(),
+                default_effort: None,
+                aliases: Default::default(),
+                encoding: ReasoningEncoding::Budget(
+                    entries
+                        .iter()
+                        .map(|(effort, tokens)| ((*effort).to_string(), *tokens))
+                        .collect(),
+                ),
+                mandatory: false,
+            }),
         }
     }
 
@@ -224,11 +265,79 @@ mod tests {
     }
 
     #[test]
+    fn thinking_config_uses_effort_encoding_for_thinking_level() {
+        let provider = GoogleOAuthProvider::new("access", "refresh", 0);
+        let body = GoogleOAuthProvider::build_request(
+            &provider,
+            &request_with_capability(
+                Some("medium"),
+                effort_capability(&["low", "medium", "high"]),
+            ),
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(
+            body["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "medium"
+        );
+        assert!(
+            body["request"]["generationConfig"]["thinkingConfig"]
+                .get("thinkingBudget")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn thinking_config_uses_budget_encoding_for_variant_budget() {
+        let provider = GoogleOAuthProvider::new("access", "refresh", 0);
+        let body = GoogleOAuthProvider::build_request(
+            &provider,
+            &request_with_capability(
+                Some("high"),
+                budget_capability(&[("high", 16_000), ("max", 24_576)]),
+            ),
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(
+            body["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            16_000
+        );
+        assert!(
+            body["request"]["generationConfig"]["thinkingConfig"]
+                .get("thinkingLevel")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn thinking_config_is_omitted_without_capability() {
+        let provider = GoogleOAuthProvider::new("access", "refresh", 0);
+        let body = GoogleOAuthProvider::build_request(
+            &provider,
+            &request_with_capability(Some("medium"), ModelCapability::default()),
+            Vec::new(),
+            None,
+        );
+
+        assert!(
+            body["request"]["generationConfig"]
+                .get("thinkingConfig")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn thinking_config_omits_thoughts_unless_provider_exposes_thinking() {
         let hidden_provider = GoogleOAuthProvider::new("access", "refresh", 0);
         let hidden = GoogleOAuthProvider::build_request(
             &hidden_provider,
-            &request(Some("medium")),
+            &request_with_capability(
+                Some("medium"),
+                effort_capability(&["low", "medium", "high"]),
+            ),
             Vec::new(),
             None,
         );
@@ -249,7 +358,10 @@ mod tests {
             });
         let exposed = GoogleOAuthProvider::build_request(
             &exposed_provider,
-            &request(Some("medium")),
+            &request_with_capability(
+                Some("medium"),
+                effort_capability(&["low", "medium", "high"]),
+            ),
             Vec::new(),
             None,
         );

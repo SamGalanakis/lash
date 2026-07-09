@@ -2,9 +2,19 @@ use crate::support::*;
 use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
 use lash_core::llm::transport::ProviderFailureKind;
 use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolChoice, LlmToolSpec};
-use lash_core::provider::CacheRetention;
+use lash_core::provider::{CacheRetention, ModelCapability, ReasoningCapability};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+
+fn reasoning_capability() -> ModelCapability {
+    ModelCapability {
+        reasoning: Some(ReasoningCapability {
+            efforts: vec!["medium".to_string(), "high".to_string()],
+            default_effort: Some("medium".to_string()),
+            ..ReasoningCapability::default()
+        }),
+    }
+}
 
 fn request(messages: Vec<LlmMessage>) -> LlmRequest {
     LlmRequest {
@@ -14,6 +24,7 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         tools: Arc::new(Vec::<LlmToolSpec>::new()),
         tool_choice: LlmToolChoice::Auto,
         model_variant: None,
+        model_capability: ModelCapability::default(),
         scope: LlmRequestScope::new(
             "session-1",
             "session-1:frame:test",
@@ -146,15 +157,28 @@ fn builds_responses_body_with_instructions_and_input() {
 }
 
 #[test]
-fn responses_body_does_not_request_reasoning_summaries_by_default() {
+fn responses_body_emits_reasoning_from_capability_variant() {
     let provider = OpenAiProvider::new("key");
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-    req.model = "openai/gpt-5.5".to_string();
-    req.model_variant = Some("medium".to_string());
+    req.model = "custom-direct-model".to_string();
+    req.model_variant = Some("high".to_string());
+    req.model_capability = reasoning_capability();
 
     let body = provider.build_responses_request_body(&req, true).unwrap();
 
-    assert_eq!(body["reasoning"], json!({ "effort": "medium" }));
+    assert_eq!(body["reasoning"], json!({ "effort": "high" }));
+}
+
+#[test]
+fn responses_body_omits_reasoning_without_capability() {
+    let provider = OpenAiProvider::new("key");
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.model = "custom-direct-model".to_string();
+    req.model_variant = Some("high".to_string());
+
+    let body = provider.build_responses_request_body(&req, true).unwrap();
+
+    assert!(body.get("reasoning").is_none());
 }
 
 #[test]
@@ -164,8 +188,8 @@ fn responses_body_requests_reasoning_summaries_when_provider_exposes_thinking() 
         ..ProviderOptions::default()
     });
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-    req.model = "openai/gpt-5.5".to_string();
     req.model_variant = Some("medium".to_string());
+    req.model_capability = reasoning_capability();
 
     let body = provider.build_responses_request_body(&req, true).unwrap();
 
@@ -232,7 +256,6 @@ fn chat_body_uses_messages_and_not_responses_input() {
         LlmMessage::text(LlmRole::User, "hello"),
     ]);
     req.model = "anthropic/claude-sonnet-4.6".to_string();
-    req.model_variant = Some("high".to_string());
     req.output_spec = Some(LlmOutputSpec::JsonObject);
 
     let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
@@ -244,8 +267,34 @@ fn chat_body_uses_messages_and_not_responses_input() {
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["stream_options"], json!({ "include_usage": true }));
-    assert_eq!(body["reasoning"], json!({ "effort": "high" }));
     assert_eq!(body["response_format"], json!({ "type": "json_object" }));
+}
+
+#[test]
+fn chat_body_emits_reasoning_from_capability_variant() {
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.model = "openrouter/custom-model".to_string();
+    req.model_variant = Some("high".to_string());
+    req.model_capability = reasoning_capability();
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(body["reasoning"], json!({ "effort": "high" }));
+}
+
+#[test]
+fn chat_body_omits_reasoning_without_capability() {
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.model = "openrouter/custom-model".to_string();
+    req.model_variant = Some("high".to_string());
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert!(body.get("reasoning").is_none());
 }
 
 #[test]
@@ -618,6 +667,7 @@ fn chat_body_honors_compat_max_token_field_streaming_usage_and_strict_tools() {
 fn local_openai_compatible_suppresses_optional_openai_fields() {
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model_variant = Some("medium".to_string());
+    req.model_capability = reasoning_capability();
     req.tools = Arc::new(vec![LlmToolSpec {
         name: "lookup".to_string(),
         description: "Lookup".to_string(),

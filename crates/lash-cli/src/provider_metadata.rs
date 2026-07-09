@@ -98,44 +98,6 @@ pub(crate) fn provider_wire_model_id(kind: &str, model: &str) -> String {
     }
 }
 
-pub(crate) fn default_model_variant_for_provider(
-    kind: &str,
-    model: &str,
-    supported_variants: &[&str],
-) -> Option<&'static str> {
-    if supported_variants.is_empty() {
-        return None;
-    }
-    match kind {
-        "anthropic" => {
-            if supported_variants.contains(&"xhigh") {
-                Some("xhigh")
-            } else if supported_variants.contains(&"max") {
-                Some("max")
-            } else {
-                Some("high")
-            }
-        }
-        "openai" => supported_variants.contains(&"medium").then_some("medium"),
-        "openai-compatible" => {
-            if model.to_ascii_lowercase().contains("gpt") {
-                Some("medium")
-            } else {
-                Some("high")
-            }
-        }
-        "codex" => {
-            if model.eq_ignore_ascii_case("gpt-5.5") || supported_variants.contains(&"xhigh") {
-                Some("xhigh")
-            } else {
-                Some("high")
-            }
-        }
-        "google_oauth" => Some("high"),
-        _ => None,
-    }
-}
-
 fn prefixed_model_id(provider: &str, model: &str) -> String {
     if model.contains('/') {
         model.to_string()

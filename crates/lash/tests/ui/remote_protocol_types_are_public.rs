@@ -66,10 +66,11 @@ fn main() {
             reason: lash::remote::observations::RemoteLiveReplayGapReason::Unavailable,
         },
     };
-    let _process = lash::remote::observations::RemoteSessionObservationEventPayload::ProcessChanged {
-        kind: lash::remote::observations::RemoteSessionProcessEventKind::Started,
-        process_ids: vec!["process".to_string()],
-    };
+    let _process =
+        lash::remote::observations::RemoteSessionObservationEventPayload::ProcessChanged {
+            kind: lash::remote::observations::RemoteSessionProcessEventKind::Started,
+            process_ids: vec!["process".to_string()],
+        };
 
     let process_start = lash::remote::processes::RemoteProcessStartRequest {
         protocol_version: lash::remote::REMOTE_PROTOCOL_VERSION,
@@ -85,6 +86,7 @@ fn main() {
                 model: lash::remote::processes::RemoteProcessModelSpec {
                     id: "model".to_string(),
                     variant: None,
+                    capability: Default::default(),
                     limits: lash::remote::processes::RemoteProcessModelLimits {
                         context_window_tokens: 10,
                         output_token_capacity: Some(1),

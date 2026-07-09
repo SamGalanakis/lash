@@ -4,10 +4,7 @@
 use lash_llm_transport::util::extract_error_detail;
 
 use crate::config::DEFAULT_BASE_URL;
-use crate::policy::{
-    ANTHROPIC_VERSION, FINE_GRAINED_BETA, INTERLEAVED_THINKING_BETA,
-    anthropic_supports_adaptive_thinking,
-};
+use crate::policy::{ANTHROPIC_VERSION, FINE_GRAINED_BETA, INTERLEAVED_THINKING_BETA};
 use crate::stream::StreamState;
 use crate::support::*;
 
@@ -59,9 +56,16 @@ impl Provider for AnthropicProvider {
 
         // `fine-grained-tool-streaming-2025-05-14` streams partial JSON so we
         // can surface tool arguments incrementally. Interleaved thinking is
-        // built-in on adaptive models; for older models we opt into the beta.
+        // built-in on adaptive thinking; the beta is only needed for the
+        // budget-encoded (`"type": "enabled"`) thinking block, so we gate on
+        // the thinking shape actually emitted rather than the model name.
         let mut betas = vec![FINE_GRAINED_BETA.to_string()];
-        if !anthropic_supports_adaptive_thinking(&req.model) {
+        let budget_thinking = body
+            .get("thinking")
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(Value::as_str)
+            == Some("enabled");
+        if budget_thinking {
             betas.push(INTERLEAVED_THINKING_BETA.to_string());
         }
 

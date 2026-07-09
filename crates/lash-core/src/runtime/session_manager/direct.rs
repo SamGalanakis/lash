@@ -238,12 +238,14 @@ impl DirectCompletionCapability {
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
         let resolved = context.current.resolve_policy()?;
         let provider = resolved.provider().clone();
+        let mut request = request;
         let model = request.model.clone();
-        if let Some(variant) = request.model_variant.as_deref() {
-            provider
-                .validate_variant(&model, variant)
-                .map_err(crate::PluginError::Session)?;
-        }
+        // Validate against the capability carried by the request and write the
+        // resolved (alias-normalized) effort back before the provider sees it.
+        request.model_variant = request
+            .model_capability
+            .validate_effort(&model, provider.kind(), request.model_variant.as_deref())
+            .map_err(|error| crate::PluginError::Session(error.message))?;
         let replay = request.replay.clone();
         let caused_by = request.caused_by.clone();
         let normalized = crate::direct::build_llm_request(&provider, request, model);

@@ -21,13 +21,13 @@ struct FailingProvider {
 
 impl FailingProvider {
     fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(Box::new(self), Arc::new(StaticModelPolicy::new()))
+        ProviderComponents::new(Box::new(self))
     }
 }
 
 impl MutatingProvider {
-    fn into_components(self, policy: Arc<dyn ProviderModelPolicy>) -> ProviderComponents {
-        ProviderComponents::new(Box::new(self), policy)
+    fn into_components(self) -> ProviderComponents {
+        ProviderComponents::new(Box::new(self))
     }
 }
 
@@ -129,7 +129,7 @@ struct StatusFailingProvider {
 
 impl StatusFailingProvider {
     fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(Box::new(self), Arc::new(StaticModelPolicy::new()))
+        ProviderComponents::new(Box::new(self))
     }
 }
 
@@ -277,6 +277,7 @@ fn empty_request() -> LlmRequest {
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
         model_variant: None,
+        model_capability: crate::ModelCapability::default(),
         scope: crate::LlmRequestScope::new(
             "provider-test",
             "provider-test:frame",
@@ -390,24 +391,9 @@ fn generation_policy_prefers_request_then_provider_then_default() {
     assert_eq!(request_limited.max_output_tokens, 2_048);
 }
 
-#[test]
-fn provider_handle_delegates_variant_policy() {
-    static VARIANTS: &[&str] = &["low", "high"];
-    let handle = ProviderHandle::new(
-        MutatingProvider::default()
-            .into_components(Arc::new(StaticModelPolicy::with_variants(VARIANTS))),
-    );
-
-    assert_eq!(handle.supported_variants("model-a"), VARIANTS);
-    assert!(handle.validate_variant("model-a", "low").is_ok());
-    assert!(handle.validate_variant("model-a", "medium").is_err());
-}
-
 #[tokio::test]
 async fn transport_mutations_are_visible_after_completion_returns() {
-    let mut handle = ProviderHandle::new(
-        MutatingProvider::default().into_components(Arc::new(StaticModelPolicy::new())),
-    );
+    let mut handle = ProviderHandle::new(MutatingProvider::default().into_components());
 
     handle.complete(empty_request()).await.expect("complete");
 
@@ -420,12 +406,10 @@ async fn transport_mutations_are_visible_after_completion_returns() {
 #[tokio::test]
 async fn map_provider_installs_transport_decorator() {
     let hits = Arc::new(AtomicUsize::new(0));
-    let components = MutatingProvider::default()
-        .into_components(Arc::new(StaticModelPolicy::new()))
-        .map_provider({
-            let hits = Arc::clone(&hits);
-            move |inner| Box::new(MetricsTransport { inner, hits })
-        });
+    let components = MutatingProvider::default().into_components().map_provider({
+        let hits = Arc::clone(&hits);
+        move |inner| Box::new(MetricsTransport { inner, hits })
+    });
     let mut handle = ProviderHandle::new(components);
 
     handle.complete(empty_request()).await.expect("complete");

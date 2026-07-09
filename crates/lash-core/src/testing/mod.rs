@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::plugin::{PluginError, SessionCreateRequest, SessionHandle, SessionSnapshot};
-use crate::provider::{Provider, ProviderComponents, ProviderHandle, ProviderModelPolicy};
+use crate::provider::{Provider, ProviderComponents, ProviderHandle};
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionSummary, ModelSpec, OutputState, ProcessRegistry,
@@ -28,12 +28,7 @@ use crate::{
 type CompletionFuture =
     Pin<Box<dyn Future<Output = Result<LlmResponse, LlmTransportError>> + Send>>;
 type CompletionFn = dyn Fn(LlmRequest) -> CompletionFuture + Send + Sync;
-type SupportedVariantsFn = dyn Fn(&str) -> &'static [&'static str] + Send + Sync;
 type SerializeConfigFn = dyn Fn() -> serde_json::Value + Send + Sync;
-
-fn no_supported_variants(_model: &str) -> &'static [&'static str] {
-    &[]
-}
 
 fn empty_provider_config() -> serde_json::Value {
     serde_json::Value::Object(Default::default())
@@ -44,7 +39,6 @@ fn empty_provider_config() -> serde_json::Value {
 #[derive(Clone)]
 pub struct TestProvider {
     kind: &'static str,
-    supported_variants: Arc<SupportedVariantsFn>,
     requires_streaming: bool,
     options: ProviderOptions,
     serialize_config: Arc<SerializeConfigFn>,
@@ -73,8 +67,7 @@ impl TestProvider {
     }
 
     pub fn into_handle(self) -> ProviderHandle {
-        let model_policy: Arc<dyn ProviderModelPolicy> = Arc::new(self.clone());
-        ProviderHandle::new(ProviderComponents::new(Box::new(self), model_policy))
+        ProviderHandle::new(ProviderComponents::new(Box::new(self)))
     }
 }
 
@@ -87,7 +80,6 @@ impl TestProviderBuilder {
         Self {
             provider: TestProvider {
                 kind: "test",
-                supported_variants: Arc::new(no_supported_variants),
                 requires_streaming: false,
                 options: ProviderOptions::default(),
                 serialize_config: Arc::new(empty_provider_config),
@@ -104,14 +96,6 @@ impl TestProviderBuilder {
 
     pub fn kind(mut self, kind: &'static str) -> Self {
         self.provider.kind = kind;
-        self
-    }
-
-    pub fn supported_variants<F>(mut self, supported_variants: F) -> Self
-    where
-        F: Fn(&str) -> &'static [&'static str] + Send + Sync + 'static,
-    {
-        self.provider.supported_variants = Arc::new(supported_variants);
         self
     }
 
@@ -190,12 +174,6 @@ impl Provider for TestProvider {
 
     fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
-    }
-}
-
-impl ProviderModelPolicy for TestProvider {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        (self.supported_variants)(model)
     }
 }
 

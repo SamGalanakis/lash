@@ -9,7 +9,6 @@ pub(super) use crate::llm::transport::{LlmTransportError, ProviderFailure, Provi
 pub(super) use crate::llm::types::{LlmContentBlock, LlmRequest, LlmResponse};
 
 pub(super) use super::handle::*;
-pub(super) use super::model_policy::*;
 pub(super) use super::options::*;
 pub(super) use super::rate_limit::*;
 pub(super) use super::spec::*;

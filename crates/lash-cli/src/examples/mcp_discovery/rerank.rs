@@ -133,6 +133,7 @@ pub(crate) fn llm_rerank_request(
     DirectRequest {
         model,
         model_variant,
+        model_capability: lash_core::ModelCapability::default(),
         messages: vec![
             DirectMessage {
                 role: DirectRole::System,

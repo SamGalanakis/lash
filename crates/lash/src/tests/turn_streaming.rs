@@ -1710,157 +1710,165 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn turn_run_batch_tool_runs_parallel_bucket_then_serial_and_preserves_order() -> Result<()> {
-    let tools = Arc::new(RuntimeBatchTools::new());
-    let tool_provider: Arc<dyn ToolProvider> = tools.clone();
-    let core = explicit_ephemeral_facets(LashCore::standard_builder())
-        .provider(runtime_batch_provider())
-        .model(mock_model_spec())
-        .tools(tool_provider)
-        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
-        .build()?;
-    let session = core.session("runtime-batch-tool-order").open().await?;
+#[test]
+fn turn_run_batch_tool_runs_parallel_bucket_then_serial_and_preserves_order() -> Result<()> {
+    run_async_test_on_stack_size("runtime-batch-tool-order-test", 8 * 1024 * 1024, || async {
+        let tools = Arc::new(RuntimeBatchTools::new());
+        let tool_provider: Arc<dyn ToolProvider> = tools.clone();
+        let core = explicit_ephemeral_facets(LashCore::standard_builder())
+            .provider(runtime_batch_provider())
+            .model(mock_model_spec())
+            .tools(tool_provider)
+            .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+            .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+            .build()?;
+        let session = core.session("runtime-batch-tool-order").open().await?;
 
-    let output = session.turn(TurnInput::text("run batch")).run().await?;
+        let output = session.turn(TurnInput::text("run batch")).run().await?;
 
-    assert_eq!(output.assistant_message(), Some("done"));
-    let batch_completed = output
-        .activities
-        .iter()
-        .find(|activity| {
-            matches!(
-                &activity.event,
-                TurnEvent::ToolCallCompleted { name, .. } if name == "runtime_batch"
-            )
-        })
-        .expect("batch completion");
-    let TurnEvent::ToolCallCompleted {
-        output: batch_output,
-        ..
-    } = &batch_completed.event
-    else {
-        unreachable!();
-    };
-    let batch_value = batch_output.value_for_projection();
-    let results = batch_value
-        .get("results")
-        .and_then(serde_json::Value::as_array)
-        .expect("batch results");
-    let result_tools = results
-        .iter()
-        .map(|result| {
-            assert_eq!(
-                result.get("success").and_then(serde_json::Value::as_bool),
-                Some(true)
+        assert_eq!(output.assistant_message(), Some("done"));
+        let batch_completed = output
+            .activities
+            .iter()
+            .find(|activity| {
+                matches!(
+                    &activity.event,
+                    TurnEvent::ToolCallCompleted { name, .. } if name == "runtime_batch"
+                )
+            })
+            .expect("batch completion");
+        let TurnEvent::ToolCallCompleted {
+            output: batch_output,
+            ..
+        } = &batch_completed.event
+        else {
+            unreachable!();
+        };
+        let batch_value = batch_output.value_for_projection();
+        let results = batch_value
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .expect("batch results");
+        let result_tools = results
+            .iter()
+            .map(|result| {
+                assert_eq!(
+                    result.get("success").and_then(serde_json::Value::as_bool),
+                    Some(true)
+                );
+                result
+                    .get("tool")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("result tool")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(result_tools, ["par_a", "ser", "par_b"]);
+
+        let parallel_windows = tools.parallel_windows();
+        assert_eq!(parallel_windows.len(), 2);
+        let serial_window = tools.serial_window().expect("serial window");
+        let parallel_names = parallel_windows
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(parallel_names, BTreeSet::from(["par_a", "par_b"]));
+        for (name, parallel_start, parallel_end) in parallel_windows {
+            assert!(
+                serial_window.0 >= parallel_end || serial_window.1 <= parallel_start,
+                "serial tool window {:?} overlapped parallel tool {name} window {:?}..{:?}",
+                serial_window,
+                parallel_start,
+                parallel_end
             );
-            result
-                .get("tool")
-                .and_then(serde_json::Value::as_str)
-                .expect("result tool")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(result_tools, ["par_a", "ser", "par_b"]);
-
-    let parallel_windows = tools.parallel_windows();
-    assert_eq!(parallel_windows.len(), 2);
-    let serial_window = tools.serial_window().expect("serial window");
-    let parallel_names = parallel_windows
-        .iter()
-        .map(|(name, _, _)| name.as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(parallel_names, BTreeSet::from(["par_a", "par_b"]));
-    for (name, parallel_start, parallel_end) in parallel_windows {
-        assert!(
-            serial_window.0 >= parallel_end || serial_window.1 <= parallel_start,
-            "serial tool window {:?} overlapped parallel tool {name} window {:?}..{:?}",
-            serial_window,
-            parallel_start,
-            parallel_end
-        );
-    }
-    Ok(())
+        }
+        Ok(())
+    })
 }
 
-#[tokio::test]
-async fn batch_child_tool_calls_carry_parent_call_id_linkage() -> Result<()> {
-    let tools = Arc::new(RuntimeBatchTools::new());
-    let tool_provider: Arc<dyn ToolProvider> = tools.clone();
-    let core = explicit_ephemeral_facets(LashCore::standard_builder())
-        .provider(runtime_batch_provider())
-        .model(mock_model_spec())
-        .tools(tool_provider)
-        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
-        .build()?;
-    let session = core.session("batch-child-parent-linkage").open().await?;
+#[test]
+fn batch_child_tool_calls_carry_parent_call_id_linkage() -> Result<()> {
+    run_async_test_on_stack_size(
+        "batch-child-parent-linkage-test",
+        8 * 1024 * 1024,
+        || async {
+            let tools = Arc::new(RuntimeBatchTools::new());
+            let tool_provider: Arc<dyn ToolProvider> = tools.clone();
+            let core = explicit_ephemeral_facets(LashCore::standard_builder())
+                .provider(runtime_batch_provider())
+                .model(mock_model_spec())
+                .tools(tool_provider)
+                .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+                .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+                .build()?;
+            let session = core.session("batch-child-parent-linkage").open().await?;
 
-    let output = session.turn(TurnInput::text("run batch")).run().await?;
+            let output = session.turn(TurnInput::text("run batch")).run().await?;
 
-    // The batch container call itself is a top-level standard-mode call: no
-    // parent linkage and no code-block graph key.
-    let (batch_call_id, batch_parent, batch_graph_key) = output
-        .activities
-        .iter()
-        .find_map(|activity| match &activity.event {
-            TurnEvent::ToolCallStarted {
-                name,
-                call_id,
-                parent_call_id,
-                graph_key,
-                ..
-            } if name == "runtime_batch" => {
-                Some((call_id.clone(), parent_call_id.clone(), graph_key.clone()))
+            // The batch container call itself is a top-level standard-mode call: no
+            // parent linkage and no code-block graph key.
+            let (batch_call_id, batch_parent, batch_graph_key) = output
+                .activities
+                .iter()
+                .find_map(|activity| match &activity.event {
+                    TurnEvent::ToolCallStarted {
+                        name,
+                        call_id,
+                        parent_call_id,
+                        graph_key,
+                        ..
+                    } if name == "runtime_batch" => {
+                        Some((call_id.clone(), parent_call_id.clone(), graph_key.clone()))
+                    }
+                    _ => None,
+                })
+                .expect("batch container ToolCallStarted");
+            assert_eq!(
+                batch_parent, None,
+                "batch container must not carry a parent"
+            );
+            assert_eq!(batch_graph_key, None, "standard-mode call has no graph key");
+            let batch_call_id = batch_call_id.expect("batch container call id");
+
+            // Each batch child is delivered as its own tool event pointing back at the
+            // batch call, so consumers reconstruct containment from real events.
+            let child_parents = output
+                .activities
+                .iter()
+                .filter_map(|activity| match &activity.event {
+                    TurnEvent::ToolCallCompleted {
+                        name,
+                        parent_call_id,
+                        graph_key,
+                        ..
+                    } if matches!(name.as_str(), "par_a" | "par_b" | "ser") => {
+                        Some((name.clone(), parent_call_id.clone(), graph_key.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let child_names = child_parents
+                .iter()
+                .map(|(name, _, _)| name.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                child_names,
+                BTreeSet::from(["par_a".to_string(), "par_b".to_string(), "ser".to_string()]),
+                "every batch child must surface as its own tool event"
+            );
+            for (name, parent, graph_key) in &child_parents {
+                assert_eq!(
+                    parent.as_deref(),
+                    Some(batch_call_id.as_str()),
+                    "batch child {name} must link to the batch call"
+                );
+                assert_eq!(
+                    graph_key, &None,
+                    "standard-mode batch child {name} has no code-block graph key"
+                );
             }
-            _ => None,
-        })
-        .expect("batch container ToolCallStarted");
-    assert_eq!(
-        batch_parent, None,
-        "batch container must not carry a parent"
-    );
-    assert_eq!(batch_graph_key, None, "standard-mode call has no graph key");
-    let batch_call_id = batch_call_id.expect("batch container call id");
-
-    // Each batch child is delivered as its own tool event pointing back at the
-    // batch call, so consumers reconstruct containment from real events.
-    let child_parents = output
-        .activities
-        .iter()
-        .filter_map(|activity| match &activity.event {
-            TurnEvent::ToolCallCompleted {
-                name,
-                parent_call_id,
-                graph_key,
-                ..
-            } if matches!(name.as_str(), "par_a" | "par_b" | "ser") => {
-                Some((name.clone(), parent_call_id.clone(), graph_key.clone()))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let child_names = child_parents
-        .iter()
-        .map(|(name, _, _)| name.clone())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        child_names,
-        BTreeSet::from(["par_a".to_string(), "par_b".to_string(), "ser".to_string()]),
-        "every batch child must surface as its own tool event"
-    );
-    for (name, parent, graph_key) in &child_parents {
-        assert_eq!(
-            parent.as_deref(),
-            Some(batch_call_id.as_str()),
-            "batch child {name} must link to the batch call"
-        );
-        assert_eq!(
-            graph_key, &None,
-            "standard-mode batch child {name} has no code-block graph key"
-        );
-    }
-    Ok(())
+            Ok(())
+        },
+    )
 }
 
 #[tokio::test]

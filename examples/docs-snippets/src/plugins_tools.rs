@@ -17,6 +17,7 @@ async fn rank(call: ToolCall<'_>) -> ToolResult {
     let request = DirectRequest {
         model: model.model,
         model_variant: model.model_variant,
+        model_capability: model.model_capability,
         messages: vec![/* ... */],
         attachments: Vec::new(),
         output: DirectOutputSpec::Text,

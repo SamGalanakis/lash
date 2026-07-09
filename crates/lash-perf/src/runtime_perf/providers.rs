@@ -1749,6 +1749,7 @@ fn empty_request() -> LlmRequest {
         tool_choice: Default::default(),
         generation: Default::default(),
         model_variant: None,
+        model_capability: lash_core::ModelCapability::default(),
         scope: LlmRequestScope::new(
             "runtime-perf-empty".to_string(),
             "runtime-perf-empty:frame".to_string(),

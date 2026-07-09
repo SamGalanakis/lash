@@ -4,7 +4,7 @@ use crate::llm::types::{
     LlmRequest, LlmRequestScope, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason,
     LlmToolChoice,
 };
-use crate::provider::ProviderHandle;
+use crate::provider::{ModelCapability, ModelEffortValidationCategory, ProviderHandle};
 use crate::{LashSchema, SchemaContract};
 use lash_trace::{TraceContext, TraceError, TraceEvent, TraceSink};
 use std::sync::Arc;
@@ -49,6 +49,8 @@ pub struct DirectRequest {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_variant: Option<String>,
+    #[serde(default, skip_serializing_if = "ModelCapability::is_empty")]
+    pub model_capability: ModelCapability,
     #[serde(default)]
     pub messages: Vec<DirectMessage>,
     #[serde(default)]
@@ -72,6 +74,7 @@ impl DirectRequest {
         Self {
             model: model.into(),
             model_variant: None,
+            model_capability: ModelCapability::default(),
             messages: vec![DirectMessage {
                 role: DirectRole::User,
                 parts: vec![DirectPart::Text(prompt.into())],
@@ -117,8 +120,11 @@ impl DirectRequest {
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum DirectLlmError {
-    #[error("invalid request: {0}")]
-    InvalidRequest(String),
+    #[error("invalid request: {message}")]
+    InvalidRequest {
+        category: ModelEffortValidationCategory,
+        message: String,
+    },
     #[error("invalid response: {0}")]
     InvalidResponse(String),
     #[error("transport error: {0}")]
@@ -167,13 +173,22 @@ impl DirectLlmClient {
 
     pub async fn complete(
         &mut self,
-        request: DirectRequest,
+        mut request: DirectRequest,
     ) -> Result<LlmResponse, DirectLlmError> {
-        if let Some(variant) = request.model_variant.as_deref() {
-            self.provider
-                .validate_variant(&request.model, variant)
-                .map_err(DirectLlmError::InvalidRequest)?;
-        }
+        // Validate the requested effort against the capability that travels
+        // with the request, and write the resolved (alias-normalized) effort
+        // back so the provider never sees an un-clamped value.
+        request.model_variant = request
+            .model_capability
+            .validate_effort(
+                &request.model,
+                self.provider.kind(),
+                request.model_variant.as_deref(),
+            )
+            .map_err(|error| DirectLlmError::InvalidRequest {
+                category: error.category,
+                message: error.message,
+            })?;
 
         let output_for_validation = request.output.clone();
         let model = request.model.clone();
@@ -273,6 +288,7 @@ pub(crate) fn build_llm_request(
     let DirectRequest {
         model: _,
         model_variant,
+        model_capability,
         messages,
         attachments,
         output,
@@ -347,6 +363,7 @@ pub(crate) fn build_llm_request(
         tools: Vec::new().into(),
         tool_choice: LlmToolChoice::None,
         model_variant,
+        model_capability,
         generation,
         scope,
         output_spec,
@@ -539,6 +556,153 @@ mod tests {
         assert!(err.to_string().contains("items >= 1"));
     }
 
+    fn reasoning_capability() -> ModelCapability {
+        ModelCapability {
+            reasoning: Some(crate::ReasoningCapability {
+                efforts: ["low", "medium", "high", "max"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                aliases: std::collections::BTreeMap::from([(
+                    "xhigh".to_string(),
+                    "max".to_string(),
+                )]),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_client_rejects_unsupported_effort_before_provider_call() {
+        let called = Arc::new(Mutex::new(false));
+        let called_for_provider = Arc::clone(&called);
+        let provider = TestProvider::builder()
+            .kind("direct-reject")
+            .complete(move |_request| {
+                let called = Arc::clone(&called_for_provider);
+                async move {
+                    *called.lock().expect("called lock") = true;
+                    Ok(LlmResponse::default())
+                }
+            })
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+
+        let mut request = DirectRequest::text("direct-model", "hi");
+        request.model_variant = Some("turbo".to_string());
+        request.model_capability = reasoning_capability();
+
+        let err = client
+            .complete(request)
+            .await
+            .expect_err("unsupported effort must be rejected");
+        assert!(matches!(
+            err,
+            DirectLlmError::InvalidRequest {
+                category: ModelEffortValidationCategory::UnsupportedEffort,
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("Unsupported effort `turbo`"));
+        assert!(
+            !*called.lock().expect("called lock"),
+            "the provider must not be called when the effort is rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_client_normalizes_alias_effort_into_outgoing_request() {
+        let captured: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+        let captured_for_provider = Arc::clone(&captured);
+        let provider = TestProvider::builder()
+            .kind("direct-alias")
+            .complete(move |request| {
+                let captured = Arc::clone(&captured_for_provider);
+                async move {
+                    *captured.lock().expect("capture lock") = Some(request.model_variant.clone());
+                    Ok(LlmResponse {
+                        full_text: "ok".to_string(),
+                        terminal_reason: LlmTerminalReason::Stop,
+                        ..Default::default()
+                    })
+                }
+            })
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+
+        let mut request = DirectRequest::text("direct-model", "hi");
+        request.model_variant = Some("XHigh".to_string());
+        request.model_capability = reasoning_capability();
+
+        client.complete(request).await.expect("completion");
+        let seen = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("provider must be called");
+        assert_eq!(
+            seen.as_deref(),
+            Some("max"),
+            "alias `XHigh` must clamp to canonical `max` before the provider sees the request"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_client_rejects_effort_when_model_is_not_configurable() {
+        let provider = TestProvider::builder()
+            .kind("direct-not-configurable")
+            .complete(|_request| async { Ok(LlmResponse::default()) })
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+
+        let mut request = DirectRequest::text("direct-model", "hi");
+        request.model_variant = Some("high".to_string());
+        // No capability: the model exposes no configurable effort.
+
+        let err = client
+            .complete(request)
+            .await
+            .expect_err("effort on a non-configurable model must be rejected");
+        assert!(matches!(
+            err,
+            DirectLlmError::InvalidRequest {
+                category: ModelEffortValidationCategory::EffortNotConfigurable,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_client_rejects_missing_mandatory_effort() {
+        let provider = TestProvider::builder()
+            .kind("direct-mandatory")
+            .complete(|_request| async { Ok(LlmResponse::default()) })
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+
+        let mut capability = reasoning_capability();
+        capability.reasoning.as_mut().expect("reasoning").mandatory = true;
+        let mut request = DirectRequest::text("direct-model", "hi");
+        request.model_capability = capability;
+        // No model_variant supplied, but the model requires one.
+
+        let err = client
+            .complete(request)
+            .await
+            .expect_err("missing mandatory effort must be rejected");
+        assert!(matches!(
+            err,
+            DirectLlmError::InvalidRequest {
+                category: ModelEffortValidationCategory::EffortRequired,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn build_llm_request_preserves_nonempty_content_and_drops_empty_messages() {
         let provider = TestProvider::default().into_handle();
@@ -567,6 +731,7 @@ mod tests {
             stream_events: None,
             session_id: None,
             model_variant: None,
+            model_capability: ModelCapability::default(),
             caused_by: None,
             replay: None,
         };

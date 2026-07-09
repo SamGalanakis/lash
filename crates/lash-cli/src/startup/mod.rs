@@ -163,7 +163,7 @@ fn resolve_agent_model_specs(
             validate_model_selection(provider, &selection)?;
             let resolved = resolve_model_selection(provider, &selection, model_catalog)?;
             let variant = resolve_model_variant(provider, &selection.model, None)?;
-            let model_spec = resolved.into_model_spec(variant)?;
+            let model_spec = resolved.into_model_spec(provider.kind(), variant)?;
             Ok((capability.clone(), model_spec))
         })
         .collect()
@@ -216,7 +216,7 @@ fn resolve_startup_model(
         resolve_model_variant(provider, &model, requested_variant).map_err(anyhow::Error::msg)?;
     let model_spec = resolved_spec
         .clone()
-        .into_model_spec(variant.clone())
+        .into_model_spec(provider.kind(), variant.clone())
         .map_err(anyhow::Error::msg)?;
     let agent_model_specs =
         resolve_agent_model_specs(provider, model_catalog, &lash_config.agent_models)

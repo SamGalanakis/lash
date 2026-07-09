@@ -29,6 +29,7 @@ fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineCon
         max_context_tokens: None,
         max_turns: None,
         model_variant: None,
+        model_capability: crate::llm::capability::ModelCapability::default(),
         generation: crate::llm::types::GenerationOptions::default(),
         autonomous: false,
         tool_specs: Vec::new().into(),

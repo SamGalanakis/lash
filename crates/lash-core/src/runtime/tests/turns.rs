@@ -2787,3 +2787,148 @@ fn turn_input_queue_ingress_has_one_production_draft_persistence_path() {
         "turn-input queued work drafts must be persisted only through LashRuntime::enqueue_turn_input; offenders: {offenders:?}"
     );
 }
+
+#[tokio::test]
+async fn turn_driver_normalizes_alias_effort_into_outgoing_request() {
+    use std::sync::{Arc, Mutex};
+
+    let captured: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+    let captured_for_provider = Arc::clone(&captured);
+    let provider = TestProvider::builder()
+        .kind("capability-capture")
+        .complete(move |req| {
+            let captured = Arc::clone(&captured_for_provider);
+            async move {
+                *captured.lock().expect("capture lock") = Some(req.model_variant.clone());
+                Ok(LlmResponse {
+                    full_text: "ok".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "ok".to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build()
+        .into_handle();
+
+    let capability = crate::ModelCapability {
+        reasoning: Some(crate::ReasoningCapability {
+            efforts: ["low", "medium", "high", "max"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            aliases: std::collections::BTreeMap::from([("xhigh".to_string(), "max".to_string())]),
+            ..Default::default()
+        }),
+    };
+    let model =
+        crate::ModelSpec::from_token_limits("mock-model", Some("xhigh".to_string()), 200_000, None)
+            .expect("valid model spec")
+            .with_capability(capability);
+
+    let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
+    runtime
+        .update_session_config(Some(provider), Some(model), None)
+        .await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "alias-normalize-turn"),
+        )
+        .await
+        .expect("turn");
+
+    assert_eq!(turn.assistant_output.safe_text, "ok");
+    let seen = captured
+        .lock()
+        .expect("capture lock")
+        .clone()
+        .expect("provider must be called");
+    assert_eq!(
+        seen.as_deref(),
+        Some("max"),
+        "alias `xhigh` must clamp to canonical `max` before the provider sees the request"
+    );
+}
+
+#[tokio::test]
+async fn turn_driver_rejects_unsupported_effort_before_provider_call() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let called = Arc::new(AtomicBool::new(false));
+    let called_for_provider = Arc::clone(&called);
+    let provider = TestProvider::builder()
+        .kind("capability-reject")
+        .complete(move |_req| {
+            let called = Arc::clone(&called_for_provider);
+            async move {
+                called.store(true, Ordering::SeqCst);
+                Ok(LlmResponse::default())
+            }
+        })
+        .build()
+        .into_handle();
+
+    let capability = crate::ModelCapability {
+        reasoning: Some(crate::ReasoningCapability {
+            efforts: ["low", "medium", "high"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            ..Default::default()
+        }),
+    };
+    let model =
+        crate::ModelSpec::from_token_limits("mock-model", Some("turbo".to_string()), 200_000, None)
+            .expect("valid model spec")
+            .with_capability(capability);
+
+    let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
+    runtime
+        .update_session_config(Some(provider), Some(model), None)
+        .await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "unsupported-effort-turn"),
+        )
+        .await
+        .expect("turn");
+
+    assert!(
+        !called.load(Ordering::SeqCst),
+        "an unsupported effort must be rejected before the provider is called"
+    );
+    let issue = turn
+        .errors
+        .iter()
+        .find(|issue| issue.kind == "llm_provider")
+        .expect("llm_provider issue");
+    assert_eq!(issue.code.as_deref(), Some("unsupported_effort"));
+    assert!(issue.message.contains("Unsupported effort `turbo`"));
+}

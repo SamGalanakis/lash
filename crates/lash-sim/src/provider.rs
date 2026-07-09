@@ -1723,6 +1723,7 @@ mod tests {
             }]),
             tool_choice: LlmToolChoice::Auto,
             model_variant: None,
+            model_capability: lash_core::ModelCapability::default(),
             generation: lash_core::GenerationOptions::default(),
             scope: lash_core::LlmRequestScope::new(
                 "session-1",
@@ -1743,6 +1744,7 @@ mod tests {
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: None,
+            model_capability: lash_core::ModelCapability::default(),
             generation: lash_core::GenerationOptions::default(),
             scope: lash_core::LlmRequestScope::new(
                 "session-1",

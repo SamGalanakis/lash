@@ -644,6 +644,8 @@ pub struct LlmRequestSpec {
     pub tool_choice: LlmToolChoice,
     pub model_variant: Option<String>,
     #[serde(default)]
+    pub model_capability: crate::ModelCapability,
+    #[serde(default)]
     pub generation: crate::GenerationOptions,
     pub scope: crate::LlmRequestScope,
     pub output_spec: Option<LlmOutputSpec>,
@@ -662,6 +664,7 @@ impl LlmRequestSpec {
             tools: Arc::clone(&request.tools),
             tool_choice: request.tool_choice.clone(),
             model_variant: request.model_variant.clone(),
+            model_capability: request.model_capability.clone(),
             generation: request.generation.clone(),
             scope: request.scope.clone(),
             output_spec: request.output_spec.clone(),
@@ -684,6 +687,7 @@ impl LlmRequestSpec {
             tools: self.tools,
             tool_choice: self.tool_choice,
             model_variant: self.model_variant,
+            model_capability: self.model_capability,
             generation: self.generation,
             scope: self.scope,
             output_spec: self.output_spec,

@@ -1,5 +1,7 @@
 use std::num::NonZeroUsize;
 
+use crate::provider::ModelCapability;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpec {
@@ -7,6 +9,11 @@ pub struct ModelSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
     pub limits: ModelLimits,
+    /// Host-supplied capability metadata: what effort levels the model exposes
+    /// and how they encode on the wire. Lash validates the requested variant
+    /// against this and threads it onto every request the provider receives.
+    #[serde(default, skip_serializing_if = "ModelCapability::is_empty")]
+    pub capability: ModelCapability,
 }
 
 impl ModelSpec {
@@ -18,6 +25,7 @@ impl ModelSpec {
                 context_window_tokens,
                 output_token_capacity: None,
             },
+            capability: ModelCapability::default(),
         }
     }
 
@@ -30,11 +38,17 @@ impl ModelSpec {
             id: id.into(),
             variant,
             limits,
+            capability: ModelCapability::default(),
         }
     }
 
     pub fn with_variant(mut self, variant: Option<String>) -> Self {
         self.variant = variant;
+        self
+    }
+
+    pub fn with_capability(mut self, capability: ModelCapability) -> Self {
+        self.capability = capability;
         self
     }
 

@@ -7,6 +7,7 @@ impl RemoteLlmRequest {
             tools,
             tool_choice,
             model_variant,
+            model_capability,
             generation,
             scope,
             output_spec,
@@ -20,6 +21,7 @@ impl RemoteLlmRequest {
             model_intent: RemoteModelIntent {
                 model,
                 variant: model_variant,
+                capability: model_capability.into(),
                 provider: None,
                 metadata: HashMap::new(),
             },
@@ -55,6 +57,7 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
         let RemoteModelIntent {
             model,
             variant,
+            capability,
             provider: _,
             metadata: _,
         } = model_intent;
@@ -68,12 +71,87 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
             tools: Arc::new(tools.into_iter().map(Into::into).collect()),
             tool_choice: tool_choice.into(),
             model_variant: variant,
+            model_capability: capability.into(),
             generation: generation.try_into()?,
             scope: scope.into(),
             output_spec: output_spec.map(Into::into),
             stream_events: None,
             provider_trace: None,
         })
+    }
+}
+
+impl From<core_llm::ModelCapability> for RemoteModelCapability {
+    fn from(value: core_llm::ModelCapability) -> Self {
+        let core_llm::ModelCapability { reasoning } = value;
+        Self {
+            reasoning: reasoning.map(Into::into),
+        }
+    }
+}
+
+impl From<RemoteModelCapability> for core_llm::ModelCapability {
+    fn from(value: RemoteModelCapability) -> Self {
+        let RemoteModelCapability { reasoning } = value;
+        Self {
+            reasoning: reasoning.map(Into::into),
+        }
+    }
+}
+
+impl From<core_llm::ReasoningCapability> for RemoteReasoningCapability {
+    fn from(value: core_llm::ReasoningCapability) -> Self {
+        let core_llm::ReasoningCapability {
+            efforts,
+            default_effort,
+            aliases,
+            encoding,
+            mandatory,
+        } = value;
+        Self {
+            efforts,
+            default_effort,
+            aliases,
+            encoding: encoding.into(),
+            mandatory,
+        }
+    }
+}
+
+impl From<RemoteReasoningCapability> for core_llm::ReasoningCapability {
+    fn from(value: RemoteReasoningCapability) -> Self {
+        let RemoteReasoningCapability {
+            efforts,
+            default_effort,
+            aliases,
+            encoding,
+            mandatory,
+        } = value;
+        Self {
+            efforts,
+            default_effort,
+            aliases,
+            encoding: encoding.into(),
+            mandatory,
+        }
+    }
+}
+
+impl From<core_llm::ReasoningEncoding> for RemoteReasoningEncoding {
+    fn from(value: core_llm::ReasoningEncoding) -> Self {
+        match value {
+            core_llm::ReasoningEncoding::Effort => Self::Effort,
+            core_llm::ReasoningEncoding::Budget(map) => Self::Budget(map),
+        }
+    }
+}
+
+impl From<RemoteReasoningEncoding> for core_llm::ReasoningEncoding {
+    fn from(value: RemoteReasoningEncoding) -> Self {
+        match value {
+            RemoteReasoningEncoding::Effort => Self::Effort,
+            RemoteReasoningEncoding::Budget(map) => Self::Budget(map),
+        }
     }
 }
 

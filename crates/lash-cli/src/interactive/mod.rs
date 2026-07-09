@@ -110,14 +110,8 @@ pub(crate) async fn run_app(
     app.set_ui_extensions(Arc::clone(&ui_extensions));
     app.set_chrome_state(chrome_state);
     app.usage.context_window = Some(initial_context_window);
-    let mut current_model_variant = initial_model_variant.or_else(|| {
-        crate::provider_metadata::default_model_variant_for_provider(
-            provider.kind(),
-            &app.model,
-            provider.supported_variants(&app.model),
-        )
-        .map(str::to_string)
-    });
+    let mut current_model_variant = initial_model_variant
+        .or_else(|| crate::model_selection::default_variant(&provider, &app.model));
     app.set_model_variant(current_model_variant.clone());
     let mut current_execution_mode = initial_execution_mode;
     app.load_history();

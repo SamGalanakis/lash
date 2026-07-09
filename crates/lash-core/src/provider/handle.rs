@@ -4,17 +4,15 @@ use super::support::*;
 #[derive(Debug)]
 pub struct ProviderComponents {
     pub provider: Box<dyn Provider>,
-    pub model_policy: Arc<dyn ProviderModelPolicy>,
     pub failure_classifier: Arc<dyn ProviderFailureClassifier>,
     pub rate_limiter: Arc<ProviderRateLimiter>,
 }
 
 impl ProviderComponents {
-    pub fn new(provider: Box<dyn Provider>, model_policy: Arc<dyn ProviderModelPolicy>) -> Self {
+    pub fn new(provider: Box<dyn Provider>) -> Self {
         let options = provider.options();
         Self {
             provider,
-            model_policy,
             failure_classifier: Arc::new(DefaultProviderFailureClassifier),
             rate_limiter: Arc::new(ProviderRateLimiter::new(options.reliability.rate_limits)),
         }
@@ -51,7 +49,6 @@ impl Clone for ProviderComponents {
     fn clone(&self) -> Self {
         Self {
             provider: self.provider.clone_boxed(),
-            model_policy: Arc::clone(&self.model_policy),
             failure_classifier: Arc::clone(&self.failure_classifier),
             rate_limiter: Arc::clone(&self.rate_limiter),
         }
@@ -88,31 +85,6 @@ impl ProviderHandle {
 
     pub fn kind(&self) -> &'static str {
         self.components.provider.kind()
-    }
-
-    pub fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        self.components.model_policy.supported_variants(model)
-    }
-
-    pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
-        let variants = self.supported_variants(model);
-        if variants.is_empty() {
-            return Err(format!(
-                "Model `{}` on {} does not expose configurable variants.",
-                model,
-                self.kind()
-            ));
-        }
-        if variants.contains(&variant) {
-            return Ok(());
-        }
-        Err(format!(
-            "Unsupported variant `{}` for `{}` on {}. Available: {}",
-            variant,
-            model,
-            self.kind(),
-            variants.join(", ")
-        ))
     }
 
     pub fn options(&self) -> ProviderOptions {
@@ -284,7 +256,7 @@ pub struct UnconfiguredProvider {
 
 impl UnconfiguredProvider {
     fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(Box::new(self), Arc::new(StaticModelPolicy::new()))
+        ProviderComponents::new(Box::new(self))
     }
 }
 

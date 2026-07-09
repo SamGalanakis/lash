@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
 
-use crate::policy::GoogleModelPolicy;
 use crate::support::*;
 
 pub(crate) const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
@@ -94,7 +93,7 @@ impl GoogleOAuthProvider {
     }
 
     pub fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(Box::new(self), std::sync::Arc::new(GoogleModelPolicy))
+        ProviderComponents::new(Box::new(self))
     }
 }
 

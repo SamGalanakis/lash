@@ -17,10 +17,50 @@ mod tests {
         LlmAttachment, LlmContentBlock, LlmJsonSchema, LlmMessage, LlmOutputPart, LlmOutputSpec,
         LlmRequest, LlmRole, LlmTerminalReason, LlmToolChoice, LlmToolSpec, LlmUsage,
     };
-    use lash_core::provider::{CacheRetention, ProviderOptions};
+    use lash_core::provider::{
+        CacheRetention, ModelCapability, Provider, ProviderOptions, ReasoningCapability,
+        ReasoningEncoding,
+    };
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
+
+    // Capability data mirrors what the host catalog supplies. Effort encoding
+    // sends the resolved variant verbatim (adaptive thinking); budget encoding
+    // maps each variant to a token budget and omits the wire thinking block for
+    // any variant absent from the map (e.g. "none").
+    fn effort_capability(efforts: &[&str]) -> ModelCapability {
+        ModelCapability {
+            reasoning: Some(ReasoningCapability {
+                efforts: efforts.iter().map(|e| e.to_string()).collect(),
+                default_effort: None,
+                aliases: BTreeMap::new(),
+                encoding: ReasoningEncoding::Effort,
+                mandatory: false,
+            }),
+        }
+    }
+
+    fn budget_capability() -> ModelCapability {
+        let budgets = BTreeMap::from([
+            ("low".to_string(), 1_024u32),
+            ("medium".to_string(), 4_096u32),
+            ("high".to_string(), 12_288u32),
+        ]);
+        ModelCapability {
+            reasoning: Some(ReasoningCapability {
+                efforts: ["none", "low", "medium", "high"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                default_effort: None,
+                aliases: BTreeMap::new(),
+                encoding: ReasoningEncoding::Budget(budgets),
+                mandatory: false,
+            }),
+        }
+    }
 
     // `DEFAULT_BASE_URL` is part of the crate's public surface and exercised by
     // downstream hosts; reference it here so the re-export stays covered.
@@ -34,6 +74,7 @@ mod tests {
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: None,
+            model_capability: ModelCapability::default(),
             scope: lash_core::LlmRequestScope::new(
                 "session-1",
                 "session-1:frame:test",
@@ -168,6 +209,7 @@ mod tests {
         let provider = AnthropicProvider::new("key");
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "extract")]);
         req.model_variant = Some("medium".to_string());
+        req.model_capability = effort_capability(&["low", "medium", "high"]);
         req.output_spec = Some(LlmOutputSpec::JsonObject);
 
         let body = provider.build_request_body(&req).expect("body");
@@ -314,6 +356,7 @@ mod tests {
     fn thinking_display_is_omitted_unless_provider_exposes_thinking() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "extract")]);
         req.model_variant = Some("medium".to_string());
+        req.model_capability = effort_capability(&["low", "medium", "high"]);
 
         let hidden = AnthropicProvider::new("key")
             .build_request_body(&req)
@@ -340,10 +383,169 @@ mod tests {
 
         let mut thinking_req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
         thinking_req.model_variant = Some("medium".to_string());
+        thinking_req.model_capability = effort_capability(&["low", "medium", "high"]);
         let thinking = provider
             .build_request_body(&thinking_req)
             .expect("thinking body");
         assert!(thinking.get("temperature").is_none());
+    }
+
+    #[test]
+    fn effort_capability_emits_adaptive_thinking_with_verbatim_variant() {
+        // Effort encoding + a resolved variant produces the adaptive wire shape
+        // and sends the variant as the `output_config.effort` verbatim — the
+        // provider does not clamp against the model name (opus-4.7 exposes
+        // `xhigh`).
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        req.model = "claude-opus-4-7".to_string();
+        req.model_variant = Some("xhigh".to_string());
+        req.model_capability = effort_capability(&["low", "medium", "high", "xhigh"]);
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], json!("xhigh"));
+        assert!(body["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn budget_capability_maps_variant_to_budget_tokens() {
+        // Budget encoding resolves the variant to its token budget and emits the
+        // `enabled` thinking block; no `output_config.effort` is set.
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        req.model = "claude-haiku-4".to_string();
+        req.model_variant = Some("medium".to_string());
+        req.model_capability = budget_capability();
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], json!(4_096));
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn budget_capability_none_variant_emits_no_thinking() {
+        // "none" is a valid effort but carries no budget entry, so no thinking
+        // block is written even though the capability exposes reasoning.
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        req.model = "claude-haiku-4".to_string();
+        req.model_variant = Some("none".to_string());
+        req.model_capability = budget_capability();
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn no_reasoning_capability_emits_no_thinking() {
+        // A variant with no reasoning capability never produces a thinking block.
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        req.model_variant = Some("medium".to_string());
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn no_variant_emits_no_thinking_even_with_capability() {
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        req.model_capability = effort_capability(&["low", "medium", "high"]);
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert!(body.get("thinking").is_none());
+    }
+
+    // Header-capturing transport: records the outbound `anthropic-beta` header
+    // and answers with a minimal end_turn stream so `complete` succeeds. Used to
+    // assert the interleaved-thinking beta gates on the emitted thinking shape.
+    #[derive(Debug)]
+    struct HeaderCaptureTransport {
+        beta: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl lash_llm_transport::LlmHttpTransport for HeaderCaptureTransport {
+        async fn send(
+            &self,
+            request: lash_llm_transport::LlmHttpRequest,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<lash_llm_transport::LlmHttpResponse, lash_core::llm::transport::LlmTransportError>
+        {
+            let beta = request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+                .map(|(_, value)| value.clone());
+            *self.beta.lock().expect("beta capture") = beta;
+            let stream = [
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ]
+            .concat();
+            Ok(lash_llm_transport::LlmHttpResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+                body: lash_llm_transport::LlmHttpBody::buffered(stream.into_bytes()),
+            })
+        }
+    }
+
+    fn captured_beta_for(req: LlmRequest) -> String {
+        let beta = Arc::new(std::sync::Mutex::new(None));
+        let mut provider =
+            AnthropicProvider::new("key").with_transport(Arc::new(HeaderCaptureTransport {
+                beta: Arc::clone(&beta),
+            }));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(provider.complete(req))
+            .expect("stream completes");
+        let value = beta.lock().expect("beta capture").clone();
+        value.expect("anthropic-beta header sent")
+    }
+
+    #[test]
+    fn interleaved_thinking_beta_gates_on_emitted_thinking_shape() {
+        // Budget/enabled thinking opts into the interleaved beta; adaptive
+        // thinking (built-in) and no thinking do not. Gating is on the wire
+        // shape, never the model name.
+        let mut budget = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        budget.model = "claude-haiku-4".to_string();
+        budget.model_variant = Some("medium".to_string());
+        budget.model_capability = budget_capability();
+        assert!(
+            captured_beta_for(budget).contains(crate::policy::INTERLEAVED_THINKING_BETA),
+            "budget thinking must request the interleaved beta"
+        );
+
+        let mut adaptive = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        adaptive.model = "claude-opus-4-7".to_string();
+        adaptive.model_variant = Some("high".to_string());
+        adaptive.model_capability = effort_capability(&["low", "medium", "high", "xhigh"]);
+        assert!(
+            !captured_beta_for(adaptive).contains(crate::policy::INTERLEAVED_THINKING_BETA),
+            "adaptive thinking must not request the interleaved beta"
+        );
+
+        let plain = request(vec![LlmMessage::text(LlmRole::User, "hi")]);
+        assert!(
+            !captured_beta_for(plain).contains(crate::policy::INTERLEAVED_THINKING_BETA),
+            "a request without thinking must not request the interleaved beta"
+        );
     }
 
     #[test]

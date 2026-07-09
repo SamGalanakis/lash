@@ -3,6 +3,11 @@ use std::sync::Arc;
 
 use crate::{AttachmentRef, SchemaContract};
 
+pub use crate::llm::capability::{
+    ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError,
+    ReasoningCapability, ReasoningEncoding,
+};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmTerminalReason {
@@ -374,6 +379,8 @@ pub struct LlmRequest {
     pub tools: Arc<Vec<LlmToolSpec>>,
     pub tool_choice: LlmToolChoice,
     pub model_variant: Option<String>,
+    #[serde(default)]
+    pub model_capability: crate::llm::capability::ModelCapability,
     #[serde(default)]
     pub generation: GenerationOptions,
     pub scope: LlmRequestScope,
