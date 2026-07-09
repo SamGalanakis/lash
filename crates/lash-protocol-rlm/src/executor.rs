@@ -1825,6 +1825,26 @@ mod tests {
     }
 
     #[test]
+    fn image_json_round_trip_preserves_mime_and_image_type() {
+        block_on(async {
+            let image = lashlang::ImageValue::new(
+                "image-sha256",
+                "image/webp",
+                "cover",
+                73,
+                Some(320),
+                Some(180),
+            );
+            let flow = FlowValue::Image(image);
+            let json = flow_to_json_value(&flow).await;
+
+            assert_eq!(json.get("mime").and_then(Value::as_str), Some("image/webp"));
+            assert!(json.get("media_type").is_none());
+            assert_eq!(json_to_flow_value(json), flow);
+        });
+    }
+
+    #[test]
     fn executor_snapshot_round_trips_projection_ref_metadata() {
         let reference = ProjectionRef::new("memory", serde_json::json!("doc"));
         let mut state = RlmExecutionState::new().expect("state");

@@ -145,14 +145,22 @@ impl S3AttachmentStore {
     }
 
     fn content_path(&self, id: &AttachmentId) -> Result<Path, AttachmentStoreError> {
-        self.path_for(id, false)
+        self.path_for(None, id)
     }
 
-    fn metadata_path(&self, id: &AttachmentId) -> Result<Path, AttachmentStoreError> {
-        self.path_for(id, true)
+    fn session_content_path(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<Path, AttachmentStoreError> {
+        self.path_for(Some(session_id), id)
     }
 
-    fn path_for(&self, id: &AttachmentId, metadata: bool) -> Result<Path, AttachmentStoreError> {
+    fn path_for(
+        &self,
+        session_id: Option<&str>,
+        id: &AttachmentId,
+    ) -> Result<Path, AttachmentStoreError> {
         let hash = id.as_str();
         let first = hash.get(..2).unwrap_or(hash);
         let mut path = String::new();
@@ -160,13 +168,17 @@ impl S3AttachmentStore {
             path.push_str(prefix);
             path.push('/');
         }
+        if let Some(session_id) = session_id {
+            path.push_str("sessions/");
+            path.push_str(&lash_core::attachments::session_storage_namespace(
+                session_id,
+            ));
+            path.push('/');
+        }
         path.push_str("sha256/");
         path.push_str(first);
         path.push('/');
         path.push_str(hash);
-        if metadata {
-            path.push_str(".json");
-        }
         Path::parse(path).map_err(|err| {
             AttachmentStoreError::Backend(format!("invalid S3 attachment path for `{id}`: {err}"))
         })
@@ -192,95 +204,108 @@ impl AttachmentStore for S3AttachmentStore {
             meta.height,
             meta.label,
         );
-        let reference = meta.as_ref();
-        let content_path = self.content_path(&meta.id)?;
-        self.store
-            .put(&content_path, bytes.into())
-            .await
-            .map_err(|err| {
-                AttachmentStoreError::Backend(format!("failed to write `{content_path}`: {err}"))
-            })?;
-
-        let metadata_path = self.metadata_path(&meta.id)?;
-        let metadata = serde_json::to_vec_pretty(&meta).map_err(|err| {
-            AttachmentStoreError::Backend(format!(
-                "failed to encode attachment metadata for `{}`: {err}",
-                meta.id
-            ))
-        })?;
-        self.store
-            .put(&metadata_path, metadata.into())
-            .await
-            .map_err(|err| {
-                AttachmentStoreError::Backend(format!("failed to write `{metadata_path}`: {err}"))
-            })?;
-
-        Ok(reference)
+        put_at_path(&*self.store, self.content_path(&meta.id)?, bytes, meta).await
     }
 
     async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
-        let content_path = self.content_path(id)?;
-        let bytes = self
-            .store
-            .get(&content_path)
-            .await
-            .map_err(|err| map_object_store_get_error(err, id, false))?
-            .bytes()
-            .await
-            .map_err(|err| {
-                AttachmentStoreError::Backend(format!("failed to read `{content_path}`: {err}"))
-            })?
-            .to_vec();
-
-        let metadata_path = self.metadata_path(id)?;
-        let metadata = self
-            .store
-            .get(&metadata_path)
-            .await
-            .map_err(|err| map_object_store_get_error(err, id, true))?
-            .bytes()
-            .await
-            .map_err(|err| {
-                AttachmentStoreError::Backend(format!("failed to read `{metadata_path}`: {err}"))
-            })?;
-        let meta = serde_json::from_slice(&metadata).map_err(|source| {
-            AttachmentStoreError::MetadataDecode {
-                id: id.clone(),
-                source,
-            }
-        })?;
-
-        Ok(StoredAttachment { meta, bytes })
+        get_at_path(&*self.store, self.content_path(id)?, id).await
     }
 
     async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
-        // Remove the content object and its metadata sidecar. A missing object
-        // is not an error (idempotent delete); any other backend failure
-        // surfaces.
-        for path in [self.content_path(id)?, self.metadata_path(id)?] {
-            match self.store.delete(&path).await {
-                Ok(()) => {}
-                Err(object_store::Error::NotFound { .. }) => {}
-                Err(err) => {
-                    return Err(AttachmentStoreError::Backend(format!(
-                        "failed to delete `{path}`: {err}"
-                    )));
-                }
-            }
-        }
-        Ok(())
+        delete_at_path(&*self.store, self.content_path(id)?).await
+    }
+
+    async fn put_for_session(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        meta: AttachmentCreateMeta,
+    ) -> Result<AttachmentRef, AttachmentStoreError> {
+        let meta = AttachmentMeta::new(
+            lash_core::attachments::content_id(&bytes),
+            meta.media_type,
+            bytes.len() as u64,
+            meta.width,
+            meta.height,
+            meta.label,
+        );
+        put_at_path(
+            &*self.store,
+            self.session_content_path(session_id, &meta.id)?,
+            bytes,
+            meta,
+        )
+        .await
+    }
+
+    async fn get_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<StoredAttachment, AttachmentStoreError> {
+        get_at_path(&*self.store, self.session_content_path(session_id, id)?, id).await
+    }
+
+    async fn delete_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<(), AttachmentStoreError> {
+        delete_at_path(&*self.store, self.session_content_path(session_id, id)?).await
     }
 }
 
-fn map_object_store_get_error(
-    err: object_store::Error,
+async fn put_at_path(
+    store: &dyn ObjectStore,
+    content_path: Path,
+    bytes: Vec<u8>,
+    meta: AttachmentMeta,
+) -> Result<AttachmentRef, AttachmentStoreError> {
+    let reference = meta.as_ref();
+    store
+        .put(&content_path, bytes.into())
+        .await
+        .map_err(|err| {
+            AttachmentStoreError::Backend(format!("failed to write `{content_path}`: {err}"))
+        })?;
+
+    Ok(reference)
+}
+
+async fn get_at_path(
+    store: &dyn ObjectStore,
+    content_path: Path,
     id: &AttachmentId,
-    metadata: bool,
-) -> AttachmentStoreError {
-    match err {
-        object_store::Error::NotFound { .. } if metadata => {
-            AttachmentStoreError::MissingMeta(id.clone())
+) -> Result<StoredAttachment, AttachmentStoreError> {
+    let bytes = store
+        .get(&content_path)
+        .await
+        .map_err(|err| map_object_store_get_error(err, id))?
+        .bytes()
+        .await
+        .map_err(|err| {
+            AttachmentStoreError::Backend(format!("failed to read `{content_path}`: {err}"))
+        })?
+        .to_vec();
+
+    Ok(StoredAttachment { bytes })
+}
+
+async fn delete_at_path(store: &dyn ObjectStore, path: Path) -> Result<(), AttachmentStoreError> {
+    match store.delete(&path).await {
+        Ok(()) => {}
+        Err(object_store::Error::NotFound { .. }) => {}
+        Err(err) => {
+            return Err(AttachmentStoreError::Backend(format!(
+                "failed to delete `{path}`: {err}"
+            )));
         }
+    }
+    Ok(())
+}
+
+fn map_object_store_get_error(err: object_store::Error, id: &AttachmentId) -> AttachmentStoreError {
+    match err {
         object_store::Error::NotFound { .. } => AttachmentStoreError::NotFound(id.clone()),
         err => AttachmentStoreError::Backend(err.to_string()),
     }

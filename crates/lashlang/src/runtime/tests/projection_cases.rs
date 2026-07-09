@@ -1,6 +1,7 @@
 fn test_image() -> Value {
     Value::Image(ImageValue::new(
         "img-1",
+        "image/png",
         "chart.png",
         1234,
         Some(640),
@@ -1091,6 +1092,7 @@ async fn image_values_serialize_as_descriptors() {
         serde_json::json!({
             "type": "image",
             "id": "img-1",
+            "mime": "image/png",
             "label": "chart.png",
             "size": 1234,
             "width": 640,
@@ -1099,7 +1101,7 @@ async fn image_values_serialize_as_descriptors() {
     );
     assert_eq!(
         stringify_value(&image).expect("stringify image"),
-        r#"{"height":480,"id":"img-1","label":"chart.png","size":1234,"type":"image","width":640}"#
+        r#"{"height":480,"id":"img-1","mime":"image/png","label":"chart.png","size":1234,"type":"image","width":640}"#
     );
     assert_eq!(
         exec_with_global("img", image.clone(), "finish img")

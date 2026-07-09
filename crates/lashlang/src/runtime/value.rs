@@ -82,6 +82,7 @@ impl FromIterator<Value> for ListValue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageValue {
     pub id: String,
+    pub mime: String,
     pub label: String,
     pub size: u64,
     pub width: Option<u32>,
@@ -91,6 +92,7 @@ pub struct ImageValue {
 impl ImageValue {
     pub fn new(
         id: impl Into<String>,
+        mime: impl Into<String>,
         label: impl Into<String>,
         size: u64,
         width: Option<u32>,
@@ -98,6 +100,7 @@ impl ImageValue {
     ) -> Self {
         Self {
             id: id.into(),
+            mime: mime.into(),
             label: label.into(),
             size,
             width,
@@ -111,9 +114,10 @@ impl Serialize for ImageValue {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(6))?;
+        let mut map = serializer.serialize_map(Some(7))?;
         map.serialize_entry("type", "image")?;
         map.serialize_entry("id", &self.id)?;
+        map.serialize_entry("mime", &self.mime)?;
         map.serialize_entry("label", &self.label)?;
         map.serialize_entry("size", &self.size)?;
         map.serialize_entry("width", &self.width)?;
@@ -132,6 +136,7 @@ impl<'de> Deserialize<'de> for ImageValue {
             #[serde(rename = "type")]
             kind: String,
             id: String,
+            mime: String,
             label: String,
             size: u64,
             #[serde(default)]
@@ -146,6 +151,7 @@ impl<'de> Deserialize<'de> for ImageValue {
         }
         Ok(Self {
             id: descriptor.id,
+            mime: descriptor.mime,
             label: descriptor.label,
             size: descriptor.size,
             width: descriptor.width,

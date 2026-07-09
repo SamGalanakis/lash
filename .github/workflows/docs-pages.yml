@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - staging
     paths:
       - "docs/**"
       - ".github/workflows/docs-pages.yml"
@@ -22,7 +21,7 @@ concurrency:
 jobs:
   publish:
     name: Publish docs
-    if: github.ref_name == 'main' || github.ref_name == 'staging'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -52,92 +51,13 @@ jobs:
         if: steps.pages.outputs.enabled == 'true'
         uses: actions/configure-pages@v5
 
-      - name: Build branch-routed docs
+      - name: Build docs
         if: steps.pages.outputs.enabled == 'true'
-        env:
-          CURRENT_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-
           site_dir="_site"
           rm -rf "${site_dir}"
-          mkdir -p "${site_dir}/main" "${site_dir}/staging"
-
-          copy_branch_docs() {
-            local branch="$1"
-            local target="${site_dir}/${branch}"
-            local tmp
-            tmp="$(mktemp -d)"
-
-            if [ "${branch}" = "${CURRENT_BRANCH}" ]; then
-              rsync -a --delete docs/ "${target}/"
-              return
-            fi
-
-            if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
-              git fetch --depth=1 origin "${branch}"
-              git archive FETCH_HEAD docs | tar -x -C "${tmp}"
-              rsync -a --delete "${tmp}/docs/" "${target}/"
-            else
-              cat > "${target}/index.html" <<HTML
-          <!doctype html>
-          <html lang="en">
-          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>lash ${branch} docs</title></head>
-          <body><main><h1>lash ${branch} docs</h1><p>The ${branch} branch has not published docs yet.</p></main></body>
-          </html>
-          HTML
-            fi
-
-            if [ ! -f "${target}/index.html" ]; then
-              cat > "${target}/index.html" <<HTML
-          <!doctype html>
-          <html lang="en">
-          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>lash ${branch} docs</title></head>
-          <body>
-            <main>
-              <h1>lash ${branch} docs</h1>
-              <p><a href="./architecture.html">Architecture</a></p>
-              <p><a href="./design-language.html">Design language</a></p>
-            </main>
-          </body>
-          </html>
-          HTML
-            fi
-          }
-
-          copy_branch_docs main
-          copy_branch_docs staging
-
-          # Root redirects to /main/ — channel switching now lives in
-          # the docs themselves (top-right dropdown), not on a chooser
-          # page. Anyone hitting bare lash.run lands on main; the
-          # dropdown takes them to staging if they want it.
-          #
-          # The page is painted in brand-dark (matching --bg) and the
-          # body is hidden so the meta-refresh hop never flashes a
-          # white default-bg paint before the redirect completes.
-          cat > "${site_dir}/index.html" <<'HTML'
-          <!doctype html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <meta http-equiv="refresh" content="0; url=./main/">
-            <link rel="canonical" href="./main/">
-            <meta name="color-scheme" content="dark light">
-            <title>lash docs</title>
-            <style>
-              html, body { margin: 0; height: 100%; background: #141412; }
-              body { visibility: hidden; }
-              @media (prefers-color-scheme: light) {
-                html, body { background: #f5efe0; }
-              }
-            </style>
-            <script>location.replace('./main/');</script>
-          </head>
-          <body><a href="./main/">lash docs · main</a></body>
-          </html>
-          HTML
-
+          rsync -a --delete docs/ "${site_dir}/"
           touch "${site_dir}/.nojekyll"
           echo "lash.run" > "${site_dir}/CNAME"
 

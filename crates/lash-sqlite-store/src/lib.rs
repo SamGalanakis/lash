@@ -85,6 +85,7 @@ mod pending_turn_inputs;
 mod persistence;
 mod process_registry;
 mod process_registry_change;
+mod process_registry_completion;
 mod queued_work;
 mod schema;
 mod triggers;

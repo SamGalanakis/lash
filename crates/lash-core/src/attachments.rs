@@ -21,14 +21,6 @@ pub enum AttachmentStoreError {
         #[source]
         source: std::io::Error,
     },
-    #[error("attachment store metadata is unavailable for `{0}`")]
-    MissingMeta(AttachmentId),
-    #[error("attachment store metadata decode failed for `{id}`: {source}")]
-    MetadataDecode {
-        id: AttachmentId,
-        #[source]
-        source: serde_json::Error,
-    },
     #[error("attachment manifest write failed: {0}")]
     ManifestRecordFailed(String),
     #[error("attachment store backend failed: {0}")]
@@ -37,7 +29,6 @@ pub enum AttachmentStoreError {
 
 #[derive(Clone, Debug)]
 pub struct StoredAttachment {
-    pub meta: AttachmentMeta,
     pub bytes: Vec<u8>,
 }
 
@@ -82,6 +73,24 @@ pub trait AttachmentStore: Send + Sync {
     /// runtime commit.
     fn mark_manifest_committed(&self, _ids: &[AttachmentId]) {}
 
+    /// Return the raw physical backend when this value is a session-bound
+    /// facade.
+    ///
+    /// Runtime assembly uses this hook before binding a store to a session.
+    /// That makes rebinding idempotent: rebuilding the same session does not
+    /// stack manifest decorators, and a managed child never inherits its
+    /// parent's session boundary. Plain physical stores return `None`.
+    #[doc(hidden)]
+    fn unscoped_backend(&self) -> Option<Arc<dyn AttachmentStore>> {
+        None
+    }
+
+    /// Identify the session bound by a session-scoped facade.
+    #[doc(hidden)]
+    fn bound_session_id(&self) -> Option<&str> {
+        None
+    }
+
     async fn put(
         &self,
         bytes: Vec<u8>,
@@ -90,28 +99,33 @@ pub trait AttachmentStore: Send + Sync {
 
     async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError>;
 
-    /// Unconditionally remove the content addressed by `id` (its payload bytes
-    /// and any metadata sidecar). Idempotent: deleting content that is already
-    /// absent returns `Ok(())`.
-    ///
-    /// # Sharing safety — read before calling
-    ///
-    /// This is a **content-addressed** delete, not a reference-aware one. The id
-    /// is a SHA-256 of the bytes, so *any* session that writes identical bytes
-    /// produces the same id and shares one stored object. Deleting by bare id
-    /// therefore removes the bytes for **every** session that references them.
-    /// The store holds no reference information — that lives in the write-ahead
-    /// [`AttachmentManifest`](crate::AttachmentManifest), which is likewise keyed
-    /// by content id, so at most one row exists per distinct content and a set
-    /// `committed_at` means *some* durable session state references it.
-    ///
-    /// Callers MUST establish that no session references the content before
-    /// deleting — for example, only delete ids returned by
-    /// [`AttachmentManifest::list_uncommitted`](crate::AttachmentManifest::list_uncommitted),
-    /// which are never committed by any session and are thus provably
-    /// unreferenced. [`reclaim_orphaned_attachments`] is the intended safe
-    /// caller; prefer it over calling `delete` directly.
+    /// Store bytes in a physical namespace owned exclusively by `session_id`.
+    /// Logical ids remain content hashes; physical objects do not cross this
+    /// ownership boundary.
+    async fn put_for_session(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        meta: AttachmentCreateMeta,
+    ) -> Result<AttachmentRef, AttachmentStoreError>;
+
+    async fn get_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<StoredAttachment, AttachmentStoreError>;
+
+    /// Remove content from the unscoped namespace. Idempotent. Runtime-managed
+    /// attachments use [`AttachmentStore::delete_for_session`] instead.
     async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError>;
+
+    /// Remove only `session_id`'s physical object. This is the reclamation
+    /// primitive for manifested attachments.
+    async fn delete_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<(), AttachmentStoreError>;
 }
 
 /// Outcome of a host-invoked orphan-attachment reclamation sweep.
@@ -137,16 +151,12 @@ pub struct AttachmentReclamationReport {
 /// The sweep asks the write-ahead `manifest` for every intent aged past
 /// `older_than_epoch_ms` that was recorded but never committed
 /// ([`AttachmentManifest::list_uncommitted`](crate::AttachmentManifest::list_uncommitted)),
-/// deletes each one's bytes via [`AttachmentStore::delete`], then forgets the
+/// deletes each one's session-owned bytes, then forgets the
 /// manifest row ([`AttachmentManifest::forget`](crate::AttachmentManifest::forget)).
 ///
-/// # Sharing safety
-///
-/// This is the *safe* delete path. Because the manifest is keyed by content id,
-/// an uncommitted intent proves no durable session state references that
-/// content: shared/committed content carries a set `committed_at` and is
-/// excluded from `list_uncommitted`. Deleting an aged uncommitted intent's
-/// bytes is therefore safe under cross-session sharing by construction.
+/// Each manifested payload has a session-owned physical object, so reclaiming
+/// an uncommitted row cannot affect identical content committed by another
+/// session.
 ///
 /// # Policy is the host's (ADR-0014)
 ///
@@ -173,13 +183,17 @@ where
     let scanned_intent_count = orphans.len();
     let mut reclaimed_count = 0;
     for orphan in orphans {
-        store.delete(&orphan.attachment_id).await?;
-        manifest.forget(&orphan.attachment_id).map_err(|err| {
-            AttachmentStoreError::Backend(format!(
-                "failed to forget reclaimed attachment `{}`: {err}",
-                orphan.attachment_id
-            ))
-        })?;
+        store
+            .delete_for_session(&orphan.session_id, &orphan.attachment_id)
+            .await?;
+        manifest
+            .forget(&orphan.session_id, &orphan.attachment_id)
+            .map_err(|err| {
+                AttachmentStoreError::Backend(format!(
+                    "failed to forget reclaimed attachment `{}`: {err}",
+                    orphan.attachment_id
+                ))
+            })?;
         reclaimed_count += 1;
     }
     Ok(AttachmentReclamationReport {
@@ -190,7 +204,7 @@ where
 
 #[derive(Default)]
 pub struct InMemoryAttachmentStore {
-    attachments: Mutex<HashMap<AttachmentId, StoredAttachment>>,
+    attachments: Mutex<HashMap<(Option<String>, AttachmentId), StoredAttachment>>,
 }
 
 impl InMemoryAttachmentStore {
@@ -208,11 +222,11 @@ impl AttachmentStore for InMemoryAttachmentStore {
     ) -> Result<AttachmentRef, AttachmentStoreError> {
         let meta = stored_meta(&bytes, meta);
         let reference = meta.as_ref();
-        let stored = StoredAttachment { meta, bytes };
+        let stored = StoredAttachment { bytes };
         self.attachments
             .lock()
             .expect("attachment store lock")
-            .insert(reference.id.clone(), stored);
+            .insert((None, reference.id.clone()), stored);
         Ok(reference)
     }
 
@@ -220,7 +234,7 @@ impl AttachmentStore for InMemoryAttachmentStore {
         self.attachments
             .lock()
             .expect("attachment store lock")
-            .get(id)
+            .get(&(None, id.clone()))
             .cloned()
             .ok_or_else(|| AttachmentStoreError::NotFound(id.clone()))
     }
@@ -229,7 +243,50 @@ impl AttachmentStore for InMemoryAttachmentStore {
         self.attachments
             .lock()
             .expect("attachment store lock")
-            .remove(id);
+            .remove(&(None, id.clone()));
+        Ok(())
+    }
+
+    async fn put_for_session(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        meta: AttachmentCreateMeta,
+    ) -> Result<AttachmentRef, AttachmentStoreError> {
+        let meta = stored_meta(&bytes, meta);
+        let reference = meta.as_ref();
+        self.attachments
+            .lock()
+            .expect("attachment store lock")
+            .insert(
+                (Some(session_id.to_string()), reference.id.clone()),
+                StoredAttachment { bytes },
+            );
+        Ok(reference)
+    }
+
+    async fn get_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<StoredAttachment, AttachmentStoreError> {
+        self.attachments
+            .lock()
+            .expect("attachment store lock")
+            .get(&(Some(session_id.to_string()), id.clone()))
+            .cloned()
+            .ok_or_else(|| AttachmentStoreError::NotFound(id.clone()))
+    }
+
+    async fn delete_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<(), AttachmentStoreError> {
+        self.attachments
+            .lock()
+            .expect("attachment store lock")
+            .remove(&(Some(session_id.to_string()), id.clone()));
         Ok(())
     }
 }
@@ -264,11 +321,22 @@ impl SessionScopedAttachmentStore {
         manifest: Arc<dyn AttachmentManifest>,
         session_id: impl Into<String>,
     ) -> Self {
+        Self::new_with_pending(inner, manifest, session_id, std::iter::empty())
+    }
+
+    pub(crate) fn new_with_pending(
+        inner: Arc<dyn AttachmentStore>,
+        manifest: Arc<dyn AttachmentManifest>,
+        session_id: impl Into<String>,
+        pending_manifest_commit_ids: impl IntoIterator<Item = AttachmentId>,
+    ) -> Self {
         Self {
             inner,
             manifest,
             session_id: session_id.into(),
-            pending_manifest_commit_ids: Mutex::new(BTreeSet::new()),
+            pending_manifest_commit_ids: Mutex::new(
+                pending_manifest_commit_ids.into_iter().collect(),
+            ),
         }
     }
 
@@ -309,6 +377,16 @@ impl AttachmentStore for SessionScopedAttachmentStore {
         }
     }
 
+    fn unscoped_backend(&self) -> Option<Arc<dyn AttachmentStore>> {
+        self.inner
+            .unscoped_backend()
+            .or_else(|| Some(Arc::clone(&self.inner)))
+    }
+
+    fn bound_session_id(&self) -> Option<&str> {
+        Some(&self.session_id)
+    }
+
     async fn put(
         &self,
         bytes: Vec<u8>,
@@ -318,7 +396,7 @@ impl AttachmentStore for SessionScopedAttachmentStore {
         let intent = AttachmentIntent {
             attachment_id: attachment_id.clone(),
             session_id: self.session_id.clone(),
-            canonical_uri: format!("sha256:{attachment_id}"),
+            canonical_uri: session_attachment_uri(&self.session_id, &attachment_id),
             intent_at_epoch_ms: now_epoch_ms(),
         };
         // Record intent first. If this fails the bytes never land,
@@ -328,7 +406,10 @@ impl AttachmentStore for SessionScopedAttachmentStore {
                 "failed to record attachment intent for `{attachment_id}`: {err}"
             ))
         })?;
-        let reference = self.inner.put(bytes, meta).await?;
+        let reference = self
+            .inner
+            .put_for_session(&self.session_id, bytes, meta)
+            .await?;
         if reference.id != attachment_id {
             return Err(AttachmentStoreError::Backend(format!(
                 "attachment store returned id `{}` after manifest intent for `{attachment_id}`",
@@ -343,16 +424,64 @@ impl AttachmentStore for SessionScopedAttachmentStore {
     }
 
     async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
-        self.inner.get(id).await
+        self.inner.get_for_session(&self.session_id, id).await
     }
 
     async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
-        // Content-addressed delete forwards straight to the backing store. The
-        // write-ahead manifest that this wrapper stamps is reconciled separately
-        // by `reclaim_orphaned_attachments`, which is the reference-safe caller
-        // of delete; the wrapper adds no reference bookkeeping of its own here.
-        self.inner.delete(id).await
+        self.inner.delete_for_session(&self.session_id, id).await
     }
+
+    async fn put_for_session(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        meta: AttachmentCreateMeta,
+    ) -> Result<AttachmentRef, AttachmentStoreError> {
+        if session_id != self.session_id {
+            return Err(AttachmentStoreError::Backend(format!(
+                "attachment store for `{}` cannot write for `{session_id}`",
+                self.session_id
+            )));
+        }
+        self.put(bytes, meta).await
+    }
+
+    async fn get_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<StoredAttachment, AttachmentStoreError> {
+        if session_id != self.session_id {
+            return Err(AttachmentStoreError::NotFound(id.clone()));
+        }
+        self.get(id).await
+    }
+
+    async fn delete_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<(), AttachmentStoreError> {
+        if session_id != self.session_id {
+            return Err(AttachmentStoreError::Backend(format!(
+                "attachment store for `{}` cannot delete for `{session_id}`",
+                self.session_id
+            )));
+        }
+        self.delete(id).await
+    }
+}
+
+fn session_attachment_uri(session_id: &str, attachment_id: &AttachmentId) -> String {
+    format!(
+        "lash-attachment://session/{}/sha256/{attachment_id}",
+        session_storage_namespace(session_id)
+    )
+}
+
+#[doc(hidden)]
+pub fn session_storage_namespace(session_id: &str) -> String {
+    format!("{:x}", Sha256::digest(session_id.as_bytes()))
 }
 
 fn now_epoch_ms() -> u64 {
@@ -385,8 +514,12 @@ impl AttachmentManifest for PersistenceManifestAdapter {
         AttachmentManifest::list_uncommitted(&*self.0, older_than_epoch_ms)
     }
 
-    fn forget(&self, attachment_id: &AttachmentId) -> Result<(), crate::StoreError> {
-        AttachmentManifest::forget(&*self.0, attachment_id)
+    fn forget(
+        &self,
+        session_id: &str,
+        attachment_id: &AttachmentId,
+    ) -> Result<(), crate::StoreError> {
+        AttachmentManifest::forget(&*self.0, session_id, attachment_id)
     }
 }
 
@@ -413,7 +546,7 @@ pub async fn resolve_llm_request_attachments(
             continue;
         }
         let stored = store.get(&reference.id).await?;
-        attachment.mime = stored.meta.media_type.canonical_mime().to_string();
+        attachment.mime = reference.canonical_mime().to_string();
         attachment.data = stored.bytes;
     }
     Ok(request)
@@ -483,7 +616,14 @@ mod tests {
                 .collect())
         }
 
-        fn forget(&self, _attachment_id: &AttachmentId) -> Result<(), crate::StoreError> {
+        fn forget(
+            &self,
+            session_id: &str,
+            attachment_id: &AttachmentId,
+        ) -> Result<(), crate::StoreError> {
+            self.intents.lock().expect("lock intents").retain(|intent| {
+                intent.session_id != session_id || intent.attachment_id != *attachment_id
+            });
             Ok(())
         }
     }
@@ -514,8 +654,12 @@ mod tests {
             self.manifest.list_uncommitted(older_than_epoch_ms)
         }
 
-        fn forget(&self, attachment_id: &AttachmentId) -> Result<(), crate::StoreError> {
-            self.manifest.forget(attachment_id)
+        fn forget(
+            &self,
+            session_id: &str,
+            attachment_id: &AttachmentId,
+        ) -> Result<(), crate::StoreError> {
+            self.manifest.forget(session_id, attachment_id)
         }
     }
 
@@ -850,6 +994,89 @@ mod tests {
             AttachmentStorePersistence::Ephemeral,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn reclaiming_one_sessions_orphan_preserves_identical_committed_content() {
+        let bytes = Arc::new(InMemoryAttachmentStore::new());
+        let committed_manifest = Arc::new(RecordingManifest::default());
+        let orphan_manifest = Arc::new(RecordingManifest::default());
+        let committed = SessionScopedAttachmentStore::new(
+            bytes.clone(),
+            committed_manifest.clone(),
+            "committed-session",
+        );
+        let orphan = SessionScopedAttachmentStore::new(
+            bytes.clone(),
+            orphan_manifest.clone(),
+            "orphan-session",
+        );
+
+        let committed_ref = committed
+            .put(vec![42, 42, 42], meta())
+            .await
+            .expect("put committed attachment");
+        committed_manifest
+            .commit_refs("committed-session", std::slice::from_ref(&committed_ref.id))
+            .expect("commit attachment reference");
+        let orphan_ref = orphan
+            .put(vec![42, 42, 42], meta())
+            .await
+            .expect("put identical orphan");
+        assert_eq!(
+            committed_ref.id, orphan_ref.id,
+            "logical ids stay content-addressed"
+        );
+
+        let report = reclaim_orphaned_attachments(&*orphan_manifest, &*bytes, u64::MAX)
+            .await
+            .expect("reclaim orphan");
+        assert_eq!(report.reclaimed_count, 1);
+        assert!(matches!(
+            orphan.get(&orphan_ref.id).await,
+            Err(AttachmentStoreError::NotFound(_))
+        ));
+        assert_eq!(
+            committed
+                .get(&committed_ref.id)
+                .await
+                .expect("other session's committed bytes survive")
+                .bytes,
+            vec![42, 42, 42]
+        );
+    }
+
+    #[tokio::test]
+    async fn attachment_reference_metadata_is_not_shared_through_blob_storage() {
+        let bytes = InMemoryAttachmentStore::new();
+        let png = bytes
+            .put_for_session("session", vec![1, 2, 3], meta())
+            .await
+            .expect("png ref");
+        let jpeg_meta = AttachmentCreateMeta::new(
+            MediaType::Image(ImageMediaType::Jpeg),
+            Some(99),
+            Some(88),
+            Some("different presentation".to_string()),
+        );
+        let jpeg = bytes
+            .put_for_session("session", vec![1, 2, 3], jpeg_meta)
+            .await
+            .expect("jpeg ref");
+
+        assert_eq!(png.id, jpeg.id);
+        assert_eq!(png.canonical_mime(), "image/png");
+        assert_eq!(jpeg.canonical_mime(), "image/jpeg");
+        assert_eq!(png.width, Some(1));
+        assert_eq!(jpeg.width, Some(99));
+        assert_eq!(
+            bytes
+                .get_for_session("session", &png.id)
+                .await
+                .expect("shared bytes")
+                .bytes,
+            vec![1, 2, 3]
+        );
     }
 
     #[tokio::test]

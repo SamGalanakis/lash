@@ -26,7 +26,7 @@ already be on crates.io at the same version — so it is **all-or-nothing**:
 `scripts/publish_workspace.py` publishes the whole set one crate at a time in
 dependency order and waits for crates.io visibility between crates.
 
-## How a release runs (CI)
+## How a release runs
 
 There is no version-bump commit and no second CI pass. `main` always carries the
 `0.0.0-dev` placeholder in every workspace manifest; the release version is
@@ -34,16 +34,17 @@ computed at cut time and stamped into an ephemeral tag checkout at packaging
 time (`scripts/release_version.py stamp`, `scripts/publish_workspace.py
 --version`), so `main` never records a released version.
 
-1. A push to `main` runs CI (`.github/workflows/ci.yml`). The
-   `release-notes-gate` job fails in under a minute when the range carries no
-   curated notes; the full matrix validates the pushed commit.
-2. When the matrix and the gate are green, the `prepare-release` job computes the
-   next version — `scripts/release_version.py print-next` reads the release
-   series from `[workspace.metadata.release].channel` and returns the next
-   `<channel>.N` from the existing `v*` tags — tags that exact commit `vX.Y.Z`,
-   and dispatches `release.yml`. A push whose head commit says `[skip release]`
-   skips the cut.
-3. `release.yml` validates `cargo metadata --locked`, then:
+1. Pull requests and pushes to `main` run CI (`.github/workflows/ci.yml`). A
+   green merge updates the releasable trunk but never tags or publishes it.
+2. When a release is wanted, a maintainer manually dispatches the GitHub
+   `Release` workflow. `release_sha` may name any commit on `main`; leaving it
+   blank selects the current `main` head.
+3. The workflow proves that the selected commit is on `main` and has a
+   successful main-push CI run, then requires curated notes for the unreleased
+   range. `scripts/release_version.py print-next` computes the next version from
+   `[workspace.metadata.release].channel` and the existing `v*` tags. The
+   workflow tags that exact commit and is idempotent when retried.
+4. `release.yml` validates `cargo metadata --locked`, then:
    - `build-release-assets` stamps the real version into its tag checkout and
      builds the CLI binaries, so `lash --version` reports the release version.
    - `publish-crates` runs
@@ -82,16 +83,14 @@ Release-Notes:
 - Signals are named and typed; the unnamed `wait_signal()` is removed.
 ```
 
-The `release-notes-gate` job runs `scripts/release_notes.py collect --require`
-at t=0 on a main push: if no commit in `previous-tag..HEAD` carries a section,
-CI fails in under a minute (push with `[skip release]` if the range deliberately
-cuts no release). The same gate runs on staging pushes, so a missing-notes state
-is known before the merge to main. The publish job collects the same range's
-sections (oldest first) into the GitHub release body; the auto-generated commit
-list is appended below. The previous tag is resolved by graph ancestry
-(`git describe`), not version sorting, so tags from unrelated history lines are
-ignored. The flow authors no synthetic commits, so every commit in range is a
-real change eligible to contribute notes.
+The manual release workflow runs `scripts/release_notes.py collect --require`
+before it creates a new tag. If no commit in `previous-tag..release_sha` carries
+a section, the release stops without publishing. The publish job collects the
+same range's sections (oldest first) into the GitHub release body; the
+auto-generated commit list is appended below. The previous tag is resolved by
+graph ancestry (`git describe`), not version sorting, so tags from unrelated
+history lines are ignored. The flow authors no synthetic commits, so every
+commit in range is a real change eligible to contribute notes.
 
 ## Docs code snippets
 

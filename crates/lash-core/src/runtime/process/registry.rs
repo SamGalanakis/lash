@@ -167,9 +167,30 @@ pub trait ProcessRegistry: Send + Sync {
         after_sequence: u64,
     ) -> Result<Vec<ProcessEvent>, PluginError>;
 
+    /// Complete a process without a Lash process lease.
+    ///
+    /// This path is reserved for execution substrates that provide their own
+    /// single-writer authority (for example a workflow keyed by `process_id`) or
+    /// for externally-owned processes. Lash-owned workers must use
+    /// [`complete_process_with_lease`](Self::complete_process_with_lease), which
+    /// fences the terminal append and lease release in one atomic operation.
     async fn complete_process(
         &self,
         process_id: &str,
+        await_output: ProcessAwaitOutput,
+    ) -> Result<ProcessRecord, PluginError>;
+
+    /// Atomically append the terminal output while the supplied process lease
+    /// is still current, then release that lease in the same transaction.
+    ///
+    /// Implementations must validate owner incarnation, lease token, fencing
+    /// token, and expiry against the persisted lease. A stale or expired writer
+    /// is rejected without appending any terminal event or clearing a newer
+    /// owner's lease. Replaying the same terminal event after a successful
+    /// completion returns the existing terminal record.
+    async fn complete_process_with_lease(
+        &self,
+        lease: &ProcessLease,
         await_output: ProcessAwaitOutput,
     ) -> Result<ProcessRecord, PluginError>;
 

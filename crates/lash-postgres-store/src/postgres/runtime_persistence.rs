@@ -471,7 +471,7 @@ impl SessionExecutionLeaseStore for PostgresSessionStore {
     ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         lock_session_execution_lease_tx(&mut tx, session_id).await?;
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let current = load_session_execution_lease_tx(&mut tx, session_id).await?;
         if current
             .as_ref()
@@ -533,7 +533,7 @@ impl SessionExecutionLeaseStore for PostgresSessionStore {
     ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         lock_session_execution_lease_tx(&mut tx, session_id).await?;
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let current = load_session_execution_lease_tx(&mut tx, session_id).await?;
         let Some(current) = current else {
             let lease = acquire_session_execution_lease_tx(
@@ -651,7 +651,7 @@ impl SessionExecutionLeaseStore for PostgresSessionStore {
         lease_ttl_ms: u64,
     ) -> Result<SessionExecutionLease, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let current = load_session_execution_lease_tx(&mut tx, &fence.session_id).await?;
         let Some(current) = current else {
             return Err(StoreError::SessionExecutionLeaseExpired {
@@ -790,7 +790,7 @@ impl QueuedWorkStore for PostgresSessionStore {
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let rows = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
@@ -934,7 +934,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         }
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let rows = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
@@ -1069,7 +1069,9 @@ impl QueuedWorkStore for PostgresSessionStore {
         claim: &QueuedWorkClaim,
         lease_ttl_ms: u64,
     ) -> Result<QueuedWorkClaim, StoreError> {
-        let expires_at = current_epoch_ms().saturating_add(lease_ttl_ms);
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
+        let expires_at = now.saturating_add(lease_ttl_ms);
         let changed = sqlx::query(
             "UPDATE lash_queued_work_batches
              SET claim_expires_at_ms = $4
@@ -1079,11 +1081,13 @@ impl QueuedWorkStore for PostgresSessionStore {
         .bind(&claim.claim_id)
         .bind(&claim.lease_token)
         .bind(expires_at as i64)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(store_sqlx_error)?
         .rows_affected();
-        renewed_claim(claim, changed as usize, expires_at)
+        let renewed = renewed_claim(claim, changed as usize, expires_at)?;
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(renewed)
     }
 
     async fn abandon_queued_work_claim(&self, claim: &QueuedWorkClaim) -> Result<(), StoreError> {
@@ -1113,7 +1117,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         batch_id: &str,
     ) -> Result<Option<QueuedWorkBatch>, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let row = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
@@ -1173,7 +1177,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         session_id: &str,
     ) -> Result<Vec<QueuedWorkBatch>, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let rows = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
@@ -1285,7 +1289,7 @@ impl TurnInputStore for PostgresSessionStore {
         session_id: &str,
     ) -> Result<Vec<lash_core::PendingTurnInput>, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let rows = sqlx::query(
             "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                     state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
@@ -1320,7 +1324,7 @@ impl TurnInputStore for PostgresSessionStore {
     ) -> Result<Vec<lash_core::PendingTurnInputCancelResult>, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         let targets = targets.to_vec();
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let mut results = Vec::with_capacity(targets.len());
         for target in targets {
             let outcome =
@@ -1343,7 +1347,7 @@ impl TurnInputStore for PostgresSessionStore {
     ) -> Result<lash_core::PendingTurnInputSuffixCancelOutcome, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         let anchor = anchor.clone();
-        let now = current_epoch_ms();
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let Some(anchor_row) =
             load_pending_turn_input_row_by_target_tx(&mut tx, session_id, &anchor, true).await?
         else {
@@ -1661,7 +1665,7 @@ async fn claim_pending_turn_inputs_postgres(
     }
     let mut tx = pool.begin().await.map_err(store_sqlx_error)?;
     ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
-    let now = current_epoch_ms();
+    let now = postgres_transaction_epoch_ms(&mut tx).await?;
     let wanted_state = match &mode {
         lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
             lash_core::TurnInputState::PendingActive
@@ -1955,7 +1959,7 @@ async fn ensure_session_execution_lease_tx(
             session_id: session_id.to_string(),
         });
     }
-    let now = current_epoch_ms();
+    let now = postgres_transaction_epoch_ms(tx).await?;
     let current = load_session_execution_lease_tx(tx, session_id).await?;
     let Some(current) = current else {
         return Err(StoreError::SessionExecutionLeaseExpired {

@@ -729,10 +729,14 @@ mod tests {
     #[test]
     fn prepared_turn_rewrites_slash_skill_prompts() {
         let skills = skill_catalog_with(&[("yolopush", "ship changes")]);
-        let turn = PreparedTurn::prepare("/yolopush merge staging".into(), Vec::new(), &skills);
+        let turn =
+            PreparedTurn::prepare("/yolopush ship current changes".into(), Vec::new(), &skills);
 
-        assert_eq!(turn.display_text, "/yolopush merge staging");
-        assert!(turn.effective_text.starts_with("/yolopush merge staging"));
+        assert_eq!(turn.display_text, "/yolopush ship current changes");
+        assert!(
+            turn.effective_text
+                .starts_with("/yolopush ship current changes")
+        );
         assert!(turn.input_metadata.transforms.is_empty());
         assert!(turn.effective_text.contains("<skill>"));
     }

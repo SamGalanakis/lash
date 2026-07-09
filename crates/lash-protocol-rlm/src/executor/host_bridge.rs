@@ -950,17 +950,28 @@ fn collect_printed_images_inner<'a>(
                 if !seen.insert(image.id.clone()) {
                     return Ok(());
                 }
-                let reference = attachment_store
+                attachment_store
                     .get(&lash_core::AttachmentId::new(image.id.clone()))
                     .await
-                    .ok()
-                    .map(|stored| stored.meta.as_ref())
-                    .ok_or_else(|| {
+                    .map_err(|_| {
                         ExecutionHostError::new(format!(
                             "image bytes for `{}` are unavailable or were pruned",
                             image.id
                         ))
                     })?;
+                let reference = AttachmentRef {
+                    id: lash_core::AttachmentId::new(image.id.clone()),
+                    media_type: lash_core::MediaType::from_mime(&image.mime).ok_or_else(|| {
+                        ExecutionHostError::new(format!(
+                            "image `{}` carries unsupported media type `{}`",
+                            image.id, image.mime
+                        ))
+                    })?,
+                    byte_len: image.size,
+                    width: image.width,
+                    height: image.height,
+                    label: Some(image.label.clone()),
+                };
                 images.push(reference);
             }
             FlowValue::Tuple(values) | FlowValue::List(values) => {

@@ -1732,19 +1732,6 @@
       s.setAttribute("data-scene", "");
       document.head.appendChild(s);
     }
-    // load the channel switcher if it isn't already on the page;
-    // when it loads it auto-builds against .band__right (just appended
-    // a few lines above), so no explicit init call is needed.
-    if (!document.querySelector('script[data-channel]')) {
-      const s = document.createElement("script");
-      s.src = base + "channel.js";
-      s.defer = true;
-      s.setAttribute("data-channel", "");
-      document.head.appendChild(s);
-    } else if (typeof window.__LASH_CHANNEL_INIT === "function") {
-      // band was just rebuilt — re-attach the switcher
-      window.__LASH_CHANNEL_INIT();
-    }
   }
 
   // On landing pages the band ships in static HTML; update the

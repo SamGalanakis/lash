@@ -643,10 +643,8 @@ impl SessionExecutionLeaseClaimOutcome {
 pub struct AttachmentIntent {
     pub attachment_id: crate::AttachmentId,
     pub session_id: String,
-    /// Canonical URI for the attachment payload in the backing store.
-    /// For file-backed stores this is the absolute on-disk path; for
-    /// blob-backed stores it can be any stable identifier the host
-    /// uses to clean the payload up.
+    /// Canonical, stable identity for the session-owned physical object.
+    /// Backends may map this identity onto their own path/key representation.
     pub canonical_uri: String,
     pub intent_at_epoch_ms: u64,
 }
@@ -695,10 +693,13 @@ pub trait AttachmentManifest: Send + Sync {
         older_than_epoch_ms: u64,
     ) -> Result<Vec<AttachmentManifestEntry>, StoreError>;
 
-    /// Remove a manifest row entirely. Called by the GC coordinator
-    /// after the corresponding bytes have been removed from the
-    /// backing [`AttachmentStore`](crate::AttachmentStore).
-    fn forget(&self, attachment_id: &crate::AttachmentId) -> Result<(), StoreError>;
+    /// Remove one session's manifest row. Called by the GC coordinator after
+    /// that session's physical object has been removed.
+    fn forget(
+        &self,
+        session_id: &str,
+        attachment_id: &crate::AttachmentId,
+    ) -> Result<(), StoreError>;
 }
 
 /// Mixin macro for [`SessionCommitStore`] implementors that have no
@@ -734,6 +735,7 @@ macro_rules! impl_noop_attachment_manifest {
 
             fn forget(
                 &self,
+                _session_id: &str,
                 _attachment_id: &$crate::AttachmentId,
             ) -> ::std::result::Result<(), $crate::StoreError> {
                 Ok(())

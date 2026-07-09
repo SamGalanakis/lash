@@ -425,7 +425,7 @@ Create `ProcessLocalExecution::execute(command: ProcessCommand)` in lash-core
 
 ## 3. Execution order (compile-green checkpoints)
 
-Work on a branch off `staging`. Each step should build
+Work on a short-lived branch off `main`. Each step should build
 (`cargo build --workspace`) before moving on.
 
 **Step 1 — additive core.** Add `ProcessChangeHub`, `WatchedProcessRegistry` +
@@ -561,7 +561,8 @@ use; do not invent a new one.
 - Commits: author-only attribution — **no** AI/Claude co-author trailers or
   mentions, ever. Never write the bracketed skip-ci token literally in a
   commit message (it suppresses CI); write "skip-ci" if you must refer to it.
-- Full CI runs on `main`/PRs only; a `staging` push runs docs publishing only.
+- Full CI runs on pull requests and `main`; releases are dispatched manually
+  from a green `main` commit.
   Run the full workspace test suite locally before declaring done.
 - This is a pre-1.0 alpha workspace: the `ProcessRegistry` trait break is
   intended and release-noted by the pipeline; do not add deprecation shims.

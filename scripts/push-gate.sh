@@ -94,6 +94,7 @@ run_release_script_tests() {
 run_runtime_feature_boundary_check() {
   step "lash-runtime feature boundary"
   cargo check -p lash-runtime --no-default-features --locked
+  cargo check -p lash-runtime --no-default-features --features testing --locked
 
   if cargo tree -p lash-runtime -e normal --no-default-features --locked \
     | grep -E 'lash-protocol-rlm|lash-lashlang-runtime|lashlang'; then
@@ -104,6 +105,12 @@ run_runtime_feature_boundary_check() {
   if cargo tree -p lash-runtime -e normal --locked \
     | grep -E 'lash-protocol-rlm|lash-lashlang-runtime|lashlang'; then
     echo "default lash-runtime pulled RLM/Lashlang dependencies" >&2
+    exit 1
+  fi
+
+  if cargo tree -p lash-runtime -e normal --no-default-features --features testing --locked \
+    | grep -E 'lash-protocol-rlm|lash-lashlang-runtime|lashlang'; then
+    echo "testing-only lash-runtime pulled RLM/Lashlang dependencies" >&2
     exit 1
   fi
 }

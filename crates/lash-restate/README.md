@@ -65,13 +65,18 @@ surface that failure and clear their running state rather than leaving the
 invocation to back off forever.
 
 Background tasks are scheduled through the first-party
-`LashProcessWorkflow`. Bind it on your Restate endpoint with `.serve()`:
+`LashProcessWorkflow`. Durable waits additionally require the exact-address
+`LashDurableWaitWorkflow` and session index `LashDurableWaitIndex`; bind all
+three services on every endpoint that constructs a
+`RestateRuntimeEffectController`:
 
 ```rust,no_run
 use std::sync::Arc;
 
 use lash_restate::{
-    LashProcessWorkflow, LashProcessWorkflowImpl, RestateCoreProcessRunner,
+    LashDurableWaitIndex, LashDurableWaitIndexImpl, LashDurableWaitWorkflow,
+    LashDurableWaitWorkflowImpl, LashProcessWorkflow, LashProcessWorkflowImpl,
+    RestateCoreProcessRunner,
 };
 use restate_sdk::prelude::Endpoint;
 
@@ -83,9 +88,15 @@ fn endpoint(
     let runner = Arc::new(RestateCoreProcessRunner::new(worker));
     Endpoint::builder()
         .bind(LashProcessWorkflowImpl::new(runner, registry).serve())
+        .bind(LashDurableWaitWorkflowImpl.serve())
+        .bind(LashDurableWaitIndexImpl.serve())
         .build()
 }
 ```
+
+The wait workflow owns Restate promises and durable deadline timers for every
+Lash execution scope. The virtual-object index serializes wait registration,
+session-wide cancellation, and permanent revocation during session deletion.
 
 The controller submits workflow `run` with workflow key
 `ProcessRegistration.id` and sends cancellation to the workflow's shared

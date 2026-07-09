@@ -7,7 +7,7 @@ use lash_core::{ProcessInput, ProcessRegistration};
 use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use restate_sdk::prelude::Endpoint;
 use restate_sdk::service::Discoverable;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -262,6 +262,31 @@ impl lash_core::AttachmentStore for DurableMemoryAttachmentStore {
         id: &lash_core::AttachmentId,
     ) -> Result<(), lash_core::AttachmentStoreError> {
         self.inner.delete(id).await
+    }
+
+    async fn put_for_session(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        meta: lash_core::AttachmentCreateMeta,
+    ) -> Result<lash_core::AttachmentRef, lash_core::AttachmentStoreError> {
+        self.inner.put_for_session(session_id, bytes, meta).await
+    }
+
+    async fn get_for_session(
+        &self,
+        session_id: &str,
+        id: &lash_core::AttachmentId,
+    ) -> Result<lash_core::StoredAttachment, lash_core::AttachmentStoreError> {
+        self.inner.get_for_session(session_id, id).await
+    }
+
+    async fn delete_for_session(
+        &self,
+        session_id: &str,
+        id: &lash_core::AttachmentId,
+    ) -> Result<(), lash_core::AttachmentStoreError> {
+        self.inner.delete_for_session(session_id, id).await
     }
 }
 
@@ -765,8 +790,12 @@ struct RecordingContext {
     started_execution_contexts: Mutex<Vec<ProcessExecutionContext>>,
     process_command_log: Mutex<Vec<String>>,
     cancelled: Mutex<Vec<(String, Option<String>)>>,
-    resolved_events: Mutex<Vec<RestateProcessEventResolveRequest>>,
+    resolved_events: Mutex<Vec<RestateDurableWaitResolveRequest>>,
     awaited_events: Mutex<HashMap<String, Resolution>>,
+    durable_events: Mutex<HashMap<String, Resolution>>,
+    durable_event_notifies: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    session_waits: Mutex<HashMap<String, Vec<RestateDurableWaitAddress>>>,
+    revoked_sessions: Mutex<HashSet<String>>,
 }
 
 impl RecordingContext {
@@ -785,6 +814,67 @@ impl RecordingContext {
             .lock()
             .expect("awaited events lock")
             .insert(key.promise_key(), resolution);
+    }
+
+    fn durable_event_notify(&self, workflow_key: &str) -> Arc<tokio::sync::Notify> {
+        self.durable_event_notifies
+            .lock()
+            .expect("durable event notifies lock")
+            .entry(workflow_key.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+            .clone()
+    }
+
+    fn resolve_durable_event(&self, request: RestateDurableWaitResolveRequest) -> ResolveOutcome {
+        if request
+            .address
+            .session_id
+            .as_deref()
+            .is_some_and(|session_id| {
+                self.revoked_sessions
+                    .lock()
+                    .expect("revoked sessions lock")
+                    .contains(session_id)
+            })
+        {
+            return ResolveOutcome::UnknownOrRevoked;
+        }
+        self.terminalize_durable_event(request)
+    }
+
+    fn terminalize_durable_event(
+        &self,
+        request: RestateDurableWaitResolveRequest,
+    ) -> ResolveOutcome {
+        self.resolved_events
+            .lock()
+            .expect("resolved events lock")
+            .push(request.clone());
+        let mut events = self.durable_events.lock().expect("durable events lock");
+        if let Some(terminal) = events.get(&request.address.workflow_key) {
+            return ResolveOutcome::AlreadyResolved {
+                terminal: terminal.clone(),
+            };
+        }
+        events.insert(request.address.workflow_key.clone(), request.resolution);
+        drop(events);
+        self.durable_event_notify(&request.address.workflow_key)
+            .notify_waiters();
+        ResolveOutcome::Accepted
+    }
+
+    fn settle_session_wait(&self, address: &RestateDurableWaitAddress) {
+        let Some(session_id) = address.session_id.as_deref() else {
+            return;
+        };
+        if let Some(waits) = self
+            .session_waits
+            .lock()
+            .expect("session waits lock")
+            .get_mut(session_id)
+        {
+            waits.retain(|wait| wait != address);
+        }
     }
 }
 
@@ -881,20 +971,75 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
 
     fn await_event<'run>(
         &'run self,
-        key: String,
+        request: RestateDurableWaitAwaitRequest,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
-        let resolution = self
-            .awaited_events
-            .lock()
-            .expect("awaited events lock")
-            .get(&key)
-            .cloned();
+        let context = Arc::clone(self);
         Box::pin(async move {
-            resolution
-                .ok_or_else(|| TerminalError::new(format!("event await is unresolved: {key}")))
+            if let Some(session_id) = request.address.session_id.as_deref() {
+                if context
+                    .revoked_sessions
+                    .lock()
+                    .expect("revoked sessions lock")
+                    .contains(session_id)
+                {
+                    context.terminalize_durable_event(RestateDurableWaitResolveRequest {
+                        address: request.address,
+                        resolution: Resolution::Cancelled,
+                    });
+                    return Ok(Resolution::Cancelled);
+                }
+                context
+                    .session_waits
+                    .lock()
+                    .expect("session waits lock")
+                    .entry(session_id.to_string())
+                    .or_default()
+                    .push(request.address.clone());
+            }
+            let notify = context.durable_event_notify(&request.address.workflow_key);
+            loop {
+                if let Some(resolution) = context
+                    .durable_events
+                    .lock()
+                    .expect("durable events lock")
+                    .get(&request.address.workflow_key)
+                    .cloned()
+                {
+                    context.settle_session_wait(&request.address);
+                    return Ok(resolution);
+                }
+                if let Some(timeout_ms) = request.timeout_ms {
+                    tokio::select! {
+                        _ = notify.notified() => {}
+                        _ = cancellation.cancelled() => {
+                            context.resolve_durable_event(RestateDurableWaitResolveRequest {
+                                address: request.address.clone(),
+                                resolution: Resolution::Cancelled,
+                            });
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
+                            context.resolve_durable_event(RestateDurableWaitResolveRequest {
+                                address: request.address.clone(),
+                                resolution: Resolution::Timeout,
+                            });
+                        }
+                    }
+                } else {
+                    tokio::select! {
+                        _ = notify.notified() => {}
+                        _ = cancellation.cancelled() => {
+                            context.resolve_durable_event(RestateDurableWaitResolveRequest {
+                                address: request.address.clone(),
+                                resolution: Resolution::Cancelled,
+                            });
+                        }
+                    }
+                }
+            }
         })
     }
 
@@ -932,19 +1077,41 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
 
     fn resolve_event<'run>(
         &'run self,
-        request: RestateProcessEventResolveRequest,
+        request: RestateDurableWaitResolveRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolveOutcome, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        let outcome = self.resolve_durable_event(request);
+        Box::pin(async move { Ok(outcome) })
+    }
+
+    fn update_session_waits<'run>(
+        &'run self,
+        session_id: String,
+        revoke: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
-        self.resolved_events
+        if revoke {
+            self.revoked_sessions
+                .lock()
+                .expect("revoked sessions lock")
+                .insert(session_id.clone());
+        }
+        let waits = self
+            .session_waits
             .lock()
-            .expect("resolved events lock")
-            .push(request.clone());
-        self.awaited_events
-            .lock()
-            .expect("awaited events lock")
-            .insert(request.key, request.resolution);
+            .expect("session waits lock")
+            .remove(&session_id)
+            .unwrap_or_default();
+        for address in waits {
+            self.terminalize_durable_event(RestateDurableWaitResolveRequest {
+                address,
+                resolution: Resolution::Cancelled,
+            });
+        }
         Box::pin(async { Ok(()) })
     }
 }
@@ -1080,7 +1247,8 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<PositionalReplayContext> {
 
     fn await_event<'run>(
         &'run self,
-        _key: String,
+        _request: RestateDurableWaitAwaitRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
@@ -1100,12 +1268,23 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<PositionalReplayContext> {
 
     fn resolve_event<'run>(
         &'run self,
-        _request: RestateProcessEventResolveRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+        _request: RestateDurableWaitResolveRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolveOutcome, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
         Box::pin(async { Err(TerminalError::new("event resolve is unsupported")) })
+    }
+
+    fn update_session_waits<'run>(
+        &'run self,
+        _session_id: String,
+        _revoke: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("session wait update is unsupported")) })
     }
 }
 
@@ -1193,7 +1372,8 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
 
     fn await_event<'run>(
         &'run self,
-        _key: String,
+        _request: RestateDurableWaitAwaitRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
@@ -1213,12 +1393,23 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
 
     fn resolve_event<'run>(
         &'run self,
-        _request: RestateProcessEventResolveRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+        _request: RestateDurableWaitResolveRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolveOutcome, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
         Box::pin(async { Err(TerminalError::new("event resolve is unsupported")) })
+    }
+
+    fn update_session_waits<'run>(
+        &'run self,
+        _session_id: String,
+        _revoke: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("session wait update is unsupported")) })
     }
 }
 
@@ -1350,140 +1541,237 @@ async fn restate_controller_routes_sleep_only_through_timer() {
 }
 
 #[tokio::test]
-async fn restate_handler_resolves_process_await_events_through_workflow_handler() {
+async fn restate_routes_every_execution_scope_to_an_exact_durable_wait_address() {
     let context = Arc::new(RecordingContext::default());
     let host = RestateRuntimeEffectController::new(context.clone());
-    let key = AwaitEventResolver::await_event_key(
-        &host,
-        &ExecutionScope::process("process-await"),
-        AwaitEventWaitIdentity::tool_completion("tool-call"),
-    )
-    .await
-    .expect("await event key");
-    let resolution = Resolution::Ok(serde_json::json!({ "done": true }));
+    let scopes = [
+        ExecutionScope::turn("session", "turn"),
+        ExecutionScope::process("process"),
+        ExecutionScope::queue_drain("session", "drain"),
+        ExecutionScope::session_delete("session"),
+        ExecutionScope::runtime_operation("operation"),
+    ];
+    let mut addresses = HashSet::new();
 
-    let outcome = AwaitEventResolver::resolve_await_event(&host, &key, resolution.clone())
-        .await
-        .expect("resolve await event");
-
-    assert_eq!(outcome, ResolveOutcome::Accepted);
-    let resolved = context
-        .resolved_events
-        .lock()
-        .expect("resolved events lock");
-    assert_eq!(resolved.len(), 1);
-    assert_eq!(resolved[0].process_id, "process-await");
-    assert_eq!(resolved[0].key, key.promise_key());
-    assert_eq!(resolved[0].resolution, resolution);
+    for (index, scope) in scopes.into_iter().enumerate() {
+        let key = restate_await_event_key(
+            &scope,
+            AwaitEventWaitIdentity::Custom {
+                key: format!("scope-{index}"),
+            },
+        )
+        .expect("scope wait key");
+        let address = RestateDurableWaitAddress::for_key(&key);
+        assert!(addresses.insert(address.workflow_key.clone()));
+        let resolution = Resolution::Ok(serde_json::json!({ "scope": index }));
+        assert_eq!(
+            host.resolve_await_event(&key, resolution.clone())
+                .await
+                .expect("resolve scope wait"),
+            ResolveOutcome::Accepted
+        );
+        assert_eq!(
+            host.await_await_event(&key, tokio_util::sync::CancellationToken::new(), None,)
+                .await
+                .expect("await scope wait"),
+            resolution
+        );
+    }
 }
 
 #[tokio::test]
-async fn restate_handler_reports_non_process_await_event_resolution_unknown() {
+async fn restate_execute_effect_honors_cancellation_and_terminalizes_late_resolution() {
     let context = Arc::new(RecordingContext::default());
-    let host = RestateRuntimeEffectController::new(context.clone());
-    let key = AwaitEventResolver::await_event_key(
-        &host,
-        &ExecutionScope::turn("session", "turn"),
-        AwaitEventWaitIdentity::tool_completion("tool-call"),
+    let key = restate_await_event_key(
+        &ExecutionScope::turn("cancel-session", "cancel-turn"),
+        AwaitEventWaitIdentity::tool_completion("cancel-tool"),
     )
-    .await
-    .expect("await event key");
-
-    let outcome = AwaitEventResolver::resolve_await_event(
-        &host,
-        &key,
-        Resolution::Ok(serde_json::json!({ "done": true })),
-    )
-    .await
-    .expect("resolve await event");
-
-    assert_eq!(outcome, ResolveOutcome::UnknownOrRevoked);
+    .expect("cancel wait key");
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task_context = context.clone();
+    let task_key = key.clone();
+    let task_cancellation = cancellation.clone();
+    let wait = tokio::spawn(async move {
+        RestateRuntimeEffectController::new(task_context)
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    runtime_invocation(RuntimeEffectKind::AwaitEvent, "cancel-wait"),
+                    RuntimeEffectCommand::AwaitEvent { key: task_key },
+                ),
+                RuntimeEffectLocalExecutor::await_event(task_cancellation, None),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
     assert!(
-        context
-            .resolved_events
-            .lock()
-            .expect("resolved events lock")
-            .is_empty()
+        !wait.is_finished(),
+        "mock wait must genuinely remain pending"
     );
-}
-
-#[tokio::test]
-async fn restate_handler_cancels_individual_wait_via_documented_workaround() {
-    // The per-wait workaround the session-wide lever points at: resolving a
-    // known key with `Resolution::Cancelled` is accepted and durably recorded
-    // by the process workflow handler under the exact promise key.
-    let context = Arc::new(RecordingContext::default());
-    let host = RestateRuntimeEffectController::new(context.clone());
-    let key = AwaitEventResolver::await_event_key(
-        &host,
-        &ExecutionScope::process("process-cancel-wait"),
-        AwaitEventWaitIdentity::tool_completion("tool-call-cancel"),
-    )
-    .await
-    .expect("await event key");
-
-    let outcome = AwaitEventResolver::resolve_await_event(&host, &key, Resolution::Cancelled)
+    cancellation.cancel();
+    let outcome = wait
         .await
-        .expect("cancel individual wait");
+        .expect("join cancellation wait")
+        .expect("cancel wait");
+    assert!(matches!(
+        outcome,
+        RuntimeEffectOutcome::AwaitEvent {
+            resolution: Resolution::Cancelled,
+        }
+    ));
 
-    assert_eq!(outcome, ResolveOutcome::Accepted);
-    let resolved = context
-        .resolved_events
-        .lock()
-        .expect("resolved events lock");
-    assert_eq!(resolved.len(), 1);
-    assert_eq!(resolved[0].process_id, "process-cancel-wait");
-    assert_eq!(resolved[0].key, key.promise_key());
-    assert_eq!(resolved[0].resolution, Resolution::Cancelled);
-}
-
-#[tokio::test]
-async fn restate_handler_controller_rejects_cancel_by_session_with_documented_error() {
-    // Restate cannot enumerate a session's outstanding promises, so the
-    // session-wide lever fails loudly with a specific error naming the
-    // per-wait workaround instead of faking success.
-    let context = Arc::new(RecordingContext::default());
-    let host = RestateRuntimeEffectController::new(context.clone());
-
-    let err = AwaitEventResolver::cancel_await_events_for_session(&host, "restate-session")
-        .await
-        .expect_err("Restate must reject session-wide durable-wait cancellation");
-
+    let host = RestateRuntimeEffectController::new(context);
     assert_eq!(
-        err.code.as_str(),
-        "restate_await_event_cancel_by_session_unsupported"
-    );
-    assert!(
-        err.message.contains("resolve_await_event"),
-        "error must name the per-wait workaround: {}",
-        err.message
-    );
-    // Refusing must not resolve anything.
-    assert!(
-        context
-            .resolved_events
-            .lock()
-            .expect("resolved events lock")
-            .is_empty()
+        host.resolve_await_event(&key, Resolution::Ok(serde_json::json!("late")))
+            .await
+            .expect("late resolve"),
+        ResolveOutcome::AlreadyResolved {
+            terminal: Resolution::Cancelled,
+        }
     );
 }
 
 #[tokio::test]
-async fn restate_effect_host_rejects_cancel_by_session_with_documented_error() {
-    // The deployment-level host delegates to its controller and surfaces the
-    // same documented refusal, so `LashSession::revoke_durable_waits` reports a
-    // specific limitation on Restate deployments.
+async fn restate_deadline_durably_terminalizes_timeout() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let key = restate_await_event_key(
+        &ExecutionScope::runtime_operation("deadline-operation"),
+        AwaitEventWaitIdentity::Custom {
+            key: "deadline".to_string(),
+        },
+    )
+    .expect("deadline key");
+    let resolution = host
+        .await_await_event(
+            &key,
+            tokio_util::sync::CancellationToken::new(),
+            Some(std::time::Instant::now() + Duration::from_millis(10)),
+        )
+        .await
+        .expect("deadline wait");
+    assert_eq!(resolution, Resolution::Timeout);
+    assert_eq!(
+        host.resolve_await_event(&key, Resolution::Ok(serde_json::json!("late")))
+            .await
+            .expect("late deadline resolve"),
+        ResolveOutcome::AlreadyResolved {
+            terminal: Resolution::Timeout,
+        }
+    );
+}
+
+#[tokio::test]
+async fn restate_session_cancel_cancels_current_waits_but_allows_new_waits() {
+    let context = Arc::new(RecordingContext::default());
+    let first_key = restate_await_event_key(
+        &ExecutionScope::queue_drain("cancel-session", "drain-one"),
+        AwaitEventWaitIdentity::Custom {
+            key: "first".to_string(),
+        },
+    )
+    .expect("first session wait");
+    let task_context = context.clone();
+    let task_key = first_key.clone();
+    let wait = tokio::spawn(async move {
+        RestateRuntimeEffectController::new(task_context)
+            .await_await_event(&task_key, tokio_util::sync::CancellationToken::new(), None)
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(!wait.is_finished());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    host.cancel_await_events_for_session("cancel-session")
+        .await
+        .expect("cancel session waits");
+    assert_eq!(
+        wait.await
+            .expect("join cancelled session wait")
+            .expect("cancelled session wait"),
+        Resolution::Cancelled
+    );
+
+    let next_key = restate_await_event_key(
+        &ExecutionScope::turn("cancel-session", "turn-two"),
+        AwaitEventWaitIdentity::Custom {
+            key: "next".to_string(),
+        },
+    )
+    .expect("next session wait");
+    let expected = Resolution::Ok(serde_json::json!("resumed"));
+    host.resolve_await_event(&next_key, expected.clone())
+        .await
+        .expect("resolve new session wait");
+    assert_eq!(
+        host.await_await_event(&next_key, tokio_util::sync::CancellationToken::new(), None,)
+            .await
+            .expect("new wait after cancel"),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn restate_session_delete_revokes_current_and_future_waits() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let key = restate_await_event_key(
+        &ExecutionScope::session_delete("deleted-session"),
+        AwaitEventWaitIdentity::Custom {
+            key: "delete".to_string(),
+        },
+    )
+    .expect("delete wait");
+    let task_context = context.clone();
+    let task_key = key.clone();
+    let wait = tokio::spawn(async move {
+        RestateRuntimeEffectController::new(task_context)
+            .await_await_event(&task_key, tokio_util::sync::CancellationToken::new(), None)
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(!wait.is_finished());
+    host.revoke_await_events_for_session("deleted-session")
+        .await
+        .expect("revoke deleted session waits");
+    assert_eq!(
+        wait.await
+            .expect("join deleted wait")
+            .expect("deleted wait"),
+        Resolution::Cancelled
+    );
+
+    let future_key = restate_await_event_key(
+        &ExecutionScope::turn("deleted-session", "future-turn"),
+        AwaitEventWaitIdentity::Custom {
+            key: "future".to_string(),
+        },
+    )
+    .expect("future revoked wait");
+    assert_eq!(
+        host.await_await_event(
+            &future_key,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("future revoked wait result"),
+        Resolution::Cancelled
+    );
+    assert_eq!(
+        host.resolve_await_event(&future_key, Resolution::Ok(serde_json::json!("late")))
+            .await
+            .expect("late resolve after deletion"),
+        ResolveOutcome::UnknownOrRevoked
+    );
+}
+
+#[tokio::test]
+async fn restate_effect_host_without_ingress_refuses_session_mutation() {
     let host = RestateEffectHost::new();
-
-    let err = AwaitEventResolver::cancel_await_events_for_session(&host, "restate-session")
+    let err = host
+        .revoke_await_events_for_session("restate-session")
         .await
-        .expect_err("Restate effect host must reject session-wide cancellation");
-
-    assert_eq!(
-        err.code.as_str(),
-        "restate_await_event_cancel_by_session_unsupported"
-    );
-    assert!(err.message.contains("resolve_await_event"));
+        .expect_err("deployment host without ingress cannot revoke Restate state");
+    assert_eq!(err.code.as_str(), "restate_await_event_ingress_required");
 }
 
 fn replay_test_policy(session_id: &str) -> lash_core::SessionPolicy {
@@ -1917,14 +2205,10 @@ async fn restate_controller_replays_parent_shaped_start_await_suspend_flow() {
     )
     .expect("parent suspend key");
     context.resolve_process_terminal(process_id, &terminal);
-    context
-        .awaited_events
-        .lock()
-        .expect("awaited events lock")
-        .insert(
-            suspend_key.promise_key(),
-            Resolution::Ok(serde_json::json!({ "answer": "resume" })),
-        );
+    context.resolve_durable_event(RestateDurableWaitResolveRequest {
+        address: RestateDurableWaitAddress::for_key(&suspend_key),
+        resolution: Resolution::Ok(serde_json::json!({ "answer": "resume" })),
+    });
 
     run_parent_shaped_start_await_suspend_flow(
         &host,
@@ -2227,10 +2511,14 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
     {
         let resolved = context.resolved_events.lock().expect("resolved lock");
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].process_id, "task-signal");
+        let expected_key = restate_await_event_key(
+            &ExecutionScope::process("task-signal"),
+            AwaitEventWaitIdentity::process_signal("task-signal", "notify", 1),
+        )
+        .expect("first signal wait key");
         assert_eq!(
-            resolved[0].key,
-            lash_core::process_signal_wait_key("task-signal", "notify", 1)
+            resolved[0].address,
+            RestateDurableWaitAddress::for_key(&expected_key)
         );
         assert_eq!(
             resolved[0].resolution,
@@ -2265,9 +2553,14 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
     };
     let resolved = context.resolved_events.lock().expect("resolved lock");
     assert_eq!(resolved.len(), 2);
+    let expected_key = restate_await_event_key(
+        &ExecutionScope::process("task-signal"),
+        AwaitEventWaitIdentity::process_signal("task-signal", "notify", 2),
+    )
+    .expect("second signal wait key");
     assert_eq!(
-        resolved[1].key,
-        lash_core::process_signal_wait_key("task-signal", "notify", 2),
+        resolved[1].address,
+        RestateDurableWaitAddress::for_key(&expected_key),
         "second signal must resolve the ordinal-2 wait key"
     );
 }
@@ -3447,19 +3740,27 @@ fn discover_service<S: Discoverable>(_: &S) -> restate_sdk::discovery::Service {
 }
 
 #[tokio::test]
-async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
+async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
     let runner = Arc::new(RecordingRunner::default());
     let registry = process_registry();
     let service = LashProcessWorkflowImpl::new(runner, registry).serve();
     let discovery = discover_service(&service);
-    let endpoint = Endpoint::builder().bind(service).build();
+    let wait_workflow = LashDurableWaitWorkflowImpl.serve();
+    let wait_workflow_discovery = discover_service(&wait_workflow);
+    let wait_index = LashDurableWaitIndexImpl.serve();
+    let wait_index_discovery = discover_service(&wait_index);
+    let endpoint = Endpoint::builder()
+        .bind(service)
+        .bind(wait_workflow)
+        .bind(wait_index)
+        .build();
 
     assert_eq!(discovery.name.to_string(), "LashProcessWorkflow");
     assert_eq!(
         discovery.ty.to_string(),
         restate_sdk::discovery::ServiceType::Workflow.to_string()
     );
-    assert_eq!(discovery.handlers.len(), 4);
+    assert_eq!(discovery.handlers.len(), 3);
 
     let run = discovery
         .handlers
@@ -3471,11 +3772,6 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
         .iter()
         .find(|handler| handler.name.to_string() == "cancel")
         .expect("cancel handler discovery");
-    let resolve_event = discovery
-        .handlers
-        .iter()
-        .find(|handler| handler.name.to_string() == "resolve_event")
-        .expect("resolve_event handler discovery");
     let await_terminal = discovery
         .handlers
         .iter()
@@ -3488,14 +3784,6 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
     );
     assert_eq!(
         cancel.ty.as_ref().map(ToString::to_string).as_deref(),
-        Some("SHARED")
-    );
-    assert_eq!(
-        resolve_event
-            .ty
-            .as_ref()
-            .map(ToString::to_string)
-            .as_deref(),
         Some("SHARED")
     );
     assert_eq!(
@@ -3550,13 +3838,33 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
     assert!(
         handlers
             .iter()
-            .any(|handler| handler["name"] == "resolve_event" && handler["ty"] == "SHARED")
-    );
-    assert!(
-        handlers
-            .iter()
             .any(|handler| handler["name"] == "await_terminal" && handler["ty"] == "SHARED")
     );
+    assert_eq!(
+        wait_workflow_discovery.name.to_string(),
+        "LashDurableWaitWorkflow"
+    );
+    assert!(wait_workflow_discovery.handlers.iter().any(|handler| {
+        handler.name.to_string() == "await_resolution"
+            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("WORKFLOW")
+    }));
+    assert!(wait_workflow_discovery.handlers.iter().any(|handler| {
+        handler.name.to_string() == "resolve"
+            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
+    }));
+    assert_eq!(
+        wait_index_discovery.name.to_string(),
+        "LashDurableWaitIndex"
+    );
+    for required in ["register", "settle", "resolve", "cancel_all", "revoke_all"] {
+        assert!(
+            wait_index_discovery
+                .handlers
+                .iter()
+                .any(|handler| handler.name.to_string() == required),
+            "missing wait-index handler {required}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3588,10 +3896,6 @@ async fn process_deployment_driver_and_workflow_share_registry() {
     }));
     assert!(discovery.handlers.iter().any(|handler| {
         handler.name.to_string() == "cancel"
-            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
-    }));
-    assert!(discovery.handlers.iter().any(|handler| {
-        handler.name.to_string() == "resolve_event"
             && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
     }));
     assert!(discovery.handlers.iter().any(|handler| {

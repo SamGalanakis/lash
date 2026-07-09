@@ -56,6 +56,31 @@ impl AttachmentStore for DurableAttachmentStore {
     async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
         self.inner.delete(id).await
     }
+
+    async fn put_for_session(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        meta: AttachmentCreateMeta,
+    ) -> Result<AttachmentRef, AttachmentStoreError> {
+        self.inner.put_for_session(session_id, bytes, meta).await
+    }
+
+    async fn get_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<StoredAttachment, AttachmentStoreError> {
+        self.inner.get_for_session(session_id, id).await
+    }
+
+    async fn delete_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<(), AttachmentStoreError> {
+        self.inner.delete_for_session(session_id, id).await
+    }
 }
 
 /// Process env store reporting a durable tier over in-memory storage.

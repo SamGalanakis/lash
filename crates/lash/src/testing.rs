@@ -11,6 +11,7 @@ pub use lash_core::testing::{TestProvider, TestProviderBuilder};
 /// and adds [`runtime_rebuild_and_worker_recovery`] — a runtime-level suite
 /// that proves cold session rebuild and durable worker recovery use the same
 /// reconstructed runtime surface.
+#[cfg(feature = "rlm")]
 pub mod conformance {
     pub use lash_core::testing::conformance::*;
 

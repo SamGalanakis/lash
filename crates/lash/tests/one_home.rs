@@ -4,7 +4,8 @@
 //! This test parses the crate's own public re-export map (`pub use` statements)
 //! and asserts no public name is re-exported from two module homes.
 //!
-//! One exemption, intentional: `prelude` mirrors the crate root exactly.
+//! One exemption, intentional: `prelude` duplicates a curated subset of root
+//! names for ergonomic glob imports.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -158,7 +159,7 @@ fn every_public_name_has_exactly_one_home() {
 
     let mut homes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, module) in pairs {
-        // The prelude mirrors the crate root exactly.
+        // Prelude names deliberately alias their canonical root home.
         let module = if module == "prelude" {
             "root".to_string()
         } else {

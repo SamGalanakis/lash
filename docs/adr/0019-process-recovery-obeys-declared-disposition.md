@@ -15,9 +15,10 @@ loss:
 - **OwnerBound**: the contract binds at first start. Before any owner has begun
   execution, any worker may claim the row; once execution has started, no other
   owner may ever re-execute it — abandonment is the only recovery.
-- **ExternallyOwned**: lash never executes the row at all. Closure comes from an
-  external actor calling `complete_process`, or from a reconciled Abandon
-  Request. Recovery never claims it.
+- **ExternallyOwned**: lash never executes the row at all. Closure may come from
+  the explicitly unleased `complete_process` path when an external actor or a
+  process-keyed workflow supplies its own single-writer authority, or from a
+  reconciled Abandon Request. Recovery never executes the external work.
 
 **Abandoned** becomes a fourth terminal state, a peer of
 `Completed | Failed | Cancelled`, with a matching `ProcessAwaitOutput` arm. It
@@ -29,6 +30,11 @@ immutable — an owner that reappears is fenced by its stale lease token, never
 "healed" back to running.
 
 The terminal fact has exactly one legitimate writer per path:
+
+- **Lash-owned execution**: `complete_process_with_lease` validates owner,
+  lease token, fencing token, and expiry, then appends the terminal fact and
+  clears the lease in one store transaction. A renew followed by a separate
+  unfenced terminal write is forbidden.
 
 - **Graceful drain**: the owner abandons its own OwnerBound work inline at
   close, under its own live lease — the ordinary completion path.

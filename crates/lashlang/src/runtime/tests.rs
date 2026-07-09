@@ -484,7 +484,14 @@ finish Payload
     assert!(matches!(outcome, ExecutionOutcome::Finished(_)));
     state.globals.insert_str(
         "cover",
-        Value::Image(ImageValue::new("img_1", "cover", 42, Some(640), Some(480))),
+        Value::Image(ImageValue::new(
+            "img_1",
+            "image/png",
+            "cover",
+            42,
+            Some(640),
+            Some(480),
+        )),
     );
     state.globals.insert_str(
         "projected",
@@ -494,9 +501,24 @@ finish Payload
         )),
     );
 
-    insta::assert_snapshot!(
-        "lashlang_serialized_state_snapshot_contract",
-        serde_json::to_string_pretty(&state.snapshot()).expect("snapshot should serialize")
+    let serialized =
+        serde_json::to_string_pretty(&state.snapshot()).expect("snapshot should serialize");
+    insta::assert_snapshot!("lashlang_serialized_state_snapshot_contract", serialized);
+
+    let restored = State::from_snapshot(
+        serde_json::from_str(&serialized).expect("snapshot should deserialize"),
+    );
+    assert_eq!(
+        restored.globals().get("cover"),
+        Some(&Value::Image(ImageValue::new(
+            "img_1",
+            "image/png",
+            "cover",
+            42,
+            Some(640),
+            Some(480),
+        ))),
+        "snapshot restoration must preserve image type and MIME metadata"
     );
 }
 

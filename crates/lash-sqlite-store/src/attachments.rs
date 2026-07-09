@@ -241,7 +241,9 @@ impl AttachmentManifest for Store {
                         "INSERT INTO attachment_manifest
                             (attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms)
                          VALUES (?1, ?2, ?3, ?4, NULL)
-                         ON CONFLICT(attachment_id) DO NOTHING",
+                         ON CONFLICT(session_id, attachment_id) DO UPDATE SET
+                            canonical_uri = excluded.canonical_uri,
+                            intent_at_ms = excluded.intent_at_ms",
                         params![attachment_id, session_id, canonical_uri, intent_at_ms],
                     )
                 })
@@ -319,14 +321,16 @@ impl AttachmentManifest for Store {
         })
     }
 
-    fn forget(&self, attachment_id: &AttachmentId) -> Result<(), StoreError> {
+    fn forget(&self, session_id: &str, attachment_id: &AttachmentId) -> Result<(), StoreError> {
         block_on_store(async {
+            let session_id = session_id.to_string();
             let attachment_id = attachment_id.as_str().to_string();
             self.conn
                 .call(move |conn| {
                     conn.execute(
-                        "DELETE FROM attachment_manifest WHERE attachment_id = ?1",
-                        params![attachment_id],
+                        "DELETE FROM attachment_manifest
+                         WHERE session_id = ?1 AND attachment_id = ?2",
+                        params![session_id, attachment_id],
                     )
                 })
                 .await

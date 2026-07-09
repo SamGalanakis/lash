@@ -151,11 +151,12 @@ CREATE INDEX IF NOT EXISTS idx_pending_turn_inputs_claim
     ON pending_turn_inputs(session_id, claim_id, claim_token);
 
 CREATE TABLE IF NOT EXISTS attachment_manifest (
-    attachment_id    TEXT PRIMARY KEY,
+    attachment_id    TEXT NOT NULL,
     session_id       TEXT NOT NULL,
     canonical_uri    TEXT NOT NULL,
     intent_at_ms     INTEGER NOT NULL,
-    committed_at_ms  INTEGER
+    committed_at_ms  INTEGER,
+    PRIMARY KEY (session_id, attachment_id)
 );
 
 CREATE TABLE IF NOT EXISTS artifact_refs (
@@ -175,7 +176,7 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// Canonical schema version. There is no migration chain — older databases
 /// must be deleted before opening. See the [`SCHEMA`] doc comment for the
 /// rationale.
-pub(crate) const SCHEMA_VERSION: i32 = 8;
+pub(crate) const SCHEMA_VERSION: i32 = 9;
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (

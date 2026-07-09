@@ -46,15 +46,11 @@ async fn attachment_put_get_round_trips_bytes_and_meta(store: Arc<dyn Attachment
     let stored = store.get(&reference.id).await.expect("get attachment");
 
     assert_eq!(stored.bytes, bytes, "bytes must round-trip unchanged");
-    assert_eq!(stored.meta.id, reference.id);
-    assert_eq!(stored.meta.byte_len, bytes.len() as u64);
-    assert_eq!(
-        stored.meta.media_type,
-        MediaType::Image(ImageMediaType::Png)
-    );
-    assert_eq!(stored.meta.width, Some(7));
-    assert_eq!(stored.meta.height, Some(11));
-    assert_eq!(stored.meta.label.as_deref(), Some("pixel"));
+    assert_eq!(reference.byte_len, bytes.len() as u64);
+    assert_eq!(reference.media_type, MediaType::Image(ImageMediaType::Png));
+    assert_eq!(reference.width, Some(7));
+    assert_eq!(reference.height, Some(11));
+    assert_eq!(reference.label.as_deref(), Some("pixel"));
 }
 
 async fn attachment_is_content_addressed(store: Arc<dyn AttachmentStore>) {
@@ -147,6 +143,5 @@ async fn attachment_store_survives_reopen(factory: ReopenableAttachmentStore) {
         .await
         .expect("get attachment after reopen");
     assert_eq!(reopened.bytes, vec![4u8, 3, 2, 1]);
-    assert_eq!(reopened.meta.id, reference.id);
-    assert_eq!(reopened.meta.byte_len, 4);
+    assert_eq!(reference.byte_len, 4);
 }

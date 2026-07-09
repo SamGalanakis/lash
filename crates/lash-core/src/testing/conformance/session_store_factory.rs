@@ -14,7 +14,106 @@ where
     session_store_factory_open_missing_returns_none(make()).await;
     session_store_factory_create_seeds_and_reopens_meta(make(), expected_tier).await;
     session_store_factory_create_is_idempotent(make()).await;
+    attachment_ownership_isolation(make()).await;
     session_store_factory_delete_removes_store_and_is_idempotent(make()).await;
+}
+
+/// Exercise the cross-session attachment ownership boundary with identical
+/// bytes, divergent reference metadata, and an orphan sweep.
+pub async fn attachment_ownership_isolation(factory: Arc<dyn crate::SessionStoreFactory>) {
+    attachment_ownership_isolation_with_store(
+        factory,
+        Arc::new(crate::InMemoryAttachmentStore::new()),
+    )
+    .await;
+}
+
+/// Run [`attachment_ownership_isolation`] against a concrete shared byte
+/// backend, combining manifest ownership and physical namespace behavior.
+pub async fn attachment_ownership_isolation_with_store(
+    factory: Arc<dyn crate::SessionStoreFactory>,
+    bytes: Arc<dyn crate::AttachmentStore>,
+) {
+    let committed_request = session_store_request(
+        "attachment-owner-committed",
+        "attachment-model",
+        crate::SessionRelation::Root,
+    );
+    let orphan_request = session_store_request(
+        "attachment-owner-orphan",
+        "attachment-model",
+        crate::SessionRelation::Root,
+    );
+    let committed_manifest = factory
+        .create_store(&committed_request)
+        .await
+        .expect("create committed attachment owner");
+    let orphan_manifest = factory
+        .create_store(&orphan_request)
+        .await
+        .expect("create orphan attachment owner");
+    let committed = crate::SessionScopedAttachmentStore::new(
+        bytes.clone(),
+        Arc::new(crate::attachments::PersistenceManifestAdapter(
+            committed_manifest.clone(),
+        )),
+        committed_request.session_id.clone(),
+    );
+    let orphan = crate::SessionScopedAttachmentStore::new(
+        bytes.clone(),
+        Arc::new(crate::attachments::PersistenceManifestAdapter(
+            orphan_manifest.clone(),
+        )),
+        orphan_request.session_id.clone(),
+    );
+    let png = AttachmentCreateMeta::new(
+        MediaType::Image(ImageMediaType::Png),
+        Some(10),
+        Some(20),
+        Some("committed.png".to_string()),
+    );
+    let jpeg = AttachmentCreateMeta::new(
+        MediaType::Image(ImageMediaType::Jpeg),
+        Some(30),
+        Some(40),
+        Some("orphan.jpg".to_string()),
+    );
+    let committed_ref = committed
+        .put(vec![6, 2, 6, 4], png)
+        .await
+        .expect("put committed attachment");
+    committed_manifest
+        .commit_refs(
+            &committed_request.session_id,
+            std::slice::from_ref(&committed_ref.id),
+        )
+        .expect("commit first owner's attachment");
+    let orphan_ref = orphan
+        .put(vec![6, 2, 6, 4], jpeg)
+        .await
+        .expect("put same bytes for orphan owner");
+    assert_eq!(committed_ref.id, orphan_ref.id);
+    assert_eq!(committed_ref.canonical_mime(), "image/png");
+    assert_eq!(orphan_ref.canonical_mime(), "image/jpeg");
+    assert_eq!(committed_ref.label.as_deref(), Some("committed.png"));
+    assert_eq!(orphan_ref.label.as_deref(), Some("orphan.jpg"));
+
+    let report = crate::reclaim_orphaned_attachments(&*orphan_manifest, &*bytes, i64::MAX as u64)
+        .await
+        .expect("sweep orphan owner");
+    assert_eq!(report.reclaimed_count, 1);
+    assert!(matches!(
+        orphan.get(&orphan_ref.id).await,
+        Err(AttachmentStoreError::NotFound(_))
+    ));
+    assert_eq!(
+        committed
+            .get(&committed_ref.id)
+            .await
+            .expect("committed owner's bytes survive another owner's sweep")
+            .bytes,
+        vec![6, 2, 6, 4]
+    );
 }
 
 fn session_store_request(

@@ -23,7 +23,15 @@ use super::envelope::{
 };
 use super::outcome::llm_call_error_from_transport;
 
-type AwaitEventOptions = (CancellationToken, Option<Instant>, Arc<dyn crate::Clock>);
+/// Host controls attached to one external event wait.
+///
+/// Durable effect controllers consume these controls and translate them to
+/// their engine-native cancellation and timer primitives.
+pub struct RuntimeAwaitEventOptions {
+    pub cancellation: CancellationToken,
+    pub deadline: Option<Instant>,
+    pub clock: Arc<dyn crate::Clock>,
+}
 
 use super::await_events::inline_await_events;
 
@@ -879,14 +887,24 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
-    fn into_await_event_options(self) -> Result<AwaitEventOptions, RuntimeEffectControllerError> {
+    pub fn into_await_event_options(
+        self,
+    ) -> Result<RuntimeAwaitEventOptions, RuntimeEffectControllerError> {
         match self.state {
             RuntimeEffectLocalExecutorState::ExternalWaitOptions {
                 cancellation,
                 deadline,
                 clock,
-            } => Ok((cancellation, deadline, clock)),
-            _ => Ok((CancellationToken::new(), None, Arc::new(crate::SystemClock))),
+            } => Ok(RuntimeAwaitEventOptions {
+                cancellation,
+                deadline,
+                clock,
+            }),
+            _ => Ok(RuntimeAwaitEventOptions {
+                cancellation: CancellationToken::new(),
+                deadline: None,
+                clock: Arc::new(crate::SystemClock),
+            }),
         }
     }
 }
@@ -1235,7 +1253,11 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match envelope.command {
             RuntimeEffectCommand::AwaitEvent { key } => {
-                let (cancellation, deadline, clock) = local_executor.into_await_event_options()?;
+                let RuntimeAwaitEventOptions {
+                    cancellation,
+                    deadline,
+                    clock,
+                } = local_executor.into_await_event_options()?;
                 let resolution = inline_await_events()
                     .await_resolution(&key, cancellation, deadline, clock.as_ref())
                     .await

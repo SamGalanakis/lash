@@ -104,7 +104,8 @@ async fn load_process_lease_tx(
                 lease_claimed_at_ms, lease_expires_at_ms,
                 lease_owner_incarnation_id, lease_owner_liveness_json
          FROM lash_process_leases
-         WHERE process_id = $1",
+         WHERE process_id = $1
+         FOR UPDATE",
     )
     .bind(process_id)
     .fetch_optional(&mut **tx)
@@ -136,6 +137,20 @@ async fn load_process_lease_tx(
         claimed_at_epoch_ms: row.get::<i64, _>(3) as u64,
         expires_at_epoch_ms: row.get::<i64, _>(4) as u64,
     }))
+}
+
+/// One authoritative wall-clock sample for every process-lease transaction.
+/// Using the database clock prevents worker clock skew from stealing or
+/// spuriously expiring a lease in multi-host Postgres deployments.
+async fn process_lease_now_epoch_ms_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<u64, PluginError> {
+    let now: i64 =
+        sqlx::query_scalar("SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(plugin_sqlx_error)?;
+    Ok(now.max(0) as u64)
 }
 
 /// Insert-or-replace the persisted lease row for `process_id` with a fresh

@@ -156,10 +156,7 @@ impl PostgresRuntimeEffectController {
             .to_string();
         let envelope_hash = envelope.stable_hash()?;
         let scope_id = self.scope.id().to_string();
-        let now = current_epoch_ms();
         let lease_token = self.inner.next_lease_token();
-        let due_at_ms = postgres_effect_sleep_due_at_ms(envelope, now);
-        let lease_expires_at_ms = now.saturating_add(self.inner.lease_timings.ttl_ms());
         let replay_mode = self.inner.replay_mode.load(Ordering::SeqCst);
         let owner_id = self.inner.owner_id.clone();
 
@@ -169,6 +166,11 @@ impl PostgresRuntimeEffectController {
             .begin()
             .await
             .map_err(postgres_effect_store_error)?;
+        let now = postgres_transaction_epoch_ms(&mut tx)
+            .await
+            .map_err(|err| postgres_effect_store_message(err.to_string()))?;
+        let due_at_ms = postgres_effect_sleep_due_at_ms(envelope, now);
+        let lease_expires_at_ms = now.saturating_add(self.inner.lease_timings.ttl_ms());
         let outcome = match postgres_select_effect_row_for_update(&mut tx, &scope_id, &replay_key)
             .await?
         {
@@ -314,7 +316,6 @@ impl PostgresRuntimeEffectController {
             POSTGRES_EFFECT_STATUS_IN_PROGRESS => {
                 let due_at_ms = existing_due_at_ms.or(due_at_ms);
                 let due_at_param = due_at_ms.map(|value| value as i64);
-                let updated_at_ms = current_epoch_ms();
                 sqlx::query(
                     "UPDATE lash_runtime_effect_replay
                      SET lease_owner_id = $3,
@@ -328,9 +329,9 @@ impl PostgresRuntimeEffectController {
                 .bind(&replay_key)
                 .bind(&owner_id)
                 .bind(&lease_token)
-                .bind(updated_at_ms.saturating_add(self.inner.lease_timings.ttl_ms()) as i64)
+                .bind(now.saturating_add(self.inner.lease_timings.ttl_ms()) as i64)
                 .bind(due_at_param)
-                .bind(updated_at_ms as i64)
+                .bind(now as i64)
                 .execute(&mut **tx)
                 .await
                 .map_err(postgres_effect_store_error)?;
@@ -366,7 +367,6 @@ impl PostgresRuntimeEffectController {
                 Some(serde_json::to_string(err).map_err(postgres_effect_encode_error)?),
             ),
         };
-        let now = current_epoch_ms();
         let changed = sqlx::query(
             "UPDATE lash_runtime_effect_replay
              SET status = $6,
@@ -375,14 +375,14 @@ impl PostgresRuntimeEffectController {
                  lease_owner_id = NULL,
                  lease_token = NULL,
                  lease_expires_at_ms = 0,
-                 updated_at_ms = $9
+                 updated_at_ms = floor(extract(epoch FROM transaction_timestamp()) * 1000)::bigint
              WHERE scope_id = $1
                AND replay_key = $2
                AND envelope_hash = $3
                AND lease_owner_id = $4
                AND lease_token = $5
                AND status = 'in_progress'
-               AND lease_expires_at_ms > $10",
+               AND lease_expires_at_ms > floor(extract(epoch FROM transaction_timestamp()) * 1000)::bigint",
         )
         .bind(&claim.scope_id)
         .bind(&claim.replay_key)
@@ -392,8 +392,6 @@ impl PostgresRuntimeEffectController {
         .bind(status)
         .bind(outcome_json)
         .bind(error_json)
-        .bind(now as i64)
-        .bind(now as i64)
         .execute(&self.inner.pool)
         .await
         .map_err(postgres_effect_store_error)?
@@ -414,28 +412,24 @@ impl PostgresRuntimeEffectController {
         &self,
         claim: &PostgresClaimedEffect,
     ) -> Result<(), RuntimeEffectControllerError> {
-        let now = current_epoch_ms();
-        let renewed_expires_at = now.saturating_add(self.inner.lease_timings.ttl_ms());
         let changed = sqlx::query(
             "UPDATE lash_runtime_effect_replay
-             SET lease_expires_at_ms = $6,
-                 updated_at_ms = $7
+             SET lease_expires_at_ms = floor(extract(epoch FROM transaction_timestamp()) * 1000)::bigint + $6,
+                 updated_at_ms = floor(extract(epoch FROM transaction_timestamp()) * 1000)::bigint
              WHERE scope_id = $1
                AND replay_key = $2
                AND envelope_hash = $3
                AND lease_owner_id = $4
                AND lease_token = $5
                AND status = 'in_progress'
-               AND lease_expires_at_ms > $8",
+               AND lease_expires_at_ms > floor(extract(epoch FROM transaction_timestamp()) * 1000)::bigint",
         )
         .bind(&claim.scope_id)
         .bind(&claim.replay_key)
         .bind(&claim.envelope_hash)
         .bind(&self.inner.owner_id)
         .bind(&claim.lease_token)
-        .bind(renewed_expires_at as i64)
-        .bind(now as i64)
-        .bind(now as i64)
+        .bind(self.inner.lease_timings.ttl_ms() as i64)
         .execute(&self.inner.pool)
         .await
         .map_err(postgres_effect_store_error)?
@@ -634,6 +628,10 @@ async fn postgres_effect_sleep_until_retry(retry_at_ms: u64) {
 
 fn postgres_effect_store_error(err: sqlx::Error) -> RuntimeEffectControllerError {
     RuntimeEffectControllerError::new("postgres_effect_replay_store", err.to_string())
+}
+
+fn postgres_effect_store_message(message: String) -> RuntimeEffectControllerError {
+    RuntimeEffectControllerError::new("postgres_effect_replay_store", message)
 }
 
 fn postgres_effect_encode_error(err: serde_json::Error) -> RuntimeEffectControllerError {

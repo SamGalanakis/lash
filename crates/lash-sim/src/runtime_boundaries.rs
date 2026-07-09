@@ -10,7 +10,8 @@ use lash_core::runtime::{
 };
 use lash_core::{
     DeliveryPolicy, ExecResponse, ExecutionScope, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey,
-    PreparedToolCall, RecoveryDisposition, RuntimeEffectCommand, RuntimeEffectController,
+    PreparedToolCall, ProcessAwaitOutput, ProcessInput, ProcessProvenance, ProcessRegistration,
+    ProcessRegistry, RecoveryDisposition, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
     RuntimeInvocation, RuntimePersistence, SessionExecutionLeaseClaimOutcome, SessionRelation,
     SessionScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, ToolAttemptLaunch,
@@ -92,6 +93,7 @@ pub struct RuntimeBoundaryHarness {
     effect_controller: Option<Arc<dyn RuntimeEffectController>>,
     durable_entries: BTreeMap<String, DurableEntry>,
     process_wake_claimed_batches: BTreeSet<String>,
+    worker_process_registry: Option<Arc<dyn ProcessRegistry>>,
 }
 
 impl RuntimeBoundaryHarness {
@@ -105,6 +107,7 @@ impl RuntimeBoundaryHarness {
             effect_controller: None,
             durable_entries: BTreeMap::new(),
             process_wake_claimed_batches: BTreeSet::new(),
+            worker_process_registry: None,
         }
     }
 
@@ -637,6 +640,15 @@ impl RuntimeBoundaryHarness {
             }
         };
 
+        let process_completion = self
+            .run_process_completion_contention(
+                &session,
+                &event.boundary_id,
+                &stale_owner,
+                &live_owner,
+            )
+            .await?;
+
         // Worker two resumes the crashed worker's in-flight work under its own
         // lease and rejects the dead owner's stale completion attempt.
         let failover = self
@@ -671,6 +683,10 @@ impl RuntimeBoundaryHarness {
             "active_owner": owner_json(&live_owner),
             "active_fencing_token": renewed_live.fencing_token,
             "stale_completion_rejected": true,
+            "process_stale_completion_rejected": process_completion.stale_rejected,
+            "process_stale_output_absent": process_completion.stale_output_absent,
+            "process_terminal_writer": process_completion.terminal_writer.clone(),
+            "process_terminal_event_count": process_completion.terminal_event_count,
             "lease_owner_changed": !stale_owner.same_incarnation(&live_owner),
             "runtime_stale_completion": {
                 "session_id": stale_completion.session_id,
@@ -687,6 +703,17 @@ impl RuntimeBoundaryHarness {
             "runtime_worker_store": {
                 "session_execution_lease_reclaimed": true,
                 "stale_completion_left_live_lease_renewable": true,
+                "process_completion": {
+                    "process_id": process_completion.process_id,
+                    "stale_fencing_token": process_completion.stale_fencing_token,
+                    "live_fencing_token": process_completion.live_fencing_token,
+                    "fencing_token_advanced": process_completion.live_fencing_token
+                        > process_completion.stale_fencing_token,
+                    "stale_completion_rejected": process_completion.stale_rejected,
+                    "stale_output_absent": process_completion.stale_output_absent,
+                    "terminal_writer": process_completion.terminal_writer,
+                    "terminal_event_count": process_completion.terminal_event_count,
+                },
                 "worker_owned_work": {
                     "batch_id_present": !work.batch_id.is_empty(),
                     "source_key": work.source_key,
@@ -946,6 +973,139 @@ impl RuntimeBoundaryHarness {
         })
     }
 
+    /// Exercise the process-registry terminal fence itself. Session and queued
+    /// work leases are useful surrounding evidence, but they cannot prove that a
+    /// stale process owner is unable to persist its semantic terminal output.
+    async fn run_process_completion_contention(
+        &mut self,
+        session: &str,
+        boundary_id: &str,
+        stale_owner: &LeaseOwnerIdentity,
+        live_owner: &LeaseOwnerIdentity,
+    ) -> Result<WorkerProcessCompletion, RuntimeBoundaryError> {
+        let registry = self.ensure_worker_process_registry().await?;
+        // A generated workload may contain several worker-contention boundaries
+        // for one session. The scheduler boundary id is stable across backend
+        // replays and unique per occurrence, so it keeps each proof independent
+        // without introducing a timing- or delivery-order-derived counter.
+        let process_id = format!("sim-worker-process-{session}-{boundary_id}");
+        registry
+            .register_process(ProcessRegistration::new(
+                process_id.clone(),
+                ProcessInput::External {
+                    metadata: json!({"simulation": "worker_stale_completion"}),
+                },
+                RecoveryDisposition::Rerunnable,
+                ProcessProvenance::host(),
+            ))
+            .await
+            .map_err(|err| RuntimeBoundaryError::new(format!("register process: {err}")))?;
+
+        // TTL zero deterministically makes A reclaimable without sleeping or
+        // depending on the simulator host's wall clock.
+        let stale_lease = registry
+            .claim_process_lease(&process_id, stale_owner, 0)
+            .await
+            .map_err(|err| RuntimeBoundaryError::new(format!("claim process A: {err}")))?
+            .acquired()
+            .ok_or_else(|| RuntimeBoundaryError::new("process A lease was busy"))?;
+        let live_lease = registry
+            .claim_process_lease(&process_id, live_owner, LEASE_TTL_MS)
+            .await
+            .map_err(|err| RuntimeBoundaryError::new(format!("take over process as B: {err}")))?
+            .acquired()
+            .ok_or_else(|| RuntimeBoundaryError::new("process B takeover was busy"))?;
+
+        let stale_output = ProcessAwaitOutput::Success {
+            value: json!({"writer": "stale", "must_not_persist": true}),
+            control: None,
+        };
+        let stale_rejected = registry
+            .complete_process_with_lease(&stale_lease, stale_output)
+            .await
+            .is_err();
+        if !stale_rejected {
+            return Err(RuntimeBoundaryError::new(
+                "stale process owner persisted terminal output".to_string(),
+            ));
+        }
+        let stale_output_absent = terminal_writer(registry.as_ref(), &process_id)
+            .await?
+            .is_none();
+        if !stale_output_absent {
+            return Err(RuntimeBoundaryError::new(
+                "stale process terminal output remained in the event log".to_string(),
+            ));
+        }
+
+        let successor_output = ProcessAwaitOutput::Success {
+            value: json!({"writer": "successor", "completed": true}),
+            control: None,
+        };
+        registry
+            .complete_process_with_lease(&live_lease, successor_output.clone())
+            .await
+            .map_err(|err| RuntimeBoundaryError::new(format!("complete process as B: {err}")))?;
+        // A same-output redelivery after the atomic lease release must replay,
+        // not append another terminal event.
+        registry
+            .complete_process_with_lease(&live_lease, successor_output)
+            .await
+            .map_err(|err| RuntimeBoundaryError::new(format!("replay process B output: {err}")))?;
+        let events = registry
+            .events_after(&process_id, 0)
+            .await
+            .map_err(|err| RuntimeBoundaryError::new(format!("read process events: {err}")))?;
+        let terminal_event_count = events
+            .iter()
+            .filter(|event| event.semantics.terminal.is_some())
+            .count();
+        let terminal_writer = terminal_writer_from_events(&events);
+        if terminal_writer.as_deref() != Some("successor") || terminal_event_count != 1 {
+            return Err(RuntimeBoundaryError::new(format!(
+                "successor process terminal was not unique: writer={terminal_writer:?}, count={terminal_event_count}"
+            )));
+        }
+        Ok(WorkerProcessCompletion {
+            process_id,
+            stale_fencing_token: stale_lease.fencing_token,
+            live_fencing_token: live_lease.fencing_token,
+            stale_rejected,
+            stale_output_absent,
+            terminal_writer: terminal_writer.unwrap_or_default(),
+            terminal_event_count,
+        })
+    }
+
+    async fn ensure_worker_process_registry(
+        &mut self,
+    ) -> Result<Arc<dyn ProcessRegistry>, RuntimeBoundaryError> {
+        if let Some(registry) = self.worker_process_registry.as_ref() {
+            return Ok(Arc::clone(registry));
+        }
+        let registry: Arc<dyn ProcessRegistry> = match &self.effect_replay_store {
+            RuntimeEffectReplayStore::Memory => {
+                Arc::new(lash_core::TestLocalProcessRegistry::durable())
+            }
+            RuntimeEffectReplayStore::SqliteFile(path) => {
+                let process_path = path.with_extension("process-registry.sqlite");
+                Arc::new(
+                    lash_sqlite_store::SqliteProcessRegistry::open(&process_path)
+                        .await
+                        .map_err(|err| {
+                            RuntimeBoundaryError::new(format!(
+                                "open SQLite process registry `{}`: {err}",
+                                process_path.display()
+                            ))
+                        })?,
+                )
+            }
+            RuntimeEffectReplayStore::Postgres(storage) => Arc::new(storage.process_registry()),
+        };
+        self.worker_process_registry = Some(Arc::clone(&registry));
+        Ok(registry)
+    }
+
     async fn ensure_effect_controller(
         &mut self,
     ) -> Result<Arc<dyn RuntimeEffectController>, RuntimeBoundaryError> {
@@ -1034,6 +1194,40 @@ struct WorkerFailover {
     resumed_by_second_owner: bool,
     resumed_claim_fencing_token: u64,
     stale_work_completion_rejected: bool,
+}
+
+struct WorkerProcessCompletion {
+    process_id: String,
+    stale_fencing_token: u64,
+    live_fencing_token: u64,
+    stale_rejected: bool,
+    stale_output_absent: bool,
+    terminal_writer: String,
+    terminal_event_count: usize,
+}
+
+async fn terminal_writer(
+    registry: &dyn ProcessRegistry,
+    process_id: &str,
+) -> Result<Option<String>, RuntimeBoundaryError> {
+    let events = registry
+        .events_after(process_id, 0)
+        .await
+        .map_err(|err| RuntimeBoundaryError::new(format!("read process events: {err}")))?;
+    Ok(terminal_writer_from_events(&events))
+}
+
+fn terminal_writer_from_events(events: &[lash_core::ProcessEvent]) -> Option<String> {
+    events.iter().find_map(|event| {
+        let terminal = event.semantics.terminal.as_ref()?;
+        let ProcessAwaitOutput::Success { value, .. } = &terminal.await_output else {
+            return None;
+        };
+        value
+            .get("writer")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
 }
 
 fn worker_failover_work(
@@ -1266,309 +1460,4 @@ fn boundary_kind_name(kind: BoundaryKind) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn event(kind: BoundaryKind, id: &str, payload: Value) -> BoundaryEvent {
-        BoundaryEvent::new(id, "session-001", kind, 1, "test", payload)
-    }
-
-    fn harness() -> RuntimeBoundaryHarness {
-        let factory: Arc<dyn SessionStoreFactory> =
-            Arc::new(lash_core::InMemorySessionStoreFactory::new());
-        RuntimeBoundaryHarness::new(factory, RuntimeEffectReplayStore::Memory)
-    }
-
-    #[tokio::test]
-    async fn worker_failover_continuation_oracle_catches_a_store_that_fails_to_fence() {
-        // END-TO-END NEGATIVE: drive the REAL worker-stale-completion boundary
-        // against a store whose session-execution lease is already held, so the
-        // worker's stale-owner claim is Busy and the real lease store can neither
-        // fence nor continue the work. The failover-continuation oracle MUST catch
-        // this — proving it bites on a real un-fencing path, not just synthetic
-        // facts.
-        let mut harness = harness();
-        let session = "worker-unfenced-session";
-        let store = harness.store_for_session(session).await.expect("store");
-        let blocker = LeaseOwnerIdentity::opaque("blocker-owner", "blocker-owner:001");
-        let blocking = match store
-            .try_claim_session_execution_lease(session, &blocker, LEASE_TTL_MS)
-            .await
-            .expect("blocker claim")
-        {
-            SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
-            other => panic!("expected to acquire the blocking lease: {other:?}"),
-        };
-
-        let worker_event = BoundaryEvent::new(
-            "worker:unfenced:001",
-            session,
-            BoundaryKind::Worker,
-            5,
-            "worker.stale-completion-rejected",
-            json!({ "session": session }),
-        );
-        let observed = harness
-            .run_worker_stale_completion(&worker_event)
-            .await
-            .expect("worker boundary observed");
-
-        // The real store could NOT fence: no rejection, no work continuation.
-        assert_eq!(
-            observed
-                .get("stale_completion_rejected")
-                .and_then(Value::as_bool),
-            Some(false),
-            "a busy store must not report a fenced stale completion: {observed}"
-        );
-        assert!(
-            observed
-                .get("runtime_worker_store")
-                .and_then(|store| store.get("worker_owned_work"))
-                .is_none(),
-            "a store that failed to fence must not record worker-owned-work continuation: {observed}"
-        );
-
-        let delivered = crate::scheduler::DeliveredBoundary {
-            schema: "test".to_string(),
-            sequence: 0,
-            scheduler: crate::scheduler::SchedulerDeliveryEvidence::default(),
-            boundary_id: "worker:unfenced:001".to_string(),
-            actor_alias: session.to_string(),
-            kind: BoundaryKind::Worker,
-            at: 5,
-            label: "worker.stale-completion-rejected".to_string(),
-            payload: json!({ "session": session }),
-            observed,
-        };
-        let verdict =
-            crate::oracles::worker_failover_continues_work(std::slice::from_ref(&delivered));
-        assert!(
-            !verdict.is_passed(),
-            "the failover-continuation oracle must catch a store that failed to fence: {}",
-            verdict.message
-        );
-
-        let _ = store
-            .release_session_execution_lease(&blocking.completion())
-            .await;
-    }
-
-    #[tokio::test]
-    async fn durable_effect_replays_through_runtime_effect_controller() {
-        let mut harness = harness();
-        let payload = json!({
-            "durable_key": "sleep/session-001/001",
-            "result": {"completed": true},
-            "runtime_effect": {"effect_id": "effect/sleep/001"},
-        });
-        let first = harness
-            .complete_durable_effect(&event(
-                BoundaryKind::DurableEffect,
-                "durable:first",
-                payload.clone(),
-            ))
-            .await
-            .expect("first durable effect");
-        let replay = harness
-            .complete_durable_effect(&event(
-                BoundaryKind::DurableEffect,
-                "durable:replay",
-                json!({
-                    "durable_key": "sleep/session-001/001",
-                    "result": {"completed": false},
-                    "runtime_effect": {"effect_id": "effect/sleep/001"},
-                }),
-            ))
-            .await
-            .expect("replayed durable effect");
-
-        assert_eq!(first["execution_count"], 1);
-        assert_eq!(replay["execution_count"], 1);
-        assert_eq!(replay["replay_count"], 1);
-        assert_eq!(replay["replayed"], true);
-        assert_eq!(first["result_digest"], replay["result_digest"]);
-        assert_eq!(
-            replay["runtime_effect"]["controller"],
-            "sqlite_runtime_effect_controller"
-        );
-    }
-
-    #[tokio::test]
-    async fn process_wake_uses_runtime_queued_work_claim_and_dedupe() {
-        let mut harness = harness();
-        let payload = json!({
-            "session": "session-001",
-            "dedupe_key": "wake/session-001/001",
-        });
-        let first = harness
-            .deliver_process_wake(&event(
-                BoundaryKind::ProcessWake,
-                "wake:first",
-                payload.clone(),
-            ))
-            .await
-            .expect("first wake");
-        let duplicate = harness
-            .deliver_process_wake(&event(BoundaryKind::ProcessWake, "wake:dupe", payload))
-            .await
-            .expect("duplicate wake");
-
-        assert_eq!(first["claimed_once"], true);
-        assert_eq!(duplicate["claimed_once"], false);
-        assert_eq!(first["runtime_queued_work"]["claim_id_present"], true);
-        assert_eq!(duplicate["runtime_queued_work"]["claim_id_present"], false);
-    }
-
-    #[tokio::test]
-    async fn process_lifecycle_boundary_drives_real_disposition_recovery() {
-        // END TO END through the REAL DurableProcessWorker sweep: spawn / crash /
-        // sweep / abandon-request produce the ADR 0019 verdicts, and both
-        // lifecycle oracles pass on the real observation.
-        let mut harness = harness();
-        let observed = harness
-            .run_process_lifecycle(&event(
-                BoundaryKind::ProcessLifecycle,
-                "session-001:process-lifecycle:001",
-                json!({ "session": "session-001" }),
-            ))
-            .await
-            .expect("process lifecycle boundary");
-
-        let processes = observed
-            .pointer("/runtime_process_lifecycle/processes")
-            .and_then(Value::as_array)
-            .expect("recorded lifecycle processes");
-        let by_id = |id: &str| {
-            processes
-                .iter()
-                .find(|process| process["process_id"] == id)
-                .unwrap_or_else(|| panic!("missing process `{id}`: {observed}"))
-                .clone()
-        };
-        // Started OwnerBound + provably-dead holder -> Abandoned{Sweep}, not re-run.
-        let ob = by_id("ob-crashed");
-        assert_eq!(ob["terminal_status"], "abandoned");
-        assert_eq!(ob["abandon_writer"], "sweep");
-        assert_eq!(ob["provably_dead_holder"], true);
-        assert_eq!(ob["reran"], false);
-        assert_eq!(ob["abandon_evidence_owner"], "sim-dead-owner");
-        // Rerunnable IS re-run to a run terminal.
-        let rerun = by_id("rerun-crashed");
-        assert_eq!(rerun["reran"], true);
-        assert_ne!(rerun["terminal_status"], "abandoned");
-        // OwnerBound + operator-authorized abandonment + lapsed lease -> reconciled.
-        let reconciled = by_id("ob-abandon-req");
-        assert_eq!(reconciled["terminal_status"], "abandoned");
-        assert_eq!(reconciled["abandon_writer"], "reconciled_request");
-        assert_eq!(reconciled["abandon_requested"], true);
-        assert_eq!(reconciled["reran"], false);
-
-        let delivered = crate::scheduler::DeliveredBoundary {
-            schema: "test".to_string(),
-            sequence: 0,
-            scheduler: crate::scheduler::SchedulerDeliveryEvidence::default(),
-            boundary_id: "session-001:process-lifecycle:001".to_string(),
-            actor_alias: "session-001".to_string(),
-            kind: BoundaryKind::ProcessLifecycle,
-            at: 1,
-            label: "process.lifecycle.recovery".to_string(),
-            payload: json!({ "session": "session-001" }),
-            observed,
-        };
-        let events = std::slice::from_ref(&delivered);
-        assert!(
-            crate::oracles::process_never_double_started(events).is_passed(),
-            "the real recovery must satisfy the double-start oracle"
-        );
-        assert!(
-            crate::oracles::abandoned_requires_evidence(events).is_passed(),
-            "the real recovery must satisfy the evidence oracle"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_boundary_uses_runtime_effect_controller_and_records_output() {
-        let mut harness = harness();
-        let observed = harness
-            .complete_tool(&event(
-                BoundaryKind::Tool,
-                "tool:001",
-                json!({
-                    "tool": "lookup",
-                    "output": {"answer": "tool data"},
-                }),
-            ))
-            .await
-            .expect("tool boundary");
-
-        assert_eq!(observed["execution_count"], 1);
-        assert_eq!(
-            observed["runtime_effect"]["controller"],
-            "sqlite_runtime_effect_controller"
-        );
-        assert_eq!(observed["runtime_tool_record"]["tool"], "lookup");
-        assert!(
-            observed["runtime_tool_output"]
-                .to_string()
-                .contains("tool data")
-        );
-    }
-
-    #[tokio::test]
-    async fn exec_boundary_uses_runtime_effect_controller_and_preserves_exit_data() {
-        let mut harness = harness();
-        let observed = harness
-            .execute_code(&event(
-                BoundaryKind::ExecCode,
-                "exec:001",
-                json!({
-                    "output": "exec data",
-                    "exit_code": 7,
-                }),
-            ))
-            .await
-            .expect("exec boundary");
-
-        assert_eq!(observed["execution_count"], 1);
-        assert_eq!(
-            observed["runtime_effect"]["controller"],
-            "sqlite_runtime_effect_controller"
-        );
-        assert_eq!(observed["exit_code"], 7);
-        assert!(
-            observed["runtime_effect_outcome"]
-                .to_string()
-                .contains("exec data")
-        );
-    }
-
-    #[tokio::test]
-    async fn worker_stale_completion_uses_runtime_session_lease_store() {
-        let mut harness = harness();
-        let observed = harness
-            .run_worker_stale_completion(&event(
-                BoundaryKind::Worker,
-                "worker-001",
-                json!({"session": "session-001"}),
-            ))
-            .await
-            .expect("worker boundary");
-
-        assert_eq!(observed["stale_completion_rejected"], true);
-        assert_eq!(
-            observed["runtime_worker_store"]["session_execution_lease_reclaimed"],
-            true
-        );
-        assert!(observed["runtime_active_lease"].is_object());
-        let work = &observed["runtime_worker_store"]["worker_owned_work"];
-        assert_eq!(work["first_owner_claimed_work"], true);
-        assert_eq!(work["second_owner_resumed_work"], true);
-        assert_eq!(work["second_owner_outranks_first"], true);
-        assert_eq!(work["stale_work_completion_rejected"], true);
-        assert!(
-            work["second_owner_claim_fencing_token"].as_u64().unwrap()
-                > work["first_owner_claim_fencing_token"].as_u64().unwrap()
-        );
-    }
-}
+mod tests;

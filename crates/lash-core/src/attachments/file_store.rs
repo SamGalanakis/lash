@@ -1,49 +1,42 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef};
 
 use super::{
-    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, StoredAttachment, content_id,
+    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, StoredAttachment,
+    content_id, session_storage_namespace,
 };
 
 pub struct FileAttachmentStore {
     root: PathBuf,
-    meta: Mutex<HashMap<AttachmentId, AttachmentMeta>>,
 }
 
 impl FileAttachmentStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            meta: Mutex::new(HashMap::new()),
-        }
+        Self { root: root.into() }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Lock the in-memory metadata cache, recovering from a poisoned lock
-    /// rather than panicking. The cache is a best-effort fast path backed by
-    /// the on-disk `.json` sidecars, so a prior panic while it was held must
-    /// not permanently brick the store — `get`/`put` simply fall back to disk.
-    fn meta_cache(&self) -> std::sync::MutexGuard<'_, HashMap<AttachmentId, AttachmentMeta>> {
-        self.meta
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn path_for_id(&self, id: &AttachmentId) -> PathBuf {
+        self.path_in_root(&self.root, id)
     }
 
-    fn path_for_id(&self, id: &AttachmentId) -> PathBuf {
+    fn path_for_session(&self, session_id: &str, id: &AttachmentId) -> PathBuf {
+        let root = self
+            .root
+            .join("sessions")
+            .join(session_storage_namespace(session_id));
+        self.path_in_root(&root, id)
+    }
+
+    fn path_in_root(&self, root: &Path, id: &AttachmentId) -> PathBuf {
         let id = id.as_str();
         let prefix = id.get(..2).unwrap_or(id);
-        self.root.join("sha256").join(prefix).join(id)
-    }
-
-    fn meta_path_for_id(&self, id: &AttachmentId) -> PathBuf {
-        self.path_for_id(id).with_extension("json")
+        root.join("sha256").join(prefix).join(id)
     }
 }
 
@@ -99,73 +92,87 @@ impl AttachmentStore for FileAttachmentStore {
             meta.label,
         );
         let path = self.path_for_id(&meta.id);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| AttachmentStoreError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        if !path.exists() {
-            write_atomic(&path, &bytes)?;
-        }
-        let meta_path = self.meta_path_for_id(&meta.id);
-        let meta_bytes = serde_json::to_vec_pretty(&meta).expect("attachment metadata serializes");
-        write_atomic(&meta_path, &meta_bytes)?;
-        let reference = meta.as_ref();
-        self.meta_cache().insert(reference.id.clone(), meta);
-        Ok(reference)
+        put_at_path(path, bytes, meta)
     }
 
     async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
-        let path = self.path_for_id(id);
-        let bytes = fs::read(&path).map_err(|source| {
-            if source.kind() == std::io::ErrorKind::NotFound {
-                AttachmentStoreError::NotFound(id.clone())
-            } else {
-                AttachmentStoreError::Io {
-                    path: path.clone(),
-                    source,
-                }
-            }
-        })?;
-        let meta = if let Some(meta) = self.meta_cache().get(id).cloned() {
-            meta
-        } else {
-            let meta_path = self.meta_path_for_id(id);
-            let meta_bytes = fs::read(&meta_path).map_err(|source| {
-                if source.kind() == std::io::ErrorKind::NotFound {
-                    AttachmentStoreError::MissingMeta(id.clone())
-                } else {
-                    AttachmentStoreError::Io {
-                        path: meta_path.clone(),
-                        source,
-                    }
-                }
-            })?;
-            serde_json::from_slice(&meta_bytes).map_err(|source| {
-                AttachmentStoreError::MetadataDecode {
-                    id: id.clone(),
-                    source,
-                }
-            })?
-        };
-        Ok(StoredAttachment { meta, bytes })
+        get_at_path(self.path_for_id(id), id)
     }
 
     async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
-        // Remove the content file and its metadata sidecar. A missing file is
-        // not an error (idempotent delete); any other I/O failure surfaces.
-        let remove = |path: PathBuf| -> Result<(), AttachmentStoreError> {
-            match fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(source) => Err(AttachmentStoreError::Io { path, source }),
+        delete_at_path(self.path_for_id(id))
+    }
+
+    async fn put_for_session(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        meta: AttachmentCreateMeta,
+    ) -> Result<AttachmentRef, AttachmentStoreError> {
+        let meta = AttachmentMeta::new(
+            content_id(&bytes),
+            meta.media_type,
+            bytes.len() as u64,
+            meta.width,
+            meta.height,
+            meta.label,
+        );
+        put_at_path(self.path_for_session(session_id, &meta.id), bytes, meta)
+    }
+
+    async fn get_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<StoredAttachment, AttachmentStoreError> {
+        get_at_path(self.path_for_session(session_id, id), id)
+    }
+
+    async fn delete_for_session(
+        &self,
+        session_id: &str,
+        id: &AttachmentId,
+    ) -> Result<(), AttachmentStoreError> {
+        delete_at_path(self.path_for_session(session_id, id))
+    }
+}
+
+fn put_at_path(
+    path: PathBuf,
+    bytes: Vec<u8>,
+    meta: AttachmentMeta,
+) -> Result<AttachmentRef, AttachmentStoreError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| AttachmentStoreError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    if !path.exists() {
+        write_atomic(&path, &bytes)?;
+    }
+    Ok(meta.as_ref())
+}
+
+fn get_at_path(path: PathBuf, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
+    let bytes = fs::read(&path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            AttachmentStoreError::NotFound(id.clone())
+        } else {
+            AttachmentStoreError::Io {
+                path: path.clone(),
+                source,
             }
-        };
-        remove(self.path_for_id(id))?;
-        remove(self.meta_path_for_id(id))?;
-        self.meta_cache().remove(id);
-        Ok(())
+        }
+    })?;
+    Ok(StoredAttachment { bytes })
+}
+
+fn delete_at_path(path: PathBuf) -> Result<(), AttachmentStoreError> {
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(AttachmentStoreError::Io { path, source }),
     }
 }
 
@@ -173,6 +180,7 @@ impl AttachmentStore for FileAttachmentStore {
 mod tests {
     use super::*;
     use crate::{ImageMediaType, MediaType};
+    use std::sync::Mutex;
 
     fn meta() -> AttachmentCreateMeta {
         AttachmentCreateMeta::new(
@@ -191,8 +199,7 @@ mod tests {
         let stored = store.get(&reference.id).await.expect("get");
 
         assert_eq!(stored.bytes, vec![1, 2, 3]);
-        assert_eq!(stored.meta.id, reference.id);
-        assert_eq!(stored.meta.byte_len, 3);
+        assert_eq!(reference.byte_len, 3);
     }
 
     // Finding 4: `put` must write crash-atomically (stage into `<final>.tmp`,
@@ -206,9 +213,7 @@ mod tests {
         let reference = store.put(vec![9, 8, 7, 6], meta()).await.expect("put");
 
         let final_path = store.path_for_id(&reference.id);
-        let meta_path = store.meta_path_for_id(&reference.id);
         assert!(final_path.exists(), "content file must be in place");
-        assert!(meta_path.exists(), "metadata file must be in place");
 
         let mut tmp_files = Vec::new();
         let dir = final_path.parent().expect("content dir");
@@ -249,6 +254,42 @@ mod tests {
             .expect("put over stale tmp");
         let stored = store.get(&reference.id).await.expect("get");
         assert_eq!(stored.bytes, vec![1, 1, 1]);
+    }
+
+    #[tokio::test]
+    async fn file_store_session_namespaces_isolate_identical_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileAttachmentStore::new(temp.path());
+        let first = store
+            .put_for_session("session-a", vec![7, 7, 7], meta())
+            .await
+            .expect("put first");
+        let second = store
+            .put_for_session("session-b", vec![7, 7, 7], meta())
+            .await
+            .expect("put second");
+        assert_eq!(first.id, second.id);
+        assert_ne!(
+            store.path_for_session("session-a", &first.id),
+            store.path_for_session("session-b", &second.id)
+        );
+
+        store
+            .delete_for_session("session-b", &second.id)
+            .await
+            .expect("delete second");
+        assert!(matches!(
+            store.get_for_session("session-b", &second.id).await,
+            Err(AttachmentStoreError::NotFound(_))
+        ));
+        assert_eq!(
+            store
+                .get_for_session("session-a", &first.id)
+                .await
+                .expect("first survives")
+                .bytes,
+            vec![7, 7, 7]
+        );
     }
 
     // Runs the backend-agnostic `AttachmentStore` conformance suite against

@@ -540,6 +540,119 @@ impl ProcessRegistry for PostgresProcessRegistry {
         })
     }
 
+    async fn complete_process_with_lease(
+        &self,
+        lease: &ProcessLease,
+        await_output: ProcessAwaitOutput,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let process_id = lease.process_id.as_str();
+        let mut record = load_process_tx(&mut tx, process_id)
+            .await?
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        let event_type = match await_output.terminal_state() {
+            lash_core::ProcessTerminalState::Completed => "process.completed",
+            lash_core::ProcessTerminalState::Failed => "process.failed",
+            lash_core::ProcessTerminalState::Cancelled => "process.cancelled",
+            lash_core::ProcessTerminalState::Abandoned => "process.abandoned",
+        };
+        let request = ProcessEventAppendRequest::new(
+            event_type,
+            serde_json::json!({ "await_output": await_output }),
+        )
+        .with_replay_key(format!("process:{process_id}:terminal:{event_type}"));
+        let replay_lookup =
+            if let Some(replay_key) = request.replay.as_ref().map(|r| r.key.as_str()) {
+                load_event_by_key_tx(&mut tx, process_id, replay_key).await?
+            } else {
+                None
+            };
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM lash_process_events WHERE process_id = $1",
+        )
+        .bind(process_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        let now = process_lease_now_epoch_ms_tx(&mut tx).await?;
+        let prepared = lash_core::runtime::prepare_process_event_append(
+            &record,
+            request,
+            sequence as u64,
+            replay_lookup,
+            now,
+        )?;
+        if matches!(prepared, lash_core::ProcessEventAppendPlan::Replay { .. }) {
+            tx.commit().await.map_err(plugin_sqlx_error)?;
+            return Ok(record);
+        }
+
+        let current = load_process_lease_tx(&mut tx, process_id).await?;
+        if !guard_lease(current.as_ref(), &lease.lease_token, now)
+            || !current.as_ref().is_some_and(|current| {
+                current.owner.same_incarnation(&lease.owner)
+                    && current.fencing_token == lease.fencing_token
+            })
+        {
+            return Err(process_lease_expired(process_id));
+        }
+
+        let lash_core::ProcessEventAppendPlan::Insert {
+            event,
+            payload_hash,
+            status_update,
+            occurred_at_ms,
+            ..
+        } = prepared
+        else {
+            unreachable!("replay returned above")
+        };
+        sqlx::query(
+            "INSERT INTO lash_process_events (
+                process_id, sequence, event_type, payload_hash, idempotency_key,
+                occurred_at_ms, event_json
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(process_id)
+        .bind(sequence)
+        .bind(event.event_type.as_str())
+        .bind(&payload_hash)
+        .bind(event.invocation.replay_key())
+        .bind(occurred_at_ms as i64)
+        .bind(serde_json::to_string(&event).map_err(process_decode_error)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        if let Some(status) = status_update {
+            lash_core::apply_process_status_projection(&mut record, status, occurred_at_ms);
+        }
+        save_process_tx(&mut tx, &record).await?;
+        let released = sqlx::query(
+            "UPDATE lash_process_leases
+             SET lease_owner_id = NULL,
+                 lease_owner_incarnation_id = NULL,
+                 lease_owner_liveness_json = NULL,
+                 lease_token = NULL,
+                 lease_claimed_at_ms = 0,
+                 lease_expires_at_ms = 0
+             WHERE process_id = $1
+               AND lease_token = $2
+               AND lease_fencing_token = $3",
+        )
+        .bind(process_id)
+        .bind(&lease.lease_token)
+        .bind(lease.fencing_token as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?
+        .rows_affected();
+        if released != 1 {
+            return Err(process_lease_expired(process_id));
+        }
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        Ok(record)
+    }
+
     async fn record_first_started(
         &self,
         process_id: &str,
@@ -728,7 +841,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 "unknown process `{process_id}`"
             )));
         }
-        let now = current_epoch_ms();
+        let now = process_lease_now_epoch_ms_tx(&mut tx).await?;
         let current = load_process_lease_tx(&mut tx, process_id).await?;
         if let Some(current) = current.as_ref()
             && current.expires_at_epoch_ms > now
@@ -780,7 +893,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
                 "unknown process `{process_id}`"
             )));
         }
-        let now = current_epoch_ms();
+        let now = process_lease_now_epoch_ms_tx(&mut tx).await?;
         let current = load_process_lease_tx(&mut tx, process_id).await?;
         let Some(current) = current else {
             // Free (or released) lease: acquire on the retained fencing token
@@ -896,7 +1009,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
         lease_ttl_ms: u64,
     ) -> Result<ProcessLease, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
-        let now = current_epoch_ms();
+        let now = process_lease_now_epoch_ms_tx(&mut tx).await?;
         let current = load_process_lease_tx(&mut tx, &lease.process_id).await?;
         if !guard_lease(current.as_ref(), &lease.lease_token, now)
             || !current.as_ref().is_some_and(|current| {
@@ -983,7 +1096,10 @@ impl ProcessRegistry for PostgresProcessRegistry {
             let record_json: String = row.get(1);
             let record: ProcessRecord =
                 serde_json::from_str(&record_json).map_err(process_decode_error)?;
-            if filter.as_ref().is_none_or(|filter| filter.matches_record(&record)) {
+            if filter
+                .as_ref()
+                .is_none_or(|filter| filter.matches_record(&record))
+            {
                 prunable.push(process_id);
             }
         }
@@ -991,13 +1107,12 @@ impl ProcessRegistry for PostgresProcessRegistry {
         let mut pruned_events = 0;
         let mut pruned_processes = 0;
         for process_id in prunable {
-            pruned_events +=
-                sqlx::query("DELETE FROM lash_process_events WHERE process_id = $1")
-                    .bind(&process_id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(plugin_sqlx_error)?
-                    .rows_affected() as usize;
+            pruned_events += sqlx::query("DELETE FROM lash_process_events WHERE process_id = $1")
+                .bind(&process_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?
+                .rows_affected() as usize;
             sqlx::query("DELETE FROM lash_process_wake_acks WHERE process_id = $1")
                 .bind(&process_id)
                 .execute(&mut *tx)

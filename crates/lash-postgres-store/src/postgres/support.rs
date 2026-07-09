@@ -5,6 +5,25 @@ fn current_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Read the authoritative lease clock from PostgreSQL.
+///
+/// Distributed lease decisions must not depend on the wall clock of whichever
+/// runtime happens to execute them. `transaction_timestamp()` is stable for the
+/// transaction, so every comparison and derived expiry in that transaction is
+/// based on one database-owned instant.
+async fn postgres_transaction_epoch_ms(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<u64, StoreError> {
+    let now: i64 = sqlx::query_scalar(
+        "SELECT floor(extract(epoch FROM transaction_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(store_sqlx_error)?;
+    u64::try_from(now)
+        .map_err(|_| StoreError::Backend(format!("postgres returned invalid epoch millis `{now}`")))
+}
+
 fn current_timestamp_string() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

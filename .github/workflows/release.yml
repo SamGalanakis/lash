@@ -1,36 +1,105 @@
 name: Release
 
 on:
-  # The tags trigger only fires for tags pushed by humans: tags pushed with
-  # the workflow-provided GITHUB_TOKEN (as prepare-release does) never start
-  # workflows, which is why prepare-release also dispatches this workflow
-  # explicitly. Do not "simplify" the dispatch away.
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: "Release tag to build and publish (for example v0.2.11)"
-        required: true
+      release_sha:
+        description: "Commit on main to release (blank uses the current main head)"
+        required: false
         type: string
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: lash-release-main
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare-release:
+    name: Prepare manual release
+    runs-on: ubuntu-latest
+    outputs:
+      release_sha: ${{ steps.release.outputs.sha }}
+      release_tag: ${{ steps.release.outputs.tag }}
+
+    steps:
+      - name: Check out main with release history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve and validate release commit
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin main --tags
+
+          requested="${REQUESTED_SHA:-origin/main}"
+          sha="$(git rev-parse "${requested}^{commit}")"
+          if ! git merge-base --is-ancestor "${sha}" origin/main; then
+            echo "Release commit ${sha} is not on main." >&2
+            exit 1
+          fi
+
+          runs_file="$(mktemp)"
+          gh run list --workflow ci.yml --commit "${sha}" --limit 20 \
+            --json conclusion,event,headSha,status > "${runs_file}"
+          python3 - "${sha}" "${runs_file}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          sha = sys.argv[1]
+          runs = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          if not any(
+              run.get("headSha") == sha
+              and run.get("event") == "push"
+              and run.get("status") == "completed"
+              and run.get("conclusion") == "success"
+              for run in runs
+          ):
+              raise SystemExit(f"no successful main CI push run found for {sha}")
+          PY
+
+          git checkout --detach "${sha}"
+          tag="$(git tag --points-at "${sha}" --list 'v*' --sort=-v:refname | head -n 1)"
+          if [ -z "${tag}" ]; then
+            python3 scripts/release_notes.py collect --require --end "${sha}" >/dev/null
+            version="$(python3 scripts/release_version.py print-next)"
+            tag="v${version}"
+            if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              echo "Computed release tag ${tag} already exists on another commit." >&2
+              exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "${tag}" "${sha}"
+            git push origin "${tag}"
+          fi
+
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "Preparing ${tag} from ${sha}." >> "${GITHUB_STEP_SUMMARY}"
+
   validate-release-ref:
     name: Validate release ref
     runs-on: ubuntu-latest
+    needs: prepare-release
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.release_tag }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -41,7 +110,7 @@ jobs:
   publish-crates:
     name: Publish crates to crates.io
     runs-on: ubuntu-latest
-    needs: [validate-release-ref, perf-guard-full]
+    needs: [prepare-release, validate-release-ref, perf-guard-full]
     # CARGO_REGISTRY_TOKEN lives in the `main` GitHub Environment; a job must
     # declare the environment to read its secrets.
     environment: main
@@ -52,12 +121,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.release_tag }}
 
       - name: Check out release tooling
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.prepare-release.outputs.release_sha }}
           path: .release-tools
 
       - name: Install Rust toolchain
@@ -95,19 +164,19 @@ jobs:
       - name: Publish workspace to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
         run: python3 .release-tools/scripts/publish_workspace.py --version "${RELEASE_TAG#v}"
 
   perf-guard-full:
     name: Perf Guard Full
     runs-on: ubuntu-latest
-    needs: validate-release-ref
+    needs: [prepare-release, validate-release-ref]
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.release_tag }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -144,7 +213,7 @@ jobs:
   build-release-assets:
     name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
-    needs: validate-release-ref
+    needs: [prepare-release, validate-release-ref]
 
     strategy:
       fail-fast: false
@@ -177,7 +246,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.release_tag }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -230,7 +299,7 @@ jobs:
       # reports it (CARGO_PKG_VERSION -> `lash --version`, self-update checks).
       - name: Stamp release version
         env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
         run: python3 scripts/release_version.py stamp "${RELEASE_TAG#v}"
 
       - name: Build release binary
@@ -250,15 +319,15 @@ jobs:
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-latest
-    needs: [build-release-assets, perf-guard-full]
+    needs: [prepare-release, build-release-assets, perf-guard-full]
     env:
-      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.release_tag }}
           # Full history + tags: release_notes.py walks previous-tag..tag to
           # assemble the curated release body.
           fetch-depth: 0
@@ -281,8 +350,8 @@ jobs:
 
       # Curated notes from `Release-Notes:` commit sections become the release
       # body; the auto-generated commit list is appended below. Written
-      # outside dist/ so it is not uploaded as an asset. Not --require here:
-      # prepare-release already gated, and manually pushed tags must publish.
+      # outside dist/ so it is not uploaded as an asset. prepare-release has
+      # already required curated notes before creating a new tag.
       - name: Collect release notes
         run: python3 scripts/release_notes.py collect --end "${RELEASE_TAG}" --out "${{ runner.temp }}/RELEASE_NOTES.md"
 

@@ -2,8 +2,8 @@
 //! lashlang value tree and `serde_json::Value`. Tuples serialize as arrays in
 //! runtime/public JSON and use a snapshot-only marker when preserving state.
 //! Image attachments encode
-//! as `{"type": "image", "id": ..., "label": ..., "size": ..., "width":
-//! ..., "height": ...}` and round-trip via `image_to_json` /
+//! as `{"type": "image", "id": ..., "mime": ..., "label": ..., "size": ...,
+//! "width": ..., "height": ...}` and round-trip via `image_to_json` /
 //! `image_from_json_map`. Projected values serialize with the canonical
 //! `{"__projected__": <inner>}` wrapper (defined in `lash-rlm-types`).
 
@@ -231,9 +231,10 @@ fn serialize_image<S>(image: &ImageValue, serializer: S) -> Result<S::Ok, S::Err
 where
     S: serde::Serializer,
 {
-    let mut map = serializer.serialize_map(Some(6))?;
+    let mut map = serializer.serialize_map(Some(7))?;
     map.serialize_entry("height", &image.height)?;
     map.serialize_entry("id", &image.id)?;
+    map.serialize_entry("mime", &image.mime)?;
     map.serialize_entry("label", &image.label)?;
     map.serialize_entry("size", &image.size)?;
     map.serialize_entry("type", "image")?;
@@ -308,6 +309,10 @@ pub(crate) fn image_to_json(image: &ImageValue) -> serde_json::Value {
     object.insert(
         "id".to_string(),
         serde_json::Value::String(image.id.clone()),
+    );
+    object.insert(
+        "mime".to_string(),
+        serde_json::Value::String(image.mime.clone()),
     );
     object.insert(
         "label".to_string(),
@@ -396,6 +401,7 @@ pub(crate) fn image_from_json_map(
     }
     Some(ImageValue {
         id: map.get("id")?.as_str()?.to_string(),
+        mime: map.get("mime")?.as_str()?.to_string(),
         label: map.get("label")?.as_str()?.to_string(),
         size: map.get("size")?.as_u64()?,
         width: optional_u32_field(map.get("width")?)?,

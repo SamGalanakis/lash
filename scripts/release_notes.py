@@ -6,17 +6,15 @@ Convention: a commit that should contribute user-facing release notes carries a
 the message) is the note, written as Markdown. Notes are collected across the
 release range (previous release tag → the release ref), oldest first, so the
 release body reads chronologically. The publish-time version-injection flow
-authors no synthetic commits (no version bump, no staging sync), so every
+authors no synthetic commits, so every
 commit in range is a real change eligible to contribute notes.
 
 The release pipeline uses two entry points:
-  - the fail-early `release-notes-gate` job runs `collect --require` at t=0 on
-    a main push, so a range with no curated notes fails in under a minute
-    instead of after the full matrix; the release-cut job relies on the gate.
+  - the manually dispatched release workflow runs `collect --require` for the
+    selected green main commit before it creates a tag.
   - the publish job runs `collect --end <tag> --out <file>` and feeds the file
     to the GitHub release body (the auto-generated commit list is appended
-    below it). Empty output is allowed there so manually pushed tags still
-    publish.
+    below it).
 
 Uses only the Python standard library, like the sibling release scripts.
 """
@@ -151,8 +149,7 @@ def main() -> int:
             "no release notes found in "
             f"{prev or 'history start'}..{args.end}.\n"
             "Add a `Release-Notes:` section to at least one commit body\n"
-            "(Markdown, everything after the marker line), or push with\n"
-            "`[skip release]` if this range should not cut a release.\n"
+            "(Markdown, everything after the marker line).\n"
         )
         return 2
     if rendered and not args.out:
