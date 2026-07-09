@@ -3,6 +3,7 @@
 //! effort clamping.
 
 use crate::support::*;
+use lash_core::provider::{ModelCapability, ModelReasoningCapability};
 
 pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub(crate) const FINE_GRAINED_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
@@ -71,25 +72,41 @@ pub(crate) fn clamp_effort(model: &str, effort: &str) -> String {
     }
 }
 
+fn reasoning_capability_for_variants(
+    variants: &[&str],
+    supports_max_tokens: bool,
+) -> ModelCapability {
+    if variants.is_empty() {
+        return ModelCapability::default();
+    }
+    ModelCapability {
+        reasoning: Some(ModelReasoningCapability {
+            supported_efforts: variants.iter().map(|effort| (*effort).to_string()).collect(),
+            supports_max_tokens,
+            ..ModelReasoningCapability::default()
+        }),
+    }
+}
+
 impl ProviderModelPolicy for AnthropicModelPolicy {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+    fn model_capability(&self, model: &str) -> ModelCapability {
         let lower = model.to_ascii_lowercase();
         if anthropic_supports_adaptive_thinking(model) {
             if anthropic_supports_xhigh(model) {
-                CLAUDE_ADAPTIVE_XHIGH_VARIANTS
-            } else if anthropic_supports_max(model) {
-                CLAUDE_ADAPTIVE_MAX_VARIANTS
-            } else {
-                CLAUDE_ADAPTIVE_VARIANTS
+                return reasoning_capability_for_variants(CLAUDE_ADAPTIVE_XHIGH_VARIANTS, false);
             }
-        } else if lower.contains("haiku-4")
+            if anthropic_supports_max(model) {
+                return reasoning_capability_for_variants(CLAUDE_ADAPTIVE_MAX_VARIANTS, false);
+            }
+            return reasoning_capability_for_variants(CLAUDE_ADAPTIVE_VARIANTS, false);
+        }
+        if lower.contains("haiku-4")
             || lower.contains("claude-opus-4")
             || lower.contains("claude-sonnet-4")
         {
-            CLAUDE_BUDGET_VARIANTS
-        } else {
-            &[]
+            return reasoning_capability_for_variants(CLAUDE_BUDGET_VARIANTS, true);
         }
+        ModelCapability::default()
     }
 }
 
@@ -99,7 +116,13 @@ impl AnthropicModelPolicy {
         model: &str,
         variant: &str,
     ) -> Option<AnthropicThinkingConfig> {
-        if !self.supported_variants(model).contains(&variant) {
+        let capability = self.model_capability(model);
+        if !capability.reasoning.as_ref().is_some_and(|reasoning| {
+            reasoning
+                .supported_efforts
+                .iter()
+                .any(|effort| effort == variant)
+        }) {
             return None;
         }
         if anthropic_supports_adaptive_thinking(model) {
@@ -119,5 +142,96 @@ impl AnthropicModelPolicy {
             };
             Some(AnthropicThinkingConfig::Budget { budget_tokens })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_capability_is_model_specific_between_adaptive_and_budget() {
+        let policy = AnthropicModelPolicy;
+        let adaptive = policy.model_capability("claude-sonnet-4.6");
+        let budget = policy.model_capability("claude-haiku-4-5");
+
+        assert_eq!(
+            adaptive
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.supports_max_tokens),
+            Some(false)
+        );
+        assert_eq!(
+            adaptive
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.supported_efforts.clone()),
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string()
+            ])
+        );
+        assert_eq!(
+            budget
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.supports_max_tokens),
+            Some(true)
+        );
+        assert_eq!(
+            budget
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.supported_efforts.clone()),
+            Some(vec![
+                "none".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn anthropic_capability_tracks_opus_xhigh_and_max_split() {
+        let policy = AnthropicModelPolicy;
+
+        assert_eq!(
+            policy
+                .model_capability("claude-opus-4.7")
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.supported_efforts.clone()),
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "xhigh".to_string()
+            ])
+        );
+        assert_eq!(
+            policy
+                .model_capability("claude-opus-4.6")
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.supported_efforts.clone()),
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn anthropic_unknown_models_expose_no_reasoning_capability() {
+        let policy = AnthropicModelPolicy;
+        assert_eq!(
+            policy.model_capability("claude-3.5-sonnet"),
+            ModelCapability::default()
+        );
     }
 }

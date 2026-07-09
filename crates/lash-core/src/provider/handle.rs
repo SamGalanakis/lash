@@ -90,8 +90,8 @@ impl ProviderHandle {
         self.components.provider.kind()
     }
 
-    pub fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        self.components.model_policy.supported_variants(model)
+    pub fn model_capability(&self, model: &str) -> ModelCapability {
+        self.components.model_policy.model_capability(model)
     }
 
     pub fn model_capability(&self, model: &str) -> ModelCapability {
@@ -99,15 +99,19 @@ impl ProviderHandle {
     }
 
     pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
-        let variants = self.supported_variants(model);
-        if variants.is_empty() {
+        let capability = self.model_capability(model);
+        let Some(reasoning) = capability.reasoning else {
             return Err(format!(
                 "Model `{}` on {} does not expose configurable variants.",
                 model,
                 self.kind()
             ));
-        }
-        if variants.contains(&variant) {
+        };
+        if reasoning
+            .supported_efforts
+            .iter()
+            .any(|supported| supported == variant)
+        {
             return Ok(());
         }
         Err(format!(
@@ -115,7 +119,7 @@ impl ProviderHandle {
             variant,
             model,
             self.kind(),
-            variants.join(", ")
+            reasoning.supported_efforts.join(", ")
         ))
     }
 

@@ -35,12 +35,15 @@ impl MutatingProvider {
 struct LegacyOnlyPolicy;
 
 impl ProviderModelPolicy for LegacyOnlyPolicy {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        static VARIANTS: &[&str] = &["low", "high"];
-        if model == "legacy-model" {
-            VARIANTS
-        } else {
-            &[]
+    fn model_capability(&self, model: &str) -> ModelCapability {
+        if model != "legacy-model" {
+            return ModelCapability::default();
+        }
+        ModelCapability {
+            reasoning: Some(ModelReasoningCapability {
+                supported_efforts: vec!["low".to_string(), "high".to_string()],
+                ..ModelReasoningCapability::default()
+            }),
         }
     }
 }
@@ -406,13 +409,20 @@ fn generation_policy_prefers_request_then_provider_then_default() {
 
 #[test]
 fn provider_handle_delegates_variant_policy() {
-    static VARIANTS: &[&str] = &["low", "high"];
+    let capability = ModelCapability {
+        reasoning: Some(ModelReasoningCapability {
+            supported_efforts: vec!["low".to_string(), "high".to_string()],
+            ..ModelReasoningCapability::default()
+        }),
+    };
     let handle = ProviderHandle::new(
         MutatingProvider::default()
-            .into_components(Arc::new(StaticModelPolicy::with_variants(VARIANTS))),
+            .into_components(Arc::new(StaticModelPolicy::new().with_model_capability(
+                "model-a",
+                capability,
+            ))),
     );
 
-    assert_eq!(handle.supported_variants("model-a"), VARIANTS);
     assert!(handle.validate_variant("model-a", "low").is_ok());
     assert!(handle.validate_variant("model-a", "medium").is_err());
 }
@@ -482,7 +492,7 @@ fn provider_handle_preserves_open_ended_effort_values() {
 }
 
 #[test]
-fn provider_model_policy_default_bridge_derives_capability_from_supported_variants() {
+fn provider_model_policy_requires_explicit_capability_output() {
     let handle = ProviderHandle::new(
         MutatingProvider::default().into_components(Arc::new(LegacyOnlyPolicy)),
     );

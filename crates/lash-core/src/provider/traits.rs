@@ -67,27 +67,8 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
 }
 
 pub trait ProviderModelPolicy: Send + Sync + std::fmt::Debug {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str];
-
     /// Return structured capability metadata for a model.
-    ///
-    /// Default behaviour bridges legacy static variant lists into the
-    /// capability contract so providers can migrate incrementally.
-    fn model_capability(&self, model: &str) -> ModelCapability {
-        let supported_variants = self.supported_variants(model);
-        if supported_variants.is_empty() {
-            return ModelCapability::default();
-        }
-        ModelCapability {
-            reasoning: Some(ModelReasoningCapability {
-                supported_efforts: supported_variants
-                    .iter()
-                    .map(|effort| (*effort).to_string())
-                    .collect(),
-                ..ModelReasoningCapability::default()
-            }),
-        }
-    }
+    fn model_capability(&self, model: &str) -> ModelCapability;
 }
 
 pub trait ProviderFailureClassifier: Send + Sync + std::fmt::Debug {

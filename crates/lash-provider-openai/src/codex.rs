@@ -20,7 +20,7 @@ use lash_core::llm::types::{LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEve
 use lash_core::provider::{
     CacheRetention, DefaultProviderFailureClassifier, Provider, ProviderComponents,
     ProviderFactory, ProviderFailureClassifier, ProviderModelPolicy, ProviderOptions,
-    ProviderReliability, resolve_generation_policy,
+    ProviderReliability, ModelCapability, ModelReasoningCapability, resolve_generation_policy,
 };
 use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
@@ -1416,7 +1416,22 @@ impl ProviderFailureClassifier for CodexFailureClassifier {
 }
 
 impl ProviderModelPolicy for CodexModelPolicy {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+    fn model_capability(&self, model: &str) -> ModelCapability {
+        let variants = self.supported_efforts(model);
+        if variants.is_empty() {
+            return ModelCapability::default();
+        }
+        ModelCapability {
+            reasoning: Some(ModelReasoningCapability {
+                supported_efforts: variants.iter().map(|variant| (*variant).to_string()).collect(),
+                ..ModelReasoningCapability::default()
+            }),
+        }
+    }
+}
+
+impl CodexModelPolicy {
+    fn supported_efforts(&self, model: &str) -> &'static [&'static str] {
         let lower = model.to_ascii_lowercase();
         if !lower.contains("gpt-5") {
             return &[];
@@ -1436,12 +1451,16 @@ impl ProviderModelPolicy for CodexModelPolicy {
             OPENAI_GPT5_VARIANTS
         }
     }
-}
-
-impl CodexModelPolicy {
     fn reasoning_effort(&self, model: &str, variant: &str) -> Option<String> {
-        self.supported_variants(model)
-            .contains(&variant)
+        self.model_capability(model)
+            .reasoning
+            .as_ref()
+            .is_some_and(|reasoning| {
+                reasoning
+                    .supported_efforts
+                    .iter()
+                    .any(|effort| effort == variant)
+            })
             .then(|| variant.to_string())
     }
 }
@@ -2051,7 +2070,7 @@ mod tests {
         let provider = CodexModelPolicy;
 
         assert_eq!(
-            provider.supported_variants("gpt-5.5"),
+            provider.supported_efforts("gpt-5.5"),
             ["low", "medium", "high", "xhigh"]
         );
         assert_eq!(
@@ -2059,6 +2078,29 @@ mod tests {
             Some("xhigh")
         );
         assert_eq!(provider.reasoning_effort("gpt-5.5", "minimal"), None);
+    }
+
+    #[test]
+    fn codex_capability_is_model_specific() {
+        let provider = CodexModelPolicy;
+
+        assert_eq!(
+            provider
+                .model_capability("gpt-5.5")
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.supported_efforts.clone()),
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "xhigh".to_string()
+            ])
+        );
+        assert_eq!(
+            provider.model_capability("gpt-4.1"),
+            ModelCapability::default()
+        );
     }
 
     #[test]
@@ -2153,7 +2195,7 @@ mod tests {
         let provider = CodexModelPolicy;
 
         assert_eq!(
-            provider.supported_variants("openai/gpt-5.5"),
+            provider.supported_efforts("openai/gpt-5.5"),
             ["low", "medium", "high", "xhigh"]
         );
     }

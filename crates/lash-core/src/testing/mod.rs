@@ -17,7 +17,10 @@ use std::sync::{Arc, Mutex};
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::plugin::{PluginError, SessionCreateRequest, SessionHandle, SessionSnapshot};
-use crate::provider::{Provider, ProviderComponents, ProviderHandle, ProviderModelPolicy};
+use crate::provider::{
+    ModelCapability, ModelReasoningCapability, Provider, ProviderComponents, ProviderHandle,
+    ProviderModelPolicy,
+};
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionSummary, ModelSpec, OutputState, ProcessRegistry,
@@ -28,11 +31,11 @@ use crate::{
 type CompletionFuture =
     Pin<Box<dyn Future<Output = Result<LlmResponse, LlmTransportError>> + Send>>;
 type CompletionFn = dyn Fn(LlmRequest) -> CompletionFuture + Send + Sync;
-type SupportedVariantsFn = dyn Fn(&str) -> &'static [&'static str] + Send + Sync;
+type ModelCapabilityFn = dyn Fn(&str) -> ModelCapability + Send + Sync;
 type SerializeConfigFn = dyn Fn() -> serde_json::Value + Send + Sync;
 
-fn no_supported_variants(_model: &str) -> &'static [&'static str] {
-    &[]
+fn no_model_capability(_model: &str) -> ModelCapability {
+    ModelCapability::default()
 }
 
 fn empty_provider_config() -> serde_json::Value {
@@ -44,7 +47,7 @@ fn empty_provider_config() -> serde_json::Value {
 #[derive(Clone)]
 pub struct TestProvider {
     kind: &'static str,
-    supported_variants: Arc<SupportedVariantsFn>,
+    model_capability: Arc<ModelCapabilityFn>,
     requires_streaming: bool,
     options: ProviderOptions,
     serialize_config: Arc<SerializeConfigFn>,
@@ -87,7 +90,7 @@ impl TestProviderBuilder {
         Self {
             provider: TestProvider {
                 kind: "test",
-                supported_variants: Arc::new(no_supported_variants),
+                model_capability: Arc::new(no_model_capability),
                 requires_streaming: false,
                 options: ProviderOptions::default(),
                 serialize_config: Arc::new(empty_provider_config),
@@ -111,7 +114,29 @@ impl TestProviderBuilder {
     where
         F: Fn(&str) -> &'static [&'static str] + Send + Sync + 'static,
     {
-        self.provider.supported_variants = Arc::new(supported_variants);
+        self.provider.model_capability = Arc::new(move |model| {
+            let supported_efforts = supported_variants(model);
+            if supported_efforts.is_empty() {
+                return ModelCapability::default();
+            }
+            ModelCapability {
+                reasoning: Some(ModelReasoningCapability {
+                    supported_efforts: supported_efforts
+                        .iter()
+                        .map(|effort| (*effort).to_string())
+                        .collect(),
+                    ..ModelReasoningCapability::default()
+                }),
+            }
+        });
+        self
+    }
+
+    pub fn model_capability<F>(mut self, model_capability: F) -> Self
+    where
+        F: Fn(&str) -> ModelCapability + Send + Sync + 'static,
+    {
+        self.provider.model_capability = Arc::new(model_capability);
         self
     }
 
@@ -194,8 +219,8 @@ impl Provider for TestProvider {
 }
 
 impl ProviderModelPolicy for TestProvider {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        (self.supported_variants)(model)
+    fn model_capability(&self, model: &str) -> ModelCapability {
+        (self.model_capability)(model)
     }
 }
 
