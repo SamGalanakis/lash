@@ -606,6 +606,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn direct_client_rejects_empty_supported_efforts_as_not_configurable() {
+        let provider = TestProvider::builder()
+            .kind("direct-capability-provider")
+            .model_capability(|_model| crate::provider::ModelCapability {
+                reasoning: Some(crate::provider::ModelReasoningCapability {
+                    supported_efforts: Vec::new(),
+                    ..crate::provider::ModelReasoningCapability::default()
+                }),
+            })
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+        let mut request = DirectRequest::text("direct-model", "hello");
+        request.model_variant = Some("low".to_string());
+
+        let err = client
+            .complete(request)
+            .await
+            .expect_err("empty supported efforts must reject explicit effort");
+        match err {
+            DirectLlmError::InvalidRequest { category, message } => {
+                assert_eq!(
+                    category,
+                    crate::provider::ModelEffortValidationCategory::EffortNotConfigurable
+                );
+                assert!(message.contains("does not expose configurable effort"));
+            }
+            other => panic!("unexpected direct error: {other}"),
+        }
+    }
+
     #[test]
     fn build_llm_request_preserves_nonempty_content_and_drops_empty_messages() {
         let provider = TestProvider::default().into_handle();

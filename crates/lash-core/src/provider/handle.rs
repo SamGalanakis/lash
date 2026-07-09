@@ -160,6 +160,15 @@ impl ProviderHandle {
                 Ok(())
             }
             (Some(reasoning), Some(requested_effort)) => {
+                if reasoning.supported_efforts.is_empty() {
+                    return Err(ModelEffortValidationError {
+                        category: ModelEffortValidationCategory::EffortNotConfigurable,
+                        message: format!(
+                            "Model `{}` on {} does not expose configurable effort (requested `{}`).",
+                            model, provider_kind, requested_effort
+                        ),
+                    });
+                }
                 if reasoning
                     .supported_efforts
                     .iter()
@@ -167,16 +176,14 @@ impl ProviderHandle {
                 {
                     return Ok(());
                 }
-                let available = if reasoning.supported_efforts.is_empty() {
-                    "none".to_string()
-                } else {
-                    reasoning.supported_efforts.join(", ")
-                };
                 Err(ModelEffortValidationError {
                     category: ModelEffortValidationCategory::UnsupportedEffort,
                     message: format!(
                         "Unsupported effort `{}` for `{}` on {}. Available: {}",
-                        requested_effort, model, provider_kind, available
+                        requested_effort,
+                        model,
+                        provider_kind,
+                        reasoning.supported_efforts.join(", ")
                     ),
                 })
             }

@@ -484,6 +484,30 @@ fn provider_handle_reports_non_configurable_effort_category() {
 }
 
 #[test]
+fn provider_handle_reports_empty_supported_efforts_as_not_configurable() {
+    let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
+        StaticModelPolicy::new().with_model_capability(
+            "model-a",
+            ModelCapability {
+                reasoning: Some(ModelReasoningCapability {
+                    supported_efforts: Vec::new(),
+                    ..ModelReasoningCapability::default()
+                }),
+            },
+        ),
+    )));
+
+    let err = handle
+        .validate_model_effort("model-a", Some("low"))
+        .expect_err("empty supported efforts must reject explicit effort as non-configurable");
+    assert_eq!(
+        err.category,
+        ModelEffortValidationCategory::EffortNotConfigurable
+    );
+    assert!(err.message.contains("does not expose configurable effort"));
+}
+
+#[test]
 fn provider_handle_reports_required_effort_category_when_missing() {
     let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
         StaticModelPolicy::new().with_model_capability(
