@@ -101,22 +101,23 @@ pub(crate) fn provider_wire_model_id(kind: &str, model: &str) -> String {
 pub(crate) fn default_model_variant_for_provider(
     kind: &str,
     model: &str,
-    supported_variants: &[&str],
+    supported_efforts: &[String],
 ) -> Option<&'static str> {
-    if supported_variants.is_empty() {
+    if supported_efforts.is_empty() {
         return None;
     }
+    let supports = |effort: &str| supported_efforts.iter().any(|supported| supported == effort);
     match kind {
         "anthropic" => {
-            if supported_variants.contains(&"xhigh") {
+            if supports("xhigh") {
                 Some("xhigh")
-            } else if supported_variants.contains(&"max") {
+            } else if supports("max") {
                 Some("max")
             } else {
                 Some("high")
             }
         }
-        "openai" => supported_variants.contains(&"medium").then_some("medium"),
+        "openai" => supports("medium").then_some("medium"),
         "openai-compatible" => {
             if model.to_ascii_lowercase().contains("gpt") {
                 Some("medium")
@@ -125,7 +126,7 @@ pub(crate) fn default_model_variant_for_provider(
             }
         }
         "codex" => {
-            if model.eq_ignore_ascii_case("gpt-5.5") || supported_variants.contains(&"xhigh") {
+            if model.eq_ignore_ascii_case("gpt-5.5") || supports("xhigh") {
                 Some("xhigh")
             } else {
                 Some("high")

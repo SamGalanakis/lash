@@ -196,7 +196,7 @@ async fn apply_graph_resume_state(
             crate::provider_metadata::default_model_variant_for_provider(
                 provider.kind(),
                 &app.model,
-                provider.supported_variants(&app.model),
+                &crate::model_selection::provider_supported_efforts(provider, &app.model),
             )
             .map(str::to_string)
         });

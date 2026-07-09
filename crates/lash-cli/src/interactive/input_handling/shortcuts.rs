@@ -11,7 +11,7 @@ use crate::command;
 use crate::config::ThemeName;
 use crate::event::AppEvent;
 use crate::input_items::insert_inline_marker;
-use crate::model_selection::provider_display_label;
+use crate::model_selection::{provider_display_label, provider_supported_efforts};
 use crate::overlay::{CommandPaletteAction, CommandPaletteItem};
 
 use crate::interactive::helpers::{
@@ -254,8 +254,8 @@ pub(crate) fn command_palette_items(
         .current(true),
     );
 
-    let supported_variants = provider.supported_variants(&app.model);
-    if supported_variants.is_empty() {
+    let supported_efforts = provider_supported_efforts(provider, &app.model);
+    if supported_efforts.is_empty() {
         items.push(
             CommandPaletteItem::new(
                 "Settings",
@@ -279,18 +279,18 @@ pub(crate) fn command_palette_items(
             .footer("/variant default")
             .current(app.model_variant.is_none()),
         );
-        for variant in supported_variants {
+        for variant in &supported_efforts {
             items.push(
                 CommandPaletteItem::new(
                     "Settings",
                     format!("Variant: {variant}"),
                     format!("Set `{}` to `{variant}`.", app.model),
                     CommandPaletteAction::Builtin(command::Command::Variant(Some(
-                        (*variant).to_string(),
+                        variant.to_string(),
                     ))),
                 )
                 .footer(format!("/variant {variant}"))
-                .current(app.model_variant.as_deref() == Some(*variant)),
+                .current(app.model_variant.as_deref() == Some(variant.as_str())),
             );
         }
     }

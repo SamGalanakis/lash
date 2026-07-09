@@ -13,8 +13,8 @@ use crate::execution_settings::{
 };
 use crate::model_catalog::CachedModelCatalog;
 use crate::model_selection::{
-    parse_model_selection, provider_display_label, resolve_model_selection, resolve_model_variant,
-    validate_model_selection, variant_lines,
+    parse_model_selection, provider_display_label, provider_supported_efforts,
+    resolve_model_selection, resolve_model_variant, validate_model_selection, variant_lines,
 };
 use crate::startup::onboarding;
 use crate::ui_effects::push_system_message;
@@ -94,7 +94,7 @@ pub(super) async fn handle_model(
     let model_variant = crate::provider_metadata::default_model_variant_for_provider(
         provider.kind(),
         &selection.model,
-        provider.supported_variants(&selection.model),
+        &provider_supported_efforts(provider, &selection.model),
     )
     .map(str::to_string);
     let model_spec = match resolved_model_spec
@@ -390,7 +390,7 @@ pub(super) async fn handle_change_provider(
                 None => crate::provider_metadata::default_model_variant_for_provider(
                     provider.kind(),
                     &selection.model,
-                    provider.supported_variants(&selection.model),
+                    &provider_supported_efforts(provider, &selection.model),
                 )
                 .map(str::to_string),
             };

@@ -124,12 +124,13 @@ pub(crate) fn resolve_model_variant(
     model: &str,
     requested: Option<&str>,
 ) -> Result<Option<String>, String> {
+    let supported_efforts = provider_supported_efforts(provider, model);
     let Some(raw) = requested else {
         return Ok(
             crate::provider_metadata::default_model_variant_for_provider(
                 provider.kind(),
                 model,
-                provider.supported_variants(model),
+                &supported_efforts,
             )
             .map(str::to_string),
         );
@@ -140,7 +141,7 @@ pub(crate) fn resolve_model_variant(
             crate::provider_metadata::default_model_variant_for_provider(
                 provider.kind(),
                 model,
-                provider.supported_variants(model),
+                &supported_efforts,
             )
             .map(str::to_string),
         );
@@ -154,7 +155,7 @@ pub(crate) fn variant_lines(
     model: &str,
     current_variant: Option<&str>,
 ) -> Vec<String> {
-    let supported = provider.supported_variants(model);
+    let supported = provider_supported_efforts(provider, model);
     let mut lines = Vec::new();
     if supported.is_empty() {
         lines.push(format!(
@@ -171,13 +172,21 @@ pub(crate) fn variant_lines(
     if let Some(default_variant) = crate::provider_metadata::default_model_variant_for_provider(
         provider.kind(),
         model,
-        supported,
+        &supported,
     ) {
         lines.push(format!("Recommended default: `{}`", default_variant));
     }
     lines.push(format!("Available variants: {}", supported.join(", ")));
     lines.push("Usage: `/variant <name>` or `/variant default`".to_string());
     lines
+}
+
+pub(crate) fn provider_supported_efforts(provider: &ProviderHandle, model: &str) -> Vec<String> {
+    provider
+        .model_capability(model)
+        .reasoning
+        .map(|reasoning| reasoning.supported_efforts)
+        .unwrap_or_default()
 }
 
 pub(crate) fn provider_display_label(provider: &ProviderHandle) -> &'static str {
