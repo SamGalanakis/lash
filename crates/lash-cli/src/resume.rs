@@ -192,14 +192,7 @@ async fn apply_graph_resume_state(
     *current_model_variant = config
         .as_ref()
         .and_then(|state| state.model.variant.clone())
-        .or_else(|| {
-            crate::provider_metadata::default_model_variant_for_provider(
-                provider.kind(),
-                &app.model,
-                &crate::model_selection::provider_supported_efforts(provider, &app.model),
-            )
-            .map(str::to_string)
-        });
+        .or_else(|| crate::model_selection::default_model_variant(provider, &app.model));
     app.set_model_variant(current_model_variant.clone());
 
     let _ = execution_mode;

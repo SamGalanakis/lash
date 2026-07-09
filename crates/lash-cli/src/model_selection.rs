@@ -124,27 +124,12 @@ pub(crate) fn resolve_model_variant(
     model: &str,
     requested: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let supported_efforts = provider_supported_efforts(provider, model);
     let Some(raw) = requested else {
-        return Ok(
-            crate::provider_metadata::default_model_variant_for_provider(
-                provider.kind(),
-                model,
-                &supported_efforts,
-            )
-            .map(str::to_string),
-        );
+        return Ok(default_model_variant(provider, model));
     };
     let variant = parse_variant_input(raw)?;
     if variant == "default" {
-        return Ok(
-            crate::provider_metadata::default_model_variant_for_provider(
-                provider.kind(),
-                model,
-                &supported_efforts,
-            )
-            .map(str::to_string),
-        );
+        return Ok(default_model_variant(provider, model));
     }
     provider.validate_variant(model, &variant)?;
     Ok(Some(variant))
@@ -155,7 +140,8 @@ pub(crate) fn variant_lines(
     model: &str,
     current_variant: Option<&str>,
 ) -> Vec<String> {
-    let supported = provider_supported_efforts(provider, model);
+    let effort_metadata = provider_effort_metadata(provider, model);
+    let supported = effort_metadata.supported_efforts;
     let mut lines = Vec::new();
     if supported.is_empty() {
         lines.push(format!(
@@ -173,6 +159,7 @@ pub(crate) fn variant_lines(
         provider.kind(),
         model,
         &supported,
+        effort_metadata.default_effort.as_deref(),
     ) {
         lines.push(format!("Recommended default: `{}`", default_variant));
     }
@@ -181,12 +168,37 @@ pub(crate) fn variant_lines(
     lines
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ProviderEffortMetadata {
+    pub(crate) supported_efforts: Vec<String>,
+    pub(crate) default_effort: Option<String>,
+}
+
+pub(crate) fn provider_effort_metadata(
+    provider: &ProviderHandle,
+    model: &str,
+) -> ProviderEffortMetadata {
+    let Some(reasoning) = provider.model_capability(model).reasoning else {
+        return ProviderEffortMetadata::default();
+    };
+    ProviderEffortMetadata {
+        supported_efforts: reasoning.supported_efforts,
+        default_effort: reasoning.default_effort,
+    }
+}
+
 pub(crate) fn provider_supported_efforts(provider: &ProviderHandle, model: &str) -> Vec<String> {
-    provider
-        .model_capability(model)
-        .reasoning
-        .map(|reasoning| reasoning.supported_efforts)
-        .unwrap_or_default()
+    provider_effort_metadata(provider, model).supported_efforts
+}
+
+pub(crate) fn default_model_variant(provider: &ProviderHandle, model: &str) -> Option<String> {
+    let effort_metadata = provider_effort_metadata(provider, model);
+    crate::provider_metadata::default_model_variant_for_provider(
+        provider.kind(),
+        model,
+        &effort_metadata.supported_efforts,
+        effort_metadata.default_effort.as_deref(),
+    )
 }
 
 pub(crate) fn provider_display_label(provider: &ProviderHandle) -> &'static str {
@@ -202,6 +214,8 @@ pub(crate) fn expose_provider_thinking(provider: &mut ProviderHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash_core::provider::{ModelCapability, ModelReasoningCapability};
+    use lash_core::testing::TestProvider;
 
     #[test]
     fn codex_route_clamps_prompt_budget_to_input_ceiling() {
@@ -219,5 +233,92 @@ mod tests {
         let ceiling = provider_input_ceiling("codex").expect("codex ceiling");
         info.max_input_tokens = Some(info.prompt_budget_tokens().min(ceiling));
         assert_eq!(info.prompt_budget_tokens(), 256_000);
+    }
+
+    #[test]
+    fn resolve_model_variant_prefers_supported_capability_default_effort() {
+        let provider = TestProvider::builder()
+            .kind("openai")
+            .model_capability(|model| {
+                if model == "gpt-5.4" {
+                    return ModelCapability {
+                        reasoning: Some(ModelReasoningCapability {
+                            supported_efforts: vec![
+                                "low".to_string(),
+                                "medium".to_string(),
+                                "high".to_string(),
+                            ],
+                            default_effort: Some("low".to_string()),
+                            ..ModelReasoningCapability::default()
+                        }),
+                    };
+                }
+                ModelCapability::default()
+            })
+            .build()
+            .into_handle();
+
+        assert_eq!(
+            resolve_model_variant(&provider, "gpt-5.4", None).expect("default variant"),
+            Some("low".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_model_variant_falls_back_when_capability_default_effort_missing() {
+        let provider = TestProvider::builder()
+            .kind("openai")
+            .model_capability(|model| {
+                if model == "gpt-5.4" {
+                    return ModelCapability {
+                        reasoning: Some(ModelReasoningCapability {
+                            supported_efforts: vec![
+                                "low".to_string(),
+                                "medium".to_string(),
+                                "high".to_string(),
+                            ],
+                            default_effort: None,
+                            ..ModelReasoningCapability::default()
+                        }),
+                    };
+                }
+                ModelCapability::default()
+            })
+            .build()
+            .into_handle();
+
+        assert_eq!(
+            resolve_model_variant(&provider, "gpt-5.4", None).expect("default variant"),
+            Some("medium".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_model_variant_falls_back_when_capability_default_effort_unsupported() {
+        let provider = TestProvider::builder()
+            .kind("openai")
+            .model_capability(|model| {
+                if model == "gpt-5.4" {
+                    return ModelCapability {
+                        reasoning: Some(ModelReasoningCapability {
+                            supported_efforts: vec![
+                                "low".to_string(),
+                                "medium".to_string(),
+                                "high".to_string(),
+                            ],
+                            default_effort: Some("xhigh".to_string()),
+                            ..ModelReasoningCapability::default()
+                        }),
+                    };
+                }
+                ModelCapability::default()
+            })
+            .build()
+            .into_handle();
+
+        assert_eq!(
+            resolve_model_variant(&provider, "gpt-5.4", None).expect("default variant"),
+            Some("medium".to_string())
+        );
     }
 }

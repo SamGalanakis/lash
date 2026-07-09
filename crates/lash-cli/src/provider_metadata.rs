@@ -102,10 +102,26 @@ pub(crate) fn default_model_variant_for_provider(
     kind: &str,
     model: &str,
     supported_efforts: &[String],
-) -> Option<&'static str> {
+    capability_default_effort: Option<&str>,
+) -> Option<String> {
     if supported_efforts.is_empty() {
         return None;
     }
+    if let Some(default_effort) = capability_default_effort
+        && supported_efforts
+            .iter()
+            .any(|supported| supported == default_effort)
+    {
+        return Some(default_effort.to_string());
+    }
+    heuristic_default_model_variant_for_provider(kind, model, supported_efforts).map(str::to_string)
+}
+
+fn heuristic_default_model_variant_for_provider(
+    kind: &str,
+    model: &str,
+    supported_efforts: &[String],
+) -> Option<&'static str> {
     let supports = |effort: &str| supported_efforts.iter().any(|supported| supported == effort);
     match kind {
         "anthropic" => {
@@ -151,5 +167,50 @@ fn prefixed_unless_prefix(provider: &str, model: &str) -> String {
         model.to_string()
     } else {
         format!("{provider}/{model}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_model_variant_for_provider;
+
+    #[test]
+    fn capability_default_effort_is_preferred_when_supported() {
+        let supported = vec!["low".to_string(), "medium".to_string(), "high".to_string()];
+
+        assert_eq!(
+            default_model_variant_for_provider(
+                "openai",
+                "gpt-5.4",
+                &supported,
+                Some("low"),
+            ),
+            Some("low".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_capability_default_effort_falls_back_to_heuristics() {
+        let supported = vec!["low".to_string(), "medium".to_string(), "high".to_string()];
+
+        assert_eq!(
+            default_model_variant_for_provider("openai", "gpt-5.4", &supported, None),
+            Some("medium".to_string())
+        );
+    }
+
+    #[test]
+    fn unsupported_capability_default_effort_falls_back_to_heuristics() {
+        let supported = vec!["low".to_string(), "medium".to_string(), "high".to_string()];
+
+        assert_eq!(
+            default_model_variant_for_provider(
+                "openai",
+                "gpt-5.4",
+                &supported,
+                Some("xhigh"),
+            ),
+            Some("medium".to_string())
+        );
     }
 }
