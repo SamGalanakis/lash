@@ -22,7 +22,10 @@ mod tests;
 mod traits;
 
 pub use factory::ProviderFactory;
-pub use handle::{ProviderComponents, ProviderHandle, UnconfiguredProvider};
+pub use handle::{
+    ModelEffortValidationCategory, ModelEffortValidationError, ProviderComponents, ProviderHandle,
+    UnconfiguredProvider,
+};
 pub use model_policy::StaticModelPolicy;
 pub use options::{
     CacheRetention, DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS,

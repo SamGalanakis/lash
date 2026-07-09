@@ -1,5 +1,37 @@
 use super::support::*;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEffortValidationCategory {
+    UnsupportedEffort,
+    EffortNotConfigurable,
+    EffortRequired,
+}
+
+impl ModelEffortValidationCategory {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::UnsupportedEffort => "unsupported_effort",
+            Self::EffortNotConfigurable => "effort_not_configurable",
+            Self::EffortRequired => "effort_required",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelEffortValidationError {
+    pub category: ModelEffortValidationCategory,
+    pub message: String,
+}
+
+impl std::fmt::Display for ModelEffortValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ModelEffortValidationError {}
+
 /// Component bundle returned by provider factories.
 #[derive(Debug)]
 pub struct ProviderComponents {
@@ -94,29 +126,66 @@ impl ProviderHandle {
         self.components.model_policy.model_capability(model)
     }
 
-    pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
+    pub fn validate_model_effort(
+        &self,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<(), ModelEffortValidationError> {
         let capability = self.model_capability(model);
-        let Some(reasoning) = capability.reasoning else {
-            return Err(format!(
-                "Model `{}` on {} does not expose configurable variants.",
-                model,
-                self.kind()
-            ));
-        };
-        if reasoning
-            .supported_efforts
-            .iter()
-            .any(|supported| supported == variant)
-        {
-            return Ok(());
+        let provider_kind = self.kind();
+        match (capability.reasoning, effort) {
+            (None, Some(requested_effort)) => Err(ModelEffortValidationError {
+                category: ModelEffortValidationCategory::EffortNotConfigurable,
+                message: format!(
+                    "Model `{}` on {} does not expose configurable effort (requested `{}`).",
+                    model, provider_kind, requested_effort
+                ),
+            }),
+            (None, None) => Ok(()),
+            (Some(reasoning), None) => {
+                if reasoning.mandatory {
+                    let available = if reasoning.supported_efforts.is_empty() {
+                        "none".to_string()
+                    } else {
+                        reasoning.supported_efforts.join(", ")
+                    };
+                    return Err(ModelEffortValidationError {
+                        category: ModelEffortValidationCategory::EffortRequired,
+                        message: format!(
+                            "Model `{}` on {} requires an explicit effort. Available: {}",
+                            model, provider_kind, available
+                        ),
+                    });
+                }
+                Ok(())
+            }
+            (Some(reasoning), Some(requested_effort)) => {
+                if reasoning
+                    .supported_efforts
+                    .iter()
+                    .any(|supported| supported == requested_effort)
+                {
+                    return Ok(());
+                }
+                let available = if reasoning.supported_efforts.is_empty() {
+                    "none".to_string()
+                } else {
+                    reasoning.supported_efforts.join(", ")
+                };
+                Err(ModelEffortValidationError {
+                    category: ModelEffortValidationCategory::UnsupportedEffort,
+                    message: format!(
+                        "Unsupported effort `{}` for `{}` on {}. Available: {}",
+                        requested_effort, model, provider_kind, available
+                    ),
+                })
+            }
         }
-        Err(format!(
-            "Unsupported variant `{}` for `{}` on {}. Available: {}",
-            variant,
-            model,
-            self.kind(),
-            reasoning.supported_efforts.join(", ")
-        ))
+    }
+
+    pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
+        self.validate_model_effort(model, Some(variant))
+            .map_err(|error| error.message)
     }
 
     pub fn options(&self) -> ProviderOptions {

@@ -656,6 +656,99 @@ async fn provider_failure_surfaces_typed_kind_and_retryability_on_turn_issue() {
 }
 
 #[tokio::test]
+async fn runtime_reports_unsupported_effort_before_provider_call() {
+    let provider = TestProvider::builder()
+        .kind("mock")
+        .model_capability(|_model| crate::provider::ModelCapability {
+            reasoning: Some(crate::provider::ModelReasoningCapability {
+                supported_efforts: vec!["low".to_string(), "high".to_string()],
+                ..crate::provider::ModelReasoningCapability::default()
+            }),
+        })
+        .complete(|_request| async {
+            panic!("runtime must fail effort validation before provider completion")
+        })
+        .build();
+    let mut runtime = runtime_with_plugins(Vec::new(), provider).await;
+    let invalid_variant_model =
+        crate::ModelSpec::from_token_limits("mock-model", Some("xhigh".to_string()), 123_456, None)
+            .expect("valid model spec");
+    runtime
+        .update_session_config(None, Some(invalid_variant_model), None)
+        .await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "unsupported-effort-turn"),
+        )
+        .await
+        .expect("turn");
+
+    let issue = turn
+        .errors
+        .iter()
+        .find(|issue| issue.kind == "llm_provider")
+        .expect("llm_provider issue");
+    assert_eq!(issue.code.as_deref(), Some("unsupported_effort"));
+    assert!(issue.message.contains("Unsupported effort `xhigh`"));
+}
+
+#[tokio::test]
+async fn runtime_reports_missing_required_effort_before_provider_call() {
+    let provider = TestProvider::builder()
+        .kind("mock")
+        .model_capability(|_model| crate::provider::ModelCapability {
+            reasoning: Some(crate::provider::ModelReasoningCapability {
+                supported_efforts: vec!["low".to_string(), "high".to_string()],
+                mandatory: true,
+                ..crate::provider::ModelReasoningCapability::default()
+            }),
+        })
+        .complete(|_request| async {
+            panic!("runtime must fail mandatory effort validation before provider completion")
+        })
+        .build();
+    let mut runtime = runtime_with_plugins(Vec::new(), provider).await;
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "required-effort-turn"),
+        )
+        .await
+        .expect("turn");
+
+    let issue = turn
+        .errors
+        .iter()
+        .find(|issue| issue.kind == "llm_provider")
+        .expect("llm_provider issue");
+    assert_eq!(issue.code.as_deref(), Some("effort_required"));
+    assert!(issue.message.contains("requires an explicit effort"));
+}
+
+#[tokio::test]
 async fn assembled_turn_reports_turn_timing_from_injected_clock() {
     let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),

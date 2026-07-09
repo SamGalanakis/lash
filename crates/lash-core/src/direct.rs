@@ -117,8 +117,11 @@ impl DirectRequest {
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum DirectLlmError {
-    #[error("invalid request: {0}")]
-    InvalidRequest(String),
+    #[error("invalid request: {message}")]
+    InvalidRequest {
+        category: crate::provider::ModelEffortValidationCategory,
+        message: String,
+    },
     #[error("invalid response: {0}")]
     InvalidResponse(String),
     #[error("transport error: {0}")]
@@ -169,11 +172,12 @@ impl DirectLlmClient {
         &mut self,
         request: DirectRequest,
     ) -> Result<LlmResponse, DirectLlmError> {
-        if let Some(variant) = request.model_variant.as_deref() {
-            self.provider
-                .validate_variant(&request.model, variant)
-                .map_err(DirectLlmError::InvalidRequest)?;
-        }
+        self.provider
+            .validate_model_effort(&request.model, request.model_variant.as_deref())
+            .map_err(|error| DirectLlmError::InvalidRequest {
+                category: error.category,
+                message: error.message,
+            })?;
 
         let output_for_validation = request.output.clone();
         let model = request.model.clone();
@@ -537,6 +541,69 @@ mod tests {
 
         assert!(matches!(err, DirectLlmError::InvalidResponse(_)));
         assert!(err.to_string().contains("items >= 1"));
+    }
+
+    #[tokio::test]
+    async fn direct_client_rejects_unsupported_effort_with_structured_category() {
+        let provider = TestProvider::builder()
+            .kind("direct-capability-provider")
+            .model_capability(|_model| crate::provider::ModelCapability {
+                reasoning: Some(crate::provider::ModelReasoningCapability {
+                    supported_efforts: vec!["low".to_string(), "medium".to_string()],
+                    ..crate::provider::ModelReasoningCapability::default()
+                }),
+            })
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+        let mut request = DirectRequest::text("direct-model", "hello");
+        request.model_variant = Some("xhigh".to_string());
+
+        let err = client
+            .complete(request)
+            .await
+            .expect_err("unsupported effort must fail");
+        match err {
+            DirectLlmError::InvalidRequest { category, message } => {
+                assert_eq!(
+                    category,
+                    crate::provider::ModelEffortValidationCategory::UnsupportedEffort
+                );
+                assert!(message.contains("Unsupported effort `xhigh`"));
+            }
+            other => panic!("unexpected direct error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_client_rejects_missing_required_effort_with_structured_category() {
+        let provider = TestProvider::builder()
+            .kind("direct-capability-provider")
+            .model_capability(|_model| crate::provider::ModelCapability {
+                reasoning: Some(crate::provider::ModelReasoningCapability {
+                    supported_efforts: vec!["low".to_string(), "high".to_string()],
+                    mandatory: true,
+                    ..crate::provider::ModelReasoningCapability::default()
+                }),
+            })
+            .build()
+            .into_handle();
+        let mut client = DirectLlmClient::new(provider);
+
+        let err = client
+            .complete(DirectRequest::text("direct-model", "hello"))
+            .await
+            .expect_err("mandatory effort must reject missing selection");
+        match err {
+            DirectLlmError::InvalidRequest { category, message } => {
+                assert_eq!(
+                    category,
+                    crate::provider::ModelEffortValidationCategory::EffortRequired
+                );
+                assert!(message.contains("requires an explicit effort"));
+            }
+            other => panic!("unexpected direct error: {other}"),
+        }
     }
 
     #[test]

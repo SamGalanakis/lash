@@ -428,6 +428,84 @@ fn provider_handle_delegates_variant_policy() {
 }
 
 #[test]
+fn provider_handle_accepts_supported_effort() {
+    let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
+        StaticModelPolicy::new().with_model_capability(
+            "model-a",
+            ModelCapability {
+                reasoning: Some(ModelReasoningCapability {
+                    supported_efforts: vec!["minimal".to_string(), "high".to_string()],
+                    ..ModelReasoningCapability::default()
+                }),
+            },
+        ),
+    )));
+
+    assert!(handle
+        .validate_model_effort("model-a", Some("minimal"))
+        .is_ok());
+}
+
+#[test]
+fn provider_handle_reports_unsupported_effort_category() {
+    let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
+        StaticModelPolicy::new().with_model_capability(
+            "model-a",
+            ModelCapability {
+                reasoning: Some(ModelReasoningCapability {
+                    supported_efforts: vec!["low".to_string(), "high".to_string()],
+                    ..ModelReasoningCapability::default()
+                }),
+            },
+        ),
+    )));
+
+    let err = handle
+        .validate_model_effort("model-a", Some("xhigh"))
+        .expect_err("unsupported effort must fail");
+    assert_eq!(err.category, ModelEffortValidationCategory::UnsupportedEffort);
+    assert!(err.message.contains("Unsupported effort `xhigh`"));
+}
+
+#[test]
+fn provider_handle_reports_non_configurable_effort_category() {
+    let handle = ProviderHandle::new(
+        MutatingProvider::default().into_components(Arc::new(StaticModelPolicy::new())),
+    );
+
+    let err = handle
+        .validate_model_effort("model-a", Some("low"))
+        .expect_err("non-configurable model must reject explicit effort");
+    assert_eq!(
+        err.category,
+        ModelEffortValidationCategory::EffortNotConfigurable
+    );
+    assert!(err.message.contains("does not expose configurable effort"));
+}
+
+#[test]
+fn provider_handle_reports_required_effort_category_when_missing() {
+    let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
+        StaticModelPolicy::new().with_model_capability(
+            "model-a",
+            ModelCapability {
+                reasoning: Some(ModelReasoningCapability {
+                    supported_efforts: vec!["low".to_string(), "high".to_string()],
+                    mandatory: true,
+                    ..ModelReasoningCapability::default()
+                }),
+            },
+        ),
+    )));
+
+    let err = handle
+        .validate_model_effort("model-a", None)
+        .expect_err("mandatory effort must reject missing value");
+    assert_eq!(err.category, ModelEffortValidationCategory::EffortRequired);
+    assert!(err.message.contains("requires an explicit effort"));
+}
+
+#[test]
 fn provider_handle_returns_model_capability_for_known_model() {
     let capability = ModelCapability {
         reasoning: Some(ModelReasoningCapability {

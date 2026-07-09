@@ -285,14 +285,15 @@ impl RuntimeTurnDriver<'_> {
         policy: &mut RuntimeSessionPolicy,
     ) -> Result<String, SessionEvent> {
         let model = policy.model.id.clone();
-        if let Some(variant) = policy.model.variant.as_deref()
-            && let Err(message) = policy.provider().validate_variant(&model, variant)
+        if let Err(validation_error) = policy
+            .provider()
+            .validate_model_effort(&model, policy.model.variant.as_deref())
         {
             return Err(make_error_event(
                 "llm_provider",
-                Some("invalid_model_variant"),
-                message.clone(),
-                Some(message),
+                Some(validation_error.category.code()),
+                validation_error.message.clone(),
+                Some(validation_error.message),
             ));
         }
         Ok(model)

@@ -239,11 +239,9 @@ impl DirectCompletionCapability {
         let resolved = context.current.resolve_policy()?;
         let provider = resolved.provider().clone();
         let model = request.model.clone();
-        if let Some(variant) = request.model_variant.as_deref() {
-            provider
-                .validate_variant(&model, variant)
-                .map_err(crate::PluginError::Session)?;
-        }
+        provider
+            .validate_model_effort(&model, request.model_variant.as_deref())
+            .map_err(|error| crate::PluginError::Session(error.message))?;
         let replay = request.replay.clone();
         let caused_by = request.caused_by.clone();
         let normalized = crate::direct::build_llm_request(&provider, request, model);
@@ -271,6 +269,11 @@ impl DirectCompletionCapability {
         usage_source: &str,
     ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
         let resolved = context.current.resolve_policy()?;
+        resolved
+            .binding
+            .provider
+            .validate_model_effort(&request.model, request.model_variant.as_deref())
+            .map_err(|error| crate::PluginError::Session(error.message))?;
         let plan = self
             .plan_direct_effect(
                 &context,
