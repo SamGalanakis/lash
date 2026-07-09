@@ -116,6 +116,7 @@ let request = RemoteProcessStartRequest {
             model: RemoteProcessModelSpec {
                 id: "example-model".to_string(),
                 variant: None,
+                capability: Default::default(),
                 limits: RemoteProcessModelLimits {
                     context_window_tokens: 128_000,
                     output_token_capacity: Some(8_192),
@@ -124,7 +125,7 @@ let request = RemoteProcessStartRequest {
             ..Default::default()
         },
     }),
-    originator: RemoteProcessOriginator::Host,
+    originator: RemoteProcessOriginator::Host { scope: None },
     wake_target: None,
     grant: None,
     event_types: Vec::new(),

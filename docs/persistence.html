@@ -248,7 +248,8 @@ let core = lash::LashCore::rlm_builder(factory)
             200_000,
             None,
         )
-        .expect("valid model metadata"),
+        .expect("valid model metadata")
+        .with_capability(adaptive_reasoning_capability()),
     )
     .store_factory(store_factory)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
