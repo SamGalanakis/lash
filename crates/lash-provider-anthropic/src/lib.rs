@@ -37,7 +37,7 @@ mod tests {
                 default_effort: None,
                 aliases: BTreeMap::new(),
                 encoding: ReasoningEncoding::Effort,
-                disable: None,
+                disable: Some(lash_core::provider::ReasoningDisableEncoding::Native),
                 mandatory: false,
             }),
         }
@@ -51,14 +51,14 @@ mod tests {
         ]);
         ModelCapability {
             reasoning: Some(ReasoningCapability {
-                efforts: ["none", "low", "medium", "high"]
+                efforts: ["low", "medium", "high"]
                     .into_iter()
                     .map(String::from)
                     .collect(),
                 default_effort: None,
                 aliases: BTreeMap::new(),
                 encoding: ReasoningEncoding::Budget(budgets),
-                disable: None,
+                disable: Some(lash_core::provider::ReasoningDisableEncoding::Omit),
                 mandatory: false,
             }),
         }
@@ -430,18 +430,29 @@ mod tests {
     }
 
     #[test]
-    fn budget_capability_none_variant_emits_no_thinking() {
-        // "none" is a valid effort but carries no budget entry, so no thinking
-        // block is written even though the capability exposes reasoning.
+    fn budget_capability_disabled_selection_uses_explicit_omit_encoding() {
         let provider = AnthropicProvider::new("key");
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
         req.model = "claude-haiku-4".to_string();
-        req.model_variant = lash_core::provider::ReasoningSelection::Effort("none".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Disabled;
         req.model_capability = budget_capability();
 
         let body = provider.build_request_body(&req).expect("body");
 
         assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn adaptive_capability_disabled_selection_emits_native_disabled_thinking() {
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        req.model_variant = lash_core::provider::ReasoningSelection::Disabled;
+        req.model_capability = effort_capability(&["low", "medium", "high"]);
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert_eq!(body["thinking"], json!({ "type": "disabled" }));
         assert!(body.get("output_config").is_none());
     }
 

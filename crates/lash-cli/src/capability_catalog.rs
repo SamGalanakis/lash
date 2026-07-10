@@ -14,7 +14,9 @@
 //! Adding a model means adding a row. No model-name capability logic lives
 //! anywhere else in the CLI.
 
-use lash_core::{ModelCapability, ReasoningCapability, ReasoningEncoding};
+use lash_core::{
+    ModelCapability, ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding,
+};
 
 /// How a rule matches a model id. `full` is the lowercased model id as
 /// configured; `bare` is that id after stripping any leading `provider/`
@@ -58,6 +60,13 @@ enum Encoding {
     Budget(&'static [(&'static str, u32)]),
 }
 
+enum DisableEncoding {
+    Native,
+    Omit,
+    Effort(&'static str),
+    Budget(u32),
+}
+
 /// One catalog row: a `(provider kind, match rule, capability)` tuple, stored as
 /// fully const data so the whole table reads as a spec.
 struct Row {
@@ -68,6 +77,7 @@ struct Row {
     /// requested-effort -> canonical-effort clamps (e.g. `minimal -> low`).
     aliases: &'static [(&'static str, &'static str)],
     encoding: Encoding,
+    disable: Option<DisableEncoding>,
 }
 
 impl Row {
@@ -91,7 +101,14 @@ impl Row {
                     .map(|(from, to)| ((*from).to_string(), (*to).to_string()))
                     .collect(),
                 encoding,
-                disable: None,
+                disable: self.disable.as_ref().map(|encoding| match encoding {
+                    DisableEncoding::Native => ReasoningDisableEncoding::Native,
+                    DisableEncoding::Omit => ReasoningDisableEncoding::Omit,
+                    DisableEncoding::Effort(effort) => {
+                        ReasoningDisableEncoding::Effort((*effort).to_string())
+                    }
+                    DisableEncoding::Budget(budget) => ReasoningDisableEncoding::Budget(*budget),
+                }),
                 mandatory: false,
             }),
         }
@@ -113,6 +130,7 @@ const ROWS: &[Row] = &[
         default_effort: "xhigh",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Native),
     },
     Row {
         kind: "anthropic",
@@ -121,6 +139,7 @@ const ROWS: &[Row] = &[
         default_effort: "max",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Native),
     },
     Row {
         kind: "anthropic",
@@ -129,16 +148,17 @@ const ROWS: &[Row] = &[
         default_effort: "high",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Native),
     },
-    // Budget fallback: "none" is deliberately absent from the budget map (no
-    // thinking block emitted for it).
+    // Budget fallback disables by explicitly omitting the thinking block.
     Row {
         kind: "anthropic",
         rule: Match::Contains(&["haiku-4", "claude-opus-4", "claude-sonnet-4"]),
-        efforts: &["none", "low", "medium", "high"],
+        efforts: &["low", "medium", "high"],
         default_effort: "high",
         aliases: &[],
         encoding: Encoding::Budget(&[("low", 1024), ("medium", 4096), ("high", 12288)]),
+        disable: Some(DisableEncoding::Omit),
     },
     // ── google_oauth ──
     Row {
@@ -148,6 +168,7 @@ const ROWS: &[Row] = &[
         default_effort: "high",
         aliases: &[],
         encoding: Encoding::Budget(&[("high", 16000), ("max", 24576)]),
+        disable: Some(DisableEncoding::Budget(0)),
     },
     // gemini-3.1 must precede gemini-3 so `gemini-3.1-pro-preview` matches here.
     Row {
@@ -157,6 +178,7 @@ const ROWS: &[Row] = &[
         default_effort: "high",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: None,
     },
     Row {
         kind: "google_oauth",
@@ -165,6 +187,7 @@ const ROWS: &[Row] = &[
         default_effort: "high",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: None,
     },
     // ── openai (direct Responses API) ──
     // Prefixes match the prefix-stripped id. gpt-5.2/5.3/5.4 drop `minimal`
@@ -172,59 +195,66 @@ const ROWS: &[Row] = &[
     Row {
         kind: "openai",
         rule: Match::Prefix(&["gpt-5.2", "gpt-5.3", "gpt-5.4"]),
-        efforts: &["none", "low", "medium", "high", "xhigh"],
+        efforts: &["low", "medium", "high", "xhigh"],
         default_effort: "medium",
         aliases: &[("minimal", "low")],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     Row {
         kind: "openai",
         rule: Match::Prefix(&["gpt-5"]),
-        efforts: &["none", "minimal", "low", "medium", "high", "xhigh"],
+        efforts: &["minimal", "low", "medium", "high", "xhigh"],
         default_effort: "medium",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     Row {
         kind: "openai",
         rule: Match::Prefix(&["o"]),
-        efforts: &["none", "minimal", "low", "medium", "high", "xhigh"],
+        efforts: &["minimal", "low", "medium", "high", "xhigh"],
         default_effort: "medium",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     // ── openai-compatible (OpenRouter base URL) ──
     Row {
         kind: "openai-compatible",
         rule: Match::Contains(&["gpt-5.2", "gpt-5.3", "gpt-5.4"]),
-        efforts: &["none", "low", "medium", "high", "xhigh"],
+        efforts: &["low", "medium", "high", "xhigh"],
         default_effort: "medium",
         aliases: &[("minimal", "low")],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     Row {
         kind: "openai-compatible",
         rule: Match::Contains(&["gpt"]),
-        efforts: &["none", "minimal", "low", "medium", "high", "xhigh"],
+        efforts: &["minimal", "low", "medium", "high", "xhigh"],
         default_effort: "medium",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     Row {
         kind: "openai-compatible",
         rule: Match::Contains(&["claude"]),
-        efforts: &["none", "minimal", "low", "medium", "high", "xhigh"],
+        efforts: &["minimal", "low", "medium", "high", "xhigh"],
         default_effort: "high",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     Row {
         kind: "openai-compatible",
         rule: Match::Contains(&["gemini-3"]),
-        efforts: &["none", "minimal", "low", "medium", "high", "xhigh"],
+        efforts: &["minimal", "low", "medium", "high", "xhigh"],
         default_effort: "high",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     // ── codex (OAuth route; only gpt-5* models) ──
     // Exact gpt-5.5 first, then codex variants, then plain gpt-5 variants.
@@ -236,6 +266,7 @@ const ROWS: &[Row] = &[
         default_effort: "xhigh",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     Row {
         kind: "codex",
@@ -247,6 +278,7 @@ const ROWS: &[Row] = &[
         default_effort: "xhigh",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     Row {
         kind: "codex",
@@ -255,6 +287,7 @@ const ROWS: &[Row] = &[
         default_effort: "high",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     // gpt-5.2/5.3/5.4 drop `minimal` and clamp it to `low`.
     Row {
@@ -267,6 +300,7 @@ const ROWS: &[Row] = &[
         default_effort: "xhigh",
         aliases: &[("minimal", "low")],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
     Row {
         kind: "codex",
@@ -275,6 +309,7 @@ const ROWS: &[Row] = &[
         default_effort: "high",
         aliases: &[],
         encoding: Encoding::Effort,
+        disable: Some(DisableEncoding::Effort("none")),
     },
 ];
 
@@ -349,7 +384,11 @@ mod tests {
     fn anthropic_budget_fallback_uses_budget_encoding() {
         let cap = capability_for("anthropic", "claude-opus-4-1");
         assert_eq!(default_effort(&cap).as_deref(), Some("high"));
-        assert_eq!(efforts(&cap), vec!["none", "low", "medium", "high"]);
+        assert_eq!(efforts(&cap), vec!["low", "medium", "high"]);
+        assert_eq!(
+            cap.reasoning.as_ref().unwrap().disable,
+            Some(ReasoningDisableEncoding::Omit)
+        );
         match &cap.reasoning.as_ref().unwrap().encoding {
             ReasoningEncoding::Budget(map) => {
                 assert_eq!(map.get("low"), Some(&1024));
@@ -387,12 +426,13 @@ mod tests {
     fn openai_gpt_5_4_drops_minimal_and_aliases_it_to_low() {
         let cap = capability_for("openai", "gpt-5.4");
         assert_eq!(default_effort(&cap).as_deref(), Some("medium"));
-        assert_eq!(
-            efforts(&cap),
-            vec!["none", "low", "medium", "high", "xhigh"]
-        );
+        assert_eq!(efforts(&cap), vec!["low", "medium", "high", "xhigh"]);
         assert!(!efforts(&cap).contains(&"minimal".to_string()));
         assert_eq!(cap.resolve_effort("minimal").as_deref(), Some("low"));
+        assert_eq!(
+            cap.reasoning.as_ref().unwrap().disable,
+            Some(ReasoningDisableEncoding::Effort("none".to_string()))
+        );
     }
 
     #[test]

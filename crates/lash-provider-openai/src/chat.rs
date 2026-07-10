@@ -316,13 +316,10 @@ impl OpenAiCompatibleProvider {
         if stream && compat.streaming_usage {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        if let Some(effort) = req.model_variant.effort()
-            && req.model_capability.reasoning.is_some()
+        if let Some(reasoning) = reasoning_config(req)
             && compat.reasoning_format != OpenAiCompatReasoningFormat::None
         {
-            body["reasoning"] = json!({
-                "effort": effort,
-            });
+            body["reasoning"] = reasoning_config_json(reasoning);
         }
         if let Some(output_spec) = &req.output_spec {
             body["response_format"] = match output_spec {

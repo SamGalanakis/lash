@@ -14,8 +14,8 @@ pub(crate) use lash_core::llm::types::{
     ResponseTextMeta,
 };
 pub(crate) use lash_core::provider::{
-    Provider, ProviderComponents, ProviderFactory, ProviderOptions, ReasoningEncoding,
-    resolve_generation_policy,
+    Provider, ProviderComponents, ProviderFactory, ProviderOptions, ReasoningDisableEncoding,
+    ReasoningEncoding, ReasoningSelection, resolve_generation_policy,
 };
 pub(crate) use lash_llm_transport::normalize::{
     http_error_envelope, serialize_options_tail, terminal_reason_from_parts,

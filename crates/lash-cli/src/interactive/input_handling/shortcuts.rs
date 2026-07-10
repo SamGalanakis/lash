@@ -254,7 +254,7 @@ pub(crate) fn command_palette_items(
         .current(true),
     );
 
-    let supported_efforts = crate::model_selection::supported_efforts(provider, &app.model);
+    let supported_efforts = crate::model_selection::supported_variants(provider, &app.model);
     if supported_efforts.is_empty() {
         items.push(
             CommandPaletteItem::new(

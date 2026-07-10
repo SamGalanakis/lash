@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
 
+use lash_core::llm::types::LlmRequest;
+use lash_core::provider::{ReasoningDisableEncoding, ReasoningSelection};
 use lash_llm_transport::util::emit_provider_trace;
 use lash_llm_transport::{LlmHttpTransport, ReqwestLlmHttpTransport};
 
@@ -16,6 +18,42 @@ pub(crate) use lash_llm_transport::{
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OpenAiReasoningConfig {
+    Effort(String),
+    Budget(u32),
+    ToggleFalse,
+}
+
+pub(crate) fn reasoning_config(req: &LlmRequest) -> Option<OpenAiReasoningConfig> {
+    let reasoning = req.model_capability.reasoning.as_ref()?;
+    match &req.model_variant {
+        ReasoningSelection::ProviderDefault => None,
+        ReasoningSelection::Effort(effort) => Some(OpenAiReasoningConfig::Effort(effort.clone())),
+        ReasoningSelection::Disabled => match reasoning.disable.as_ref()? {
+            ReasoningDisableEncoding::Native => {
+                Some(OpenAiReasoningConfig::Effort("none".to_string()))
+            }
+            ReasoningDisableEncoding::Omit => None,
+            ReasoningDisableEncoding::Effort(effort) => {
+                Some(OpenAiReasoningConfig::Effort(effort.clone()))
+            }
+            ReasoningDisableEncoding::Budget(budget) => {
+                Some(OpenAiReasoningConfig::Budget(*budget))
+            }
+            ReasoningDisableEncoding::ToggleFalse => Some(OpenAiReasoningConfig::ToggleFalse),
+        },
+    }
+}
+
+pub(crate) fn reasoning_config_json(config: OpenAiReasoningConfig) -> Value {
+    match config {
+        OpenAiReasoningConfig::Effort(effort) => json!({ "effort": effort }),
+        OpenAiReasoningConfig::Budget(max_tokens) => json!({ "max_tokens": max_tokens }),
+        OpenAiReasoningConfig::ToggleFalse => json!({ "enabled": false }),
+    }
+}
 
 pub(crate) static DEFAULT_HTTP_TRANSPORT: LazyLock<Arc<dyn LlmHttpTransport>> =
     LazyLock::new(|| Arc::new(ReqwestLlmHttpTransport::new()));

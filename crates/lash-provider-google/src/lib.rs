@@ -85,7 +85,7 @@ mod tests {
                         .map(|(effort, tokens)| ((*effort).to_string(), *tokens))
                         .collect(),
                 ),
-                disable: None,
+                disable: Some(lash_core::provider::ReasoningDisableEncoding::Budget(0)),
                 mandatory: false,
             }),
         }
@@ -313,6 +313,23 @@ mod tests {
             body["request"]["generationConfig"]["thinkingConfig"]
                 .get("thinkingLevel")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn disabled_budget_model_emits_zero_thinking_budget() {
+        let provider = GoogleOAuthProvider::new("access", "refresh", 0);
+        let mut req = request_with_capability(
+            None,
+            budget_capability(&[("high", 16_000), ("max", 24_576)]),
+        );
+        req.model_variant = lash_core::provider::ReasoningSelection::Disabled;
+
+        let body = GoogleOAuthProvider::build_request(&provider, &req, Vec::new(), None);
+
+        assert_eq!(
+            body["request"]["generationConfig"]["thinkingConfig"],
+            json!({ "thinkingBudget": 0 })
         );
     }
 

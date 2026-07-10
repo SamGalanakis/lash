@@ -11,6 +11,9 @@ fn reasoning_capability() -> ModelCapability {
         reasoning: Some(ReasoningCapability {
             efforts: vec!["medium".to_string(), "high".to_string()],
             default_effort: Some("medium".to_string()),
+            disable: Some(lash_core::provider::ReasoningDisableEncoding::Effort(
+                "none".to_string(),
+            )),
             ..ReasoningCapability::default()
         }),
     }
@@ -170,6 +173,18 @@ fn responses_body_emits_reasoning_from_capability_variant() {
 }
 
 #[test]
+fn responses_body_emits_none_effort_for_disabled_selection() {
+    let provider = OpenAiProvider::new("key");
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.model_variant = lash_core::provider::ReasoningSelection::Disabled;
+    req.model_capability = reasoning_capability();
+
+    let body = provider.build_responses_request_body(&req, true).unwrap();
+
+    assert_eq!(body["reasoning"], json!({ "effort": "none" }));
+}
+
+#[test]
 fn responses_body_omits_reasoning_without_capability() {
     let provider = OpenAiProvider::new("key");
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
@@ -282,6 +297,19 @@ fn chat_body_emits_reasoning_from_capability_variant() {
         .unwrap();
 
     assert_eq!(body["reasoning"], json!({ "effort": "high" }));
+}
+
+#[test]
+fn chat_body_emits_none_effort_for_disabled_selection() {
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.model_variant = lash_core::provider::ReasoningSelection::Disabled;
+    req.model_capability = reasoning_capability();
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(body["reasoning"], json!({ "effort": "none" }));
 }
 
 #[test]

@@ -294,24 +294,40 @@ impl AnthropicProvider {
         }
     }
 
-    /// Derive the Anthropic thinking config from the request's already-resolved
-    /// variant and the host-supplied model capability. Returns `None` when there
-    /// is no variant, no reasoning capability, or (for budget encoding) the
-    /// variant carries no token budget (e.g. an explicit "none").
+    /// Derive the Anthropic thinking config from the resolved selection and
+    /// host-supplied capability.
     fn thinking_config(req: &LlmRequest) -> Option<AnthropicThinkingConfig> {
-        let variant = req.model_variant.effort()?;
         let reasoning = req.model_capability.reasoning.as_ref()?;
-        match &reasoning.encoding {
-            ReasoningEncoding::Effort => Some(AnthropicThinkingConfig::Adaptive {
-                effort: variant.to_string(),
-            }),
-            ReasoningEncoding::Budget(budgets) => {
-                budgets
-                    .get(variant)
-                    .map(|&budget_tokens| AnthropicThinkingConfig::Budget {
-                        budget_tokens: budget_tokens as i32,
+        match &req.model_variant {
+            ReasoningSelection::ProviderDefault => None,
+            ReasoningSelection::Effort(variant) => match &reasoning.encoding {
+                ReasoningEncoding::Effort => Some(AnthropicThinkingConfig::Adaptive {
+                    effort: variant.clone(),
+                }),
+                ReasoningEncoding::Budget(budgets) => {
+                    budgets
+                        .get(variant)
+                        .map(|&budget_tokens| AnthropicThinkingConfig::Budget {
+                            budget_tokens: budget_tokens as i32,
+                        })
+                }
+            },
+            ReasoningSelection::Disabled => match reasoning.disable.as_ref()? {
+                ReasoningDisableEncoding::Native | ReasoningDisableEncoding::ToggleFalse => {
+                    Some(AnthropicThinkingConfig::Disabled)
+                }
+                ReasoningDisableEncoding::Omit => None,
+                ReasoningDisableEncoding::Effort(effort) => {
+                    Some(AnthropicThinkingConfig::Adaptive {
+                        effort: effort.clone(),
                     })
-            }
+                }
+                ReasoningDisableEncoding::Budget(budget_tokens) => {
+                    Some(AnthropicThinkingConfig::Budget {
+                        budget_tokens: *budget_tokens as i32,
+                    })
+                }
+            },
         }
     }
 
@@ -389,6 +405,9 @@ impl AnthropicProvider {
                         "budget_tokens": budget_tokens,
                         "display": display,
                     });
+                }
+                AnthropicThinkingConfig::Disabled => {
+                    body["thinking"] = json!({ "type": "disabled" });
                 }
             }
         }

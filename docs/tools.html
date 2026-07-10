@@ -147,7 +147,7 @@ async fn lookup_weather(args: WeatherArgs) -&gt; WeatherReport {
             <table>
               <thead><tr><th>Method</th><th>Use it for</th></tr></thead>
               <tbody>
-                <tr><td><code>context.sessions().model().await?</code></td><td>Read the active session's concrete <code>model</code> and optional <code>model_variant</code>. Use this before building a <code>DirectRequest</code> that should match the current session.</td></tr>
+                <tr><td><code>context.sessions().model().await?</code></td><td>Read the active session's concrete <code>model</code> and typed <code>model_variant</code>. Use this before building a <code>DirectRequest</code> that should match the current session.</td></tr>
                 <tr><td><code>context.sessions().snapshot_current().await?</code></td><td>Read the current session snapshot when a tool truly needs more than model selection.</td></tr>
                 <tr><td><code>context.sessions().snapshot(session_id).await?</code></td><td>Read another session snapshot through the tool context when the host grants that runtime capability.</td></tr>
                 <tr><td><code>context.sessions().tool_catalog().await?</code></td><td>Read the current session's projected flat tool catalog (every member) for host-owned discovery/ranking tools.</td></tr>

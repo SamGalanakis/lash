@@ -44,13 +44,10 @@ impl OpenAiCompatibleProvider {
         if compat.store {
             body["store"] = json!(false);
         }
-        if let Some(effort) = req.model_variant.effort()
-            && req.model_capability.reasoning.is_some()
+        if let Some(config) = reasoning_config(req)
             && compat.reasoning_format != OpenAiCompatReasoningFormat::None
         {
-            let mut reasoning = json!({
-                "effort": effort,
-            });
+            let mut reasoning = reasoning_config_json(config);
             if policy.expose_thinking {
                 reasoning["summary"] = json!("auto");
             }
