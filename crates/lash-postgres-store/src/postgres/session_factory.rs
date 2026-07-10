@@ -145,9 +145,8 @@ struct QueuedBatchRow {
     available_at_ms: u64,
     enqueued_at_ms: u64,
     claim_fencing_token: u64,
-    claim_owner: Option<LeaseOwnerIdentity>,
     claim_token: Option<String>,
-    claim_expires_at_ms: u64,
+    claim_session_lease_generation: u64,
 }
 
 fn queued_batch_row(row: PgRow) -> Result<QueuedBatchRow, StoreError> {
@@ -170,13 +169,8 @@ fn queued_batch_row(row: PgRow) -> Result<QueuedBatchRow, StoreError> {
         available_at_ms: row.get::<i64, _>("available_at_ms") as u64,
         enqueued_at_ms: row.get::<i64, _>("enqueued_at_ms") as u64,
         claim_fencing_token: row.get::<i64, _>("claim_fencing_token") as u64,
-        claim_owner: lease_owner_from_columns(
-            row.get("claim_owner_id"),
-            row.get("claim_owner_incarnation_id"),
-            row.get("claim_owner_liveness_json"),
-        ),
         claim_token: row.get("claim_token"),
-        claim_expires_at_ms: row.get::<i64, _>("claim_expires_at_ms") as u64,
+        claim_session_lease_generation: row.get::<i64, _>("claim_session_lease_generation") as u64,
     })
 }
 
@@ -188,7 +182,7 @@ async fn load_queued_batch(
         "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                 slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
                 claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                claim_owner_liveness_json, claim_token, claim_session_lease_generation
          FROM lash_queued_work_batches
          WHERE batch_id = $1",
     )
@@ -260,7 +254,7 @@ async fn ensure_queued_work_completion_tx(
         .await
         .map_err(store_sqlx_error)?;
         if exists.is_none() {
-            return Err(StoreError::QueuedWorkClaimExpired {
+            return Err(StoreError::QueuedWorkClaimSuperseded {
                 session_id: completed.session_id.clone(),
                 claim_id: completed.claim_id.clone(),
             });
@@ -283,7 +277,7 @@ struct PendingTurnInputRow {
     claim_fencing_token: u64,
     claim_owner: Option<LeaseOwnerIdentity>,
     claim_token: Option<String>,
-    claim_expires_at_ms: u64,
+    claim_session_lease_generation: u64,
 }
 
 fn pending_turn_input_row(row: PgRow) -> Result<PendingTurnInputRow, StoreError> {
@@ -306,7 +300,7 @@ fn pending_turn_input_row(row: PgRow) -> Result<PendingTurnInputRow, StoreError>
             row.get("claim_owner_liveness_json"),
         ),
         claim_token: row.get("claim_token"),
-        claim_expires_at_ms: row.get::<i64, _>("claim_expires_at_ms") as u64,
+        claim_session_lease_generation: row.get::<i64, _>("claim_session_lease_generation") as u64,
     })
 }
 
@@ -334,7 +328,7 @@ async fn load_pending_turn_input(
         "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                 state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                 claim_owner_id, claim_owner_incarnation_id,
-                claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                claim_owner_liveness_json, claim_token, claim_session_lease_generation
          FROM lash_pending_turn_inputs
          WHERE session_id = $1 AND input_id = $2",
     )
@@ -362,7 +356,7 @@ async fn load_pending_turn_input_row_by_target_tx(
                 "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                         state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                         claim_owner_id, claim_owner_incarnation_id,
-                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
                  FROM lash_pending_turn_inputs
                  WHERE session_id = $1 AND input_id = $2{for_update}"
             ))
@@ -377,7 +371,7 @@ async fn load_pending_turn_input_row_by_target_tx(
                 "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                         state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                         claim_owner_id, claim_owner_incarnation_id,
-                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
                  FROM lash_pending_turn_inputs
                  WHERE session_id = $1 AND source_key = $2{for_update}"
             ))
@@ -399,7 +393,10 @@ fn pending_turn_input_claim_diagnostics_from_row(
             state: row.state,
             claim_id: row.claim_id.clone(),
             claim_owner: row.claim_owner.clone(),
-            claim_expires_at_ms: row.claim_token.as_ref().map(|_| row.claim_expires_at_ms),
+            claim_session_lease_generation: row
+                .claim_token
+                .as_ref()
+                .map(|_| row.claim_session_lease_generation),
             claim_fencing_token: row.claim_fencing_token,
         },
     )
@@ -425,7 +422,16 @@ async fn cancel_pending_turn_input_row_tx(
             })
         }
         lash_core::TurnInputState::PendingActive | lash_core::TurnInputState::DeferredNextTurn => {
-            let live_claim = row.claim_token.is_some() && row.claim_expires_at_ms > now_epoch_ms;
+            // A claim is live only while the session-execution-lease generation it
+            // pins still holds the session lease (ADR 0029).
+            let live_claim = row.claim_token.is_some()
+                && load_session_execution_lease_tx(tx, &row.session_id)
+                    .await?
+                    .is_some_and(|lease| {
+                        lease.lease_token.is_some()
+                            && lease.expires_at_ms > now_epoch_ms
+                            && lease.fencing_token == row.claim_session_lease_generation
+                    });
             if live_claim {
                 return Ok(lash_core::PendingTurnInputCancelOutcome::AlreadyClaimed {
                     input,
@@ -440,8 +446,7 @@ async fn cancel_pending_turn_input_row_tx(
                      claim_owner_incarnation_id = NULL,
                      claim_owner_liveness_json = NULL,
                      claim_token = NULL,
-                     claim_claimed_at_ms = 0,
-                     claim_expires_at_ms = 0
+                     claim_session_lease_generation = 0
                  WHERE session_id = $1 AND input_id = $2",
             )
             .bind(&row.session_id)
@@ -477,7 +482,7 @@ async fn ensure_turn_input_completion_tx(
         .await
         .map_err(store_sqlx_error)?;
         if exists.is_none() {
-            return Err(StoreError::TurnInputClaimExpired {
+            return Err(StoreError::TurnInputClaimSuperseded {
                 session_id: completed.session_id.clone(),
                 claim_id: completed.claim_id.clone(),
             });
@@ -491,8 +496,7 @@ struct TurnInputClaimLease {
     claim_id: String,
     lease_token: String,
     fencing_token: u64,
-    claimed_at_epoch_ms: u64,
-    expires_at_epoch_ms: u64,
+    session_lease_generation: u64,
 }
 
 impl TurnInputClaimLease {
@@ -501,7 +505,7 @@ impl TurnInputClaimLease {
         session_id: &str,
         owner: &LeaseOwnerIdentity,
         now_epoch_ms: u64,
-        lease_ttl_ms: u64,
+        session_lease_generation: u64,
     ) -> Self {
         let fencing_token = head.claim_fencing_token.saturating_add(1);
         let claim_id = format!("tic:{}:{fencing_token}", head.enqueue_seq);
@@ -519,8 +523,7 @@ impl TurnInputClaimLease {
             claim_id,
             lease_token,
             fencing_token,
-            claimed_at_epoch_ms: now_epoch_ms,
-            expires_at_epoch_ms: now_epoch_ms.saturating_add(lease_ttl_ms),
+            session_lease_generation,
         }
     }
 }

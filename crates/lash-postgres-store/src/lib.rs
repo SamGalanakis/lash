@@ -14,7 +14,7 @@ use lash_core::runtime::{
     QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem,
 };
 use lash_core::store::queued_work::{
-    ClaimCandidate, QueuedWorkClaimLease, claim_scan_limit, derive_batch_id, renewed_claim,
+    ClaimCandidate, QueuedWorkClaimLease, claim_scan_limit, derive_batch_id,
     select_leading_session_command, select_turn_work_claim_prefix,
 };
 use lash_core::store::{
@@ -58,7 +58,13 @@ const SCHEMA_COMPONENT: &str = "lash-postgres-store";
 // name `sessions/<hash>/...` blob paths the flat layout cannot read. Rejecting
 // and recreating pre-11 databases removes both hazards; the old `sessions/` blob
 // prefix is unreachable garbage operators delete manually.
-const SCHEMA_VERSION: i32 = 11;
+//
+// Bumped to 12 for claim generation fencing (ADR 0029): `lash_queued_work_batches`
+// and `lash_pending_turn_inputs` replace their per-claim `claim_claimed_at_ms` /
+// `claim_expires_at_ms` columns with a single `claim_session_lease_generation`
+// pinning the session-execution-lease generation the claim was taken under. This
+// is a reject-and-recreate boundary; pre-12 databases are rejected at open.
+const SCHEMA_VERSION: i32 = 12;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]
