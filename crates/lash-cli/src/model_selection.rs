@@ -148,15 +148,38 @@ pub(crate) fn resolve_model_variant(
     };
     let variant = parse_variant_input(raw)?;
     if variant == "default" {
-        return Ok(capability
-            .reasoning
-            .and_then(|reasoning| reasoning.default_effort));
+        return Ok(None);
     }
     // Validate through the same seam the runtime uses; the returned effort is
     // alias-normalized (e.g. `minimal` -> `low`).
     capability
-        .validate_effort(model, provider.kind(), Some(&variant))
+        .validate_selection(
+            model,
+            provider.kind(),
+            &reasoning_selection_from_variant(Some(variant)),
+        )
+        .map(variant_from_reasoning_selection)
         .map_err(|err| err.to_string())
+}
+
+pub(crate) fn reasoning_selection_from_variant(
+    variant: Option<String>,
+) -> lash_core::ReasoningSelection {
+    match variant.as_deref() {
+        None | Some("default") => lash_core::ReasoningSelection::ProviderDefault,
+        Some("off") => lash_core::ReasoningSelection::Disabled,
+        Some(_) => lash_core::ReasoningSelection::Effort(variant.expect("variant is present")),
+    }
+}
+
+pub(crate) fn variant_from_reasoning_selection(
+    selection: lash_core::ReasoningSelection,
+) -> Option<String> {
+    match selection {
+        lash_core::ReasoningSelection::ProviderDefault => None,
+        lash_core::ReasoningSelection::Disabled => Some("off".to_string()),
+        lash_core::ReasoningSelection::Effort(effort) => Some(effort),
+    }
 }
 
 pub(crate) fn variant_lines(
@@ -223,7 +246,7 @@ mod tests {
         let spec = resolved("claude-opus-4-7", "claude-opus-4-7")
             .into_model_spec("anthropic", Some("xhigh".to_string()))
             .expect("spec");
-        assert_eq!(spec.variant.as_deref(), Some("xhigh"));
+        assert_eq!(spec.variant.effort(), Some("xhigh"));
         assert_eq!(
             spec.capability,
             crate::capability_catalog::capability_for("anthropic", "claude-opus-4-7")

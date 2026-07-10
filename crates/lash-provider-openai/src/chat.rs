@@ -316,7 +316,7 @@ impl OpenAiCompatibleProvider {
         if stream && compat.streaming_usage {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        if let Some(effort) = req.model_variant.as_deref()
+        if let Some(effort) = req.model_variant.effort()
             && req.model_capability.reasoning.is_some()
             && compat.reasoning_format != OpenAiCompatReasoningFormat::None
         {

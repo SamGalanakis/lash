@@ -165,7 +165,8 @@ pub(super) async fn handle_variant(
     };
     if let Some(rt) = runtime.as_mut() {
         let mut model_spec = rt.policy_snapshot().model;
-        model_spec.variant = variant.clone();
+        model_spec.variant =
+            crate::model_selection::reasoning_selection_from_variant(variant.clone());
         let _ = rt
             .admin()
             .config()

@@ -1015,8 +1015,13 @@ mod tests {
         ];
         let policy = lash_core::SessionPolicy {
             provider_id: "stub".to_string(),
-            model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
-                .expect("valid model"),
+            model: lash_core::ModelSpec::from_token_limits(
+                "mock-model",
+                Default::default(),
+                200_000,
+                None,
+            )
+            .expect("valid model"),
             ..lash_core::SessionPolicy::default()
         };
         let controller = CountingEffectController::default();

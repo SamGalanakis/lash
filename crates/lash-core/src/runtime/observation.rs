@@ -692,8 +692,13 @@ mod tests {
         let runtime = LashRuntime::builder()
             .with_session_id("session-a")
             .with_policy(crate::SessionPolicy {
-                model: crate::ModelSpec::from_token_limits("test-model", None, 1024, None)
-                    .expect("model"),
+                model: crate::ModelSpec::from_token_limits(
+                    "test-model",
+                    Default::default(),
+                    1024,
+                    None,
+                )
+                .expect("model"),
                 ..Default::default()
             })
             .build()

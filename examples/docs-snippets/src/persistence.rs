@@ -25,7 +25,7 @@ async fn sqlite_core(provider: ProviderHandle, model: String) -> anyhow::Result<
     let core = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(
-            lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
+            lash::ModelSpec::from_token_limits(model.clone(), Default::default(), 200_000, None)
                 .expect("valid model metadata"),
         )
         .store_factory(store_factory)
@@ -173,7 +173,7 @@ async fn shared_factory(
         .model(
             lash::ModelSpec::from_token_limits(
                 model.clone(),
-                Some(model_variant.clone()),
+                lash::provider::ReasoningSelection::Effort(model_variant.clone()),
                 200_000,
                 None,
             )
@@ -203,6 +203,7 @@ fn adaptive_reasoning_capability() -> lash::provider::ModelCapability {
             default_effort: Some("medium".to_string()),
             aliases: Default::default(),
             encoding: lash::provider::ReasoningEncoding::Effort,
+            disable: None,
             mandatory: false,
         }),
     }

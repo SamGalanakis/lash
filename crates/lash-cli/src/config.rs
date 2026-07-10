@@ -800,7 +800,7 @@ mod tests {
             cfg.model_default("anthropic"),
             Some(&ModelDefault {
                 model: "claude-sonnet-4.6".to_string(),
-                variant: None,
+                variant: Default::default(),
             })
         );
     }

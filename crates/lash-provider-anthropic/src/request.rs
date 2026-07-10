@@ -299,7 +299,7 @@ impl AnthropicProvider {
     /// is no variant, no reasoning capability, or (for budget encoding) the
     /// variant carries no token budget (e.g. an explicit "none").
     fn thinking_config(req: &LlmRequest) -> Option<AnthropicThinkingConfig> {
-        let variant = req.model_variant.as_deref()?;
+        let variant = req.model_variant.effort()?;
         let reasoning = req.model_capability.reasoning.as_ref()?;
         match &reasoning.encoding {
             ReasoningEncoding::Effort => Some(AnthropicThinkingConfig::Adaptive {

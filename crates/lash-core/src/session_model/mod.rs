@@ -180,8 +180,8 @@ impl SessionPolicy {
         &self.model.id
     }
 
-    pub fn model_variant(&self) -> Option<&str> {
-        self.model.variant.as_deref()
+    pub fn model_variant(&self) -> &crate::ReasoningSelection {
+        &self.model.variant
     }
 
     pub fn context_window_tokens(&self) -> usize {
@@ -447,7 +447,7 @@ mod tests {
     fn session_policy_serializes_provider_id_without_provider_handle() {
         let policy = SessionPolicy {
             provider_id: "mock-provider".to_string(),
-            model: ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+            model: ModelSpec::from_token_limits("mock-model", Default::default(), 200_000, None)
                 .expect("valid test model"),
             ..SessionPolicy::default()
         };

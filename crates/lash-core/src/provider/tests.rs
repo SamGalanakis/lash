@@ -276,7 +276,7 @@ fn empty_request() -> LlmRequest {
         attachments: Vec::new(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: crate::ModelCapability::default(),
         scope: crate::LlmRequestScope::new(
             "provider-test",

@@ -37,7 +37,9 @@ mod tests {
             attachments: Vec::new(),
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
-            model_variant: model_variant.map(str::to_string),
+            model_variant: model_variant
+                .map(|effort| lash_core::provider::ReasoningSelection::Effort(effort.to_string()))
+                .unwrap_or_default(),
             model_capability,
             scope: lash_core::LlmRequestScope::new(
                 "session-1",
@@ -62,6 +64,7 @@ mod tests {
                 default_effort: None,
                 aliases: Default::default(),
                 encoding: ReasoningEncoding::Effort,
+                disable: None,
                 mandatory: false,
             }),
         }
@@ -82,6 +85,7 @@ mod tests {
                         .map(|(effort, tokens)| ((*effort).to_string(), *tokens))
                         .collect(),
                 ),
+                disable: None,
                 mandatory: false,
             }),
         }

@@ -266,8 +266,13 @@ finish { value: "venmo-routed-ok", discovered: hits[0].call, sent: result.sent }
         let core = lash::LashCore::rlm_builder(factory)
             .provider(scripted_provider(Arc::clone(&prompts)))
             .model(
-                ModelSpec::from_token_limits("test/cli-e2e-model", None, 200_000, None)
-                    .expect("model spec"),
+                ModelSpec::from_token_limits(
+                    "test/cli-e2e-model",
+                    Default::default(),
+                    200_000,
+                    None,
+                )
+                .expect("model spec"),
             )
             // Safety bound: the scripted program finishs on its first turn, so a
             // healthy run terminates well within this; it stops a regression from

@@ -612,7 +612,9 @@ pub async fn fork_current_session(
     } else {
         let model = lash_core::ModelSpec::from_token_limits(
             configured_model,
-            _model_variant.map(str::to_string),
+            _model_variant
+                .map(|effort| lash_core::ReasoningSelection::Effort(effort.to_string()))
+                .unwrap_or_default(),
             usize::try_from(_context_window).context("fork context window does not fit usize")?,
             None,
         )
@@ -715,8 +717,13 @@ mod fork_tests {
                 graph,
                 config: lash_core::PersistedSessionConfig {
                     provider_id: dummy_provider().kind().to_string(),
-                    model: lash_core::ModelSpec::from_token_limits("gpt-test", None, 1024, None)
-                        .expect("valid model spec"),
+                    model: lash_core::ModelSpec::from_token_limits(
+                        "gpt-test",
+                        Default::default(),
+                        1024,
+                        None,
+                    )
+                    .expect("valid model spec"),
                 },
                 checkpoint_ref: Some(checkpoint_ref),
                 token_ledger: Vec::new(),

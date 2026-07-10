@@ -85,7 +85,7 @@ fn main() {
                 provider_id: "provider".to_string(),
                 model: lash::remote::processes::RemoteProcessModelSpec {
                     id: "model".to_string(),
-                    variant: None,
+                    variant: Default::default(),
                     capability: Default::default(),
                     limits: lash::remote::processes::RemoteProcessModelLimits {
                         context_window_tokens: 10,

@@ -44,7 +44,7 @@ impl OpenAiCompatibleProvider {
         if compat.store {
             body["store"] = json!(false);
         }
-        if let Some(effort) = req.model_variant.as_deref()
+        if let Some(effort) = req.model_variant.effort()
             && req.model_capability.reasoning.is_some()
             && compat.reasoning_format != OpenAiCompatReasoningFormat::None
         {

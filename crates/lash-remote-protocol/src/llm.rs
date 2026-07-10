@@ -161,8 +161,8 @@ impl RemoteLlmResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteModelIntent {
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variant: Option<String>,
+    #[serde(default)]
+    pub variant: RemoteReasoningSelection,
     /// Host-supplied capability metadata for the model (mirrors the core
     /// `ModelCapability` contract).
     #[serde(default, skip_serializing_if = "RemoteModelCapability::is_empty")]
@@ -199,8 +199,29 @@ pub struct RemoteReasoningCapability {
     pub aliases: BTreeMap<String, String>,
     #[serde(default)]
     pub encoding: RemoteReasoningEncoding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable: Option<RemoteReasoningDisableEncoding>,
     #[serde(default)]
     pub mandatory: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteReasoningSelection {
+    #[default]
+    ProviderDefault,
+    Disabled,
+    Effort(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteReasoningDisableEncoding {
+    Native,
+    Omit,
+    Effort(String),
+    Budget(u32),
+    ToggleFalse,
 }
 
 /// Mirror of the core `ReasoningEncoding`.
@@ -216,7 +237,7 @@ impl RemoteModelIntent {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            variant: None,
+            variant: RemoteReasoningSelection::ProviderDefault,
             capability: RemoteModelCapability::default(),
             provider: None,
             metadata: HashMap::new(),

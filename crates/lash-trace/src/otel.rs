@@ -1072,7 +1072,7 @@ mod tests {
             TraceEvent::LlmCallStarted {
                 request: TraceLlmRequest {
                     model: "gpt-test".to_string(),
-                    model_variant: None,
+                    model_variant: Default::default(),
                     messages: Vec::new(),
                     attachments: Vec::new(),
                     tools: Vec::new(),

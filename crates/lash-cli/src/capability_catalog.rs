@@ -91,6 +91,7 @@ impl Row {
                     .map(|(from, to)| ((*from).to_string(), (*to).to_string()))
                     .collect(),
                 encoding,
+                disable: None,
                 mandatory: false,
             }),
         }

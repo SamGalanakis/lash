@@ -681,7 +681,11 @@ pub(crate) fn model_spec_for_chat_selection(
 ) -> AppResult<lash::ModelSpec> {
     lash::ModelSpec::from_token_limits(
         selection.model.clone(),
-        selection.model_variant.clone(),
+        selection
+            .model_variant
+            .clone()
+            .map(lash::provider::ReasoningSelection::Effort)
+            .unwrap_or_default(),
         DEFAULT_CONTEXT_WINDOW_TOKENS,
         None,
     )
@@ -761,7 +765,7 @@ finish "done through route"
         let core = LashCore::rlm_builder(factory)
             .provider(provider)
             .model(
-                lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+                lash::ModelSpec::from_token_limits("mock-model", Default::default(), 200_000, None)
                     .expect("model spec"),
             )
             .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
@@ -806,7 +810,7 @@ finish "done through route"
                 text: "exercise live replay".to_string(),
                 board: crate::board::default_board(),
                 model: None,
-                model_variant: None,
+                model_variant: Default::default(),
             }),
         )
         .await

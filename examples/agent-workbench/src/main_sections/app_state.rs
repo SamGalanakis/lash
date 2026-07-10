@@ -200,7 +200,14 @@ fn model_spec_for_request(
         .unwrap_or(selected_model.model.as_str())
         .to_string();
     let model_variant = model_variant_for_request(&selected_model, model_variant);
-    lash::ModelSpec::from_token_limits(model, model_variant, DEFAULT_CONTEXT_WINDOW_TOKENS, None)
+    lash::ModelSpec::from_token_limits(
+        model,
+        model_variant
+            .map(lash::provider::ReasoningSelection::Effort)
+            .unwrap_or_default(),
+        DEFAULT_CONTEXT_WINDOW_TOKENS,
+        None,
+    )
         .map(with_workbench_model_capability)
         .map_err(AppError::bad_request)
 }
@@ -225,7 +232,10 @@ fn model_variant_for_request(
 fn model_spec_from_selection(selection: ModelSelection) -> lash::ModelSpec {
     lash::ModelSpec::from_token_limits(
         selection.model,
-        selection.model_variant,
+        selection
+            .model_variant
+            .map(lash::provider::ReasoningSelection::Effort)
+            .unwrap_or_default(),
         DEFAULT_CONTEXT_WINDOW_TOKENS,
         None,
     )
@@ -247,6 +257,7 @@ fn workbench_model_capability() -> lash::provider::ModelCapability {
             default_effort: Some("medium".to_string()),
             aliases: Default::default(),
             encoding: lash::provider::ReasoningEncoding::Effort,
+            disable: None,
             mandatory: false,
         }),
     }

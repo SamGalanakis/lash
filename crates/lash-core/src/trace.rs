@@ -247,7 +247,11 @@ pub(crate) fn trace_context_with_causal_ref(
 pub(crate) fn trace_llm_request(req: &LlmRequest) -> TraceLlmRequest {
     TraceLlmRequest {
         model: req.model.clone(),
-        model_variant: req.model_variant.clone(),
+        model_variant: match &req.model_variant {
+            crate::ReasoningSelection::ProviderDefault => None,
+            crate::ReasoningSelection::Disabled => Some("disabled".to_string()),
+            crate::ReasoningSelection::Effort(effort) => Some(effort.clone()),
+        },
         messages: req.messages.iter().map(trace_llm_message).collect(),
         attachments: req.attachments.iter().map(trace_attachment).collect(),
         tools: req
@@ -478,7 +482,7 @@ mod span_identity_tests {
     fn sample_request() -> TraceLlmRequest {
         TraceLlmRequest {
             model: "openai/test".to_string(),
-            model_variant: None,
+            model_variant: Default::default(),
             messages: Vec::new(),
             attachments: Vec::new(),
             tools: Vec::new(),

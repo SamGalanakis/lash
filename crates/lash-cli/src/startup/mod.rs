@@ -519,7 +519,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             info_text(
                 &active_provider,
                 &startup_model.model,
-                session_policy.model.variant.as_deref(),
+                session_policy.model.variant.effort(),
                 &execution_mode,
                 configured_standard_context_approach.as_ref(),
                 Some(startup_model.resolved_spec.context_window()),
@@ -689,7 +689,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         model_catalog,
         Arc::clone(&store),
         toolset_hash,
-        initial_model_variant,
+        crate::model_selection::variant_from_reasoning_selection(initial_model_variant),
         execution_mode,
         startup_system_message,
     )

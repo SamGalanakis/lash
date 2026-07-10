@@ -15,19 +15,23 @@ use serde_json::{Value, json};
 #[derive(Clone, Debug, Default)]
 pub struct LlmToolsPluginFactory {
     model: Option<String>,
-    model_variant: Option<String>,
+    model_variant: Option<lash_core::ReasoningSelection>,
     model_capability: Option<lash_core::ModelCapability>,
 }
 
 impl LlmToolsPluginFactory {
-    pub fn with_model(mut self, model: impl Into<String>, model_variant: Option<String>) -> Self {
+    pub fn with_model(
+        mut self,
+        model: impl Into<String>,
+        model_variant: Option<lash_core::ReasoningSelection>,
+    ) -> Self {
         self.model = Some(model.into());
         self.model_variant = model_variant;
         self
     }
 
     pub fn with_model_variant(mut self, model_variant: impl Into<String>) -> Self {
-        self.model_variant = Some(model_variant.into());
+        self.model_variant = Some(lash_core::ReasoningSelection::Effort(model_variant.into()));
         self
     }
 
@@ -64,14 +68,14 @@ impl PluginFactory for LlmToolsPluginFactory {
 
 pub struct LlmToolsProvider {
     model: Option<String>,
-    model_variant: Option<String>,
+    model_variant: Option<lash_core::ReasoningSelection>,
     model_capability: Option<lash_core::ModelCapability>,
 }
 
 /// Build the `llm_query` tool provider for the given optional model override.
 pub fn llm_query_provider(
     model: Option<String>,
-    model_variant: Option<String>,
+    model_variant: Option<lash_core::ReasoningSelection>,
     model_capability: Option<lash_core::ModelCapability>,
 ) -> StaticToolProvider<LlmToolsProvider> {
     StaticToolProvider::new(
@@ -100,7 +104,10 @@ impl LlmToolsProvider {
             Some(model) => (model, self.model_capability.clone().unwrap_or_default()),
             None => (session_model.model, session_model.model_capability),
         };
-        let model_variant = self.model_variant.clone().or(session_model.model_variant);
+        let model_variant = self
+            .model_variant
+            .clone()
+            .unwrap_or(session_model.model_variant);
         let response_schema = llm_query_response_schema(output_schema.as_ref());
         let prompt = llm_query_prompt(&task, &inputs, output_schema.as_ref());
 
@@ -323,8 +330,15 @@ mod tests {
     use lash_core::{SessionCreateRequest, SessionSnapshot, ToolCall};
 
     fn model_spec(model: &str, variant: Option<&str>) -> lash_core::ModelSpec {
-        lash_core::ModelSpec::from_token_limits(model, variant.map(str::to_string), 200_000, None)
-            .expect("valid test model spec")
+        lash_core::ModelSpec::from_token_limits(
+            model,
+            variant
+                .map(|effort| lash_core::ReasoningSelection::Effort(effort.to_string()))
+                .unwrap_or_default(),
+            200_000,
+            None,
+        )
+        .expect("valid test model spec")
     }
 
     #[derive(Default)]
@@ -464,7 +478,7 @@ mod tests {
         let (request, usage_source) = &requests[0];
         assert_eq!(usage_source, "llm_query");
         assert_eq!(request.model, "root-model");
-        assert_eq!(request.model_variant.as_deref(), Some("fast"));
+        assert_eq!(request.model_variant.effort(), Some("fast"));
         assert!(matches!(
             request.output,
             lash_core::DirectOutputSpec::JsonSchema(_)
@@ -496,8 +510,11 @@ mod tests {
             requests: Mutex::new(Vec::new()),
             response_text: r#"{"kind":"value","value":"done","error":null}"#.to_string(),
         });
-        let provider =
-            llm_query_provider(Some("gpt-5.5".to_string()), Some("low".to_string()), None);
+        let provider = llm_query_provider(
+            Some("gpt-5.5".to_string()),
+            Some(lash_core::ReasoningSelection::Effort("low".to_string())),
+            None,
+        );
         let context = direct_completion_context(manager.clone());
 
         let args = json!({ "task": "answer directly" });
@@ -516,7 +533,7 @@ mod tests {
         let (request, usage_source) = &requests[0];
         assert_eq!(usage_source, "llm_query");
         assert_eq!(request.model, "gpt-5.5");
-        assert_eq!(request.model_variant.as_deref(), Some("low"));
+        assert_eq!(request.model_variant.effort(), Some("low"));
     }
 
     #[tokio::test]

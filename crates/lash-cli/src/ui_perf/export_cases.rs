@@ -68,7 +68,7 @@ fn export_prompt_snapshots(turn_count: usize) -> Vec<LlmPromptSnapshot> {
                 caused_by: None,
                 timestamp: None,
                 model: Some("gpt-5.4".to_string()),
-                model_variant: None,
+                model_variant: Default::default(),
                 system_chars: system_text.chars().count(),
                 system_hash: format!("system-hash-{}", index % 4),
                 system_text,

@@ -244,7 +244,7 @@ impl DirectCompletionCapability {
         // resolved (alias-normalized) effort back before the provider sees it.
         request.model_variant = request
             .model_capability
-            .validate_effort(&model, provider.kind(), request.model_variant.as_deref())
+            .validate_selection(&model, provider.kind(), &request.model_variant)
             .map_err(|error| crate::PluginError::Session(error.message))?;
         let replay = request.replay.clone();
         let caused_by = request.caused_by.clone();

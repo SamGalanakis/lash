@@ -155,7 +155,7 @@ async fn async_main() -> anyhow_like::Result<()> {
     let shared_db = Arc::new(Mutex::new(app_db));
     let model_spec = lash::ModelSpec::from_token_limits(
         model.clone(),
-        Some(model_variant.clone()),
+        lash::provider::ReasoningSelection::Effort(model_variant.clone()),
         200_000,
         None,
     )

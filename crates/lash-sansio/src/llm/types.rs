@@ -5,7 +5,7 @@ use crate::{AttachmentRef, SchemaContract};
 
 pub use crate::llm::capability::{
     ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError,
-    ReasoningCapability, ReasoningEncoding,
+    ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -378,7 +378,7 @@ pub struct LlmRequest {
     pub attachments: Vec<LlmAttachment>,
     pub tools: Arc<Vec<LlmToolSpec>>,
     pub tool_choice: LlmToolChoice,
-    pub model_variant: Option<String>,
+    pub model_variant: crate::llm::capability::ReasoningSelection,
     #[serde(default)]
     pub model_capability: crate::llm::capability::ModelCapability,
     #[serde(default)]

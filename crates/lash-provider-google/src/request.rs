@@ -254,11 +254,11 @@ impl GoogleOAuthProvider {
     }
 
     fn thinking_config_from_capability(req: &LlmRequest) -> Option<GoogleThinkingConfig> {
-        let variant = req.model_variant.as_ref()?;
+        let variant = req.model_variant.effort()?;
         let reasoning = req.model_capability.reasoning.as_ref()?;
         match &reasoning.encoding {
             ReasoningEncoding::Effort => Some(GoogleThinkingConfig::Level {
-                level: variant.clone(),
+                level: variant.to_string(),
             }),
             ReasoningEncoding::Budget(map) => {
                 map.get(variant)

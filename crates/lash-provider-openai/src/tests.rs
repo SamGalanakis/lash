@@ -23,7 +23,7 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         attachments: Vec::new(),
         tools: Arc::new(Vec::<LlmToolSpec>::new()),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: ModelCapability::default(),
         scope: LlmRequestScope::new(
             "session-1",
@@ -161,7 +161,7 @@ fn responses_body_emits_reasoning_from_capability_variant() {
     let provider = OpenAiProvider::new("key");
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model = "custom-direct-model".to_string();
-    req.model_variant = Some("high".to_string());
+    req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
     req.model_capability = reasoning_capability();
 
     let body = provider.build_responses_request_body(&req, true).unwrap();
@@ -174,7 +174,7 @@ fn responses_body_omits_reasoning_without_capability() {
     let provider = OpenAiProvider::new("key");
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model = "custom-direct-model".to_string();
-    req.model_variant = Some("high".to_string());
+    req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
 
     let body = provider.build_responses_request_body(&req, true).unwrap();
 
@@ -188,7 +188,7 @@ fn responses_body_requests_reasoning_summaries_when_provider_exposes_thinking() 
         ..ProviderOptions::default()
     });
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-    req.model_variant = Some("medium".to_string());
+    req.model_variant = lash_core::provider::ReasoningSelection::Effort("medium".to_string());
     req.model_capability = reasoning_capability();
 
     let body = provider.build_responses_request_body(&req, true).unwrap();
@@ -274,7 +274,7 @@ fn chat_body_uses_messages_and_not_responses_input() {
 fn chat_body_emits_reasoning_from_capability_variant() {
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model = "openrouter/custom-model".to_string();
-    req.model_variant = Some("high".to_string());
+    req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
     req.model_capability = reasoning_capability();
 
     let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
@@ -288,7 +288,7 @@ fn chat_body_emits_reasoning_from_capability_variant() {
 fn chat_body_omits_reasoning_without_capability() {
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model = "openrouter/custom-model".to_string();
-    req.model_variant = Some("high".to_string());
+    req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
 
     let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
         .build_chat_request_body(&req, true)
@@ -666,7 +666,7 @@ fn chat_body_honors_compat_max_token_field_streaming_usage_and_strict_tools() {
 #[test]
 fn local_openai_compatible_suppresses_optional_openai_fields() {
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-    req.model_variant = Some("medium".to_string());
+    req.model_variant = lash_core::provider::ReasoningSelection::Effort("medium".to_string());
     req.model_capability = reasoning_capability();
     req.tools = Arc::new(vec![LlmToolSpec {
         name: "lookup".to_string(),

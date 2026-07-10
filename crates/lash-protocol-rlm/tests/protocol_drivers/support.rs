@@ -37,7 +37,7 @@ pub(crate) fn test_config_with_protocol_turn_options(
         model: "test-model".to_string(),
         max_context_tokens: None,
         max_turns: None,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         autonomous: false,

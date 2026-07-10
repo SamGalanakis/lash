@@ -75,7 +75,7 @@ async fn async_main() -> AnyhowResult<()> {
     );
     let model_spec = lash::ModelSpec::from_token_limits(
         model.clone(),
-        Some(model_variant.clone()),
+        lash::provider::ReasoningSelection::Effort(model_variant.clone()),
         DEFAULT_CONTEXT_WINDOW_TOKENS,
         None,
     )

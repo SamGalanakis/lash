@@ -201,7 +201,9 @@ async fn apply_graph_resume_state(
 
     *current_model_variant = config
         .as_ref()
-        .and_then(|state| state.model.variant.clone())
+        .and_then(|state| {
+            crate::model_selection::variant_from_reasoning_selection(state.model.variant.clone())
+        })
         .or_else(|| crate::model_selection::default_variant(provider, &app.model));
     app.set_model_variant(current_model_variant.clone());
 
@@ -220,7 +222,9 @@ async fn apply_graph_resume_state(
                 provider: Some(provider.clone()),
                 model: config.as_ref().map(|config| {
                     let mut model = config.model.clone();
-                    model.variant = current_model_variant.clone();
+                    model.variant = crate::model_selection::reasoning_selection_from_variant(
+                        current_model_variant.clone(),
+                    );
                     model
                 }),
                 ..SessionConfigPatch::default()
@@ -380,8 +384,13 @@ mod tests {
                 graph,
                 config: lash_core::PersistedSessionConfig {
                     provider_id: "openai_generic".to_string(),
-                    model: lash_core::ModelSpec::from_token_limits("gpt-5", None, 200_000, None)
-                        .expect("valid model spec"),
+                    model: lash_core::ModelSpec::from_token_limits(
+                        "gpt-5",
+                        Default::default(),
+                        200_000,
+                        None,
+                    )
+                    .expect("valid model spec"),
                 },
                 checkpoint_ref: Some(checkpoint_ref),
                 token_ledger: Vec::new(),

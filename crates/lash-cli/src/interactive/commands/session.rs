@@ -76,7 +76,7 @@ fn fallback_policy_for_session_switch(
 ) -> SessionPolicy {
     let model = lash_core::ModelSpec::from_token_limits(
         app.model.clone(),
-        current_model_variant.clone(),
+        crate::model_selection::reasoning_selection_from_variant(current_model_variant.clone()),
         app.usage.context_window.unwrap_or(1) as usize,
         None,
     )
@@ -146,7 +146,9 @@ pub(super) async fn handle_clear(
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         let session_id = rt.session_id();
         app.session_id = session_id;
-        *current_model_variant = rt.policy_snapshot().model.variant;
+        *current_model_variant = crate::model_selection::variant_from_reasoning_selection(
+            rt.policy_snapshot().model.variant,
+        );
     }
     app.session_name = opened.bootstrap.session_name();
     *active_tool_state = session.admin().tools().state().await?;

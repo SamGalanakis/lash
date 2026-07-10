@@ -103,7 +103,7 @@ fn codex_request(tools: bool, stream_events: Option<LlmEventSender>) -> LlmReque
         attachments: Vec::new(),
         tools: Arc::new(tool_specs),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
@@ -805,7 +805,7 @@ fn openai_compatible_request_with_events(stream_events: Option<LlmEventSender>) 
             output_schema: json!({}).into(),
         }]),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
@@ -835,7 +835,7 @@ fn openai_responses_request() -> LlmRequest {
         attachments: Vec::new(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
@@ -856,7 +856,7 @@ fn anthropic_messages_request() -> LlmRequest {
         attachments: Vec::new(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
@@ -877,7 +877,7 @@ fn google_request(stream: bool) -> LlmRequest {
         attachments: Vec::new(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(

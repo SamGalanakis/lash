@@ -392,7 +392,7 @@ impl CodexProvider {
             shared::build_responses_input(req, shared::ResponsesInputOptions::CODEX);
         let requested_effort = req
             .model_variant
-            .as_deref()
+            .effort()
             .filter(|_| req.model_capability.reasoning.is_some())
             .map(str::to_owned);
         let policy = resolve_generation_policy(
@@ -1822,7 +1822,7 @@ mod tests {
             attachments: Vec::new(),
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
-            model_variant: None,
+            model_variant: Default::default(),
             model_capability: ModelCapability::default(),
             scope: LlmRequestScope::new(
                 "session-1",
@@ -2012,7 +2012,7 @@ mod tests {
     fn codex_request_body_emits_reasoning_from_capability_variant() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
         req.model = "custom-codex-model".to_string();
-        req.model_variant = Some("high".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
         req.model_capability = reasoning_capability();
 
         let body = CodexProvider::new("access", "refresh", 0)
@@ -2026,7 +2026,7 @@ mod tests {
     fn codex_request_body_omits_reasoning_without_capability() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
         req.model = "custom-codex-model".to_string();
-        req.model_variant = Some("high".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
 
         let body = CodexProvider::new("access", "refresh", 0)
             .build_request_body(&req, true)
@@ -2038,7 +2038,7 @@ mod tests {
     #[test]
     fn codex_request_body_exposes_reasoning_summary_only_when_configured() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-        req.model_variant = Some("medium".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("medium".to_string());
         req.model_capability = reasoning_capability();
 
         let hidden = CodexProvider::new("access", "refresh", 0)

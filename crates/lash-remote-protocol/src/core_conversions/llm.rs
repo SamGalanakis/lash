@@ -20,7 +20,7 @@ impl RemoteLlmRequest {
             scope: scope.into(),
             model_intent: RemoteModelIntent {
                 model,
-                variant: model_variant,
+                variant: model_variant.into(),
                 capability: model_capability.into(),
                 provider: None,
                 metadata: HashMap::new(),
@@ -70,7 +70,7 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
                 .collect::<Result<Vec<_>, _>>()?,
             tools: Arc::new(tools.into_iter().map(Into::into).collect()),
             tool_choice: tool_choice.into(),
-            model_variant: variant,
+            model_variant: variant.into(),
             model_capability: capability.into(),
             generation: generation.try_into()?,
             scope: scope.into(),
@@ -106,6 +106,7 @@ impl From<core_llm::ReasoningCapability> for RemoteReasoningCapability {
             default_effort,
             aliases,
             encoding,
+            disable,
             mandatory,
         } = value;
         Self {
@@ -113,6 +114,7 @@ impl From<core_llm::ReasoningCapability> for RemoteReasoningCapability {
             default_effort,
             aliases,
             encoding: encoding.into(),
+            disable: disable.map(Into::into),
             mandatory,
         }
     }
@@ -125,6 +127,7 @@ impl From<RemoteReasoningCapability> for core_llm::ReasoningCapability {
             default_effort,
             aliases,
             encoding,
+            disable,
             mandatory,
         } = value;
         Self {
@@ -132,7 +135,52 @@ impl From<RemoteReasoningCapability> for core_llm::ReasoningCapability {
             default_effort,
             aliases,
             encoding: encoding.into(),
+            disable: disable.map(Into::into),
             mandatory,
+        }
+    }
+}
+
+impl From<core_llm::ReasoningSelection> for RemoteReasoningSelection {
+    fn from(value: core_llm::ReasoningSelection) -> Self {
+        match value {
+            core_llm::ReasoningSelection::ProviderDefault => Self::ProviderDefault,
+            core_llm::ReasoningSelection::Disabled => Self::Disabled,
+            core_llm::ReasoningSelection::Effort(effort) => Self::Effort(effort),
+        }
+    }
+}
+
+impl From<RemoteReasoningSelection> for core_llm::ReasoningSelection {
+    fn from(value: RemoteReasoningSelection) -> Self {
+        match value {
+            RemoteReasoningSelection::ProviderDefault => Self::ProviderDefault,
+            RemoteReasoningSelection::Disabled => Self::Disabled,
+            RemoteReasoningSelection::Effort(effort) => Self::Effort(effort),
+        }
+    }
+}
+
+impl From<core_llm::ReasoningDisableEncoding> for RemoteReasoningDisableEncoding {
+    fn from(value: core_llm::ReasoningDisableEncoding) -> Self {
+        match value {
+            core_llm::ReasoningDisableEncoding::Native => Self::Native,
+            core_llm::ReasoningDisableEncoding::Omit => Self::Omit,
+            core_llm::ReasoningDisableEncoding::Effort(effort) => Self::Effort(effort),
+            core_llm::ReasoningDisableEncoding::Budget(budget) => Self::Budget(budget),
+            core_llm::ReasoningDisableEncoding::ToggleFalse => Self::ToggleFalse,
+        }
+    }
+}
+
+impl From<RemoteReasoningDisableEncoding> for core_llm::ReasoningDisableEncoding {
+    fn from(value: RemoteReasoningDisableEncoding) -> Self {
+        match value {
+            RemoteReasoningDisableEncoding::Native => Self::Native,
+            RemoteReasoningDisableEncoding::Omit => Self::Omit,
+            RemoteReasoningDisableEncoding::Effort(effort) => Self::Effort(effort),
+            RemoteReasoningDisableEncoding::Budget(budget) => Self::Budget(budget),
+            RemoteReasoningDisableEncoding::ToggleFalse => Self::ToggleFalse,
         }
     }
 }
