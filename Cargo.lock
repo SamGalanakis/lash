@@ -3076,6 +3076,7 @@ name = "lash-sqlite-store"
 version = "0.0.0-dev"
 dependencies = [
  "async-trait",
+ "chrono",
  "flate2",
  "futures-executor",
  "lash-core",

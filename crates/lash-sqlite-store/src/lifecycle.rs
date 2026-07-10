@@ -19,15 +19,31 @@ impl Store {
         Self::open_with_options(path, StoreOptions::default()).await
     }
 
+    pub async fn open_with_clock(
+        path: &Path,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_options_and_clock(path, StoreOptions::default(), clock).await
+    }
+
     pub async fn open_with_options(
         path: &Path,
         options: StoreOptions,
+    ) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_options_and_clock(path, options, Arc::new(lash_core::SystemClock)).await
+    }
+
+    pub async fn open_with_options_and_clock(
+        path: &Path,
+        options: StoreOptions,
+        clock: Arc<dyn lash_core::Clock>,
     ) -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path).await?;
         ensure_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::File).await?;
         Ok(Self {
             conn,
+            clock,
             artifact_cache: Mutex::new(BTreeMap::new()),
             options,
             commit_count: AtomicU64::new(0),
@@ -40,6 +56,7 @@ impl Store {
         let conn = SqliteConnection::open_readonly(path).await?;
         Ok(Self {
             conn,
+            clock: Arc::new(lash_core::SystemClock),
             artifact_cache: Mutex::new(BTreeMap::new()),
             options: StoreOptions::default(),
             commit_count: AtomicU64::new(0),
@@ -104,12 +121,33 @@ impl Store {
         .await
     }
 
+    pub async fn memory_with_clock(
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_options_and_clock(
+            StoreOptions {
+                blob_profile: BuiltinBlobProfile::LowLatency,
+                gc_policy: StoreGcPolicy::default(),
+            },
+            clock,
+        )
+        .await
+    }
+
     pub async fn memory_with_options(options: StoreOptions) -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_options_and_clock(options, Arc::new(lash_core::SystemClock)).await
+    }
+
+    pub async fn memory_with_options_and_clock(
+        options: StoreOptions,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open_in_memory().await?;
         ensure_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::Memory).await?;
         Ok(Self {
             conn,
+            clock,
             artifact_cache: Mutex::new(BTreeMap::new()),
             options,
             commit_count: AtomicU64::new(0),

@@ -198,6 +198,49 @@ fn current_epoch_ms_for_test() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
+#[derive(Debug)]
+struct ConformanceClock(std::sync::atomic::AtomicU64);
+
+impl ConformanceClock {
+    fn new(timestamp_ms: u64) -> Self {
+        Self(std::sync::atomic::AtomicU64::new(timestamp_ms))
+    }
+
+    fn advance(&self, duration_ms: u64) {
+        self.0
+            .fetch_add(duration_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::Clock for ConformanceClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn timestamp_ms(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn timestamp_rfc3339(&self) -> String {
+        self.timestamp_datetime().to_rfc3339()
+    }
+
+    fn timestamp_datetime(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from(
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.timestamp_ms()),
+        )
+    }
+
+    async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+    }
+
+    async fn sleep_until(&self, deadline: std::time::Instant) {
+        tokio::time::sleep_until(deadline.into()).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sqlite_process_registry_satisfies_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
@@ -224,6 +267,20 @@ async fn sqlite_session_store_factory_satisfies_conformance() {
         },
         DurabilityTier::Durable,
     )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_store_uses_injected_clock_for_expiry() {
+    let clock = Arc::new(ConformanceClock::new(20_000));
+    let store = Arc::new(
+        Store::memory_with_clock(clock.clone())
+            .await
+            .expect("clock-driven sqlite store"),
+    ) as Arc<dyn RuntimePersistence>;
+    lash_core::testing::conformance::runtime_persistence_clock_expiry(store, |duration_ms| {
+        clock.advance(duration_ms);
+    })
     .await;
 }
 

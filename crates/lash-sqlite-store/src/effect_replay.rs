@@ -42,6 +42,7 @@ pub struct SqliteEffectReplayOptions {
 
 struct SqliteEffectReplayInner {
     conn: SqliteConnection,
+    clock: Arc<dyn lash_core::Clock>,
     owner_id: String,
     lease_counter: AtomicU64,
     replay_mode: AtomicBool,
@@ -90,12 +91,27 @@ impl SqliteEffectHost {
         Self::open_with_options(path, SqliteEffectReplayOptions::default()).await
     }
 
+    pub async fn open_with_clock(
+        path: &Path,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_options_and_clock(path, SqliteEffectReplayOptions::default(), clock).await
+    }
+
     pub async fn open_with_options(
         path: &Path,
         options: SqliteEffectReplayOptions,
     ) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_options_and_clock(path, options, Arc::new(lash_core::SystemClock)).await
+    }
+
+    pub async fn open_with_options_and_clock(
+        path: &Path,
+        options: SqliteEffectReplayOptions,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {
-            inner: open_effect_replay_inner(path, StoreBacking::File, options).await?,
+            inner: open_effect_replay_inner(path, StoreBacking::File, options, clock).await?,
         })
     }
 
@@ -103,11 +119,24 @@ impl SqliteEffectHost {
         Self::memory_with_options(SqliteEffectReplayOptions::default()).await
     }
 
+    pub async fn memory_with_clock(
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_options_and_clock(SqliteEffectReplayOptions::default(), clock).await
+    }
+
     pub async fn memory_with_options(
         options: SqliteEffectReplayOptions,
     ) -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_options_and_clock(options, Arc::new(lash_core::SystemClock)).await
+    }
+
+    pub async fn memory_with_options_and_clock(
+        options: SqliteEffectReplayOptions,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {
-            inner: open_effect_replay_memory_inner(options).await?,
+            inner: open_effect_replay_memory_inner(options, clock).await?,
         })
     }
 
@@ -156,13 +185,32 @@ impl SqliteRuntimeEffectController {
         Self::open_with_options(path, scope, SqliteEffectReplayOptions::default()).await
     }
 
+    pub async fn open_with_clock(
+        path: &Path,
+        scope: ExecutionScope,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_options_and_clock(path, scope, SqliteEffectReplayOptions::default(), clock)
+            .await
+    }
+
     pub async fn open_with_options(
         path: &Path,
         scope: ExecutionScope,
         options: SqliteEffectReplayOptions,
     ) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_options_and_clock(path, scope, options, Arc::new(lash_core::SystemClock))
+            .await
+    }
+
+    pub async fn open_with_options_and_clock(
+        path: &Path,
+        scope: ExecutionScope,
+        options: SqliteEffectReplayOptions,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {
-            inner: open_effect_replay_inner(path, StoreBacking::File, options).await?,
+            inner: open_effect_replay_inner(path, StoreBacking::File, options, clock).await?,
             scope,
         })
     }
@@ -171,12 +219,28 @@ impl SqliteRuntimeEffectController {
         Self::memory_with_options(scope, SqliteEffectReplayOptions::default()).await
     }
 
+    pub async fn memory_with_clock(
+        scope: ExecutionScope,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_options_and_clock(scope, SqliteEffectReplayOptions::default(), clock)
+            .await
+    }
+
     pub async fn memory_with_options(
         scope: ExecutionScope,
         options: SqliteEffectReplayOptions,
     ) -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_options_and_clock(scope, options, Arc::new(lash_core::SystemClock)).await
+    }
+
+    pub async fn memory_with_options_and_clock(
+        scope: ExecutionScope,
+        options: SqliteEffectReplayOptions,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {
-            inner: open_effect_replay_memory_inner(options).await?,
+            inner: open_effect_replay_memory_inner(options, clock).await?,
             scope,
         })
     }
@@ -203,7 +267,7 @@ impl SqliteRuntimeEffectController {
             .to_string();
         let envelope_hash = envelope.stable_hash()?;
         let scope_id = self.scope.id().to_string();
-        let now = current_epoch_ms();
+        let now = self.inner.clock.timestamp_ms();
         let lease_token = self.inner.next_lease_token();
         let due_at_ms = sleep_due_at_ms(envelope, now);
         let lease_ttl_ms = self.inner.lease_timings.ttl_ms();
@@ -350,9 +414,9 @@ impl SqliteRuntimeEffectController {
                                 replay_key.as_str(),
                                 owner_id.as_str(),
                                 lease_token.as_str(),
-                                current_epoch_ms().saturating_add(lease_ttl_ms) as i64,
+                                now.saturating_add(lease_ttl_ms) as i64,
                                 due_at_param,
-                                current_epoch_ms() as i64,
+                                now as i64,
                             ],
                         )?;
                         Ok(Ok(PreparedEffect::Claimed(ClaimedEffect {
@@ -391,7 +455,7 @@ impl SqliteRuntimeEffectController {
                 Some(serde_json::to_string(err).map_err(effect_encode_error)?),
             ),
         };
-        let now = current_epoch_ms();
+        let now = self.inner.clock.timestamp_ms();
         let scope_id = claim.scope_id.clone();
         let replay_key = claim.replay_key.clone();
         let envelope_hash = claim.envelope_hash.clone();
@@ -451,7 +515,7 @@ impl SqliteRuntimeEffectController {
         &self,
         claim: &ClaimedEffect,
     ) -> Result<(), RuntimeEffectControllerError> {
-        let now = current_epoch_ms();
+        let now = self.inner.clock.timestamp_ms();
         let renewed_expires_at = now.saturating_add(self.inner.lease_timings.ttl_ms());
         let scope_id = claim.scope_id.clone();
         let replay_key = claim.replay_key.clone();
@@ -509,15 +573,12 @@ impl SqliteRuntimeEffectController {
         let renew_every = self.inner.lease_timings.renew_interval();
         let effect = self.execute_claimed_effect(claim, envelope, local_executor);
         tokio::pin!(effect);
-        let renew_sleep = tokio::time::sleep(renew_every);
-        tokio::pin!(renew_sleep);
 
         loop {
             tokio::select! {
                 result = &mut effect => return result,
-                _ = &mut renew_sleep => {
+                _ = self.inner.clock.sleep(renew_every) => {
                     self.renew_effect_lease(claim).await?;
-                    renew_sleep.as_mut().reset(tokio::time::Instant::now() + renew_every);
                 }
             }
         }
@@ -530,7 +591,7 @@ impl SqliteRuntimeEffectController {
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         if matches!(envelope.command, RuntimeEffectCommand::Sleep { .. }) {
-            sleep_until_due(claim.due_at_ms).await;
+            sleep_until_due(self.inner.clock.as_ref(), claim.due_at_ms).await;
             return Ok(RuntimeEffectOutcome::Sleep);
         }
         match envelope.command {
@@ -563,7 +624,7 @@ impl RuntimeEffectController for SqliteRuntimeEffectController {
         loop {
             match self.prepare_effect(&envelope).await? {
                 PreparedEffect::ReplayOutcome { outcome, due_at_ms } => {
-                    sleep_until_due(due_at_ms).await;
+                    sleep_until_due(self.inner.clock.as_ref(), due_at_ms).await;
                     return Ok(*outcome);
                 }
                 PreparedEffect::ReplayError(err) => return Err(err),
@@ -579,7 +640,7 @@ impl RuntimeEffectController for SqliteRuntimeEffectController {
                     };
                 }
                 PreparedEffect::Busy { retry_at_ms } => {
-                    sleep_until_retry(retry_at_ms).await;
+                    sleep_until_retry(self.inner.clock.as_ref(), retry_at_ms).await;
                 }
             }
         }
@@ -590,32 +651,36 @@ async fn open_effect_replay_inner(
     path: &Path,
     backing: StoreBacking,
     options: SqliteEffectReplayOptions,
+    clock: Arc<dyn lash_core::Clock>,
 ) -> tokio_rusqlite::Result<Arc<SqliteEffectReplayInner>> {
     let conn = SqliteConnection::open(path).await?;
     ensure_effect_schema(&conn).await?;
     apply_pragmas(&conn, backing).await?;
-    Ok(Arc::new(SqliteEffectReplayInner::new(conn, options)))
+    Ok(Arc::new(SqliteEffectReplayInner::new(conn, options, clock)))
 }
 
 async fn open_effect_replay_memory_inner(
     options: SqliteEffectReplayOptions,
+    clock: Arc<dyn lash_core::Clock>,
 ) -> tokio_rusqlite::Result<Arc<SqliteEffectReplayInner>> {
     let conn = SqliteConnection::open_in_memory().await?;
     ensure_effect_schema(&conn).await?;
     apply_pragmas(&conn, StoreBacking::Memory).await?;
-    Ok(Arc::new(SqliteEffectReplayInner::new(conn, options)))
+    Ok(Arc::new(SqliteEffectReplayInner::new(conn, options, clock)))
 }
 
 impl SqliteEffectReplayInner {
-    fn new(conn: SqliteConnection, options: SqliteEffectReplayOptions) -> Self {
+    fn new(
+        conn: SqliteConnection,
+        options: SqliteEffectReplayOptions,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> Self {
         let sequence = EFFECT_OWNER_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let timestamp_ms = clock.timestamp_ms();
         Self {
             conn,
-            owner_id: format!(
-                "pid{}-{sequence}-{}",
-                std::process::id(),
-                current_epoch_ms()
-            ),
+            clock,
+            owner_id: format!("pid{}-{sequence}-{}", std::process::id(), timestamp_ms),
             lease_counter: AtomicU64::new(1),
             replay_mode: AtomicBool::new(false),
             lease_timings: options.lease_timings,
@@ -635,24 +700,24 @@ fn sleep_due_at_ms(envelope: &RuntimeEffectEnvelope, now: u64) -> Option<u64> {
     }
 }
 
-async fn sleep_until_due(due_at_ms: Option<u64>) {
+async fn sleep_until_due(clock: &dyn lash_core::Clock, due_at_ms: Option<u64>) {
     let Some(due_at_ms) = due_at_ms else {
         return;
     };
-    let now = current_epoch_ms();
+    let now = clock.timestamp_ms();
     if due_at_ms > now {
-        tokio::time::sleep(Duration::from_millis(due_at_ms - now)).await;
+        clock.sleep(Duration::from_millis(due_at_ms - now)).await;
     }
 }
 
-async fn sleep_until_retry(retry_at_ms: u64) {
-    let now = current_epoch_ms();
+async fn sleep_until_retry(clock: &dyn lash_core::Clock, retry_at_ms: u64) {
+    let now = clock.timestamp_ms();
     let delay = if retry_at_ms > now {
         Duration::from_millis(retry_at_ms - now).min(BUSY_POLL)
     } else {
         BUSY_POLL
     };
-    tokio::time::sleep(delay).await;
+    clock.sleep(delay).await;
 }
 
 fn effect_sqlite_error(err: rusqlite::Error) -> RuntimeEffectControllerError {

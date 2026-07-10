@@ -35,7 +35,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -111,6 +110,7 @@ pub use triggers::SqliteTriggerStore;
 /// tokio-rusqlite handle to one database thread).
 pub struct Store {
     conn: SqliteConnection,
+    clock: Arc<dyn lash_core::Clock>,
     artifact_cache: Mutex<BTreeMap<lashlang::ModuleRef, Arc<lashlang::ModuleArtifact>>>,
     options: StoreOptions,
     commit_count: AtomicU64,
@@ -123,6 +123,7 @@ pub struct Store {
 /// handle visibility across all sessions sharing the registry.
 pub struct SqliteProcessRegistry {
     conn: SqliteConnection,
+    clock: Arc<dyn lash_core::Clock>,
 }
 
 fn sqlite_error(err: rusqlite::Error) -> StoreError {
@@ -277,6 +278,7 @@ pub struct StoredSessionCheckpoint {
 pub struct SqliteSessionStoreFactory {
     root: PathBuf,
     options: StoreOptions,
+    clock: Arc<dyn lash_core::Clock>,
 }
 
 impl SqliteSessionStoreFactory {
@@ -284,6 +286,7 @@ impl SqliteSessionStoreFactory {
         Self {
             root: root.into(),
             options: StoreOptions::default(),
+            clock: Arc::new(lash_core::SystemClock),
         }
     }
 
@@ -291,7 +294,13 @@ impl SqliteSessionStoreFactory {
         Self {
             root: root.into(),
             options,
+            clock: Arc::new(lash_core::SystemClock),
         }
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn lash_core::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn path_for_session(&self, session_id: &str) -> PathBuf {
@@ -312,7 +321,7 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
         std::fs::create_dir_all(&self.root).map_err(|err| err.to_string())?;
         let path = self.path_for_session(&request.session_id);
         let store = Arc::new(
-            Store::open_with_options(&path, self.options)
+            Store::open_with_options_and_clock(&path, self.options, Arc::clone(&self.clock))
                 .await
                 .map_err(|err| err.to_string())?,
         );
@@ -321,7 +330,7 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
                 .save_session_meta(SessionMeta {
                     session_id: request.session_id.clone(),
                     session_name: request.session_id.clone(),
-                    created_at: current_timestamp_string(),
+                    created_at: self.clock.timestamp_rfc3339(),
                     model: request.policy.model.id.clone(),
                     cwd: std::env::current_dir()
                         .ok()
@@ -410,14 +419,15 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
             // A primary session database that fails to open might still hold live
             // refs. Aborting the whole sweep is the safe choice: treating it as
             // empty would let GC delete blobs it actually references.
-            let store = Store::open_with_options(&path, self.options)
-                .await
-                .map_err(|err| {
-                    lash_core::StoreError::Backend(format!(
-                        "attachment GC aborted: session database {} could not be opened: {err}",
-                        path.display()
-                    ))
-                })?;
+            let store =
+                Store::open_with_options_and_clock(&path, self.options, Arc::clone(&self.clock))
+                    .await
+                    .map_err(|err| {
+                        lash_core::StoreError::Backend(format!(
+                            "attachment GC aborted: session database {} could not be opened: {err}",
+                            path.display()
+                        ))
+                    })?;
             // Reconcile crash orphans in this session database atomically: one
             // conditional DELETE of uncommitted intents aged past the cutoff (no
             // list-then-forget race against a concurrent `record_intent` refresh),
@@ -462,7 +472,11 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
             if !is_primary_session_db_name(file_name) {
                 continue;
             }
-            let store = Store::open_with_options(&path, self.options)
+            let store = Store::open_with_options_and_clock(
+                &path,
+                self.options,
+                Arc::clone(&self.clock),
+            )
                 .await
                 .map_err(|err| {
                     lash_core::StoreError::Backend(format!(
@@ -525,20 +539,6 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
     PathBuf::from(sidecar)
-}
-
-fn current_timestamp_string() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("unix:{}", now.as_secs())
-}
-
-fn current_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 fn retained_artifact_refs(checkpoint: &SessionCheckpoint) -> Vec<RetainedArtifactRef> {
