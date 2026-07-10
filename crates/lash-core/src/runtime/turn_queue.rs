@@ -240,8 +240,10 @@ pub struct QueuedWorkClaim {
     pub owner: crate::LeaseOwnerIdentity,
     pub lease_token: String,
     pub fencing_token: u64,
-    pub claimed_at_epoch_ms: u64,
-    pub expires_at_epoch_ms: u64,
+    /// The session-execution-lease generation this claim pins. The claim is
+    /// live exactly while this generation still holds the session lease
+    /// (ADR 0029).
+    pub session_lease_generation: u64,
     pub batches: Vec<QueuedWorkBatch>,
 }
 

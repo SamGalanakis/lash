@@ -80,8 +80,7 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             claim_owner_liveness_json TEXT,
             claim_token TEXT,
             claim_fencing_token BIGINT NOT NULL DEFAULT 0,
-            claim_claimed_at_ms BIGINT NOT NULL DEFAULT 0,
-            claim_expires_at_ms BIGINT NOT NULL DEFAULT 0,
+            claim_session_lease_generation BIGINT NOT NULL DEFAULT 0,
             UNIQUE (session_id, source_key)
         );
         CREATE INDEX IF NOT EXISTS idx_lash_queued_work_ready
@@ -110,8 +109,7 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             claim_owner_liveness_json TEXT,
             claim_token TEXT,
             claim_fencing_token BIGINT NOT NULL DEFAULT 0,
-            claim_claimed_at_ms BIGINT NOT NULL DEFAULT 0,
-            claim_expires_at_ms BIGINT NOT NULL DEFAULT 0,
+            claim_session_lease_generation BIGINT NOT NULL DEFAULT 0,
             UNIQUE (session_id, source_key)
         );
         CREATE INDEX IF NOT EXISTS idx_lash_pending_turn_inputs_session

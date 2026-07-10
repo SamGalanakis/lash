@@ -26,7 +26,7 @@ struct RuntimePerfQueuedBatch {
     claim_token: Option<String>,
     claim_owner: Option<LeaseOwnerIdentity>,
     claim_fencing_token: u64,
-    claim_expires_at_ms: u64,
+    claim_session_lease_generation: u64,
 }
 
 #[derive(Clone)]
@@ -36,21 +36,20 @@ struct RuntimePerfPendingTurnInput {
     claim_token: Option<String>,
     claim_owner: Option<LeaseOwnerIdentity>,
     claim_fencing_token: u64,
-    claim_expires_at_ms: u64,
+    claim_session_lease_generation: u64,
 }
 
 impl RuntimePerfPendingTurnInput {
-    fn has_live_claim(&self, now_epoch_ms: u64) -> bool {
-        self.claim_token.is_some() && self.claim_expires_at_ms > now_epoch_ms
-    }
-
     fn claim_diagnostics(&self) -> Option<lash_core::PendingTurnInputClaimDiagnostics> {
         (self.claim_id.is_some() || matches!(self.input.state, lash_core::TurnInputState::Accepted))
             .then(|| lash_core::PendingTurnInputClaimDiagnostics {
                 state: self.input.state,
                 claim_id: self.claim_id.clone(),
                 claim_owner: self.claim_owner.clone(),
-                claim_expires_at_ms: self.claim_token.as_ref().map(|_| self.claim_expires_at_ms),
+                claim_session_lease_generation: self
+                    .claim_token
+                    .as_ref()
+                    .map(|_| self.claim_session_lease_generation),
                 claim_fencing_token: self.claim_fencing_token,
             })
     }
@@ -59,10 +58,10 @@ impl RuntimePerfPendingTurnInput {
         self.claim_id = None;
         self.claim_token = None;
         self.claim_owner = None;
-        self.claim_expires_at_ms = 0;
+        self.claim_session_lease_generation = 0;
     }
 
-    fn cancel_outcome(&mut self, now_epoch_ms: u64) -> lash_core::PendingTurnInputCancelOutcome {
+    fn cancel_outcome(&mut self, claim_is_live: bool) -> lash_core::PendingTurnInputCancelOutcome {
         match self.input.state {
             lash_core::TurnInputState::Cancelled => {
                 lash_core::PendingTurnInputCancelOutcome::AlreadyCancelled(self.input.clone())
@@ -78,7 +77,7 @@ impl RuntimePerfPendingTurnInput {
             }
             lash_core::TurnInputState::PendingActive
             | lash_core::TurnInputState::DeferredNextTurn => {
-                if self.has_live_claim(now_epoch_ms) {
+                if self.claim_token.is_some() && claim_is_live {
                     lash_core::PendingTurnInputCancelOutcome::AlreadyClaimed {
                         input: self.input.clone(),
                         claim: self.claim_diagnostics(),
@@ -196,6 +195,21 @@ impl RuntimePerfStore {
         }
     }
 
+    /// The fencing token of the session's currently-live execution lease, or
+    /// `None` when no live lease holds the session. A queued-work or turn-input
+    /// claim is live for lease-less host callers exactly when the generation it
+    /// pins equals this value (ADR 0029).
+    fn live_session_lease_generation(&self, session_id: &str, now: u64) -> Option<u64> {
+        let leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock perf session execution leases");
+        leases
+            .get(session_id)
+            .filter(|lease| lease.lease_token.is_some() && lease.expires_at_epoch_ms > now)
+            .map(|lease| lease.fencing_token)
+    }
+
     fn release_session_execution_lease_in_memory(
         &self,
         completion: &SessionExecutionLeaseCompletion,
@@ -232,7 +246,6 @@ impl RuntimePerfStore {
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
         kind: RuntimePerfQueuedWorkClaimKind,
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
         let max_batches = match kind {
@@ -243,16 +256,16 @@ impl RuntimePerfStore {
             return Ok(None);
         }
         self.verify_session_execution_lease(session_id, session_execution_lease)?;
+        // The fence is validated live, so its fencing token is the currently-live
+        // session-lease generation. A row is claimable when it is unheld or its
+        // pinned generation differs from ours; same-generation self-steal is
+        // therefore unrepresentable (ADR 0029).
+        let generation = session_execution_lease.fencing_token;
         let now = current_epoch_ms();
         let mut queued = self.queued_work.lock().expect("lock perf queued work");
         queued.sort_by_key(|entry| entry.batch.enqueue_seq);
         let claim_available = |entry: &RuntimePerfQueuedBatch| {
-            entry.claim_token.is_none()
-                || entry.claim_expires_at_ms <= now
-                || entry
-                    .claim_owner
-                    .as_ref()
-                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
+            entry.claim_token.is_none() || entry.claim_session_lease_generation != generation
         };
         let claimable_indices = queued
             .iter()
@@ -305,7 +318,6 @@ impl RuntimePerfStore {
             "{session_id}:{}:{}:{claim_id}:{now}",
             owner.owner_id, owner.incarnation_id
         );
-        let expires_at = now.saturating_add(lease_ttl_ms);
         let mut batches = Vec::new();
         for index in claimable_indices.into_iter().take(selected_len) {
             let entry = &mut queued[index];
@@ -313,7 +325,7 @@ impl RuntimePerfStore {
             entry.claim_token = Some(lease_token.clone());
             entry.claim_owner = Some(owner.clone());
             entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
-            entry.claim_expires_at_ms = expires_at;
+            entry.claim_session_lease_generation = generation;
             batches.push(entry.batch.clone());
         }
         Ok(Some(QueuedWorkClaim {
@@ -322,8 +334,7 @@ impl RuntimePerfStore {
             owner: owner.clone(),
             lease_token,
             fencing_token,
-            claimed_at_epoch_ms: now,
-            expires_at_epoch_ms: expires_at,
+            session_lease_generation: generation,
             batches,
         }))
     }
@@ -333,7 +344,6 @@ impl RuntimePerfStore {
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
         max_inputs: usize,
         mode: lash_core::TurnInputClaimMode,
     ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
@@ -341,6 +351,11 @@ impl RuntimePerfStore {
             return Ok(None);
         }
         self.verify_session_execution_lease(session_id, session_execution_lease)?;
+        // Validated-live fence: its fencing token is the currently-live
+        // session-lease generation. Rows pinned to it are our own live claims;
+        // rows pinned to any other generation (or unheld) are claimable
+        // (ADR 0029).
+        let generation = session_execution_lease.fencing_token;
         let now = current_epoch_ms();
         let mut pending = self
             .pending_turn_inputs
@@ -360,11 +375,7 @@ impl RuntimePerfStore {
                 entry.input.session_id == session_id
                     && entry.input.state == wanted_state
                     && (entry.claim_token.is_none()
-                        || entry.claim_expires_at_ms <= now
-                        || entry
-                            .claim_owner
-                            .as_ref()
-                            .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner)))
+                        || entry.claim_session_lease_generation != generation)
             })
             .filter(|(_, entry)| match &mode {
                 lash_core::TurnInputClaimMode::ActiveTurn {
@@ -393,7 +404,6 @@ impl RuntimePerfStore {
             "{session_id}:{}:{}:{claim_id}:{now}",
             owner.owner_id, owner.incarnation_id
         );
-        let expires_at = now.saturating_add(lease_ttl_ms);
         let state_after_claim = match mode {
             lash_core::TurnInputClaimMode::ActiveTurn { .. } => lash_core::TurnInputState::Accepted,
             lash_core::TurnInputClaimMode::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
@@ -406,7 +416,7 @@ impl RuntimePerfStore {
             entry.claim_token = Some(lease_token.clone());
             entry.claim_owner = Some(owner.clone());
             entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
-            entry.claim_expires_at_ms = expires_at;
+            entry.claim_session_lease_generation = generation;
             inputs.push(entry.input.clone());
         }
         Ok(Some(lash_core::TurnInputClaim {
@@ -415,8 +425,7 @@ impl RuntimePerfStore {
             owner: owner.clone(),
             lease_token,
             fencing_token,
-            claimed_at_epoch_ms: now,
-            expires_at_epoch_ms: expires_at,
+            session_lease_generation: generation,
             mode,
             inputs,
         }))
@@ -609,7 +618,7 @@ impl SessionCommitStore for RuntimePerfStore {
                     })
                     .count();
                 if matches != completed.input_ids.len() {
-                    return Err(StoreError::TurnInputClaimExpired {
+                    return Err(StoreError::TurnInputClaimSuperseded {
                         session_id: completed.session_id.clone(),
                         claim_id: completed.claim_id.clone(),
                     });
@@ -650,7 +659,7 @@ impl SessionCommitStore for RuntimePerfStore {
                 })
                 .count();
             if matches != completed.batch_ids.len() {
-                return Err(StoreError::QueuedWorkClaimExpired {
+                return Err(StoreError::QueuedWorkClaimSuperseded {
                     session_id: completed.session_id.clone(),
                     claim_id: completed.claim_id.clone(),
                 });
@@ -690,7 +699,7 @@ impl SessionCommitStore for RuntimePerfStore {
                         entry.claim_id = None;
                         entry.claim_token = None;
                         entry.claim_owner = None;
-                        entry.claim_expires_at_ms = 0;
+                        entry.claim_session_lease_generation = 0;
                     }
                 }
             }
@@ -985,7 +994,7 @@ impl TurnInputStore for RuntimePerfStore {
             claim_token: None,
             claim_owner: None,
             claim_fencing_token: 0,
-            claim_expires_at_ms: 0,
+            claim_session_lease_generation: 0,
         });
         pending.sort_by_key(|entry| entry.input.enqueue_seq);
         Ok(stored)
@@ -996,6 +1005,7 @@ impl TurnInputStore for RuntimePerfStore {
         session_id: &str,
     ) -> Result<Vec<lash_core::PendingTurnInput>, StoreError> {
         let now = current_epoch_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut inputs = self
             .pending_turn_inputs
             .lock()
@@ -1008,7 +1018,8 @@ impl TurnInputStore for RuntimePerfStore {
                         lash_core::TurnInputState::PendingActive
                             | lash_core::TurnInputState::DeferredNextTurn
                     )
-                    && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
+                    && (entry.claim_token.is_none()
+                        || live_generation != Some(entry.claim_session_lease_generation))
             })
             .map(|entry| entry.input.clone())
             .collect::<Vec<_>>();
@@ -1022,6 +1033,7 @@ impl TurnInputStore for RuntimePerfStore {
         targets: &[lash_core::PendingTurnInputCancelTarget],
     ) -> Result<Vec<lash_core::PendingTurnInputCancelResult>, StoreError> {
         let now = current_epoch_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut pending = self
             .pending_turn_inputs
             .lock()
@@ -1029,7 +1041,11 @@ impl TurnInputStore for RuntimePerfStore {
         let mut results = Vec::with_capacity(targets.len());
         for target in targets {
             let outcome = match find_pending_turn_input_index(&pending, session_id, target) {
-                Some(index) => pending[index].cancel_outcome(now),
+                Some(index) => {
+                    let claim_is_live =
+                        live_generation == Some(pending[index].claim_session_lease_generation);
+                    pending[index].cancel_outcome(claim_is_live)
+                }
                 None => lash_core::PendingTurnInputCancelOutcome::NotFound,
             };
             results.push(lash_core::PendingTurnInputCancelResult {
@@ -1046,6 +1062,7 @@ impl TurnInputStore for RuntimePerfStore {
         anchor: &lash_core::PendingTurnInputCancelTarget,
     ) -> Result<lash_core::PendingTurnInputSuffixCancelOutcome, StoreError> {
         let now = current_epoch_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut pending = self
             .pending_turn_inputs
             .lock()
@@ -1064,7 +1081,10 @@ impl TurnInputStore for RuntimePerfStore {
             .iter_mut()
             .filter(|entry| entry.input.session_id == session_id)
             .filter(|entry| entry.input.enqueue_seq >= anchor_seq)
-            .map(|entry| entry.cancel_outcome(now))
+            .map(|entry| {
+                let claim_is_live = live_generation == Some(entry.claim_session_lease_generation);
+                entry.cancel_outcome(claim_is_live)
+            })
             .collect::<Vec<_>>();
         Ok(lash_core::PendingTurnInputSuffixCancelOutcome::Outcomes {
             anchor: anchor.clone(),
@@ -1079,14 +1099,12 @@ impl TurnInputStore for RuntimePerfStore {
         owner: &LeaseOwnerIdentity,
         turn_id: &str,
         checkpoint: lash_core::CheckpointKind,
-        lease_ttl_ms: u64,
         max_inputs: usize,
     ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
         self.claim_pending_turn_inputs_perf(
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             max_inputs,
             lash_core::TurnInputClaimMode::ActiveTurn {
                 turn_id: turn_id.to_string(),
@@ -1100,14 +1118,12 @@ impl TurnInputStore for RuntimePerfStore {
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
         max_inputs: usize,
     ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
         self.claim_pending_turn_inputs_perf(
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             max_inputs,
             lash_core::TurnInputClaimMode::NextTurn,
         )
@@ -1139,7 +1155,7 @@ impl TurnInputStore for RuntimePerfStore {
                 entry.claim_id = None;
                 entry.claim_token = None;
                 entry.claim_owner = None;
-                entry.claim_expires_at_ms = 0;
+                entry.claim_session_lease_generation = 0;
             }
         }
         Ok(())
@@ -1190,7 +1206,7 @@ impl QueuedWorkStore for RuntimePerfStore {
             claim_token: None,
             claim_owner: None,
             claim_fencing_token: 0,
-            claim_expires_at_ms: 0,
+            claim_session_lease_generation: 0,
         });
         queued.sort_by_key(|entry| entry.batch.enqueue_seq);
         Ok(stored)
@@ -1201,13 +1217,11 @@ impl QueuedWorkStore for RuntimePerfStore {
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
         self.claim_ready_queued_work_perf(
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             RuntimePerfQueuedWorkClaimKind::LeadingSessionCommand,
         )
     }
@@ -1218,48 +1232,17 @@ impl QueuedWorkStore for RuntimePerfStore {
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
         boundary: QueuedWorkClaimBoundary,
-        lease_ttl_ms: u64,
         max_batches: usize,
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
         self.claim_ready_queued_work_perf(
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             RuntimePerfQueuedWorkClaimKind::TurnWork {
                 boundary,
                 max_batches,
             },
         )
-    }
-
-    async fn renew_queued_work_claim(
-        &self,
-        claim: &QueuedWorkClaim,
-        lease_ttl_ms: u64,
-    ) -> Result<QueuedWorkClaim, StoreError> {
-        let mut queued = self.queued_work.lock().expect("lock perf queued work");
-        let expires_at = current_epoch_ms().saturating_add(lease_ttl_ms);
-        let mut changed = 0;
-        for entry in queued.iter_mut() {
-            if entry.batch.session_id == claim.session_id
-                && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
-                && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
-            {
-                entry.claim_expires_at_ms = expires_at;
-                changed += 1;
-            }
-        }
-        if changed != claim.batches.len() {
-            return Err(StoreError::QueuedWorkClaimExpired {
-                session_id: claim.session_id.clone(),
-                claim_id: claim.claim_id.clone(),
-            });
-        }
-        Ok(QueuedWorkClaim {
-            expires_at_epoch_ms: expires_at,
-            ..claim.clone()
-        })
     }
 
     async fn abandon_queued_work_claim(&self, claim: &QueuedWorkClaim) -> Result<(), StoreError> {
@@ -1272,7 +1255,7 @@ impl QueuedWorkStore for RuntimePerfStore {
                 entry.claim_id = None;
                 entry.claim_token = None;
                 entry.claim_owner = None;
-                entry.claim_expires_at_ms = 0;
+                entry.claim_session_lease_generation = 0;
             }
         }
         Ok(())
@@ -1284,6 +1267,7 @@ impl QueuedWorkStore for RuntimePerfStore {
         batch_id: &str,
     ) -> Result<Option<QueuedWorkBatch>, StoreError> {
         let now = current_epoch_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut queued = self.queued_work.lock().expect("lock perf queued work");
         let Some(index) = queued.iter().position(|entry| {
             entry.batch.session_id == session_id && entry.batch.batch_id == batch_id
@@ -1291,7 +1275,9 @@ impl QueuedWorkStore for RuntimePerfStore {
             return Ok(None);
         };
         let entry = &queued[index];
-        if entry.claim_token.is_some() && entry.claim_expires_at_ms > now {
+        if entry.claim_token.is_some()
+            && live_generation == Some(entry.claim_session_lease_generation)
+        {
             return Ok(None);
         }
         Ok(Some(queued.remove(index).batch))
@@ -1315,6 +1301,7 @@ impl QueuedWorkStore for RuntimePerfStore {
         session_id: &str,
     ) -> Result<Vec<QueuedWorkBatch>, StoreError> {
         let now = current_epoch_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut batches = self
             .queued_work
             .lock()
@@ -1322,7 +1309,8 @@ impl QueuedWorkStore for RuntimePerfStore {
             .iter()
             .filter(|entry| {
                 entry.batch.session_id == session_id
-                    && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
+                    && (entry.claim_token.is_none()
+                        || live_generation != Some(entry.claim_session_lease_generation))
             })
             .map(|entry| entry.batch.clone())
             .collect::<Vec<_>>();

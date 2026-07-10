@@ -21,10 +21,6 @@ fn queued_work_and_pending_input_lease_decisions_use_the_postgres_clock() {
         ),
         (
             "async fn claim_ready_queued_work(",
-            "async fn renew_queued_work_claim(",
-        ),
-        (
-            "async fn renew_queued_work_claim(",
             "async fn abandon_queued_work_claim(",
         ),
         (

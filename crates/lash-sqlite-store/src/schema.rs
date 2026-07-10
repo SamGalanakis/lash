@@ -102,8 +102,7 @@ CREATE TABLE IF NOT EXISTS queued_work_batches (
     claim_owner_liveness_json TEXT,
     claim_token       TEXT,
     claim_fencing_token INTEGER NOT NULL DEFAULT 0,
-    claim_claimed_at_ms INTEGER NOT NULL DEFAULT 0,
-    claim_expires_at_ms INTEGER NOT NULL DEFAULT 0,
+    claim_session_lease_generation INTEGER NOT NULL DEFAULT 0,
     UNIQUE (session_id, source_key)
         ON CONFLICT IGNORE
 );
@@ -138,8 +137,7 @@ CREATE TABLE IF NOT EXISTS pending_turn_inputs (
     claim_owner_liveness_json TEXT,
     claim_token       TEXT,
     claim_fencing_token INTEGER NOT NULL DEFAULT 0,
-    claim_claimed_at_ms INTEGER NOT NULL DEFAULT 0,
-    claim_expires_at_ms INTEGER NOT NULL DEFAULT 0,
+    claim_session_lease_generation INTEGER NOT NULL DEFAULT 0,
     UNIQUE (session_id, source_key)
         ON CONFLICT IGNORE
 );
@@ -183,7 +181,14 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// content-addressed layout cannot read. Pre-10 session databases are rejected
 /// at open and recreated; the old `sessions/` blob trees are unreachable garbage
 /// operators delete manually.
-pub(crate) const SCHEMA_VERSION: i32 = 10;
+///
+/// Bumped to 11 for claim generation fencing (ADR 0029): queued-work and
+/// pending-turn-input rows replace their per-claim `claim_claimed_at_ms` /
+/// `claim_expires_at_ms` columns with a single `claim_session_lease_generation`
+/// pinning the session-execution-lease generation the claim was taken under.
+/// There is no migration chain — pre-11 session databases are rejected at open
+/// and recreated.
+pub(crate) const SCHEMA_VERSION: i32 = 11;
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (

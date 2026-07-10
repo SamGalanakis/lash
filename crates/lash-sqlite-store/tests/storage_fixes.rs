@@ -264,7 +264,6 @@ async fn second_claim_on_held_batch_is_not_won() {
             &session_fence,
             &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
@@ -278,7 +277,6 @@ async fn second_claim_on_held_batch_is_not_won() {
             &session_fence,
             &lease_owner("owner-b"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
@@ -288,11 +286,17 @@ async fn second_claim_on_held_batch_is_not_won() {
         "a batch already held by a live claim must not be re-claimed, got {claim_b:?}"
     );
 
-    // Owner A's claim is still the live, renewable one.
-    store
-        .renew_queued_work_claim(&claim_a, 60_000)
-        .await
-        .expect("owner a can still renew its uncontended claim");
+    // Owner A's claim is the live one: while its session-lease generation holds
+    // the batch, the batch is hidden from the user-editable pending snapshot.
+    assert!(
+        store
+            .list_pending_queued_work("root")
+            .await
+            .expect("list pending during owner-a's live claim")
+            .is_empty(),
+        "the batch held by owner A's live claim must be hidden from pending work"
+    );
+    let _ = claim_a;
 }
 
 // Finding 2 (concurrent): two owners on two connections race for the same
@@ -334,7 +338,6 @@ fn concurrent_claims_never_double_own_a_batch() {
                         &session_fence,
                         &lease_owner(owner),
                         QueuedWorkClaimBoundary::Idle,
-                        60_000,
                         10,
                     )
                     .await
@@ -366,11 +369,17 @@ fn concurrent_claims_never_double_own_a_batch() {
         winners.len()
     );
     if let Some(claim) = winners.first() {
-        // A successful claim must really own the batch: renewing it must update
-        // exactly the claimed batch.
+        // A successful claim must really own the batch: while the winner's
+        // session-lease generation holds it, the batch is hidden from the
+        // user-editable pending snapshot.
         let verify = block_on(Store::open(&path)).expect("verify store");
-        block_on(verify.renew_queued_work_claim(claim, 60_000))
-            .expect("the winning claim must actually own its batch");
+        let pending = block_on(verify.list_pending_queued_work("root"))
+            .expect("list pending during the winning claim");
+        assert!(
+            pending.is_empty(),
+            "the winning claim must own its batch, hiding it from pending work"
+        );
+        let _ = claim;
     }
 }
 
@@ -396,8 +405,8 @@ async fn unsupported_schema_error_reports_real_versions() {
         "error must report the found version 99: {message}"
     );
     assert!(
-        message.contains("schema version 10"),
-        "error must report the real expected version 10: {message}"
+        message.contains("schema version 11"),
+        "error must report the real expected version 11: {message}"
     );
     assert!(
         !message.contains("version 1 only"),
@@ -433,5 +442,5 @@ fn concurrent_first_open_never_observes_version_zero_schema() {
     let user_version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 10);
+    assert_eq!(user_version, 11);
 }

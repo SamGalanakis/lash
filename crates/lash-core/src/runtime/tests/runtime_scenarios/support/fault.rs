@@ -29,7 +29,7 @@ impl RuntimeScenarioContext {
             .await
             .expect_err("stale queue-completion fault should reject the commit");
         assert!(
-            matches!(err, StoreError::QueuedWorkClaimExpired { .. }),
+            matches!(err, StoreError::QueuedWorkClaimSuperseded { .. }),
             "{} stale queue-completion fault produced the wrong error: {err:?}",
             self.name
         );

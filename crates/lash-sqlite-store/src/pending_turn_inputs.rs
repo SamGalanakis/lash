@@ -48,7 +48,7 @@ pub(crate) struct PendingTurnInputRow {
     pub(crate) claim_fencing_token: u64,
     pub(crate) claim_owner: Option<LeaseOwnerIdentity>,
     pub(crate) claim_token: Option<String>,
-    pub(crate) claim_expires_at_ms: u64,
+    pub(crate) claim_session_lease_generation: u64,
 }
 
 pub(crate) fn pending_turn_input_row_from_sql(
@@ -67,7 +67,7 @@ pub(crate) fn pending_turn_input_row_from_sql(
         claim_fencing_token: row.get::<_, i64>(9)? as u64,
         claim_owner: lease_owner_from_columns(row.get(10)?, row.get(11)?, row.get(12)?),
         claim_token: row.get(13)?,
-        claim_expires_at_ms: row.get::<_, i64>(14)? as u64,
+        claim_session_lease_generation: row.get::<_, i64>(14)? as u64,
     })
 }
 
@@ -96,7 +96,7 @@ pub(crate) fn load_pending_turn_input_by_id_conn(
             "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                     state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                     claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
              FROM pending_turn_inputs
              WHERE session_id = ?1 AND input_id = ?2",
             params![session_id, input_id],
@@ -118,7 +118,7 @@ pub(crate) fn load_pending_turn_input_row_by_target_conn(
                 "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                         state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                         claim_owner_id, claim_owner_incarnation_id,
-                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
                  FROM pending_turn_inputs
                  WHERE session_id = ?1 AND input_id = ?2",
                 params![session_id, input_id],
@@ -131,7 +131,7 @@ pub(crate) fn load_pending_turn_input_row_by_target_conn(
                 "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                         state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                         claim_owner_id, claim_owner_incarnation_id,
-                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
                  FROM pending_turn_inputs
                  WHERE session_id = ?1 AND source_key = ?2",
                 params![session_id, source_key],
@@ -151,7 +151,10 @@ pub(crate) fn pending_turn_input_claim_diagnostics_from_row(
             state,
             claim_id: row.claim_id.clone(),
             claim_owner: row.claim_owner.clone(),
-            claim_expires_at_ms: row.claim_token.as_ref().map(|_| row.claim_expires_at_ms),
+            claim_session_lease_generation: row
+                .claim_token
+                .as_ref()
+                .map(|_| row.claim_session_lease_generation),
             claim_fencing_token: row.claim_fencing_token,
         }
     })
@@ -162,8 +165,7 @@ pub(crate) struct TurnInputClaimLease {
     pub(crate) claim_id: String,
     pub(crate) lease_token: String,
     pub(crate) fencing_token: u64,
-    pub(crate) claimed_at_epoch_ms: u64,
-    pub(crate) expires_at_epoch_ms: u64,
+    pub(crate) session_lease_generation: u64,
 }
 
 impl TurnInputClaimLease {
@@ -172,7 +174,7 @@ impl TurnInputClaimLease {
         session_id: &str,
         owner: &LeaseOwnerIdentity,
         now_epoch_ms: u64,
-        lease_ttl_ms: u64,
+        session_lease_generation: u64,
     ) -> Self {
         let fencing_token = head.claim_fencing_token.saturating_add(1);
         let claim_id = format!("tic:{}:{fencing_token}", head.enqueue_seq);
@@ -190,8 +192,7 @@ impl TurnInputClaimLease {
             claim_id,
             lease_token,
             fencing_token,
-            claimed_at_epoch_ms: now_epoch_ms,
-            expires_at_epoch_ms: now_epoch_ms.saturating_add(lease_ttl_ms),
+            session_lease_generation,
         }
     }
 }
@@ -201,7 +202,7 @@ pub(crate) fn ensure_turn_input_completion_owns_all_inputs(
     owned_rows: usize,
 ) -> Result<(), StoreError> {
     if owned_rows != completed.input_ids.len() {
-        return Err(StoreError::TurnInputClaimExpired {
+        return Err(StoreError::TurnInputClaimSuperseded {
             session_id: completed.session_id.clone(),
             claim_id: completed.claim_id.clone(),
         });

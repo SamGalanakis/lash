@@ -163,7 +163,7 @@ impl SessionCommitStore for PostgresSessionStore {
         }
         for completed in &commit.completed_queue_claims {
             if completed.session_id != commit.session_id {
-                return Err(StoreError::QueuedWorkClaimExpired {
+                return Err(StoreError::QueuedWorkClaimSuperseded {
                     session_id: completed.session_id.clone(),
                     claim_id: completed.claim_id.clone(),
                 });
@@ -172,7 +172,7 @@ impl SessionCommitStore for PostgresSessionStore {
         }
         for completed in &commit.completed_turn_input_claims {
             if completed.session_id != commit.session_id {
-                return Err(StoreError::TurnInputClaimExpired {
+                return Err(StoreError::TurnInputClaimSuperseded {
                     session_id: completed.session_id.clone(),
                     claim_id: completed.claim_id.clone(),
                 });
@@ -329,8 +329,7 @@ impl SessionCommitStore for PostgresSessionStore {
                          claim_owner_incarnation_id = NULL,
                          claim_owner_liveness_json = NULL,
                          claim_token = NULL,
-                         claim_claimed_at_ms = 0,
-                         claim_expires_at_ms = 0
+                         claim_session_lease_generation = 0
                      WHERE session_id = $1 AND input_id = $2 AND claim_id = $3 AND claim_token = $4",
                 )
                 .bind(&completed.session_id)
@@ -348,7 +347,7 @@ impl SessionCommitStore for PostgresSessionStore {
                 "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                         state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                         claim_owner_id, claim_owner_incarnation_id,
-                        claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
                  FROM lash_pending_turn_inputs
                  WHERE session_id = $1 AND state = $2
                  ORDER BY enqueue_seq ASC
@@ -380,8 +379,7 @@ impl SessionCommitStore for PostgresSessionStore {
                          claim_owner_incarnation_id = NULL,
                          claim_owner_liveness_json = NULL,
                          claim_token = NULL,
-                         claim_claimed_at_ms = 0,
-                         claim_expires_at_ms = 0
+                         claim_session_lease_generation = 0
                      WHERE session_id = $1 AND input_id = $2",
                 )
                 .bind(&commit.session_id)
@@ -739,15 +737,34 @@ impl QueuedWorkStore for PostgresSessionStore {
             }
         }
         let now = current_epoch_ms();
-        let batch_id = derive_batch_id(&batch.session_id, batch.source_key.as_deref(), now, None);
-        let row = sqlx::query_scalar::<_, i64>(
+        // Allocate the durable ordering key first and also use it as the batch-id
+        // nonce. PostgreSQL can enqueue multiple source-key-less batches for the
+        // same session within one millisecond (and across many store handles or
+        // hosts), so timestamp alone is not a unique identity source. Sequence
+        // values are database-global and are intentionally not rolled back.
+        let enqueue_seq: i64 = sqlx::query_scalar(
+            "SELECT nextval(pg_get_serial_sequence(
+                'lash_queued_work_batches',
+                'enqueue_seq'
+             ))",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let batch_id = derive_batch_id(
+            &batch.session_id,
+            batch.source_key.as_deref(),
+            now,
+            Some(enqueue_seq as u64),
+        );
+        sqlx::query(
             "INSERT INTO lash_queued_work_batches (
-                batch_id, session_id, source_key, delivery_policy, slot_policy,
+                enqueue_seq, batch_id, session_id, source_key, delivery_policy, slot_policy,
                 merge_key_json, available_at_ms, enqueued_at_ms
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             RETURNING enqueue_seq",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
+        .bind(enqueue_seq)
         .bind(&batch_id)
         .bind(&batch.session_id)
         .bind(&batch.source_key)
@@ -756,7 +773,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         .bind(encode_json(&batch.merge_key))
         .bind(batch.available_at_ms as i64)
         .bind(now as i64)
-        .fetch_one(&mut *tx)
+        .execute(&mut *tx)
         .await
         .map_err(store_sqlx_error)?;
         for (index, payload) in batch.payloads.iter().enumerate() {
@@ -776,7 +793,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         let queued = load_queued_batch(&mut tx, &batch_id)
             .await?
             .ok_or_else(|| StoreError::Backend("queued work insert disappeared".to_string()))?;
-        debug_assert_eq!(queued.enqueue_seq, row as u64);
+        debug_assert_eq!(queued.enqueue_seq, enqueue_seq as u64);
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(queued)
     }
@@ -786,25 +803,33 @@ impl QueuedWorkStore for PostgresSessionStore {
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
+        // The fence is validated live, so its fencing token is the
+        // currently-live session-lease generation; claims pin it and are
+        // claimable only across a different generation (ADR 0029).
+        let generation = session_execution_lease.fencing_token;
         let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let rows = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
                     claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
              FROM lash_queued_work_batches
              WHERE session_id = $1
                AND available_at_ms <= $2
+               AND (
+                    claim_token IS NULL
+                    OR claim_session_lease_generation <> $3
+               )
              ORDER BY enqueue_seq ASC
-             LIMIT $3
+             LIMIT $4
              FOR UPDATE SKIP LOCKED",
         )
         .bind(session_id)
         .bind(now as i64)
+        .bind(generation as i64)
         .bind(claim_scan_limit(1))
         .fetch_all(&mut *tx)
         .await
@@ -812,13 +837,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         let mut selected = Vec::new();
         for row in rows {
             let row = queued_batch_row(row)?;
-            if row.claim_token.is_none()
-                || row.claim_expires_at_ms <= now
-                || row
-                    .claim_owner
-                    .as_ref()
-                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
-            {
+            if row.claim_token.is_none() || row.claim_session_lease_generation != generation {
                 selected.push(row);
             }
         }
@@ -853,7 +872,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         selected.truncate(selected_len);
         selected_batches.truncate(selected_len);
         let lease =
-            QueuedWorkClaimLease::derive(&candidates[0], session_id, owner, now, lease_ttl_ms);
+            QueuedWorkClaimLease::derive(&candidates[0], session_id, owner, now, generation);
         let liveness_json = encode_liveness(&owner.liveness)?;
         for row in &selected {
             let changed = sqlx::query(
@@ -864,18 +883,12 @@ impl QueuedWorkStore for PostgresSessionStore {
                      claim_owner_liveness_json = $6,
                      claim_token = $7,
                      claim_fencing_token = claim_fencing_token + 1,
-                     claim_claimed_at_ms = $8,
-                     claim_expires_at_ms = $9
+                     claim_session_lease_generation = $8
                  WHERE session_id = $1
                    AND batch_id = $2
                    AND (
                         claim_token IS NULL
-                        OR claim_expires_at_ms <= $8
-                        OR (
-                            claim_token = $10
-                            AND claim_owner_id = $11
-                            AND claim_owner_incarnation_id = $12
-                        )
+                        OR claim_session_lease_generation <> $8
                    )",
             )
             .bind(session_id)
@@ -885,19 +898,7 @@ impl QueuedWorkStore for PostgresSessionStore {
             .bind(&owner.incarnation_id)
             .bind(&liveness_json)
             .bind(&lease.lease_token)
-            .bind(now as i64)
-            .bind(lease.expires_at_epoch_ms as i64)
-            .bind(&row.claim_token)
-            .bind(
-                row.claim_owner
-                    .as_ref()
-                    .map(|owner| owner.owner_id.as_str()),
-            )
-            .bind(
-                row.claim_owner
-                    .as_ref()
-                    .map(|owner| owner.incarnation_id.as_str()),
-            )
+            .bind(lease.session_lease_generation as i64)
             .execute(&mut *tx)
             .await
             .map_err(store_sqlx_error)?
@@ -914,8 +915,7 @@ impl QueuedWorkStore for PostgresSessionStore {
             owner: owner.clone(),
             lease_token: lease.lease_token,
             fencing_token: lease.fencing_token,
-            claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
-            expires_at_epoch_ms: lease.expires_at_epoch_ms,
+            session_lease_generation: lease.session_lease_generation,
             batches: selected_batches,
         }))
     }
@@ -926,7 +926,6 @@ impl QueuedWorkStore for PostgresSessionStore {
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
         boundary: QueuedWorkClaimBoundary,
-        lease_ttl_ms: u64,
         max_batches: usize,
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
         if max_batches == 0 {
@@ -934,21 +933,27 @@ impl QueuedWorkStore for PostgresSessionStore {
         }
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
+        let generation = session_execution_lease.fencing_token;
         let now = postgres_transaction_epoch_ms(&mut tx).await?;
         let rows = sqlx::query(
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
                     claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
              FROM lash_queued_work_batches
              WHERE session_id = $1
                AND available_at_ms <= $2
+               AND (
+                    claim_token IS NULL
+                    OR claim_session_lease_generation <> $3
+               )
              ORDER BY enqueue_seq ASC
-             LIMIT $3
+             LIMIT $4
              FOR UPDATE SKIP LOCKED",
         )
         .bind(session_id)
         .bind(now as i64)
+        .bind(generation as i64)
         .bind(claim_scan_limit(max_batches))
         .fetch_all(&mut *tx)
         .await
@@ -956,13 +961,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         let mut selected = Vec::new();
         for row in rows {
             let row = queued_batch_row(row)?;
-            if row.claim_token.is_none()
-                || row.claim_expires_at_ms <= now
-                || row
-                    .claim_owner
-                    .as_ref()
-                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
-            {
+            if row.claim_token.is_none() || row.claim_session_lease_generation != generation {
                 selected.push(row);
             }
         }
@@ -997,7 +996,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         selected.truncate(selected_len);
         selected_batches.truncate(selected_len);
         let lease =
-            QueuedWorkClaimLease::derive(&candidates[0], session_id, owner, now, lease_ttl_ms);
+            QueuedWorkClaimLease::derive(&candidates[0], session_id, owner, now, generation);
         let liveness_json = encode_liveness(&owner.liveness)?;
         for row in &selected {
             let changed = sqlx::query(
@@ -1008,18 +1007,12 @@ impl QueuedWorkStore for PostgresSessionStore {
                      claim_owner_liveness_json = $6,
                      claim_token = $7,
                      claim_fencing_token = claim_fencing_token + 1,
-                     claim_claimed_at_ms = $8,
-                     claim_expires_at_ms = $9
+                     claim_session_lease_generation = $8
                  WHERE session_id = $1
                    AND batch_id = $2
                    AND (
                         claim_token IS NULL
-                        OR claim_expires_at_ms <= $8
-                        OR (
-                            claim_token = $10
-                            AND claim_owner_id = $11
-                            AND claim_owner_incarnation_id = $12
-                        )
+                        OR claim_session_lease_generation <> $8
                    )",
             )
             .bind(session_id)
@@ -1029,19 +1022,7 @@ impl QueuedWorkStore for PostgresSessionStore {
             .bind(&owner.incarnation_id)
             .bind(&liveness_json)
             .bind(&lease.lease_token)
-            .bind(now as i64)
-            .bind(lease.expires_at_epoch_ms as i64)
-            .bind(&row.claim_token)
-            .bind(
-                row.claim_owner
-                    .as_ref()
-                    .map(|owner| owner.owner_id.as_str()),
-            )
-            .bind(
-                row.claim_owner
-                    .as_ref()
-                    .map(|owner| owner.incarnation_id.as_str()),
-            )
+            .bind(lease.session_lease_generation as i64)
             .execute(&mut *tx)
             .await
             .map_err(store_sqlx_error)?
@@ -1058,36 +1039,9 @@ impl QueuedWorkStore for PostgresSessionStore {
             owner: owner.clone(),
             lease_token: lease.lease_token,
             fencing_token: lease.fencing_token,
-            claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
-            expires_at_epoch_ms: lease.expires_at_epoch_ms,
+            session_lease_generation: lease.session_lease_generation,
             batches: selected_batches,
         }))
-    }
-
-    async fn renew_queued_work_claim(
-        &self,
-        claim: &QueuedWorkClaim,
-        lease_ttl_ms: u64,
-    ) -> Result<QueuedWorkClaim, StoreError> {
-        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
-        let now = postgres_transaction_epoch_ms(&mut tx).await?;
-        let expires_at = now.saturating_add(lease_ttl_ms);
-        let changed = sqlx::query(
-            "UPDATE lash_queued_work_batches
-             SET claim_expires_at_ms = $4
-             WHERE session_id = $1 AND claim_id = $2 AND claim_token = $3",
-        )
-        .bind(&claim.session_id)
-        .bind(&claim.claim_id)
-        .bind(&claim.lease_token)
-        .bind(expires_at as i64)
-        .execute(&mut *tx)
-        .await
-        .map_err(store_sqlx_error)?
-        .rows_affected();
-        let renewed = renewed_claim(claim, changed as usize, expires_at)?;
-        tx.commit().await.map_err(store_sqlx_error)?;
-        Ok(renewed)
     }
 
     async fn abandon_queued_work_claim(&self, claim: &QueuedWorkClaim) -> Result<(), StoreError> {
@@ -1098,8 +1052,7 @@ impl QueuedWorkStore for PostgresSessionStore {
                  claim_owner_incarnation_id = NULL,
                  claim_owner_liveness_json = NULL,
                  claim_token = NULL,
-                 claim_claimed_at_ms = 0,
-                 claim_expires_at_ms = 0
+                 claim_session_lease_generation = 0
              WHERE session_id = $1 AND claim_id = $2 AND claim_token = $3",
         )
         .bind(&claim.session_id)
@@ -1122,11 +1075,18 @@ impl QueuedWorkStore for PostgresSessionStore {
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
                     claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
              FROM lash_queued_work_batches
              WHERE session_id = $1
                AND batch_id = $2
-               AND (claim_token IS NULL OR claim_expires_at_ms <= $3)
+               AND (claim_token IS NULL OR NOT EXISTS (
+                    SELECT 1 FROM lash_session_execution_leases sel
+                    WHERE sel.session_id = $1
+                      AND sel.lease_token IS NOT NULL
+                      AND sel.lease_expires_at_ms > $3
+                      AND sel.lease_fencing_token
+                          = lash_queued_work_batches.claim_session_lease_generation
+               ))
              FOR UPDATE",
         )
         .bind(session_id)
@@ -1155,7 +1115,7 @@ impl QueuedWorkStore for PostgresSessionStore {
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
                     claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
              FROM lash_queued_work_batches
              WHERE session_id = $1
              ORDER BY enqueue_seq ASC",
@@ -1182,10 +1142,17 @@ impl QueuedWorkStore for PostgresSessionStore {
             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
                     slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
                     claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
              FROM lash_queued_work_batches
              WHERE session_id = $1
-               AND (claim_token IS NULL OR claim_expires_at_ms <= $2)
+               AND (claim_token IS NULL OR NOT EXISTS (
+                    SELECT 1 FROM lash_session_execution_leases sel
+                    WHERE sel.session_id = $1
+                      AND sel.lease_token IS NOT NULL
+                      AND sel.lease_expires_at_ms > $2
+                      AND sel.lease_fencing_token
+                          = lash_queued_work_batches.claim_session_lease_generation
+               ))
              ORDER BY enqueue_seq ASC",
         )
         .bind(session_id)
@@ -1232,7 +1199,7 @@ impl TurnInputStore for PostgresSessionStore {
                  RETURNING enqueue_seq, input_id, session_id, source_key, ingress_json,
                            state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                            claim_owner_id, claim_owner_incarnation_id,
-                           claim_owner_liveness_json, claim_token, claim_expires_at_ms",
+                           claim_owner_liveness_json, claim_token, claim_session_lease_generation",
             )
             .bind(&input_id)
             .bind(&draft.session_id)
@@ -1294,11 +1261,18 @@ impl TurnInputStore for PostgresSessionStore {
             "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                     state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                     claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
              FROM lash_pending_turn_inputs
              WHERE session_id = $1
                AND state IN ($2, $3)
-               AND (claim_token IS NULL OR claim_expires_at_ms <= $4)
+               AND (claim_token IS NULL OR NOT EXISTS (
+                    SELECT 1 FROM lash_session_execution_leases sel
+                    WHERE sel.session_id = $1
+                      AND sel.lease_token IS NOT NULL
+                      AND sel.lease_expires_at_ms > $4
+                      AND sel.lease_fencing_token
+                          = lash_pending_turn_inputs.claim_session_lease_generation
+               ))
              ORDER BY enqueue_seq ASC",
         )
         .bind(session_id)
@@ -1360,7 +1334,7 @@ impl TurnInputStore for PostgresSessionStore {
             "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                     state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                     claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
              FROM lash_pending_turn_inputs
              WHERE session_id = $1 AND enqueue_seq >= $2
              ORDER BY enqueue_seq ASC
@@ -1392,7 +1366,6 @@ impl TurnInputStore for PostgresSessionStore {
         owner: &LeaseOwnerIdentity,
         turn_id: &str,
         checkpoint: lash_core::CheckpointKind,
-        lease_ttl_ms: u64,
         max_inputs: usize,
     ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
         claim_pending_turn_inputs_postgres(
@@ -1400,7 +1373,6 @@ impl TurnInputStore for PostgresSessionStore {
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             max_inputs,
             lash_core::TurnInputClaimMode::ActiveTurn {
                 turn_id: turn_id.to_string(),
@@ -1415,7 +1387,6 @@ impl TurnInputStore for PostgresSessionStore {
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
         max_inputs: usize,
     ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
         claim_pending_turn_inputs_postgres(
@@ -1423,7 +1394,6 @@ impl TurnInputStore for PostgresSessionStore {
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             max_inputs,
             lash_core::TurnInputClaimMode::NextTurn,
         )
@@ -1453,8 +1423,7 @@ impl TurnInputStore for PostgresSessionStore {
                  claim_owner_incarnation_id = NULL,
                  claim_owner_liveness_json = NULL,
                  claim_token = NULL,
-                 claim_claimed_at_ms = 0,
-                 claim_expires_at_ms = 0
+                 claim_session_lease_generation = 0
              WHERE session_id = $1 AND claim_id = $2 AND claim_token = $3",
         )
         .bind(&claim.session_id)
@@ -1656,7 +1625,6 @@ async fn claim_pending_turn_inputs_postgres(
     session_id: &str,
     session_execution_lease: &SessionExecutionLeaseFence,
     owner: &LeaseOwnerIdentity,
-    lease_ttl_ms: u64,
     max_inputs: usize,
     mode: lash_core::TurnInputClaimMode,
 ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
@@ -1665,6 +1633,7 @@ async fn claim_pending_turn_inputs_postgres(
     }
     let mut tx = pool.begin().await.map_err(store_sqlx_error)?;
     ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
+    let generation = session_execution_lease.fencing_token;
     let now = postgres_transaction_epoch_ms(&mut tx).await?;
     let wanted_state = match &mode {
         lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
@@ -1676,15 +1645,20 @@ async fn claim_pending_turn_inputs_postgres(
         "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                 state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                 claim_owner_id, claim_owner_incarnation_id,
-                claim_owner_liveness_json, claim_token, claim_expires_at_ms
+                claim_owner_liveness_json, claim_token, claim_session_lease_generation
          FROM lash_pending_turn_inputs
          WHERE session_id = $1 AND state = $2
+           AND (
+                claim_token IS NULL
+                OR claim_session_lease_generation <> $3
+           )
          ORDER BY enqueue_seq ASC
-         LIMIT $3
+         LIMIT $4
          FOR UPDATE SKIP LOCKED",
     )
     .bind(session_id)
     .bind(wanted_state.as_str())
+    .bind(generation as i64)
     .bind(claim_scan_limit(max_inputs))
     .fetch_all(&mut *tx)
     .await
@@ -1692,12 +1666,8 @@ async fn claim_pending_turn_inputs_postgres(
     let mut selected = Vec::new();
     for row in rows {
         let row = pending_turn_input_row(row)?;
-        let claim_available = row.claim_token.is_none()
-            || row.claim_expires_at_ms <= now
-            || row
-                .claim_owner
-                .as_ref()
-                .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner));
+        let claim_available =
+            row.claim_token.is_none() || row.claim_session_lease_generation != generation;
         if !claim_available {
             continue;
         }
@@ -1726,7 +1696,7 @@ async fn claim_pending_turn_inputs_postgres(
         tx.commit().await.map_err(store_sqlx_error)?;
         return Ok(None);
     };
-    let lease = TurnInputClaimLease::derive(head, session_id, owner, now, lease_ttl_ms);
+    let lease = TurnInputClaimLease::derive(head, session_id, owner, now, generation);
     let liveness_json = encode_liveness(&owner.liveness)?;
     let state_after_claim = match &mode {
         lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
@@ -1745,18 +1715,12 @@ async fn claim_pending_turn_inputs_postgres(
                  claim_owner_liveness_json = $7,
                  claim_token = $8,
                  claim_fencing_token = claim_fencing_token + 1,
-                 claim_claimed_at_ms = $9,
-                 claim_expires_at_ms = $10
+                 claim_session_lease_generation = $9
              WHERE session_id = $1
                AND input_id = $2
                AND (
                     claim_token IS NULL
-                    OR claim_expires_at_ms <= $9
-                    OR (
-                        claim_token = $11
-                        AND claim_owner_id = $12
-                        AND claim_owner_incarnation_id = $13
-                    )
+                    OR claim_session_lease_generation <> $9
                )",
         )
         .bind(session_id)
@@ -1767,19 +1731,7 @@ async fn claim_pending_turn_inputs_postgres(
         .bind(&owner.incarnation_id)
         .bind(&liveness_json)
         .bind(&lease.lease_token)
-        .bind(now as i64)
-        .bind(lease.expires_at_epoch_ms as i64)
-        .bind(&row.claim_token)
-        .bind(
-            row.claim_owner
-                .as_ref()
-                .map(|owner| owner.owner_id.as_str()),
-        )
-        .bind(
-            row.claim_owner
-                .as_ref()
-                .map(|owner| owner.incarnation_id.as_str()),
-        )
+        .bind(lease.session_lease_generation as i64)
         .execute(&mut *tx)
         .await
         .map_err(store_sqlx_error)?
@@ -1798,8 +1750,7 @@ async fn claim_pending_turn_inputs_postgres(
         owner: owner.clone(),
         lease_token: lease.lease_token,
         fencing_token: lease.fencing_token,
-        claimed_at_epoch_ms: lease.claimed_at_epoch_ms,
-        expires_at_epoch_ms: lease.expires_at_epoch_ms,
+        session_lease_generation: lease.session_lease_generation,
         mode,
         inputs,
     }))

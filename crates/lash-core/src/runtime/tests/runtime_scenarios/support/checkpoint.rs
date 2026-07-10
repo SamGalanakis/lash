@@ -36,7 +36,7 @@ impl RuntimeScenarioContext {
             let (owner, lease) = self.owner_and_lease();
             assert!(
                 self.store()
-                    .claim_next_turn_inputs(self.session_id, &lease.fence(), owner, 60_000, 10)
+                    .claim_next_turn_inputs(self.session_id, &lease.fence(), owner, 10)
                     .await
                     .unwrap_or_else(|err| panic!(
                         "{} failed to claim next-turn inputs after cancellation: {err}",

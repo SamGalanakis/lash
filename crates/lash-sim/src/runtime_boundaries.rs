@@ -11,11 +11,11 @@ use lash_core::runtime::{
 use lash_core::{
     DeliveryPolicy, ExecResponse, ExecutionScope, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey,
     PreparedToolCall, ProcessAwaitOutput, ProcessInput, ProcessProvenance, ProcessRegistration,
-    ProcessRegistry, RecoveryDisposition, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimePersistence, SessionExecutionLeaseClaimOutcome, SessionRelation,
-    SessionScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, ToolAttemptLaunch,
-    ToolCallOutput, ToolCallRecord, ToolId,
+    ProcessRegistry, RecoveryDisposition, RuntimeCommit, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor,
+    RuntimeEffectOutcome, RuntimeInvocation, RuntimePersistence, RuntimeSessionState,
+    SessionExecutionLeaseClaimOutcome, SessionRelation, SessionScope, SessionStoreCreateRequest,
+    SessionStoreFactory, SlotPolicy, ToolAttemptLaunch, ToolCallOutput, ToolCallRecord, ToolId,
 };
 use serde_json::{Value, json};
 
@@ -92,7 +92,7 @@ pub struct RuntimeBoundaryHarness {
     effect_replay_store: RuntimeEffectReplayStore,
     effect_controller: Option<Arc<dyn RuntimeEffectController>>,
     durable_entries: BTreeMap<String, DurableEntry>,
-    process_wake_claimed_batches: BTreeSet<String>,
+    process_wake_delivered_dedupe_keys: BTreeSet<String>,
     worker_process_registry: Option<Arc<dyn ProcessRegistry>>,
 }
 
@@ -106,7 +106,7 @@ impl RuntimeBoundaryHarness {
             effect_replay_store,
             effect_controller: None,
             durable_entries: BTreeMap::new(),
-            process_wake_claimed_batches: BTreeSet::new(),
+            process_wake_delivered_dedupe_keys: BTreeSet::new(),
             worker_process_registry: None,
         }
     }
@@ -500,6 +500,17 @@ impl RuntimeBoundaryHarness {
                 }));
             }
         };
+        // A wake redelivered with the same dedupe_key must be claimed exactly
+        // once. Under the old model the first claim stayed live for its TTL and
+        // blocked the duplicate; generation fencing makes a claim non-live once
+        // its owner releases the session lease, so a later delivery under a fresh
+        // generation could re-claim a released-but-uncompleted batch. This driver
+        // dedups redeliveries the way the process wake-ack layer does, and it
+        // settles the claimed wake below so it never lingers as reclaimable
+        // queued work that a subsequent runtime turn would double-claim.
+        let duplicate = self
+            .process_wake_delivered_dedupe_keys
+            .contains(&dedupe_key);
         let batch = store
             .enqueue_queued_work(
                 QueuedWorkBatchDraft::new(
@@ -513,17 +524,22 @@ impl RuntimeBoundaryHarness {
             )
             .await
             .map_err(|err| RuntimeBoundaryError::new(format!("enqueue wake failed: {err}")))?;
-        let claim = store
-            .claim_ready_queued_work_by_batch_ids(
-                &session,
-                &lease.fence(),
-                &owner,
-                QueuedWorkClaimBoundary::Idle,
-                LEASE_TTL_MS,
-                std::slice::from_ref(&batch.batch_id),
-            )
-            .await
-            .map_err(|err| RuntimeBoundaryError::new(format!("claim queued wake failed: {err}")))?;
+        let claim = if duplicate {
+            None
+        } else {
+            store
+                .claim_ready_queued_work_by_batch_ids(
+                    &session,
+                    &lease.fence(),
+                    &owner,
+                    QueuedWorkClaimBoundary::Idle,
+                    std::slice::from_ref(&batch.batch_id),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeBoundaryError::new(format!("claim queued wake failed: {err}"))
+                })?
+        };
         store
             .release_session_execution_lease(&lease.completion())
             .await
@@ -533,9 +549,42 @@ impl RuntimeBoundaryHarness {
                 ))
             })?;
         let claimed_once = claim.is_some();
+        if let Some(claim) = &claim {
+            // Consume the delivered wake: hand the claim back and remove the
+            // now-unheld batch so it is not reclaimable after this delivery. This
+            // mirrors the real runtime settling a claimed wake in its turn, and
+            // keeps a redelivery from surfacing the same work to another claimant.
+            store
+                .abandon_queued_work_claim(claim)
+                .await
+                .map_err(|err| {
+                    RuntimeBoundaryError::new(format!("abandon delivered wake claim failed: {err}"))
+                })?;
+        }
+        // Remove the batch this delivery enqueued (whether it was claimed here or
+        // was a redelivery of an already-consumed wake) so no lingering queued
+        // work leaks to a later claimant.
+        let settled = store
+            .cancel_queued_work_batch(&session, &batch.batch_id)
+            .await
+            .map_err(|err| {
+                RuntimeBoundaryError::new(format!("settle delivered wake batch failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                RuntimeBoundaryError::new(format!(
+                    "settle delivered wake batch returned no removal for `{}`",
+                    batch.batch_id
+                ))
+            })?;
+        if settled.batch_id != batch.batch_id {
+            return Err(RuntimeBoundaryError::new(format!(
+                "settle delivered wake removed `{}` instead of `{}`",
+                settled.batch_id, batch.batch_id
+            )));
+        }
         if claimed_once {
-            self.process_wake_claimed_batches
-                .insert(batch.batch_id.clone());
+            self.process_wake_delivered_dedupe_keys
+                .insert(dedupe_key.clone());
         }
         Ok(json!({
             "session": session,
@@ -896,7 +945,6 @@ impl RuntimeBoundaryHarness {
                 &lease.fence(),
                 owner,
                 QueuedWorkClaimBoundary::Idle,
-                LEASE_TTL_MS,
                 std::slice::from_ref(&batch.batch_id),
             )
             .await
@@ -926,21 +974,16 @@ impl RuntimeBoundaryHarness {
         lease: &lash_core::SessionExecutionLease,
         work: &WorkerOwnedWork,
     ) -> Result<WorkerFailover, RuntimeBoundaryError> {
-        // The crashed worker's claim is released on takeover so the work is
-        // reclaimable by the new lease owner.
-        store
-            .abandon_queued_work_claim(&work.claim)
-            .await
-            .map_err(|err| {
-                RuntimeBoundaryError::new(format!("release crashed worker claim failed: {err}"))
-            })?;
+        // The crashed worker's claim remains attached to the row here. The
+        // successor must reclaim through the generation-mismatch predicate;
+        // clearing the claim first would reduce this proof to the unclaimed-row
+        // path and mask a broken generation cutover.
         let resumed = store
             .claim_ready_queued_work_by_batch_ids(
                 session,
                 &lease.fence(),
                 owner,
                 QueuedWorkClaimBoundary::Idle,
-                LEASE_TTL_MS,
                 std::slice::from_ref(&work.batch_id),
             )
             .await
@@ -952,13 +995,24 @@ impl RuntimeBoundaryHarness {
                     "second worker could not resume the crashed worker's queued work".to_string(),
                 )
             })?;
-        // The dead owner's late completion (a renewal of its now-superseded
-        // claim) must be rejected as expired, never silently accepted.
+        // The dead owner's late completion of its now-superseded claim must be
+        // rejected, never silently accepted. The reclaim under the live lease
+        // rewrote the batch's claim id + lease token, so settling the crashed
+        // worker's original claim through the runtime commit path is rejected as
+        // superseded (ADR 0029).
+        let stale_state = RuntimeSessionState {
+            session_id: session.to_string(),
+            ..RuntimeSessionState::default()
+        };
         let stale_work_completion_rejected = matches!(
             store
-                .renew_queued_work_claim(&work.claim, LEASE_TTL_MS)
+                .commit_runtime_state(
+                    RuntimeCommit::persisted_state(&stale_state, &[])
+                        .with_session_execution_lease(lease.fence())
+                        .completing_queue_claim(work.claim.completion()),
+                )
                 .await,
-            Err(lash_core::StoreError::QueuedWorkClaimExpired { .. })
+            Err(lash_core::StoreError::QueuedWorkClaimSuperseded { .. })
         );
         if !stale_work_completion_rejected {
             return Err(RuntimeBoundaryError::new(
@@ -966,9 +1020,27 @@ impl RuntimeBoundaryHarness {
                     .to_string(),
             ));
         }
+        let resumed_claim_fencing_token = resumed.fencing_token;
+        // Settle the resumed work so it does not linger as reclaimable queued
+        // work once this boundary releases the worker's session lease. Under
+        // generation fencing a released-but-uncompleted claim is reclaimable, so
+        // an unsettled batch would otherwise be double-claimed by a later runtime
+        // turn. Hand the claim back and remove the now-unheld batch.
+        store
+            .abandon_queued_work_claim(&resumed)
+            .await
+            .map_err(|err| {
+                RuntimeBoundaryError::new(format!("abandon resumed worker claim failed: {err}"))
+            })?;
+        store
+            .cancel_queued_work_batch(session, &work.batch_id)
+            .await
+            .map_err(|err| {
+                RuntimeBoundaryError::new(format!("settle resumed worker batch failed: {err}"))
+            })?;
         Ok(WorkerFailover {
             resumed_by_second_owner: true,
-            resumed_claim_fencing_token: resumed.fencing_token,
+            resumed_claim_fencing_token,
             stale_work_completion_rejected,
         })
     }

@@ -52,11 +52,12 @@ pub struct RuntimeControlConfig {
     pub effect_host: Arc<dyn EffectHost>,
     pub process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
     pub termination: TerminationPolicy,
-    /// Lease/claim timing capability for every durable single-writer lane this
-    /// runtime claims: session execution leases, turn-input and queued-work
-    /// claims, and process leases. Effect-replay backends accept the same type
-    /// at construction. Defaults to [`LeaseTimings::default`] (30s TTL / 10s
-    /// renew).
+    /// Lease timing capability for every durable single-writer *lease* lane this
+    /// runtime renews on a cadence: session execution leases, process leases,
+    /// and durable effect-replay leases. Queued-work and turn-input claims are
+    /// not leases and carry no TTL — they are generation-fenced under the
+    /// session execution lease (ADR 0029). Defaults to [`LeaseTimings::default`]
+    /// (30s TTL / 10s renew).
     pub lease_timings: crate::LeaseTimings,
 }
 

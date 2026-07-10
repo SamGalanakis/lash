@@ -143,7 +143,10 @@ where
     queued_work_cancel_removes_only_unclaimed_batches(make()).await;
     queued_work_exact_claim_uses_selected_batch_ids(make()).await;
     queued_work_classes_gate_command_and_turn_claims(make()).await;
-    queued_work_claims_respect_boundaries_renewal_and_abandon(make()).await;
+    queued_work_claims_respect_boundaries_abandon_and_stale_completion(make()).await;
+    queued_work_claims_supersede_across_session_lease_generations(make()).await;
+    claim_liveness_for_lease_less_paths_tracks_session_generations(make()).await;
+    same_generation_claim_scans_reach_rows_beyond_the_scan_surplus(make()).await;
     queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions(make()).await;
     queued_work_join_groups_by_delivery_policy_and_merge_key(make()).await;
     queued_work_completion_is_lease_guarded(make()).await;
@@ -153,6 +156,7 @@ where
     pending_turn_inputs_source_keys_order_cancel_and_cross_session(make()).await;
     pending_turn_input_bulk_and_suffix_cancellation(make()).await;
     pending_turn_input_claims_reclaim_complete_and_fence(make()).await;
+    turn_input_claims_supersede_across_session_lease_generations(make()).await;
     pending_turn_input_cancel_covers_active_and_deferred_states(make()).await;
     pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(make()).await;
     // [`StoreMaintenance`]: tombstone/vacuum/GC retention.
@@ -682,7 +686,6 @@ async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
             &commit_lease.fence(),
             &lease_owner("queue-owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             1,
         )
         .await
@@ -698,7 +701,6 @@ async fn session_execution_lease_contract(store: Arc<dyn RuntimePersistence>) {
             &queue_lease.fence(),
             &lease_owner("queue-owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             1,
         )
         .await
@@ -1291,14 +1293,15 @@ async fn queued_work_cancel_removes_only_unclaimed_batches(store: Arc<dyn Runtim
             &session_lease.fence(),
             &lease_owner("owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             1,
         )
         .await
         .expect("claim batch")
         .expect("claim exists");
-    release_session_execution_lease_for_test(&store, &session_lease).await;
     assert_eq!(claim.batches[0].batch_id, claimed.batch_id);
+    // The session lease stays live here: a claim is live for lease-less host
+    // callers exactly while the generation it pins still holds the session lease
+    // (ADR 0029), so the hiding/cancel guards below must observe a live lease.
     assert!(
         store
             .list_pending_queued_work("root")
@@ -1328,6 +1331,7 @@ async fn queued_work_cancel_removes_only_unclaimed_batches(store: Arc<dyn Runtim
         .abandon_queued_work_claim(&claim)
         .await
         .expect("abandon claim");
+    release_session_execution_lease_for_test(&store, &session_lease).await;
     assert_eq!(
         store
             .list_pending_queued_work("root")
@@ -1376,7 +1380,6 @@ async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimeP
                 &rejected_session_lease.fence(),
                 &lease_owner("owner"),
                 QueuedWorkClaimBoundary::Idle,
-                60_000,
                 std::slice::from_ref(&second.batch_id),
             )
             .await
@@ -1404,13 +1407,11 @@ async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimeP
             &accepted_session_lease.fence(),
             &lease_owner("owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             std::slice::from_ref(&first.batch_id),
         )
         .await
         .expect("claim first exact batch")
         .expect("first exact claim exists");
-    release_session_execution_lease_for_test(&store, &accepted_session_lease).await;
     assert_eq!(
         claim
             .batches
@@ -1419,6 +1420,9 @@ async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimeP
             .collect::<Vec<_>>(),
         vec![first.batch_id.as_str()]
     );
+    // The claim only hides `first` from the pending snapshot while its pinned
+    // session-lease generation is still live (ADR 0029), so keep the lease held
+    // across this assertion.
     assert_eq!(
         store
             .list_pending_queued_work("root")
@@ -1429,6 +1433,7 @@ async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimeP
             .collect::<Vec<_>>(),
         vec![second.batch_id.as_str()]
     );
+    release_session_execution_lease_for_test(&store, &accepted_session_lease).await;
 }
 
 async fn queued_work_classes_gate_command_and_turn_claims(store: Arc<dyn RuntimePersistence>) {
@@ -1455,7 +1460,6 @@ async fn queued_work_classes_gate_command_and_turn_claims(store: Arc<dyn Runtime
                 &rejected_turn_lease.fence(),
                 &lease_owner("turn-owner"),
                 QueuedWorkClaimBoundary::Idle,
-                60_000,
                 10,
             )
             .await
@@ -1472,7 +1476,6 @@ async fn queued_work_classes_gate_command_and_turn_claims(store: Arc<dyn Runtime
             "root",
             &command_lease.fence(),
             &lease_owner("command-owner"),
-            60_000,
         )
         .await
         .expect("claim leading command")
@@ -1507,7 +1510,6 @@ async fn queued_work_classes_gate_command_and_turn_claims(store: Arc<dyn Runtime
             &selected_turn_lease.fence(),
             &lease_owner("turn-owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             std::slice::from_ref(&turn.batch_id),
         )
         .await
@@ -1537,7 +1539,6 @@ async fn queued_work_classes_gate_command_and_turn_claims(store: Arc<dyn Runtime
                 "turn-first",
                 &rejected_command_lease.fence(),
                 &lease_owner("command-owner"),
-                60_000,
             )
             .await
             .expect("claim command behind turn")
@@ -1550,7 +1551,6 @@ async fn queued_work_classes_gate_command_and_turn_claims(store: Arc<dyn Runtime
             &rejected_command_lease.fence(),
             &lease_owner("command-owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
@@ -1577,7 +1577,7 @@ async fn queued_work_classes_gate_command_and_turn_claims(store: Arc<dyn Runtime
     );
 }
 
-async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
+async fn queued_work_claims_respect_boundaries_abandon_and_stale_completion(
     store: Arc<dyn RuntimePersistence>,
 ) {
     let after_commit = store
@@ -1599,16 +1599,17 @@ async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
         .await
         .expect("enqueue earliest work");
 
-    let checkpoint_empty_lease =
-        claim_session_execution_lease_for_test(&store, "root", "owner-a").await;
+    // A single live session lease governs the whole flow: a queued-work claim
+    // blocks the checkpoint boundary only while its own generation still holds
+    // the session lease (ADR 0029).
+    let session_lease = claim_session_execution_lease_for_test(&store, "root", "owner-a").await;
     assert!(
         store
             .claim_ready_queued_work(
                 "root",
-                &checkpoint_empty_lease.fence(),
+                &session_lease.fence(),
                 &lease_owner("owner-a"),
                 QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
-                60_000,
                 10,
             )
             .await
@@ -1616,76 +1617,518 @@ async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
             .is_none(),
         "after-current-commit work at the queue head must wait for the idle boundary"
     );
-    release_session_execution_lease_for_test(&store, &checkpoint_empty_lease).await;
 
-    let idle_session_lease =
-        claim_session_execution_lease_for_test(&store, "root", "owner-a").await;
     let idle_claim = store
         .claim_ready_queued_work(
             "root",
-            &idle_session_lease.fence(),
+            &session_lease.fence(),
             &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
         .expect("idle claim")
         .expect("idle claim exists");
-    release_session_execution_lease_for_test(&store, &idle_session_lease).await;
     assert_eq!(idle_claim.batches.len(), 1);
     assert_eq!(idle_claim.batches[0].batch_id, after_commit.batch_id);
 
-    let checkpoint_session_lease =
-        claim_session_execution_lease_for_test(&store, "root", "owner-b").await;
+    // With the after-commit head held by this generation's own live claim, the
+    // checkpoint boundary skips past it to the earliest-safe-boundary batch.
     let checkpoint_claim = store
         .claim_ready_queued_work(
             "root",
-            &checkpoint_session_lease.fence(),
-            &lease_owner("owner-b"),
+            &session_lease.fence(),
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
-            60_000,
             10,
         )
         .await
         .expect("checkpoint claim after head is leased")
         .expect("checkpoint claim exists");
-    release_session_execution_lease_for_test(&store, &checkpoint_session_lease).await;
     assert_eq!(checkpoint_claim.batches[0].batch_id, earliest.batch_id);
 
+    // Abandoning the idle claim frees the after-commit batch; reclaiming it under
+    // the same live lease advances the fencing token.
     store
         .abandon_queued_work_claim(&idle_claim)
         .await
         .expect("abandon idle claim");
-    let reclaim_session_lease =
-        claim_session_execution_lease_for_test(&store, "root", "owner-c").await;
     let reclaimed = store
         .claim_ready_queued_work(
             "root",
-            &reclaim_session_lease.fence(),
-            &lease_owner("owner-c"),
+            &session_lease.fence(),
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
         .expect("reclaim abandoned work")
         .expect("reclaimed work exists");
-    release_session_execution_lease_for_test(&store, &reclaim_session_lease).await;
     assert_eq!(reclaimed.batches[0].batch_id, after_commit.batch_id);
     assert!(
         reclaimed.fencing_token > idle_claim.fencing_token,
         "reclaiming abandoned work must advance the fencing token"
     );
+    release_session_execution_lease_for_test(&store, &session_lease).await;
 
-    let renewed = store
-        .renew_queued_work_claim(&reclaimed, 60_000)
+    // The pre-abandon claim's completion no longer owns any row: the reclaim
+    // rewrote the batch's claim id + lease token, so committing the stale
+    // completion is rejected as superseded (ADR 0029 keeps completion validation
+    // by claim id + lease token; the abandon+reclaim is what supersedes it).
+    let stale_state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let stale_err = commit_runtime_state_for_test(
+        &store,
+        RuntimeCommit::persisted_state(&stale_state, &[])
+            .completing_queue_claim(idle_claim.completion()),
+        "owner-d",
+    )
+    .await
+    .expect_err("stale pre-abandon completion must be rejected");
+    assert!(
+        matches!(stale_err, StoreError::QueuedWorkClaimSuperseded { .. }),
+        "stale completion produced the wrong error: {stale_err:?}"
+    );
+    assert_eq!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("rejected stale completion preserves queued work")
+            .len(),
+        2,
+        "rejected stale completion must not delete the reclaimed batch"
+    );
+}
+
+async fn queued_work_claims_supersede_across_session_lease_generations(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let batch = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "generation work",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
         .await
-        .expect("renew queued work claim");
-    assert_eq!(renewed.claim_id, reclaimed.claim_id);
-    assert_eq!(renewed.lease_token, reclaimed.lease_token);
-    assert_eq!(renewed.batches[0].batch_id, reclaimed.batches[0].batch_id);
-    assert!(renewed.expires_at_epoch_ms >= reclaimed.expires_at_epoch_ms);
+        .expect("enqueue generation work");
+
+    // (a) Same generation: a live claim cannot re-claim its own row. The
+    // caller's validated-live fence generation matches the row's pinned
+    // generation, so self-steal is unrepresentable (ADR 0029).
+    let lease_a = claim_session_execution_lease_for_test(&store, "root", "gen-owner-a").await;
+    let claim_a = store
+        .claim_ready_queued_work(
+            "root",
+            &lease_a.fence(),
+            &lease_owner("gen-owner-a"),
+            QueuedWorkClaimBoundary::Idle,
+            10,
+        )
+        .await
+        .expect("first-generation claim")
+        .expect("first-generation claim exists");
+    assert_eq!(claim_a.batches[0].batch_id, batch.batch_id);
+    assert_eq!(claim_a.session_lease_generation, lease_a.fencing_token);
+    assert!(
+        store
+            .claim_ready_queued_work(
+                "root",
+                &lease_a.fence(),
+                &lease_owner("gen-owner-a"),
+                QueuedWorkClaimBoundary::Idle,
+                10,
+            )
+            .await
+            .expect("same-generation re-claim")
+            .is_none(),
+        "a live claim must not be re-claimable under its own session-lease generation"
+    );
+
+    // (b) Release + re-acquire mints a new generation; the batch is claimable by
+    // it and the old generation's completion is superseded.
+    release_session_execution_lease_for_test(&store, &lease_a).await;
+    let lease_b = claim_session_execution_lease_for_test(&store, "root", "gen-owner-b").await;
+    assert!(
+        lease_b.fencing_token > lease_a.fencing_token,
+        "re-acquisition must mint a fresh generation"
+    );
+    let claim_b = store
+        .claim_ready_queued_work(
+            "root",
+            &lease_b.fence(),
+            &lease_owner("gen-owner-b"),
+            QueuedWorkClaimBoundary::Idle,
+            10,
+        )
+        .await
+        .expect("next-generation reclaim")
+        .expect("next-generation reclaim exists");
+    assert_eq!(claim_b.batches[0].batch_id, batch.batch_id);
+    assert!(claim_b.fencing_token > claim_a.fencing_token);
+
+    let stale_state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let stale_err = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&stale_state, &[])
+                .with_session_execution_lease(lease_b.fence())
+                .completing_queue_claim(claim_a.completion()),
+        )
+        .await
+        .expect_err("superseded-generation completion must fail");
+    assert!(matches!(
+        stale_err,
+        StoreError::QueuedWorkClaimSuperseded { .. }
+    ));
+    release_session_execution_lease_for_test(&store, &lease_b).await;
+
+    // (c) A dead-owner takeover mints a new generation without any release, so
+    // the pre-takeover claim is superseded the same way.
+    let pid = std::process::id();
+    let dead_owner = local_lease_owner(
+        "gen-dead",
+        "gen-dead:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "not-the-current-process-start",
+    );
+    let dead_lease = store
+        .try_claim_session_execution_lease("root", &dead_owner, 60_000)
+        .await
+        .expect("claim dead-owner lease")
+        .acquired()
+        .expect("dead-owner lease acquired");
+    let claim_dead = store
+        .claim_ready_queued_work(
+            "root",
+            &dead_lease.fence(),
+            &dead_owner,
+            QueuedWorkClaimBoundary::Idle,
+            10,
+        )
+        .await
+        .expect("dead-owner claim")
+        .expect("dead-owner claim exists");
+    let taker = local_lease_owner(
+        "gen-taker",
+        "gen-taker:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "gen-taker-start",
+    );
+    let taker_lease = store
+        .reclaim_session_execution_lease("root", &taker, &dead_lease.fence(), 60_000)
+        .await
+        .expect("reclaim dead owner")
+        .acquired()
+        .expect("dead owner is reclaimable");
+    assert!(taker_lease.fencing_token > dead_lease.fencing_token);
+    let claim_taker = store
+        .claim_ready_queued_work(
+            "root",
+            &taker_lease.fence(),
+            &taker,
+            QueuedWorkClaimBoundary::Idle,
+            10,
+        )
+        .await
+        .expect("post-takeover claim")
+        .expect("post-takeover claim exists");
+    assert_eq!(claim_taker.batches[0].batch_id, batch.batch_id);
+    let takeover_err = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&stale_state, &[])
+                .with_session_execution_lease(taker_lease.fence())
+                .completing_queue_claim(claim_dead.completion()),
+        )
+        .await
+        .expect_err("pre-takeover completion must fail");
+    assert!(matches!(
+        takeover_err,
+        StoreError::QueuedWorkClaimSuperseded { .. }
+    ));
+}
+
+async fn claim_both_generation_fenced_lanes(
+    store: &Arc<dyn RuntimePersistence>,
+    session_id: &str,
+    owner: &crate::LeaseOwnerIdentity,
+    lease_ttl_ms: u64,
+) -> (
+    QueuedWorkBatch,
+    crate::PendingTurnInput,
+    crate::SessionExecutionLease,
+    crate::QueuedWorkClaim,
+    crate::TurnInputClaim,
+) {
+    let batch = store
+        .enqueue_queued_work(queued_draft(
+            session_id,
+            "lease-less liveness work",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue generation-fenced queued work");
+    let input = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft(
+            session_id,
+            "lease-less liveness input",
+        ))
+        .await
+        .expect("enqueue generation-fenced turn input");
+    let lease = store
+        .try_claim_session_execution_lease(session_id, owner, lease_ttl_ms)
+        .await
+        .expect("claim session lease for both claim lanes")
+        .acquired()
+        .expect("session lease for both claim lanes is free");
+    let queue_claim = store
+        .claim_ready_queued_work(
+            session_id,
+            &lease.fence(),
+            owner,
+            QueuedWorkClaimBoundary::Idle,
+            1,
+        )
+        .await
+        .expect("claim generation-fenced queued work")
+        .expect("generation-fenced queued work claim exists");
+    let input_claim = store
+        .claim_next_turn_inputs(session_id, &lease.fence(), owner, 1)
+        .await
+        .expect("claim generation-fenced turn input")
+        .expect("generation-fenced turn input claim exists");
+    (batch, input, lease, queue_claim, input_claim)
+}
+
+async fn assert_both_retained_claims_are_visible_and_cancellable(
+    store: &Arc<dyn RuntimePersistence>,
+    session_id: &str,
+    batch: &QueuedWorkBatch,
+    input: &crate::PendingTurnInput,
+) {
+    assert_eq!(
+        store
+            .list_pending_queued_work(session_id)
+            .await
+            .expect("list queued work after claim generation stopped being live")
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![batch.batch_id.as_str()],
+        "a queued-work claim whose generation is no longer live must be visible"
+    );
+    assert_eq!(
+        store
+            .list_pending_turn_inputs(session_id)
+            .await
+            .expect("list turn inputs after claim generation stopped being live")
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![input.input_id.as_str()],
+        "a turn-input claim whose generation is no longer live must be visible"
+    );
+    let cancelled_batch = store
+        .cancel_queued_work_batch(session_id, &batch.batch_id)
+        .await
+        .expect("cancel queued work after claim generation stopped being live")
+        .expect("queued work with a non-live claim generation is cancellable");
+    assert_eq!(cancelled_batch.batch_id, batch.batch_id);
+    let cancelled_input = store
+        .cancel_pending_turn_input(session_id, &input.input_id)
+        .await
+        .expect("cancel turn input after claim generation stopped being live");
+    expect_cancelled_pending_input(cancelled_input, &input.input_id);
+}
+
+async fn claim_liveness_for_lease_less_paths_tracks_session_generations(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    // Release: retain both claim rows, then clear the lease token without
+    // abandoning either claim. Lease-less paths must immediately treat both
+    // rows as pending again.
+    let release_owner = lease_owner("lease-less-release-owner");
+    let (batch, input, lease, _queue_claim, _input_claim) =
+        claim_both_generation_fenced_lanes(&store, "lease-less-release", &release_owner, 60_000)
+            .await;
+    release_session_execution_lease_for_test(&store, &lease).await;
+    assert_both_retained_claims_are_visible_and_cancellable(
+        &store,
+        "lease-less-release",
+        &batch,
+        &input,
+    )
+    .await;
+
+    // Expiry: the lease row still carries the generation, but its token is no
+    // longer live once the TTL elapses. The correlated SQL predicates must not
+    // mistake generation equality alone for a live claim.
+    let expiry_owner = lease_owner("lease-less-expiry-owner");
+    let (batch, input, _lease, _queue_claim, _input_claim) =
+        claim_both_generation_fenced_lanes(&store, "lease-less-expiry", &expiry_owner, 1_000).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    assert_both_retained_claims_are_visible_and_cancellable(
+        &store,
+        "lease-less-expiry",
+        &batch,
+        &input,
+    )
+    .await;
+
+    // Dead-owner takeover: the lease stays live but advances to a different
+    // generation. Claims retained from the dead generation are no longer live
+    // for lease-less callers even before a successor reclaims the rows.
+    let pid = std::process::id();
+    let dead_owner = local_lease_owner(
+        "lease-less-dead",
+        "lease-less-dead:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "not-the-current-process-start",
+    );
+    let (batch, input, dead_lease, _queue_claim, _input_claim) =
+        claim_both_generation_fenced_lanes(&store, "lease-less-takeover", &dead_owner, 60_000)
+            .await;
+    let taker = local_lease_owner(
+        "lease-less-taker",
+        "lease-less-taker:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "lease-less-taker-start",
+    );
+    let taker_lease = store
+        .reclaim_session_execution_lease("lease-less-takeover", &taker, &dead_lease.fence(), 60_000)
+        .await
+        .expect("take over lease for lease-less liveness checks")
+        .acquired()
+        .expect("dead owner is reclaimable for lease-less liveness checks");
+    assert_both_retained_claims_are_visible_and_cancellable(
+        &store,
+        "lease-less-takeover",
+        &batch,
+        &input,
+    )
+    .await;
+    release_session_execution_lease_for_test(&store, &taker_lease).await;
+}
+
+async fn same_generation_claim_scans_reach_rows_beyond_the_scan_surplus(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    const ROW_COUNT: usize = 34;
+
+    let queue_session = "bounded-scan-queue";
+    let queue_owner = lease_owner("bounded-scan-queue-owner");
+    let mut queue_batches = Vec::with_capacity(ROW_COUNT);
+    for index in 0..ROW_COUNT {
+        queue_batches.push(
+            store
+                .enqueue_queued_work(queued_draft(
+                    queue_session,
+                    &format!("bounded queue {index}"),
+                    DeliveryPolicy::EarliestSafeBoundary,
+                    SlotPolicy::Exclusive,
+                ))
+                .await
+                .expect("enqueue bounded-scan queued work"),
+        );
+    }
+    let queue_lease = store
+        .try_claim_session_execution_lease(queue_session, &queue_owner, 60_000)
+        .await
+        .expect("claim bounded-scan queue session lease")
+        .acquired()
+        .expect("bounded-scan queue session lease is free");
+    for expected in &queue_batches {
+        let claim = store
+            .claim_ready_queued_work(
+                queue_session,
+                &queue_lease.fence(),
+                &queue_owner,
+                QueuedWorkClaimBoundary::Idle,
+                1,
+            )
+            .await
+            .expect("claim bounded-scan queued work")
+            .expect("bounded-scan queued work remains reachable");
+        assert_eq!(claim.batches[0].batch_id, expected.batch_id);
+    }
+    release_session_execution_lease_for_test(&store, &queue_lease).await;
+
+    let command_session = "bounded-scan-command";
+    let command_owner = lease_owner("bounded-scan-command-owner");
+    let mut command_batches = Vec::with_capacity(ROW_COUNT);
+    for index in 0..ROW_COUNT {
+        command_batches.push(
+            store
+                .enqueue_queued_work(queued_session_command_draft(
+                    command_session,
+                    &format!("bounded command {index}"),
+                ))
+                .await
+                .expect("enqueue bounded-scan session command"),
+        );
+    }
+    let command_lease = store
+        .try_claim_session_execution_lease(command_session, &command_owner, 60_000)
+        .await
+        .expect("claim bounded-scan command session lease")
+        .acquired()
+        .expect("bounded-scan command session lease is free");
+    for expected in &command_batches {
+        let claim = store
+            .claim_leading_ready_session_command(
+                command_session,
+                &command_lease.fence(),
+                &command_owner,
+            )
+            .await
+            .expect("claim bounded-scan session command")
+            .expect("bounded-scan session command remains reachable");
+        assert_eq!(claim.batches[0].batch_id, expected.batch_id);
+    }
+    release_session_execution_lease_for_test(&store, &command_lease).await;
+
+    let input_session = "bounded-scan-turn-input";
+    let input_owner = lease_owner("bounded-scan-turn-input-owner");
+    let mut inputs = Vec::with_capacity(ROW_COUNT);
+    for index in 0..ROW_COUNT {
+        inputs.push(
+            store
+                .enqueue_pending_turn_input(pending_next_turn_input_draft(
+                    input_session,
+                    &format!("bounded turn input {index}"),
+                ))
+                .await
+                .expect("enqueue bounded-scan turn input"),
+        );
+    }
+    let input_lease = store
+        .try_claim_session_execution_lease(input_session, &input_owner, 60_000)
+        .await
+        .expect("claim bounded-scan turn-input session lease")
+        .acquired()
+        .expect("bounded-scan turn-input session lease is free");
+    for expected in &inputs {
+        let claim = store
+            .claim_next_turn_inputs(input_session, &input_lease.fence(), &input_owner, 1)
+            .await
+            .expect("claim bounded-scan turn input")
+            .expect("bounded-scan turn input remains reachable");
+        assert_eq!(claim.inputs[0].input_id, expected.input_id);
+    }
+    release_session_execution_lease_for_test(&store, &input_lease).await;
 }
 
 async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions(
@@ -1734,6 +2177,9 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         .await
         .expect("enqueue other session work");
 
+    // Both root claims run under one live session lease: advancing through the
+    // queue relies on each claimed batch staying held by the current generation,
+    // so a same-generation follow-up claim skips it (ADR 0029).
     let root_session_lease =
         claim_session_execution_lease_for_test(&store, "root", "owner-a").await;
     let claim = store
@@ -1742,13 +2188,11 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
             &root_session_lease.fence(),
             &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
         .expect("claim root")
         .expect("root claim");
-    release_session_execution_lease_for_test(&store, &root_session_lease).await;
     assert_eq!(
         claim
             .batches
@@ -1758,21 +2202,18 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         vec![exclusive.batch_id.as_str()],
         "an exclusive batch must claim alone and unavailable earlier work must be skipped"
     );
-    let next_root_session_lease =
-        claim_session_execution_lease_for_test(&store, "root", "owner-b").await;
     let next_root = store
         .claim_ready_queued_work(
             "root",
-            &next_root_session_lease.fence(),
-            &lease_owner("owner-b"),
+            &root_session_lease.fence(),
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
         .expect("claim joined")
         .expect("joined claim");
-    release_session_execution_lease_for_test(&store, &next_root_session_lease).await;
+    release_session_execution_lease_for_test(&store, &root_session_lease).await;
     assert_eq!(next_root.batches[0].batch_id, joined.batch_id);
     let other_session_lease =
         claim_session_execution_lease_for_test(&store, "other", "owner-c").await;
@@ -1782,7 +2223,6 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
             &other_session_lease.fence(),
             &lease_owner("owner-c"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
@@ -1797,27 +2237,26 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
     let reclaimed_source = store
         .enqueue_queued_work(queued_draft(
             "reclaim",
-            "expired claim",
+            "superseded claim",
             DeliveryPolicy::EarliestSafeBoundary,
             SlotPolicy::Exclusive,
         ))
         .await
         .expect("enqueue reclaim work");
-    let expired_session_lease =
+    let first_generation_lease =
         claim_session_execution_lease_for_test(&store, "reclaim", "owner-a").await;
-    let expired = store
+    let first_generation_claim = store
         .claim_ready_queued_work(
             "reclaim",
-            &expired_session_lease.fence(),
+            &first_generation_lease.fence(),
             &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            0,
             1,
         )
         .await
-        .expect("claim with zero ttl")
-        .expect("expired claim");
-    release_session_execution_lease_for_test(&store, &expired_session_lease).await;
+        .expect("claim under the first generation")
+        .expect("first-generation claim");
+    release_session_execution_lease_for_test(&store, &first_generation_lease).await;
     let reclaim_session_lease =
         claim_session_execution_lease_for_test(&store, "reclaim", "owner-b").await;
     let reclaimed = store
@@ -1826,17 +2265,16 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
             &reclaim_session_lease.fence(),
             &lease_owner("owner-b"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             1,
         )
         .await
-        .expect("reclaim expired")
-        .expect("reclaimed expired claim");
+        .expect("reclaim under a new generation")
+        .expect("reclaimed superseded claim");
     release_session_execution_lease_for_test(&store, &reclaim_session_lease).await;
     assert_eq!(reclaimed.batches[0].batch_id, reclaimed_source.batch_id);
     assert!(
-        reclaimed.fencing_token > expired.fencing_token,
-        "reclaiming an expired queued-work claim must bump the fencing token"
+        reclaimed.fencing_token > first_generation_claim.fencing_token,
+        "reclaiming a claim across a session-lease generation must bump the fencing token"
     );
 
     let limited_first = store
@@ -1875,6 +2313,8 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         )
         .await
         .expect("enqueue limited three");
+    // One live lease: the capped claim keeps the first two batches held, so the
+    // same-generation follow-up claim only sees the third (ADR 0029).
     let limited_session_lease =
         claim_session_execution_lease_for_test(&store, "limited", "owner").await;
     let limited = store
@@ -1883,13 +2323,11 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
             &limited_session_lease.fence(),
             &lease_owner("owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             2,
         )
         .await
         .expect("limited claim")
         .expect("limited claim exists");
-    release_session_execution_lease_for_test(&store, &limited_session_lease).await;
     assert_eq!(
         limited
             .batches
@@ -1902,21 +2340,18 @@ async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions
         ],
         "max_batches must cap a join claim"
     );
-    let remaining_session_lease =
-        claim_session_execution_lease_for_test(&store, "limited", "owner-next").await;
     let remaining = store
         .claim_ready_queued_work(
             "limited",
-            &remaining_session_lease.fence(),
-            &lease_owner("owner-next"),
+            &limited_session_lease.fence(),
+            &lease_owner("owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
         .expect("remaining claim")
         .expect("remaining claim exists");
-    release_session_execution_lease_for_test(&store, &remaining_session_lease).await;
+    release_session_execution_lease_for_test(&store, &limited_session_lease).await;
     assert_eq!(remaining.batches[0].batch_id, limited_third.batch_id);
 }
 
@@ -1972,21 +2407,21 @@ async fn queued_work_join_groups_by_delivery_policy_and_merge_key(
         .await
         .expect("enqueue after-commit");
 
-    let first_session_lease =
-        claim_session_execution_lease_for_test(&store, "root", "owner-a").await;
+    // All three group claims run under one live session lease so each claimed
+    // group stays held by the current generation and the next same-generation
+    // claim advances to the following group (ADR 0029).
+    let session_lease = claim_session_execution_lease_for_test(&store, "root", "owner-a").await;
     let first_claim = store
         .claim_ready_queued_work(
             "root",
-            &first_session_lease.fence(),
+            &session_lease.fence(),
             &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
         .expect("claim first group")
         .expect("first group claim");
-    release_session_execution_lease_for_test(&store, &first_session_lease).await;
     assert_eq!(
         first_claim
             .batches
@@ -1996,37 +2431,30 @@ async fn queued_work_join_groups_by_delivery_policy_and_merge_key(
         vec![first.batch_id.as_str(), second.batch_id.as_str()],
         "join claims must group only adjacent batches with the same delivery policy and merge key"
     );
-    let second_session_lease =
-        claim_session_execution_lease_for_test(&store, "root", "owner-b").await;
     let second_claim = store
         .claim_ready_queued_work(
             "root",
-            &second_session_lease.fence(),
-            &lease_owner("owner-b"),
+            &session_lease.fence(),
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
         .expect("claim second group")
         .expect("second group claim");
-    release_session_execution_lease_for_test(&store, &second_session_lease).await;
     assert_eq!(second_claim.batches[0].batch_id, different_merge.batch_id);
-    let third_session_lease =
-        claim_session_execution_lease_for_test(&store, "root", "owner-c").await;
     let third_claim = store
         .claim_ready_queued_work(
             "root",
-            &third_session_lease.fence(),
-            &lease_owner("owner-c"),
+            &session_lease.fence(),
+            &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
         .expect("claim third group")
         .expect("third group claim");
-    release_session_execution_lease_for_test(&store, &third_session_lease).await;
+    release_session_execution_lease_for_test(&store, &session_lease).await;
     assert_eq!(third_claim.batches[0].batch_id, different_delivery.batch_id);
 }
 
@@ -2063,7 +2491,6 @@ async fn queued_work_completion_is_lease_guarded(store: Arc<dyn RuntimePersisten
             &claim_session_lease.fence(),
             &lease_owner("owner-a"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await
@@ -2092,7 +2519,7 @@ async fn queued_work_completion_is_lease_guarded(store: Arc<dyn RuntimePersisten
         )
         .await
         .expect_err("stale queued-work completion must fail");
-    assert!(matches!(err, StoreError::QueuedWorkClaimExpired { .. }));
+    assert!(matches!(err, StoreError::QueuedWorkClaimSuperseded { .. }));
     assert_eq!(
         store
             .list_queued_work("root")
@@ -2137,7 +2564,6 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
             &session_lease.fence(),
             &lease_owner("queue-owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             1,
         )
         .await
@@ -2164,7 +2590,7 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
         )
         .await
         .expect_err("stale queue completion must reject the whole final commit");
-    assert!(matches!(err, StoreError::QueuedWorkClaimExpired { .. }));
+    assert!(matches!(err, StoreError::QueuedWorkClaimSuperseded { .. }));
     assert!(
         store
             .load_session(SessionReadScope::FullGraph)
@@ -2442,7 +2868,6 @@ async fn pending_turn_input_bulk_and_suffix_cancellation(store: Arc<dyn RuntimeP
             &lease_owner("suffix-cancel-owner"),
             "suffix-active-turn",
             crate::CheckpointKind::AfterWork,
-            60_000,
             10,
         )
         .await
@@ -2538,13 +2963,7 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
         .expect("enqueue second next input");
     let lease = claim_session_execution_lease_for_test(&store, "root", "turn-input-owner").await;
     let claim = store
-        .claim_next_turn_inputs(
-            "root",
-            &lease.fence(),
-            &lease_owner("turn-input-owner"),
-            60_000,
-            10,
-        )
+        .claim_next_turn_inputs("root", &lease.fence(), &lease_owner("turn-input-owner"), 10)
         .await
         .expect("claim next inputs")
         .expect("next input claim");
@@ -2604,13 +3023,7 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
         2
     );
     let reclaimed = store
-        .claim_next_turn_inputs(
-            "root",
-            &lease.fence(),
-            &lease_owner("turn-input-owner"),
-            60_000,
-            10,
-        )
+        .claim_next_turn_inputs("root", &lease.fence(), &lease_owner("turn-input-owner"), 10)
         .await
         .expect("reclaim next inputs")
         .expect("reclaimed next claim");
@@ -2631,7 +3044,7 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
         )
         .await
         .expect_err("stale turn-input completion must fail");
-    assert!(matches!(err, StoreError::TurnInputClaimExpired { .. }));
+    assert!(matches!(err, StoreError::TurnInputClaimSuperseded { .. }));
     assert!(
         store
             .list_pending_turn_inputs("root")
@@ -2686,7 +3099,6 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
                 "root",
                 &post_completion_lease.fence(),
                 &lease_owner("post-completion-owner"),
-                60_000,
                 10,
             )
             .await
@@ -2694,6 +3106,125 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
             .is_none(),
         "completed pending input tombstones must not be claimable"
     );
+}
+
+async fn turn_input_claims_supersede_across_session_lease_generations(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    // The DeferredNextTurn idle-retry shape: a failed turn releases its lease
+    // and the next idle acquisition re-claims the same next-turn input under a
+    // fresh generation, while the stale claim's completion is rejected. This was
+    // the latent unrenewed-claim bug (ADR 0029).
+    let input = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft(
+            "root",
+            "generation next input",
+        ))
+        .await
+        .expect("enqueue next-turn input");
+
+    // (a) Same generation: a live next-turn claim is not re-claimable.
+    let lease_a = claim_session_execution_lease_for_test(&store, "root", "tin-owner-a").await;
+    let claim_a = store
+        .claim_next_turn_inputs("root", &lease_a.fence(), &lease_owner("tin-owner-a"), 10)
+        .await
+        .expect("first next-turn claim")
+        .expect("first next-turn claim exists");
+    assert_eq!(claim_a.inputs[0].input_id, input.input_id);
+    assert_eq!(claim_a.session_lease_generation, lease_a.fencing_token);
+    assert!(
+        store
+            .claim_next_turn_inputs("root", &lease_a.fence(), &lease_owner("tin-owner-a"), 10)
+            .await
+            .expect("same-generation re-claim")
+            .is_none(),
+        "a live next-turn claim must not be re-claimable under its own generation"
+    );
+
+    // (b) Idle retry after lease release + re-acquire: the same next-turn input
+    // is re-claimable by the new generation and the stale completion is
+    // superseded.
+    release_session_execution_lease_for_test(&store, &lease_a).await;
+    let lease_b = claim_session_execution_lease_for_test(&store, "root", "tin-owner-b").await;
+    let claim_b = store
+        .claim_next_turn_inputs("root", &lease_b.fence(), &lease_owner("tin-owner-b"), 10)
+        .await
+        .expect("idle-retry next-turn claim")
+        .expect("idle-retry next-turn claim exists");
+    assert_eq!(claim_b.inputs[0].input_id, input.input_id);
+    assert!(claim_b.fencing_token > claim_a.fencing_token);
+
+    let stale_state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let stale_err = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&stale_state, &[])
+                .with_session_execution_lease(lease_b.fence())
+                .completing_turn_input_claim(claim_a.completion()),
+        )
+        .await
+        .expect_err("superseded next-turn completion must fail");
+    assert!(matches!(
+        stale_err,
+        StoreError::TurnInputClaimSuperseded { .. }
+    ));
+    release_session_execution_lease_for_test(&store, &lease_b).await;
+
+    // (c) Dead-owner takeover mints a new generation without a release.
+    let pid = std::process::id();
+    let dead_owner = local_lease_owner(
+        "tin-dead",
+        "tin-dead:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "not-the-current-process-start",
+    );
+    let dead_lease = store
+        .try_claim_session_execution_lease("root", &dead_owner, 60_000)
+        .await
+        .expect("claim dead-owner lease")
+        .acquired()
+        .expect("dead-owner lease acquired");
+    let claim_dead = store
+        .claim_next_turn_inputs("root", &dead_lease.fence(), &dead_owner, 10)
+        .await
+        .expect("dead-owner next-turn claim")
+        .expect("dead-owner next-turn claim exists");
+    let taker = local_lease_owner(
+        "tin-taker",
+        "tin-taker:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "tin-taker-start",
+    );
+    let taker_lease = store
+        .reclaim_session_execution_lease("root", &taker, &dead_lease.fence(), 60_000)
+        .await
+        .expect("reclaim dead owner")
+        .acquired()
+        .expect("dead owner is reclaimable");
+    let claim_taker = store
+        .claim_next_turn_inputs("root", &taker_lease.fence(), &taker, 10)
+        .await
+        .expect("post-takeover next-turn claim")
+        .expect("post-takeover next-turn claim exists");
+    assert_eq!(claim_taker.inputs[0].input_id, input.input_id);
+    let takeover_err = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&stale_state, &[])
+                .with_session_execution_lease(taker_lease.fence())
+                .completing_turn_input_claim(claim_dead.completion()),
+        )
+        .await
+        .expect_err("pre-takeover next-turn completion must fail");
+    assert!(matches!(
+        takeover_err,
+        StoreError::TurnInputClaimSuperseded { .. }
+    ));
 }
 
 async fn pending_turn_input_cancel_covers_active_and_deferred_states(
@@ -2788,7 +3319,6 @@ async fn pending_turn_input_cancel_covers_active_and_deferred_states(
                 "root",
                 &lease.fence(),
                 &lease_owner("cancel-input-owner"),
-                60_000,
                 10,
             )
             .await
@@ -2853,7 +3383,6 @@ async fn pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(
             &lease_owner("active-input-owner"),
             turn_id,
             crate::CheckpointKind::AfterWork,
-            60_000,
             1,
         )
         .await
@@ -2936,7 +3465,6 @@ async fn pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(
             "root",
             &lease.fence(),
             &lease_owner("active-input-owner"),
-            60_000,
             10,
         )
         .await
@@ -3426,7 +3954,6 @@ async fn queued_wake_delivery_is_source_key_idempotent_and_claimed_once(
             &session_lease.fence(),
             &lease_owner("wake-owner"),
             QueuedWorkClaimBoundary::Idle,
-            60_000,
             10,
         )
         .await

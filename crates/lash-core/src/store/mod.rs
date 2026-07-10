@@ -123,13 +123,17 @@ pub enum StoreError {
         "runtime turn `{turn_id}` for session `{session_id}` was already committed with a different commit hash"
     )]
     RuntimeTurnCommitConflict { session_id: String, turn_id: String },
-    #[error("queued work claim `{claim_id}` for session `{session_id}` is missing or expired")]
-    QueuedWorkClaimExpired {
+    #[error(
+        "queued work claim `{claim_id}` for session `{session_id}` is superseded by a newer session-lease generation"
+    )]
+    QueuedWorkClaimSuperseded {
         session_id: String,
         claim_id: String,
     },
-    #[error("turn input claim `{claim_id}` for session `{session_id}` is missing or expired")]
-    TurnInputClaimExpired {
+    #[error(
+        "turn input claim `{claim_id}` for session `{session_id}` is superseded by a newer session-lease generation"
+    )]
+    TurnInputClaimSuperseded {
         session_id: String,
         claim_id: String,
     },
@@ -1075,12 +1079,10 @@ pub trait TurnInputStore: Send + Sync {
     ) -> Result<crate::PendingTurnInputSuffixCancelOutcome, StoreError>;
 
     /// Claim active-turn input at a checkpoint for the live turn id.
-    // The parameters are the cohesive, all-required identity/lease inputs of a
-    // durable active-turn claim (session, execution-lease fence, owner, turn,
-    // checkpoint, lease TTL, batch size). They exceed the default threshold by
-    // one and have no non-artificial sub-grouping; the sibling
-    // `claim_next_turn_inputs` uses the same positional shape.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// The claim pins the caller's live session-execution-lease generation
+    /// (`session_execution_lease.fencing_token`) rather than a TTL; it is live
+    /// exactly while that generation still holds the session lease (ADR 0029).
     async fn claim_active_turn_inputs(
         &self,
         session_id: &str,
@@ -1088,7 +1090,6 @@ pub trait TurnInputStore: Send + Sync {
         owner: &LeaseOwnerIdentity,
         turn_id: &str,
         checkpoint: crate::CheckpointKind,
-        lease_ttl_ms: u64,
         max_inputs: usize,
     ) -> Result<Option<crate::TurnInputClaim>, StoreError>;
 
@@ -1098,7 +1099,6 @@ pub trait TurnInputStore: Send + Sync {
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
         max_inputs: usize,
     ) -> Result<Option<crate::TurnInputClaim>, StoreError>;
 
@@ -1182,7 +1182,6 @@ pub trait QueuedWorkStore: Send + Sync {
         session_id: &str,
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
     ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
 
     /// Claim the next ready turn-work group for `owner_id`.
@@ -1197,7 +1196,6 @@ pub trait QueuedWorkStore: Send + Sync {
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
         boundary: crate::QueuedWorkClaimBoundary,
-        lease_ttl_ms: u64,
         max_batches: usize,
     ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
 
@@ -1218,7 +1216,6 @@ pub trait QueuedWorkStore: Send + Sync {
         session_execution_lease: &SessionExecutionLeaseFence,
         owner: &LeaseOwnerIdentity,
         boundary: crate::QueuedWorkClaimBoundary,
-        lease_ttl_ms: u64,
         batch_ids: &[String],
     ) -> Result<Option<crate::QueuedWorkClaim>, StoreError> {
         if batch_ids.is_empty() {
@@ -1230,7 +1227,6 @@ pub trait QueuedWorkStore: Send + Sync {
                 session_execution_lease,
                 owner,
                 boundary,
-                lease_ttl_ms,
                 batch_ids.len(),
             )
             .await?
@@ -1248,13 +1244,6 @@ pub trait QueuedWorkStore: Send + Sync {
         self.abandon_queued_work_claim(&claim).await?;
         Ok(None)
     }
-
-    /// Extend the lease on a held queued-work claim.
-    async fn renew_queued_work_claim(
-        &self,
-        claim: &crate::QueuedWorkClaim,
-        lease_ttl_ms: u64,
-    ) -> Result<crate::QueuedWorkClaim, StoreError>;
 
     /// Release a held queued-work claim without completing it.
     async fn abandon_queued_work_claim(
@@ -1283,8 +1272,10 @@ pub trait QueuedWorkStore: Send + Sync {
 
     /// List queued-work batches that are still pending presentation/editing.
     ///
-    /// This excludes batches currently held by a live claim. Expired claims are
-    /// considered pending again because they can be reclaimed or cancelled.
+    /// This excludes batches currently held by a live claim. A claim counts as
+    /// live only while the session-execution-lease generation it pins still
+    /// holds the session lease; batches pinned to a superseded or released
+    /// generation are pending again because they can be reclaimed or cancelled.
     ///
     /// This is a distinct required query, not a derivation of
     /// [`list_queued_work`](Self::list_queued_work): the two differ by

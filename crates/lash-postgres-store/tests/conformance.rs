@@ -158,7 +158,7 @@ async fn postgres_session_store_factory_satisfies_conformance_when_configured() 
 }
 
 // Blocker 1: `from_pool` must enforce the same component schema-version gate as
-// `connect`/`connect_with`. Writing a stale version (10) into
+// `connect`/`connect_with`. Writing a stale version (11) into
 // `lash_schema_versions` and then constructing over the pool must fail loudly with
 // the mismatch error, so a pre-cutover database can never be adopted post-bump.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -171,7 +171,7 @@ async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
     let pool = storage.pool().clone();
     // Force the recorded component version to a stale value.
     sqlx::query(
-        "INSERT INTO lash_schema_versions (component, version) VALUES ('lash-postgres-store', 10)
+        "INSERT INTO lash_schema_versions (component, version) VALUES ('lash-postgres-store', 11)
          ON CONFLICT (component) DO UPDATE SET version = EXCLUDED.version",
     )
     .execute(&pool)
@@ -183,18 +183,18 @@ async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
     // Restore the correct version BEFORE asserting so a failed assert never leaves
     // the shared database wedged for other cases.
     sqlx::query(
-        "UPDATE lash_schema_versions SET version = 11 WHERE component = 'lash-postgres-store'",
+        "UPDATE lash_schema_versions SET version = 12 WHERE component = 'lash-postgres-store'",
     )
     .execute(&pool)
     .await
     .expect("restore schema version");
 
     let message = match result {
-        Ok(_) => panic!("from_pool must reject a version-10 database"),
+        Ok(_) => panic!("from_pool must reject a version-11 database"),
         Err(err) => err.to_string(),
     };
     assert!(
-        message.contains("version 10") && message.contains("expected 11"),
+        message.contains("version 11") && message.contains("expected 12"),
         "expected a schema-version mismatch error, got: {message}"
     );
 }

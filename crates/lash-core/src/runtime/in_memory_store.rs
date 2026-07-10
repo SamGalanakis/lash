@@ -26,7 +26,7 @@ struct InMemoryQueuedBatch {
     claim_token: Option<String>,
     claim_owner: Option<crate::LeaseOwnerIdentity>,
     claim_fencing_token: u64,
-    claim_expires_at_ms: u64,
+    claim_session_lease_generation: u64,
 }
 
 #[derive(Clone, Default)]
@@ -45,21 +45,20 @@ struct InMemoryPendingTurnInput {
     claim_token: Option<String>,
     claim_owner: Option<crate::LeaseOwnerIdentity>,
     claim_fencing_token: u64,
-    claim_expires_at_ms: u64,
+    claim_session_lease_generation: u64,
 }
 
 impl InMemoryPendingTurnInput {
-    fn has_live_claim(&self, now_epoch_ms: u64) -> bool {
-        self.claim_token.is_some() && self.claim_expires_at_ms > now_epoch_ms
-    }
-
     fn claim_diagnostics(&self) -> Option<crate::PendingTurnInputClaimDiagnostics> {
         (self.claim_id.is_some() || matches!(self.input.state, crate::TurnInputState::Accepted))
             .then(|| crate::PendingTurnInputClaimDiagnostics {
                 state: self.input.state,
                 claim_id: self.claim_id.clone(),
                 claim_owner: self.claim_owner.clone(),
-                claim_expires_at_ms: self.claim_token.as_ref().map(|_| self.claim_expires_at_ms),
+                claim_session_lease_generation: self
+                    .claim_token
+                    .as_ref()
+                    .map(|_| self.claim_session_lease_generation),
                 claim_fencing_token: self.claim_fencing_token,
             })
     }
@@ -68,10 +67,10 @@ impl InMemoryPendingTurnInput {
         self.claim_id = None;
         self.claim_token = None;
         self.claim_owner = None;
-        self.claim_expires_at_ms = 0;
+        self.claim_session_lease_generation = 0;
     }
 
-    fn cancel_outcome(&mut self, now_epoch_ms: u64) -> crate::PendingTurnInputCancelOutcome {
+    fn cancel_outcome(&mut self, claim_is_live: bool) -> crate::PendingTurnInputCancelOutcome {
         match self.input.state {
             crate::TurnInputState::Cancelled => {
                 crate::PendingTurnInputCancelOutcome::AlreadyCancelled(self.input.clone())
@@ -86,7 +85,7 @@ impl InMemoryPendingTurnInput {
                 }
             }
             crate::TurnInputState::PendingActive | crate::TurnInputState::DeferredNextTurn => {
-                if self.has_live_claim(now_epoch_ms) {
+                if self.claim_token.is_some() && claim_is_live {
                     crate::PendingTurnInputCancelOutcome::AlreadyClaimed {
                         input: self.input.clone(),
                         claim: self.claim_diagnostics(),
@@ -136,6 +135,11 @@ enum InMemoryQueuedWorkClaimKind {
 
 pub struct InMemorySessionStore {
     clock: Arc<dyn crate::Clock>,
+    /// Serializes every operation whose correctness depends on observing the
+    /// session lease and mutating fenced runtime state atomically. Component
+    /// mutexes still guard their data; this mutex supplies the transaction
+    /// boundary and lock ordering that SQLite/Postgres provide natively.
+    write_transaction: Mutex<()>,
     pub(crate) session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
     pub(crate) session_meta: Mutex<Option<crate::SessionMeta>>,
     pub(crate) session_graph: Mutex<crate::SessionGraph>,
@@ -153,6 +157,8 @@ pub struct InMemorySessionStore {
     pending_turn_input_next_seq: Mutex<u64>,
     attachment_manifest:
         Mutex<HashMap<(String, crate::AttachmentId), crate::AttachmentManifestEntry>>,
+    #[cfg(test)]
+    claim_after_lease_validation_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl InMemorySessionStore {
@@ -163,6 +169,7 @@ impl InMemorySessionStore {
     pub fn with_clock(clock: Arc<dyn crate::Clock>) -> Self {
         Self {
             clock,
+            write_transaction: Mutex::new(()),
             session_head_meta: Mutex::new(None),
             session_meta: Mutex::new(None),
             session_graph: Mutex::new(crate::SessionGraph::default()),
@@ -177,7 +184,29 @@ impl InMemorySessionStore {
             pending_turn_inputs: Mutex::new(Vec::new()),
             pending_turn_input_next_seq: Mutex::new(0),
             attachment_manifest: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            claim_after_lease_validation_hook: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    fn run_claim_after_lease_validation_hook(&self) {
+        let hook = self
+            .claim_after_lease_validation_hook
+            .lock()
+            .expect("lock claim validation hook")
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_claim_after_lease_validation_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .claim_after_lease_validation_hook
+            .lock()
+            .expect("lock claim validation hook") = Some(hook);
     }
 
     fn verify_session_execution_lease(
@@ -214,6 +243,21 @@ impl InMemorySessionStore {
                 session_id: fence.session_id.clone(),
             })
         }
+    }
+
+    /// The fencing token of the session's currently-live execution lease, or
+    /// `None` when no live lease holds the session. A queued-work or turn-input
+    /// claim is live for lease-less host callers exactly when the generation it
+    /// pins equals this value (ADR 0029).
+    fn live_session_lease_generation(&self, session_id: &str, now: u64) -> Option<u64> {
+        let leases = self
+            .session_execution_leases
+            .lock()
+            .expect("lock session execution leases");
+        leases
+            .get(session_id)
+            .filter(|lease| lease.is_live(now))
+            .map(|lease| lease.fencing_token)
     }
 
     fn release_session_execution_lease_in_memory(
@@ -287,7 +331,6 @@ impl InMemorySessionStore {
         session_id: &str,
         session_execution_lease: &crate::SessionExecutionLeaseFence,
         owner: &crate::LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
         kind: InMemoryQueuedWorkClaimKind,
     ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
         let max_batches = match kind {
@@ -297,17 +340,23 @@ impl InMemorySessionStore {
         if max_batches == 0 {
             return Ok(None);
         }
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         self.verify_session_execution_lease(session_id, session_execution_lease)?;
+        #[cfg(test)]
+        self.run_claim_after_lease_validation_hook();
+        // The fence is validated live, so its fencing token is the currently-live
+        // session-lease generation. A row is claimable when it is unheld or its
+        // pinned generation differs from ours; same-generation self-steal is
+        // therefore unrepresentable (ADR 0029).
+        let generation = session_execution_lease.fencing_token;
         let now = self.clock.timestamp_ms();
         let mut queued = self.queued_work.lock().expect("lock queued work");
         queued.sort_by_key(|entry| entry.batch.enqueue_seq);
         let claim_available = |entry: &InMemoryQueuedBatch| {
-            entry.claim_token.is_none()
-                || entry.claim_expires_at_ms <= now
-                || entry
-                    .claim_owner
-                    .as_ref()
-                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
+            entry.claim_token.is_none() || entry.claim_session_lease_generation != generation
         };
         let claimable_indices = queued
             .iter()
@@ -360,7 +409,6 @@ impl InMemorySessionStore {
             "{}:{}:{}:{claim_id}:{now}",
             session_id, owner.owner_id, owner.incarnation_id
         );
-        let expires_at = now.saturating_add(lease_ttl_ms);
         let mut batches = Vec::new();
         for index in claimable_indices.into_iter().take(selected_len) {
             let entry = &mut queued[index];
@@ -368,7 +416,7 @@ impl InMemorySessionStore {
             entry.claim_token = Some(lease_token.clone());
             entry.claim_owner = Some(owner.clone());
             entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
-            entry.claim_expires_at_ms = expires_at;
+            entry.claim_session_lease_generation = generation;
             batches.push(entry.batch.clone());
         }
         Ok(Some(crate::QueuedWorkClaim {
@@ -377,8 +425,7 @@ impl InMemorySessionStore {
             owner: owner.clone(),
             lease_token,
             fencing_token,
-            claimed_at_epoch_ms: now,
-            expires_at_epoch_ms: expires_at,
+            session_lease_generation: generation,
             batches,
         }))
     }
@@ -388,14 +435,24 @@ impl InMemorySessionStore {
         session_id: &str,
         session_execution_lease: &crate::SessionExecutionLeaseFence,
         owner: &crate::LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
         max_inputs: usize,
         mode: crate::TurnInputClaimMode,
     ) -> Result<Option<crate::TurnInputClaim>, crate::store::StoreError> {
         if max_inputs == 0 {
             return Ok(None);
         }
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         self.verify_session_execution_lease(session_id, session_execution_lease)?;
+        #[cfg(test)]
+        self.run_claim_after_lease_validation_hook();
+        // Validated-live fence: its fencing token is the currently-live
+        // session-lease generation. Rows pinned to it are our own live claims;
+        // rows pinned to any other generation (or unheld) are claimable
+        // (ADR 0029).
+        let generation = session_execution_lease.fencing_token;
         let now = self.clock.timestamp_ms();
         let mut pending = self
             .pending_turn_inputs
@@ -403,12 +460,7 @@ impl InMemorySessionStore {
             .expect("lock pending turn input");
         pending.sort_by_key(|entry| entry.input.enqueue_seq);
         let claim_available = |entry: &InMemoryPendingTurnInput| {
-            entry.claim_token.is_none()
-                || entry.claim_expires_at_ms <= now
-                || entry
-                    .claim_owner
-                    .as_ref()
-                    .is_some_and(|holder| holder.is_definitely_dead_for_claimant(owner))
+            entry.claim_token.is_none() || entry.claim_session_lease_generation != generation
         };
         let selected_indices = pending
             .iter()
@@ -449,7 +501,6 @@ impl InMemorySessionStore {
             "{}:{}:{}:{claim_id}:{now}",
             session_id, owner.owner_id, owner.incarnation_id
         );
-        let expires_at = now.saturating_add(lease_ttl_ms);
         let mut inputs = Vec::new();
         for index in selected_indices {
             let entry = &mut pending[index];
@@ -457,7 +508,7 @@ impl InMemorySessionStore {
             entry.claim_token = Some(lease_token.clone());
             entry.claim_owner = Some(owner.clone());
             entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
-            entry.claim_expires_at_ms = expires_at;
+            entry.claim_session_lease_generation = generation;
             if matches!(mode, crate::TurnInputClaimMode::ActiveTurn { .. }) {
                 entry.input.state = crate::TurnInputState::Accepted;
             }
@@ -469,8 +520,7 @@ impl InMemorySessionStore {
             owner: owner.clone(),
             lease_token,
             fencing_token,
-            claimed_at_epoch_ms: now,
-            expires_at_epoch_ms: expires_at,
+            session_lease_generation: generation,
             mode,
             inputs,
         }))
@@ -558,6 +608,10 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
         &self,
         commit: crate::store::RuntimeCommit,
     ) -> Result<crate::store::RuntimeCommitResult, crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         let mut meta = self.session_head_meta.lock().expect("lock store");
         let actual = meta.as_ref().map_or(0, |meta| meta.head_revision);
         if let Some(bound) = meta.as_ref().map(|meta| meta.session_id.clone())
@@ -620,7 +674,7 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
                 })
                 .count();
             if matches != completed.batch_ids.len() {
-                return Err(crate::store::StoreError::QueuedWorkClaimExpired {
+                return Err(crate::store::StoreError::QueuedWorkClaimSuperseded {
                     session_id: completed.session_id.clone(),
                     claim_id: completed.claim_id.clone(),
                 });
@@ -647,7 +701,7 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
                 })
                 .count();
             if matches != completed.input_ids.len() {
-                return Err(crate::store::StoreError::TurnInputClaimExpired {
+                return Err(crate::store::StoreError::TurnInputClaimSuperseded {
                     session_id: completed.session_id.clone(),
                     claim_id: completed.claim_id.clone(),
                 });
@@ -682,7 +736,7 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
                     entry.claim_id = None;
                     entry.claim_token = None;
                     entry.claim_owner = None;
-                    entry.claim_expires_at_ms = 0;
+                    entry.claim_session_lease_generation = 0;
                 }
             }
         }
@@ -791,6 +845,10 @@ impl crate::store::SessionExecutionLeaseStore for InMemorySessionStore {
         owner: &crate::LeaseOwnerIdentity,
         lease_ttl_ms: u64,
     ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         let now = self.clock.timestamp_ms();
         let mut leases = self
             .session_execution_leases
@@ -830,6 +888,10 @@ impl crate::store::SessionExecutionLeaseStore for InMemorySessionStore {
         observed_holder: &crate::SessionExecutionLeaseFence,
         lease_ttl_ms: u64,
     ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         let now = self.clock.timestamp_ms();
         let mut leases = self
             .session_execution_leases
@@ -872,6 +934,10 @@ impl crate::store::SessionExecutionLeaseStore for InMemorySessionStore {
         fence: &crate::SessionExecutionLeaseFence,
         lease_ttl_ms: u64,
     ) -> Result<crate::SessionExecutionLease, crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         let now = self.clock.timestamp_ms();
         let mut leases = self
             .session_execution_leases
@@ -909,6 +975,10 @@ impl crate::store::SessionExecutionLeaseStore for InMemorySessionStore {
         &self,
         completion: &crate::SessionExecutionLeaseCompletion,
     ) -> Result<(), crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         self.release_session_execution_lease_in_memory(completion);
         Ok(())
     }
@@ -977,7 +1047,7 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
             claim_token: None,
             claim_owner: None,
             claim_fencing_token: 0,
-            claim_expires_at_ms: 0,
+            claim_session_lease_generation: 0,
         });
         pending.sort_by_key(|entry| entry.input.enqueue_seq);
         Ok(stored)
@@ -987,7 +1057,12 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::PendingTurnInput>, crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         let now = self.clock.timestamp_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut inputs = self
             .pending_turn_inputs
             .lock()
@@ -1000,7 +1075,8 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
                         crate::TurnInputState::PendingActive
                             | crate::TurnInputState::DeferredNextTurn
                     )
-                    && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
+                    && (entry.claim_token.is_none()
+                        || live_generation != Some(entry.claim_session_lease_generation))
             })
             .map(|entry| entry.input.clone())
             .collect::<Vec<_>>();
@@ -1013,7 +1089,12 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
         session_id: &str,
         targets: &[crate::PendingTurnInputCancelTarget],
     ) -> Result<Vec<crate::PendingTurnInputCancelResult>, crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         let now = self.clock.timestamp_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut pending = self
             .pending_turn_inputs
             .lock()
@@ -1021,7 +1102,11 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
         let mut results = Vec::with_capacity(targets.len());
         for target in targets {
             let outcome = match find_pending_turn_input_index(&pending, session_id, target) {
-                Some(index) => pending[index].cancel_outcome(now),
+                Some(index) => {
+                    let claim_is_live =
+                        live_generation == Some(pending[index].claim_session_lease_generation);
+                    pending[index].cancel_outcome(claim_is_live)
+                }
                 None => crate::PendingTurnInputCancelOutcome::NotFound,
             };
             results.push(crate::PendingTurnInputCancelResult {
@@ -1037,7 +1122,12 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
         session_id: &str,
         anchor: &crate::PendingTurnInputCancelTarget,
     ) -> Result<crate::PendingTurnInputSuffixCancelOutcome, crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         let now = self.clock.timestamp_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut pending = self
             .pending_turn_inputs
             .lock()
@@ -1054,7 +1144,10 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
             .iter_mut()
             .filter(|entry| entry.input.session_id == session_id)
             .filter(|entry| entry.input.enqueue_seq >= anchor_seq)
-            .map(|entry| entry.cancel_outcome(now))
+            .map(|entry| {
+                let claim_is_live = live_generation == Some(entry.claim_session_lease_generation);
+                entry.cancel_outcome(claim_is_live)
+            })
             .collect::<Vec<_>>();
         Ok(crate::PendingTurnInputSuffixCancelOutcome::Outcomes {
             anchor: anchor.clone(),
@@ -1069,14 +1162,12 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
         owner: &crate::LeaseOwnerIdentity,
         turn_id: &str,
         checkpoint: crate::CheckpointKind,
-        lease_ttl_ms: u64,
         max_inputs: usize,
     ) -> Result<Option<crate::TurnInputClaim>, crate::store::StoreError> {
         self.claim_pending_turn_inputs_in_memory(
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             max_inputs,
             crate::TurnInputClaimMode::ActiveTurn {
                 turn_id: turn_id.to_string(),
@@ -1090,14 +1181,12 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
         session_id: &str,
         session_execution_lease: &crate::SessionExecutionLeaseFence,
         owner: &crate::LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
         max_inputs: usize,
     ) -> Result<Option<crate::TurnInputClaim>, crate::store::StoreError> {
         self.claim_pending_turn_inputs_in_memory(
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             max_inputs,
             crate::TurnInputClaimMode::NextTurn,
         )
@@ -1129,7 +1218,7 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
                 entry.claim_id = None;
                 entry.claim_token = None;
                 entry.claim_owner = None;
-                entry.claim_expires_at_ms = 0;
+                entry.claim_session_lease_generation = 0;
             }
         }
         Ok(())
@@ -1184,7 +1273,7 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
             claim_token: None,
             claim_owner: None,
             claim_fencing_token: 0,
-            claim_expires_at_ms: 0,
+            claim_session_lease_generation: 0,
         });
         queued.sort_by_key(|entry| entry.batch.enqueue_seq);
         Ok(stored)
@@ -1195,13 +1284,11 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
         session_id: &str,
         session_execution_lease: &crate::SessionExecutionLeaseFence,
         owner: &crate::LeaseOwnerIdentity,
-        lease_ttl_ms: u64,
     ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
         self.claim_ready_queued_work_in_memory(
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             InMemoryQueuedWorkClaimKind::LeadingSessionCommand,
         )
     }
@@ -1212,48 +1299,17 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
         session_execution_lease: &crate::SessionExecutionLeaseFence,
         owner: &crate::LeaseOwnerIdentity,
         boundary: crate::QueuedWorkClaimBoundary,
-        lease_ttl_ms: u64,
         max_batches: usize,
     ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
         self.claim_ready_queued_work_in_memory(
             session_id,
             session_execution_lease,
             owner,
-            lease_ttl_ms,
             InMemoryQueuedWorkClaimKind::TurnWork {
                 boundary,
                 max_batches,
             },
         )
-    }
-
-    async fn renew_queued_work_claim(
-        &self,
-        claim: &crate::QueuedWorkClaim,
-        lease_ttl_ms: u64,
-    ) -> Result<crate::QueuedWorkClaim, crate::store::StoreError> {
-        let mut queued = self.queued_work.lock().expect("lock queued work");
-        let expires_at = self.clock.timestamp_ms().saturating_add(lease_ttl_ms);
-        let mut changed = 0;
-        for entry in queued.iter_mut() {
-            if entry.batch.session_id == claim.session_id
-                && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
-                && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
-            {
-                entry.claim_expires_at_ms = expires_at;
-                changed += 1;
-            }
-        }
-        if changed != claim.batches.len() {
-            return Err(crate::store::StoreError::QueuedWorkClaimExpired {
-                session_id: claim.session_id.clone(),
-                claim_id: claim.claim_id.clone(),
-            });
-        }
-        Ok(crate::QueuedWorkClaim {
-            expires_at_epoch_ms: expires_at,
-            ..claim.clone()
-        })
     }
 
     async fn abandon_queued_work_claim(
@@ -1269,7 +1325,7 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
                 entry.claim_id = None;
                 entry.claim_token = None;
                 entry.claim_owner = None;
-                entry.claim_expires_at_ms = 0;
+                entry.claim_session_lease_generation = 0;
             }
         }
         Ok(())
@@ -1280,7 +1336,12 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
         session_id: &str,
         batch_id: &str,
     ) -> Result<Option<crate::QueuedWorkBatch>, crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         let now = self.clock.timestamp_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut queued = self.queued_work.lock().expect("lock queued work");
         let Some(index) = queued.iter().position(|entry| {
             entry.batch.session_id == session_id && entry.batch.batch_id == batch_id
@@ -1288,7 +1349,9 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
             return Ok(None);
         };
         let entry = &queued[index];
-        if entry.claim_token.is_some() && entry.claim_expires_at_ms > now {
+        if entry.claim_token.is_some()
+            && live_generation == Some(entry.claim_session_lease_generation)
+        {
             return Ok(None);
         }
         Ok(Some(queued.remove(index).batch))
@@ -1314,7 +1377,12 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::QueuedWorkBatch>, crate::store::StoreError> {
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
         let now = self.clock.timestamp_ms();
+        let live_generation = self.live_session_lease_generation(session_id, now);
         let mut batches = self
             .queued_work
             .lock()
@@ -1322,7 +1390,8 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
             .iter()
             .filter(|entry| {
                 entry.batch.session_id == session_id
-                    && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
+                    && (entry.claim_token.is_none()
+                        || live_generation != Some(entry.claim_session_lease_generation))
             })
             .map(|entry| entry.batch.clone())
             .collect::<Vec<_>>();
