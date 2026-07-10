@@ -125,7 +125,51 @@ again `test-provider echo: slow initial prompt`; the delivery gate is the new `�
 next turn` turn, not the echo wording.) The queued draft never firing → Abort/RCA
 (queued-turn dispatch). Then `lash-exit 10`.
 
-## Phase 4 — Score
+## Phase 4 — Slow-turn generation-fence regression (`standard-slow-echo`)
+
+This phase reproduces the original incident shape without relying on wall-clock expiry.
+Generation fencing makes the proof time-independent: the provider's bounded ~2s stall crosses
+the same claim/checkpoint/commit path that a ~35s stall crossed before the cutover. A healthy
+session-lease generation must retain its claims for the whole turn, however long that takes.
+
+Relaunch with a fixed `LASH_HOME`, `--scenario standard-slow-echo`, and
+`--trace "$LASH_HOME/trace.json"`. Submit one Early Injection while the first provider call is
+stalled:
+
+```
+expect 20 Message · / for commands
+type slow initial prompt
+key enter
+expect 10 slow initial prompt
+expect 10 Thinking
+type generation fence follow-up
+key enter
+expect 8 ◆ Will send in this turn
+expect 5 generation fence follow-up
+clear
+expect 25 ■ test-provider echo: slow initial prompt
+expect 20 ● slow initial prompt
+expect 20 ● generation fence follow-up
+clear
+expect 25 ■ test-provider echo: slow initial prompt
+expect 20 Idle
+screen 80
+lash-exit 10
+```
+
+Gates: both `● slow initial prompt` and `● generation fence follow-up` are committed user rows,
+the assistant row `■ test-provider echo: slow initial prompt` commits, and the footer returns to
+the idle prompt. In the final `screen 80`, no `Superseded`, `turn failed`, or equivalent
+turn-failure text may appear; any such text is a contract violation → Abort/RCA.
+
+After clean exit, parse the JSON artifacts rather than counting substrings. The UI trace must
+contain exactly one `queue_current_turn_input` and zero `queue_turn` ops for
+`generation fence follow-up`. Across every line of
+`$LASH_HOME/test-provider-requests.jsonl`, that text must occur exactly once in the
+`user_texts` arrays. Those counts are the objective exactly-once delivery gate; a preview alone
+does not pass this phase.
+
+## Phase 5 — Score
 
 | Item | Objective gate | Verdict | Notes |
 |------|----------------|---------|-------|
@@ -134,9 +178,14 @@ next turn` turn, not the echo wording.) The queued draft never firing → Abort/
 | Next Full Turn label | `◇ Queued for next turn` + `↳ hold for next turn` |  |  |
 | Ingress recorded correctly | trace: 1× `queue_current_turn_input`, 1× `queue_turn` |  |  |
 | Next-turn draft delivers | new `● hold for next turn` committed turn after commit |  |  |
+| Slow-turn rows commit | `● slow initial prompt`, `● generation fence follow-up`, and `■ test-provider echo: slow initial prompt` rendered; footer returned idle |  |  |
+| Slow-turn ingress delivers once | trace: 1× `queue_current_turn_input`, 0× `queue_turn`; provider log: 1× `generation fence follow-up` |  |  |
+| Slow-turn claim stays live | final screen contains no `Superseded` or turn-failure text |  |  |
 
 **Aggregate:** does a turn round-trip, do Enter and Tab render the two **distinct** queue
 labels matching their ingress, and does a queued next-turn draft dispatch on its own.
+The slow-turn regression must also commit both user rows and the assistant row, deliver the
+mid-turn ingress exactly once, and surface no supersession failure.
 
 ---
 
