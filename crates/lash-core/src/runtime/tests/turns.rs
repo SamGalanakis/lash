@@ -1428,6 +1428,150 @@ async fn process_wake_claimed_at_checkpoint_is_completed_when_turn_is_cancelled(
     ));
 }
 
+// Regression: a long-running turn must keep the queued-work claim it already
+// holds alive across the lease TTL instead of stealing the claim back from
+// itself. Queued-work batches are claimed at active-turn checkpoints, but --
+// unlike the session execution lease, which renews on a background cadence --
+// the claim is never renewed. So a turn that claims a batch at one checkpoint,
+// stalls past the claim TTL (here, a slow provider call), then crosses another
+// checkpoint re-runs `claim_ready_queued_work`; the store now treats the
+// turn's own expired rows as free and re-claims them under a bumped fencing
+// token. At finalization the original, now-stale claim can no longer complete
+// its rows and the commit fails with `QueuedWorkClaimExpired`.
+//
+// The turn is driven with an in-process `TurnInput` (not a store-claimed
+// pending input) so the queued-work claim is the only unrenewed store claim in
+// play -- otherwise the equally-unrenewed turn-input claim would expire first
+// and mask the queued-work failure this test pins down.
+#[tokio::test]
+async fn long_turn_keeps_queued_work_claim_alive_across_lease_ttl() {
+    // A tiny TTL keeps the test sub-second: the session execution lease renews
+    // every `renew_interval` and stays live, while the never-renewed queued-work
+    // claim lapses long before the stalled provider call returns.
+    let lease_ttl = std::time::Duration::from_millis(120);
+    let provider_stall = std::time::Duration::from_millis(500);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stall_calls = Arc::clone(&calls);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_request| {
+            let stall_calls = Arc::clone(&stall_calls);
+            async move {
+                // Call 0 leaves the turn at a checkpoint that claims the wake;
+                // the claimed wake is injected into call 1, and stalling there
+                // pushes the live claim past its TTL before the next checkpoint.
+                if stall_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    tokio::time::sleep(provider_stall).await;
+                }
+                Ok(LlmResponse {
+                    full_text: "stalled turn response".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "stalled turn response".to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build();
+
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut config = crate::RuntimeHostConfig::in_memory()
+        .with_lease_timings(crate::LeaseTimings::from_ttl(lease_ttl).expect("valid lease timings"));
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        transport.clone().into_handle(),
+    ));
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        crate::EmbeddedRuntimeHost::new(config),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+
+    // The wake batch is the queued work the turn claims mid-flight at an
+    // active-turn checkpoint.
+    let registry = runtime
+        .host
+        .process_registry
+        .as_ref()
+        .expect("process registry")
+        .clone();
+    let target_scope = crate::SessionScope::new("root");
+    registry
+        .register_process(
+            crate::ProcessRegistration::new(
+                "stalled-turn-wake",
+                crate::ProcessInput::External {
+                    metadata: serde_json::Value::Null,
+                },
+                crate::RecoveryDisposition::ExternallyOwned,
+                crate::ProcessProvenance::session(target_scope.clone()),
+            )
+            .with_extra_event_types([process_wake_event_type()]),
+        )
+        .await
+        .expect("register wake process");
+    let wake = append_process_wake_to_queue(
+        registry.as_ref(),
+        store.as_ref(),
+        "stalled-turn-wake",
+        crate::ProcessEventAppendRequest::new(
+            "process.wake",
+            json!({
+                "text": "queued work claimed mid turn",
+                "value": {
+                    "status": "queued work claimed mid turn"
+                }
+            }),
+        )
+        .with_wake_target_scope(target_scope),
+    )
+    .await;
+
+    // Correct behavior: the turn renews the claim it holds and commits, so the
+    // wake is completed exactly once. Today this fails with
+    // `QueuedWorkClaimExpired` because the second checkpoint re-steals the batch
+    // from the turn under a bumped fencing token.
+    let turn = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.run_turn_assembled(
+            TurnInput::text("long running user turn"),
+            CancellationToken::new(),
+            named_turn_scope("root", "long-turn-queued-work-claim"),
+        ),
+    )
+    .await
+    .expect("stalled turn should finish")
+    .expect("stalled turn must commit without losing its queued-work claim");
+
+    assert_eq!(turn.assistant_output.safe_text, "stalled turn response");
+    assert!(
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queued work after stalled turn")
+            .is_empty(),
+        "wake `{}` should be completed exactly once by the committing turn",
+        wake.wake_id
+    );
+    assert!(
+        runtime
+            .stream_next_queued_work(TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "after-long-turn-queued-work-claim"),
+            ))
+            .await
+            .expect("post-turn queue check should succeed")
+            .is_none(),
+        "the committed wake `{}` must not replay after the turn",
+        wake.wake_id
+    );
+}
+
 // Boundary: command ordering tests stay in `turns.rs` when they assert public
 // queued-work scheduler behavior across `stream_next_queued_work` calls,
 // provider execution, and the API distinction between "ran a turn" and
