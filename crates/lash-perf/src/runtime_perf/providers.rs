@@ -1748,7 +1748,7 @@ fn empty_request() -> LlmRequest {
         tools: std::sync::Arc::new(Vec::new()),
         tool_choice: Default::default(),
         generation: Default::default(),
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         scope: LlmRequestScope::new(
             "runtime-perf-empty".to_string(),

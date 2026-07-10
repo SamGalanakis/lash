@@ -300,7 +300,7 @@ fn checkpoint_config(
         model: "mock-model".to_string(),
         max_context_tokens: None,
         max_turns: Some(8),
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         autonomous: false,

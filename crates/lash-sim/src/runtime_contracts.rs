@@ -506,9 +506,9 @@ mod tests {
             transcript_message_count: 4,
             activity_count: 3,
             provider_exchange_count: 2,
-            graph_invariant: None,
-            agent_frame_invariant: None,
-            usage_invariant: None,
+            graph_invariant: Default::default(),
+            agent_frame_invariant: Default::default(),
+            usage_invariant: Default::default(),
         }
     }
 

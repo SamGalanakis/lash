@@ -132,7 +132,7 @@ pub(crate) fn llm_rerank_request(
     let prompt = llm_rerank_prompt(args, candidates, limit);
     DirectRequest {
         model,
-        model_variant,
+        model_variant: crate::model_selection::reasoning_selection_from_variant(model_variant),
         model_capability: lash_core::ModelCapability::default(),
         messages: vec![
             DirectMessage {
@@ -282,7 +282,7 @@ mod tests {
         );
 
         assert_eq!(request.model, "parent-model");
-        assert_eq!(request.model_variant.as_deref(), Some("parent-variant"));
+        assert_eq!(request.model_variant.effort(), Some("parent-variant"));
         let DirectOutputSpec::JsonSchema(schema) = request.output else {
             panic!("expected json schema output");
         };

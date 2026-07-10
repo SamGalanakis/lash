@@ -43,7 +43,7 @@ mod tests {
             caused_by: None,
             timestamp: None,
             model: Some("gpt-test".to_string()),
-            model_variant: None,
+            model_variant: Default::default(),
             system_text: "You are lash.".to_string(),
             system_chars: 13,
             system_hash: "abc123".to_string(),

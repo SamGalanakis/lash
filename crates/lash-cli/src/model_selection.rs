@@ -127,12 +127,16 @@ pub(crate) fn default_variant(provider: &ProviderHandle, model: &str) -> Option<
         .and_then(|reasoning| reasoning.default_effort)
 }
 
-/// The effort levels `model` exposes on this provider (empty when none).
-pub(crate) fn supported_efforts(provider: &ProviderHandle, model: &str) -> Vec<String> {
-    crate::capability_catalog::capability_for(provider.kind(), model)
-        .reasoning
-        .map(|reasoning| reasoning.efforts)
-        .unwrap_or_default()
+pub(crate) fn supported_variants(provider: &ProviderHandle, model: &str) -> Vec<String> {
+    let capability = crate::capability_catalog::capability_for(provider.kind(), model);
+    let Some(reasoning) = capability.reasoning else {
+        return Vec::new();
+    };
+    let mut variants = reasoning.efforts;
+    if reasoning.disable.is_some() {
+        variants.push("off".to_string());
+    }
+    variants
 }
 
 pub(crate) fn resolve_model_variant(
@@ -148,15 +152,38 @@ pub(crate) fn resolve_model_variant(
     };
     let variant = parse_variant_input(raw)?;
     if variant == "default" {
-        return Ok(capability
-            .reasoning
-            .and_then(|reasoning| reasoning.default_effort));
+        return Ok(None);
     }
     // Validate through the same seam the runtime uses; the returned effort is
     // alias-normalized (e.g. `minimal` -> `low`).
     capability
-        .validate_effort(model, provider.kind(), Some(&variant))
+        .validate_selection(
+            model,
+            provider.kind(),
+            &reasoning_selection_from_variant(Some(variant)),
+        )
+        .map(variant_from_reasoning_selection)
         .map_err(|err| err.to_string())
+}
+
+pub(crate) fn reasoning_selection_from_variant(
+    variant: Option<String>,
+) -> lash_core::ReasoningSelection {
+    match variant.as_deref() {
+        None | Some("default") => lash_core::ReasoningSelection::ProviderDefault,
+        Some("off") => lash_core::ReasoningSelection::Disabled,
+        Some(_) => lash_core::ReasoningSelection::Effort(variant.expect("variant is present")),
+    }
+}
+
+pub(crate) fn variant_from_reasoning_selection(
+    selection: lash_core::ReasoningSelection,
+) -> Option<String> {
+    match selection {
+        lash_core::ReasoningSelection::ProviderDefault => None,
+        lash_core::ReasoningSelection::Disabled => Some("off".to_string()),
+        lash_core::ReasoningSelection::Effort(effort) => Some(effort),
+    }
 }
 
 pub(crate) fn variant_lines(
@@ -164,7 +191,7 @@ pub(crate) fn variant_lines(
     model: &str,
     current_variant: Option<&str>,
 ) -> Vec<String> {
-    let supported = supported_efforts(provider, model);
+    let supported = supported_variants(provider, model);
     let mut lines = Vec::new();
     if supported.is_empty() {
         lines.push(format!(
@@ -182,7 +209,7 @@ pub(crate) fn variant_lines(
         lines.push(format!("Recommended default: `{}`", default_variant));
     }
     lines.push(format!("Available variants: {}", supported.join(", ")));
-    lines.push("Usage: `/variant <name>` or `/variant default`".to_string());
+    lines.push("Usage: `/variant <name>`, `/variant off`, or `/variant default`".to_string());
     lines
 }
 
@@ -223,7 +250,7 @@ mod tests {
         let spec = resolved("claude-opus-4-7", "claude-opus-4-7")
             .into_model_spec("anthropic", Some("xhigh".to_string()))
             .expect("spec");
-        assert_eq!(spec.variant.as_deref(), Some("xhigh"));
+        assert_eq!(spec.variant.effort(), Some("xhigh"));
         assert_eq!(
             spec.capability,
             crate::capability_catalog::capability_for("anthropic", "claude-opus-4-7")
@@ -258,14 +285,26 @@ mod tests {
     }
 
     #[test]
-    fn resolve_default_variant_falls_back_to_catalog_default() {
+    fn absent_variant_uses_catalog_default_but_explicit_default_uses_provider_default() {
         assert_eq!(
             resolve_model_variant(&provider("openai"), "gpt-5.4", None).expect("ok"),
             Some("medium".to_string())
         );
         assert_eq!(
             resolve_model_variant(&provider("openai"), "gpt-5.4", Some("default")).expect("ok"),
-            Some("medium".to_string())
+            None
+        );
+    }
+
+    #[test]
+    fn off_maps_to_disabled_when_catalog_has_disable_encoding() {
+        assert_eq!(
+            resolve_model_variant(&provider("openai"), "gpt-5.4", Some("off")).expect("ok"),
+            Some("off".to_string())
+        );
+        assert_eq!(
+            reasoning_selection_from_variant(Some("off".to_string())),
+            lash_core::ReasoningSelection::Disabled
         );
     }
 

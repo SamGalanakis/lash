@@ -414,7 +414,10 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .unwrap_or_else(|| default_model_for_provider(self.provider.kind()).to_string());
         let model_spec = lash::ModelSpec::from_token_limits(
             model,
-            self.variant.clone(),
+            self.variant
+                .clone()
+                .map(lash::provider::ReasoningSelection::Effort)
+                .unwrap_or_default(),
             self.max_context_tokens,
             None,
         )

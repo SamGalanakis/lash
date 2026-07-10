@@ -368,7 +368,7 @@ async fn commit_increments_head_and_round_trips_agent_frames(store: Arc<dyn Runt
     let mut state = RuntimeSessionState {
         session_id: "root".to_string(),
         policy: SessionPolicy {
-            model: ModelSpec::from_token_limits("gpt-5.4-mini", None, 200_000, None)
+            model: ModelSpec::from_token_limits("gpt-5.4-mini", Default::default(), 200_000, None)
                 .expect("valid model spec"),
             ..SessionPolicy::default()
         },

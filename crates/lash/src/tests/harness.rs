@@ -8,9 +8,16 @@ pub(super) fn model_spec(
     context_window_tokens: usize,
 ) -> lash_core::ModelSpec {
     let capability = capability_for_variant(variant.as_deref());
-    lash_core::ModelSpec::from_token_limits(model, variant, context_window_tokens, None)
-        .expect("valid model spec")
-        .with_capability(capability)
+    lash_core::ModelSpec::from_token_limits(
+        model,
+        variant
+            .map(lash_core::ReasoningSelection::Effort)
+            .unwrap_or_default(),
+        context_window_tokens,
+        None,
+    )
+    .expect("valid model spec")
+    .with_capability(capability)
 }
 
 pub(super) fn mock_model_spec() -> lash_core::ModelSpec {
@@ -27,6 +34,7 @@ fn capability_for_variant(variant: Option<&str>) -> lash_core::ModelCapability {
             default_effort: None,
             aliases: Default::default(),
             encoding: lash_core::ReasoningEncoding::Effort,
+            disable: None,
             mandatory: false,
         }),
     }

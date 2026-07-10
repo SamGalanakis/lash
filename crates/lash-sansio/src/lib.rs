@@ -21,7 +21,7 @@ pub use attachment::{
 pub use causal::CausalRef;
 pub use llm::capability::{
     ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError,
-    ReasoningCapability, ReasoningEncoding,
+    ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection,
 };
 pub use llm::types::{LlmTerminalReason, ProviderFailureKind};
 pub use plugin::{

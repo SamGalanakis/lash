@@ -543,8 +543,13 @@ mod tests {
             lash::tracing::TraceLevel::Standard,
         );
         let policy = SessionPolicy {
-            model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
-                .expect("model spec"),
+            model: lash_core::ModelSpec::from_token_limits(
+                "mock-model",
+                Default::default(),
+                200_000,
+                None,
+            )
+            .expect("model spec"),
             provider_id: "test".to_string(),
             ..Default::default()
         };

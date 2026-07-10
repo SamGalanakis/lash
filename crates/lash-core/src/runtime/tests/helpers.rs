@@ -249,7 +249,7 @@ pub(crate) fn set_runtime_provider(runtime: &mut LashRuntime, provider: crate::P
 pub(crate) fn standard_test_policy() -> SessionPolicy {
     SessionPolicy {
         provider_id: "mock".to_string(),
-        model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+        model: crate::ModelSpec::from_token_limits("mock-model", Default::default(), 200_000, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
     }

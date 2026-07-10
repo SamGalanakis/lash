@@ -65,7 +65,7 @@ fn remote_process_start_request() -> anyhow::Result<()> {
                 provider_id: "example-provider".to_string(),
                 model: RemoteProcessModelSpec {
                     id: "example-model".to_string(),
-                    variant: None,
+                    variant: Default::default(),
                     capability: Default::default(),
                     limits: RemoteProcessModelLimits {
                         context_window_tokens: 128_000,

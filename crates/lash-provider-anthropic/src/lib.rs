@@ -37,6 +37,7 @@ mod tests {
                 default_effort: None,
                 aliases: BTreeMap::new(),
                 encoding: ReasoningEncoding::Effort,
+                disable: Some(lash_core::provider::ReasoningDisableEncoding::Native),
                 mandatory: false,
             }),
         }
@@ -50,13 +51,14 @@ mod tests {
         ]);
         ModelCapability {
             reasoning: Some(ReasoningCapability {
-                efforts: ["none", "low", "medium", "high"]
+                efforts: ["low", "medium", "high"]
                     .into_iter()
                     .map(String::from)
                     .collect(),
                 default_effort: None,
                 aliases: BTreeMap::new(),
                 encoding: ReasoningEncoding::Budget(budgets),
+                disable: Some(lash_core::provider::ReasoningDisableEncoding::Omit),
                 mandatory: false,
             }),
         }
@@ -73,7 +75,7 @@ mod tests {
             attachments: Vec::new(),
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
-            model_variant: None,
+            model_variant: Default::default(),
             model_capability: ModelCapability::default(),
             scope: lash_core::LlmRequestScope::new(
                 "session-1",
@@ -208,7 +210,7 @@ mod tests {
     fn structured_output_preserves_adaptive_effort_config() {
         let provider = AnthropicProvider::new("key");
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "extract")]);
-        req.model_variant = Some("medium".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("medium".to_string());
         req.model_capability = effort_capability(&["low", "medium", "high"]);
         req.output_spec = Some(LlmOutputSpec::JsonObject);
 
@@ -355,7 +357,7 @@ mod tests {
     #[test]
     fn thinking_display_is_omitted_unless_provider_exposes_thinking() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "extract")]);
-        req.model_variant = Some("medium".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("medium".to_string());
         req.model_capability = effort_capability(&["low", "medium", "high"]);
 
         let hidden = AnthropicProvider::new("key")
@@ -382,7 +384,8 @@ mod tests {
         assert!(plain.get("temperature").is_none());
 
         let mut thinking_req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
-        thinking_req.model_variant = Some("medium".to_string());
+        thinking_req.model_variant =
+            lash_core::provider::ReasoningSelection::Effort("medium".to_string());
         thinking_req.model_capability = effort_capability(&["low", "medium", "high"]);
         let thinking = provider
             .build_request_body(&thinking_req)
@@ -399,7 +402,7 @@ mod tests {
         let provider = AnthropicProvider::new("key");
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
         req.model = "claude-opus-4-7".to_string();
-        req.model_variant = Some("xhigh".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("xhigh".to_string());
         req.model_capability = effort_capability(&["low", "medium", "high", "xhigh"]);
 
         let body = provider.build_request_body(&req).expect("body");
@@ -416,7 +419,7 @@ mod tests {
         let provider = AnthropicProvider::new("key");
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
         req.model = "claude-haiku-4".to_string();
-        req.model_variant = Some("medium".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("medium".to_string());
         req.model_capability = budget_capability();
 
         let body = provider.build_request_body(&req).expect("body");
@@ -427,13 +430,11 @@ mod tests {
     }
 
     #[test]
-    fn budget_capability_none_variant_emits_no_thinking() {
-        // "none" is a valid effort but carries no budget entry, so no thinking
-        // block is written even though the capability exposes reasoning.
+    fn budget_capability_disabled_selection_uses_explicit_omit_encoding() {
         let provider = AnthropicProvider::new("key");
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
         req.model = "claude-haiku-4".to_string();
-        req.model_variant = Some("none".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Disabled;
         req.model_capability = budget_capability();
 
         let body = provider.build_request_body(&req).expect("body");
@@ -443,11 +444,24 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_capability_disabled_selection_emits_native_disabled_thinking() {
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
+        req.model_variant = lash_core::provider::ReasoningSelection::Disabled;
+        req.model_capability = effort_capability(&["low", "medium", "high"]);
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert_eq!(body["thinking"], json!({ "type": "disabled" }));
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
     fn no_reasoning_capability_emits_no_thinking() {
         // A variant with no reasoning capability never produces a thinking block.
         let provider = AnthropicProvider::new("key");
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "think")]);
-        req.model_variant = Some("medium".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("medium".to_string());
 
         let body = provider.build_request_body(&req).expect("body");
 
@@ -525,7 +539,8 @@ mod tests {
         // shape, never the model name.
         let mut budget = request(vec![LlmMessage::text(LlmRole::User, "think")]);
         budget.model = "claude-haiku-4".to_string();
-        budget.model_variant = Some("medium".to_string());
+        budget.model_variant =
+            lash_core::provider::ReasoningSelection::Effort("medium".to_string());
         budget.model_capability = budget_capability();
         assert!(
             captured_beta_for(budget).contains(crate::policy::INTERLEAVED_THINKING_BETA),
@@ -534,7 +549,8 @@ mod tests {
 
         let mut adaptive = request(vec![LlmMessage::text(LlmRole::User, "think")]);
         adaptive.model = "claude-opus-4-7".to_string();
-        adaptive.model_variant = Some("high".to_string());
+        adaptive.model_variant =
+            lash_core::provider::ReasoningSelection::Effort("high".to_string());
         adaptive.model_capability = effort_capability(&["low", "medium", "high", "xhigh"]);
         assert!(
             !captured_beta_for(adaptive).contains(crate::policy::INTERLEAVED_THINKING_BETA),

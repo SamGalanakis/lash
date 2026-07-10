@@ -359,8 +359,13 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL).into_components(),
     );
 
-    let model = ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
-        .map_err(anyhow::Error::msg)?;
+    let model = ModelSpec::from_token_limits(
+        "anthropic/claude-sonnet-4.6",
+        Default::default(),
+        200_000,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
 
     // one LashCore per app, cloned freely.
     let core = lash::LashCore::standard_builder()

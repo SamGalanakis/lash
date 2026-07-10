@@ -130,8 +130,13 @@ impl ToolDiscoveryToolsProvider {
                 ));
             }
         };
-        let request =
-            llm_rerank_request(args, &candidates, limit, model.model, model.model_variant);
+        let request = llm_rerank_request(
+            args,
+            &candidates,
+            limit,
+            model.model,
+            crate::model_selection::variant_from_reasoning_selection(model.model_variant),
+        );
         let completion = match context
             .direct_completions()
             .complete(request, "search_tools")
@@ -250,7 +255,8 @@ mod tests {
     fn snapshot_with_model(model: &str, variant: Option<&str>) -> SessionSnapshot {
         let mut snapshot = SessionSnapshot::default();
         snapshot.policy.model.id = model.to_string();
-        snapshot.policy.model.variant = variant.map(str::to_string);
+        snapshot.policy.model.variant =
+            crate::model_selection::reasoning_selection_from_variant(variant.map(str::to_string));
         snapshot
     }
 
@@ -483,6 +489,6 @@ mod tests {
             .expect("direct requests lock poisoned");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].model, "gpt-5.5");
-        assert_eq!(requests[0].model_variant.as_deref(), Some("medium"));
+        assert_eq!(requests[0].model_variant.effort(), Some("medium"));
     }
 }

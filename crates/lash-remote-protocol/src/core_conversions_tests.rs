@@ -82,9 +82,9 @@ fn turn_input_rejects_non_remote_safe_fields() {
     ));
 
     let mut input = lash_core::TurnInput::text("model");
-    input
-        .turn_context
-        .set_model(lash_core::ModelSpec::from_token_limits("m", None, 100, None).expect("model"));
+    input.turn_context.set_model(
+        lash_core::ModelSpec::from_token_limits("m", Default::default(), 100, None).expect("model"),
+    );
     assert!(matches!(
         RemoteTurnInput::try_from(input),
         Err(RemoteProtocolError::NonRemoteSafeTurnInput(message))
@@ -115,7 +115,7 @@ fn llm_request_and_response_round_trip_owned_dtos() {
             output_schema: serde_json::Value::Null.into(),
         }]),
         tool_choice: core_llm::LlmToolChoice::Auto,
-        model_variant: Some("fast".to_string()),
+        model_variant: core_llm::ReasoningSelection::Effort("fast".to_string()),
         model_capability: core_llm::ModelCapability {
             reasoning: Some(core_llm::ReasoningCapability {
                 efforts: vec!["fast".to_string(), "slow".to_string()],
@@ -127,6 +127,7 @@ fn llm_request_and_response_round_trip_owned_dtos() {
                 encoding: core_llm::ReasoningEncoding::Budget(std::collections::BTreeMap::from([
                     ("slow".to_string(), 2048u32),
                 ])),
+                disable: Some(core_llm::ReasoningDisableEncoding::ToggleFalse),
                 mandatory: false,
             }),
         },
@@ -144,13 +145,27 @@ fn llm_request_and_response_round_trip_owned_dtos() {
     };
 
     let remote = RemoteLlmRequest::from_core("request-1", request);
+    let remote_json = serde_json::to_value(&remote).expect("serialize remote request");
+    assert_eq!(
+        remote_json["model_intent"]["variant"],
+        serde_json::json!({ "effort": "fast" })
+    );
+    assert_eq!(
+        remote_json["model_intent"]["capability"]["reasoning"]["disable"],
+        serde_json::json!("toggle_false")
+    );
+    let remote: RemoteLlmRequest =
+        serde_json::from_value(remote_json).expect("deserialize remote request");
     remote.validate().expect("valid remote request");
     assert_eq!(remote.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(remote.request_id, "request-1");
     assert_eq!(remote.scope.agent_frame_id, "session-1:frame:test");
     let core = core_llm::LlmRequest::try_from(remote).expect("core request");
     assert_eq!(core.model, "gpt-test");
-    assert_eq!(core.model_variant.as_deref(), Some("fast"));
+    assert_eq!(
+        core.model_variant,
+        core_llm::ReasoningSelection::Effort("fast".to_string())
+    );
     let reasoning = core
         .model_capability
         .reasoning
@@ -206,6 +221,38 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         core.provider_usage,
         Some(serde_json::json!({"provider": "usage"}))
     );
+}
+
+#[test]
+fn remote_model_intent_and_process_model_spec_round_trip_reasoning_selections() {
+    for selection in [
+        RemoteReasoningSelection::ProviderDefault,
+        RemoteReasoningSelection::Disabled,
+        RemoteReasoningSelection::Effort("high".to_string()),
+    ] {
+        let intent = RemoteModelIntent {
+            model: "remote-model".to_string(),
+            variant: selection.clone(),
+            capability: RemoteModelCapability::default(),
+            provider: None,
+            metadata: HashMap::new(),
+        };
+        let intent_json = serde_json::to_value(&intent).expect("serialize model intent");
+        let intent_round_trip: RemoteModelIntent =
+            serde_json::from_value(intent_json).expect("deserialize model intent");
+        assert_eq!(intent_round_trip.variant, selection);
+
+        let spec = RemoteProcessModelSpec {
+            id: "remote-model".to_string(),
+            variant: selection.clone(),
+            capability: RemoteModelCapability::default(),
+            limits: RemoteProcessModelLimits::default(),
+        };
+        let spec_json = serde_json::to_value(&spec).expect("serialize process model spec");
+        let spec_round_trip: RemoteProcessModelSpec =
+            serde_json::from_value(spec_json).expect("deserialize process model spec");
+        assert_eq!(spec_round_trip.variant, selection);
+    }
 }
 
 #[test]
@@ -398,8 +445,13 @@ fn process_start_requests_round_trip_core_values() {
         .expect("plugin options"),
         lash_core::SessionPolicy {
             provider_id: "process-provider".to_string(),
-            model: lash_core::ModelSpec::from_token_limits("process-model", None, 4096, Some(512))
-                .expect("model"),
+            model: lash_core::ModelSpec::from_token_limits(
+                "process-model",
+                Default::default(),
+                4096,
+                Some(512),
+            )
+            .expect("model"),
             ..Default::default()
         },
     ))

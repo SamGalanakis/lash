@@ -1017,8 +1017,8 @@ impl Default for RemoteProcessModelLimits {
 pub struct RemoteProcessModelSpec {
     #[serde(default)]
     pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variant: Option<String>,
+    #[serde(default)]
+    pub variant: crate::llm::RemoteReasoningSelection,
     #[serde(
         default,
         skip_serializing_if = "crate::llm::RemoteModelCapability::is_empty"

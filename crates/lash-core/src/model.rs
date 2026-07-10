@@ -1,13 +1,13 @@
 use std::num::NonZeroUsize;
 
-use crate::provider::ModelCapability;
+use crate::provider::{ModelCapability, ReasoningSelection};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpec {
     pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variant: Option<String>,
+    #[serde(default)]
+    pub variant: ReasoningSelection,
     pub limits: ModelLimits,
     /// Host-supplied capability metadata: what effort levels the model exposes
     /// and how they encode on the wire. Lash validates the requested variant
@@ -20,7 +20,7 @@ impl ModelSpec {
     pub fn new(id: impl Into<String>, context_window_tokens: NonZeroUsize) -> Self {
         Self {
             id: id.into(),
-            variant: None,
+            variant: ReasoningSelection::ProviderDefault,
             limits: ModelLimits {
                 context_window_tokens,
                 output_token_capacity: None,
@@ -31,7 +31,7 @@ impl ModelSpec {
 
     pub fn with_limits(
         id: impl Into<String>,
-        variant: Option<String>,
+        variant: ReasoningSelection,
         limits: ModelLimits,
     ) -> Self {
         Self {
@@ -42,7 +42,7 @@ impl ModelSpec {
         }
     }
 
-    pub fn with_variant(mut self, variant: Option<String>) -> Self {
+    pub fn with_variant(mut self, variant: ReasoningSelection) -> Self {
         self.variant = variant;
         self
     }
@@ -58,7 +58,7 @@ impl ModelSpec {
     /// measure against.
     pub fn from_token_limits(
         id: impl Into<String>,
-        variant: Option<String>,
+        variant: ReasoningSelection,
         context_window_tokens: usize,
         output_token_capacity: Option<usize>,
     ) -> Result<Self, String> {
@@ -140,24 +140,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn model_spec_reasoning_selection_serde_is_explicit() {
+        for (selection, expected) in [
+            (
+                ReasoningSelection::ProviderDefault,
+                serde_json::json!("provider_default"),
+            ),
+            (ReasoningSelection::Disabled, serde_json::json!("disabled")),
+            (
+                ReasoningSelection::Effort("high".to_string()),
+                serde_json::json!({ "effort": "high" }),
+            ),
+        ] {
+            let spec = ModelSpec::new("model", NonZeroUsize::new(1024).expect("non-zero"))
+                .with_variant(selection.clone());
+            let json = serde_json::to_value(&spec).expect("serialize model spec");
+            assert_eq!(json["variant"], expected);
+            let round_trip: ModelSpec =
+                serde_json::from_value(json).expect("deserialize model spec");
+            assert_eq!(round_trip.variant, selection);
+        }
+    }
+
+    #[test]
     fn model_spec_constructors_preserve_identity_variant_and_limits() {
         let limits = ModelLimits::from_token_limits(8_192, Some(1_024)).expect("valid limits");
 
-        let spec =
-            ModelSpec::with_limits("provider/model", Some("fast".to_string()), limits.clone());
+        let spec = ModelSpec::with_limits(
+            "provider/model",
+            ReasoningSelection::Effort("fast".to_string()),
+            limits.clone(),
+        );
 
         assert_eq!(spec.id, "provider/model");
-        assert_eq!(spec.variant.as_deref(), Some("fast"));
+        assert_eq!(spec.variant, ReasoningSelection::Effort("fast".to_string()));
         assert_eq!(spec.limits, limits);
 
-        let changed = spec.clone().with_variant(Some("accurate".to_string()));
+        let changed = spec
+            .clone()
+            .with_variant(ReasoningSelection::Effort("accurate".to_string()));
         assert_eq!(changed.id, "provider/model");
-        assert_eq!(changed.variant.as_deref(), Some("accurate"));
+        assert_eq!(
+            changed.variant,
+            ReasoningSelection::Effort("accurate".to_string())
+        );
         assert_eq!(changed.limits, spec.limits);
 
-        let cleared = changed.with_variant(None);
+        let cleared = changed.with_variant(ReasoningSelection::ProviderDefault);
         assert_eq!(cleared.id, "provider/model");
-        assert_eq!(cleared.variant, None);
+        assert_eq!(cleared.variant, ReasoningSelection::ProviderDefault);
         assert_eq!(cleared.context_window_tokens(), 8_192);
     }
 
@@ -165,22 +196,26 @@ mod tests {
     fn model_token_limit_constructors_reject_zero_and_preserve_output_cap() {
         let spec = ModelSpec::from_token_limits(
             "provider/model",
-            Some("variant-a".to_string()),
+            ReasoningSelection::Effort("variant-a".to_string()),
             200_000,
             Some(4_096),
         )
         .expect("valid token limits");
 
         assert_eq!(spec.id, "provider/model");
-        assert_eq!(spec.variant.as_deref(), Some("variant-a"));
+        assert_eq!(
+            spec.variant,
+            ReasoningSelection::Effort("variant-a".to_string())
+        );
         assert_eq!(spec.context_window_tokens(), 200_000);
         assert_eq!(
             spec.limits.output_token_capacity.map(NonZeroUsize::get),
             Some(4_096)
         );
 
-        let context_error = ModelSpec::from_token_limits("bad-context", None, 0, Some(1))
-            .expect_err("zero context");
+        let context_error =
+            ModelSpec::from_token_limits("bad-context", Default::default(), 0, Some(1))
+                .expect_err("zero context");
         assert!(
             context_error.contains("context_window_tokens"),
             "context error should name the invalid field: {context_error}"

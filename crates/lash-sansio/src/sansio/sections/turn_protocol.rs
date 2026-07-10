@@ -571,7 +571,7 @@ pub struct TurnMachineConfig<M: TurnProtocol = UnitTurnProtocol> {
     /// disables that refinement.
     pub max_context_tokens: Option<usize>,
     pub max_turns: Option<usize>,
-    pub model_variant: Option<String>,
+    pub model_variant: crate::ReasoningSelection,
     pub model_capability: crate::llm::capability::ModelCapability,
     pub generation: crate::llm::types::GenerationOptions,
     pub autonomous: bool,

@@ -8,16 +8,21 @@ provider crates — where they had accreted as model-name sniffing behind
 pinned hosts with stale catalogs. We decided the runtime never derives these facts:
 **capability is data the host attaches to the `ModelSpec`, and lash validates against it,
 normalizes with it, and encodes from it**. `ModelCapability { reasoning }` lives in
-lash-sansio (`ReasoningCapability { efforts, default_effort, aliases, encoding, mandatory }`,
+lash-sansio (`ReasoningCapability { efforts, default_effort, aliases, encoding, disable, mandatory }`,
 `ReasoningEncoding::{Effort, Budget}`) and travels spec → turn config → `LlmRequest`, with
 `DirectRequest` carrying it on the direct path and the remote protocol mirroring it on
 `RemoteModelIntent`/`RemoteProcessModelSpec` so remote workers behave identically.
 
+The selected value is a closed `ReasoningSelection::{ProviderDefault, Disabled, Effort}`
+rather than an optional string. Disable is separately encoded by host data as
+`ReasoningDisableEncoding::{Native, Omit, Effort, Budget, ToggleFalse}`; aliases remain
+effort-name normalization only.
+
 Validation happens once, at the runtime seams (turn-driver prepare, direct client,
-session-manager direct), via `ModelCapability::validate_effort`: a deterministic taxonomy
+session-manager direct), via `ModelCapability::validate_selection`: a deterministic taxonomy
 (`unsupported_effort`, `effort_not_configurable`, `effort_required`) whose snake_case codes
 are a stable contract, with the alias-normalized effort written back so a provider never
-sees an un-clamped value. Provider crates branch only on `encoding` to build the wire shape
+sees an un-clamped value. Provider crates branch only on `encoding` and `disable` to build the wire shape
 (Anthropic adaptive vs budget thinking, Gemini `thinkingLevel` vs `thinkingBudget`, OpenAI
 `reasoning.effort`); the model-name checks that remain there are wire-protocol dialect facts
 (request shapes, payload variants), never capability. `ProviderModelPolicy`,

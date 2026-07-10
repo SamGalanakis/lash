@@ -642,7 +642,7 @@ pub struct LlmRequestSpec {
     pub attachments: Vec<LlmAttachmentSpec>,
     pub tools: Arc<Vec<LlmToolSpec>>,
     pub tool_choice: LlmToolChoice,
-    pub model_variant: Option<String>,
+    pub model_variant: crate::ReasoningSelection,
     #[serde(default)]
     pub model_capability: crate::ModelCapability,
     #[serde(default)]

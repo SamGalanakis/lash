@@ -479,7 +479,7 @@ mod tests {
     ) -> lash::process::ProcessWorkObserver {
         let core = lash::LashCore::standard_builder()
             .model(
-                lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
+                lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None)
                     .expect("model spec"),
             )
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))

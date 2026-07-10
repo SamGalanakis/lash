@@ -359,13 +359,22 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
     assert_eq!(
         *seen.lock().expect("seen requests"),
         vec![
-            ("core-model".to_string(), Some("core-variant".to_string())),
-            ("core-model".to_string(), Some("core-variant".to_string())),
+            (
+                "core-model".to_string(),
+                lash_core::ReasoningSelection::Effort("core-variant".to_string()),
+            ),
+            (
+                "core-model".to_string(),
+                lash_core::ReasoningSelection::Effort("core-variant".to_string()),
+            ),
             (
                 "manual-model".to_string(),
-                Some("manual-variant".to_string())
+                lash_core::ReasoningSelection::Effort("manual-variant".to_string())
             ),
-            ("core-model".to_string(), Some("core-variant".to_string())),
+            (
+                "core-model".to_string(),
+                lash_core::ReasoningSelection::Effort("core-variant".to_string()),
+            ),
         ]
     );
     Ok(())

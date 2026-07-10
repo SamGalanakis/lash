@@ -323,8 +323,8 @@ pub use provider::{
     CacheRetention, EmptyProviderResolver, LlmTimeouts, MapProviderResolver, ModelCapability,
     ModelEffortValidationCategory, ModelEffortValidationError, Provider, ProviderBinding,
     ProviderComponents, ProviderFactory, ProviderHandle, ProviderOptions, ProviderResolutionError,
-    ProviderSpec, ReasoningCapability, ReasoningEncoding, RequestTimeout, RuntimeProviderResolver,
-    SingleProviderResolver,
+    ProviderSpec, ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding,
+    ReasoningSelection, RequestTimeout, RuntimeProviderResolver, SingleProviderResolver,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;

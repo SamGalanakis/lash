@@ -877,7 +877,7 @@ impl App {
             overlay: None,
             focused: true,
             usage: UsageState::default(),
-            model_variant: None,
+            model_variant: Default::default(),
             execution_mode_label: "standard".to_string(),
             session_name,
             session_id,

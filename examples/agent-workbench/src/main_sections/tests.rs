@@ -377,7 +377,7 @@ mod tests {
             .build()
             .into_handle();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let (event_tx, _) = broadcast::channel(16);
         let mut events = event_tx.subscribe();
         let core = explicit_durable_test_facets(&data_dir)
@@ -399,7 +399,7 @@ mod tests {
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
-                model_variant: None,
+                model_variant: Default::default(),
             })),
             web_configured: false,
             trace_sink: None,
@@ -434,7 +434,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let provider = lash::testing::TestProvider::builder()
             .kind("workbench-observation-stream-test")
             .complete(|_request| async {
@@ -527,7 +527,7 @@ finish "observed through live replay"
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let provider = lash::testing::TestProvider::builder()
             .kind("workbench-observation-gap-test")
             .complete(|_request| async {
@@ -630,7 +630,7 @@ finish "gap source"
             .build()
             .into_handle();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let (event_tx, _) = broadcast::channel(16);
         let mut events = event_tx.subscribe();
         let (restate_admin_url, mut admin_requests) = spawn_restate_admin_capture().await;
@@ -653,7 +653,7 @@ finish "gap source"
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
-                model_variant: None,
+                model_variant: Default::default(),
             })),
             web_configured: false,
             trace_sink: None,
@@ -726,7 +726,7 @@ finish "gap source"
             .build()
             .into_handle();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let session_id = WorkbenchSessionIds::fresh().current();
         let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
@@ -806,7 +806,7 @@ finish initial
             .build()
             .into_handle();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let session_id = WorkbenchSessionIds::fresh().current();
         let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
@@ -870,7 +870,7 @@ finish initial
             .build()
             .into_handle();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
         let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
@@ -894,7 +894,7 @@ finish initial
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
-                model_variant: None,
+                model_variant: Default::default(),
             })),
             web_configured: false,
             trace_sink: None,
@@ -1023,7 +1023,7 @@ finish initial
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let provider = trigger_registration_provider();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
         let session_id = session_ids.current();
         let core = explicit_durable_test_facets(&data_dir)
@@ -1111,7 +1111,7 @@ finish initial
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
-                model_variant: None,
+                model_variant: Default::default(),
             })),
             web_configured: false,
             trace_sink: None,
@@ -1214,7 +1214,7 @@ finish initial
             .build()
             .into_handle();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let model = with_workbench_model_capability(model);
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let (event_tx, _) = broadcast::channel(1024);
@@ -1252,7 +1252,7 @@ finish initial
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
-                model_variant: None,
+                model_variant: Default::default(),
             })),
             web_configured: false,
             trace_sink: None,
@@ -1418,7 +1418,7 @@ finish initial
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let provider = trigger_registration_provider();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
@@ -1445,7 +1445,7 @@ finish initial
             }])),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
-                model_variant: None,
+                model_variant: Default::default(),
             })),
             web_configured: false,
             trace_sink: None,
@@ -1822,7 +1822,12 @@ finish initial
             .build()
             .into_handle();
         let model =
-            lash::ModelSpec::from_token_limits("mock-model", Some("high".to_string()), 4096, None)
+            lash::ModelSpec::from_token_limits(
+                "mock-model",
+                lash::provider::ReasoningSelection::Effort("high".to_string()),
+                4096,
+                None,
+            )
                 .expect("model spec");
         let model = with_workbench_model_capability(model);
         let process_deployment = lash_restate::RestateProcessDeployment::new(
@@ -2167,7 +2172,7 @@ finish initial
     ) -> LashCore {
         let provider = trigger_registration_provider();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
             lash::rlm::RlmProtocolPluginConfig::default()
                 .with_lashlang_abilities(workbench_lashlang_abilities()),

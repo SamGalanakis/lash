@@ -259,8 +259,13 @@ finish "registered"
     }
 
     fn rebuild_model() -> crate::ModelSpec {
-        crate::ModelSpec::from_token_limits("rebuild-conformance-model", None, 4096, None)
-            .expect("model spec")
+        crate::ModelSpec::from_token_limits(
+            "rebuild-conformance-model",
+            Default::default(),
+            4096,
+            None,
+        )
+        .expect("model spec")
     }
 
     fn lashlang_block(source: &str) -> String {

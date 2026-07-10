@@ -41,7 +41,7 @@ mod tests {
             attachments: vec![LlmAttachment::bytes("image/png", vec![1, 2, 3, 4])],
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::None,
-            model_variant: Some("fast".to_string()),
+            model_variant: crate::ReasoningSelection::Effort("fast".to_string()),
             model_capability: crate::ModelCapability::default(),
             scope: crate::LlmRequestScope::new(
                 "session",

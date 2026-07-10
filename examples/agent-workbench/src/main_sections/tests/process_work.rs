@@ -32,7 +32,7 @@ mod process_work_tests {
             .build()
             .into_handle();
         let model =
-            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
+            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let (event_tx, _) = broadcast::channel(16);
         // The app sink, wired exactly as bootstrap wires it — through the
         // driver's watched decorator, feeding an mpsc channel.
@@ -61,7 +61,7 @@ mod process_work_tests {
             messages: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
                 model: "test-model".to_string(),
-                model_variant: None,
+                model_variant: Default::default(),
             })),
             web_configured: false,
             trace_sink: None,

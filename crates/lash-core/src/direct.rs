@@ -47,8 +47,8 @@ pub enum DirectOutputSpec {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DirectRequest {
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_variant: Option<String>,
+    #[serde(default)]
+    pub model_variant: crate::ReasoningSelection,
     #[serde(default, skip_serializing_if = "ModelCapability::is_empty")]
     pub model_capability: ModelCapability,
     #[serde(default)]
@@ -73,7 +73,7 @@ impl DirectRequest {
     pub fn text(model: impl Into<String>, prompt: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            model_variant: None,
+            model_variant: crate::ReasoningSelection::ProviderDefault,
             model_capability: ModelCapability::default(),
             messages: vec![DirectMessage {
                 role: DirectRole::User,
@@ -180,11 +180,7 @@ impl DirectLlmClient {
         // back so the provider never sees an un-clamped value.
         request.model_variant = request
             .model_capability
-            .validate_effort(
-                &request.model,
-                self.provider.kind(),
-                request.model_variant.as_deref(),
-            )
+            .validate_selection(&request.model, self.provider.kind(), &request.model_variant)
             .map_err(|error| DirectLlmError::InvalidRequest {
                 category: error.category,
                 message: error.message,
@@ -590,7 +586,7 @@ mod tests {
         let mut client = DirectLlmClient::new(provider);
 
         let mut request = DirectRequest::text("direct-model", "hi");
-        request.model_variant = Some("turbo".to_string());
+        request.model_variant = crate::ReasoningSelection::Effort("turbo".to_string());
         request.model_capability = reasoning_capability();
 
         let err = client
@@ -613,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_client_normalizes_alias_effort_into_outgoing_request() {
-        let captured: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+        let captured: Arc<Mutex<Option<crate::ReasoningSelection>>> = Arc::new(Mutex::new(None));
         let captured_for_provider = Arc::clone(&captured);
         let provider = TestProvider::builder()
             .kind("direct-alias")
@@ -633,7 +629,7 @@ mod tests {
         let mut client = DirectLlmClient::new(provider);
 
         let mut request = DirectRequest::text("direct-model", "hi");
-        request.model_variant = Some("XHigh".to_string());
+        request.model_variant = crate::ReasoningSelection::Effort("XHigh".to_string());
         request.model_capability = reasoning_capability();
 
         client.complete(request).await.expect("completion");
@@ -643,8 +639,8 @@ mod tests {
             .clone()
             .expect("provider must be called");
         assert_eq!(
-            seen.as_deref(),
-            Some("max"),
+            seen,
+            crate::ReasoningSelection::Effort("max".to_string()),
             "alias `XHigh` must clamp to canonical `max` before the provider sees the request"
         );
     }
@@ -659,7 +655,7 @@ mod tests {
         let mut client = DirectLlmClient::new(provider);
 
         let mut request = DirectRequest::text("direct-model", "hi");
-        request.model_variant = Some("high".to_string());
+        request.model_variant = crate::ReasoningSelection::Effort("high".to_string());
         // No capability: the model exposes no configurable effort.
 
         let err = client
@@ -730,7 +726,7 @@ mod tests {
             generation: crate::GenerationOptions::default(),
             stream_events: None,
             session_id: None,
-            model_variant: None,
+            model_variant: Default::default(),
             model_capability: ModelCapability::default(),
             caused_by: None,
             replay: None,

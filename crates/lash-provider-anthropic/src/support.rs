@@ -16,7 +16,7 @@ pub(crate) use lash_core::llm::types::{
 };
 pub(crate) use lash_core::provider::{
     CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderOptions,
-    ReasoningEncoding, resolve_generation_policy,
+    ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection, resolve_generation_policy,
 };
 pub(crate) use lash_core::{
     ProviderSchemaCapabilities, SchemaPurpose, SchemaResolutionError, SchemaResolutionRequest,

@@ -1493,7 +1493,7 @@ fn text_provider(kind: &'static str, _model: &'static str, text: &'static str) -
         .into_handle()
 }
 
-type SeenModels = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+type SeenModels = Arc<std::sync::Mutex<Vec<(String, lash_core::ReasoningSelection)>>>;
 
 fn recording_text_provider(
     kind: &'static str,

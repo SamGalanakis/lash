@@ -293,8 +293,13 @@ pub(super) async fn prove_pending_tool_completion_through_turn()
             as Arc<dyn lash_core::ProcessRegistry>)
         .provider(pending_tool_roundtrip_provider())
         .model(
-            lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
-                .map_err(FixedScriptRunnerError::Assertion)?,
+            lash_core::ModelSpec::from_token_limits(
+                "mock-model",
+                Default::default(),
+                200_000,
+                None,
+            )
+            .map_err(FixedScriptRunnerError::Assertion)?,
         )
         .tools(Arc::new(PendingToolProvider::new(key_tx)) as Arc<dyn lash_core::ToolProvider>)
         .build()
@@ -520,8 +525,13 @@ pub(super) async fn prove_final_value_semantic_channel()
             as Arc<dyn lash_core::ProcessRegistry>)
         .provider(rlm_final_value_provider())
         .model(
-            lash_core::ModelSpec::from_token_limits("mock-rlm-final-value", None, 200_000, None)
-                .map_err(FixedScriptRunnerError::Assertion)?,
+            lash_core::ModelSpec::from_token_limits(
+                "mock-rlm-final-value",
+                Default::default(),
+                200_000,
+                None,
+            )
+            .map_err(FixedScriptRunnerError::Assertion)?,
         )
         .build()
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;

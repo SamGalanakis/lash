@@ -15,6 +15,7 @@ const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
 pub(crate) enum GoogleThinkingConfig {
     Level { level: String },
     Budget { budget_tokens: u32 },
+    ToggleFalse,
 }
 
 impl GoogleOAuthProvider {
@@ -254,18 +255,35 @@ impl GoogleOAuthProvider {
     }
 
     fn thinking_config_from_capability(req: &LlmRequest) -> Option<GoogleThinkingConfig> {
-        let variant = req.model_variant.as_ref()?;
         let reasoning = req.model_capability.reasoning.as_ref()?;
-        match &reasoning.encoding {
-            ReasoningEncoding::Effort => Some(GoogleThinkingConfig::Level {
-                level: variant.clone(),
-            }),
-            ReasoningEncoding::Budget(map) => {
-                map.get(variant)
-                    .map(|budget_tokens| GoogleThinkingConfig::Budget {
+        match &req.model_variant {
+            ReasoningSelection::ProviderDefault => None,
+            ReasoningSelection::Effort(variant) => match &reasoning.encoding {
+                ReasoningEncoding::Effort => Some(GoogleThinkingConfig::Level {
+                    level: variant.clone(),
+                }),
+                ReasoningEncoding::Budget(map) => {
+                    map.get(variant)
+                        .map(|budget_tokens| GoogleThinkingConfig::Budget {
+                            budget_tokens: *budget_tokens,
+                        })
+                }
+            },
+            ReasoningSelection::Disabled => match reasoning.disable.as_ref()? {
+                ReasoningDisableEncoding::Native => {
+                    Some(GoogleThinkingConfig::Budget { budget_tokens: 0 })
+                }
+                ReasoningDisableEncoding::Omit => None,
+                ReasoningDisableEncoding::Effort(level) => Some(GoogleThinkingConfig::Level {
+                    level: level.clone(),
+                }),
+                ReasoningDisableEncoding::Budget(budget_tokens) => {
+                    Some(GoogleThinkingConfig::Budget {
                         budget_tokens: *budget_tokens,
                     })
-            }
+                }
+                ReasoningDisableEncoding::ToggleFalse => Some(GoogleThinkingConfig::ToggleFalse),
+            },
         }
     }
 
@@ -312,6 +330,10 @@ impl GoogleOAuthProvider {
                         thinking_config["includeThoughts"] = json!(true);
                     }
                     request["request"]["generationConfig"]["thinkingConfig"] = thinking_config;
+                }
+                GoogleThinkingConfig::ToggleFalse => {
+                    request["request"]["generationConfig"]["thinkingConfig"] =
+                        json!({ "thinkingEnabled": false });
                 }
             }
         }

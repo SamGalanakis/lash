@@ -35,7 +35,7 @@ impl ModelInfo {
     ) -> Result<ModelSpec, String> {
         ModelSpec::from_token_limits(
             id,
-            variant,
+            crate::model_selection::reasoning_selection_from_variant(variant),
             usize::try_from(self.prompt_budget_tokens())
                 .map_err(|_| "prompt budget does not fit in usize".to_string())?,
             self.max_output_tokens

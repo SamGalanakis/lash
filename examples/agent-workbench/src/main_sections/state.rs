@@ -38,7 +38,7 @@ impl ModelSelection {
     fn from_spec(model: &lash::ModelSpec) -> Self {
         Self {
             model: model.id.clone(),
-            model_variant: model.variant.clone(),
+            model_variant: model.variant.effort().map(str::to_string),
         }
     }
 }

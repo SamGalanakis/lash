@@ -1722,7 +1722,7 @@ mod tests {
                 output_schema: json!({}).into(),
             }]),
             tool_choice: LlmToolChoice::Auto,
-            model_variant: None,
+            model_variant: Default::default(),
             model_capability: lash_core::ModelCapability::default(),
             generation: lash_core::GenerationOptions::default(),
             scope: lash_core::LlmRequestScope::new(
@@ -1743,7 +1743,7 @@ mod tests {
             attachments: Vec::new(),
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::Auto,
-            model_variant: None,
+            model_variant: Default::default(),
             model_capability: lash_core::ModelCapability::default(),
             generation: lash_core::GenerationOptions::default(),
             scope: lash_core::LlmRequestScope::new(

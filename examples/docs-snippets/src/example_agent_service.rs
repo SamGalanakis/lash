@@ -45,7 +45,7 @@ async fn service_core(
         .model(
             lash::ModelSpec::from_token_limits(
                 model.clone(),
-                Some(model_variant.clone()),
+                lash::provider::ReasoningSelection::Effort(model_variant.clone()),
                 200_000,
                 None,
             )
@@ -111,7 +111,10 @@ async fn service_turn(
         .model(
             lash::ModelSpec::from_token_limits(
                 model_selection.model,
-                model_selection.model_variant,
+                model_selection
+                    .model_variant
+                    .map(lash::provider::ReasoningSelection::Effort)
+                    .unwrap_or_default(),
                 200_000,
                 None,
             )
@@ -140,6 +143,7 @@ fn adaptive_reasoning_capability() -> lash::provider::ModelCapability {
             default_effort: Some("medium".to_string()),
             aliases: Default::default(),
             encoding: lash::provider::ReasoningEncoding::Effort,
+            disable: None,
             mandatory: false,
         }),
     }

@@ -583,7 +583,7 @@ fn openai_compatible_request(stream: bool) -> LlmRequest {
             output_schema: json!({}).into(),
         }]),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
@@ -604,7 +604,7 @@ fn openai_responses_request() -> LlmRequest {
         attachments: Vec::new(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
@@ -625,7 +625,7 @@ fn anthropic_messages_request() -> LlmRequest {
         attachments: Vec::new(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
@@ -646,7 +646,7 @@ fn google_request(stream: bool) -> LlmRequest {
         attachments: Vec::new(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::Auto,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(

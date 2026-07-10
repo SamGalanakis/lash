@@ -271,8 +271,13 @@ async fn observation_test_session(
     let mut builder = lash::LashCore::standard_builder()
         .provider(provider)
         .model(
-            lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
-                .expect("model spec"),
+            lash_core::ModelSpec::from_token_limits(
+                "mock-model",
+                Default::default(),
+                200_000,
+                None,
+            )
+            .expect("model spec"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
@@ -521,8 +526,13 @@ fn copy_shortcut_rejects_plain_ctrl_c() {
 #[test]
 fn cleared_session_state_preserves_model_spec() {
     let state = cleared_session_state(SessionPolicy {
-        model: lash_core::ModelSpec::from_token_limits("mock-model", None, 123_456, None)
-            .expect("valid model spec"),
+        model: lash_core::ModelSpec::from_token_limits(
+            "mock-model",
+            Default::default(),
+            123_456,
+            None,
+        )
+        .expect("valid model spec"),
         ..SessionPolicy::default()
     });
 

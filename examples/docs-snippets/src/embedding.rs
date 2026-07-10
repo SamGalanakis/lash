@@ -83,8 +83,13 @@ async fn full_core(provider: ProviderHandle) -> anyhow::Result<()> {
     let core = lash::LashCore::rlm_builder(factory)
         .provider(provider)
         .model(
-            lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
-                .expect("valid model metadata"),
+            lash::ModelSpec::from_token_limits(
+                "anthropic/claude-sonnet-4.6",
+                Default::default(),
+                200_000,
+                None,
+            )
+            .expect("valid model metadata"),
         )
         .plugins(runtime_plugin_stack())
         .tools(Arc::new(AppTools) as Arc<dyn ToolProvider>)
@@ -120,7 +125,7 @@ async fn preset_core(provider: ProviderHandle) -> anyhow::Result<()> {
     use lash::{SessionSpec, plugins::PluginFactory};
 
     let root_spec = SessionSpec::new().provider_id(provider.kind()).model(
-        lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None)
+        lash::ModelSpec::from_token_limits("gpt-5.4", Default::default(), 200_000, None)
             .expect("valid model metadata"),
     );
 

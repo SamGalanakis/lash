@@ -7,7 +7,7 @@ use crate::plugin::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolSessionModel {
     pub model: String,
-    pub model_variant: Option<String>,
+    pub model_variant: crate::ReasoningSelection,
     pub model_capability: crate::provider::ModelCapability,
 }
 

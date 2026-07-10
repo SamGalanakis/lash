@@ -124,7 +124,7 @@ fn llm_spec() -> lash_core::LlmRequestSpec {
         attachments: Vec::new(),
         tools: Arc::new(Vec::new()),
         tool_choice: Default::default(),
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: lash_core::ModelCapability::default(),
         generation: lash_core::GenerationOptions::default(),
         scope: lash_core::LlmRequestScope::new(
@@ -2915,8 +2915,13 @@ fn recovery_worker_with_plugins(
 
 fn recovery_session_policy() -> lash_core::SessionPolicy {
     lash_core::SessionPolicy {
-        model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
-            .expect("model spec"),
+        model: lash_core::ModelSpec::from_token_limits(
+            "mock-model",
+            Default::default(),
+            200_000,
+            None,
+        )
+        .expect("model spec"),
         ..lash_core::SessionPolicy::default()
     }
 }
@@ -3125,8 +3130,13 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
             session_id: "root".to_string(),
             relation: lash_core::SessionRelation::default(),
             policy: lash_core::SessionPolicy {
-                model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
-                    .expect("model spec"),
+                model: lash_core::ModelSpec::from_token_limits(
+                    "mock-model",
+                    Default::default(),
+                    200_000,
+                    None,
+                )
+                .expect("model spec"),
                 ..lash_core::SessionPolicy::default()
             },
         })

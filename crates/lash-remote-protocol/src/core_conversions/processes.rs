@@ -1080,7 +1080,7 @@ impl From<lash_core::ModelSpec> for RemoteProcessModelSpec {
         } = value;
         Self {
             id,
-            variant,
+            variant: variant.into(),
             capability: capability.into(),
             limits: limits.into(),
         }
@@ -1099,7 +1099,7 @@ impl TryFrom<RemoteProcessModelSpec> for lash_core::ModelSpec {
         } = value;
         Ok(lash_core::ModelSpec::from_token_limits(
             id,
-            variant,
+            variant.into(),
             limits.context_window_tokens,
             limits.output_token_capacity,
         )

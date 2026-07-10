@@ -290,10 +290,10 @@ impl RuntimeTurnDriver<'_> {
         // Validate the requested effort against the host-supplied capability
         // and normalize (alias-clamp) it back onto the spec so the outgoing
         // request carries the canonical effort the provider expects.
-        match policy.model.capability.validate_effort(
+        match policy.model.capability.validate_selection(
             &model,
             provider_kind,
-            policy.model.variant.as_deref(),
+            &policy.model.variant,
         ) {
             Ok(resolved) => policy.model.variant = resolved,
             Err(error) => {

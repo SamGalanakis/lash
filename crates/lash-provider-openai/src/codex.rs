@@ -12,7 +12,9 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use crate::common::{DEFAULT_HTTP_TRANSPORT, DEFAULT_MAX_OUTPUT_TOKENS};
+use crate::common::{
+    DEFAULT_HTTP_TRANSPORT, DEFAULT_MAX_OUTPUT_TOKENS, reasoning_config, reasoning_config_json,
+};
 use crate::responses_shared as shared;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash_core::llm::types::{LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
@@ -390,16 +392,12 @@ impl CodexProvider {
         let tools = Self::build_tools(req)?;
         let (instructions, input) =
             shared::build_responses_input(req, shared::ResponsesInputOptions::CODEX);
-        let requested_effort = req
-            .model_variant
-            .as_deref()
-            .filter(|_| req.model_capability.reasoning.is_some())
-            .map(str::to_owned);
+        let requested_reasoning = reasoning_config(req);
         let policy = resolve_generation_policy(
             &req.generation,
             &self.options,
             DEFAULT_MAX_OUTPUT_TOKENS,
-            requested_effort,
+            requested_reasoning,
         );
         let mut body = json!({
             "model": req.model,
@@ -424,10 +422,8 @@ impl CodexProvider {
         if !req.tools.is_empty() {
             body["tool_choice"] = json!(shared::tool_choice_value(&req.tool_choice));
         }
-        if let Some(effort) = policy.thinking {
-            let mut reasoning = json!({
-                "effort": effort,
-            });
+        if let Some(config) = policy.thinking {
+            let mut reasoning = reasoning_config_json(config);
             if policy.expose_thinking {
                 reasoning["summary"] = json!("auto");
             }
@@ -1810,6 +1806,9 @@ mod tests {
             reasoning: Some(ReasoningCapability {
                 efforts: vec!["medium".to_string(), "high".to_string()],
                 default_effort: Some("medium".to_string()),
+                disable: Some(lash_core::provider::ReasoningDisableEncoding::Effort(
+                    "none".to_string(),
+                )),
                 ..ReasoningCapability::default()
             }),
         }
@@ -1822,7 +1821,7 @@ mod tests {
             attachments: Vec::new(),
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
-            model_variant: None,
+            model_variant: Default::default(),
             model_capability: ModelCapability::default(),
             scope: LlmRequestScope::new(
                 "session-1",
@@ -2012,7 +2011,7 @@ mod tests {
     fn codex_request_body_emits_reasoning_from_capability_variant() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
         req.model = "custom-codex-model".to_string();
-        req.model_variant = Some("high".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
         req.model_capability = reasoning_capability();
 
         let body = CodexProvider::new("access", "refresh", 0)
@@ -2023,10 +2022,23 @@ mod tests {
     }
 
     #[test]
+    fn codex_request_body_emits_none_effort_for_disabled_selection() {
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.model_variant = lash_core::provider::ReasoningSelection::Disabled;
+        req.model_capability = reasoning_capability();
+
+        let body = CodexProvider::new("access", "refresh", 0)
+            .build_request_body(&req, true)
+            .unwrap();
+
+        assert_eq!(body["reasoning"], json!({ "effort": "none" }));
+    }
+
+    #[test]
     fn codex_request_body_omits_reasoning_without_capability() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
         req.model = "custom-codex-model".to_string();
-        req.model_variant = Some("high".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
 
         let body = CodexProvider::new("access", "refresh", 0)
             .build_request_body(&req, true)
@@ -2038,7 +2050,7 @@ mod tests {
     #[test]
     fn codex_request_body_exposes_reasoning_summary_only_when_configured() {
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-        req.model_variant = Some("medium".to_string());
+        req.model_variant = lash_core::provider::ReasoningSelection::Effort("medium".to_string());
         req.model_capability = reasoning_capability();
 
         let hidden = CodexProvider::new("access", "refresh", 0)

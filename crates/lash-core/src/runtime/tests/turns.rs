@@ -349,8 +349,9 @@ async fn session_config_change_hook_receives_context_window_updates() {
         .kind("alt")
         .complete_error("alt provider not wired")
         .build();
-    let alt_model = crate::ModelSpec::from_token_limits("alt-model", None, 123_456, None)
-        .expect("valid model spec");
+    let alt_model =
+        crate::ModelSpec::from_token_limits("alt-model", Default::default(), 123_456, None)
+            .expect("valid model spec");
     runtime
         .update_session_config(
             Some(alt_provider.into_handle()),
@@ -2940,7 +2941,7 @@ fn turn_input_queue_ingress_has_one_production_draft_persistence_path() {
 async fn turn_driver_normalizes_alias_effort_into_outgoing_request() {
     use std::sync::{Arc, Mutex};
 
-    let captured: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+    let captured: Arc<Mutex<Option<crate::ReasoningSelection>>> = Arc::new(Mutex::new(None));
     let captured_for_provider = Arc::clone(&captured);
     let provider = TestProvider::builder()
         .kind("capability-capture")
@@ -2971,10 +2972,14 @@ async fn turn_driver_normalizes_alias_effort_into_outgoing_request() {
             ..Default::default()
         }),
     };
-    let model =
-        crate::ModelSpec::from_token_limits("mock-model", Some("xhigh".to_string()), 200_000, None)
-            .expect("valid model spec")
-            .with_capability(capability);
+    let model = crate::ModelSpec::from_token_limits(
+        "mock-model",
+        crate::ReasoningSelection::Effort("xhigh".to_string()),
+        200_000,
+        None,
+    )
+    .expect("valid model spec")
+    .with_capability(capability);
 
     let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     runtime
@@ -3006,8 +3011,8 @@ async fn turn_driver_normalizes_alias_effort_into_outgoing_request() {
         .clone()
         .expect("provider must be called");
     assert_eq!(
-        seen.as_deref(),
-        Some("max"),
+        seen,
+        crate::ReasoningSelection::Effort("max".to_string()),
         "alias `xhigh` must clamp to canonical `max` before the provider sees the request"
     );
 }
@@ -3040,10 +3045,14 @@ async fn turn_driver_rejects_unsupported_effort_before_provider_call() {
             ..Default::default()
         }),
     };
-    let model =
-        crate::ModelSpec::from_token_limits("mock-model", Some("turbo".to_string()), 200_000, None)
-            .expect("valid model spec")
-            .with_capability(capability);
+    let model = crate::ModelSpec::from_token_limits(
+        "mock-model",
+        crate::ReasoningSelection::Effort("turbo".to_string()),
+        200_000,
+        None,
+    )
+    .expect("valid model spec")
+    .with_capability(capability);
 
     let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     runtime

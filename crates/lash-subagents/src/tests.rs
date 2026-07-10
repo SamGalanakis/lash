@@ -27,8 +27,15 @@ fn model_spec(
     variant: Option<String>,
     context_window_tokens: usize,
 ) -> lash_core::ModelSpec {
-    lash_core::ModelSpec::from_token_limits(model, variant, context_window_tokens, None)
-        .expect("valid model spec")
+    lash_core::ModelSpec::from_token_limits(
+        model,
+        variant
+            .map(lash_core::ReasoningSelection::Effort)
+            .unwrap_or_default(),
+        context_window_tokens,
+        None,
+    )
+    .expect("valid model spec")
 }
 
 struct SeedProbeState {
@@ -56,7 +63,10 @@ fn static_capability_policy_fields_distinguish_inherit_set_and_clear() {
     let policy = build_session_policy(&registry, &current, "child").expect("policy");
 
     assert_eq!(policy.model.id, "child-model");
-    assert_eq!(policy.model.variant, None);
+    assert_eq!(
+        policy.model.variant,
+        lash_core::ReasoningSelection::ProviderDefault
+    );
 }
 
 struct CustomRequestCapability;

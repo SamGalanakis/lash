@@ -271,7 +271,7 @@ mod tests {
                     provider_id: "openai-compatible".into(),
                     model: lash_core::ModelSpec::from_token_limits(
                         "gpt-5.4-mini",
-                        None,
+                        Default::default(),
                         200_000,
                         None,
                     )

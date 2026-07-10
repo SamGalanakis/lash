@@ -718,7 +718,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 7);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 8);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());

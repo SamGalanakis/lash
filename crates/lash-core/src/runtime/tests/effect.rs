@@ -1514,7 +1514,7 @@ async fn exec_and_execution_environment_effects_cross_controller_once() {
     let recorder = RecordingEffectController::default();
     let policy = SessionPolicy {
         provider_id: "mock".to_string(),
-        model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+        model: crate::ModelSpec::from_token_limits("mock-model", Default::default(), 200_000, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
     };
@@ -1563,7 +1563,7 @@ async fn exec_and_execution_environment_effects_cross_controller_once() {
 async fn start_exec_without_code_executor_stops_as_runtime_error() {
     let policy = SessionPolicy {
         provider_id: "mock".to_string(),
-        model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+        model: crate::ModelSpec::from_token_limits("mock-model", Default::default(), 200_000, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
     };
@@ -1844,7 +1844,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
         attachments: Vec::new(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: crate::ModelCapability::default(),
         scope: crate::LlmRequestScope::new(
             "direct-llm-test",
@@ -1893,7 +1893,7 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
         attachments: vec![LlmAttachment::bytes("image/png", image_bytes)],
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
-        model_variant: None,
+        model_variant: Default::default(),
         model_capability: crate::ModelCapability::default(),
         scope: crate::LlmRequestScope::new(
             "direct-attachment-test",
