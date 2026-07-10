@@ -517,27 +517,91 @@ impl ProcessRegistry for PostgresProcessRegistry {
         &self,
         process_id: &str,
         await_output: ProcessAwaitOutput,
+        authority: lash_core::ProcessCompletionAuthority,
     ) -> Result<ProcessRecord, PluginError> {
-        let event_type = match await_output.terminal_state() {
-            lash_core::ProcessTerminalState::Completed => "process.completed",
-            lash_core::ProcessTerminalState::Failed => "process.failed",
-            lash_core::ProcessTerminalState::Cancelled => "process.cancelled",
-            lash_core::ProcessTerminalState::Abandoned => "process.abandoned",
-        };
-        self.append_event(
-            process_id,
-            ProcessEventAppendRequest::new(
-                event_type,
-                serde_json::json!({ "await_output": await_output }),
-            )
-            .with_replay_key(format!("process:{process_id}:terminal:{event_type}")),
+        // Load (FOR UPDATE), validate the authority against the row's declared
+        // disposition, and append the terminal event as one transaction. The
+        // `FOR UPDATE` row lock held from the load through the commit is the
+        // guard: under READ COMMITTED a concurrent complete→prune→re-register
+        // would otherwise change the disposition between a separate read and the
+        // append. Locking the row means the disposition we validate is the
+        // disposition we append against — the re-registration serialises either
+        // fully before our load or fully after our commit.
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        let mut record = load_process_tx(&mut tx, process_id)
+            .await?
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        authority.validate(process_id, record.disposition, &await_output)?;
+        let request =
+            lash_core::terminal_append_request(process_id, &await_output, Some(&authority));
+        let replay_lookup =
+            if let Some(replay_key) = request.replay.as_ref().map(|r| r.key.as_str()) {
+                load_event_by_key_tx(&mut tx, process_id, replay_key).await?
+            } else {
+                None
+            };
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM lash_process_events WHERE process_id = $1",
         )
-        .await?;
-        load_process(&self.pool, process_id).await?.ok_or_else(|| {
-            PluginError::Session(format!(
-                "unknown process `{process_id}` after terminal event"
-            ))
-        })
+        .bind(process_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        let occurred_at_ms = current_epoch_ms();
+        let prepared = lash_core::runtime::prepare_process_event_append(
+            &record,
+            request,
+            sequence as u64,
+            replay_lookup,
+            occurred_at_ms,
+        )?;
+        match prepared {
+            lash_core::ProcessEventAppendPlan::Replay {
+                repair_status,
+                occurred_at_ms,
+                ..
+            } => {
+                if let Some(status) = repair_status {
+                    lash_core::apply_process_status_projection(&mut record, status, occurred_at_ms);
+                    save_process_tx(&mut tx, &record).await?;
+                }
+                tx.commit().await.map_err(plugin_sqlx_error)?;
+                Ok(record)
+            }
+            lash_core::ProcessEventAppendPlan::Insert {
+                event,
+                payload_hash,
+                status_update,
+                occurred_at_ms,
+                ..
+            } => {
+                sqlx::query(
+                    "INSERT INTO lash_process_events (
+                        process_id, sequence, event_type, payload_hash, idempotency_key,
+                        occurred_at_ms, event_json
+                     )
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(process_id)
+                .bind(sequence)
+                .bind(event.event_type.as_str())
+                .bind(&payload_hash)
+                .bind(event.invocation.replay_key())
+                .bind(occurred_at_ms as i64)
+                .bind(serde_json::to_string(&event).map_err(process_decode_error)?)
+                .execute(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?;
+                if let Some(status) = status_update {
+                    lash_core::apply_process_status_projection(&mut record, status, occurred_at_ms);
+                } else {
+                    record.updated_at_ms = occurred_at_ms;
+                }
+                save_process_tx(&mut tx, &record).await?;
+                tx.commit().await.map_err(plugin_sqlx_error)?;
+                Ok(record)
+            }
+        }
     }
 
     async fn complete_process_with_lease(
@@ -550,17 +614,7 @@ impl ProcessRegistry for PostgresProcessRegistry {
         let mut record = load_process_tx(&mut tx, process_id)
             .await?
             .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
-        let event_type = match await_output.terminal_state() {
-            lash_core::ProcessTerminalState::Completed => "process.completed",
-            lash_core::ProcessTerminalState::Failed => "process.failed",
-            lash_core::ProcessTerminalState::Cancelled => "process.cancelled",
-            lash_core::ProcessTerminalState::Abandoned => "process.abandoned",
-        };
-        let request = ProcessEventAppendRequest::new(
-            event_type,
-            serde_json::json!({ "await_output": await_output }),
-        )
-        .with_replay_key(format!("process:{process_id}:terminal:{event_type}"));
+        let request = lash_core::terminal_append_request(process_id, &await_output, None);
         let replay_lookup =
             if let Some(replay_key) = request.replay.as_ref().map(|r| r.key.as_str()) {
                 load_event_by_key_tx(&mut tx, process_id, replay_key).await?

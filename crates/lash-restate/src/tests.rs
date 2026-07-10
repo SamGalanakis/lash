@@ -264,29 +264,8 @@ impl lash_core::AttachmentStore for DurableMemoryAttachmentStore {
         self.inner.delete(id).await
     }
 
-    async fn put_for_session(
-        &self,
-        session_id: &str,
-        bytes: Vec<u8>,
-        meta: lash_core::AttachmentCreateMeta,
-    ) -> Result<lash_core::AttachmentRef, lash_core::AttachmentStoreError> {
-        self.inner.put_for_session(session_id, bytes, meta).await
-    }
-
-    async fn get_for_session(
-        &self,
-        session_id: &str,
-        id: &lash_core::AttachmentId,
-    ) -> Result<lash_core::StoredAttachment, lash_core::AttachmentStoreError> {
-        self.inner.get_for_session(session_id, id).await
-    }
-
-    async fn delete_for_session(
-        &self,
-        session_id: &str,
-        id: &lash_core::AttachmentId,
-    ) -> Result<(), lash_core::AttachmentStoreError> {
-        self.inner.delete_for_session(session_id, id).await
+    async fn list(&self) -> Result<Vec<lash_core::StoredBlobRef>, lash_core::AttachmentStoreError> {
+        self.inner.list().await
     }
 }
 
@@ -1871,7 +1850,9 @@ async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
         .into_handle();
     let mut host = lash_core::RuntimeHostConfig::in_memory();
     host.providers.provider_resolver = Arc::new(lash_core::SingleProviderResolver::new(provider));
-    host.durability.attachment_store = Arc::new(DurableMemoryAttachmentStore::default());
+    host.durability.attachment_store = Arc::new(lash_core::SessionAttachmentStore::ephemeral(
+        Arc::new(DurableMemoryAttachmentStore::default()),
+    ));
     host.durability.process_env_store = Arc::new(DurableMemoryProcessEnvStore::default());
     let store = Arc::new(
         lash_sqlite_store::Store::open(&dir.path().join("session.db"))
@@ -2049,7 +2030,11 @@ async fn restate_controller_replays_process_start_await_command_sequence() {
     .await
     .expect("first start");
     registry
-        .complete_process(process_id, terminal.clone())
+        .complete_process(
+            process_id,
+            terminal.clone(),
+            lash_core::ProcessCompletionAuthority::external_owner("test"),
+        )
         .await
         .expect("complete child process");
     context.resolve_process_terminal(process_id, &terminal);
@@ -2446,7 +2431,11 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
         control: None,
     };
     registry
-        .complete_process("task-await-signal", awaited_output.clone())
+        .complete_process(
+            "task-await-signal",
+            awaited_output.clone(),
+            lash_core::ProcessCompletionAuthority::external_owner("test"),
+        )
         .await
         .expect("complete");
     context.resolve_process_terminal("task-await-signal", &awaited_output);
@@ -3918,7 +3907,10 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
     let runner = Arc::new(RecordingRunner::default());
     let registry = process_registry();
     let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
-    let registration = external_registration("task-workflow")
+    // The workflow only ever runs lash-executed rows: `submit_record` refuses to
+    // POST an ExternallyOwned row, and the registry rejects a workflow-key
+    // completion of one (ADR 0027) — so the fixture is Rerunnable.
+    let registration = rerunnable_registration("task-workflow")
         .with_wake_target(Some(lash_core::SessionScope::new("wake-session")));
     registry
         .register_process(registration.clone())
@@ -4577,7 +4569,11 @@ async fn restate_driver_short_circuits_terminal_without_ingress_call() {
         .expect("register");
     driver
         .process_registry()
-        .complete_process("process-1", output.clone())
+        .complete_process(
+            "process-1",
+            output.clone(),
+            lash_core::ProcessCompletionAuthority::external_owner("test"),
+        )
         .await
         .expect("complete");
 
@@ -4672,6 +4668,7 @@ async fn restate_deployment_sink_funnel_feeds_appended_events() {
                 value: serde_json::Value::Null,
                 control: None,
             },
+            lash_core::ProcessCompletionAuthority::external_owner("test"),
         )
         .await
         .expect("complete");

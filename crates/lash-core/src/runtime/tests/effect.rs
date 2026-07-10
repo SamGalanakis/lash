@@ -74,7 +74,8 @@ fn runtime_host_config_with_durability(
     process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
 ) -> RuntimeHostConfig {
     let mut config = RuntimeHostConfig::in_memory();
-    config.durability.attachment_store = attachment_store;
+    config.durability.attachment_store =
+        Arc::new(crate::SessionAttachmentStore::ephemeral(attachment_store));
     config.durability.process_env_store = process_env_store;
     config
 }
@@ -335,10 +336,6 @@ impl crate::AwaitEventResolver for DurableAttachmentRequiredController {
     fn durability_tier(&self) -> crate::DurabilityTier {
         crate::DurabilityTier::Durable
     }
-
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
-    }
 }
 
 #[async_trait::async_trait]
@@ -388,29 +385,8 @@ impl crate::AttachmentStore for DurableInMemoryAttachmentStore {
         self.inner.delete(id).await
     }
 
-    async fn put_for_session(
-        &self,
-        session_id: &str,
-        bytes: Vec<u8>,
-        meta: lash_sansio::AttachmentCreateMeta,
-    ) -> Result<lash_sansio::AttachmentRef, crate::AttachmentStoreError> {
-        self.inner.put_for_session(session_id, bytes, meta).await
-    }
-
-    async fn get_for_session(
-        &self,
-        session_id: &str,
-        id: &lash_sansio::AttachmentId,
-    ) -> Result<crate::StoredAttachment, crate::AttachmentStoreError> {
-        self.inner.get_for_session(session_id, id).await
-    }
-
-    async fn delete_for_session(
-        &self,
-        session_id: &str,
-        id: &lash_sansio::AttachmentId,
-    ) -> Result<(), crate::AttachmentStoreError> {
-        self.inner.delete_for_session(session_id, id).await
+    async fn list(&self) -> Result<Vec<crate::StoredBlobRef>, crate::AttachmentStoreError> {
+        self.inner.list().await
     }
 }
 
@@ -786,7 +762,9 @@ async fn durable_controller_rejects_ephemeral_process_env_store_before_turn_runs
         EmbeddedRuntimeHost::new({
             let mut config = RuntimeHostConfig::in_memory();
             config.durability.attachment_store =
-                Arc::new(DurableInMemoryAttachmentStore::default());
+                Arc::new(crate::SessionAttachmentStore::ephemeral(Arc::new(
+                    DurableInMemoryAttachmentStore::default(),
+                )));
             config
         }),
     )

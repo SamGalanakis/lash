@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::plugin::{
     PluginError, SessionGraphService, SessionLifecycleService, SessionSnapshot, SessionStateService,
 };
-use crate::{AttachmentStore, ToolContract, ToolDefinition, ToolId, ToolManifest, ToolResult};
+use crate::{ToolContract, ToolDefinition, ToolId, ToolManifest, ToolResult};
 
 mod attachments;
 mod direct_completion;
@@ -116,7 +116,7 @@ pub struct ToolContext<'run> {
     pub(crate) async_process_id: Option<String>,
     pub(crate) runtime_process_id: Option<String>,
     pub(crate) process_events: Option<ToolProcessEventContext>,
-    pub(crate) attachment_store: Arc<dyn AttachmentStore>,
+    pub(crate) attachment_store: Arc<crate::SessionAttachmentStore>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) prepared_payload: serde_json::Value,
     pub(crate) tool_execution_binding: serde_json::Value,
@@ -183,7 +183,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     async_process_id: Option<String>,
     runtime_process_id: Option<String>,
     process_events: Option<ToolProcessEventContext>,
-    attachment_store: Arc<dyn AttachmentStore>,
+    attachment_store: Arc<crate::SessionAttachmentStore>,
     direct_completions: crate::DirectCompletionClient<'run>,
     prepared_payload: serde_json::Value,
     tool_execution_binding: serde_json::Value,
@@ -355,7 +355,7 @@ impl<'run> ToolContext<'run> {
         processes: Arc<dyn crate::ProcessService>,
         process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
-        attachment_store: Arc<dyn AttachmentStore>,
+        attachment_store: Arc<crate::SessionAttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'run>,
     ) -> ToolContextBuilder<'run> {
         ToolContextBuilder {
@@ -676,7 +676,7 @@ impl<'run> ToolContext<'run> {
         session_lifecycle: Arc<dyn SessionLifecycleService>,
         session_graph: Arc<dyn SessionGraphService>,
         processes: Arc<dyn crate::ProcessService>,
-        attachment_store: Arc<dyn AttachmentStore>,
+        attachment_store: Arc<crate::SessionAttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'static>,
         tool_call_id: Option<String>,
     ) -> ToolContext<'static> {
@@ -713,7 +713,7 @@ impl<'run> ToolContext<'run> {
         session_graph: Arc<dyn SessionGraphService>,
         processes: Arc<dyn crate::ProcessService>,
         process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
-        attachment_store: Arc<dyn AttachmentStore>,
+        attachment_store: Arc<crate::SessionAttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'static>,
         tool_call_id: Option<String>,
     ) -> ToolContext<'static> {
@@ -1302,7 +1302,7 @@ mod tests {
             Arc::new(crate::UnavailableProcessService),
             Arc::new(crate::DefaultProcessCancelAbility),
             crate::runtime::RuntimeEffectControllerHandle::shared(controller),
-            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::SessionAttachmentStore::in_memory()),
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
@@ -1333,7 +1333,7 @@ mod tests {
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
-            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::SessionAttachmentStore::in_memory()),
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),

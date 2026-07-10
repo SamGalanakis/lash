@@ -1,12 +1,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef};
 
 use super::{
     AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, StoredAttachment,
-    content_id, session_storage_namespace,
+    StoredBlobRef, content_id,
 };
+
+/// Monotonic suffix so concurrent stagers within one process never collide on a
+/// staging file name.
+static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct FileAttachmentStore {
     root: PathBuf,
@@ -21,35 +26,36 @@ impl FileAttachmentStore {
         &self.root
     }
 
+    fn content_root(&self) -> PathBuf {
+        self.root.join("sha256")
+    }
+
     fn path_for_id(&self, id: &AttachmentId) -> PathBuf {
-        self.path_in_root(&self.root, id)
-    }
-
-    fn path_for_session(&self, session_id: &str, id: &AttachmentId) -> PathBuf {
-        let root = self
-            .root
-            .join("sessions")
-            .join(session_storage_namespace(session_id));
-        self.path_in_root(&root, id)
-    }
-
-    fn path_in_root(&self, root: &Path, id: &AttachmentId) -> PathBuf {
         let id = id.as_str();
         let prefix = id.get(..2).unwrap_or(id);
-        root.join("sha256").join(prefix).join(id)
+        self.content_root().join(prefix).join(id)
     }
 }
 
-/// Write `bytes` to `final_path` crash-atomically: stage into a sibling
-/// `<final>.tmp`, flush it, then `rename` into place. A `rename` within the
-/// same directory is atomic on POSIX, so a reader (or a crash) ever sees either
-/// the old contents or the complete new contents — never a half-written file.
-/// The temp file is removed on any failure so a crashed write leaves no
-/// `.tmp` litter behind.
+/// Write `bytes` to `final_path` crash-atomically and crash-durably: stage into
+/// a per-write unique sibling file, flush it, `rename` into place, then fsync
+/// the parent directory so the new directory entry itself survives a crash. A
+/// `rename` within one directory is atomic on POSIX, so a reader (or a crash)
+/// only ever sees the old contents or the complete new contents — never a
+/// half-written file. The staging file is removed on any failure so a crashed
+/// write leaves no litter behind, and its unique name means a stale staging
+/// file from a prior crash never blocks a later write.
 fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<(), AttachmentStoreError> {
-    let mut tmp_os = final_path.as_os_str().to_os_string();
-    tmp_os.push(".tmp");
-    let tmp_path = PathBuf::from(tmp_os);
+    let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut staging_name = final_path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    staging_name.push(format!(".staging.{}.{counter}.tmp", std::process::id()));
+    let tmp_path = final_path
+        .parent()
+        .map(|parent| parent.join(&staging_name))
+        .unwrap_or_else(|| PathBuf::from(&staging_name));
 
     let io_err = |path: &Path, source: std::io::Error| AttachmentStoreError::Io {
         path: path.to_path_buf(),
@@ -59,17 +65,32 @@ fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<(), AttachmentStoreEr
     let write_result = (|| {
         let mut file = fs::File::create(&tmp_path).map_err(|source| io_err(&tmp_path, source))?;
         std::io::Write::write_all(&mut file, bytes).map_err(|source| io_err(&tmp_path, source))?;
-        // Best-effort durability for the staged bytes before the rename.
+        // Durability for the staged bytes before the rename.
         file.sync_all()
             .map_err(|source| io_err(&tmp_path, source))?;
-        fs::rename(&tmp_path, final_path).map_err(|source| io_err(final_path, source))
+        fs::rename(&tmp_path, final_path).map_err(|source| io_err(final_path, source))?;
+        // Make the directory entry itself crash-durable: without this, a crash
+        // after `rename` can lose the entry even though the bytes are on disk.
+        if let Some(parent) = final_path.parent() {
+            fsync_dir(parent);
+        }
+        Ok(())
     })();
 
     if write_result.is_err() {
-        // Never leave a partial temp file behind.
+        // Never leave a partial staging file behind.
         let _ = fs::remove_file(&tmp_path);
     }
     write_result
+}
+
+/// Best-effort parent-directory fsync. Not every filesystem supports fsync on a
+/// directory handle; a failure to open or sync is tolerated rather than failing
+/// an otherwise-successful write.
+fn fsync_dir(dir: &Path) {
+    if let Ok(handle) = fs::File::open(dir) {
+        let _ = handle.sync_all();
+    }
 }
 
 #[async_trait::async_trait]
@@ -103,37 +124,66 @@ impl AttachmentStore for FileAttachmentStore {
         delete_at_path(self.path_for_id(id))
     }
 
-    async fn put_for_session(
-        &self,
-        session_id: &str,
-        bytes: Vec<u8>,
-        meta: AttachmentCreateMeta,
-    ) -> Result<AttachmentRef, AttachmentStoreError> {
-        let meta = AttachmentMeta::new(
-            content_id(&bytes),
-            meta.media_type,
-            bytes.len() as u64,
-            meta.width,
-            meta.height,
-            meta.label,
-        );
-        put_at_path(self.path_for_session(session_id, &meta.id), bytes, meta)
+    async fn head(&self, id: &AttachmentId) -> Result<Option<StoredBlobRef>, AttachmentStoreError> {
+        head_at_path(self.path_for_id(id), id)
     }
 
-    async fn get_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<StoredAttachment, AttachmentStoreError> {
-        get_at_path(self.path_for_session(session_id, id), id)
-    }
-
-    async fn delete_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<(), AttachmentStoreError> {
-        delete_at_path(self.path_for_session(session_id, id))
+    async fn list(&self) -> Result<Vec<StoredBlobRef>, AttachmentStoreError> {
+        let content_root = self.content_root();
+        let mut blobs = Vec::new();
+        let prefix_dirs = match fs::read_dir(&content_root) {
+            Ok(entries) => entries,
+            // No content written yet: an empty store lists nothing.
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(blobs),
+            Err(source) => {
+                return Err(AttachmentStoreError::Io {
+                    path: content_root,
+                    source,
+                });
+            }
+        };
+        for prefix_dir in prefix_dirs {
+            let prefix_dir = prefix_dir.map_err(|source| AttachmentStoreError::Io {
+                path: content_root.clone(),
+                source,
+            })?;
+            if !prefix_dir
+                .file_type()
+                .map(|ty| ty.is_dir())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let dir_path = prefix_dir.path();
+            for entry in fs::read_dir(&dir_path).map_err(|source| AttachmentStoreError::Io {
+                path: dir_path.clone(),
+                source,
+            })? {
+                let entry = entry.map_err(|source| AttachmentStoreError::Io {
+                    path: dir_path.clone(),
+                    source,
+                })?;
+                let file_name = entry.file_name();
+                let Some(name) = file_name.to_str() else {
+                    continue;
+                };
+                // Skip any in-flight staging files.
+                if name.contains(".staging.") {
+                    continue;
+                }
+                let last_modified_epoch_ms = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|dur| dur.as_millis() as u64);
+                blobs.push(StoredBlobRef {
+                    id: AttachmentId::new(name.to_string()),
+                    last_modified_epoch_ms,
+                });
+            }
+        }
+        Ok(blobs)
     }
 }
 
@@ -148,10 +198,60 @@ fn put_at_path(
             source,
         })?;
     }
-    if !path.exists() {
+    if path.exists() {
+        // Dedup hit: refresh the blob's modification time so a GC sweep that
+        // snapshotted the roots before this put (a fresh intent for the same
+        // content id) cannot reclaim the now-freshly-referenced blob.
+        refresh_mtime(&path, &bytes)?;
+    } else {
         write_atomic(&path, &bytes)?;
     }
     Ok(meta.as_ref())
+}
+
+/// Refresh a blob's modification time on a dedup-hit `put`. Prefers a cheap
+/// `set_modified`; if the platform refuses it (or the file raced with a delete),
+/// falls back to a full crash-atomic rewrite, which necessarily bumps the mtime.
+fn refresh_mtime(path: &Path, bytes: &[u8]) -> Result<(), AttachmentStoreError> {
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(file) => {
+            if file.set_modified(std::time::SystemTime::now()).is_ok() {
+                return Ok(());
+            }
+            // set_modified refused (platform quirk): rewrite below.
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            // Raced with a concurrent delete: rewrite below.
+        }
+        Err(source) => {
+            return Err(AttachmentStoreError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    write_atomic(path, bytes)
+}
+
+fn head_at_path(
+    path: PathBuf,
+    id: &AttachmentId,
+) -> Result<Option<StoredBlobRef>, AttachmentStoreError> {
+    match fs::metadata(&path) {
+        Ok(metadata) => {
+            let last_modified_epoch_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|dur| dur.as_millis() as u64);
+            Ok(Some(StoredBlobRef {
+                id: id.clone(),
+                last_modified_epoch_ms,
+            }))
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(AttachmentStoreError::Io { path, source }),
+    }
 }
 
 fn get_at_path(path: PathBuf, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
@@ -180,6 +280,7 @@ fn delete_at_path(path: PathBuf) -> Result<(), AttachmentStoreError> {
 mod tests {
     use super::*;
     use crate::{ImageMediaType, MediaType};
+    use std::collections::BTreeSet;
     use std::sync::Mutex;
 
     fn meta() -> AttachmentCreateMeta {
@@ -202,10 +303,10 @@ mod tests {
         assert_eq!(reference.byte_len, 3);
     }
 
-    // Finding 4: `put` must write crash-atomically (stage into `<final>.tmp`,
-    // then rename). After a successful put there must be no leftover `.tmp`
-    // files in the content directory — proof that the temp file was renamed
-    // into place rather than written in situ.
+    // `put` must write crash-atomically (stage into a unique sibling, then
+    // rename). After a successful put there must be no leftover staging files
+    // in the content directory — proof the temp file was renamed into place
+    // rather than written in situ.
     #[tokio::test]
     async fn file_store_writes_atomically_without_temp_litter() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -215,17 +316,22 @@ mod tests {
         let final_path = store.path_for_id(&reference.id);
         assert!(final_path.exists(), "content file must be in place");
 
-        let mut tmp_files = Vec::new();
+        let mut staging_files = Vec::new();
         let dir = final_path.parent().expect("content dir");
         for entry in fs::read_dir(dir).expect("read content dir") {
             let path = entry.expect("dir entry").path();
-            if path.extension().and_then(|ext| ext.to_str()) == Some("tmp") {
-                tmp_files.push(path);
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.contains(".staging."))
+                .unwrap_or(false)
+            {
+                staging_files.push(path);
             }
         }
         assert!(
-            tmp_files.is_empty(),
-            "atomic write must not leave .tmp files behind: {tmp_files:?}"
+            staging_files.is_empty(),
+            "atomic write must not leave staging files behind: {staging_files:?}"
         );
 
         // The bytes round-trip in full (no truncation from a partial write).
@@ -233,10 +339,11 @@ mod tests {
         assert_eq!(stored.bytes, vec![9, 8, 7, 6]);
     }
 
-    // A stale `<final>.tmp` left by a crashed prior write must not block a
-    // subsequent successful put — the temp file is recreated/truncated.
+    // A stale staging file left by a crashed prior write must not block a
+    // subsequent successful put — unique staging names sidestep it entirely,
+    // and it is not mistaken for content.
     #[tokio::test]
-    async fn file_store_overwrites_stale_temp_file() {
+    async fn file_store_ignores_stale_staging_file() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileAttachmentStore::new(temp.path());
         let content_id = content_id(&[1, 1, 1]);
@@ -244,52 +351,89 @@ mod tests {
         let final_path = store.path_for_id(&id);
         let parent = final_path.parent().expect("parent");
         fs::create_dir_all(parent).expect("mkdir");
-        let mut tmp_os = final_path.as_os_str().to_os_string();
-        tmp_os.push(".tmp");
-        fs::write(PathBuf::from(tmp_os), b"stale partial write").expect("seed stale tmp");
+        // Seed a stale staging file with a plausible prior-crash name.
+        let mut stale = final_path.file_name().expect("name").to_os_string();
+        stale.push(".staging.999.0.tmp");
+        fs::write(parent.join(&stale), b"stale partial write").expect("seed stale staging");
 
         let reference = store
             .put(vec![1, 1, 1], meta())
             .await
-            .expect("put over stale tmp");
+            .expect("put over stale staging");
         let stored = store.get(&reference.id).await.expect("get");
         assert_eq!(stored.bytes, vec![1, 1, 1]);
+
+        // The stale staging file is not enumerated as a blob.
+        let listed: Vec<AttachmentId> = store
+            .list()
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|blob| blob.id)
+            .collect();
+        assert_eq!(listed, vec![reference.id]);
+    }
+
+    // Fix C: a dedup-hit `put` (identical bytes already stored) must refresh the
+    // blob's modification time, so a GC sweep that snapshotted the roots before
+    // this put cannot reclaim the now-freshly-referenced blob.
+    #[tokio::test]
+    async fn file_store_put_refreshes_mtime_on_dedup_hit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileAttachmentStore::new(temp.path());
+        let reference = store.put(vec![2, 4, 6], meta()).await.expect("put");
+        let path = store.path_for_id(&reference.id);
+
+        // Age the blob far into the past to make the refresh observable.
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open blob")
+            .set_modified(old)
+            .expect("set old mtime");
+        let aged = store
+            .head(&reference.id)
+            .await
+            .expect("head")
+            .expect("blob present");
+
+        // Identical bytes: a dedup hit that must still refresh the mtime.
+        store.put(vec![2, 4, 6], meta()).await.expect("dedup put");
+        let refreshed = store
+            .head(&reference.id)
+            .await
+            .expect("head")
+            .expect("blob present");
+
+        assert!(
+            refreshed.last_modified_epoch_ms > aged.last_modified_epoch_ms,
+            "dedup-hit put must refresh mtime: {:?} !> {:?}",
+            refreshed.last_modified_epoch_ms,
+            aged.last_modified_epoch_ms
+        );
     }
 
     #[tokio::test]
-    async fn file_store_session_namespaces_isolate_identical_content() {
+    async fn file_store_is_flat_content_addressed_across_writers() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileAttachmentStore::new(temp.path());
-        let first = store
-            .put_for_session("session-a", vec![7, 7, 7], meta())
-            .await
-            .expect("put first");
-        let second = store
-            .put_for_session("session-b", vec![7, 7, 7], meta())
-            .await
-            .expect("put second");
+        // Identical bytes written twice resolve to ONE physical blob (flat,
+        // content-addressed — no per-session namespace).
+        let first = store.put(vec![7, 7, 7], meta()).await.expect("put first");
+        let second = store.put(vec![7, 7, 7], meta()).await.expect("put second");
         assert_eq!(first.id, second.id);
-        assert_ne!(
-            store.path_for_session("session-a", &first.id),
-            store.path_for_session("session-b", &second.id)
-        );
+        assert_eq!(store.path_for_id(&first.id), store.path_for_id(&second.id));
 
-        store
-            .delete_for_session("session-b", &second.id)
+        let listed: BTreeSet<AttachmentId> = store
+            .list()
             .await
-            .expect("delete second");
-        assert!(matches!(
-            store.get_for_session("session-b", &second.id).await,
-            Err(AttachmentStoreError::NotFound(_))
-        ));
-        assert_eq!(
-            store
-                .get_for_session("session-a", &first.id)
-                .await
-                .expect("first survives")
-                .bytes,
-            vec![7, 7, 7]
-        );
+            .expect("list")
+            .into_iter()
+            .map(|blob| blob.id)
+            .collect();
+        assert_eq!(listed.len(), 1);
+        assert!(listed.contains(&first.id));
     }
 
     // Runs the backend-agnostic `AttachmentStore` conformance suite against

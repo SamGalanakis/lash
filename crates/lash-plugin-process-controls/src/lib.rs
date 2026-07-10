@@ -282,7 +282,7 @@ mod tests {
             manager,
             Arc::new(lash_core::UnavailableProcessService),
             ability,
-            Arc::new(lash_core::InMemoryAttachmentStore::new()),
+            Arc::new(lash_core::SessionAttachmentStore::in_memory()),
             lash_core::DirectCompletionClient::from_fn(|_, _| {
                 Err(PluginError::Session(
                     "direct completions are unavailable in this test context".to_string(),

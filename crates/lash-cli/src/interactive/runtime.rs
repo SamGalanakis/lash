@@ -1,25 +1,33 @@
-use lash::persistence::FileAttachmentStore;
-use lash::{InputItem, LashSession, TurnInput};
-use lash_core::session_model::{Part, PartKind, PruneState};
-use lash_core::{
-    AttachmentCreateMeta, AttachmentStore, ImageMediaType, MediaType, Message, MessageRole,
-    PluginMessage,
-};
+use lash::{LashSession, TurnInput};
+use lash_core::Message;
 
 use super::helpers::SessionObservationBridge;
 use super::*;
 use crate::app::ToastKind;
 use crate::event::AppEventTx;
-use crate::input_items::build_items_from_editor_input;
 use crate::turn_runner::{
     RuntimeRunResult, make_turn_input, spawn_session_queued_turn, spawn_session_turn,
 };
 
-#[cfg_attr(not(test), allow(dead_code))]
+// Test-only helpers below build a plugin message from editor input. They live
+// entirely under `#[cfg(test)]` so no raw attachment-store write is ever
+// compiled into the shipping binary.
+#[cfg(test)]
+use crate::input_items::build_items_from_editor_input;
+#[cfg(test)]
+use lash::InputItem;
+#[cfg(test)]
+use lash_core::PluginMessage;
+#[cfg(test)]
+use lash_core::session_model::{Part, PartKind, PruneState};
+#[cfg(test)]
+use lash_core::{AttachmentCreateMeta, AttachmentStore, ImageMediaType, MediaType, MessageRole};
+
+#[cfg(test)]
 pub(crate) async fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
         build_items_from_editor_input(&turn.effective_text, turn.images.clone());
-    let attachment_store = FileAttachmentStore::new(crate::paths::attachments_dir());
+    let attachment_store = lash_core::InMemoryAttachmentStore::new();
     let mut parts = Vec::new();
     let mut image_ids = Vec::new();
     for item in items {

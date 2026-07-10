@@ -122,10 +122,6 @@ impl AwaitEventResolver for SqliteEffectHost {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
-
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
-    }
 }
 
 impl EffectHost for SqliteEffectHost {
@@ -550,10 +546,6 @@ impl SqliteRuntimeEffectController {
 impl AwaitEventResolver for SqliteRuntimeEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
-    }
-
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
     }
 
     fn supports_durable_effects(&self) -> bool {

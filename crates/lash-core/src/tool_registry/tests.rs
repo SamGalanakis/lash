@@ -96,7 +96,7 @@ mod tests {
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
-            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::SessionAttachmentStore::in_memory()),
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),

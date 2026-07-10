@@ -167,7 +167,15 @@ mod tests {
                 }
                 Some(_) => {}
             }
-            self.registry.complete_process(process_id, await_output).await
+            self.registry
+                .complete_process(
+                    process_id,
+                    await_output,
+                    lash_core::ProcessCompletionAuthority::external_owner(
+                        session_scope.id().to_string(),
+                    ),
+                )
+                .await
         }
 
         async fn await_process(
@@ -307,7 +315,7 @@ mod tests {
             host.clone(),
             host,
             processes,
-            Arc::new(lash_core::InMemoryAttachmentStore::new()),
+            Arc::new(lash_core::SessionAttachmentStore::in_memory()),
             lash_core::DirectCompletionClient::from_fn(|_, _| {
                 Err(lash_core::PluginError::Session(
                     "direct completions are unavailable in shell tests".to_string(),
@@ -725,6 +733,7 @@ mod tests {
                     value: serde_json::json!({ "pid": 1234 }),
                     control: None,
                 },
+                lash_core::ProcessCompletionAuthority::external_owner("test"),
             )
             .await
             .expect("complete external row");

@@ -930,7 +930,7 @@ pub(super) struct CollectedExecutionOutput {
 
 async fn collect_printed_images(
     value: &FlowValue,
-    attachment_store: &dyn lash_core::AttachmentStore,
+    attachment_store: &lash_core::SessionAttachmentStore,
 ) -> Result<Vec<AttachmentRef>, ExecutionHostError> {
     let mut seen = HashSet::new();
     let mut images = Vec::new();
@@ -940,7 +940,7 @@ async fn collect_printed_images(
 
 fn collect_printed_images_inner<'a>(
     value: &'a FlowValue,
-    attachment_store: &'a dyn lash_core::AttachmentStore,
+    attachment_store: &'a lash_core::SessionAttachmentStore,
     seen: &'a mut HashSet<String>,
     images: &'a mut Vec<AttachmentRef>,
 ) -> ProjectedFuture<'a, Result<(), ExecutionHostError>> {

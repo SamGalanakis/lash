@@ -15,6 +15,7 @@ categories = ["database", "asynchronous"]
 
 [dependencies]
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 lash-core = { workspace = true }
 object_store = { workspace = true, default-features = false, features = ["aws"] }
 serde_json = { workspace = true }

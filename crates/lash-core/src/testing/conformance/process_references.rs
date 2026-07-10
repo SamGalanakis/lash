@@ -60,6 +60,7 @@ pub(super) async fn live_reference_summary_tracks_non_terminal_reference_counts(
                 value: serde_json::Value::Null,
                 control: None,
             },
+            crate::ProcessCompletionAuthority::workflow_key("proc-ref-a1"),
         )
         .await
         .expect("complete one alpha process");
@@ -81,6 +82,7 @@ pub(super) async fn live_reference_summary_tracks_non_terminal_reference_counts(
                     value: serde_json::Value::Null,
                     control: None,
                 },
+                crate::ProcessCompletionAuthority::workflow_key(process_id),
             )
             .await
             .expect("complete remaining process");

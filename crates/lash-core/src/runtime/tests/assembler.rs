@@ -508,7 +508,7 @@ async fn normalize_items_merges_adjacent_text_items() {
     let out = normalize_input_items(
         &items,
         &HashMap::new(),
-        &crate::InMemoryAttachmentStore::new(),
+        &crate::SessionAttachmentStore::in_memory(),
     )
     .await
     .expect("normalized");

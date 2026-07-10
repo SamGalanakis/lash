@@ -49,7 +49,16 @@ const SCHEMA_COMPONENT: &str = "lash-postgres-store";
 // Bumped to 9: ADR 0020 process-row `change_seq` now uses a transactional
 // clock row instead of a sequence. The schema is a reject-and-recreate
 // boundary; pre-9 databases are rejected at open rather than migrated.
-const SCHEMA_VERSION: i32 = 10;
+//
+// Bumped to 11 for the combined completion-authority (ADR 0027) and attachment
+// three-layer (ADR 0028) cutovers. This single component gates every table,
+// including `lash_process_events` and `lash_attachment_manifest`. Pre-cutover
+// terminal process events lack the `completion_authority` payload (so a
+// cross-version replay-key hash would mismatch), and pre-cutover manifest rows
+// name `sessions/<hash>/...` blob paths the flat layout cannot read. Rejecting
+// and recreating pre-11 databases removes both hazards; the old `sessions/` blob
+// prefix is unreachable garbage operators delete manually.
+const SCHEMA_VERSION: i32 = 11;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]
@@ -178,8 +187,18 @@ impl PostgresStorage {
         Ok(Self { pool })
     }
 
-    pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+    /// Build storage over an already-constructed pool.
+    ///
+    /// This runs the same [`ensure_schema`] gate `connect`/`connect_with` do, so
+    /// every public construction path enforces the component schema version: a
+    /// pre-cutover (e.g. version-10) database is rejected loudly with the same
+    /// mismatch error rather than silently used, which would resurrect the
+    /// cross-version hazards the version bump exists to prevent. The
+    /// `CREATE TABLE IF NOT EXISTS` statements are idempotent, so running the gate
+    /// against an already-provisioned pool is safe.
+    pub async fn from_pool(pool: PgPool) -> Result<Self, StoreError> {
+        ensure_schema(&pool).await?;
+        Ok(Self { pool })
     }
 
     pub fn pool(&self) -> &PgPool {

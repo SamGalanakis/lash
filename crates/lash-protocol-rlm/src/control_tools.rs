@@ -354,7 +354,7 @@ mod tests {
             session_lifecycle,
             session_graph,
             processes,
-            Arc::new(lash_core::InMemoryAttachmentStore::new()),
+            Arc::new(lash_core::SessionAttachmentStore::in_memory()),
             lash_core::DirectCompletionClient::from_fn(|_, _| {
                 Err(lash_core::PluginError::Session(
                     "direct completions are unavailable in continue_as tests".to_string(),

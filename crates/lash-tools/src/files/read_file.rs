@@ -559,7 +559,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use lash_core::AttachmentStore;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -777,7 +776,7 @@ mod tests {
         data.extend_from_slice(&1u32.to_be_bytes());
         std::fs::write(&path, &data).unwrap();
 
-        let store = Arc::new(lash_core::InMemoryAttachmentStore::new());
+        let store = Arc::new(lash_core::SessionAttachmentStore::in_memory());
         let host = Arc::new(lash_core::testing::MockSessionManager::default());
         let context = lash_core::ToolContext::__for_testing(
             "test-session".into(),

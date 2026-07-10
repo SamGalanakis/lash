@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use super::model::{ProcessId, SessionScope, SessionScopeId};
+use super::model::{ProcessId, RecoveryDisposition, SessionScope, SessionScopeId};
 use super::validation::process_event_payload_hash;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,6 +105,162 @@ pub struct AbandonEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<crate::LeaseOwnerIdentity>,
     pub epoch_ms: u64,
+}
+
+/// Authority under which an *unleased* terminal completion
+/// ([`ProcessRegistry::complete_process`](super::registry::ProcessRegistry::complete_process))
+/// is written.
+///
+/// Lash-owned workers fence terminal writes with a process lease
+/// (`complete_process_with_lease`), which the store validates against the
+/// persisted `(owner, lease_token, fencing_token)`. The unleased path is
+/// reserved for writers whose single-writer discipline lives *outside* the Lash
+/// lease. In-process Rust cannot make such a token unforgeable; the value of
+/// this type is instead **explicitness + a single validation choke point per
+/// backend + audit evidence** on the terminal write. Every backend calls
+/// [`validate`](Self::validate) against the row's declared
+/// [`RecoveryDisposition`] inside its completion operation, and records the
+/// authority on the durable terminal event (see [`terminal_append_request`]).
+///
+/// There is deliberately no `Default`: a caller must name its authority, the
+/// same footgun-prevention stance the runtime takes elsewhere.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "authority", rename_all = "snake_case")]
+pub enum ProcessCompletionAuthority {
+    /// An external actor closes an [`RecoveryDisposition::ExternallyOwned`] row
+    /// it holds a handle grant for (the `shell.start` detach path, ADR 0019).
+    /// `granted_to` is the session-scope identity the caller verified holds the
+    /// grant — the audit trail for who closed the row out of band. Rejected on
+    /// any lash-executed disposition: those have a lease-fenced single writer.
+    ExternalOwner { granted_to: String },
+    /// A workflow-key-coalesced substrate (e.g. Restate keyed by `process_id`)
+    /// completes a row it ran itself. Its single-writer discipline is the
+    /// engine's per-key coalescing, not a Lash lease; `workflow_key` records the
+    /// key that served as that discipline. Valid for the lash-executed
+    /// dispositions ([`RecoveryDisposition::Rerunnable`] and
+    /// [`RecoveryDisposition::OwnerBound`], which Restate runs), and rejected on
+    /// [`RecoveryDisposition::ExternallyOwned`] rows — a substrate never runs
+    /// one, so it may not close one.
+    WorkflowKey { workflow_key: String },
+    /// The sweep reconciled a durable Abandon Request on an
+    /// [`RecoveryDisposition::ExternallyOwned`] row (whose lease had lapsed, or
+    /// which Lash never leased) into an
+    /// [`ProcessTerminalState::Abandoned`] terminal. Carries no owner: the
+    /// closure is authorized by the recorded request, not a live writer. Only
+    /// ever writes an `Abandoned` terminal.
+    ReconciledAbandon,
+}
+
+impl ProcessCompletionAuthority {
+    /// Construct [`ExternalOwner`](Self::ExternalOwner) authority naming the
+    /// session-scope identity that holds the handle grant.
+    pub fn external_owner(granted_to: impl Into<String>) -> Self {
+        Self::ExternalOwner {
+            granted_to: granted_to.into(),
+        }
+    }
+
+    /// Construct [`WorkflowKey`](Self::WorkflowKey) authority naming the
+    /// coalescing key that serves as the substrate's single-writer discipline.
+    pub fn workflow_key(workflow_key: impl Into<String>) -> Self {
+        Self::WorkflowKey {
+            workflow_key: workflow_key.into(),
+        }
+    }
+
+    /// Short, stable label for diagnostics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ExternalOwner { .. } => "external-owner",
+            Self::WorkflowKey { .. } => "workflow-key",
+            Self::ReconciledAbandon => "reconciled-abandon",
+        }
+    }
+
+    /// Validate this authority against the row's declared recovery disposition
+    /// and the terminal outcome being written. This is the single per-backend
+    /// choke point that keeps unleased completion honest: each `complete_process`
+    /// implementation calls it before appending the terminal event, so the
+    /// disposition×authority contract is enforced uniformly across memory,
+    /// SQLite, and Postgres rather than at each scattered caller.
+    pub fn validate(
+        &self,
+        process_id: &str,
+        disposition: RecoveryDisposition,
+        await_output: &ProcessAwaitOutput,
+    ) -> Result<(), crate::PluginError> {
+        let reject = |reason: &str| {
+            Err(crate::PluginError::Session(format!(
+                "process `{process_id}` cannot be completed with {} authority: {reason}",
+                self.label()
+            )))
+        };
+        match self {
+            Self::ExternalOwner { .. } => {
+                if disposition != RecoveryDisposition::ExternallyOwned {
+                    return reject(
+                        "only externally-owned rows may be completed by an external owner; a \
+                         lash-executed row has a lease-fenced single writer",
+                    );
+                }
+            }
+            Self::WorkflowKey { .. } => {
+                if disposition == RecoveryDisposition::ExternallyOwned {
+                    return reject(
+                        "externally-owned rows are never executed by a workflow substrate; they \
+                         close through their external owner or a reconciled abandon request",
+                    );
+                }
+            }
+            Self::ReconciledAbandon => {
+                if disposition != RecoveryDisposition::ExternallyOwned {
+                    return reject(
+                        "reconciled-abandon closes only externally-owned rows; a lash-executed \
+                         row is abandoned under its lease",
+                    );
+                }
+                if await_output.terminal_state() != ProcessTerminalState::Abandoned {
+                    return reject("reconciled-abandon writes only an Abandoned terminal");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Terminal event type name for a terminal state.
+pub fn terminal_event_type_name(state: ProcessTerminalState) -> &'static str {
+    match state {
+        ProcessTerminalState::Completed => "process.completed",
+        ProcessTerminalState::Failed => "process.failed",
+        ProcessTerminalState::Cancelled => "process.cancelled",
+        ProcessTerminalState::Abandoned => "process.abandoned",
+    }
+}
+
+/// Build the replay-keyed terminal event append for a completion.
+///
+/// The single source of truth for the terminal event's type, replay key, and
+/// payload shape, shared by every completion path (leased and unleased) across
+/// all backends. When `authority` is supplied — the unleased
+/// [`ProcessRegistry::complete_process`](super::registry::ProcessRegistry::complete_process)
+/// path — it is recorded alongside `await_output` as durable audit evidence
+/// (the leased path's evidence is the lease it releases, so it passes `None`
+/// and the payload is byte-identical to the historical shape). The
+/// `await_output` selector (`/await_output`) is untouched by the sibling key.
+pub fn terminal_append_request(
+    process_id: &str,
+    await_output: &ProcessAwaitOutput,
+    authority: Option<&ProcessCompletionAuthority>,
+) -> ProcessEventAppendRequest {
+    let event_type = terminal_event_type_name(await_output.terminal_state());
+    let mut payload = serde_json::json!({ "await_output": await_output });
+    if let Some(authority) = authority {
+        payload["completion_authority"] =
+            serde_json::to_value(authority).expect("completion authority serializes");
+    }
+    ProcessEventAppendRequest::new(event_type, payload)
+        .with_replay_key(format!("process:{process_id}:terminal:{event_type}"))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

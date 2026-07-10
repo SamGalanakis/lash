@@ -18,8 +18,10 @@ where
     session_store_factory_delete_removes_store_and_is_idempotent(make()).await;
 }
 
-/// Exercise the cross-session attachment ownership boundary with identical
-/// bytes, divergent reference metadata, and an orphan sweep.
+/// Exercise the shared-bytes attachment contract: identical bytes across
+/// sessions dedup to one blob, the session-boundary guard keeps sessions from
+/// resolving each other's blobs, and mark-and-sweep GC collects a blob only
+/// once no session references it.
 pub async fn attachment_ownership_isolation(factory: Arc<dyn crate::SessionStoreFactory>) {
     attachment_ownership_isolation_with_store(
         factory,
@@ -28,91 +30,135 @@ pub async fn attachment_ownership_isolation(factory: Arc<dyn crate::SessionStore
     .await;
 }
 
-/// Run [`attachment_ownership_isolation`] against a concrete shared byte
-/// backend, combining manifest ownership and physical namespace behavior.
+/// Run [`attachment_ownership_isolation`] against a concrete flat byte backend,
+/// combining manifest reference tracking with the shared physical layout.
 pub async fn attachment_ownership_isolation_with_store(
     factory: Arc<dyn crate::SessionStoreFactory>,
-    bytes: Arc<dyn crate::AttachmentStore>,
+    backend: Arc<dyn crate::AttachmentStore>,
 ) {
-    let committed_request = session_store_request(
-        "attachment-owner-committed",
+    let a_request = session_store_request(
+        "attachment-owner-a",
         "attachment-model",
         crate::SessionRelation::Root,
     );
-    let orphan_request = session_store_request(
-        "attachment-owner-orphan",
+    let b_request = session_store_request(
+        "attachment-owner-b",
         "attachment-model",
         crate::SessionRelation::Root,
     );
-    let committed_manifest = factory
-        .create_store(&committed_request)
+    let a_manifest = factory
+        .create_store(&a_request)
         .await
-        .expect("create committed attachment owner");
-    let orphan_manifest = factory
-        .create_store(&orphan_request)
+        .expect("create attachment owner a");
+    let b_manifest = factory
+        .create_store(&b_request)
         .await
-        .expect("create orphan attachment owner");
-    let committed = crate::SessionScopedAttachmentStore::new(
-        bytes.clone(),
+        .expect("create attachment owner b");
+    let session_a = crate::SessionAttachmentStore::new(
+        backend.clone(),
         Arc::new(crate::attachments::PersistenceManifestAdapter(
-            committed_manifest.clone(),
+            a_manifest.clone(),
         )),
-        committed_request.session_id.clone(),
+        a_request.session_id.clone(),
     );
-    let orphan = crate::SessionScopedAttachmentStore::new(
-        bytes.clone(),
+    let session_b = crate::SessionAttachmentStore::new(
+        backend.clone(),
         Arc::new(crate::attachments::PersistenceManifestAdapter(
-            orphan_manifest.clone(),
+            b_manifest.clone(),
         )),
-        orphan_request.session_id.clone(),
+        b_request.session_id.clone(),
     );
     let png = AttachmentCreateMeta::new(
         MediaType::Image(ImageMediaType::Png),
         Some(10),
         Some(20),
-        Some("committed.png".to_string()),
+        Some("a.png".to_string()),
     );
     let jpeg = AttachmentCreateMeta::new(
         MediaType::Image(ImageMediaType::Jpeg),
         Some(30),
         Some(40),
-        Some("orphan.jpg".to_string()),
+        Some("b.jpg".to_string()),
     );
-    let committed_ref = committed
+
+    // Session A writes and commits the bytes.
+    let a_ref = session_a
         .put(vec![6, 2, 6, 4], png)
         .await
-        .expect("put committed attachment");
-    committed_manifest
-        .commit_refs(
-            &committed_request.session_id,
-            std::slice::from_ref(&committed_ref.id),
-        )
-        .expect("commit first owner's attachment");
-    let orphan_ref = orphan
+        .expect("put a attachment");
+    a_manifest
+        .commit_refs(&a_request.session_id, std::slice::from_ref(&a_ref.id))
+        .expect("commit a's attachment ref");
+
+    // Boundary guard: session B never referenced A's blob, so its facade get
+    // must NotFound even though the backend physically holds the bytes.
+    assert!(
+        matches!(
+            session_b.get(&a_ref.id).await,
+            Err(AttachmentStoreError::NotFound(_))
+        ),
+        "session B must not resolve session A's committed blob"
+    );
+    backend
+        .get(&a_ref.id)
+        .await
+        .expect("backend physically holds the shared blob");
+
+    // Session B writes identical bytes: ONE physical blob, divergent reference
+    // presentation. Commit B's ref too, so the multi-session GC narrative below
+    // rests on stable committed roots rather than grace-aged intents (an
+    // in-flight intent aged past the grace cutoff is a crash orphan the sweep
+    // reconciles away — covered separately in the attachment unit tests).
+    let b_ref = session_b
         .put(vec![6, 2, 6, 4], jpeg)
         .await
-        .expect("put same bytes for orphan owner");
-    assert_eq!(committed_ref.id, orphan_ref.id);
-    assert_eq!(committed_ref.canonical_mime(), "image/png");
-    assert_eq!(orphan_ref.canonical_mime(), "image/jpeg");
-    assert_eq!(committed_ref.label.as_deref(), Some("committed.png"));
-    assert_eq!(orphan_ref.label.as_deref(), Some("orphan.jpg"));
-
-    let report = crate::reclaim_orphaned_attachments(&*orphan_manifest, &*bytes, i64::MAX as u64)
+        .expect("put identical bytes for b");
+    assert_eq!(a_ref.id, b_ref.id, "identical bytes share one content id");
+    assert_eq!(a_ref.canonical_mime(), "image/png");
+    assert_eq!(b_ref.canonical_mime(), "image/jpeg");
+    assert_eq!(a_ref.label.as_deref(), Some("a.png"));
+    assert_eq!(b_ref.label.as_deref(), Some("b.jpg"));
+    session_b
+        .get(&b_ref.id)
         .await
-        .expect("sweep orphan owner");
-    assert_eq!(report.reclaimed_count, 1);
-    assert!(matches!(
-        orphan.get(&orphan_ref.id).await,
-        Err(AttachmentStoreError::NotFound(_))
-    ));
+        .expect("b resolves the blob it now references");
+    b_manifest
+        .commit_refs(&b_request.session_id, std::slice::from_ref(&b_ref.id))
+        .expect("commit b's attachment ref");
+
+    // Sweep: A's and B's committed refs both count as live roots, so the shared
+    // blob survives.
+    let report = crate::reclaim_unreferenced_attachments(&*factory, &*backend, 0)
+        .await
+        .expect("sweep with two live refs");
     assert_eq!(
-        committed
-            .get(&committed_ref.id)
-            .await
-            .expect("committed owner's bytes survive another owner's sweep")
-            .bytes,
-        vec![6, 2, 6, 4]
+        report.reclaimed_count, 0,
+        "a blob referenced by any session is never swept, got {report:?}"
+    );
+    backend
+        .get(&a_ref.id)
+        .await
+        .expect("blob survives while referenced");
+
+    // Session A releases its ref: B's ref still holds the blob.
+    session_a.delete(&a_ref.id).await.expect("a releases ref");
+    let report = crate::reclaim_unreferenced_attachments(&*factory, &*backend, 0)
+        .await
+        .expect("sweep with one remaining ref");
+    assert_eq!(report.reclaimed_count, 0, "b still references the blob");
+
+    // Both sessions release: now unreferenced, GC collects the single blob.
+    session_b.delete(&b_ref.id).await.expect("b releases ref");
+    let report = crate::reclaim_unreferenced_attachments(&*factory, &*backend, 0)
+        .await
+        .expect("sweep with no refs");
+    assert_eq!(report.reclaimed_count, 1, "unreferenced blob is reclaimed");
+    assert!(
+        matches!(
+            backend.get(&a_ref.id).await,
+            Err(AttachmentStoreError::NotFound(_))
+        ),
+        "reclaimed blob bytes are gone"
     );
 }
 

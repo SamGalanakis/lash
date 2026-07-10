@@ -192,7 +192,8 @@ impl RuntimeEnvironmentBuilder {
     }
 
     pub fn with_attachment_store(mut self, store: Arc<dyn crate::AttachmentStore>) -> Self {
-        self.env.core.durability.attachment_store = store;
+        self.env.core.durability.attachment_store =
+            Arc::new(crate::SessionAttachmentStore::ephemeral(store));
         self
     }
 
@@ -294,7 +295,7 @@ mod tests {
             .build();
 
         assert!(Arc::ptr_eq(
-            &env.core.durability.attachment_store,
+            env.core.durability.attachment_store.backend(),
             &attachment_store
         ));
         assert!(env.core.prompt.prompt.template.is_some());

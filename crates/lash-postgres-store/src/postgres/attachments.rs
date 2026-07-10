@@ -2,6 +2,13 @@ impl AttachmentManifest for PostgresSessionStore {
     fn record_intent(&self, intent: AttachmentIntent) -> Result<(), StoreError> {
         let pool = self.pool.clone();
         block_on_detached(async move {
+            // Re-recording an intent REFRESHES `intent_at_ms` (the
+            // `DO UPDATE SET intent_at_ms` below). A long-lived retry loop
+            // re-`put`ting the same content id keeps bumping the timestamp forward,
+            // so the crash-orphan reconciliation — the single conditional DELETE in
+            // `PostgresSessionStoreFactory::live_attachment_refs`, which removes
+            // uncommitted intents at/before the grace cutoff — never collects a
+            // blob a session is still actively retrying.
             sqlx::query(
                 "INSERT INTO lash_attachment_manifest (
                     attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms
@@ -81,6 +88,45 @@ impl AttachmentManifest for PostgresSessionStore {
                 .await
                 .map(|_| ())
                 .map_err(store_sqlx_error)
+        })
+    }
+
+    fn holds_ref(
+        &self,
+        session_id: &str,
+        attachment_id: &AttachmentId,
+    ) -> Result<bool, StoreError> {
+        let pool = self.pool.clone();
+        let session_id = session_id.to_string();
+        let attachment_id = attachment_id.to_string();
+        block_on_detached(async move {
+            let row = sqlx::query(
+                "SELECT 1 FROM lash_attachment_manifest
+                 WHERE session_id = $1 AND attachment_id = $2
+                 LIMIT 1",
+            )
+            .bind(session_id)
+            .bind(attachment_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(store_sqlx_error)?;
+            Ok(row.is_some())
+        })
+    }
+
+    fn list_all_refs(&self) -> Result<Vec<AttachmentId>, StoreError> {
+        let pool = self.pool.clone();
+        block_on_detached(async move {
+            let rows = sqlx::query(
+                "SELECT DISTINCT attachment_id FROM lash_attachment_manifest",
+            )
+            .fetch_all(&pool)
+            .await
+            .map_err(store_sqlx_error)?;
+            Ok(rows
+                .into_iter()
+                .map(|row| AttachmentId::new(row.get::<String, _>(0)))
+                .collect())
         })
     }
 }

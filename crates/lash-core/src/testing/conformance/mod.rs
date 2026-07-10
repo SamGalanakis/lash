@@ -40,13 +40,13 @@ use std::time::Duration;
 
 use crate::{
     AbandonEvidence, AbandonRequest, AbandonWriter, LashSchema, ProcessAwaitOutput,
-    ProcessChangeCursor, ProcessEventAppendRequest, ProcessEventSemanticsSpec, ProcessEventType,
-    ProcessExecutionEnvRef, ProcessExternalRef, ProcessHandleDescriptor, ProcessIdentity,
-    ProcessInput, ProcessLeaseCompletion, ProcessListFilter, ProcessLiveReferenceSummary,
-    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted,
-    ProcessStatus, ProcessStatusFilter, ProcessTerminalState, ProcessValueSelector,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, RecoveryDisposition, SessionScope,
-    SessionScopeId, WaitKind, WaitState,
+    ProcessChangeCursor, ProcessCompletionAuthority, ProcessEventAppendRequest,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionEnvRef, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessIdentity, ProcessInput, ProcessLeaseCompletion,
+    ProcessListFilter, ProcessLiveReferenceSummary, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessStarted, ProcessStatus, ProcessStatusFilter,
+    ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeDelivery,
+    ProcessWakeSpec, RecoveryDisposition, SessionScope, SessionScopeId, WaitKind, WaitState,
 };
 use crate::{
     AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, AwaitEventWaitIdentity,

@@ -27,7 +27,13 @@ pub struct RuntimeHostConfig {
 
 #[derive(Clone)]
 pub struct RuntimeDurabilityConfig {
-    pub attachment_store: Arc<dyn crate::AttachmentStore>,
+    /// The session-bound attachment facade every runtime consumer sees. Hosts
+    /// supply a flat [`AttachmentStore`](crate::AttachmentStore) backend
+    /// (`RuntimeHostConfig::new`, the builder); the runtime wraps it here in a
+    /// [`SessionAttachmentStore`](crate::SessionAttachmentStore) and rebinds it
+    /// to the live session (with a reference-tracking manifest) at session
+    /// start. Before rebinding it is an ephemeral facade with no boundary guard.
+    pub attachment_store: Arc<crate::SessionAttachmentStore>,
     pub process_env_store: Arc<dyn ProcessExecutionEnvStore>,
 }
 
@@ -76,7 +82,9 @@ impl RuntimeHostConfig {
     ) -> Self {
         Self {
             durability: RuntimeDurabilityConfig {
-                attachment_store,
+                attachment_store: Arc::new(crate::SessionAttachmentStore::ephemeral(
+                    attachment_store,
+                )),
                 process_env_store,
             },
             process_engines: ProcessEngineRegistry::new(),

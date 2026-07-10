@@ -16,6 +16,9 @@ use super::{SessionStoreCreateRequest, SessionStoreFactory};
 use crate::DurabilityTier;
 use crate::store::RuntimePersistence;
 
+mod attachments;
+mod maintenance;
+
 #[derive(Clone)]
 struct InMemoryQueuedBatch {
     batch: crate::QueuedWorkBatch,
@@ -477,93 +480,6 @@ impl InMemorySessionStore {
 impl Default for InMemorySessionStore {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl crate::AttachmentManifest for InMemorySessionStore {
-    fn record_intent(
-        &self,
-        intent: crate::AttachmentIntent,
-    ) -> Result<(), crate::store::StoreError> {
-        let key = (intent.session_id.clone(), intent.attachment_id.clone());
-        let mut manifest = self
-            .attachment_manifest
-            .lock()
-            .expect("lock attachment manifest");
-        match manifest.get_mut(&key) {
-            Some(existing) => {
-                existing.canonical_uri = intent.canonical_uri;
-                existing.intent_at_epoch_ms = intent.intent_at_epoch_ms;
-            }
-            None => {
-                manifest.insert(
-                    key,
-                    crate::AttachmentManifestEntry {
-                        attachment_id: intent.attachment_id,
-                        session_id: intent.session_id,
-                        canonical_uri: intent.canonical_uri,
-                        intent_at_epoch_ms: intent.intent_at_epoch_ms,
-                        committed_at_epoch_ms: None,
-                    },
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn commit_refs(
-        &self,
-        session_id: &str,
-        attachment_ids: &[crate::AttachmentId],
-    ) -> Result<(), crate::store::StoreError> {
-        let now = self.clock.timestamp_ms();
-        let mut manifest = self
-            .attachment_manifest
-            .lock()
-            .expect("lock attachment manifest");
-        for attachment_id in attachment_ids {
-            if let Some(entry) = manifest.get_mut(&(session_id.to_string(), attachment_id.clone()))
-            {
-                entry.committed_at_epoch_ms.get_or_insert(now);
-            }
-        }
-        Ok(())
-    }
-
-    fn list_uncommitted(
-        &self,
-        older_than_epoch_ms: u64,
-    ) -> Result<Vec<crate::AttachmentManifestEntry>, crate::store::StoreError> {
-        let mut entries = self
-            .attachment_manifest
-            .lock()
-            .expect("lock attachment manifest")
-            .values()
-            .filter(|entry| {
-                entry.committed_at_epoch_ms.is_none()
-                    && entry.intent_at_epoch_ms <= older_than_epoch_ms
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| {
-            left.intent_at_epoch_ms
-                .cmp(&right.intent_at_epoch_ms)
-                .then_with(|| left.session_id.cmp(&right.session_id))
-                .then_with(|| left.attachment_id.cmp(&right.attachment_id))
-        });
-        Ok(entries)
-    }
-
-    fn forget(
-        &self,
-        session_id: &str,
-        attachment_id: &crate::AttachmentId,
-    ) -> Result<(), crate::store::StoreError> {
-        self.attachment_manifest
-            .lock()
-            .expect("lock attachment manifest")
-            .remove(&(session_id.to_string(), attachment_id.clone()));
-        Ok(())
     }
 }
 
@@ -1415,65 +1331,6 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
     }
 }
 
-#[async_trait::async_trait]
-impl crate::store::StoreMaintenance for InMemorySessionStore {
-    async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), crate::store::StoreError> {
-        self.tombstoned_node_ids
-            .lock()
-            .expect("lock tombstoned nodes")
-            .extend(ids.iter().cloned());
-        Ok(())
-    }
-
-    async fn vacuum(&self) -> Result<crate::store::VacuumReport, crate::store::StoreError> {
-        let ids = {
-            let mut tombstoned = self
-                .tombstoned_node_ids
-                .lock()
-                .expect("lock tombstoned nodes");
-            std::mem::take(&mut *tombstoned)
-        };
-        let removed_node_count = if ids.is_empty() {
-            0
-        } else {
-            let mut graph = self.session_graph.lock().expect("lock graph");
-            let before = graph.nodes.len();
-            let leaf_node_id = graph
-                .leaf_node_id
-                .clone()
-                .filter(|leaf| !ids.contains(leaf));
-            let nodes = graph
-                .nodes
-                .iter()
-                .filter(|node| !ids.contains(&node.node_id))
-                .cloned()
-                .collect::<Vec<_>>();
-            let removed_node_count = before.saturating_sub(nodes.len());
-            *graph = crate::SessionGraph::from_nodes(nodes, leaf_node_id);
-            removed_node_count
-        };
-        let mut pending = self
-            .pending_turn_inputs
-            .lock()
-            .expect("lock pending turn input");
-        let before = pending.len();
-        pending.retain(|entry| {
-            !matches!(
-                entry.input.state,
-                crate::TurnInputState::Cancelled | crate::TurnInputState::Completed
-            )
-        });
-        Ok(crate::store::VacuumReport {
-            removed_node_count,
-            removed_pending_turn_input_tombstone_count: before.saturating_sub(pending.len()),
-        })
-    }
-
-    async fn gc_unreachable(&self) -> Result<crate::store::GcReport, crate::store::StoreError> {
-        Ok(crate::store::GcReport::default())
-    }
-}
-
 /// Test-only introspection: call counters and a head-meta seeder used by the
 /// lash-core runtime tests. Compiled only under `cfg(test)`, so the shipped
 /// embedding surface carries none of it.
@@ -1560,5 +1417,56 @@ impl SessionStoreFactory for InMemorySessionStoreFactory {
             .expect("in-memory store factory")
             .remove(session_id);
         Ok(())
+    }
+
+    async fn live_attachment_refs(
+        &self,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<std::collections::BTreeSet<crate::AttachmentId>, crate::store::StoreError> {
+        let stores = {
+            self.stores
+                .lock()
+                .expect("in-memory store factory")
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut refs = std::collections::BTreeSet::new();
+        for store in stores {
+            // Reconcile crash orphans atomically: forget uncommitted intents aged
+            // past the cutoff in one conditional pass (no list-then-forget race
+            // against a concurrent `record_intent` refresh), then union the rest.
+            crate::AttachmentManifest::forget_aged_uncommitted_intents(
+                &*store,
+                intent_grace_cutoff_epoch_ms,
+            )?;
+            refs.extend(crate::AttachmentManifest::list_all_refs(&*store)?);
+        }
+        Ok(refs)
+    }
+
+    async fn has_live_attachment_ref(
+        &self,
+        id: &crate::AttachmentId,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<bool, crate::store::StoreError> {
+        let stores = {
+            self.stores
+                .lock()
+                .expect("in-memory store factory")
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for store in stores {
+            if crate::AttachmentManifest::has_live_ref_for_id(
+                &*store,
+                id,
+                intent_grace_cutoff_epoch_ms,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }

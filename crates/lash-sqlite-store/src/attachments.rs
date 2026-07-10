@@ -237,6 +237,12 @@ impl AttachmentManifest for Store {
             let intent_at_ms = intent.intent_at_epoch_ms as i64;
             self.conn
                 .call(move |conn| {
+                    // Re-recording an intent REFRESHES `intent_at_ms` (the
+                    // `DO UPDATE SET intent_at_ms` below). A long-lived retry loop
+                    // re-`put`ting the same content id keeps bumping the timestamp
+                    // forward, so the crash-orphan reconciliation — which deletes
+                    // uncommitted intents at/before the grace cutoff — never
+                    // collects a blob a session is still actively retrying.
                     conn.execute(
                         "INSERT INTO attachment_manifest
                             (attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms)
@@ -321,6 +327,60 @@ impl AttachmentManifest for Store {
         })
     }
 
+    fn forget_aged_uncommitted_intents(
+        &self,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<(), StoreError> {
+        block_on_store(async {
+            let cutoff = intent_grace_cutoff_epoch_ms as i64;
+            self.conn
+                .write(move |tx| {
+                    // One conditional DELETE inside the write transaction — the age
+                    // predicate lives in the statement, not in a prior read. A
+                    // concurrent `record_intent` that refreshes `intent_at_ms` past
+                    // the cutoff no longer matches, so a freshly-refreshed live
+                    // intent is never deleted (no list-then-forget race).
+                    tx.execute(
+                        "DELETE FROM attachment_manifest
+                         WHERE committed_at_ms IS NULL AND intent_at_ms <= ?1",
+                        params![cutoff],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .map_err(sqlite_error)?;
+            Ok(())
+        })
+    }
+
+    fn has_live_ref_for_id(
+        &self,
+        attachment_id: &AttachmentId,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<bool, StoreError> {
+        block_on_store(async {
+            let attachment_id = attachment_id.as_str().to_string();
+            let cutoff = intent_grace_cutoff_epoch_ms as i64;
+            self.conn
+                .call(move |conn| {
+                    // A GC-live ref: a committed row, or an uncommitted intent
+                    // younger than the cutoff. Aged orphan intents do not count.
+                    conn.query_row(
+                        "SELECT 1 FROM attachment_manifest
+                         WHERE attachment_id = ?1
+                           AND (committed_at_ms IS NOT NULL OR intent_at_ms > ?2)
+                         LIMIT 1",
+                        params![attachment_id, cutoff],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map(|found| found.is_some())
+                })
+                .await
+                .map_err(sqlite_error)
+        })
+    }
+
     fn forget(&self, session_id: &str, attachment_id: &AttachmentId) -> Result<(), StoreError> {
         block_on_store(async {
             let session_id = session_id.to_string();
@@ -336,6 +396,47 @@ impl AttachmentManifest for Store {
                 .await
                 .map_err(sqlite_error)?;
             Ok(())
+        })
+    }
+
+    fn holds_ref(
+        &self,
+        session_id: &str,
+        attachment_id: &AttachmentId,
+    ) -> Result<bool, StoreError> {
+        block_on_store(async {
+            let session_id = session_id.to_string();
+            let attachment_id = attachment_id.as_str().to_string();
+            self.conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT 1 FROM attachment_manifest
+                         WHERE session_id = ?1 AND attachment_id = ?2",
+                        params![session_id, attachment_id],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map(|found| found.is_some())
+                })
+                .await
+                .map_err(sqlite_error)
+        })
+    }
+
+    fn list_all_refs(&self) -> Result<Vec<AttachmentId>, StoreError> {
+        block_on_store(async {
+            self.conn
+                .call(move |conn| {
+                    let mut stmt =
+                        conn.prepare("SELECT DISTINCT attachment_id FROM attachment_manifest")?;
+                    let rows = stmt.query_map([], |row| {
+                        let id: String = row.get(0)?;
+                        Ok(AttachmentId::new(id))
+                    })?;
+                    Ok(rows.filter_map(Result::ok).collect())
+                })
+                .await
+                .map_err(sqlite_error)
         })
     }
 }

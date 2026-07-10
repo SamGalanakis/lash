@@ -79,6 +79,58 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
         }
         tx.commit().await.map_err(|err| err.to_string())
     }
+
+    async fn live_attachment_refs(
+        &self,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<std::collections::BTreeSet<lash_core::AttachmentId>, lash_core::StoreError> {
+        // The manifest table is global to this deployment. Reconcile crash
+        // orphans and read the root set in one transaction: first delete every
+        // uncommitted intent aged past the cutoff (its turn never committed), then
+        // read the DISTINCT survivors (committed refs + young intents). Deleting
+        // the aged intent rows is what lets their blobs become collectable.
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        sqlx::query(
+            "DELETE FROM lash_attachment_manifest
+             WHERE committed_at_ms IS NULL AND intent_at_ms <= $1",
+        )
+        .bind(intent_grace_cutoff_epoch_ms as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let rows = sqlx::query("SELECT DISTINCT attachment_id FROM lash_attachment_manifest")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?;
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| lash_core::AttachmentId::new(row.get::<String, _>(0)))
+            .collect())
+    }
+
+    async fn has_live_attachment_ref(
+        &self,
+        id: &lash_core::AttachmentId,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<bool, lash_core::StoreError> {
+        // One indexed, read-only SELECT: a GC-live root is a committed ref or an
+        // uncommitted intent younger than the cutoff. Unlike `live_attachment_refs`
+        // this does not reconcile (delete) aged intents — it is the delete-time
+        // re-check probe run after the reconciling snapshot was already taken.
+        let row = sqlx::query(
+            "SELECT 1 FROM lash_attachment_manifest
+             WHERE attachment_id = $1
+               AND (committed_at_ms IS NOT NULL OR intent_at_ms > $2)
+             LIMIT 1",
+        )
+        .bind(id.as_str())
+        .bind(intent_grace_cutoff_epoch_ms as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_sqlx_error)?;
+        Ok(row.is_some())
+    }
 }
 
 #[derive(Clone, Debug)]

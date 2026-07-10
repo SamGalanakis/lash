@@ -301,7 +301,7 @@ impl TurnInputClaim {
 
     pub async fn materialize_for_checkpoint(
         &self,
-        attachment_store: &dyn crate::AttachmentStore,
+        attachment_store: &crate::SessionAttachmentStore,
     ) -> Result<QueuedCheckpointTurnInput, String> {
         let mut transient_messages = Vec::new();
         for input in &self.inputs {
@@ -388,7 +388,7 @@ pub(crate) fn plugin_message_from_turn_input(input: &TurnInput) -> Option<Plugin
 
 pub(crate) async fn plugin_message_from_turn_input_with_attachments(
     input: &TurnInput,
-    attachment_store: &dyn crate::AttachmentStore,
+    attachment_store: &crate::SessionAttachmentStore,
 ) -> Result<Option<PluginMessage>, String> {
     let normalized =
         super::io::normalize_input_items(&input.items, &input.image_blobs, attachment_store)

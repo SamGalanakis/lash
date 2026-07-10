@@ -5,7 +5,8 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use super::events::{
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ProcessAwaitOutput, ProcessCompletionAuthority, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult,
 };
 use super::model::{
     AbandonRequest, ProcessChangeCursor, ProcessExternalRef, ProcessHandleDescriptor,
@@ -487,10 +488,11 @@ impl ProcessRegistry for WatchedProcessRegistry {
         &self,
         process_id: &str,
         await_output: ProcessAwaitOutput,
+        authority: ProcessCompletionAuthority,
     ) -> Result<ProcessRecord, PluginError> {
         let record = self
             .inner
-            .complete_process(process_id, await_output)
+            .complete_process(process_id, await_output, authority)
             .await?;
         self.hub.notify(process_id);
         Ok(record)
@@ -745,7 +747,11 @@ mod tests {
             .await
             .expect("register terminal");
         registry
-            .complete_process("proc-terminal", success(serde_json::json!("done")))
+            .complete_process(
+                "proc-terminal",
+                success(serde_json::json!("done")),
+                crate::ProcessCompletionAuthority::external_owner("test"),
+            )
             .await
             .expect("complete");
         registry
@@ -835,7 +841,11 @@ mod tests {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
             writer
-                .complete_process("proc", success(serde_json::json!({ "ok": true })))
+                .complete_process(
+                    "proc",
+                    success(serde_json::json!({ "ok": true })),
+                    crate::ProcessCompletionAuthority::external_owner("test"),
+                )
                 .await
                 .expect("complete");
         });
@@ -861,7 +871,11 @@ mod tests {
         let awaiter = ProcessAwaiter::new(Arc::clone(&registry), hub);
         let waiter = tokio::spawn(async move { awaiter.await_terminal("proc").await });
         registry
-            .complete_process("proc", success(serde_json::json!("done")))
+            .complete_process(
+                "proc",
+                success(serde_json::json!("done")),
+                crate::ProcessCompletionAuthority::external_owner("test"),
+            )
             .await
             .expect("complete");
 
@@ -969,7 +983,11 @@ mod tests {
             .await
             .expect("explicit append");
         registry
-            .complete_process("proc", success(serde_json::json!("done")))
+            .complete_process(
+                "proc",
+                success(serde_json::json!("done")),
+                crate::ProcessCompletionAuthority::external_owner("test"),
+            )
             .await
             .expect("complete");
 
@@ -1052,7 +1070,11 @@ mod tests {
             .await
             .expect("register");
         registry
-            .complete_process("proc", success(serde_json::json!("ready")))
+            .complete_process(
+                "proc",
+                success(serde_json::json!("ready")),
+                crate::ProcessCompletionAuthority::external_owner("test"),
+            )
             .await
             .expect("complete");
 
@@ -1124,7 +1146,11 @@ mod tests {
         barrier.wait().await;
         let output = success(serde_json::json!({ "raced": true }));
         registry
-            .complete_process("proc", output.clone())
+            .complete_process(
+                "proc",
+                output.clone(),
+                crate::ProcessCompletionAuthority::external_owner("test"),
+            )
             .await
             .expect("complete");
 
@@ -1164,7 +1190,11 @@ mod tests {
         // Process reaches terminal with no waiter attached.
         let output = success(serde_json::json!("reattached"));
         registry
-            .complete_process("proc", output.clone())
+            .complete_process(
+                "proc",
+                output.clone(),
+                crate::ProcessCompletionAuthority::external_owner("test"),
+            )
             .await
             .expect("complete");
 
@@ -1229,7 +1259,11 @@ mod tests {
         // The terminal event never rides the sink at all (ADR 0017): completion
         // observation is the await seam's job.
         registry
-            .complete_process("proc", success(serde_json::json!("done")))
+            .complete_process(
+                "proc",
+                success(serde_json::json!("done")),
+                crate::ProcessCompletionAuthority::external_owner("test"),
+            )
             .await
             .expect("complete");
 

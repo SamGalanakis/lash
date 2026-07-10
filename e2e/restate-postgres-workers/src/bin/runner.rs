@@ -12,10 +12,11 @@ use lash_restate::{
 };
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
-    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_PARENT_DURABLE_INPUT_TEXT,
-    EXPECTED_TOOL_BATCH_TEXT, ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse,
-    TurnScenario, build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
-    expected_attachment_bytes, process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
+    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_DURABLE_WAIT_TEXT, EXPECTED_FINAL_TEXT,
+    EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_TOOL_BATCH_TEXT, ProcessSignalRequest,
+    TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario, build_e2e_core,
+    e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env, expected_attachment_bytes,
+    process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -250,7 +251,9 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &tool_batch_failover_request.workflow_id).await?;
     assert_tool_batch_response(&tool_batch_failover_response)?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 13).await?;
+    drive_durable_wait_index_scenarios(&storage, &ingress_url, &admin_url).await?;
+
+    let responses = wait_for_terminal_results(storage.pool(), 17).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -892,6 +895,235 @@ async fn wait_for_durable_input_key(
     anyhow::bail!("timed out waiting for durable input key for `{workflow_id}`")
 }
 
+/// Drive PENDING foreground durable waits through the real Restate
+/// session-wait-index cancel / re-register / revoke handlers.
+///
+/// The `durable_wait_probe` scenario parks a session-scoped durable wait in the
+/// `LashDurableWaitIndex` virtual object (unlike the in-process wait scenarios,
+/// whose Process-scoped keys never enter the session index). We then drive the
+/// real `LashDurableWaitIndexImpl::{cancel_all,revoke_all}` handlers over
+/// Restate ingress and assert the observable turn outcomes.
+///
+/// Cancel/revoke are driven through the production
+/// `RestateEffectHost::{cancel,revoke}_await_events_for_session` controller
+/// route. Restate rejects no-input handler invocations that carry a body or
+/// content-type, so this doubles as live regression coverage for the
+/// empty-body ingress encoding in `update_restate_session_waits_via_ingress`.
+async fn drive_durable_wait_index_scenarios(
+    storage: &PostgresStorage,
+    ingress_url: &str,
+    admin_url: &str,
+) -> Result<()> {
+    let host = RestateEffectHost::with_ingress_url(ingress_url.to_string());
+
+    // 1) Cancel a pending wait through the real cancel_all handler; the turn
+    //    must observe the wait resolving as Cancelled and leave no stuck
+    //    invocations behind.
+    let cancel_workflow_id = "e2e-wait-cancel";
+    submit_durable_wait_probe(ingress_url, cancel_workflow_id).await?;
+    let cancel_key = wait_for_durable_wait_key(storage.pool(), cancel_workflow_id).await?;
+    let cancel_session_id = durable_wait_session_id(&cancel_key)?;
+    anyhow::ensure!(
+        cancel_session_id == DEFAULT_SESSION_ID,
+        "durable wait registered under unexpected session `{cancel_session_id}`"
+    );
+    let cancel_response = drive_session_wait_update(
+        storage.pool(),
+        &host,
+        &cancel_session_id,
+        cancel_workflow_id,
+        SessionWaitUpdate::Cancel,
+    )
+    .await?;
+    assert_durable_wait_cancelled(&cancel_response)?;
+    assert_no_problem_lash_restate_invocations(admin_url).await?;
+
+    // 2) Re-register a NEW wait on the same session and resolve it normally to
+    //    prove cancellation left the session usable (cancel is not permanent).
+    let reregister_workflow_id = "e2e-wait-reregister";
+    submit_durable_wait_probe(ingress_url, reregister_workflow_id).await?;
+    let reregister_key = wait_for_durable_wait_key(storage.pool(), reregister_workflow_id).await?;
+    let reregister_resolve = host
+        .resolve_await_event(
+            &reregister_key,
+            lash_core::Resolution::Ok(json!({ "answer": "post-cancel-approved" })),
+        )
+        .await
+        .context("resolve re-registered durable wait")?;
+    anyhow::ensure!(
+        matches!(reregister_resolve, lash_core::ResolveOutcome::Accepted),
+        "re-registered durable wait resolve was not accepted: {reregister_resolve:?}"
+    );
+    let reregister_response =
+        wait_for_terminal_result(storage.pool(), reregister_workflow_id).await?;
+    assert_durable_wait_resolved(&reregister_response, "post-cancel-approved")?;
+
+    // 3) Revoke (the session-deletion path): the pending wait must cancel...
+    let revoke_workflow_id = "e2e-wait-revoke";
+    submit_durable_wait_probe(ingress_url, revoke_workflow_id).await?;
+    let revoke_key = wait_for_durable_wait_key(storage.pool(), revoke_workflow_id).await?;
+    let revoke_session_id = durable_wait_session_id(&revoke_key)?;
+    let revoke_response = drive_session_wait_update(
+        storage.pool(),
+        &host,
+        &revoke_session_id,
+        revoke_workflow_id,
+        SessionWaitUpdate::Revoke,
+    )
+    .await?;
+    assert_durable_wait_cancelled(&revoke_response)?;
+
+    // ...and a subsequent registration on that session must be rejected as
+    // Revoked. Production surfaces that rejection to the turn as a Cancelled
+    // resolution, so this turn completes cancelled WITHOUT the runner invoking
+    // any resolver; if revoke had not stuck, the wait would park forever.
+    let post_revoke_workflow_id = "e2e-wait-post-revoke";
+    submit_durable_wait_probe(ingress_url, post_revoke_workflow_id).await?;
+    let post_revoke_response =
+        wait_for_terminal_result(storage.pool(), post_revoke_workflow_id).await?;
+    assert_durable_wait_cancelled(&post_revoke_response)?;
+    assert_no_problem_lash_restate_invocations(admin_url).await?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum SessionWaitUpdate {
+    Cancel,
+    Revoke,
+}
+
+async fn submit_durable_wait_probe(ingress_url: &str, workflow_id: &str) -> Result<()> {
+    submit_workflow(
+        ingress_url,
+        &TurnRequest {
+            workflow_id: workflow_id.to_string(),
+            fail_once: false,
+            scenario: TurnScenario::DurableWaitProbe,
+            signal: None,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+fn durable_wait_session_id(key: &AwaitEventKey) -> Result<String> {
+    key.scope
+        .session_id()
+        .map(str::to_string)
+        .context("durable wait key carried no session id; the session wait index was not exercised")
+}
+
+/// Repeatedly drive the production cancel/revoke controller route until the
+/// parked turn resolves. Both handlers are idempotent, so retrying is safe and
+/// removes any race between wait registration and the update landing on the
+/// index.
+async fn drive_session_wait_update(
+    pool: &sqlx::PgPool,
+    host: &RestateEffectHost,
+    session_id: &str,
+    workflow_id: &str,
+    update: SessionWaitUpdate,
+) -> Result<TurnResponse> {
+    let handler = match update {
+        SessionWaitUpdate::Cancel => "cancel_all",
+        SessionWaitUpdate::Revoke => "revoke_all",
+    };
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        match update {
+            SessionWaitUpdate::Cancel => host.cancel_await_events_for_session(session_id).await,
+            SessionWaitUpdate::Revoke => host.revoke_await_events_for_session(session_id).await,
+        }
+        .map_err(|err| anyhow::anyhow!("`{handler}` for `{session_id}` via controller: {err}"))?;
+        if let Some(response) = load_terminal_result(pool, workflow_id).await? {
+            return Ok(response);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for `{workflow_id}` to resolve after `{handler}`");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn wait_for_durable_wait_key(
+    pool: &sqlx::PgPool,
+    workflow_id: &str,
+) -> Result<AwaitEventKey> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let row: Option<String> = sqlx::query_scalar(
+            "SELECT result_json
+             FROM lash_e2e_tool_events
+             WHERE workflow_id = $1 AND tool_name = 'durable_wait_probe.opened'
+             ORDER BY event_id DESC
+             LIMIT 1",
+        )
+        .bind(workflow_id)
+        .fetch_optional(pool)
+        .await
+        .with_context(|| format!("load durable wait key for `{workflow_id}`"))?;
+        if let Some(result_json) = row {
+            let value: Value = serde_json::from_str(&result_json)
+                .with_context(|| format!("decode durable wait key row for `{workflow_id}`"))?;
+            let key_value = value
+                .get("await_key")
+                .cloned()
+                .context("durable wait key row missing await_key")?;
+            let key: AwaitEventKey =
+                serde_json::from_value(key_value).context("decode durable wait AwaitEventKey")?;
+            return Ok(key);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("timed out waiting for durable wait key for `{workflow_id}`")
+}
+
+fn assert_durable_wait_cancelled(response: &TurnResponse) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == EXPECTED_DURABLE_WAIT_TEXT,
+        "workflow `{}` durable wait final mismatch: {}",
+        response.workflow_id,
+        response.final_text
+    );
+    anyhow::ensure!(
+        response
+            .final_value
+            .get("cancelled")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "workflow `{}` durable wait was not cancelled: {}",
+        response.workflow_id,
+        response.final_value
+    );
+    Ok(())
+}
+
+fn assert_durable_wait_resolved(response: &TurnResponse, expected_answer: &str) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == EXPECTED_DURABLE_WAIT_TEXT,
+        "workflow `{}` durable wait final mismatch: {}",
+        response.workflow_id,
+        response.final_text
+    );
+    anyhow::ensure!(
+        response
+            .final_value
+            .get("cancelled")
+            .and_then(Value::as_bool)
+            == Some(false),
+        "workflow `{}` durable wait should have resolved, not cancelled: {}",
+        response.workflow_id,
+        response.final_value
+    );
+    anyhow::ensure!(
+        response.final_value.get("answer").and_then(Value::as_str) == Some(expected_answer),
+        "workflow `{}` durable wait answer mismatch: {}",
+        response.workflow_id,
+        response.final_value
+    );
+    Ok(())
+}
+
 async fn wait_for_queued_work(
     storage: &PostgresStorage,
     mock_provider_base_url: &str,
@@ -1290,6 +1522,7 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
     for expected in [
         "async_completion",
         "durable_input_request",
+        "durable_wait_probe",
         "kitchen_sink",
         "parent_durable_input_after_child",
         "queued_wake",
@@ -1485,8 +1718,10 @@ async fn assert_attachments_round_trip(
                 response.attachment_id
             )
         })?;
+        // Blob storage is flat and content-addressed now; session ownership is
+        // asserted through the Postgres manifest row below, not the object key.
         let stored = store
-            .get_for_session(&session_id, &id)
+            .get(&id)
             .await
             .with_context(|| format!("read worker attachment `{id}` from MinIO"))?;
         anyhow::ensure!(

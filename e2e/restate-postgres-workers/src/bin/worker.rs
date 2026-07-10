@@ -287,6 +287,9 @@ impl AppState {
                 TurnScenario::ToolBatch => {
                     lash_restate_postgres_workers_e2e::EXPECTED_TOOL_BATCH_TEXT
                 }
+                TurnScenario::DurableWaitProbe => {
+                    lash_restate_postgres_workers_e2e::EXPECTED_DURABLE_WAIT_TEXT
+                }
             })
             .to_string();
         let response = TurnResponse {
@@ -438,6 +441,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         TurnScenario::ToolBatch => format!(
             "Run the E2E tool batch scenario. workflow_id={} tool_batch=true fail_once={}",
             request.workflow_id, request.fail_once
+        ),
+        TurnScenario::DurableWaitProbe => format!(
+            "Run the E2E foreground durable wait scenario. workflow_id={} durable_wait_probe=true",
+            request.workflow_id
         ),
     }
 }

@@ -241,7 +241,7 @@ where
         session_lifecycle,
         session_graph,
         Arc::new(crate::UnavailableProcessService),
-        Arc::new(crate::InMemoryAttachmentStore::new()),
+        Arc::new(crate::SessionAttachmentStore::in_memory()),
         direct_completions,
         None,
     )
@@ -312,8 +312,8 @@ fn code_execution_context_with_tool_provider_catalog_and_trigger_router(
         crate::PluginOptions::default(),
         crate::SessionPolicy::default(),
     );
-    let attachment_store: Arc<dyn crate::AttachmentStore> =
-        Arc::new(crate::InMemoryAttachmentStore::new());
+    let attachment_store: Arc<crate::SessionAttachmentStore> =
+        Arc::new(crate::SessionAttachmentStore::in_memory());
     let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
         plugins,
         tools: provider,
@@ -563,6 +563,14 @@ impl crate::ProcessService for MockSessionManager {
         _scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessRecord, PluginError> {
         let id = registration.id.clone();
+        // This mock stands in as the executor, so it completes the row under the
+        // authority its declared disposition permits: externally-owned rows close
+        // via their external owner, lash-executed rows via the workflow-key path.
+        let authority = if registration.disposition == crate::RecoveryDisposition::ExternallyOwned {
+            crate::ProcessCompletionAuthority::external_owner(session_id)
+        } else {
+            crate::ProcessCompletionAuthority::workflow_key(&id)
+        };
         self.process_registry.register_process(registration).await?;
         if let Some(descriptor) = options.descriptor {
             let session_scope = crate::SessionScope::new(session_id);
@@ -578,6 +586,7 @@ impl crate::ProcessService for MockSessionManager {
                         "state": "completed"
                     }),
                 )),
+                authority,
             )
             .await
     }
