@@ -209,7 +209,7 @@ pub(crate) fn json_to_flow_value(value: Value) -> FlowValue {
             FlowValue::List(values.into_iter().map(json_to_flow_value).collect())
         }
         Value::Object(map) => json_map_to_image(&map)
-            .map(FlowValue::Image)
+            .map(|image| FlowValue::Image(Box::new(image)))
             .unwrap_or_else(|| {
                 FlowValue::Record(Arc::new(
                     map.into_iter()

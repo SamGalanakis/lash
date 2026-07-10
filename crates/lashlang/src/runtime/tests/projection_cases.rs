@@ -1,12 +1,12 @@
 fn test_image() -> Value {
-    Value::Image(ImageValue::new(
+    Value::Image(Box::new(ImageValue::new(
         "img-1",
         "image/png",
         "chart.png",
         1234,
         Some(640),
         Some(480),
-    ))
+    )))
 }
 
 async fn exec_with_global(name: &str, value: Value, source: &str) -> Result<Value, RuntimeError> {

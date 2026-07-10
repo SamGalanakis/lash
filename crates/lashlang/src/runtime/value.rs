@@ -181,7 +181,11 @@ pub enum Value {
     Bool(bool),
     Number(f64),
     String(CompactString),
-    Image(ImageValue),
+    // Boxed: `ImageValue` is by far the largest variant, and images are rare in
+    // value streams. Storing it inline would inflate `size_of::<Value>()` (and
+    // therefore every `Vec<Value>`/record allocation) for the common case, so we
+    // keep the payload behind a pointer.
+    Image(Box<ImageValue>),
     Resource(ResourceHandle),
     Tuple(ListValue),
     List(ListValue),

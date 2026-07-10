@@ -154,14 +154,14 @@ pub fn seeded_state_for(scenario: Scenario) -> State {
     if matches!(scenario, Scenario::ImageHostEnvironment) {
         globals.insert(
             "img".to_string(),
-            Value::Image(ImageValue::new(
+            Value::Image(Box::new(ImageValue::new(
                 "img-1",
                 "image/png",
                 "chart.png",
                 1234,
                 Some(640),
                 Some(480),
-            )),
+            ))),
         );
     }
     State::from_snapshot(lashlang::Snapshot { globals })

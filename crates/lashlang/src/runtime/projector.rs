@@ -343,14 +343,14 @@ mod tests {
     #[test]
     fn projects_image_and_resource_descriptors() {
         assert_eq!(
-            default_project(&Value::Image(ImageValue::new(
+            default_project(&Value::Image(Box::new(ImageValue::new(
                 "img-1",
                 "image/png",
                 "plot.png",
                 123,
                 Some(10),
                 Some(20),
-            ))),
+            )))),
             r#"{"type":"image","id":"img-1","mime":"image/png","label":"plot.png","size":123,"width":10,"height":20}"#
         );
         assert_eq!(

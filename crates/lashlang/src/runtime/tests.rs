@@ -484,14 +484,14 @@ finish Payload
     assert!(matches!(outcome, ExecutionOutcome::Finished(_)));
     state.globals.insert_str(
         "cover",
-        Value::Image(ImageValue::new(
+        Value::Image(Box::new(ImageValue::new(
             "img_1",
             "image/png",
             "cover",
             42,
             Some(640),
             Some(480),
-        )),
+        ))),
     );
     state.globals.insert_str(
         "projected",
@@ -510,14 +510,14 @@ finish Payload
     );
     assert_eq!(
         restored.globals().get("cover"),
-        Some(&Value::Image(ImageValue::new(
+        Some(&Value::Image(Box::new(ImageValue::new(
             "img_1",
             "image/png",
             "cover",
             42,
             Some(640),
             Some(480),
-        ))),
+        )))),
         "snapshot restoration must preserve image type and MIME metadata"
     );
 }

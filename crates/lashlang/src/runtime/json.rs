@@ -349,7 +349,7 @@ pub fn from_json(value: serde_json::Value) -> Value {
             Value::List(values.into_iter().map(from_json).collect::<Vec<_>>().into())
         }
         serde_json::Value::Object(map) => image_from_json_map(&map)
-            .map(Value::Image)
+            .map(|image| Value::Image(Box::new(image)))
             .or_else(|| resource_from_json_map(&map).map(Value::Resource))
             .unwrap_or_else(|| {
                 Value::Record(Arc::new(
