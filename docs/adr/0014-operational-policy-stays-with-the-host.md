@@ -2,7 +2,11 @@
 
 ## Status
 
-accepted
+accepted. The *Lease Timings* bullet is superseded in part by
+[ADR 0029](0029-claims-are-generation-fenced-under-the-session-lease.md):
+queued-work and turn-input claims are no longer TTL leases with a renewal API —
+they are generation-fenced under the session execution lease. `LeaseTimings`
+governs only the true lease lanes.
 
 ## Decision
 
@@ -14,11 +18,14 @@ host policy is implementable through explicit, lash-owned capabilities, because
 the state those capabilities act on (leases, claims, waits, cached transports,
 trace buffers) lives inside lash. The capability set:
 
-- **Lease Timings**: every runtime lease and claim (session execution, effect
-  replay, queued work, turn input, process leases) derives its TTL and renewal
-  cadence from one host-configurable `LeaseTimings` on the core builder,
-  validated against the survive-two-missed-renewals invariant
-  (`ttl >= 3 * renew_interval`). The former hardcoded 30s constants are gone.
+- **Lease Timings**: every runtime *lease* (session execution, durable effect
+  replay, process leases) derives its TTL and renewal cadence from one
+  host-configurable `LeaseTimings` on the core builder, validated against the
+  survive-two-missed-renewals invariant (`ttl >= 3 * renew_interval`). The former
+  hardcoded 30s constants are gone. Queued-work and turn-input **claims** are not
+  leases: they carry no TTL and are generation-fenced under the session execution
+  lease (ADR 0029), so they inherit their liveness from that lane rather than
+  from `LeaseTimings`.
 - **Quiesce and handoff**: `LashSession::park(self)` flushes dirty state
   through a fresh-lease commit and returns a resumable `ParkedSession`;
   `LashCore::resume` rebuilds it. `LashSession::close(self)` is park-without-
