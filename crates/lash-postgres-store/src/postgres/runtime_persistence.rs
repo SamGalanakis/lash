@@ -737,15 +737,34 @@ impl QueuedWorkStore for PostgresSessionStore {
             }
         }
         let now = current_epoch_ms();
-        let batch_id = derive_batch_id(&batch.session_id, batch.source_key.as_deref(), now, None);
-        let row = sqlx::query_scalar::<_, i64>(
+        // Allocate the durable ordering key first and also use it as the batch-id
+        // nonce. PostgreSQL can enqueue multiple source-key-less batches for the
+        // same session within one millisecond (and across many store handles or
+        // hosts), so timestamp alone is not a unique identity source. Sequence
+        // values are database-global and are intentionally not rolled back.
+        let enqueue_seq: i64 = sqlx::query_scalar(
+            "SELECT nextval(pg_get_serial_sequence(
+                'lash_queued_work_batches',
+                'enqueue_seq'
+             ))",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        let batch_id = derive_batch_id(
+            &batch.session_id,
+            batch.source_key.as_deref(),
+            now,
+            Some(enqueue_seq as u64),
+        );
+        sqlx::query(
             "INSERT INTO lash_queued_work_batches (
-                batch_id, session_id, source_key, delivery_policy, slot_policy,
+                enqueue_seq, batch_id, session_id, source_key, delivery_policy, slot_policy,
                 merge_key_json, available_at_ms, enqueued_at_ms
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             RETURNING enqueue_seq",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
+        .bind(enqueue_seq)
         .bind(&batch_id)
         .bind(&batch.session_id)
         .bind(&batch.source_key)
@@ -754,7 +773,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         .bind(encode_json(&batch.merge_key))
         .bind(batch.available_at_ms as i64)
         .bind(now as i64)
-        .fetch_one(&mut *tx)
+        .execute(&mut *tx)
         .await
         .map_err(store_sqlx_error)?;
         for (index, payload) in batch.payloads.iter().enumerate() {
@@ -774,7 +793,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         let queued = load_queued_batch(&mut tx, &batch_id)
             .await?
             .ok_or_else(|| StoreError::Backend("queued work insert disappeared".to_string()))?;
-        debug_assert_eq!(queued.enqueue_seq, row as u64);
+        debug_assert_eq!(queued.enqueue_seq, enqueue_seq as u64);
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(queued)
     }
