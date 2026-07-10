@@ -194,8 +194,10 @@ pub struct PendingTurnInputClaimDiagnostics {
     pub claim_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_owner: Option<crate::LeaseOwnerIdentity>,
+    /// The session-execution-lease generation the live claim pins, when a claim
+    /// holds the row. `None` when the row carries no claim (ADR 0029).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim_expires_at_ms: Option<u64>,
+    pub claim_session_lease_generation: Option<u64>,
     pub claim_fencing_token: u64,
 }
 
@@ -272,8 +274,10 @@ pub struct TurnInputClaim {
     pub owner: crate::LeaseOwnerIdentity,
     pub lease_token: String,
     pub fencing_token: u64,
-    pub claimed_at_epoch_ms: u64,
-    pub expires_at_epoch_ms: u64,
+    /// The session-execution-lease generation this claim pins. The claim is
+    /// live exactly while this generation still holds the session lease
+    /// (ADR 0029).
+    pub session_lease_generation: u64,
     pub mode: TurnInputClaimMode,
     pub inputs: Vec<PendingTurnInput>,
 }

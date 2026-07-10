@@ -291,6 +291,12 @@ impl LashRuntime {
         })
     }
 
+    // Prompt handback on lease loss. This is no longer load-bearing for
+    // correctness: a claim is generation-fenced under the session lease, so once
+    // this owner has lost the lease its claims are already superseded and the
+    // next acquirer reclaims them by generation regardless (ADR 0029). Abandoning
+    // eagerly just lets a peer reclaim the rows without waiting to observe the
+    // generation bump.
     async fn abandon_queued_work_claims_after_lease_loss(
         &self,
         err: &RuntimeError,
@@ -717,7 +723,6 @@ impl LashRuntime {
                     &self.state.session_id,
                     &session_execution_fence,
                     &self.runtime_lease_owner,
-                    self.host.core.control.lease_timings.ttl_ms(),
                     64,
                 )
                 .await
@@ -784,7 +789,6 @@ impl LashRuntime {
                     &session_execution_fence,
                     &self.runtime_lease_owner,
                     crate::QueuedWorkClaimBoundary::Idle,
-                    self.host.core.control.lease_timings.ttl_ms(),
                     batch_ids,
                 )
                 .await
@@ -795,7 +799,6 @@ impl LashRuntime {
                     &session_execution_fence,
                     &self.runtime_lease_owner,
                     crate::QueuedWorkClaimBoundary::Idle,
-                    self.host.core.control.lease_timings.ttl_ms(),
                     64,
                 )
                 .await

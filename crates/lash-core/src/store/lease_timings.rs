@@ -11,9 +11,15 @@ use std::time::Duration;
 /// hardcoded 30s TTL / 10s renew contract.
 const MIN_TTL_TO_RENEW_RATIO: u32 = 3;
 
-/// Lease timing capability for every durable single-writer lane the runtime
-/// claims: session execution leases, turn-input claims, queued-work claims,
-/// process leases, and durable effect-replay leases.
+/// Lease timing capability for the durable single-writer *lease* lanes the
+/// runtime renews on a cadence: session execution leases, process leases, and
+/// durable effect-replay leases.
+///
+/// Queued-work and turn-input claims are deliberately *not* governed by this
+/// type: they are not leases, carry no TTL, and are never renewed. A claim is
+/// live exactly while the session-execution-lease generation it pins still holds
+/// the session lease (ADR 0029), so it inherits its liveness from the session
+/// lease lane rather than from a clock.
 ///
 /// The TTL is the failover-latency vs false-takeover-risk knob: a shorter TTL
 /// lets a peer reclaim work from a crashed owner sooner, while a longer TTL
@@ -83,7 +89,8 @@ impl LeaseTimings {
         self.renew_interval
     }
 
-    /// TTL in epoch milliseconds, as passed to store claim/renew calls.
+    /// TTL in epoch milliseconds, as passed to store lease claim/renew calls
+    /// (session execution, process, and effect-replay leases).
     pub fn ttl_ms(&self) -> u64 {
         duration_to_ms(self.ttl)
     }

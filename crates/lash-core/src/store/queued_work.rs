@@ -14,10 +14,7 @@ use sha2::{Digest, Sha256};
 use super::LeaseOwnerIdentity;
 use super::StoreError;
 use crate::runtime::QueuedWorkClass;
-use crate::{
-    DeliveryPolicy, MergeKey, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkCompletion,
-    SlotPolicy,
-};
+use crate::{DeliveryPolicy, MergeKey, QueuedWorkClaimBoundary, QueuedWorkCompletion, SlotPolicy};
 
 /// Decoded claim-relevant fields of one ready queued-work batch row.
 ///
@@ -113,14 +110,15 @@ pub fn select_turn_work_claim_prefix(
 /// The fencing token advances past the head batch's last observed token, the
 /// claim id is stable for (head batch, fencing token), and the lease token is
 /// an opaque proof-of-ownership digest the backend stamps on every claimed
-/// row.
+/// row. `session_lease_generation` is the caller's live session-execution-lease
+/// fencing token; the backend records it so the claim is live exactly while
+/// that generation still holds the session lease (see ADR 0029).
 #[derive(Clone, Debug)]
 pub struct QueuedWorkClaimLease {
     pub claim_id: String,
     pub lease_token: String,
     pub fencing_token: u64,
-    pub claimed_at_epoch_ms: u64,
-    pub expires_at_epoch_ms: u64,
+    pub session_lease_generation: u64,
 }
 
 impl QueuedWorkClaimLease {
@@ -129,7 +127,7 @@ impl QueuedWorkClaimLease {
         session_id: &str,
         owner: &LeaseOwnerIdentity,
         now_epoch_ms: u64,
-        lease_ttl_ms: u64,
+        session_lease_generation: u64,
     ) -> Self {
         let fencing_token = head.claim_fencing_token.saturating_add(1);
         let claim_id = format!("qwc:{}:{fencing_token}", head.enqueue_seq);
@@ -147,8 +145,7 @@ impl QueuedWorkClaimLease {
             claim_id,
             lease_token,
             fencing_token,
-            claimed_at_epoch_ms: now_epoch_ms,
-            expires_at_epoch_ms: now_epoch_ms.saturating_add(lease_ttl_ms),
+            session_lease_generation,
         }
     }
 }
@@ -170,25 +167,6 @@ pub fn derive_batch_id(
     format!("qwb:{:x}", Sha256::digest(seed.as_bytes()))
 }
 
-/// Apply the shared lease-renewal decision: the lease holds only when every
-/// batch row in the claim accepted the new expiry stamp.
-pub fn renewed_claim(
-    claim: &QueuedWorkClaim,
-    renewed_rows: usize,
-    expires_at_epoch_ms: u64,
-) -> Result<QueuedWorkClaim, StoreError> {
-    if renewed_rows != claim.batches.len() {
-        return Err(StoreError::QueuedWorkClaimExpired {
-            session_id: claim.session_id.clone(),
-            claim_id: claim.claim_id.clone(),
-        });
-    }
-    Ok(QueuedWorkClaim {
-        expires_at_epoch_ms,
-        ..claim.clone()
-    })
-}
-
 /// Apply the shared completion-fencing decision: a completion may delete its
 /// batches only when the live store still shows the claim owning every one
 /// of them (`owned_rows` rows matched the claim id + lease token).
@@ -197,7 +175,7 @@ pub fn ensure_completion_owns_all_batches(
     owned_rows: usize,
 ) -> Result<(), StoreError> {
     if owned_rows != completed.batch_ids.len() {
-        return Err(StoreError::QueuedWorkClaimExpired {
+        return Err(StoreError::QueuedWorkClaimSuperseded {
             session_id: completed.session_id.clone(),
             claim_id: completed.claim_id.clone(),
         });
@@ -372,12 +350,11 @@ mod tests {
             merge_key: MergeKey::Never,
         };
         let owner = LeaseOwnerIdentity::opaque("owner", "owner:incarnation");
-        let lease = QueuedWorkClaimLease::derive(&head, "session", &owner, 1_000, 250);
+        let lease = QueuedWorkClaimLease::derive(&head, "session", &owner, 1_000, 5);
         assert_eq!(lease.fencing_token, 3);
         assert_eq!(lease.claim_id, "qwc:7:3");
-        assert_eq!(lease.claimed_at_epoch_ms, 1_000);
-        assert_eq!(lease.expires_at_epoch_ms, 1_250);
-        let again = QueuedWorkClaimLease::derive(&head, "session", &owner, 1_000, 250);
+        assert_eq!(lease.session_lease_generation, 5);
+        let again = QueuedWorkClaimLease::derive(&head, "session", &owner, 1_000, 5);
         assert_eq!(lease.lease_token, again.lease_token);
     }
 

@@ -12,7 +12,6 @@ impl RuntimeScenarioContext {
                     &lease.fence(),
                     owner,
                     QueuedWorkClaimBoundary::Idle,
-                    60_000,
                     10,
                 )
                 .await
@@ -27,7 +26,7 @@ impl RuntimeScenarioContext {
 
         let command_claim = self
             .store()
-            .claim_leading_ready_session_command(self.session_id, &lease.fence(), owner, 60_000)
+            .claim_leading_ready_session_command(self.session_id, &lease.fence(), owner)
             .await
             .expect("claim leading session command");
         assert_eq!(
@@ -47,14 +46,7 @@ impl RuntimeScenarioContext {
         let (owner, lease) = self.owner_and_lease();
         let turn_claim = self
             .store()
-            .claim_ready_queued_work(
-                self.session_id,
-                &lease.fence(),
-                owner,
-                phase.boundary,
-                60_000,
-                10,
-            )
+            .claim_ready_queued_work(self.session_id, &lease.fence(), owner, phase.boundary, 10)
             .await
             .expect("claim ready turn work");
         assert_eq!(
@@ -90,7 +82,7 @@ impl RuntimeScenarioContext {
         let (owner, lease) = self.owner_and_lease();
         let claim = self
             .store()
-            .claim_next_turn_inputs(self.session_id, &lease.fence(), owner, 60_000, 10)
+            .claim_next_turn_inputs(self.session_id, &lease.fence(), owner, 10)
             .await
             .unwrap_or_else(|err| panic!("{} failed to claim next-turn inputs: {err}", self.name));
         if phase.expected_aliases.is_empty() {
