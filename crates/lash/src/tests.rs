@@ -423,7 +423,6 @@ impl lash_core::QueuedWorkStore for SnapshotStore {
         _session_id: &str,
         _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
         _owner: &lash_core::LeaseOwnerIdentity,
-        _lease_ttl_ms: u64,
     ) -> std::result::Result<
         Option<lash_core::runtime::QueuedWorkClaim>,
         lash_core::store::StoreError,
@@ -437,25 +436,12 @@ impl lash_core::QueuedWorkStore for SnapshotStore {
         _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
         _owner: &lash_core::LeaseOwnerIdentity,
         _boundary: lash_core::runtime::QueuedWorkClaimBoundary,
-        _lease_ttl_ms: u64,
         _max_batches: usize,
     ) -> std::result::Result<
         Option<lash_core::runtime::QueuedWorkClaim>,
         lash_core::store::StoreError,
     > {
         Ok(None)
-    }
-
-    async fn renew_queued_work_claim(
-        &self,
-        claim: &lash_core::runtime::QueuedWorkClaim,
-        _lease_ttl_ms: u64,
-    ) -> std::result::Result<lash_core::runtime::QueuedWorkClaim, lash_core::store::StoreError>
-    {
-        Err(lash_core::store::StoreError::QueuedWorkClaimExpired {
-            session_id: claim.session_id.clone(),
-            claim_id: claim.claim_id.clone(),
-        })
     }
 
     async fn abandon_queued_work_claim(
@@ -542,7 +528,6 @@ impl lash_core::TurnInputStore for SnapshotStore {
         _owner: &lash_core::LeaseOwnerIdentity,
         _turn_id: &str,
         _checkpoint: lash_core::CheckpointKind,
-        _lease_ttl_ms: u64,
         _max_inputs: usize,
     ) -> std::result::Result<Option<lash_core::TurnInputClaim>, lash_core::store::StoreError> {
         Ok(None)
@@ -553,7 +538,6 @@ impl lash_core::TurnInputStore for SnapshotStore {
         _session_id: &str,
         _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
         _owner: &lash_core::LeaseOwnerIdentity,
-        _lease_ttl_ms: u64,
         _max_inputs: usize,
     ) -> std::result::Result<Option<lash_core::TurnInputClaim>, lash_core::store::StoreError> {
         Ok(None)
@@ -762,7 +746,6 @@ impl lash_core::TurnInputStore for BoundSessionStore {
         _owner: &lash_core::LeaseOwnerIdentity,
         _turn_id: &str,
         _checkpoint: lash_core::CheckpointKind,
-        _lease_ttl_ms: u64,
         _max_inputs: usize,
     ) -> std::result::Result<Option<lash_core::TurnInputClaim>, lash_core::store::StoreError> {
         unreachable!("BoundSessionStore does not serve pending turn input")
@@ -773,7 +756,6 @@ impl lash_core::TurnInputStore for BoundSessionStore {
         _session_id: &str,
         _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
         _owner: &lash_core::LeaseOwnerIdentity,
-        _lease_ttl_ms: u64,
         _max_inputs: usize,
     ) -> std::result::Result<Option<lash_core::TurnInputClaim>, lash_core::store::StoreError> {
         unreachable!("BoundSessionStore does not serve pending turn input")
@@ -802,7 +784,6 @@ impl lash_core::QueuedWorkStore for BoundSessionStore {
         _session_id: &str,
         _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
         _owner: &lash_core::LeaseOwnerIdentity,
-        _lease_ttl_ms: u64,
     ) -> std::result::Result<
         Option<lash_core::runtime::QueuedWorkClaim>,
         lash_core::store::StoreError,
@@ -816,22 +797,12 @@ impl lash_core::QueuedWorkStore for BoundSessionStore {
         _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
         _owner: &lash_core::LeaseOwnerIdentity,
         _boundary: lash_core::runtime::QueuedWorkClaimBoundary,
-        _lease_ttl_ms: u64,
         _max_batches: usize,
     ) -> std::result::Result<
         Option<lash_core::runtime::QueuedWorkClaim>,
         lash_core::store::StoreError,
     > {
         Ok(None)
-    }
-
-    async fn renew_queued_work_claim(
-        &self,
-        _claim: &lash_core::runtime::QueuedWorkClaim,
-        _lease_ttl_ms: u64,
-    ) -> std::result::Result<lash_core::runtime::QueuedWorkClaim, lash_core::store::StoreError>
-    {
-        unreachable!("BoundSessionStore does not serve queued work")
     }
 
     async fn abandon_queued_work_claim(

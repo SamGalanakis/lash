@@ -87,12 +87,7 @@ async fn run_once_queued_work_claim_stress(
         let (command_claim, phase) =
             measure_runtime_perf_async_phase("queued_work.claim_session_command", async {
                 store
-                    .claim_leading_ready_session_command(
-                        &session_id,
-                        &lease.fence(),
-                        &owner,
-                        QUEUED_WORK_CLAIM_TTL_MS,
-                    )
+                    .claim_leading_ready_session_command(&session_id, &lease.fence(), &owner)
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("queued-work stress expected command claim"))
             })
@@ -128,7 +123,6 @@ async fn run_once_queued_work_claim_stress(
                         &lease.fence(),
                         &owner,
                         QueuedWorkClaimBoundary::Idle,
-                        QUEUED_WORK_CLAIM_TTL_MS,
                         QUEUED_WORK_JOIN_BATCHES_PER_TURN,
                     )
                     .await?
@@ -151,16 +145,6 @@ async fn run_once_queued_work_claim_stress(
             .map(|batch| batch.batch_id.clone())
             .collect::<Vec<_>>();
 
-        let (join_claim, phase) =
-            measure_runtime_perf_async_phase("queued_work.renew_join_claim", async {
-                store
-                    .renew_queued_work_claim(&join_claim, QUEUED_WORK_CLAIM_TTL_MS)
-                    .await
-                    .map_err(anyhow::Error::from)
-            })
-            .await?;
-        phase_profile.insert(phase.0, phase.1);
-
         let (_, phase) =
             measure_runtime_perf_async_phase("queued_work.abandon_join_claim", async {
                 store
@@ -179,7 +163,6 @@ async fn run_once_queued_work_claim_stress(
                         &lease.fence(),
                         &owner,
                         QueuedWorkClaimBoundary::Idle,
-                        QUEUED_WORK_CLAIM_TTL_MS,
                         &join_batch_ids,
                     )
                     .await?
@@ -221,7 +204,6 @@ async fn run_once_queued_work_claim_stress(
                         &lease.fence(),
                         &owner,
                         QueuedWorkClaimBoundary::Idle,
-                        QUEUED_WORK_CLAIM_TTL_MS,
                         QUEUED_WORK_JOIN_BATCHES_PER_TURN,
                     )
                     .await?
@@ -614,7 +596,6 @@ async fn run_once_turn_input_ingress_interrupt(
                         &owner,
                         &turn_id,
                         lash_core::CheckpointKind::AfterWork,
-                        QUEUED_WORK_CLAIM_TTL_MS,
                         1,
                     )
                     .await?
@@ -644,7 +625,6 @@ async fn run_once_turn_input_ingress_interrupt(
                         &owner,
                         &turn_id,
                         lash_core::CheckpointKind::AfterWork,
-                        QUEUED_WORK_CLAIM_TTL_MS,
                         TURN_INPUT_INGRESS_ACCEPTED_PER_TURN,
                     )
                     .await?
@@ -700,7 +680,6 @@ async fn run_once_turn_input_ingress_interrupt(
                         &session_id,
                         &lease.fence(),
                         &owner,
-                        QUEUED_WORK_CLAIM_TTL_MS,
                         TURN_INPUT_INGRESS_ACTIVE_PER_TURN + TURN_INPUT_INGRESS_NEXT_PER_TURN,
                     )
                     .await?
@@ -737,7 +716,6 @@ async fn run_once_turn_input_ingress_interrupt(
                         &session_id,
                         &lease.fence(),
                         &owner,
-                        QUEUED_WORK_CLAIM_TTL_MS,
                         TURN_INPUT_INGRESS_ACTIVE_PER_TURN + TURN_INPUT_INGRESS_NEXT_PER_TURN,
                     )
                     .await?

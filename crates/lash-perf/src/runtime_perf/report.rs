@@ -562,7 +562,6 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
             "queued_work.claim_session_command",
             "queued_work.complete_session_command",
             "queued_work.claim_join_turn_work",
-            "queued_work.renew_join_claim",
             "queued_work.abandon_join_claim",
             "queued_work.reclaim_by_batch_ids",
             "queued_work.complete_join_turn_work",

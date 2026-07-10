@@ -179,7 +179,6 @@ impl TurnInputStore for FacadeStore {
         _owner: &LeaseOwnerIdentity,
         _turn_id: &str,
         _checkpoint: CheckpointKind,
-        _lease_ttl_ms: u64,
         _max_inputs: usize,
     ) -> Result<Option<TurnInputClaim>, StoreError> {
         Ok(None)
@@ -190,7 +189,6 @@ impl TurnInputStore for FacadeStore {
         _session_id: &str,
         _session_execution_lease: &SessionExecutionLeaseFence,
         _owner: &LeaseOwnerIdentity,
-        _lease_ttl_ms: u64,
         _max_inputs: usize,
     ) -> Result<Option<TurnInputClaim>, StoreError> {
         Ok(None)
@@ -215,7 +213,6 @@ impl QueuedWorkStore for FacadeStore {
         _session_id: &str,
         _session_execution_lease: &SessionExecutionLeaseFence,
         _owner: &LeaseOwnerIdentity,
-        _lease_ttl_ms: u64,
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
         Ok(None)
     }
@@ -226,18 +223,9 @@ impl QueuedWorkStore for FacadeStore {
         _session_execution_lease: &SessionExecutionLeaseFence,
         _owner: &LeaseOwnerIdentity,
         _boundary: QueuedWorkClaimBoundary,
-        _lease_ttl_ms: u64,
         _max_batches: usize,
     ) -> Result<Option<QueuedWorkClaim>, StoreError> {
         Ok(None)
-    }
-
-    async fn renew_queued_work_claim(
-        &self,
-        _claim: &QueuedWorkClaim,
-        _lease_ttl_ms: u64,
-    ) -> Result<QueuedWorkClaim, StoreError> {
-        unreachable!("compile-only facade store")
     }
 
     async fn abandon_queued_work_claim(&self, _claim: &QueuedWorkClaim) -> Result<(), StoreError> {
