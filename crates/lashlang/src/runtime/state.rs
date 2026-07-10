@@ -118,7 +118,7 @@ fn snapshot_value_from_json(value: serde_json::Value) -> Value {
                 );
             }
             image_from_json_map(&map)
-                .map(Value::Image)
+                .map(|image| Value::Image(Box::new(image)))
                 .or_else(|| resource_from_json_map(&map).map(Value::Resource))
                 .unwrap_or_else(|| Value::Record(Arc::new(snapshot_record_from_json(map))))
         }

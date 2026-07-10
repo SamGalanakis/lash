@@ -1835,7 +1835,7 @@ mod tests {
                 Some(320),
                 Some(180),
             );
-            let flow = FlowValue::Image(image);
+            let flow = FlowValue::Image(Box::new(image));
             let json = flow_to_json_value(&flow).await;
 
             assert_eq!(json.get("mime").and_then(Value::as_str), Some("image/webp"));

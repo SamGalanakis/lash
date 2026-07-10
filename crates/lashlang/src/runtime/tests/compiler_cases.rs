@@ -1454,14 +1454,14 @@ finish validate(img, Type {
     let mut state = State::new();
     state.globals.insert_str(
         "img",
-        Value::Image(ImageValue::new(
+        Value::Image(Box::new(ImageValue::new(
             "img-1",
             "image/png",
             "chart.png",
             1234,
             Some(640),
             None,
-        )),
+        ))),
     );
 
     let outcome = execute_program(&program, &mut state, &Host)
@@ -1469,14 +1469,14 @@ finish validate(img, Type {
         .expect("image descriptor validation should succeed");
     assert_eq!(
         outcome,
-        ExecutionOutcome::Finished(Value::Image(ImageValue::new(
+        ExecutionOutcome::Finished(Value::Image(Box::new(ImageValue::new(
             "img-1",
             "image/png",
             "chart.png",
             1234,
             Some(640),
             None
-        )))
+        ))))
     );
 }
 
