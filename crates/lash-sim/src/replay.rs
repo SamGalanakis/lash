@@ -304,6 +304,7 @@ fn normalize(value: &Value) -> Value {
         object.remove("runtime_suspend");
         object.remove("runtime_invariant_facts");
         object.remove("runtime_final_value_facts");
+        object.remove("sim_clock");
         // The cancel outcome (`cancelled`/`cancel_outcome`) depends on whether
         // the real runtime had already consumed the targeted input by the time
         // the cancellation arrived — a fact the abstract ModelStore cannot

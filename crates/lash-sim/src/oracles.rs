@@ -1044,6 +1044,7 @@ pub fn worker_stale_completion_rejected(summary: &AbstractWorldSummary) -> Oracl
 
 pub const WORKER_FAILOVER_CONTINUATION_ORACLE: &str =
     "sim.oracle.worker-failover-continues-work.v1";
+pub const HEALTHY_LONG_TURN_RENEWAL_ORACLE: &str = "sim.oracle.healthy-long-turn-renewal.v1";
 
 /// Real worker FAILOVER CONTINUATION: a second worker incarnation reclaimed the
 /// crashed first owner's session-execution lease at a strictly higher fencing
@@ -1068,6 +1069,40 @@ pub fn worker_failover_continues_work(events: &[DeliveredBoundary]) -> OracleVer
     OracleVerdict::failed(
         WORKER_FAILOVER_CONTINUATION_ORACLE,
         "no worker boundary proved second-owner failover CONTINUATION of the first owner's in-flight work (claimed -> reclaimed at higher fence -> continued -> stale rejected)",
+    )
+}
+
+/// A generated provider turn remained live and committed while the shared
+/// schedule clock crossed several complete session-lease TTL windows.
+pub fn healthy_long_turn_renewal(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let healthy = events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::Provider)
+        .find(|event| {
+            event.observed.get("success").and_then(Value::as_bool) == Some(true)
+                && event
+                    .observed
+                    .pointer("/sim_clock/elapsed_ms")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|elapsed| elapsed >= 3 * 30_000)
+                && event
+                    .observed
+                    .pointer("/sim_clock/completed_sleeps_during_turn")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|renewals| renewals >= 3)
+        });
+    if let Some(event) = healthy {
+        return OracleVerdict::passed(
+            HEALTHY_LONG_TURN_RENEWAL_ORACLE,
+            format!(
+                "provider turn `{}` committed after the shared virtual clock crossed at least three lease TTL windows and woke repeated renewal sleeps",
+                event.boundary_id
+            ),
+        );
+    }
+    OracleVerdict::failed(
+        HEALTHY_LONG_TURN_RENEWAL_ORACLE,
+        "no successful generated provider turn crossed three lease TTL windows with repeated virtual-clock renewal wakes",
     )
 }
 
@@ -1206,6 +1241,16 @@ fn worker_owned_work_continued_by_successor(event: &DeliveredBoundary) -> bool {
             && process.get("terminal_event_count").and_then(Value::as_u64) == Some(1)
     });
     process_is_fenced
+        && event
+            .observed
+            .get("expired_owner_commit_rejected")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && event
+            .observed
+            .pointer("/runtime_worker_store/takeover_after_ttl_expiry")
+            .and_then(Value::as_bool)
+            == Some(true)
         && flag("first_owner_claimed_work")
         && flag("second_owner_resumed_work")
         && flag("second_owner_outranks_first")
@@ -7537,7 +7582,9 @@ mod tests {
                 BoundaryKind::Worker,
                 json!({ "session": "session-001" }),
                 json!({
+                    "expired_owner_commit_rejected": true,
                     "runtime_worker_store": {
+                        "takeover_after_ttl_expiry": true,
                         "worker_owned_work": work,
                         "process_completion": {
                             "stale_completion_rejected": true,

@@ -333,6 +333,7 @@ impl PostgresRuntimeReplayWorld {
         attachment_root: PathBuf,
         trace: &SimulationTrace,
     ) -> Self {
+        let clock = crate::clock::SimClock::new();
         let store_factory: Arc<dyn SessionStoreFactory> = Arc::new(storage.session_store_factory());
         let provider_completion_events = trace
             .events
@@ -344,6 +345,7 @@ impl PostgresRuntimeReplayWorld {
             runtime_boundaries: RuntimeBoundaryHarness::new(
                 Arc::clone(&store_factory),
                 RuntimeEffectReplayStore::postgres(Arc::clone(&storage)),
+                clock,
             ),
             storage,
             attachment_root,
@@ -1028,6 +1030,7 @@ pub(crate) async fn reset_postgres_for_replay(
 fn normalize_backend_observed(kind: BoundaryKind, value: &Value) -> Value {
     let mut normalized = value.clone();
     if let Some(object) = normalized.as_object_mut() {
+        object.remove("sim_clock");
         object.remove("runtime_lease_probe");
         object.remove("runtime_suspend");
         object.remove("scripted_transport_release");

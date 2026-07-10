@@ -129,12 +129,16 @@ fn full_random_seed_12_keeps_modeled_provider_exchange_slots_owned_by_scheduler(
 async fn runtime_completion_serialization_mutation_guard() {
     let seed = generated_seed("full-random", 12);
     let workload = generate_workload(seed, "full-random", 384).expect("workload");
+    let clock = SimClock::new();
     let mut world = GeneratedRuntimeWorld::with_backend(
-        Arc::new(lash::persistence::InMemorySessionStoreFactory::new()),
+        Arc::new(lash::persistence::InMemorySessionStoreFactory::with_clock(
+            clock.clone(),
+        )),
         RuntimeEffectReplayStore::Memory,
         Arc::new(lash::persistence::InMemoryAttachmentStore::new()),
         Arc::new(lash::persistence::InMemoryProcessExecutionEnvStore::new()),
         true,
+        clock,
     );
 
     let (events, _summary) = drive_generated_workload(&mut world, &workload)

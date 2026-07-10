@@ -7,6 +7,7 @@ pub(super) fn runtime_core_for_scripts(
     process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore>,
     provider_schedule: Option<ScriptedTransportSchedule>,
     disable_inline_queued_work_driver: bool,
+    clock: Arc<SimClock>,
 ) -> Result<(lash::LashCore, Arc<ScriptedLlmHttpTransport>, String), FixedScriptRunnerError> {
     let provider_kind = scripts
         .first()
@@ -38,6 +39,7 @@ pub(super) fn runtime_core_for_scripts(
         .attachment_store(attachment_store)
         .process_env_store(process_env_store)
         .store_factory(store_factory)
+        .clock(clock)
         .provider(provider_handle)
         .model(model);
     if disable_inline_queued_work_driver {

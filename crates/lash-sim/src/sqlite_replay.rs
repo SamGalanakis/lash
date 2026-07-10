@@ -283,8 +283,10 @@ struct SqliteActiveProviderTurn {
 
 impl SqliteRuntimeReplayWorld {
     fn new(database_root: PathBuf, trace: &SimulationTrace) -> Self {
+        let clock = crate::clock::SimClock::new();
         let store_factory: Arc<dyn SessionStoreFactory> = Arc::new(
-            lash_sqlite_store::SqliteSessionStoreFactory::new(database_root.clone()),
+            lash_sqlite_store::SqliteSessionStoreFactory::new(database_root.clone())
+                .with_clock(clock.clone()),
         );
         let effect_replay_path = database_root.join("runtime-effects.sqlite");
         let provider_completion_events = trace
@@ -301,6 +303,7 @@ impl SqliteRuntimeReplayWorld {
             runtime_boundaries: RuntimeBoundaryHarness::new(
                 Arc::clone(&store_factory),
                 RuntimeEffectReplayStore::sqlite_file(effect_replay_path),
+                clock,
             ),
             store_factory,
         }
@@ -1027,6 +1030,7 @@ fn boundary_family_name(kind: BoundaryKind) -> &'static str {
 fn normalize_backend_observed(kind: BoundaryKind, value: &Value) -> Value {
     let mut normalized = value.clone();
     if let Some(object) = normalized.as_object_mut() {
+        object.remove("sim_clock");
         // Real lease fencing tokens are not reproducible by the abstract
         // projector path, so they are excluded from cross-backend equality.
         object.remove("runtime_lease_probe");
