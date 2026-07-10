@@ -53,6 +53,17 @@
       </div>
     </div>
 
+    <div class="section" id="schema-compatibility">
+      <div class="section-header">
+        <h2>Schema Compatibility</h2>
+        <p>lash rejects a persistent database unless its schema version matches exactly: SQLite uses <code>PRAGMA user_version</code>, and Postgres records component versions.</p>
+      </div>
+      <aside class="contract">
+        <strong>Start fresh for this release</strong>
+        <p>The SQLite schema moves from version 10 to 11, and the Postgres component moves from version 11 to 12. Persistent deployments must use a fresh database; there is no migration chain by policy.</p>
+      </aside>
+    </div>
+
     <div class="section" id="minimal-example">
       <div class="section-header">
         <h2>Minimal Example</h2>

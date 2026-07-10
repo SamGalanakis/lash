@@ -14,12 +14,11 @@ fn configure_lease_timings(
     store_factory: Arc<dyn SessionStoreFactory>,
 ) -> lash::Result<LashCore> {
     // docs:start:lease-timings
-    // One timing decision governs every durable single-writer lane lash claims:
-    // session-execution leases, effect replay, queued-work and turn-input
-    // claims, and process leases. `new` enforces `ttl >= 3 * renew_interval`, so
-    // a live owner can miss two renewals before a peer may treat the lease as
-    // expired. A shorter TTL reclaims a crashed owner's work sooner; a longer
-    // one tolerates slower renewal and lowers false-takeover risk.
+    // One timing decision governs the three durable lease lanes:
+    // session execution, effect replay, and process execution. `new` enforces
+    // `ttl >= 3 * renew_interval`, so a live owner can miss two renewals before
+    // a peer may treat the lease as expired. Queued-work and turn-input claims
+    // are generation-fenced under the session lease and carry no timing.
     let lease_timings = LeaseTimings::new(
         Duration::from_secs(15), // ttl
         Duration::from_secs(5),  // renew_interval
@@ -100,9 +99,10 @@ async fn graceful_drain(
     }
 
     // 4. If you stopped an external queued-work or turn-input driver mid-claim,
-    //    hand its claims back so peers take the work now instead of waiting out
-    //    the claim TTL — `session.abandon_queued_work_claim(&claim)` and
-    //    `session.abandon_turn_input_claim(&claim)` — and resolve outstanding
+    //    hand its claims back for immediate reuse with
+    //    `session.abandon_queued_work_claim(&claim)` and
+    //    `session.abandon_turn_input_claim(&claim)`. Losing the session lease
+    //    also supersedes those generation-fenced claims. Resolve outstanding
     //    durable waits as `Cancelled` with `session.revoke_durable_waits()`.
 
     // 5. Release provider transports. The default `close()` is a no-op; the

@@ -109,6 +109,39 @@ const DURABLE_FAULT_MATRIX: &[DurableFaultMatrixRow] = &[
         },
     },
     DurableFaultMatrixRow {
+        id: "queued-work-claim-generation-supersession",
+        kind: DurableFaultKind::LeaseLoss,
+        contract: "A queued-work claim superseded by a new session-lease generation is rejected at commit.",
+        evidence: FaultEvidence::CargoTest(CargoTestEvidence {
+            package: "lash-core",
+            test_target: None,
+            filter: "queued_work_claims_supersede_across_session_lease_generations",
+            required_env: None,
+        }),
+    },
+    DurableFaultMatrixRow {
+        id: "deferred-next-turn-generation-reclaim",
+        kind: DurableFaultKind::LeaseLoss,
+        contract: "A failed turn's DeferredNextTurn claim is reclaimed by idle retry under a new session-lease generation while its stale completion is rejected.",
+        evidence: FaultEvidence::CargoTest(CargoTestEvidence {
+            package: "lash-core",
+            test_target: None,
+            filter: "turn_input_claims_supersede_across_session_lease_generations",
+            required_env: None,
+        }),
+    },
+    DurableFaultMatrixRow {
+        id: "same-generation-claim-bounded-scan",
+        kind: DurableFaultKind::LeaseLoss,
+        contract: "More than 32 same-generation claims cannot hide a later unclaimed queued-work, session-command, or turn-input row from bounded scans.",
+        evidence: FaultEvidence::CargoTest(CargoTestEvidence {
+            package: "lash-core",
+            test_target: None,
+            filter: "same_generation_claim_scans_reach_rows_beyond_the_scan_surplus",
+            required_env: None,
+        }),
+    },
+    DurableFaultMatrixRow {
         id: "trigger-delivery-reserve-start-crash-window",
         kind: DurableFaultKind::TriggerDeliveryRecovery,
         contract: "A trigger delivery reserved before a crash but missing its process row is reconciled into exactly one deterministic process start.",

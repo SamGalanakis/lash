@@ -25,6 +25,8 @@ pub const OBSERVER_CONVERGENCE_ORACLE: &str = "sim.oracle.observer-convergence.v
 pub const OBSERVER_RECONNECT_ORACLE: &str = "sim.oracle.observer-reconnect.v1";
 pub const OPERATIONAL_COVERAGE_ORACLE: &str = "sim.oracle.operational-coverage.v1";
 pub const PROCESS_WAKE_ORACLE: &str = "sim.oracle.process-wake-observed.v1";
+pub const PROCESS_WAKE_AT_MOST_ONCE_ORACLE: &str =
+    "sim.oracle.process-wake-at-most-once-runtime-turn.v1";
 pub const PROCESS_NEVER_DOUBLE_STARTED_ORACLE: &str = "sim.oracle.process-never-double-started.v1";
 pub const ABANDONED_REQUIRES_EVIDENCE_ORACLE: &str = "sim.oracle.abandoned-requires-evidence.v1";
 pub const PROVIDER_MUTATION_ORACLE: &str = "sim.oracle.provider-mutation-rejected.v1";
@@ -660,6 +662,75 @@ pub fn process_wake_observed(
         process_wake_runtime_dto_observed(events) && duplicate_process_wake_rejected(events),
         "process wake boundary was observed but it did not materialize a runtime DTO with a deduped duplicate wake",
         "process wake boundary materialized a runtime DTO and the duplicate wake was rejected (delivered exactly once)",
+    )
+}
+
+/// Assert across the whole generated schedule that one logical process wake
+/// materializes into at most one runtime turn. The harness records a stable
+/// `runtime_turn_id` when the real queued-work claim materializes a wake;
+/// grouping those ids by durable source key makes duplicate materialization
+/// visible even when the duplicate boundary is later settled or deduplicated.
+pub fn process_wake_at_most_once(events: &[DeliveredBoundary]) -> OracleVerdict {
+    let mut turns_by_wake = BTreeMap::<String, BTreeSet<String>>::new();
+    for event in events
+        .iter()
+        .filter(|event| event.kind == BoundaryKind::ProcessWake)
+    {
+        let Some(queued_work) = event.observed.get("runtime_queued_work") else {
+            continue;
+        };
+        if queued_work.get("enqueued").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let Some(source_key) = queued_work.get("source_key").and_then(Value::as_str) else {
+            return OracleVerdict::failed(
+                PROCESS_WAKE_AT_MOST_ONCE_ORACLE,
+                format!(
+                    "enqueued process wake `{}` recorded no queued-work source key",
+                    event.boundary_id
+                ),
+            );
+        };
+        let turns = turns_by_wake.entry(source_key.to_string()).or_default();
+        if queued_work.get("claimed").and_then(Value::as_bool) == Some(true) {
+            let Some(turn_id) = queued_work.get("runtime_turn_id").and_then(Value::as_str) else {
+                return OracleVerdict::failed(
+                    PROCESS_WAKE_AT_MOST_ONCE_ORACLE,
+                    format!(
+                        "claimed process wake `{}` recorded no runtime-turn materialization id",
+                        event.boundary_id
+                    ),
+                );
+            };
+            turns.insert(turn_id.to_string());
+            if turns.len() > 1 {
+                return OracleVerdict::failed(
+                    PROCESS_WAKE_AT_MOST_ONCE_ORACLE,
+                    format!(
+                        "process wake `{source_key}` materialized into {} runtime turns: {:?}",
+                        turns.len(),
+                        turns
+                    ),
+                );
+            }
+        }
+    }
+    if turns_by_wake.is_empty() {
+        return OracleVerdict::failed(
+            PROCESS_WAKE_AT_MOST_ONCE_ORACLE,
+            "generated schedule recorded no enqueued process wakes",
+        );
+    }
+    let materialized = turns_by_wake
+        .values()
+        .filter(|turns| !turns.is_empty())
+        .count();
+    OracleVerdict::passed(
+        PROCESS_WAKE_AT_MOST_ONCE_ORACLE,
+        format!(
+            "{} enqueued logical process wake(s) materialized into at most one runtime turn each ({materialized} materialized)",
+            turns_by_wake.len()
+        ),
     )
 }
 
@@ -7154,6 +7225,73 @@ mod tests {
                 verdict.message
             );
         }
+    }
+
+    fn process_wake_turn_event(
+        sequence: usize,
+        boundary_id: &str,
+        source_key: &str,
+        runtime_turn_id: Option<&str>,
+    ) -> DeliveredBoundary {
+        delivered_with_payload(
+            sequence,
+            boundary_id,
+            "session-001",
+            BoundaryKind::ProcessWake,
+            json!({"dedupe_key": source_key}),
+            json!({
+                "runtime_queued_work": {
+                    "enqueued": true,
+                    "claimed": runtime_turn_id.is_some(),
+                    "runtime_turn_id": runtime_turn_id,
+                    "source_key": source_key,
+                }
+            }),
+        )
+    }
+
+    #[test]
+    fn process_wake_at_most_once_fails_on_duplicate_runtime_turns() {
+        let source_key = "process/wake/session-001/001";
+        let valid = vec![
+            process_wake_turn_event(1, "wake:first", source_key, Some("turn:first")),
+            process_wake_turn_event(2, "wake:duplicate", source_key, None),
+        ];
+        assert!(process_wake_at_most_once(&valid).is_passed());
+
+        let duplicate = vec![
+            process_wake_turn_event(1, "wake:first", source_key, Some("turn:first")),
+            process_wake_turn_event(2, "wake:duplicate", source_key, Some("turn:second")),
+        ];
+        let verdict = process_wake_at_most_once(&duplicate);
+        assert!(!verdict.is_passed());
+        assert!(
+            verdict
+                .message
+                .contains("materialized into 2 runtime turns")
+        );
+
+        let missing_turn_id = vec![delivered_with_payload(
+            1,
+            "wake:missing-turn",
+            "session-001",
+            BoundaryKind::ProcessWake,
+            json!({"dedupe_key": source_key}),
+            json!({
+                "runtime_queued_work": {
+                    "enqueued": true,
+                    "claimed": true,
+                    "source_key": source_key,
+                }
+            }),
+        )];
+        let verdict = process_wake_at_most_once(&missing_turn_id);
+        assert!(!verdict.is_passed());
+        assert!(
+            verdict
+                .message
+                .contains("no runtime-turn materialization id")
+        );
     }
 
     fn clean_live_failure_facts() -> LiveProviderFailureFacts {

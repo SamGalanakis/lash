@@ -96,6 +96,17 @@ let session = core
       </aside>
     </div>
 
+    <div class="section" id="schema-compatibility">
+      <div class="section-header">
+        <h2>Schema Compatibility</h2>
+        <p>lash accepts a persistent database only when its schema version matches exactly. SQLite checks <code>PRAGMA user_version</code>; Postgres checks each component version.</p>
+      </div>
+      <aside class="contract">
+        <strong>Clean break</strong>
+        <p>This release moves SQLite from version 10 to 11 and the Postgres component from version 11 to 12. Persistent deployments must start with a fresh database. lash does not maintain a migration chain by policy.</p>
+      </aside>
+    </div>
+
     <div class="section" id="lease-timings">
       <div class="section-header">
         <h2>Lease Timings</h2>
@@ -107,19 +118,17 @@ let session = core
           <tbody>
             <tr><td>session execution</td><td>How long a mutating session runner holds its single-writer lease and how often it renews.</td></tr>
             <tr><td>effect replay</td><td>The durable effect-replay leases; effect hosts (SQLite/Postgres replay options) accept the same type, so one decision spans both boundaries.</td></tr>
-            <tr><td>queued work</td><td>The claim TTL for durable queued-work batches picked up by any lease-holding runner.</td></tr>
-            <tr><td>turn input</td><td>The claim TTL for pending turn-input dispatch.</td></tr>
             <tr><td>process leases</td><td>How long a durable process worker holds a process lease and how often it renews.</td></tr>
           </tbody>
         </table>
       </div>
+      <p>Queued-work and turn-input claims are not timed lanes. Each claim pins the session-execution-lease generation under which it was taken and stays live exactly while that generation holds the session lease. Renewing the session lease preserves the generation; release or takeover supersedes its claims immediately.</p>
       <p>The default is a 30 second TTL with a 10 second renew interval. The constructor enforces <code>ttl &gt;= 3 * renew_interval</code>, so a healthy owner can miss two consecutive renewals — a scheduler stall, a transient store error — before a peer may treat the lease as expired. A shorter TTL reclaims a crashed owner's work sooner but widens the window in which a slow-but-alive owner is falsely taken over; a longer TTL does the reverse. Choosing that number is the trade, and it is now a host decision instead of a constant baked into lash.</p>
-      <pre data-lang="rust" data-snippet="operations#lease-timings"><code>// One timing decision governs every durable single-writer lane lash claims:
-// session-execution leases, effect replay, queued-work and turn-input
-// claims, and process leases. `new` enforces `ttl &gt;= 3 * renew_interval`, so
-// a live owner can miss two renewals before a peer may treat the lease as
-// expired. A shorter TTL reclaims a crashed owner's work sooner; a longer
-// one tolerates slower renewal and lowers false-takeover risk.
+      <pre data-lang="rust" data-snippet="operations#lease-timings"><code>// One timing decision governs the three durable lease lanes:
+// session execution, effect replay, and process execution. `new` enforces
+// `ttl &gt;= 3 * renew_interval`, so a live owner can miss two renewals before
+// a peer may treat the lease as expired. Queued-work and turn-input claims
+// are generation-fenced under the session lease and carry no timing.
 let lease_timings = LeaseTimings::new(
     Duration::from_secs(15), // ttl
     Duration::from_secs(5),  // renew_interval
@@ -166,9 +175,10 @@ for session in idle_sessions {
 }
 
 // 4. If you stopped an external queued-work or turn-input driver mid-claim,
-//    hand its claims back so peers take the work now instead of waiting out
-//    the claim TTL — `session.abandon_queued_work_claim(&amp;claim)` and
-//    `session.abandon_turn_input_claim(&amp;claim)` — and resolve outstanding
+//    hand its claims back for immediate reuse with
+//    `session.abandon_queued_work_claim(&amp;claim)` and
+//    `session.abandon_turn_input_claim(&amp;claim)`. Losing the session lease
+//    also supersedes those generation-fenced claims. Resolve outstanding
 //    durable waits as `Cancelled` with `session.revoke_durable_waits()`.
 
 // 5. Release provider transports. The default `close()` is a no-op; the
