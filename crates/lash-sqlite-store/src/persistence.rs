@@ -859,13 +859,22 @@ impl QueuedWorkStore for Store {
                                  FROM queued_work_batches
                                  WHERE session_id = ?1
                                    AND available_at_ms <= ?2
+                                   AND (
+                                        claim_token IS NULL
+                                        OR claim_session_lease_generation <> ?3
+                                   )
                                  ORDER BY enqueue_seq ASC
-                                 LIMIT ?3",
+                                 LIMIT ?4",
                             )
                             .map_err(sqlite_error)?;
                         let rows = stmt
                             .query_map(
-                                params![session_id, now as i64, claim_scan_limit(1)],
+                                params![
+                                    session_id,
+                                    now as i64,
+                                    generation as i64,
+                                    claim_scan_limit(1)
+                                ],
                                 queued_batch_row_from_sql,
                             )
                             .map_err(sqlite_error)?;
@@ -1006,13 +1015,22 @@ impl QueuedWorkStore for Store {
                                  FROM queued_work_batches
                                  WHERE session_id = ?1
                                    AND available_at_ms <= ?2
+                                   AND (
+                                        claim_token IS NULL
+                                        OR claim_session_lease_generation <> ?3
+                                   )
                                  ORDER BY enqueue_seq ASC
-                                 LIMIT ?3",
+                                 LIMIT ?4",
                             )
                             .map_err(sqlite_error)?;
                         let rows = stmt
                             .query_map(
-                                params![session_id, now as i64, claim_scan_limit(max_batches)],
+                                params![
+                                    session_id,
+                                    now as i64,
+                                    generation as i64,
+                                    claim_scan_limit(max_batches)
+                                ],
                                 queued_batch_row_from_sql,
                             )
                             .map_err(sqlite_error)?;
@@ -1784,8 +1802,12 @@ async fn claim_pending_turn_inputs_sqlite(
                                 claim_owner_liveness_json, claim_token, claim_session_lease_generation
                          FROM pending_turn_inputs
                          WHERE session_id = ?1 AND state = ?2
+                           AND (
+                                claim_token IS NULL
+                                OR claim_session_lease_generation <> ?3
+                           )
                          ORDER BY enqueue_seq ASC
-                         LIMIT ?3",
+                         LIMIT ?4",
                     )
                     .map_err(sqlite_error)?;
                 let rows = stmt
@@ -1793,6 +1815,7 @@ async fn claim_pending_turn_inputs_sqlite(
                         params![
                             session_id,
                             wanted_state.as_str(),
+                            generation as i64,
                             (max_inputs as i64).saturating_add(32)
                         ],
                         pending_turn_input_row_from_sql,

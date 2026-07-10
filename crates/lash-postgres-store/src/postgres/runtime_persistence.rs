@@ -800,12 +800,17 @@ impl QueuedWorkStore for PostgresSessionStore {
              FROM lash_queued_work_batches
              WHERE session_id = $1
                AND available_at_ms <= $2
+               AND (
+                    claim_token IS NULL
+                    OR claim_session_lease_generation <> $3
+               )
              ORDER BY enqueue_seq ASC
-             LIMIT $3
+             LIMIT $4
              FOR UPDATE SKIP LOCKED",
         )
         .bind(session_id)
         .bind(now as i64)
+        .bind(generation as i64)
         .bind(claim_scan_limit(1))
         .fetch_all(&mut *tx)
         .await
@@ -919,12 +924,17 @@ impl QueuedWorkStore for PostgresSessionStore {
              FROM lash_queued_work_batches
              WHERE session_id = $1
                AND available_at_ms <= $2
+               AND (
+                    claim_token IS NULL
+                    OR claim_session_lease_generation <> $3
+               )
              ORDER BY enqueue_seq ASC
-             LIMIT $3
+             LIMIT $4
              FOR UPDATE SKIP LOCKED",
         )
         .bind(session_id)
         .bind(now as i64)
+        .bind(generation as i64)
         .bind(claim_scan_limit(max_batches))
         .fetch_all(&mut *tx)
         .await
@@ -1619,12 +1629,17 @@ async fn claim_pending_turn_inputs_postgres(
                 claim_owner_liveness_json, claim_token, claim_session_lease_generation
          FROM lash_pending_turn_inputs
          WHERE session_id = $1 AND state = $2
+           AND (
+                claim_token IS NULL
+                OR claim_session_lease_generation <> $3
+           )
          ORDER BY enqueue_seq ASC
-         LIMIT $3
+         LIMIT $4
          FOR UPDATE SKIP LOCKED",
     )
     .bind(session_id)
     .bind(wanted_state.as_str())
+    .bind(generation as i64)
     .bind(claim_scan_limit(max_inputs))
     .fetch_all(&mut *tx)
     .await

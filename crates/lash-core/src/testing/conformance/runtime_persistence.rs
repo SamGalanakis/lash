@@ -145,6 +145,8 @@ where
     queued_work_classes_gate_command_and_turn_claims(make()).await;
     queued_work_claims_respect_boundaries_abandon_and_stale_completion(make()).await;
     queued_work_claims_supersede_across_session_lease_generations(make()).await;
+    claim_liveness_for_lease_less_paths_tracks_session_generations(make()).await;
+    same_generation_claim_scans_reach_rows_beyond_the_scan_surplus(make()).await;
     queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions(make()).await;
     queued_work_join_groups_by_delivery_policy_and_merge_key(make()).await;
     queued_work_completion_is_lease_guarded(make()).await;
@@ -1852,6 +1854,281 @@ async fn queued_work_claims_supersede_across_session_lease_generations(
         takeover_err,
         StoreError::QueuedWorkClaimSuperseded { .. }
     ));
+}
+
+async fn claim_both_generation_fenced_lanes(
+    store: &Arc<dyn RuntimePersistence>,
+    session_id: &str,
+    owner: &crate::LeaseOwnerIdentity,
+    lease_ttl_ms: u64,
+) -> (
+    QueuedWorkBatch,
+    crate::PendingTurnInput,
+    crate::SessionExecutionLease,
+    crate::QueuedWorkClaim,
+    crate::TurnInputClaim,
+) {
+    let batch = store
+        .enqueue_queued_work(queued_draft(
+            session_id,
+            "lease-less liveness work",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue generation-fenced queued work");
+    let input = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft(
+            session_id,
+            "lease-less liveness input",
+        ))
+        .await
+        .expect("enqueue generation-fenced turn input");
+    let lease = store
+        .try_claim_session_execution_lease(session_id, owner, lease_ttl_ms)
+        .await
+        .expect("claim session lease for both claim lanes")
+        .acquired()
+        .expect("session lease for both claim lanes is free");
+    let queue_claim = store
+        .claim_ready_queued_work(
+            session_id,
+            &lease.fence(),
+            owner,
+            QueuedWorkClaimBoundary::Idle,
+            1,
+        )
+        .await
+        .expect("claim generation-fenced queued work")
+        .expect("generation-fenced queued work claim exists");
+    let input_claim = store
+        .claim_next_turn_inputs(session_id, &lease.fence(), owner, 1)
+        .await
+        .expect("claim generation-fenced turn input")
+        .expect("generation-fenced turn input claim exists");
+    (batch, input, lease, queue_claim, input_claim)
+}
+
+async fn assert_both_retained_claims_are_visible_and_cancellable(
+    store: &Arc<dyn RuntimePersistence>,
+    session_id: &str,
+    batch: &QueuedWorkBatch,
+    input: &crate::PendingTurnInput,
+) {
+    assert_eq!(
+        store
+            .list_pending_queued_work(session_id)
+            .await
+            .expect("list queued work after claim generation stopped being live")
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![batch.batch_id.as_str()],
+        "a queued-work claim whose generation is no longer live must be visible"
+    );
+    assert_eq!(
+        store
+            .list_pending_turn_inputs(session_id)
+            .await
+            .expect("list turn inputs after claim generation stopped being live")
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![input.input_id.as_str()],
+        "a turn-input claim whose generation is no longer live must be visible"
+    );
+    let cancelled_batch = store
+        .cancel_queued_work_batch(session_id, &batch.batch_id)
+        .await
+        .expect("cancel queued work after claim generation stopped being live")
+        .expect("queued work with a non-live claim generation is cancellable");
+    assert_eq!(cancelled_batch.batch_id, batch.batch_id);
+    let cancelled_input = store
+        .cancel_pending_turn_input(session_id, &input.input_id)
+        .await
+        .expect("cancel turn input after claim generation stopped being live");
+    expect_cancelled_pending_input(cancelled_input, &input.input_id);
+}
+
+async fn claim_liveness_for_lease_less_paths_tracks_session_generations(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    // Release: retain both claim rows, then clear the lease token without
+    // abandoning either claim. Lease-less paths must immediately treat both
+    // rows as pending again.
+    let release_owner = lease_owner("lease-less-release-owner");
+    let (batch, input, lease, _queue_claim, _input_claim) =
+        claim_both_generation_fenced_lanes(&store, "lease-less-release", &release_owner, 60_000)
+            .await;
+    release_session_execution_lease_for_test(&store, &lease).await;
+    assert_both_retained_claims_are_visible_and_cancellable(
+        &store,
+        "lease-less-release",
+        &batch,
+        &input,
+    )
+    .await;
+
+    // Expiry: the lease row still carries the generation, but its token is no
+    // longer live once the TTL elapses. The correlated SQL predicates must not
+    // mistake generation equality alone for a live claim.
+    let expiry_owner = lease_owner("lease-less-expiry-owner");
+    let (batch, input, _lease, _queue_claim, _input_claim) =
+        claim_both_generation_fenced_lanes(&store, "lease-less-expiry", &expiry_owner, 1_000).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    assert_both_retained_claims_are_visible_and_cancellable(
+        &store,
+        "lease-less-expiry",
+        &batch,
+        &input,
+    )
+    .await;
+
+    // Dead-owner takeover: the lease stays live but advances to a different
+    // generation. Claims retained from the dead generation are no longer live
+    // for lease-less callers even before a successor reclaims the rows.
+    let pid = std::process::id();
+    let dead_owner = local_lease_owner(
+        "lease-less-dead",
+        "lease-less-dead:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "not-the-current-process-start",
+    );
+    let (batch, input, dead_lease, _queue_claim, _input_claim) =
+        claim_both_generation_fenced_lanes(&store, "lease-less-takeover", &dead_owner, 60_000)
+            .await;
+    let taker = local_lease_owner(
+        "lease-less-taker",
+        "lease-less-taker:incarnation",
+        "host-a",
+        "boot-a",
+        pid,
+        "lease-less-taker-start",
+    );
+    let taker_lease = store
+        .reclaim_session_execution_lease("lease-less-takeover", &taker, &dead_lease.fence(), 60_000)
+        .await
+        .expect("take over lease for lease-less liveness checks")
+        .acquired()
+        .expect("dead owner is reclaimable for lease-less liveness checks");
+    assert_both_retained_claims_are_visible_and_cancellable(
+        &store,
+        "lease-less-takeover",
+        &batch,
+        &input,
+    )
+    .await;
+    release_session_execution_lease_for_test(&store, &taker_lease).await;
+}
+
+async fn same_generation_claim_scans_reach_rows_beyond_the_scan_surplus(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    const ROW_COUNT: usize = 34;
+
+    let queue_session = "bounded-scan-queue";
+    let queue_owner = lease_owner("bounded-scan-queue-owner");
+    let mut queue_batches = Vec::with_capacity(ROW_COUNT);
+    for index in 0..ROW_COUNT {
+        queue_batches.push(
+            store
+                .enqueue_queued_work(queued_draft(
+                    queue_session,
+                    &format!("bounded queue {index}"),
+                    DeliveryPolicy::EarliestSafeBoundary,
+                    SlotPolicy::Exclusive,
+                ))
+                .await
+                .expect("enqueue bounded-scan queued work"),
+        );
+    }
+    let queue_lease = store
+        .try_claim_session_execution_lease(queue_session, &queue_owner, 60_000)
+        .await
+        .expect("claim bounded-scan queue session lease")
+        .acquired()
+        .expect("bounded-scan queue session lease is free");
+    for expected in &queue_batches {
+        let claim = store
+            .claim_ready_queued_work(
+                queue_session,
+                &queue_lease.fence(),
+                &queue_owner,
+                QueuedWorkClaimBoundary::Idle,
+                1,
+            )
+            .await
+            .expect("claim bounded-scan queued work")
+            .expect("bounded-scan queued work remains reachable");
+        assert_eq!(claim.batches[0].batch_id, expected.batch_id);
+    }
+    release_session_execution_lease_for_test(&store, &queue_lease).await;
+
+    let command_session = "bounded-scan-command";
+    let command_owner = lease_owner("bounded-scan-command-owner");
+    let mut command_batches = Vec::with_capacity(ROW_COUNT);
+    for index in 0..ROW_COUNT {
+        command_batches.push(
+            store
+                .enqueue_queued_work(queued_session_command_draft(
+                    command_session,
+                    &format!("bounded command {index}"),
+                ))
+                .await
+                .expect("enqueue bounded-scan session command"),
+        );
+    }
+    let command_lease = store
+        .try_claim_session_execution_lease(command_session, &command_owner, 60_000)
+        .await
+        .expect("claim bounded-scan command session lease")
+        .acquired()
+        .expect("bounded-scan command session lease is free");
+    for expected in &command_batches {
+        let claim = store
+            .claim_leading_ready_session_command(
+                command_session,
+                &command_lease.fence(),
+                &command_owner,
+            )
+            .await
+            .expect("claim bounded-scan session command")
+            .expect("bounded-scan session command remains reachable");
+        assert_eq!(claim.batches[0].batch_id, expected.batch_id);
+    }
+    release_session_execution_lease_for_test(&store, &command_lease).await;
+
+    let input_session = "bounded-scan-turn-input";
+    let input_owner = lease_owner("bounded-scan-turn-input-owner");
+    let mut inputs = Vec::with_capacity(ROW_COUNT);
+    for index in 0..ROW_COUNT {
+        inputs.push(
+            store
+                .enqueue_pending_turn_input(pending_next_turn_input_draft(
+                    input_session,
+                    &format!("bounded turn input {index}"),
+                ))
+                .await
+                .expect("enqueue bounded-scan turn input"),
+        );
+    }
+    let input_lease = store
+        .try_claim_session_execution_lease(input_session, &input_owner, 60_000)
+        .await
+        .expect("claim bounded-scan turn-input session lease")
+        .acquired()
+        .expect("bounded-scan turn-input session lease is free");
+    for expected in &inputs {
+        let claim = store
+            .claim_next_turn_inputs(input_session, &input_lease.fence(), &input_owner, 1)
+            .await
+            .expect("claim bounded-scan turn input")
+            .expect("bounded-scan turn input remains reachable");
+        assert_eq!(claim.inputs[0].input_id, expected.input_id);
+    }
+    release_session_execution_lease_for_test(&store, &input_lease).await;
 }
 
 async fn queued_work_respects_membership_limits_exclusivity_reclaim_and_sessions(
