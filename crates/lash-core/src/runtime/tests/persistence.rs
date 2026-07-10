@@ -18,6 +18,34 @@ async fn recording_store_satisfies_runtime_persistence_conformance() {
     .await;
 }
 
+fn recording_runtime_persistence() -> Arc<dyn crate::RuntimePersistence> {
+    Arc::new(RecordingStore::default())
+}
+
+#[tokio::test]
+async fn queued_work_claims_supersede_across_session_lease_generations() {
+    crate::testing::conformance::queued_work_claims_supersede_across_session_lease_generations(
+        recording_runtime_persistence(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn turn_input_claims_supersede_across_session_lease_generations() {
+    crate::testing::conformance::turn_input_claims_supersede_across_session_lease_generations(
+        recording_runtime_persistence(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn same_generation_claim_scans_reach_rows_beyond_the_scan_surplus() {
+    crate::testing::conformance::same_generation_claim_scans_reach_rows_beyond_the_scan_surplus(
+        recording_runtime_persistence(),
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn in_memory_claim_validation_serializes_takeover_before_mutation() {
     let store = Arc::new(RecordingStore::default());

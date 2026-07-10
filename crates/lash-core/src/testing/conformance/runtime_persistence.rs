@@ -1702,7 +1702,7 @@ async fn queued_work_claims_respect_boundaries_abandon_and_stale_completion(
     );
 }
 
-async fn queued_work_claims_supersede_across_session_lease_generations(
+pub async fn queued_work_claims_supersede_across_session_lease_generations(
     store: Arc<dyn RuntimePersistence>,
 ) {
     let batch = store
@@ -2023,7 +2023,7 @@ async fn claim_liveness_for_lease_less_paths_tracks_session_generations(
     release_session_execution_lease_for_test(&store, &taker_lease).await;
 }
 
-async fn same_generation_claim_scans_reach_rows_beyond_the_scan_surplus(
+pub async fn same_generation_claim_scans_reach_rows_beyond_the_scan_surplus(
     store: Arc<dyn RuntimePersistence>,
 ) {
     const ROW_COUNT: usize = 34;
@@ -3108,7 +3108,7 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
     );
 }
 
-async fn turn_input_claims_supersede_across_session_lease_generations(
+pub async fn turn_input_claims_supersede_across_session_lease_generations(
     store: Arc<dyn RuntimePersistence>,
 ) {
     // The DeferredNextTurn idle-retry shape: a failed turn releases its lease

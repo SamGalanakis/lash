@@ -426,6 +426,15 @@ run_state_machine_and_fault_matrix() {
     runtime_rebuild_and_worker_recovery_with_durable_stores
   # durable-fault-matrix: provider-retry-exhaustion
   run_cargo_tests -p lash-core --locked retryable_llm_failures_exhaust_and_fail_turn
+  # durable-fault-matrix: queued-work-claim-generation-supersession
+  run_cargo_tests -p lash-core --locked \
+    queued_work_claims_supersede_across_session_lease_generations
+  # durable-fault-matrix: deferred-next-turn-generation-reclaim
+  run_cargo_tests -p lash-core --locked \
+    turn_input_claims_supersede_across_session_lease_generations
+  # durable-fault-matrix: same-generation-claim-bounded-scan
+  run_cargo_tests -p lash-core --locked \
+    same_generation_claim_scans_reach_rows_beyond_the_scan_surplus
   # durable-fault-matrix: trigger-delivery-reserve-start-crash-window
   run_cargo_tests -p lash-core --locked sweep_reconciles_reserved_trigger_delivery_without_process
   # durable-fault-matrix: trigger-delivery-prune-orphan-retention
