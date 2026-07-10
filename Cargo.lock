@@ -3049,6 +3049,7 @@ version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "bytes",
+ "chrono",
  "lash-core",
  "lash-lashlang-runtime",
  "lash-llm-transport",
@@ -3076,6 +3077,7 @@ name = "lash-sqlite-store"
 version = "0.0.0-dev"
 dependencies = [
  "async-trait",
+ "chrono",
  "flate2",
  "futures-executor",
  "lash-core",

@@ -273,9 +273,9 @@ impl AttachmentManifest for Store {
                 .iter()
                 .map(|id| id.as_str().to_string())
                 .collect();
+            let now = self.clock.timestamp_ms() as i64;
             self.conn
                 .write(move |tx| {
-                    let now = current_epoch_ms() as i64;
                     let mut stmt = tx.prepare(
                         "UPDATE attachment_manifest
                          SET committed_at_ms = COALESCE(committed_at_ms, ?1)

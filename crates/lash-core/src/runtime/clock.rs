@@ -16,8 +16,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-/// Runtime time source. Cloneable as `Arc<dyn Clock>`; carried on
-/// [`RuntimeHostConfig`](super::RuntimeHostConfig).
+/// Runtime and embedded-store time source. Cloneable as `Arc<dyn Clock>`;
+/// carried on [`RuntimeHostConfig`](super::RuntimeHostConfig).
+///
+/// SQLite and in-memory persistence read this host-injectable clock because
+/// they run in the same clock domain as their host. PostgreSQL lease decisions
+/// deliberately remain database-authoritative (`transaction_timestamp()` /
+/// `clock_timestamp()`) to protect fencing across skewed hosts; the
+/// `postgres_clock_contract` tests pin that boundary.
 #[async_trait]
 pub trait Clock: Send + Sync + std::fmt::Debug {
     /// Monotonic instant for measuring elapsed time. Never persisted.

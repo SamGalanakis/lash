@@ -5,9 +5,11 @@ fn event(kind: BoundaryKind, id: &str, payload: Value) -> BoundaryEvent {
 }
 
 fn harness() -> RuntimeBoundaryHarness {
-    let factory: Arc<dyn SessionStoreFactory> =
-        Arc::new(lash_core::InMemorySessionStoreFactory::new());
-    RuntimeBoundaryHarness::new(factory, RuntimeEffectReplayStore::Memory)
+    let clock = crate::clock::SimClock::new();
+    let factory: Arc<dyn SessionStoreFactory> = Arc::new(
+        lash_core::InMemorySessionStoreFactory::with_clock(clock.clone()),
+    );
+    RuntimeBoundaryHarness::new(factory, RuntimeEffectReplayStore::Memory, clock)
 }
 
 #[tokio::test]
@@ -360,12 +362,15 @@ async fn worker_stale_completion_uses_runtime_session_lease_store() {
 #[tokio::test]
 async fn worker_stale_process_completion_is_fenced_by_sqlite_registry() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let clock = crate::clock::SimClock::new();
     let factory: Arc<dyn SessionStoreFactory> = Arc::new(
-        lash_sqlite_store::SqliteSessionStoreFactory::new(temp.path().join("sessions")),
+        lash_sqlite_store::SqliteSessionStoreFactory::new(temp.path().join("sessions"))
+            .with_clock(clock.clone()),
     );
     let mut harness = RuntimeBoundaryHarness::new(
         factory,
         RuntimeEffectReplayStore::sqlite_file(temp.path().join("effects.sqlite")),
+        clock,
     );
     let observed = harness
         .run_worker_stale_completion(&event(

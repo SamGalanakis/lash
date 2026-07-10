@@ -19,17 +19,30 @@ fn process_status_label(record: &ProcessRecord) -> &'static str {
 
 impl SqliteProcessRegistry {
     pub async fn open(path: &Path) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_clock(path, Arc::new(lash_core::SystemClock)).await
+    }
+
+    pub async fn open_with_clock(
+        path: &Path,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path).await?;
         ensure_process_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::File).await?;
-        Ok(Self { conn })
+        Ok(Self { conn, clock })
     }
 
     pub async fn memory() -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_clock(Arc::new(lash_core::SystemClock)).await
+    }
+
+    pub async fn memory_with_clock(
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open_in_memory().await?;
         ensure_process_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::Memory).await?;
-        Ok(Self { conn })
+        Ok(Self { conn, clock })
     }
 
     pub(super) fn load_process_conn(
@@ -279,6 +292,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         registration: ProcessRegistration,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let (registration, registration_hash) = prepare_process_registration(registration)?;
+        let now = self.clock.timestamp_ms();
         let record = self
             .conn
             .write_flow(move |tx| {
@@ -292,7 +306,6 @@ impl ProcessRegistry for SqliteProcessRegistry {
                             registration.id, existing.registration_hash, registration_hash
                         )));
                     }
-                    let now = current_epoch_ms();
                     let record = ProcessRecord::from_prepared_registration(
                         registration,
                         registration_hash,
@@ -332,6 +345,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         external_ref: ProcessExternalRef,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let process_id = process_id.to_string();
+        let now = self.clock.timestamp_ms();
         let (record, _changed) = self
             .conn
             .write_flow(move |tx| {
@@ -353,7 +367,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                         ));
                     }
                     record.external_ref = Some(external_ref);
-                    record.updated_at_ms = current_epoch_ms();
+                    record.updated_at_ms = now;
                     Self::save_process_conn(tx, &record)?;
                     Ok((record, true))
                 })()))
@@ -704,6 +718,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         request: ProcessEventAppendRequest,
     ) -> Result<ProcessEventAppendResult, lash_core::PluginError> {
         let process_id = process_id.to_string();
+        let occurred_at_ms = self.clock.timestamp_ms();
         let (result, _appended) = self
             .conn
             .write_flow(move |tx| {
@@ -728,7 +743,6 @@ impl ProcessRegistry for SqliteProcessRegistry {
                             |row| row.get::<_, i64>(0),
                         )
                         .map_err(process_sqlite_error)? as u64;
-                    let occurred_at_ms = current_epoch_ms();
                     let prepared = prepare_process_event_append(
                         &record,
                         request,
@@ -996,6 +1010,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         started: ProcessStarted,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let process_id = process_id.to_string();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -1008,7 +1023,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                     // First-writer-wins: the started fact is immutable once written.
                     if record.first_started.is_none() {
                         record.first_started = Some(Box::new(started));
-                        record.updated_at_ms = current_epoch_ms();
+                        record.updated_at_ms = now;
                         Self::save_process_conn(tx, &record)?;
                     }
                     Ok(record)
@@ -1024,6 +1039,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         request: AbandonRequest,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let process_id = process_id.to_string();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -1041,7 +1057,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                     // First-writer-wins: preserve the original recorded authorization.
                     if record.abandon_request.is_none() {
                         record.abandon_request = Some(Box::new(request));
-                        record.updated_at_ms = current_epoch_ms();
+                        record.updated_at_ms = now;
                         Self::save_process_conn(tx, &record)?;
                     }
                     Ok(record)
@@ -1057,6 +1073,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         wait: lash_core::WaitState,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let process_id = process_id.to_string();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -1072,7 +1089,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                         )));
                     }
                     record.wait = Some(wait);
-                    record.updated_at_ms = current_epoch_ms();
+                    record.updated_at_ms = now;
                     Self::save_process_conn(tx, &record)?;
                     Ok(record)
                 })()))
@@ -1086,6 +1103,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         process_id: &str,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
         let process_id = process_id.to_string();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -1096,7 +1114,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                             ))
                         })?;
                     record.wait = None;
-                    record.updated_at_ms = current_epoch_ms();
+                    record.updated_at_ms = now;
                     Self::save_process_conn(tx, &record)?;
                     Ok(record)
                 })()))
@@ -1236,6 +1254,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
     ) -> Result<ProcessLeaseClaimOutcome, lash_core::PluginError> {
         let process_id = process_id.to_string();
         let owner = owner.clone();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -1244,7 +1263,6 @@ impl ProcessRegistry for SqliteProcessRegistry {
                             "unknown process `{process_id}`"
                         )));
                     }
-                    let now = current_epoch_ms();
                     let current = Self::load_process_lease_conn(tx, &process_id)?;
                     if let Some(current) = current.as_ref()
                         && current.expires_at_epoch_ms > now
@@ -1309,6 +1327,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         let process_id = process_id.to_string();
         let owner = owner.clone();
         let observed_holder = observed_holder.clone();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
@@ -1317,7 +1336,6 @@ impl ProcessRegistry for SqliteProcessRegistry {
                             "unknown process `{process_id}`"
                         )));
                     }
-                    let now = current_epoch_ms();
                     let current = Self::load_process_lease_conn(tx, &process_id)?;
                     let Some(current) = current else {
                         // Free (or released) lease: acquire on the retained
@@ -1438,10 +1456,10 @@ impl ProcessRegistry for SqliteProcessRegistry {
         lease_ttl_ms: u64,
     ) -> Result<ProcessLease, lash_core::PluginError> {
         let lease = lease.clone();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(tx_outcome((|| {
-                    let now = current_epoch_ms();
                     let current = Self::load_process_lease_conn(tx, &lease.process_id)?;
                     if !guard_lease(current.as_ref(), &lease.lease_token, now)
                         || !current.as_ref().is_some_and(|current| {

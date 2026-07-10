@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) struct GeneratedRuntimeWorld {
+    clock: Arc<SimClock>,
     sessions: BTreeMap<String, GeneratedRuntimeSession>,
     queued_inputs: BTreeMap<String, String>,
     lease_ticks: BTreeMap<String, Vec<u64>>,
@@ -55,18 +56,26 @@ struct ActiveProviderTurn {
     completion_event: BoundaryEvent,
     handle: tokio::task::JoinHandle<Result<Value, FixedScriptRunnerError>>,
     final_ready_at: u64,
+    completed_sleeps_at_start: u64,
+    logical_ms_at_start: u64,
 }
+
+const SCHEDULE_TICK_MS: u64 = 40_000;
 
 impl GeneratedRuntimeWorld {
     pub(super) fn new() -> Self {
         // The in-memory reference / generated SEARCH lane keeps full preserved
         // cross-session concurrency (serialize_provider_turns = false).
+        let clock = SimClock::new();
         Self::with_backend(
-            Arc::new(lash::persistence::InMemorySessionStoreFactory::new()),
+            Arc::new(lash::persistence::InMemorySessionStoreFactory::with_clock(
+                clock.clone(),
+            )),
             RuntimeEffectReplayStore::Memory,
             Arc::new(lash::persistence::InMemoryAttachmentStore::new()),
             Arc::new(lash::persistence::InMemoryProcessExecutionEnvStore::new()),
             false,
+            clock,
         )
     }
 
@@ -85,8 +94,10 @@ impl GeneratedRuntimeWorld {
         attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
         process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore>,
         serialize_provider_turns: bool,
+        clock: Arc<SimClock>,
     ) -> Self {
         Self {
+            clock: Arc::clone(&clock),
             sessions: BTreeMap::new(),
             queued_inputs: BTreeMap::new(),
             lease_ticks: BTreeMap::new(),
@@ -96,6 +107,7 @@ impl GeneratedRuntimeWorld {
             runtime_boundaries: RuntimeBoundaryHarness::new(
                 Arc::clone(&store_factory),
                 effect_replay_store,
+                clock,
             ),
             store_factory,
             attachment_store,
@@ -104,6 +116,24 @@ impl GeneratedRuntimeWorld {
             suspending_turns: BTreeMap::new(),
             serialize_provider_turns,
         }
+    }
+
+    pub(super) async fn advance_time_for_boundary(&self, event: &BoundaryEvent) {
+        let schedule_time = if event.kind == BoundaryKind::LeaseTime {
+            event
+                .payload
+                .get("tick")
+                .and_then(Value::as_u64)
+                .unwrap_or(event.at)
+        } else {
+            event.at
+        };
+        let schedule_time = if event.kind == BoundaryKind::ProviderEvent {
+            self.clock.logical_ms().saturating_add(SCHEDULE_TICK_MS)
+        } else {
+            schedule_time
+        };
+        self.clock.advance_to(schedule_time).await;
     }
 
     pub(super) fn pending_suspend_turn_count(&self) -> usize {
@@ -216,6 +246,7 @@ impl GeneratedRuntimeWorld {
             // queued work inert so modeled provider boundaries remain the only
             // provider exchanges in the session.
             true,
+            self.clock.clone(),
         )?;
         let session = core
             .session(event.actor_alias.clone())
@@ -378,6 +409,8 @@ impl GeneratedRuntimeWorld {
                 completion_event,
                 handle,
                 final_ready_at,
+                completed_sleeps_at_start: self.clock.completed_sleeps(),
+                logical_ms_at_start: self.clock.logical_ms(),
             },
         );
         Ok(())
@@ -519,12 +552,23 @@ impl GeneratedRuntimeWorld {
                     completion_event,
                     handle,
                     final_ready_at,
+                    completed_sleeps_at_start,
+                    logical_ms_at_start,
                 } = active;
-                let observed = handle.await.map_err(|err| {
+                let mut observed = handle.await.map_err(|err| {
                     FixedScriptRunnerError::Runtime(format!(
                         "provider turn `{turn_id}` task failed to join: {err}"
                     ))
                 })??;
+                observed["sim_clock"] = json!({
+                    "schedule_driven": true,
+                    "logical_ms": self.clock.logical_ms(),
+                    "elapsed_ms": self.clock.logical_ms().saturating_sub(logical_ms_at_start),
+                    "completed_sleeps_during_turn": self
+                        .clock
+                        .completed_sleeps()
+                        .saturating_sub(completed_sleeps_at_start),
+                });
                 let runtime_session = self.sessions.get_mut(&session_alias).ok_or_else(|| {
                     FixedScriptRunnerError::Assertion(format!(
                         "provider turn `{turn_id}` session `{session_alias}` disappeared"
@@ -759,8 +803,9 @@ impl GeneratedRuntimeWorld {
                 lash::persistence::InMemoryProcessExecutionEnvStore::new(),
             ))
             .store_factory(Arc::new(
-                lash::persistence::InMemorySessionStoreFactory::new(),
+                lash::persistence::InMemorySessionStoreFactory::with_clock(self.clock.clone()),
             ))
+            .clock(self.clock.clone())
             .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
                 as Arc<dyn lash_core::ProcessRegistry>)
             .provider(provider_handle)

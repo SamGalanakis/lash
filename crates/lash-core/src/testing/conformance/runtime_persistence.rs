@@ -110,6 +110,115 @@ where
     runtime_persistence_survives_reopen(make()).await;
 }
 
+/// Prove lease and claim expiry using an injected embedded-backend clock.
+///
+/// This complements the full suite's real-time expiry check: the real-time
+/// proof guards production `SystemClock` wiring, while this variant proves an
+/// embedded store actually consults its injected [`Clock`](crate::Clock).
+pub async fn runtime_persistence_clock_expiry(
+    store: Arc<dyn RuntimePersistence>,
+    advance: impl FnOnce(u64),
+) {
+    const TTL_MS: u64 = 1_000;
+    let session_id = "clock-expiry";
+    let stale_owner = lease_owner("clock-expiry-stale");
+    let successor = lease_owner("clock-expiry-successor");
+    let batch = store
+        .enqueue_queued_work(queued_draft(
+            session_id,
+            "clock expiry queued work",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue clock-expiry queued work");
+    let input = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft(
+            session_id,
+            "clock expiry turn input",
+        ))
+        .await
+        .expect("enqueue clock-expiry turn input");
+    let stale_lease = store
+        .try_claim_session_execution_lease(session_id, &stale_owner, TTL_MS)
+        .await
+        .expect("claim clock-expiry stale lease")
+        .acquired()
+        .expect("clock-expiry stale lease acquired");
+    let stale_queue_claim = store
+        .claim_ready_queued_work_by_batch_ids(
+            session_id,
+            &stale_lease.fence(),
+            &stale_owner,
+            QueuedWorkClaimBoundary::Idle,
+            std::slice::from_ref(&batch.batch_id),
+        )
+        .await
+        .expect("claim clock-expiry queued work")
+        .expect("clock-expiry queued work claim exists");
+    let stale_input_claim = store
+        .claim_next_turn_inputs(session_id, &stale_lease.fence(), &stale_owner, 1)
+        .await
+        .expect("claim clock-expiry turn input")
+        .expect("clock-expiry turn input claim exists");
+
+    advance(TTL_MS + 1);
+
+    let successor_lease = store
+        .try_claim_session_execution_lease(session_id, &successor, TTL_MS)
+        .await
+        .expect("claim clock-expiry successor lease")
+        .acquired()
+        .expect("expired lease is claimable through injected time");
+    assert!(successor_lease.fencing_token > stale_lease.fencing_token);
+    let successor_queue_claim = store
+        .claim_ready_queued_work_by_batch_ids(
+            session_id,
+            &successor_lease.fence(),
+            &successor,
+            QueuedWorkClaimBoundary::Idle,
+            std::slice::from_ref(&batch.batch_id),
+        )
+        .await
+        .expect("reclaim clock-expiry queued work")
+        .expect("dead-generation queued work is reclaimable");
+    let successor_input_claim = store
+        .claim_next_turn_inputs(session_id, &successor_lease.fence(), &successor, 1)
+        .await
+        .expect("reclaim clock-expiry turn input")
+        .expect("dead-generation turn input is reclaimable");
+    assert!(successor_queue_claim.fencing_token > stale_queue_claim.fencing_token);
+    assert!(successor_input_claim.fencing_token > stale_input_claim.fencing_token);
+
+    let stale_state = RuntimeSessionState {
+        session_id: session_id.to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let stale_commit = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&stale_state, &[])
+                .with_session_execution_lease(stale_lease.fence()),
+        )
+        .await;
+    assert!(matches!(
+        stale_commit,
+        Err(StoreError::SessionExecutionLeaseExpired { .. })
+    ));
+
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&stale_state, &[])
+                .with_session_execution_lease(successor_lease.fence())
+                .releasing_session_execution_lease(successor_lease.completion())
+                .completing_queue_claim(successor_queue_claim.completion())
+                .completing_turn_input_claim(successor_input_claim.completion()),
+        )
+        .await
+        .expect("successor settles reclaimed clock-expiry claims");
+    assert_eq!(stale_queue_claim.batches[0].batch_id, batch.batch_id);
+    assert_eq!(stale_input_claim.inputs[0].input_id, input.input_id);
+}
+
 pub async fn runtime_persistence_with_options<F>(make: F, options: RuntimePersistenceConformance)
 where
     F: Fn() -> Arc<dyn RuntimePersistence>,

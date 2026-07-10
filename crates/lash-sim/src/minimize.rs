@@ -8,14 +8,14 @@ use crate::generator::generate_workload;
 use crate::oracles::{
     abandoned_requires_evidence, backend_failure_observed, cancellation_observed, combine_oracles,
     cross_session_isolation, durable_effect_exactly_once, exec_code_observed,
-    generated_final_value_semantic_channel, generated_suspend_resume, ingress_sessions_opened,
-    lease_time_monotonic, observer_convergence, observer_reconnect_observed, operational_coverage,
-    process_never_double_started, process_wake_observed, provider_mutation_rejected,
-    provider_transport_mutation_classified, provider_turn_interleaving_depth,
-    queued_ingress_observed, runtime_session_graph_contract, scenario_contract_mini_oracles,
-    scenario_contract_oracles, scheduler_controlled_delivery, scheduler_owned_runtime_completions,
-    state_machine_semantic_invariants, tool_boundary_observed, trigger_delivery_observed,
-    worker_failover_continues_work, worker_stale_completion_rejected,
+    generated_final_value_semantic_channel, generated_suspend_resume, healthy_long_turn_renewal,
+    ingress_sessions_opened, lease_time_monotonic, observer_convergence,
+    observer_reconnect_observed, operational_coverage, process_never_double_started,
+    process_wake_observed, provider_mutation_rejected, provider_transport_mutation_classified,
+    provider_turn_interleaving_depth, queued_ingress_observed, runtime_session_graph_contract,
+    scenario_contract_mini_oracles, scenario_contract_oracles, scheduler_controlled_delivery,
+    scheduler_owned_runtime_completions, state_machine_semantic_invariants, tool_boundary_observed,
+    trigger_delivery_observed, worker_failover_continues_work, worker_stale_completion_rejected,
 };
 use crate::replay::{ReplayError, replay_trace};
 use crate::runner::run_generated_workload_for_fixture;
@@ -744,6 +744,7 @@ fn generated_oracles(
         durable_effect_exactly_once(summary),
         worker_stale_completion_rejected(summary),
         worker_failover_continues_work(events),
+        healthy_long_turn_renewal(events),
         lease_time_monotonic(events),
         generated_suspend_resume(events),
         generated_final_value_semantic_channel(events),

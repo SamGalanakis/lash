@@ -40,6 +40,7 @@ use crate::canonical_scripts::{
     OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT, OPENAI_COMPAT_TOOL_CALL, OPENAI_COMPAT_VALIDATION,
     OPENAI_RESPONSES_TEXT,
 };
+use crate::clock::SimClock;
 use crate::generator::{
     GENERATOR_VERSION, GeneratedWorkload, SimShard, WorkloadProfileError, generate_workload,
     validate_workload_profile,
@@ -50,11 +51,11 @@ use crate::oracles::{
     cancellation_observed, combine_oracles, cross_session_isolation, durable_effect_exactly_once,
     exec_code_observed, generated_final_value_semantic_channel,
     generated_runtime_provider_matrix as generated_runtime_provider_matrix_oracle,
-    generated_suspend_resume, ingress_sessions_opened, lease_time_monotonic,
-    live_provider_failure_coverage, observer_convergence, observer_reconnect_observed,
-    operational_coverage, peak_concurrent_live_turns, pending_tool_completion,
-    process_never_double_started, process_wake_at_most_once, process_wake_observed,
-    provider_mutation_rejected, provider_transport_mutation_classified,
+    generated_suspend_resume, healthy_long_turn_renewal, ingress_sessions_opened,
+    lease_time_monotonic, live_provider_failure_coverage, observer_convergence,
+    observer_reconnect_observed, operational_coverage, peak_concurrent_live_turns,
+    pending_tool_completion, process_never_double_started, process_wake_at_most_once,
+    process_wake_observed, provider_mutation_rejected, provider_transport_mutation_classified,
     provider_turn_interleaving_depth, queued_ingress_observed, replay_determinism,
     runtime_final_value_semantic, runtime_graph_acyclic, runtime_provider_turn,
     runtime_session_graph_contract, runtime_single_active_agent_frame, runtime_usage_monotonic,

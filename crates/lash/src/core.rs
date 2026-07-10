@@ -608,6 +608,7 @@ pub struct LashCoreBuilder {
     plugin_host: Option<PluginHost>,
     residency: Option<Residency>,
     lease_timings: Option<lash_core::LeaseTimings>,
+    clock: Option<Arc<dyn lash_core::Clock>>,
     // Single source of truth for process lifecycle support and process-work
     // consumption.
     process_work_source: ProcessWorkSource,
@@ -758,6 +759,12 @@ impl LashCoreBuilder {
         self
     }
 
+    /// Use one host clock for runtime sleeps and embedded-store time.
+    pub fn clock(mut self, clock: Arc<dyn lash_core::Clock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     /// Configure the bounded live replay buffer used by session observation
     /// cursors. This is best-effort reconnect recovery only; durable state
     /// still comes from the session store and [`SessionReadView`].
@@ -818,6 +825,9 @@ impl LashCoreBuilder {
         }
         if let Some(lease_timings) = self.lease_timings.take() {
             core.control.lease_timings = lease_timings;
+        }
+        if let Some(clock) = self.clock.take() {
+            core.clock = clock;
         }
         core
     }

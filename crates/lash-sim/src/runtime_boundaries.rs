@@ -19,6 +19,7 @@ use lash_core::{
 };
 use serde_json::{Value, json};
 
+use crate::clock::SimClock;
 use crate::scheduler::{BoundaryEvent, BoundaryKind};
 use crate::trace::value_digest;
 
@@ -94,12 +95,14 @@ pub struct RuntimeBoundaryHarness {
     durable_entries: BTreeMap<String, DurableEntry>,
     process_wake_delivered_dedupe_keys: BTreeSet<String>,
     worker_process_registry: Option<Arc<dyn ProcessRegistry>>,
+    clock: Arc<SimClock>,
 }
 
 impl RuntimeBoundaryHarness {
-    pub fn new(
+    pub(crate) fn new(
         store_factory: Arc<dyn SessionStoreFactory>,
         effect_replay_store: RuntimeEffectReplayStore,
+        clock: Arc<SimClock>,
     ) -> Self {
         Self {
             store_factory,
@@ -108,6 +111,7 @@ impl RuntimeBoundaryHarness {
             durable_entries: BTreeMap::new(),
             process_wake_delivered_dedupe_keys: BTreeSet::new(),
             worker_process_registry: None,
+            clock,
         }
     }
 
@@ -669,18 +673,15 @@ impl RuntimeBoundaryHarness {
             )
             .await?;
 
-        // Worker one crashes mid-flight: worker two fences it out by reclaiming
-        // the session execution lease at a higher fencing token.
+        // Worker one crashes mid-flight. The scheduled world advances beyond
+        // the real TTL before worker two takes over; no host wall clock or
+        // dead-process shortcut establishes expiry.
+        self.clock.advance_by(LEASE_TTL_MS + 1).await;
         let live_lease = match store
-            .reclaim_session_execution_lease(
-                &session,
-                &live_owner,
-                &stale_lease.fence(),
-                LEASE_TTL_MS,
-            )
+            .try_claim_session_execution_lease(&session, &live_owner, LEASE_TTL_MS)
             .await
             .map_err(|err| {
-                RuntimeBoundaryError::new(format!("reclaim worker lease failed: {err}"))
+                RuntimeBoundaryError::new(format!("take over expired worker lease failed: {err}"))
             })? {
             SessionExecutionLeaseClaimOutcome::Acquired(lease) => lease,
             SessionExecutionLeaseClaimOutcome::Busy { holder } => {
@@ -690,6 +691,25 @@ impl RuntimeBoundaryHarness {
                 )));
             }
         };
+
+        let stale_state = RuntimeSessionState {
+            session_id: session.clone(),
+            ..RuntimeSessionState::default()
+        };
+        let expired_owner_commit_rejected = matches!(
+            store
+                .commit_runtime_state(
+                    RuntimeCommit::persisted_state(&stale_state, &[])
+                        .with_session_execution_lease(stale_lease.fence()),
+                )
+                .await,
+            Err(lash_core::StoreError::SessionExecutionLeaseExpired { .. })
+        );
+        if !expired_owner_commit_rejected {
+            return Err(RuntimeBoundaryError::new(
+                "expired worker owner committed after lease takeover",
+            ));
+        }
 
         let process_completion = self
             .run_process_completion_contention(
@@ -734,6 +754,7 @@ impl RuntimeBoundaryHarness {
             "active_owner": owner_json(&live_owner),
             "active_fencing_token": renewed_live.fencing_token,
             "stale_completion_rejected": true,
+            "expired_owner_commit_rejected": expired_owner_commit_rejected,
             "process_stale_completion_rejected": process_completion.stale_rejected,
             "process_stale_output_absent": process_completion.stale_output_absent,
             "process_terminal_writer": process_completion.terminal_writer.clone(),
@@ -753,6 +774,7 @@ impl RuntimeBoundaryHarness {
             },
             "runtime_worker_store": {
                 "session_execution_lease_reclaimed": true,
+                "takeover_after_ttl_expiry": true,
                 "stale_completion_left_live_lease_renewable": true,
                 "process_completion": {
                     "process_id": process_completion.process_id,
@@ -1189,13 +1211,16 @@ impl RuntimeBoundaryHarness {
         let scope = ExecutionScope::runtime_operation(EFFECT_SCOPE_ID);
         let controller: Arc<dyn RuntimeEffectController> = match &self.effect_replay_store {
             RuntimeEffectReplayStore::Memory => Arc::new(
-                lash_sqlite_store::SqliteRuntimeEffectController::memory(scope)
-                    .await
-                    .map_err(|err| {
-                        RuntimeBoundaryError::new(format!(
-                            "open in-memory effect replay controller failed: {err}"
-                        ))
-                    })?,
+                lash_sqlite_store::SqliteRuntimeEffectController::memory_with_clock(
+                    scope,
+                    self.clock.clone(),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeBoundaryError::new(format!(
+                        "open in-memory effect replay controller failed: {err}"
+                    ))
+                })?,
             ),
             RuntimeEffectReplayStore::SqliteFile(path) => {
                 if let Some(parent) = path.parent() {
@@ -1207,14 +1232,18 @@ impl RuntimeBoundaryHarness {
                     })?;
                 }
                 Arc::new(
-                    lash_sqlite_store::SqliteRuntimeEffectController::open(path, scope)
-                        .await
-                        .map_err(|err| {
-                            RuntimeBoundaryError::new(format!(
-                                "open sqlite effect replay controller `{}` failed: {err}",
-                                path.display()
-                            ))
-                        })?,
+                    lash_sqlite_store::SqliteRuntimeEffectController::open_with_clock(
+                        path,
+                        scope,
+                        self.clock.clone(),
+                    )
+                    .await
+                    .map_err(|err| {
+                        RuntimeBoundaryError::new(format!(
+                            "open sqlite effect replay controller `{}` failed: {err}",
+                            path.display()
+                        ))
+                    })?,
                 )
             }
             RuntimeEffectReplayStore::Postgres(storage) => {

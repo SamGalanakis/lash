@@ -19,6 +19,7 @@ pub(super) async fn complete_process(
     authority: lash_core::ProcessCompletionAuthority,
 ) -> Result<ProcessRecord, lash_core::PluginError> {
     let process_id = process_id.to_string();
+    let now = registry.clock.timestamp_ms();
     registry
         .conn
         .write_flow(move |tx| {
@@ -53,7 +54,6 @@ pub(super) async fn complete_process(
                         |row| row.get::<_, i64>(0),
                     )
                     .map_err(process_sqlite_error)? as u64;
-                let now = current_epoch_ms();
                 let prepared =
                     prepare_process_event_append(&record, request, sequence, replay_lookup, now)?;
                 match prepared {
@@ -120,6 +120,7 @@ pub(super) async fn complete_process_with_lease(
     await_output: ProcessAwaitOutput,
 ) -> Result<ProcessRecord, lash_core::PluginError> {
     let lease = lease.clone();
+    let now = registry.clock.timestamp_ms();
     registry.conn
         .write_flow(move |tx| {
             Ok(tx_outcome((|| {
@@ -145,8 +146,6 @@ pub(super) async fn complete_process_with_lease(
                         |row| row.get::<_, i64>(0),
                     )
                     .map_err(process_sqlite_error)? as u64;
-                let now = current_epoch_ms();
-
                 // A successful prior terminal append is replay-idempotent even
                 // though that transaction already cleared the lease.
                 let prepared = prepare_process_event_append(

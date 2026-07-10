@@ -8,21 +8,35 @@ use super::*;
 
 pub struct SqliteTriggerStore {
     conn: SqliteConnection,
+    clock: Arc<dyn lash_core::Clock>,
 }
 
 impl SqliteTriggerStore {
     pub async fn open(path: &Path) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_clock(path, Arc::new(lash_core::SystemClock)).await
+    }
+
+    pub async fn open_with_clock(
+        path: &Path,
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path).await?;
         ensure_trigger_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::File).await?;
-        Ok(Self { conn })
+        Ok(Self { conn, clock })
     }
 
     pub async fn memory() -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_clock(Arc::new(lash_core::SystemClock)).await
+    }
+
+    pub async fn memory_with_clock(
+        clock: Arc<dyn lash_core::Clock>,
+    ) -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open_in_memory().await?;
         ensure_trigger_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::Memory).await?;
-        Ok(Self { conn })
+        Ok(Self { conn, clock })
     }
 
     fn encode_json<T: serde::Serialize>(value: &T) -> Result<String, lash_core::PluginError> {
@@ -134,6 +148,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
         draft: lash_core::TriggerSubscriptionDraft,
     ) -> Result<lash_core::TriggerSubscriptionRecord, lash_core::PluginError> {
         draft.validate()?;
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(trigger_tx_outcome((|| {
@@ -142,7 +157,6 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                     let seq = tx.last_insert_rowid();
                     let handle = format!("trigger:{seq}");
                     let subscription_id = format!("subscription:{seq}");
-                    let now = current_epoch_ms();
                     let record = lash_core::TriggerSubscriptionRecord {
                         subscription_id: subscription_id.clone(),
                         registrant: draft.registrant,
@@ -259,6 +273,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
     ) -> Result<bool, lash_core::PluginError> {
         let registrant_scope_id = registrant_scope_id.to_string();
         let handle = handle.to_string();
+        let updated_at_ms = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(trigger_tx_outcome((|| {
@@ -276,7 +291,6 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         return Ok(false);
                     };
                     let changed = enabled != 0;
-                    let updated_at_ms = current_epoch_ms();
                     match Self::decode_subscription(json) {
                         Ok(mut record) => {
                             record.enabled = false;
@@ -382,6 +396,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
         lash_core::validate_trigger_occurrence_request(&request)?;
         let request_hash = lash_core::trigger_occurrence_request_hash(&request)?;
         let occurrence_id = lash_core::deterministic_occurrence_id(&request)?;
+        let occurred_at_ms = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(trigger_tx_outcome((|| {
@@ -411,7 +426,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         payload: request.payload,
                         idempotency_key: request.idempotency_key,
                         source: request.source,
-                        occurred_at_ms: current_epoch_ms(),
+                        occurred_at_ms,
                     };
                     tx.execute(
                         "INSERT INTO trigger_occurrences (
@@ -495,6 +510,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
         occurrence_id: &str,
     ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
         let occurrence_id = occurrence_id.to_string();
+        let created_at_ms = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(trigger_tx_outcome((|| {
@@ -555,7 +571,6 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                             &occurrence.occurrence_id,
                             &subscription.subscription_id,
                         )?;
-                        let created_at_ms = current_epoch_ms();
                         let inserted = tx
                             .execute(
                                 "INSERT OR IGNORE INTO trigger_deliveries (

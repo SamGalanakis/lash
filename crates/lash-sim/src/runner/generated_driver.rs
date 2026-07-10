@@ -102,6 +102,7 @@ pub(super) async fn drive_generated_workload(
             continue;
         };
         let event = delivered.as_event();
+        world.advance_time_for_boundary(&event).await;
         let observed = world.deliver_boundary(&event).await?;
         store.apply_observed_boundary(&event, &observed);
         delivered.observed = observed;
@@ -166,12 +167,16 @@ pub(super) async fn drive_generated_workload(
 pub async fn replay_workload_serialized_reference(
     workload: &GeneratedWorkload,
 ) -> Result<AbstractWorldSummary, FixedScriptRunnerError> {
+    let clock = SimClock::new();
     let mut world = GeneratedRuntimeWorld::with_backend(
-        Arc::new(lash::persistence::InMemorySessionStoreFactory::new()),
+        Arc::new(lash::persistence::InMemorySessionStoreFactory::with_clock(
+            clock.clone(),
+        )),
         RuntimeEffectReplayStore::Memory,
         Arc::new(lash::persistence::InMemoryAttachmentStore::new()),
         Arc::new(lash::persistence::InMemoryProcessExecutionEnvStore::new()),
         true,
+        clock,
     );
     let (_events, final_summary) = drive_generated_workload(&mut world, workload).await?;
     Ok(final_summary)
@@ -201,8 +206,10 @@ pub async fn replay_workload_on_sqlite(
         }
     }
     std::fs::create_dir_all(db_root)?;
+    let clock = SimClock::new();
     let store_factory: Arc<dyn SessionStoreFactory> = Arc::new(
-        lash_sqlite_store::SqliteSessionStoreFactory::new(db_root.to_path_buf()),
+        lash_sqlite_store::SqliteSessionStoreFactory::new(db_root.to_path_buf())
+            .with_clock(clock.clone()),
     );
     let effect_replay_store =
         RuntimeEffectReplayStore::sqlite_file(db_root.join("runtime-effects.sqlite"));
@@ -214,9 +221,12 @@ pub async fn replay_workload_on_sqlite(
         lash::persistence::FileAttachmentStore::new(db_root.join("attachments")),
     );
     let process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore> = Arc::new(
-        lash_sqlite_store::Store::open(&db_root.join("process-env.sqlite"))
-            .await
-            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?,
+        lash_sqlite_store::Store::open_with_clock(
+            &db_root.join("process-env.sqlite"),
+            clock.clone(),
+        )
+        .await
+        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?,
     );
     let mut world = GeneratedRuntimeWorld::with_backend(
         store_factory,
@@ -227,6 +237,7 @@ pub async fn replay_workload_on_sqlite(
         // interleaving cannot change committed outcomes vs the sync in-memory
         // reference; the comparison is then a well-posed durable-state equivalence.
         true,
+        clock,
     );
     let (_events, final_summary) = drive_generated_workload(&mut world, workload).await?;
     Ok(final_summary)
@@ -246,6 +257,7 @@ pub async fn replay_workload_on_postgres(
             .await
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?,
     );
+    let clock = SimClock::new();
     crate::postgres_replay::reset_postgres_for_replay(storage.as_ref())
         .await
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
@@ -266,6 +278,7 @@ pub async fn replay_workload_on_postgres(
         attachment_store,
         process_env_store,
         true,
+        clock,
     );
     let (_events, final_summary) = drive_generated_workload(&mut world, workload).await?;
     Ok(final_summary)
@@ -428,6 +441,7 @@ pub(super) async fn run_generated_workload(
         durable_effect_exactly_once(&final_summary),
         worker_stale_completion_rejected(&final_summary),
         worker_failover_continues_work(&events),
+        healthy_long_turn_renewal(&events),
         lease_time_monotonic(&events),
         generated_suspend_resume(&events),
         generated_final_value_semantic_channel(&events),

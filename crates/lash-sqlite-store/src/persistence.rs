@@ -112,6 +112,7 @@ impl SessionCommitStore for Store {
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError> {
         let blob_profile = self.options.blob_profile;
+        let now = self.clock.timestamp_ms();
         let result = self
             .conn
             .write_flow(move |tx| {
@@ -173,6 +174,7 @@ impl SessionCommitStore for Store {
                         tx,
                         &commit.session_id,
                         session_execution_lease,
+                        now,
                     )?;
                     let actual_revision = existing.as_ref().map_or(0, |meta| meta.head_revision);
                     if commit.expected_head_revision.is_some()
@@ -406,7 +408,7 @@ impl SessionCommitStore for Store {
                         }
                     }
                     if !commit.committed_attachment_ids.is_empty() {
-                        let now = current_epoch_ms() as i64;
+                        let now = now as i64;
                         let mut stmt = tx
                             .prepare(
                                 "UPDATE attachment_manifest
@@ -435,7 +437,7 @@ impl SessionCommitStore for Store {
                                 completed.turn_id,
                                 completed.turn_commit_hash,
                                 encode_json(&result),
-                                current_epoch_ms() as i64
+                                now as i64
                             ],
                         )
                         .map_err(sqlite_error)?;
@@ -480,10 +482,10 @@ impl SessionExecutionLeaseStore for Store {
     ) -> Result<SessionExecutionLeaseClaimOutcome, StoreError> {
         let session_id = session_id.to_string();
         let owner = owner.clone();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<SessionExecutionLeaseClaimOutcome, StoreError> = (|| {
-                    let now = current_epoch_ms();
                     let current = load_session_execution_lease_row_conn(tx, &session_id)?;
                     if current.as_ref().is_some_and(|lease| {
                         lease.lease_token.is_some() && lease.expires_at_ms > now
@@ -548,10 +550,10 @@ impl SessionExecutionLeaseStore for Store {
         let session_id = session_id.to_string();
         let owner = owner.clone();
         let observed_holder = observed_holder.clone();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<SessionExecutionLeaseClaimOutcome, StoreError> = (|| {
-                    let now = current_epoch_ms();
                     let current = load_session_execution_lease_row_conn(tx, &session_id)?;
                     let Some(current) = current else {
                         return Ok(SessionExecutionLeaseClaimOutcome::Acquired(
@@ -674,10 +676,10 @@ impl SessionExecutionLeaseStore for Store {
         lease_ttl_ms: u64,
     ) -> Result<SessionExecutionLease, StoreError> {
         let fence = fence.clone();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<SessionExecutionLease, StoreError> = (|| {
-                    let now = current_epoch_ms();
                     let current = load_session_execution_lease_row_conn(tx, &fence.session_id)?;
                     let Some(current) = current else {
                         return Err(StoreError::SessionExecutionLeaseExpired {
@@ -758,6 +760,7 @@ impl QueuedWorkStore for Store {
         batch: QueuedWorkBatchDraft,
     ) -> Result<QueuedWorkBatch, StoreError> {
         let nonce = self.commit_count.fetch_add(1, AtomicOrdering::Relaxed);
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<QueuedWorkBatch, StoreError> = (|| {
@@ -782,7 +785,6 @@ impl QueuedWorkStore for Store {
                             return Ok(existing);
                         }
                     }
-                    let now = current_epoch_ms();
                     let batch_id =
                         derive_batch_id(&batch.session_id, batch.source_key.as_deref(), now, Some(nonce));
                     tx.execute(
@@ -836,6 +838,7 @@ impl QueuedWorkStore for Store {
         let session_id = session_id.to_string();
         let session_execution_lease = session_execution_lease.clone();
         let owner = owner.clone();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<TxOutcome<Option<QueuedWorkClaim>>, StoreError> = (|| {
@@ -843,12 +846,12 @@ impl QueuedWorkStore for Store {
                         tx,
                         &session_id,
                         &session_execution_lease,
+                        now,
                     )?;
                     // The fence is validated live, so its fencing token is the
                     // currently-live session-lease generation; claims pin it and
                     // are claimable only across a different generation (ADR 0029).
                     let generation = session_execution_lease.fencing_token;
-                    let now = current_epoch_ms();
                     let candidate_rows = {
                         let mut stmt = tx
                             .prepare(
@@ -995,6 +998,7 @@ impl QueuedWorkStore for Store {
         let session_id = session_id.to_string();
         let session_execution_lease = session_execution_lease.clone();
         let owner = owner.clone();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<TxOutcome<Option<QueuedWorkClaim>>, StoreError> = (|| {
@@ -1002,9 +1006,9 @@ impl QueuedWorkStore for Store {
                         tx,
                         &session_id,
                         &session_execution_lease,
+                        now,
                     )?;
                     let generation = session_execution_lease.fencing_token;
-                    let now = current_epoch_ms();
                     let candidate_rows = {
                         let mut stmt = tx
                             .prepare(
@@ -1182,10 +1186,10 @@ impl QueuedWorkStore for Store {
     ) -> Result<Option<QueuedWorkBatch>, StoreError> {
         let session_id = session_id.to_string();
         let batch_id = batch_id.to_string();
+        let now = self.clock.timestamp_ms() as i64;
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<Option<QueuedWorkBatch>, StoreError> = (|| {
-                    let now = current_epoch_ms() as i64;
                     let row = tx
                         .query_row(
                             "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
@@ -1275,10 +1279,10 @@ impl QueuedWorkStore for Store {
         session_id: &str,
     ) -> Result<Vec<QueuedWorkBatch>, StoreError> {
         let session_id = session_id.to_string();
+        let now = self.clock.timestamp_ms();
         self.conn
             .call(move |conn| {
                 let outcome: Result<Vec<QueuedWorkBatch>, StoreError> = (|| {
-                    let now = current_epoch_ms();
                     let rows = {
                         let mut stmt = conn
                             .prepare(
@@ -1325,6 +1329,7 @@ impl TurnInputStore for Store {
         draft: lash_core::PendingTurnInputDraft,
     ) -> Result<lash_core::PendingTurnInput, StoreError> {
         let nonce = self.commit_count.fetch_add(1, AtomicOrdering::Relaxed);
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<lash_core::PendingTurnInput, StoreError> = (|| {
@@ -1364,7 +1369,6 @@ impl TurnInputStore for Store {
                             return Ok(existing);
                         }
                     }
-                    let now = current_epoch_ms();
                     let input_id = draft.input_id.clone().unwrap_or_else(|| {
                         derive_pending_turn_input_id(
                             &draft.session_id,
@@ -1417,10 +1421,10 @@ impl TurnInputStore for Store {
         session_id: &str,
     ) -> Result<Vec<lash_core::PendingTurnInput>, StoreError> {
         let session_id = session_id.to_string();
+        let now = self.clock.timestamp_ms();
         self.conn
             .call(move |conn| {
                 let outcome: Result<Vec<lash_core::PendingTurnInput>, StoreError> = (|| {
-                    let now = current_epoch_ms();
                     let rows = {
                         let mut stmt = conn
                             .prepare(
@@ -1471,11 +1475,11 @@ impl TurnInputStore for Store {
     ) -> Result<Vec<lash_core::PendingTurnInputCancelResult>, StoreError> {
         let session_id = session_id.to_string();
         let targets = targets.to_vec();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<Vec<lash_core::PendingTurnInputCancelResult>, StoreError> =
                     (|| {
-                        let now = current_epoch_ms();
                         let mut results = Vec::with_capacity(targets.len());
                         for target in targets {
                             let outcome = match load_pending_turn_input_row_by_target_conn(
@@ -1507,11 +1511,11 @@ impl TurnInputStore for Store {
     ) -> Result<lash_core::PendingTurnInputSuffixCancelOutcome, StoreError> {
         let session_id = session_id.to_string();
         let anchor = anchor.clone();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 let outcome: Result<lash_core::PendingTurnInputSuffixCancelOutcome, StoreError> =
                     (|| {
-                        let now = current_epoch_ms();
                         let Some(anchor_row) =
                             load_pending_turn_input_row_by_target_conn(tx, &session_id, &anchor)?
                         else {
@@ -1570,6 +1574,7 @@ impl TurnInputStore for Store {
     ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
         claim_pending_turn_inputs_sqlite(
             &self.conn,
+            self.clock.timestamp_ms(),
             session_id,
             session_execution_lease,
             owner,
@@ -1591,6 +1596,7 @@ impl TurnInputStore for Store {
     ) -> Result<Option<lash_core::TurnInputClaim>, StoreError> {
         claim_pending_turn_inputs_sqlite(
             &self.conn,
+            self.clock.timestamp_ms(),
             session_id,
             session_execution_lease,
             owner,
@@ -1768,6 +1774,7 @@ fn cancel_pending_turn_input_row_conn(
 
 async fn claim_pending_turn_inputs_sqlite(
     conn: &SqliteConnection,
+    now: u64,
     session_id: &str,
     session_execution_lease: &SessionExecutionLeaseFence,
     owner: &LeaseOwnerIdentity,
@@ -1782,9 +1789,13 @@ async fn claim_pending_turn_inputs_sqlite(
     let owner = owner.clone();
     conn.write_flow(move |tx| {
         let outcome: Result<TxOutcome<Option<lash_core::TurnInputClaim>>, StoreError> = (|| {
-            ensure_session_execution_lease_conn(tx, &session_id, &session_execution_lease)?;
+            ensure_session_execution_lease_conn(
+                tx,
+                &session_id,
+                &session_execution_lease,
+                now,
+            )?;
             let generation = session_execution_lease.fencing_token;
-            let now = current_epoch_ms();
             let wanted_state = match &mode {
                 lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
                     lash_core::TurnInputState::PendingActive
@@ -2055,13 +2066,13 @@ fn ensure_session_execution_lease_conn(
     conn: &Connection,
     session_id: &str,
     fence: &SessionExecutionLeaseFence,
+    now: u64,
 ) -> Result<(), StoreError> {
     if fence.session_id != session_id {
         return Err(StoreError::SessionExecutionLeaseExpired {
             session_id: session_id.to_string(),
         });
     }
-    let now = current_epoch_ms();
     let current = load_session_execution_lease_row_conn(conn, session_id)?;
     let Some(current) = current else {
         return Err(StoreError::SessionExecutionLeaseExpired {
