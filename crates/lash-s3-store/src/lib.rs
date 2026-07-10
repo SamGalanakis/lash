@@ -4,9 +4,10 @@
 //! including AWS S3 and MinIO. Runtime metadata and attachment manifests remain
 //! in the configured [`lash_core::RuntimePersistence`] backend.
 
+use futures_util::TryStreamExt;
 use lash_core::{
     AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef, AttachmentStore,
-    AttachmentStoreError, AttachmentStorePersistence, StoredAttachment,
+    AttachmentStoreError, AttachmentStorePersistence, StoredAttachment, StoredBlobRef,
 };
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
@@ -144,35 +145,14 @@ impl S3AttachmentStore {
         }
     }
 
+    /// Flat, content-addressed key for a blob: `<prefix>/sha256/<first2>/<hash>`.
+    /// No session namespace — identical bytes from any session share one object.
     fn content_path(&self, id: &AttachmentId) -> Result<Path, AttachmentStoreError> {
-        self.path_for(None, id)
-    }
-
-    fn session_content_path(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<Path, AttachmentStoreError> {
-        self.path_for(Some(session_id), id)
-    }
-
-    fn path_for(
-        &self,
-        session_id: Option<&str>,
-        id: &AttachmentId,
-    ) -> Result<Path, AttachmentStoreError> {
         let hash = id.as_str();
         let first = hash.get(..2).unwrap_or(hash);
         let mut path = String::new();
         if let Some(prefix) = &self.prefix {
             path.push_str(prefix);
-            path.push('/');
-        }
-        if let Some(session_id) = session_id {
-            path.push_str("sessions/");
-            path.push_str(&lash_core::attachments::session_storage_namespace(
-                session_id,
-            ));
             path.push('/');
         }
         path.push_str("sha256/");
@@ -181,6 +161,19 @@ impl S3AttachmentStore {
         path.push_str(hash);
         Path::parse(path).map_err(|err| {
             AttachmentStoreError::Backend(format!("invalid S3 attachment path for `{id}`: {err}"))
+        })
+    }
+
+    /// Key prefix under which all content-addressed blobs live.
+    fn content_prefix(&self) -> Result<Path, AttachmentStoreError> {
+        let mut path = String::new();
+        if let Some(prefix) = &self.prefix {
+            path.push_str(prefix);
+            path.push('/');
+        }
+        path.push_str("sha256");
+        Path::parse(path).map_err(|err| {
+            AttachmentStoreError::Backend(format!("invalid S3 attachment list prefix: {err}"))
         })
     }
 }
@@ -215,43 +208,42 @@ impl AttachmentStore for S3AttachmentStore {
         delete_at_path(&*self.store, self.content_path(id)?).await
     }
 
-    async fn put_for_session(
-        &self,
-        session_id: &str,
-        bytes: Vec<u8>,
-        meta: AttachmentCreateMeta,
-    ) -> Result<AttachmentRef, AttachmentStoreError> {
-        let meta = AttachmentMeta::new(
-            lash_core::attachments::content_id(&bytes),
-            meta.media_type,
-            bytes.len() as u64,
-            meta.width,
-            meta.height,
-            meta.label,
-        );
-        put_at_path(
-            &*self.store,
-            self.session_content_path(session_id, &meta.id)?,
-            bytes,
-            meta,
-        )
-        .await
+    async fn head(&self, id: &AttachmentId) -> Result<Option<StoredBlobRef>, AttachmentStoreError> {
+        match self.store.head(&self.content_path(id)?).await {
+            Ok(meta) => Ok(Some(StoredBlobRef {
+                id: id.clone(),
+                last_modified_epoch_ms: u64::try_from(meta.last_modified.timestamp_millis()).ok(),
+            })),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(err) => Err(AttachmentStoreError::Backend(format!(
+                "failed to head S3 attachment `{id}`: {err}"
+            ))),
+        }
     }
 
-    async fn get_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<StoredAttachment, AttachmentStoreError> {
-        get_at_path(&*self.store, self.session_content_path(session_id, id)?, id).await
-    }
-
-    async fn delete_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<(), AttachmentStoreError> {
-        delete_at_path(&*self.store, self.session_content_path(session_id, id)?).await
+    async fn list(&self) -> Result<Vec<StoredBlobRef>, AttachmentStoreError> {
+        let prefix = self.content_prefix()?;
+        let metas: Vec<object_store::ObjectMeta> = self
+            .store
+            .list(Some(&prefix))
+            .try_collect()
+            .await
+            .map_err(|err| {
+                AttachmentStoreError::Backend(format!("failed to list S3 attachments: {err}"))
+            })?;
+        Ok(metas
+            .into_iter()
+            .filter_map(|meta| {
+                // The object key's final segment is the content hash.
+                let id = meta.location.parts().next_back()?;
+                let last_modified_epoch_ms =
+                    u64::try_from(meta.last_modified.timestamp_millis()).ok();
+                Some(StoredBlobRef {
+                    id: AttachmentId::new(id.as_ref().to_string()),
+                    last_modified_epoch_ms,
+                })
+            })
+            .collect())
     }
 }
 
@@ -262,6 +254,10 @@ async fn put_at_path(
     meta: AttachmentMeta,
 ) -> Result<AttachmentRef, AttachmentStoreError> {
     let reference = meta.as_ref();
+    // Unconditional PUT even on a dedup hit: overwriting identical content
+    // refreshes the object's LastModified, which is the freshness signal GC's
+    // grace window and delete-time re-check rely on (Fix C). Do not short-circuit
+    // on an existing object.
     store
         .put(&content_path, bytes.into())
         .await
@@ -347,15 +343,52 @@ mod tests {
         };
         lash_core::testing::conformance::attachment_store_reopenable(
             || {
+                // The conformance contract requires each `make()` to yield a
+                // fresh, empty store. S3 has no per-instance isolation, so give
+                // every call its own key prefix; `open`/`reopen` share one
+                // prefix so the durable-reopen check still sees prior writes.
+                let mut cfg = config.clone();
+                cfg.prefix = Some(format!(
+                    "{}/case-{}",
+                    cfg.prefix.as_deref().unwrap_or("tests"),
+                    unique_case_suffix()
+                ));
                 let open =
-                    Arc::new(S3AttachmentStore::from_config(config.clone()).expect("open store"))
+                    Arc::new(S3AttachmentStore::from_config(cfg.clone()).expect("open store"))
                         as Arc<dyn AttachmentStore>;
                 let reopen =
-                    Arc::new(S3AttachmentStore::from_config(config.clone()).expect("reopen store"))
+                    Arc::new(S3AttachmentStore::from_config(cfg.clone()).expect("reopen store"))
                         as Arc<dyn AttachmentStore>;
                 ReopenableAttachmentStore { open, reopen }
             },
             AttachmentStorePersistence::Durable,
+        )
+        .await;
+    }
+
+    // The flipped attachment contract against a real S3 backend: identical
+    // bytes from two sessions dedup to one object, the session-boundary guard
+    // keeps a session from resolving another's blob, and GC collects the blob
+    // only once no session references it.
+    #[tokio::test]
+    async fn shared_bytes_isolation_and_gc_when_minio_configured() {
+        let Some(mut config) = minio_config_from_env() else {
+            eprintln!("skipping MinIO shared-bytes isolation: LASH_MINIO_ENDPOINT is not set");
+            return;
+        };
+        // The GC narrative asserts exact scanned/reclaimed counts, so this
+        // test's sweep must see only its own blobs: sibling tests share the
+        // env-provided prefix and run concurrently, and a zero-grace sweep
+        // would otherwise reclaim their freshly written, unrooted objects.
+        config.prefix = Some(format!(
+            "{}/gc-{}",
+            config.prefix.as_deref().unwrap_or("tests"),
+            unique_case_suffix()
+        ));
+        lash_core::testing::conformance::attachment_ownership_isolation_with_store(
+            Arc::new(lash_core::InMemorySessionStoreFactory::new()),
+            Arc::new(S3AttachmentStore::from_config(config).expect("store"))
+                as Arc<dyn AttachmentStore>,
         )
         .await;
     }
@@ -438,6 +471,16 @@ mod tests {
             ),
             path_style: true,
         })
+    }
+
+    fn unique_case_suffix() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "{}-{}",
+            uuid_like_suffix(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
     }
 
     fn uuid_like_suffix() -> String {

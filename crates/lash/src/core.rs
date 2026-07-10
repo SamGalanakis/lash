@@ -794,7 +794,9 @@ impl LashCoreBuilder {
             core.control.effect_host = effect_host;
         }
         if let Some(attachment_store) = self.attachment_store.take() {
-            core.durability.attachment_store = attachment_store;
+            core.durability.attachment_store = Arc::new(
+                lash_core::SessionAttachmentStore::ephemeral(attachment_store),
+            );
         }
         if let Some(process_env_store) = self.process_env_store.take() {
             core.durability.process_env_store = process_env_store;

@@ -84,9 +84,6 @@ impl AwaitEventResolver for PostgresEffectHost {
         DurabilityTier::Durable
     }
 
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
-    }
 
     fn supports_durable_effects(&self) -> bool {
         true
@@ -494,9 +491,6 @@ impl AwaitEventResolver for PostgresRuntimeEffectController {
         DurabilityTier::Durable
     }
 
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
-    }
 
     fn supports_durable_effects(&self) -> bool {
         true

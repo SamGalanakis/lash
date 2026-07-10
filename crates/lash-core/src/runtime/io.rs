@@ -9,7 +9,7 @@ use super::{InputItem, NormalizedItem};
 pub(super) async fn normalize_input_items(
     items: &[InputItem],
     image_blobs: &HashMap<String, Vec<u8>>,
-    attachment_store: &dyn crate::AttachmentStore,
+    attachment_store: &crate::SessionAttachmentStore,
 ) -> Result<Vec<NormalizedItem>, String> {
     let mut out: Vec<NormalizedItem> = Vec::new();
     for item in items {

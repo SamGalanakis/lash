@@ -91,7 +91,7 @@ pub struct ToolDispatchContext<'run> {
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub(crate) checkpoint_messages: CheckpointMessageBuffer,
     pub(crate) trigger_outcomes: ToolTriggerOutcomeBuffer,
-    pub attachment_store: Arc<dyn crate::AttachmentStore>,
+    pub attachment_store: Arc<crate::SessionAttachmentStore>,
     pub turn_context: crate::TurnContext,
     pub clock: Arc<dyn crate::Clock>,
 }

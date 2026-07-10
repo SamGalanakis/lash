@@ -286,7 +286,7 @@ impl QueuedWorkClaim {
 
     pub async fn materialize_for_checkpoint_with_attachments(
         &self,
-        _attachment_store: &dyn crate::AttachmentStore,
+        _attachment_store: &crate::SessionAttachmentStore,
     ) -> Result<QueuedCheckpointWork, String> {
         let messages = Vec::new();
         let transient_messages = Vec::new();

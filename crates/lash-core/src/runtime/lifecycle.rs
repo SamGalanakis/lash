@@ -69,26 +69,25 @@ impl LashRuntime {
             let manifest: Arc<dyn crate::AttachmentManifest> =
                 Arc::new(crate::attachments::PersistenceManifestAdapter(store));
             // `host` can come from a live runtime during same-session rebuilds
-            // and managed-child materialization. In both cases its attachment
-            // store is already session-scoped. Rebind from the raw physical
-            // backend so decorators never stack and a child cannot inherit the
-            // parent's namespace guard.
+            // and managed-child materialization. Rebind a fresh facade over the
+            // flat backend so a same-session rebuild inherits its pending
+            // commit ids while a managed child starts with its own empty
+            // manifest refs (bytes may still dedup in the shared backend — that
+            // is intended).
             let previous_attachment_store = Arc::clone(&host.core.durability.attachment_store);
-            let inherited_pending_attachment_ids = previous_attachment_store
-                .bound_session_id()
-                .filter(|session_id| *session_id == state.session_id)
-                .map(|_| previous_attachment_store.pending_manifest_commit_ids())
-                .unwrap_or_default();
-            let attachment_backend = previous_attachment_store
-                .unscoped_backend()
-                .unwrap_or(previous_attachment_store);
-            let scoped: Arc<dyn crate::AttachmentStore> =
-                Arc::new(crate::SessionScopedAttachmentStore::new_with_pending(
-                    attachment_backend,
-                    manifest,
-                    state.session_id.clone(),
-                    inherited_pending_attachment_ids,
-                ));
+            let inherited_pending_attachment_ids =
+                if previous_attachment_store.session_id() == state.session_id {
+                    previous_attachment_store.pending_manifest_commit_ids()
+                } else {
+                    Vec::new()
+                };
+            let backend = Arc::clone(previous_attachment_store.backend());
+            let scoped = Arc::new(crate::SessionAttachmentStore::new_with_pending(
+                backend,
+                manifest,
+                state.session_id.clone(),
+                inherited_pending_attachment_ids,
+            ));
             host.core.durability.attachment_store = scoped;
         }
         let services = services

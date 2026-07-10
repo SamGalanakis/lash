@@ -126,8 +126,7 @@ where
         AttachmentManifestConformance::Persistent => {
             attachment_manifest_records_intent_and_commit_stamps(make()).await;
             attachment_manifest_keeps_same_content_ownership_per_session(make()).await;
-            attachment_orphan_reclamation_reclaims_aged_and_spares_committed_and_recent(make())
-                .await;
+            attachment_manifest_reference_tracking_and_gc_root_set(make()).await;
         }
         AttachmentManifestConformance::Noop => {
             noop_attachment_manifest_is_explicit_and_empty(make()).await;
@@ -3138,109 +3137,94 @@ async fn gc_reclaims_unreachable_checkpoint_blobs_and_preserves_live(
     );
 }
 
-/// The host-invoked orphan-attachment sweep reclaims aged uncommitted intents,
-/// spares content a session committed, and spares intents newer than the age
-/// threshold. Exercises the durable manifest under test paired with an in-memory
-/// byte store; the S3 delete primitive is covered by that crate's own suite.
-async fn attachment_orphan_reclamation_reclaims_aged_and_spares_committed_and_recent(
+/// The durable manifest is the reference layer: it answers `holds_ref` for the
+/// session-boundary guard, exposes every live ref (intent or committed) for the
+/// GC root set, and drops refs on `forget`. Both intents and commits count as
+/// live refs; a forgotten ref disappears from both queries.
+async fn attachment_manifest_reference_tracking_and_gc_root_set(
     store: Arc<dyn RuntimePersistence>,
 ) {
-    let bytes_store = crate::InMemoryAttachmentStore::new();
-    let meta = || {
-        AttachmentCreateMeta::new(
-            MediaType::Image(ImageMediaType::Png),
-            Some(1),
-            Some(1),
-            None,
-        )
-    };
-    // Content ids are the sha256 of the bytes, so the ids recorded as intents
-    // match what the byte store holds.
-    let aged = bytes_store
-        .put_for_session("root", vec![10], meta())
-        .await
-        .expect("put aged");
-    let committed = bytes_store
-        .put_for_session("root", vec![20], meta())
-        .await
-        .expect("put committed");
-    let recent = bytes_store
-        .put_for_session("root", vec![30], meta())
-        .await
-        .expect("put recent");
-
+    let intent_id = AttachmentId::new(format!("{:x}", sha256_of(b"intent-only")));
+    let committed_id = AttachmentId::new(format!("{:x}", sha256_of(b"committed")));
     let intent = |id: &AttachmentId, at: u64| AttachmentIntent {
         attachment_id: id.clone(),
         session_id: "root".to_string(),
-        canonical_uri: format!("sha256:{id}"),
+        canonical_uri: format!("lash-attachment://sha256/{id}"),
         intent_at_epoch_ms: at,
     };
     store
-        .record_intent(intent(&aged.id, 100))
-        .expect("record aged intent");
+        .record_intent(intent(&intent_id, 100))
+        .expect("record intent-only");
     store
-        .record_intent(intent(&committed.id, 100))
+        .record_intent(intent(&committed_id, 100))
         .expect("record committed intent");
     store
-        .record_intent(intent(&recent.id, 10_000))
-        .expect("record recent intent");
-    // `committed` becomes referenced by durable session state.
-    store
-        .commit_refs("root", std::slice::from_ref(&committed.id))
+        .commit_refs("root", std::slice::from_ref(&committed_id))
         .expect("commit attachment ref");
 
-    // Sweep everything aged at/before 200: only the uncommitted `aged` intent
-    // qualifies. `committed` is excluded (it carries a commit stamp); `recent`
-    // is excluded (its intent is newer than the threshold).
-    let report = crate::reclaim_orphaned_attachments(&*store, &bytes_store, 200)
-        .await
-        .expect("reclaim orphaned attachments");
-    assert_eq!(
-        report.scanned_intent_count, 1,
-        "only the aged uncommitted intent is in scope, got {report:?}"
+    // Boundary guard: both an intent and a commit are live refs for their
+    // session; another session (or an unknown id) holds no ref.
+    assert!(
+        store.holds_ref("root", &intent_id).expect("holds intent"),
+        "an uncommitted intent is a live ref"
     );
-    assert_eq!(
-        report.reclaimed_count, 1,
-        "the aged orphan is reclaimed, got {report:?}"
+    assert!(
+        store
+            .holds_ref("root", &committed_id)
+            .expect("holds commit"),
+        "a committed attachment is a live ref"
+    );
+    assert!(
+        !store
+            .holds_ref("other-session", &committed_id)
+            .expect("no cross-session ref"),
+        "a ref belongs only to its own session"
+    );
+    assert!(
+        !store
+            .holds_ref("root", &AttachmentId::new("sha256:never-referenced"))
+            .expect("no ref for unknown id"),
+        "an id never referenced holds no ref"
     );
 
-    assert!(
-        matches!(
-            bytes_store.get_for_session("root", &aged.id).await,
-            Err(AttachmentStoreError::NotFound(_))
-        ),
-        "aged orphan bytes must be deleted"
-    );
-    bytes_store
-        .get_for_session("root", &committed.id)
-        .await
-        .expect("committed content retained");
-    bytes_store
-        .get_for_session("root", &recent.id)
-        .await
-        .expect("recent content retained");
+    // Root set: every live ref, intent or committed.
+    let refs = store.list_all_refs().expect("list all refs");
+    assert!(refs.contains(&intent_id), "intents feed the GC root set");
+    assert!(refs.contains(&committed_id), "commits feed the GC root set");
 
-    // A threshold well past every intent above (backends bind the age as i64,
-    // so `u64::MAX` would wrap negative and hide every row).
-    let remaining = store
-        .list_uncommitted(1_000_000)
-        .expect("list remaining uncommitted");
+    // Uncommitted listing still distinguishes intents from commits.
+    let uncommitted = store.list_uncommitted(1_000_000).expect("list uncommitted");
     assert!(
-        remaining
+        uncommitted
             .iter()
-            .any(|entry| entry.attachment_id == recent.id),
-        "a recent uncommitted intent must survive an aged-only sweep"
+            .any(|entry| entry.attachment_id == intent_id),
+        "an uncommitted intent is listed as uncommitted"
     );
     assert!(
-        !remaining.iter().any(|entry| entry.attachment_id == aged.id),
-        "the reclaimed intent must be forgotten"
-    );
-    assert!(
-        !remaining
+        !uncommitted
             .iter()
-            .any(|entry| entry.attachment_id == committed.id),
-        "a committed intent is never listed as uncommitted"
+            .any(|entry| entry.attachment_id == committed_id),
+        "a committed attachment is not listed as uncommitted"
     );
+
+    // Forget drops the ref from both the boundary guard and the root set.
+    store.forget("root", &intent_id).expect("forget intent ref");
+    assert!(
+        !store.holds_ref("root", &intent_id).expect("ref dropped"),
+        "a forgotten ref is no longer held"
+    );
+    assert!(
+        !store
+            .list_all_refs()
+            .expect("list after forget")
+            .contains(&intent_id),
+        "a forgotten ref leaves the root set"
+    );
+}
+
+fn sha256_of(bytes: &[u8]) -> impl std::fmt::LowerHex {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
 }
 
 async fn runtime_persistence_survives_reopen(factory: ReopenableRuntimePersistence) {

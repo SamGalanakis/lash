@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef};
 use sha2::{Digest, Sha256};
 
-use crate::store::{AttachmentIntent, AttachmentManifest};
+use crate::store::{AttachmentIntent, AttachmentManifest, StoreError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AttachmentStoreError {
@@ -32,6 +32,17 @@ pub struct StoredAttachment {
     pub bytes: Vec<u8>,
 }
 
+/// One blob enumerated by [`AttachmentStore::list`]. Feeds mark-and-sweep GC:
+/// the sweeper pairs each blob's `id` against the live root set and uses
+/// `last_modified_epoch_ms` to apply the write grace period. Backends that
+/// cannot report a modification time leave it `None`, and the sweep treats
+/// such blobs as always past the grace window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredBlobRef {
+    pub id: AttachmentId,
+    pub last_modified_epoch_ms: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachmentStorePersistence {
     Ephemeral,
@@ -51,44 +62,23 @@ impl AttachmentStorePersistence {
     }
 }
 
+/// A flat, content-addressed blob store: host-supplied dumb infrastructure.
+///
+/// The store maps a content hash to its bytes and nothing more. It has no
+/// notion of sessions — identical bytes written by any number of sessions
+/// resolve to one physical blob, and that dedup is intended. Reference
+/// tracking and the session boundary live one layer up in
+/// [`SessionAttachmentStore`] and the [`AttachmentManifest`]; lifecycle
+/// (which blobs may be deleted) lives above that in the host, via
+/// [`reclaim_unreferenced_attachments`].
+///
+/// Conventions every backend upholds: `put` is idempotent (identical bytes are
+/// a no-op returning the same ref), `delete` is idempotent, and a missing blob
+/// maps to [`AttachmentStoreError::NotFound`].
 #[async_trait::async_trait]
 pub trait AttachmentStore: Send + Sync {
     fn persistence(&self) -> AttachmentStorePersistence {
         AttachmentStorePersistence::Ephemeral
-    }
-
-    /// Attachment refs written by this store that still need their
-    /// write-ahead manifest rows stamped by the next runtime commit.
-    ///
-    /// Plain stores return an empty set. [`SessionScopedAttachmentStore`]
-    /// overrides this so attachments created through downstream tools,
-    /// process execution, and other runtime services are committed by the
-    /// same final turn transaction that makes them reachable from session
-    /// state.
-    fn pending_manifest_commit_ids(&self) -> Vec<AttachmentId> {
-        Vec::new()
-    }
-
-    /// Clear attachment refs that were stamped committed by a successful
-    /// runtime commit.
-    fn mark_manifest_committed(&self, _ids: &[AttachmentId]) {}
-
-    /// Return the raw physical backend when this value is a session-bound
-    /// facade.
-    ///
-    /// Runtime assembly uses this hook before binding a store to a session.
-    /// That makes rebinding idempotent: rebuilding the same session does not
-    /// stack manifest decorators, and a managed child never inherits its
-    /// parent's session boundary. Plain physical stores return `None`.
-    #[doc(hidden)]
-    fn unscoped_backend(&self) -> Option<Arc<dyn AttachmentStore>> {
-        None
-    }
-
-    /// Identify the session bound by a session-scoped facade.
-    #[doc(hidden)]
-    fn bound_session_id(&self) -> Option<&str> {
-        None
     }
 
     async fn put(
@@ -99,112 +89,311 @@ pub trait AttachmentStore: Send + Sync {
 
     async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError>;
 
-    /// Store bytes in a physical namespace owned exclusively by `session_id`.
-    /// Logical ids remain content hashes; physical objects do not cross this
-    /// ownership boundary.
-    async fn put_for_session(
-        &self,
-        session_id: &str,
-        bytes: Vec<u8>,
-        meta: AttachmentCreateMeta,
-    ) -> Result<AttachmentRef, AttachmentStoreError>;
-
-    async fn get_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<StoredAttachment, AttachmentStoreError>;
-
-    /// Remove content from the unscoped namespace. Idempotent. Runtime-managed
-    /// attachments use [`AttachmentStore::delete_for_session`] instead.
+    /// Remove one blob. Idempotent: deleting an absent blob is a no-op. This is
+    /// the primitive mark-and-sweep GC uses to reclaim unreferenced content;
+    /// per-session lifecycle is expressed by dropping manifest refs, never by
+    /// calling this directly for a live session.
     async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError>;
 
-    /// Remove only `session_id`'s physical object. This is the reclamation
-    /// primitive for manifested attachments.
-    async fn delete_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<(), AttachmentStoreError>;
+    /// Enumerate every blob currently held. Used only by mark-and-sweep GC.
+    /// Large deployments may hold many blobs; backends should stream/batch
+    /// internally where possible. Order is unspecified.
+    async fn list(&self) -> Result<Vec<StoredBlobRef>, AttachmentStoreError>;
+
+    /// Re-fetch one blob's current freshness signal, or `None` if it is absent.
+    ///
+    /// The mark-and-sweep GC calls this immediately before deleting a candidate:
+    /// the `last_modified_epoch_ms` captured by the `list` snapshot is stale by
+    /// delete time, so a blob that a fresh `put` (a new intent for the same
+    /// content id) touched *after* the snapshot must be spared. The default
+    /// implementation scans `list`; backends override it with a cheap
+    /// stat/`HEAD`.
+    async fn head(&self, id: &AttachmentId) -> Result<Option<StoredBlobRef>, AttachmentStoreError> {
+        Ok(self.list().await?.into_iter().find(|blob| &blob.id == id))
+    }
 }
 
-/// Outcome of a host-invoked orphan-attachment reclamation sweep.
+/// A source of the live attachment root set: every attachment ref (intent or
+/// committed) across ALL sessions a store factory owns. Intents count as refs,
+/// so an in-flight write is never mistaken for garbage.
 ///
-/// See [`reclaim_orphaned_attachments`] for the full contract. Returned so
+/// Implemented by session-store factories, which own the full set of sessions:
+/// a global manifest table answers in one query (Postgres); a per-session
+/// database topology answers by iterating the factory's session databases at
+/// sweep time (SQLite); an in-memory factory answers from its live stores.
+#[async_trait::async_trait]
+pub trait AttachmentRootSet: Send + Sync {
+    /// The live root set, reconciled against `intent_grace_cutoff_epoch_ms`.
+    ///
+    /// A committed ref is always a root. An *uncommitted* intent counts as a
+    /// root only while it is younger than the cutoff; an intent whose
+    /// `intent_at_epoch_ms` is at or before the cutoff is a crash orphan (its
+    /// turn never committed and has aged past the grace window), so the root set
+    /// forgets it and excludes it, making its blob collectable. The cutoff is
+    /// `now - grace_period_ms`; callers must set the grace period larger than the
+    /// longest expected turn so a live turn's intent is never mistaken for an
+    /// orphan (the same assumption the removed per-session sweep made).
+    async fn live_attachment_refs(
+        &self,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<BTreeSet<AttachmentId>, StoreError>;
+
+    /// Whether a *single* id currently has a live root — a committed ref, or an
+    /// uncommitted intent younger than `intent_grace_cutoff_epoch_ms`.
+    ///
+    /// Targeted counterpart to [`Self::live_attachment_refs`] for the GC lever's
+    /// delete-time root re-check (see [`reclaim_unreferenced_attachments`]): the
+    /// full root set is snapshotted once, but a candidate blob can be re-referenced
+    /// in the narrow window between the freshness re-check and the delete, so the
+    /// sweep re-probes just that id. Unlike the snapshot, this is a read-only probe
+    /// — it must NOT reconcile (forget) aged intents. Backends answer with a single
+    /// indexed query / first-hit scan rather than materializing the whole set. The
+    /// default re-materializes the root set and tests membership.
+    async fn has_live_attachment_ref(
+        &self,
+        id: &AttachmentId,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .live_attachment_refs(intent_grace_cutoff_epoch_ms)
+            .await?
+            .contains(id))
+    }
+}
+
+/// Every session-store factory is a root set: it owns all sessions, so it can
+/// enumerate their refs. The concrete factories override
+/// [`SessionStoreFactory::live_attachment_refs`](crate::SessionStoreFactory::live_attachment_refs);
+/// this blanket makes any of them (including `dyn SessionStoreFactory`) usable
+/// as the GC lever's `root_set`.
+#[async_trait::async_trait]
+impl<T: crate::SessionStoreFactory + ?Sized> AttachmentRootSet for T {
+    async fn live_attachment_refs(
+        &self,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<BTreeSet<AttachmentId>, StoreError> {
+        crate::SessionStoreFactory::live_attachment_refs(self, intent_grace_cutoff_epoch_ms).await
+    }
+
+    async fn has_live_attachment_ref(
+        &self,
+        id: &AttachmentId,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<bool, StoreError> {
+        crate::SessionStoreFactory::has_live_attachment_ref(self, id, intent_grace_cutoff_epoch_ms)
+            .await
+    }
+}
+
+/// Outcome of a host-invoked unreferenced-attachment reclamation sweep.
+///
+/// See [`reclaim_unreferenced_attachments`] for the full contract. Returned so
 /// hosts can emit metrics the same way [`GcReport`](crate::GcReport) and
 /// [`VacuumReport`](crate::VacuumReport) do for the store-side levers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttachmentReclamationReport {
-    /// Uncommitted manifest intents aged past the threshold that the sweep
-    /// examined.
-    pub scanned_intent_count: usize,
-    /// Orphans reclaimed: bytes deleted from the store and the manifest row
-    /// forgotten. Equal to `scanned_intent_count` unless a delete failed.
+    /// Blobs enumerated from the backend and considered by the sweep.
+    pub scanned_blob_count: usize,
+    /// Blobs deleted: unreferenced by any session and past the grace window.
     pub reclaimed_count: usize,
+    /// Blobs the sweep tried but failed to delete. The sweep continues past
+    /// per-blob failures and reports them here rather than aborting.
+    pub failed_ids: Vec<AttachmentId>,
+    /// Blobs that were deleted but a live root re-appeared for in the residual
+    /// window between the pre-delete root re-check and the delete itself. The
+    /// bytes are already gone and cannot be restored, but a put-always-writes
+    /// backend self-heals on the referencing session's next `put` (the intent's
+    /// write-ahead ordering guarantees a retry rewrites the bytes). Recorded and
+    /// logged at error level so an operator sees the (single-digit-millisecond,
+    /// self-healing) event rather than a silent data loss.
+    pub deleted_while_referenced: Vec<AttachmentId>,
 }
 
-/// Reclaim attachment bytes left orphaned by a crash between `put` and the next
-/// durable commit — the host-invocable counterpart to
+/// Mark-and-sweep GC for attachment blobs — the host-invocable counterpart to
 /// [`StoreMaintenance::gc_unreachable`](crate::StoreMaintenance::gc_unreachable)
 /// for attachment payloads.
 ///
-/// The sweep asks the write-ahead `manifest` for every intent aged past
-/// `older_than_epoch_ms` that was recorded but never committed
-/// ([`AttachmentManifest::list_uncommitted`](crate::AttachmentManifest::list_uncommitted)),
-/// deletes each one's session-owned bytes, then forgets the
-/// manifest row ([`AttachmentManifest::forget`](crate::AttachmentManifest::forget)).
+/// Enumerates every blob in `backend`, computes the live root set from
+/// `root_set` (committed refs plus intents younger than the grace window;
+/// intents aged past the window are reconciled away as crash orphans), and
+/// deletes every blob no session references. A `grace_period_ms` window protects
+/// blobs whose bytes are freshly written or whose intent is still in flight: any
+/// blob modified within the window is spared even if it currently looks
+/// unreferenced. Per-blob delete failures are collected into
+/// [`AttachmentReclamationReport::failed_ids`]; the sweep does not abort on the
+/// first failure.
 ///
-/// Each manifested payload has a session-owned physical object, so reclaiming
-/// an uncommitted row cannot affect identical content committed by another
-/// session.
+/// # Two reconciliation windows, one grace period
+///
+/// `grace_period_ms` gates two independent hazards, both keyed off the same
+/// value:
+///
+/// * *Aged uncommitted intents.* The root set forgets every intent older than
+///   `now - grace_period_ms` and excludes it, so a blob orphaned by a crash
+///   between `put` and the next turn commit is finally collectable. Intents
+///   younger than the window stay roots, so a live in-flight write is never
+///   swept.
+/// * *Delete-time freshness race.* The `list` snapshot's `last_modified` is
+///   stale by the time the sweep reaches a candidate. Before deleting, the sweep
+///   re-fetches the blob's freshness with [`AttachmentStore::head`] and spares
+///   any blob touched within the window — covering the interleaving where a new
+///   intent plus a `put` of the same content id lands after the root snapshot
+///   was taken (the `put` refreshes the blob's modification time).
+///
+/// The host must therefore set `grace_period_ms` larger than the longest
+/// expected turn, so neither a live turn's intent nor a just-written blob is
+/// ever reclaimed.
+///
+/// # The delete window and its residual
+///
+/// After the freshness re-check the sweep does a *targeted root re-check* for the
+/// single candidate id ([`AttachmentRootSet::has_live_attachment_ref`]) and skips
+/// any blob a session has re-referenced since the root snapshot. This probe is
+/// what the write-ahead intent ordering makes reliable: the facade records the
+/// manifest intent *before* the backend `put`, so a root exists no later than the
+/// bytes. A ref can still appear in the residual window between that probe and the
+/// physical delete — bounded to the single-digit milliseconds of one probe plus
+/// one delete. When it does, the bytes are already unrecoverable, but every
+/// backend `put` physically rewrites absent content, so the referencing session's
+/// next `put` self-heals; the sweep records the id in
+/// [`AttachmentReclamationReport::deleted_while_referenced`] and logs at error
+/// level so the (rare, self-healing) event is never silent.
+///
+/// # Deployment assumption
+///
+/// The `backend` instance is assumed exclusive to this lash deployment: every
+/// blob it holds was written by this deployment's sessions, so a blob with no
+/// live ref is genuinely garbage. Sharing a bucket/directory across
+/// deployments would let this sweep delete another deployment's live content.
 ///
 /// # Policy is the host's (ADR-0014)
 ///
-/// This is a lever, not a scheduler: the host chooses `older_than_epoch_ms`
-/// (typically `now - grace_period`, where the grace period exceeds any live
-/// turn's duration so an in-flight `put` is never swept) and when to run it. It
-/// does no background work of its own.
-pub async fn reclaim_orphaned_attachments<M, S>(
-    manifest: &M,
-    store: &S,
-    older_than_epoch_ms: u64,
+/// This is a lever, not a scheduler: the host chooses `grace_period_ms`
+/// (larger than any live turn's duration so an in-flight `put` is never swept)
+/// and when to run it. It does no background work of its own.
+pub async fn reclaim_unreferenced_attachments<R>(
+    root_set: &R,
+    backend: &dyn AttachmentStore,
+    grace_period_ms: u64,
 ) -> Result<AttachmentReclamationReport, AttachmentStoreError>
 where
-    M: AttachmentManifest + ?Sized,
-    S: AttachmentStore + ?Sized,
+    R: AttachmentRootSet + ?Sized,
 {
-    let orphans = manifest
-        .list_uncommitted(older_than_epoch_ms)
+    let now = now_epoch_ms();
+    let intent_grace_cutoff = now.saturating_sub(grace_period_ms);
+    let live = root_set
+        .live_attachment_refs(intent_grace_cutoff)
+        .await
         .map_err(|err| {
             AttachmentStoreError::Backend(format!(
-                "failed to list uncommitted attachment intents: {err}"
+                "failed to enumerate live attachment refs: {err}"
             ))
         })?;
-    let scanned_intent_count = orphans.len();
-    let mut reclaimed_count = 0;
-    for orphan in orphans {
-        store
-            .delete_for_session(&orphan.session_id, &orphan.attachment_id)
-            .await?;
-        manifest
-            .forget(&orphan.session_id, &orphan.attachment_id)
-            .map_err(|err| {
-                AttachmentStoreError::Backend(format!(
-                    "failed to forget reclaimed attachment `{}`: {err}",
-                    orphan.attachment_id
-                ))
-            })?;
-        reclaimed_count += 1;
+    let blobs = backend.list().await?;
+    let mut report = AttachmentReclamationReport::default();
+    for blob in blobs {
+        report.scanned_blob_count += 1;
+        if live.contains(&blob.id) {
+            continue;
+        }
+        if within_grace(blob.last_modified_epoch_ms, now, grace_period_ms) {
+            // Fresh write or in-flight intent per the (possibly stale) snapshot.
+            continue;
+        }
+        // (a) Delete-time freshness re-check: the snapshot's freshness is stale, so
+        // re-stat the blob immediately before deleting. A concurrent
+        // new-intent-plus-`put` of the same content id — landed after the root
+        // snapshot — refreshes the blob's modification time; spare it so a
+        // newly-referenced blob is never reclaimed out from under its intent.
+        match backend.head(&blob.id).await {
+            Ok(Some(fresh)) => {
+                if within_grace(
+                    fresh.last_modified_epoch_ms,
+                    now_epoch_ms(),
+                    grace_period_ms,
+                ) {
+                    continue;
+                }
+            }
+            // Already gone (a concurrent delete): nothing to reclaim.
+            Ok(None) => continue,
+            // Could not re-stat: treat as a per-blob failure rather than risk
+            // deleting a blob we can no longer vouch for.
+            Err(_) => {
+                report.failed_ids.push(blob.id);
+                continue;
+            }
+        }
+        // (b) Targeted root re-check for THIS id. The `live` snapshot was taken
+        // before the per-blob loop began; a session may have recorded a fresh
+        // intent for this content id since. This is effective because the facade's
+        // `put` records the write-ahead intent BEFORE the backend `put` refreshes
+        // the bytes (`SessionAttachmentStore::put`): by the time bytes exist to be
+        // reclaimed, the intent row that roots them already does, so this probe
+        // observes it. A live root here means we must not delete.
+        match root_set
+            .has_live_attachment_ref(&blob.id, intent_grace_cutoff)
+            .await
+        {
+            Ok(true) => continue,
+            Ok(false) => {}
+            // Could not probe the root set: do not delete a blob we can no longer
+            // prove is unreferenced.
+            Err(_) => {
+                report.failed_ids.push(blob.id);
+                continue;
+            }
+        }
+        // (c) Delete.
+        match backend.delete(&blob.id).await {
+            Ok(()) => {
+                report.reclaimed_count += 1;
+                // (d) Post-delete root re-check. A ref can still appear in the
+                // residual window between (b) and (c) — bounded to the single-digit
+                // milliseconds of one root-set probe plus one backend delete. The
+                // bytes are already gone and cannot be restored, but every backend
+                // `put` physically rewrites content when it is absent (file store
+                // rewrites on a missing path, S3 PUTs unconditionally, the
+                // in-memory store re-inserts), so the referencing session's next
+                // `put` self-heals. Record and log loudly so an operator sees the
+                // (rare, self-healing) event.
+                // A late ref (probe answers true) is recorded and alarmed. No late
+                // ref, or a failed probe, needs nothing more — a failed probe here
+                // cannot un-delete the blob.
+                if let Ok(true) = root_set
+                    .has_live_attachment_ref(&blob.id, intent_grace_cutoff)
+                    .await
+                {
+                    tracing::error!(
+                        attachment_id = %blob.id,
+                        "attachment GC deleted a blob that was re-referenced in the \
+                         delete window; bytes are unrecoverable but a subsequent put \
+                         self-heals"
+                    );
+                    report.deleted_while_referenced.push(blob.id);
+                }
+            }
+            Err(_) => report.failed_ids.push(blob.id),
+        }
     }
-    Ok(AttachmentReclamationReport {
-        scanned_intent_count,
-        reclaimed_count,
-    })
+    Ok(report)
+}
+
+/// Whether a blob modified at `last_modified_epoch_ms` is within the write grace
+/// window relative to `now`. A backend that cannot report a modification time
+/// (`None`) is treated as past the window, matching [`StoredBlobRef`].
+fn within_grace(last_modified_epoch_ms: Option<u64>, now: u64, grace_period_ms: u64) -> bool {
+    last_modified_epoch_ms.is_some_and(|modified| now.saturating_sub(modified) < grace_period_ms)
+}
+
+struct InMemoryBlob {
+    stored: StoredAttachment,
+    stored_at_epoch_ms: u64,
 }
 
 #[derive(Default)]
 pub struct InMemoryAttachmentStore {
-    attachments: Mutex<HashMap<(Option<String>, AttachmentId), StoredAttachment>>,
+    attachments: Mutex<HashMap<AttachmentId, InMemoryBlob>>,
 }
 
 impl InMemoryAttachmentStore {
@@ -222,11 +411,22 @@ impl AttachmentStore for InMemoryAttachmentStore {
     ) -> Result<AttachmentRef, AttachmentStoreError> {
         let meta = stored_meta(&bytes, meta);
         let reference = meta.as_ref();
-        let stored = StoredAttachment { bytes };
-        self.attachments
-            .lock()
-            .expect("attachment store lock")
-            .insert((None, reference.id.clone()), stored);
+        let now = now_epoch_ms();
+        let mut attachments = self.attachments.lock().expect("attachment store lock");
+        match attachments.entry(reference.id.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                // Dedup hit: refresh the freshness signal so a GC sweep that
+                // snapshotted the roots before this put cannot reclaim the
+                // now-freshly-referenced blob.
+                existing.get_mut().stored_at_epoch_ms = now;
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(InMemoryBlob {
+                    stored: StoredAttachment { bytes },
+                    stored_at_epoch_ms: now,
+                });
+            }
+        }
         Ok(reference)
     }
 
@@ -234,8 +434,8 @@ impl AttachmentStore for InMemoryAttachmentStore {
         self.attachments
             .lock()
             .expect("attachment store lock")
-            .get(&(None, id.clone()))
-            .cloned()
+            .get(id)
+            .map(|blob| blob.stored.clone())
             .ok_or_else(|| AttachmentStoreError::NotFound(id.clone()))
     }
 
@@ -243,51 +443,33 @@ impl AttachmentStore for InMemoryAttachmentStore {
         self.attachments
             .lock()
             .expect("attachment store lock")
-            .remove(&(None, id.clone()));
+            .remove(id);
         Ok(())
     }
 
-    async fn put_for_session(
-        &self,
-        session_id: &str,
-        bytes: Vec<u8>,
-        meta: AttachmentCreateMeta,
-    ) -> Result<AttachmentRef, AttachmentStoreError> {
-        let meta = stored_meta(&bytes, meta);
-        let reference = meta.as_ref();
-        self.attachments
+    async fn list(&self) -> Result<Vec<StoredBlobRef>, AttachmentStoreError> {
+        Ok(self
+            .attachments
             .lock()
             .expect("attachment store lock")
-            .insert(
-                (Some(session_id.to_string()), reference.id.clone()),
-                StoredAttachment { bytes },
-            );
-        Ok(reference)
+            .iter()
+            .map(|(id, blob)| StoredBlobRef {
+                id: id.clone(),
+                last_modified_epoch_ms: Some(blob.stored_at_epoch_ms),
+            })
+            .collect())
     }
 
-    async fn get_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<StoredAttachment, AttachmentStoreError> {
-        self.attachments
+    async fn head(&self, id: &AttachmentId) -> Result<Option<StoredBlobRef>, AttachmentStoreError> {
+        Ok(self
+            .attachments
             .lock()
             .expect("attachment store lock")
-            .get(&(Some(session_id.to_string()), id.clone()))
-            .cloned()
-            .ok_or_else(|| AttachmentStoreError::NotFound(id.clone()))
-    }
-
-    async fn delete_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<(), AttachmentStoreError> {
-        self.attachments
-            .lock()
-            .expect("attachment store lock")
-            .remove(&(Some(session_id.to_string()), id.clone()));
-        Ok(())
+            .get(id)
+            .map(|blob| StoredBlobRef {
+                id: id.clone(),
+                last_modified_epoch_ms: Some(blob.stored_at_epoch_ms),
+            }))
     }
 }
 
@@ -295,43 +477,48 @@ pub fn content_id(bytes: &[u8]) -> AttachmentId {
     AttachmentId::new(format!("{:x}", Sha256::digest(bytes)))
 }
 
-/// Session-scoped wrapper that records a write-ahead intent in
-/// [`AttachmentManifest`] before delegating each `put` to the backing
-/// [`AttachmentStore`]. The intent row durably captures "this session
-/// is about to write these bytes," so if the process dies between
-/// `put` and the next committed runtime state, a later GC sweep can
-/// reconcile the orphaned bytes by walking
-/// [`AttachmentManifest::list_uncommitted`].
+/// The concrete, session-bound facade over a flat [`AttachmentStore`] backend —
+/// the only attachment surface the runtime and its consumers ever see.
 ///
-/// Constructed by the runtime when both a durable [`AttachmentStore`]
-/// and a [`RuntimePersistence`](crate::RuntimePersistence) backend
-/// (which also implements [`AttachmentManifest`]) are wired up. Other
-/// callers — tests, hosts using only ephemeral storage — keep the
-/// plain inner store and skip the manifest entirely.
-pub struct SessionScopedAttachmentStore {
-    inner: Arc<dyn AttachmentStore>,
+/// It binds a flat blob `backend`, an [`AttachmentManifest`] that tracks
+/// `(session_id, attachment_id)` refs, and a `session_id`. Every `put` records
+/// a write-ahead intent in the manifest *before* the bytes hit the backend, so
+/// a crash between `put` and the next durable commit surfaces as an uncommitted
+/// manifest row that GC reconciles. Every `get` first checks the manifest holds
+/// a ref for this session — the session-boundary guard that replaces physical
+/// per-session isolation: a turn in one session can never resolve another
+/// session's content-addressed blob by guessing its hash. `delete` drops the
+/// session's manifest ref and leaves the blob in place; the bytes die later via
+/// [`reclaim_unreferenced_attachments`] once no session references them.
+///
+/// Ephemeral runtimes (no durable reference store) wrap their backend with a
+/// [`NoopAttachmentManifest`] via [`SessionAttachmentStore::ephemeral`], so
+/// consumers still see exactly one type. A no-op manifest imposes no boundary
+/// guard (reads pass straight through) and records nothing.
+pub struct SessionAttachmentStore {
+    backend: Arc<dyn AttachmentStore>,
     manifest: Arc<dyn AttachmentManifest>,
     session_id: String,
     pending_manifest_commit_ids: Mutex<BTreeSet<AttachmentId>>,
 }
 
-impl SessionScopedAttachmentStore {
+impl SessionAttachmentStore {
     pub fn new(
-        inner: Arc<dyn AttachmentStore>,
+        backend: Arc<dyn AttachmentStore>,
         manifest: Arc<dyn AttachmentManifest>,
         session_id: impl Into<String>,
     ) -> Self {
-        Self::new_with_pending(inner, manifest, session_id, std::iter::empty())
+        Self::new_with_pending(backend, manifest, session_id, std::iter::empty())
     }
 
-    pub(crate) fn new_with_pending(
-        inner: Arc<dyn AttachmentStore>,
+    pub fn new_with_pending(
+        backend: Arc<dyn AttachmentStore>,
         manifest: Arc<dyn AttachmentManifest>,
         session_id: impl Into<String>,
         pending_manifest_commit_ids: impl IntoIterator<Item = AttachmentId>,
     ) -> Self {
         Self {
-            inner,
+            backend,
             manifest,
             session_id: session_id.into(),
             pending_manifest_commit_ids: Mutex::new(
@@ -340,22 +527,37 @@ impl SessionScopedAttachmentStore {
         }
     }
 
-    pub fn inner(&self) -> &Arc<dyn AttachmentStore> {
-        &self.inner
+    /// Ephemeral facade: wrap `backend` with a no-op manifest and an empty
+    /// session id. No boundary guard, no reference tracking — used by ephemeral
+    /// runtimes and tests with no durable reference store.
+    pub fn ephemeral(backend: Arc<dyn AttachmentStore>) -> Self {
+        Self::new(backend, Arc::new(NoopAttachmentManifest), String::new())
+    }
+
+    /// Ephemeral facade over a fresh in-memory backend.
+    pub fn in_memory() -> Self {
+        Self::ephemeral(Arc::new(InMemoryAttachmentStore::new()))
+    }
+
+    pub fn backend(&self) -> &Arc<dyn AttachmentStore> {
+        &self.backend
     }
 
     pub fn manifest(&self) -> &Arc<dyn AttachmentManifest> {
         &self.manifest
     }
-}
 
-#[async_trait::async_trait]
-impl AttachmentStore for SessionScopedAttachmentStore {
-    fn persistence(&self) -> AttachmentStorePersistence {
-        self.inner.persistence()
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
-    fn pending_manifest_commit_ids(&self) -> Vec<AttachmentId> {
+    pub fn persistence(&self) -> AttachmentStorePersistence {
+        self.backend.persistence()
+    }
+
+    /// Attachment refs written through this facade that still need their
+    /// write-ahead manifest rows stamped by the next runtime commit.
+    pub fn pending_manifest_commit_ids(&self) -> Vec<AttachmentId> {
         self.pending_manifest_commit_ids
             .lock()
             .expect("attachment manifest commit tracker lock")
@@ -364,7 +566,9 @@ impl AttachmentStore for SessionScopedAttachmentStore {
             .collect()
     }
 
-    fn mark_manifest_committed(&self, ids: &[AttachmentId]) {
+    /// Clear attachment refs that were stamped committed by a successful
+    /// runtime commit.
+    pub fn mark_manifest_committed(&self, ids: &[AttachmentId]) {
         if ids.is_empty() {
             return;
         }
@@ -377,17 +581,7 @@ impl AttachmentStore for SessionScopedAttachmentStore {
         }
     }
 
-    fn unscoped_backend(&self) -> Option<Arc<dyn AttachmentStore>> {
-        self.inner
-            .unscoped_backend()
-            .or_else(|| Some(Arc::clone(&self.inner)))
-    }
-
-    fn bound_session_id(&self) -> Option<&str> {
-        Some(&self.session_id)
-    }
-
-    async fn put(
+    pub async fn put(
         &self,
         bytes: Vec<u8>,
         meta: AttachmentCreateMeta,
@@ -396,20 +590,17 @@ impl AttachmentStore for SessionScopedAttachmentStore {
         let intent = AttachmentIntent {
             attachment_id: attachment_id.clone(),
             session_id: self.session_id.clone(),
-            canonical_uri: session_attachment_uri(&self.session_id, &attachment_id),
+            canonical_uri: attachment_uri(&attachment_id),
             intent_at_epoch_ms: now_epoch_ms(),
         };
-        // Record intent first. If this fails the bytes never land,
-        // matching the write-ahead guarantee.
+        // Record intent first. If this fails the bytes never land, matching the
+        // write-ahead guarantee.
         self.manifest.record_intent(intent).map_err(|err| {
             AttachmentStoreError::ManifestRecordFailed(format!(
                 "failed to record attachment intent for `{attachment_id}`: {err}"
             ))
         })?;
-        let reference = self
-            .inner
-            .put_for_session(&self.session_id, bytes, meta)
-            .await?;
+        let reference = self.backend.put(bytes, meta).await?;
         if reference.id != attachment_id {
             return Err(AttachmentStoreError::Backend(format!(
                 "attachment store returned id `{}` after manifest intent for `{attachment_id}`",
@@ -423,65 +614,84 @@ impl AttachmentStore for SessionScopedAttachmentStore {
         Ok(reference)
     }
 
-    async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
-        self.inner.get_for_session(&self.session_id, id).await
-    }
-
-    async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
-        self.inner.delete_for_session(&self.session_id, id).await
-    }
-
-    async fn put_for_session(
-        &self,
-        session_id: &str,
-        bytes: Vec<u8>,
-        meta: AttachmentCreateMeta,
-    ) -> Result<AttachmentRef, AttachmentStoreError> {
-        if session_id != self.session_id {
-            return Err(AttachmentStoreError::Backend(format!(
-                "attachment store for `{}` cannot write for `{session_id}`",
-                self.session_id
-            )));
-        }
-        self.put(bytes, meta).await
-    }
-
-    async fn get_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<StoredAttachment, AttachmentStoreError> {
-        if session_id != self.session_id {
+    pub async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
+        // Session-boundary guard: refuse to resolve a blob this session never
+        // referenced, even if the backend physically holds identical bytes for
+        // another session.
+        let holds_ref = self
+            .manifest
+            .holds_ref(&self.session_id, id)
+            .map_err(|err| {
+                AttachmentStoreError::Backend(format!(
+                    "failed to check attachment manifest for `{id}`: {err}"
+                ))
+            })?;
+        if !holds_ref {
             return Err(AttachmentStoreError::NotFound(id.clone()));
         }
-        self.get(id).await
+        self.backend.get(id).await
     }
 
-    async fn delete_for_session(
+    pub async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
+        // Drop this session's manifest ref. Backend bytes stay put; they are
+        // reclaimed by GC once no session references them.
+        self.pending_manifest_commit_ids
+            .lock()
+            .expect("attachment manifest commit tracker lock")
+            .remove(id);
+        self.manifest.forget(&self.session_id, id).map_err(|err| {
+            AttachmentStoreError::ManifestRecordFailed(format!(
+                "failed to forget attachment ref for `{id}`: {err}"
+            ))
+        })?;
+        Ok(())
+    }
+}
+
+/// No-op [`AttachmentManifest`] for ephemeral facades: records nothing, imposes
+/// no boundary guard (`holds_ref` returns `true`), and exposes no refs. The
+/// backend is the sole source of truth for these runtimes.
+pub struct NoopAttachmentManifest;
+
+impl AttachmentManifest for NoopAttachmentManifest {
+    fn record_intent(&self, _intent: AttachmentIntent) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn commit_refs(
         &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<(), AttachmentStoreError> {
-        if session_id != self.session_id {
-            return Err(AttachmentStoreError::Backend(format!(
-                "attachment store for `{}` cannot delete for `{session_id}`",
-                self.session_id
-            )));
-        }
-        self.delete(id).await
+        _session_id: &str,
+        _attachment_ids: &[AttachmentId],
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn list_uncommitted(
+        &self,
+        _older_than_epoch_ms: u64,
+    ) -> Result<Vec<crate::AttachmentManifestEntry>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn forget(&self, _session_id: &str, _attachment_id: &AttachmentId) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn holds_ref(
+        &self,
+        _session_id: &str,
+        _attachment_id: &AttachmentId,
+    ) -> Result<bool, StoreError> {
+        Ok(true)
+    }
+
+    fn list_all_refs(&self) -> Result<Vec<AttachmentId>, StoreError> {
+        Ok(Vec::new())
     }
 }
 
-fn session_attachment_uri(session_id: &str, attachment_id: &AttachmentId) -> String {
-    format!(
-        "lash-attachment://session/{}/sha256/{attachment_id}",
-        session_storage_namespace(session_id)
-    )
-}
-
-#[doc(hidden)]
-pub fn session_storage_namespace(session_id: &str) -> String {
-    format!("{:x}", Sha256::digest(session_id.as_bytes()))
+fn attachment_uri(attachment_id: &AttachmentId) -> String {
+    format!("lash-attachment://sha256/{attachment_id}")
 }
 
 fn now_epoch_ms() -> u64 {
@@ -521,6 +731,18 @@ impl AttachmentManifest for PersistenceManifestAdapter {
     ) -> Result<(), crate::StoreError> {
         AttachmentManifest::forget(&*self.0, session_id, attachment_id)
     }
+
+    fn holds_ref(
+        &self,
+        session_id: &str,
+        attachment_id: &AttachmentId,
+    ) -> Result<bool, crate::StoreError> {
+        AttachmentManifest::holds_ref(&*self.0, session_id, attachment_id)
+    }
+
+    fn list_all_refs(&self) -> Result<Vec<AttachmentId>, crate::StoreError> {
+        AttachmentManifest::list_all_refs(&*self.0)
+    }
 }
 
 fn stored_meta(bytes: &[u8], meta: AttachmentCreateMeta) -> AttachmentMeta {
@@ -536,7 +758,7 @@ fn stored_meta(bytes: &[u8], meta: AttachmentCreateMeta) -> AttachmentMeta {
 
 pub async fn resolve_llm_request_attachments(
     mut request: crate::llm::types::LlmRequest,
-    store: &dyn AttachmentStore,
+    store: &SessionAttachmentStore,
 ) -> Result<crate::llm::types::LlmRequest, AttachmentStoreError> {
     for attachment in &mut request.attachments {
         let Some(reference) = attachment.reference.as_ref() else {
@@ -556,18 +778,26 @@ pub async fn resolve_llm_request_attachments(
 mod tests {
     use super::*;
     use lash_sansio::{ImageMediaType, MediaType};
-    use std::collections::HashSet;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Default)]
     struct RecordingManifest {
-        intents: Mutex<Vec<AttachmentIntent>>,
-        committed: Mutex<Vec<(String, AttachmentId)>>,
+        entries: Mutex<HashMap<(String, AttachmentId), crate::AttachmentManifestEntry>>,
     }
 
     impl AttachmentManifest for RecordingManifest {
         fn record_intent(&self, intent: AttachmentIntent) -> Result<(), crate::StoreError> {
-            self.intents.lock().expect("lock intents").push(intent);
+            let key = (intent.session_id.clone(), intent.attachment_id.clone());
+            self.entries
+                .lock()
+                .expect("lock entries")
+                .entry(key)
+                .or_insert(crate::AttachmentManifestEntry {
+                    attachment_id: intent.attachment_id,
+                    session_id: intent.session_id,
+                    canonical_uri: intent.canonical_uri,
+                    intent_at_epoch_ms: intent.intent_at_epoch_ms,
+                    committed_at_epoch_ms: None,
+                });
             Ok(())
         }
 
@@ -576,13 +806,14 @@ mod tests {
             session_id: &str,
             attachment_ids: &[AttachmentId],
         ) -> Result<(), crate::StoreError> {
-            let mut committed = self.committed.lock().expect("lock committed attachments");
-            committed.extend(
-                attachment_ids
-                    .iter()
-                    .cloned()
-                    .map(|attachment_id| (session_id.to_string(), attachment_id)),
-            );
+            let mut entries = self.entries.lock().expect("lock entries");
+            for attachment_id in attachment_ids {
+                if let Some(entry) =
+                    entries.get_mut(&(session_id.to_string(), attachment_id.clone()))
+                {
+                    entry.committed_at_epoch_ms.get_or_insert(1);
+                }
+            }
             Ok(())
         }
 
@@ -590,29 +821,16 @@ mod tests {
             &self,
             older_than_epoch_ms: u64,
         ) -> Result<Vec<crate::AttachmentManifestEntry>, crate::StoreError> {
-            let committed = self
-                .committed
-                .lock()
-                .expect("lock committed attachments")
-                .iter()
-                .cloned()
-                .collect::<HashSet<_>>();
             Ok(self
-                .intents
+                .entries
                 .lock()
-                .expect("lock intents")
-                .iter()
-                .filter(|intent| intent.intent_at_epoch_ms <= older_than_epoch_ms)
-                .filter(|intent| {
-                    !committed.contains(&(intent.session_id.clone(), intent.attachment_id.clone()))
+                .expect("lock entries")
+                .values()
+                .filter(|entry| {
+                    entry.committed_at_epoch_ms.is_none()
+                        && entry.intent_at_epoch_ms <= older_than_epoch_ms
                 })
-                .map(|intent| crate::AttachmentManifestEntry {
-                    attachment_id: intent.attachment_id.clone(),
-                    session_id: intent.session_id.clone(),
-                    canonical_uri: intent.canonical_uri.clone(),
-                    intent_at_epoch_ms: intent.intent_at_epoch_ms,
-                    committed_at_epoch_ms: None,
-                })
+                .cloned()
                 .collect())
         }
 
@@ -621,327 +839,59 @@ mod tests {
             session_id: &str,
             attachment_id: &AttachmentId,
         ) -> Result<(), crate::StoreError> {
-            self.intents.lock().expect("lock intents").retain(|intent| {
-                intent.session_id != session_id || intent.attachment_id != *attachment_id
-            });
+            self.entries
+                .lock()
+                .expect("lock entries")
+                .remove(&(session_id.to_string(), attachment_id.clone()));
             Ok(())
         }
-    }
 
-    #[derive(Default)]
-    struct RecordingRuntimePersistence {
-        inner: crate::InMemorySessionStore,
-        manifest: RecordingManifest,
-    }
-
-    impl AttachmentManifest for RecordingRuntimePersistence {
-        fn record_intent(&self, intent: AttachmentIntent) -> Result<(), crate::StoreError> {
-            self.manifest.record_intent(intent)
-        }
-
-        fn commit_refs(
-            &self,
-            session_id: &str,
-            attachment_ids: &[AttachmentId],
-        ) -> Result<(), crate::StoreError> {
-            self.manifest.commit_refs(session_id, attachment_ids)
-        }
-
-        fn list_uncommitted(
-            &self,
-            older_than_epoch_ms: u64,
-        ) -> Result<Vec<crate::AttachmentManifestEntry>, crate::StoreError> {
-            self.manifest.list_uncommitted(older_than_epoch_ms)
-        }
-
-        fn forget(
+        fn holds_ref(
             &self,
             session_id: &str,
             attachment_id: &AttachmentId,
-        ) -> Result<(), crate::StoreError> {
-            self.manifest.forget(session_id, attachment_id)
+        ) -> Result<bool, crate::StoreError> {
+            Ok(self
+                .entries
+                .lock()
+                .expect("lock entries")
+                .contains_key(&(session_id.to_string(), attachment_id.clone())))
+        }
+
+        fn list_all_refs(&self) -> Result<Vec<AttachmentId>, crate::StoreError> {
+            Ok(self
+                .entries
+                .lock()
+                .expect("lock entries")
+                .values()
+                .map(|entry| entry.attachment_id.clone())
+                .collect())
         }
     }
 
-    // Pass-through wrapper: every persistence segment delegates to the inner
-    // in-memory store; only the attachment manifest is replaced with the
-    // recording double above.
-    #[async_trait::async_trait]
-    impl crate::SessionCommitStore for RecordingRuntimePersistence {
-        async fn load_session(
-            &self,
-            scope: crate::SessionReadScope,
-        ) -> Result<Option<crate::PersistedSessionRead>, crate::StoreError> {
-            crate::SessionCommitStore::load_session(&self.inner, scope).await
-        }
-
-        async fn load_node(
-            &self,
-            node_id: &str,
-        ) -> Result<Option<crate::SessionNodeRecord>, crate::StoreError> {
-            crate::SessionCommitStore::load_node(&self.inner, node_id).await
-        }
-
-        async fn commit_runtime_state(
-            &self,
-            commit: crate::RuntimeCommit,
-        ) -> Result<crate::RuntimeCommitResult, crate::StoreError> {
-            crate::SessionCommitStore::commit_runtime_state(&self.inner, commit).await
-        }
-
-        async fn save_session_meta(
-            &self,
-            meta: crate::SessionMeta,
-        ) -> Result<(), crate::StoreError> {
-            crate::SessionCommitStore::save_session_meta(&self.inner, meta).await
-        }
-
-        async fn load_session_meta(&self) -> Result<Option<crate::SessionMeta>, crate::StoreError> {
-            crate::SessionCommitStore::load_session_meta(&self.inner).await
-        }
+    /// Root set backed by a set of [`RecordingManifest`]s — the in-memory
+    /// analogue of a factory unioning its sessions' refs.
+    struct RecordingRootSet {
+        manifests: Vec<Arc<RecordingManifest>>,
     }
 
     #[async_trait::async_trait]
-    impl crate::SessionExecutionLeaseStore for RecordingRuntimePersistence {
-        async fn try_claim_session_execution_lease(
+    impl AttachmentRootSet for RecordingRootSet {
+        async fn live_attachment_refs(
             &self,
-            session_id: &str,
-            owner: &crate::LeaseOwnerIdentity,
-            lease_ttl_ms: u64,
-        ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::StoreError> {
-            crate::SessionExecutionLeaseStore::try_claim_session_execution_lease(
-                &self.inner,
-                session_id,
-                owner,
-                lease_ttl_ms,
-            )
-            .await
-        }
-
-        async fn reclaim_session_execution_lease(
-            &self,
-            session_id: &str,
-            owner: &crate::LeaseOwnerIdentity,
-            observed_holder: &crate::SessionExecutionLeaseFence,
-            lease_ttl_ms: u64,
-        ) -> Result<crate::SessionExecutionLeaseClaimOutcome, crate::StoreError> {
-            crate::SessionExecutionLeaseStore::reclaim_session_execution_lease(
-                &self.inner,
-                session_id,
-                owner,
-                observed_holder,
-                lease_ttl_ms,
-            )
-            .await
-        }
-
-        async fn renew_session_execution_lease(
-            &self,
-            fence: &crate::SessionExecutionLeaseFence,
-            lease_ttl_ms: u64,
-        ) -> Result<crate::SessionExecutionLease, crate::StoreError> {
-            crate::SessionExecutionLeaseStore::renew_session_execution_lease(
-                &self.inner,
-                fence,
-                lease_ttl_ms,
-            )
-            .await
-        }
-
-        async fn release_session_execution_lease(
-            &self,
-            completion: &crate::SessionExecutionLeaseCompletion,
-        ) -> Result<(), crate::StoreError> {
-            crate::SessionExecutionLeaseStore::release_session_execution_lease(
-                &self.inner,
-                completion,
-            )
-            .await
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::TurnInputStore for RecordingRuntimePersistence {
-        async fn enqueue_pending_turn_input(
-            &self,
-            input: crate::PendingTurnInputDraft,
-        ) -> Result<crate::PendingTurnInput, crate::StoreError> {
-            crate::TurnInputStore::enqueue_pending_turn_input(&self.inner, input).await
-        }
-
-        async fn list_pending_turn_inputs(
-            &self,
-            session_id: &str,
-        ) -> Result<Vec<crate::PendingTurnInput>, crate::StoreError> {
-            crate::TurnInputStore::list_pending_turn_inputs(&self.inner, session_id).await
-        }
-
-        async fn cancel_pending_turn_inputs(
-            &self,
-            session_id: &str,
-            targets: &[crate::PendingTurnInputCancelTarget],
-        ) -> Result<Vec<crate::PendingTurnInputCancelResult>, crate::StoreError> {
-            crate::TurnInputStore::cancel_pending_turn_inputs(&self.inner, session_id, targets)
-                .await
-        }
-
-        async fn cancel_pending_turn_input_suffix(
-            &self,
-            session_id: &str,
-            anchor: &crate::PendingTurnInputCancelTarget,
-        ) -> Result<crate::PendingTurnInputSuffixCancelOutcome, crate::StoreError> {
-            crate::TurnInputStore::cancel_pending_turn_input_suffix(&self.inner, session_id, anchor)
-                .await
-        }
-
-        async fn claim_active_turn_inputs(
-            &self,
-            session_id: &str,
-            session_execution_lease: &crate::SessionExecutionLeaseFence,
-            owner: &crate::LeaseOwnerIdentity,
-            turn_id: &str,
-            checkpoint: crate::CheckpointKind,
-            lease_ttl_ms: u64,
-            max_inputs: usize,
-        ) -> Result<Option<crate::TurnInputClaim>, crate::StoreError> {
-            crate::TurnInputStore::claim_active_turn_inputs(
-                &self.inner,
-                session_id,
-                session_execution_lease,
-                owner,
-                turn_id,
-                checkpoint,
-                lease_ttl_ms,
-                max_inputs,
-            )
-            .await
-        }
-
-        async fn claim_next_turn_inputs(
-            &self,
-            session_id: &str,
-            session_execution_lease: &crate::SessionExecutionLeaseFence,
-            owner: &crate::LeaseOwnerIdentity,
-            lease_ttl_ms: u64,
-            max_inputs: usize,
-        ) -> Result<Option<crate::TurnInputClaim>, crate::StoreError> {
-            crate::TurnInputStore::claim_next_turn_inputs(
-                &self.inner,
-                session_id,
-                session_execution_lease,
-                owner,
-                lease_ttl_ms,
-                max_inputs,
-            )
-            .await
-        }
-
-        async fn abandon_turn_input_claim(
-            &self,
-            claim: &crate::TurnInputClaim,
-        ) -> Result<(), crate::StoreError> {
-            crate::TurnInputStore::abandon_turn_input_claim(&self.inner, claim).await
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::QueuedWorkStore for RecordingRuntimePersistence {
-        async fn enqueue_queued_work(
-            &self,
-            batch: crate::QueuedWorkBatchDraft,
-        ) -> Result<crate::QueuedWorkBatch, crate::StoreError> {
-            crate::QueuedWorkStore::enqueue_queued_work(&self.inner, batch).await
-        }
-
-        async fn claim_leading_ready_session_command(
-            &self,
-            session_id: &str,
-            session_execution_lease: &crate::SessionExecutionLeaseFence,
-            owner: &crate::LeaseOwnerIdentity,
-            lease_ttl_ms: u64,
-        ) -> Result<Option<crate::QueuedWorkClaim>, crate::StoreError> {
-            crate::QueuedWorkStore::claim_leading_ready_session_command(
-                &self.inner,
-                session_id,
-                session_execution_lease,
-                owner,
-                lease_ttl_ms,
-            )
-            .await
-        }
-
-        async fn claim_ready_queued_work(
-            &self,
-            session_id: &str,
-            session_execution_lease: &crate::SessionExecutionLeaseFence,
-            owner: &crate::LeaseOwnerIdentity,
-            boundary: crate::QueuedWorkClaimBoundary,
-            lease_ttl_ms: u64,
-            max_batches: usize,
-        ) -> Result<Option<crate::QueuedWorkClaim>, crate::StoreError> {
-            crate::QueuedWorkStore::claim_ready_queued_work(
-                &self.inner,
-                session_id,
-                session_execution_lease,
-                owner,
-                boundary,
-                lease_ttl_ms,
-                max_batches,
-            )
-            .await
-        }
-
-        async fn renew_queued_work_claim(
-            &self,
-            claim: &crate::QueuedWorkClaim,
-            lease_ttl_ms: u64,
-        ) -> Result<crate::QueuedWorkClaim, crate::StoreError> {
-            crate::QueuedWorkStore::renew_queued_work_claim(&self.inner, claim, lease_ttl_ms).await
-        }
-
-        async fn abandon_queued_work_claim(
-            &self,
-            claim: &crate::QueuedWorkClaim,
-        ) -> Result<(), crate::StoreError> {
-            crate::QueuedWorkStore::abandon_queued_work_claim(&self.inner, claim).await
-        }
-
-        async fn cancel_queued_work_batch(
-            &self,
-            session_id: &str,
-            batch_id: &str,
-        ) -> Result<Option<crate::QueuedWorkBatch>, crate::StoreError> {
-            crate::QueuedWorkStore::cancel_queued_work_batch(&self.inner, session_id, batch_id)
-                .await
-        }
-
-        async fn list_queued_work(
-            &self,
-            session_id: &str,
-        ) -> Result<Vec<crate::QueuedWorkBatch>, crate::StoreError> {
-            crate::QueuedWorkStore::list_queued_work(&self.inner, session_id).await
-        }
-
-        async fn list_pending_queued_work(
-            &self,
-            session_id: &str,
-        ) -> Result<Vec<crate::QueuedWorkBatch>, crate::StoreError> {
-            crate::QueuedWorkStore::list_pending_queued_work(&self.inner, session_id).await
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::StoreMaintenance for RecordingRuntimePersistence {
-        async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), crate::StoreError> {
-            crate::StoreMaintenance::tombstone_nodes(&self.inner, ids).await
-        }
-
-        async fn vacuum(&self) -> Result<crate::VacuumReport, crate::StoreError> {
-            crate::StoreMaintenance::vacuum(&self.inner).await
-        }
-
-        async fn gc_unreachable(&self) -> Result<crate::GcReport, crate::StoreError> {
-            crate::StoreMaintenance::gc_unreachable(&self.inner).await
+            intent_grace_cutoff_epoch_ms: u64,
+        ) -> Result<BTreeSet<AttachmentId>, crate::StoreError> {
+            let mut refs = BTreeSet::new();
+            for manifest in &self.manifests {
+                // Reconcile crash orphans: forget uncommitted intents aged past
+                // the grace cutoff so their blobs drop out of the root set, then
+                // union what remains (committed refs + young intents).
+                for aged in manifest.list_uncommitted(intent_grace_cutoff_epoch_ms)? {
+                    manifest.forget(&aged.session_id, &aged.attachment_id)?;
+                }
+                refs.extend(manifest.list_all_refs()?);
+            }
+            Ok(refs)
         }
     }
 
@@ -952,13 +902,6 @@ mod tests {
             Some(1),
             Some("pixel".to_string()),
         )
-    }
-
-    fn system_epoch_ms_for_test() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock must be after Unix epoch")
-            .as_millis() as u64
     }
 
     #[tokio::test]
@@ -981,120 +924,409 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_scoped_attachment_store_satisfies_conformance() {
-        crate::testing::conformance::attachment_store(
-            || {
-                let manifest: Arc<dyn AttachmentManifest> = Arc::new(RecordingManifest::default());
-                Arc::new(SessionScopedAttachmentStore::new(
-                    Arc::new(InMemoryAttachmentStore::new()),
-                    manifest,
-                    "session-scoped-conformance",
-                )) as Arc<dyn AttachmentStore>
-            },
-            AttachmentStorePersistence::Ephemeral,
-        )
-        .await;
+    async fn memory_store_lists_stored_blobs() {
+        let store = InMemoryAttachmentStore::new();
+        let a = store.put(vec![1], meta()).await.expect("put a");
+        let b = store.put(vec![2], meta()).await.expect("put b");
+        let listed: BTreeSet<AttachmentId> = store
+            .list()
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|blob| blob.id)
+            .collect();
+        assert!(listed.contains(&a.id));
+        assert!(listed.contains(&b.id));
+        assert_eq!(listed.len(), 2);
     }
 
     #[tokio::test]
-    async fn reclaiming_one_sessions_orphan_preserves_identical_committed_content() {
-        let bytes = Arc::new(InMemoryAttachmentStore::new());
-        let committed_manifest = Arc::new(RecordingManifest::default());
-        let orphan_manifest = Arc::new(RecordingManifest::default());
-        let committed = SessionScopedAttachmentStore::new(
-            bytes.clone(),
-            committed_manifest.clone(),
-            "committed-session",
-        );
-        let orphan = SessionScopedAttachmentStore::new(
-            bytes.clone(),
-            orphan_manifest.clone(),
-            "orphan-session",
-        );
+    async fn facade_get_is_gated_by_manifest_ownership() {
+        let backend: Arc<dyn AttachmentStore> = Arc::new(InMemoryAttachmentStore::new());
+        let manifest: Arc<dyn AttachmentManifest> = Arc::new(RecordingManifest::default());
+        let session_a = SessionAttachmentStore::new(backend.clone(), manifest.clone(), "session-a");
+        let session_b = SessionAttachmentStore::new(backend.clone(), manifest.clone(), "session-b");
 
-        let committed_ref = committed
-            .put(vec![42, 42, 42], meta())
-            .await
-            .expect("put committed attachment");
-        committed_manifest
-            .commit_refs("committed-session", std::slice::from_ref(&committed_ref.id))
-            .expect("commit attachment reference");
-        let orphan_ref = orphan
-            .put(vec![42, 42, 42], meta())
-            .await
-            .expect("put identical orphan");
+        let reference = session_a.put(vec![7, 7, 7], meta()).await.expect("put a");
+        // Session A holds the ref and resolves the blob.
         assert_eq!(
-            committed_ref.id, orphan_ref.id,
-            "logical ids stay content-addressed"
+            session_a.get(&reference.id).await.expect("a reads").bytes,
+            vec![7, 7, 7]
         );
-
-        let report = reclaim_orphaned_attachments(&*orphan_manifest, &*bytes, u64::MAX)
-            .await
-            .expect("reclaim orphan");
-        assert_eq!(report.reclaimed_count, 1);
+        // Session B shares the backend blob but never referenced it: NotFound.
         assert!(matches!(
-            orphan.get(&orphan_ref.id).await,
+            session_b.get(&reference.id).await,
             Err(AttachmentStoreError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn facade_delete_drops_ref_but_keeps_backend_bytes() {
+        let backend: Arc<dyn AttachmentStore> = Arc::new(InMemoryAttachmentStore::new());
+        let manifest: Arc<dyn AttachmentManifest> = Arc::new(RecordingManifest::default());
+        let session = SessionAttachmentStore::new(backend.clone(), manifest, "session-1");
+
+        let reference = session.put(vec![9, 9], meta()).await.expect("put");
+        session.delete(&reference.id).await.expect("delete ref");
+
+        // Facade no longer resolves it (ref dropped)...
+        assert!(matches!(
+            session.get(&reference.id).await,
+            Err(AttachmentStoreError::NotFound(_))
+        ));
+        // ...but the backend still physically holds the bytes (GC's job).
         assert_eq!(
-            committed
-                .get(&committed_ref.id)
+            backend
+                .get(&reference.id)
                 .await
-                .expect("other session's committed bytes survive")
+                .expect("bytes remain")
                 .bytes,
-            vec![42, 42, 42]
+            vec![9, 9]
         );
     }
 
     #[tokio::test]
-    async fn attachment_reference_metadata_is_not_shared_through_blob_storage() {
-        let bytes = InMemoryAttachmentStore::new();
-        let png = bytes
-            .put_for_session("session", vec![1, 2, 3], meta())
-            .await
-            .expect("png ref");
-        let jpeg_meta = AttachmentCreateMeta::new(
-            MediaType::Image(ImageMediaType::Jpeg),
-            Some(99),
-            Some(88),
-            Some("different presentation".to_string()),
+    async fn shared_bytes_survive_until_all_refs_released_then_gc_collects() {
+        let backend: Arc<dyn AttachmentStore> = Arc::new(InMemoryAttachmentStore::new());
+        let manifest_a = Arc::new(RecordingManifest::default());
+        let manifest_b = Arc::new(RecordingManifest::default());
+        let session_a = SessionAttachmentStore::new(
+            backend.clone(),
+            manifest_a.clone() as Arc<dyn AttachmentManifest>,
+            "session-a",
         );
-        let jpeg = bytes
-            .put_for_session("session", vec![1, 2, 3], jpeg_meta)
-            .await
-            .expect("jpeg ref");
+        let session_b = SessionAttachmentStore::new(
+            backend.clone(),
+            manifest_b.clone() as Arc<dyn AttachmentManifest>,
+            "session-b",
+        );
 
-        assert_eq!(png.id, jpeg.id);
-        assert_eq!(png.canonical_mime(), "image/png");
-        assert_eq!(jpeg.canonical_mime(), "image/jpeg");
-        assert_eq!(png.width, Some(1));
-        assert_eq!(jpeg.width, Some(99));
+        // Two sessions put identical bytes: ONE physical blob. Commit both refs
+        // so they are stable committed roots (not grace-gated intents), letting
+        // this test exercise ref-driven collection independently of intent aging.
+        let ref_a = session_a.put(vec![5, 5, 5], meta()).await.expect("put a");
+        let ref_b = session_b.put(vec![5, 5, 5], meta()).await.expect("put b");
+        assert_eq!(ref_a.id, ref_b.id);
+        manifest_a
+            .commit_refs("session-a", std::slice::from_ref(&ref_a.id))
+            .expect("commit a");
+        manifest_b
+            .commit_refs("session-b", std::slice::from_ref(&ref_b.id))
+            .expect("commit b");
+        assert_eq!(backend.list().await.expect("list").len(), 1);
+
+        let root_set = RecordingRootSet {
+            manifests: vec![manifest_a.clone(), manifest_b.clone()],
+        };
+
+        // Session A releases its ref. Blob is still referenced by B: spared.
+        session_a.delete(&ref_a.id).await.expect("a releases");
+        let report = reclaim_unreferenced_attachments(&root_set, &*backend, 0)
+            .await
+            .expect("sweep with b holding a ref");
+        assert_eq!(report.reclaimed_count, 0, "b still references the blob");
         assert_eq!(
-            bytes
-                .get_for_session("session", &png.id)
-                .await
-                .expect("shared bytes")
-                .bytes,
-            vec![1, 2, 3]
+            backend.get(&ref_b.id).await.expect("blob alive").bytes,
+            vec![5, 5, 5]
         );
+
+        // Session B releases too. Now unreferenced: GC collects it.
+        session_b.delete(&ref_b.id).await.expect("b releases");
+        let report = reclaim_unreferenced_attachments(&root_set, &*backend, 0)
+            .await
+            .expect("sweep with no refs");
+        assert_eq!(report.reclaimed_count, 1);
+        assert!(matches!(
+            backend.get(&ref_b.id).await,
+            Err(AttachmentStoreError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
-    async fn session_scoped_store_tracks_successful_puts_until_commit_mark() {
+    async fn gc_spares_fresh_in_flight_intents_as_refs() {
+        let backend: Arc<dyn AttachmentStore> = Arc::new(InMemoryAttachmentStore::new());
         let manifest = Arc::new(RecordingManifest::default());
-        let manifest_for_store: Arc<dyn AttachmentManifest> = manifest.clone();
-        let store = SessionScopedAttachmentStore::new(
+        let session = SessionAttachmentStore::new(
+            backend.clone(),
+            manifest.clone() as Arc<dyn AttachmentManifest>,
+            "session-1",
+        );
+
+        // Uncommitted intent, recorded just now: younger than the grace window,
+        // so it counts as a live root and its blob is spared.
+        let reference = session.put(vec![3, 1, 4], meta()).await.expect("put");
+        let root_set = RecordingRootSet {
+            manifests: vec![manifest.clone()],
+        };
+        const GRACE_MS: u64 = 60 * 60 * 1000;
+        let report = reclaim_unreferenced_attachments(&root_set, &*backend, GRACE_MS)
+            .await
+            .expect("sweep");
+        assert_eq!(report.reclaimed_count, 0, "a fresh intent is a live ref");
+        assert_eq!(
+            backend.get(&reference.id).await.expect("kept").bytes,
+            vec![3, 1, 4]
+        );
+    }
+
+    // Fix B: a crash orphan — an uncommitted intent aged past the grace window
+    // (its turn never committed) — is reconciled away, so its blob is collected.
+    // A fresh intent recorded in the same store survives the same sweep.
+    #[tokio::test]
+    async fn gc_collects_aged_uncommitted_intent_orphan() {
+        let backend: Arc<dyn AttachmentStore> = Arc::new(InMemoryAttachmentStore::new());
+        let manifest = Arc::new(RecordingManifest::default());
+        let session = SessionAttachmentStore::new(
+            backend.clone(),
+            manifest.clone() as Arc<dyn AttachmentManifest>,
+            "session-1",
+        );
+
+        // An uncommitted intent whose turn never committed. With a zero grace
+        // window it is already past the cutoff — the crash-orphan case.
+        let orphan = session
+            .put(vec![9, 9, 9], meta())
+            .await
+            .expect("put orphan");
+        let root_set = RecordingRootSet {
+            manifests: vec![manifest.clone()],
+        };
+        let report = reclaim_unreferenced_attachments(&root_set, &*backend, 0)
+            .await
+            .expect("sweep");
+        assert_eq!(
+            report.reclaimed_count, 1,
+            "an aged, never-committed intent is a collectable orphan"
+        );
+        assert!(matches!(
+            backend.get(&orphan.id).await,
+            Err(AttachmentStoreError::NotFound(_))
+        ));
+        // The intent row was reconciled away too, so it is no longer a root.
+        assert!(manifest.list_all_refs().expect("refs").is_empty());
+    }
+
+    // Fix C: the GC delete-time re-check. A blob looks unreferenced and stale in
+    // the `list` snapshot, but a new intent + `put` of the same content id landed
+    // after the snapshot, refreshing the blob. The sweep must re-stat the blob via
+    // `head` before deleting and spare it. Modelled sequentially with a backend
+    // whose `list` reports a stale mtime and whose `head` reports a fresh one.
+    #[tokio::test]
+    async fn gc_delete_recheck_spares_blob_refreshed_after_snapshot() {
+        struct StaleSnapshotStore {
+            id: AttachmentId,
+            list_mtime: u64,
+            head_mtime: u64,
+            deleted: Mutex<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl AttachmentStore for StaleSnapshotStore {
+            async fn put(
+                &self,
+                _bytes: Vec<u8>,
+                _meta: AttachmentCreateMeta,
+            ) -> Result<AttachmentRef, AttachmentStoreError> {
+                unreachable!("test does not put through this store")
+            }
+            async fn get(
+                &self,
+                id: &AttachmentId,
+            ) -> Result<StoredAttachment, AttachmentStoreError> {
+                Err(AttachmentStoreError::NotFound(id.clone()))
+            }
+            async fn delete(&self, _id: &AttachmentId) -> Result<(), AttachmentStoreError> {
+                *self.deleted.lock().expect("lock") = true;
+                Ok(())
+            }
+            async fn list(&self) -> Result<Vec<StoredBlobRef>, AttachmentStoreError> {
+                // Stale snapshot: the blob looks old and unreferenced.
+                Ok(vec![StoredBlobRef {
+                    id: self.id.clone(),
+                    last_modified_epoch_ms: Some(self.list_mtime),
+                }])
+            }
+            async fn head(
+                &self,
+                id: &AttachmentId,
+            ) -> Result<Option<StoredBlobRef>, AttachmentStoreError> {
+                // Fresh re-stat: the new intent's `put` refreshed the blob.
+                Ok((id == &self.id).then(|| StoredBlobRef {
+                    id: id.clone(),
+                    last_modified_epoch_ms: Some(self.head_mtime),
+                }))
+            }
+        }
+
+        let now = now_epoch_ms();
+        const GRACE_MS: u64 = 60 * 60 * 1000;
+        let backend = StaleSnapshotStore {
+            id: AttachmentId::new("recheck"),
+            // Stale mtime well past the grace window: the first check would delete.
+            list_mtime: now.saturating_sub(GRACE_MS * 2),
+            // Fresh mtime inside the window: the re-check must spare it.
+            head_mtime: now,
+            deleted: Mutex::new(false),
+        };
+        // Empty root set: the snapshot did not see the new intent.
+        let root_set = RecordingRootSet { manifests: vec![] };
+        let report = reclaim_unreferenced_attachments(&root_set, &backend, GRACE_MS)
+            .await
+            .expect("sweep");
+        assert_eq!(
+            report.reclaimed_count, 0,
+            "the delete-time re-check must spare a blob refreshed after the snapshot"
+        );
+        assert!(
+            !*backend.deleted.lock().expect("lock"),
+            "the freshly-refreshed blob must not be deleted"
+        );
+    }
+
+    // Fix C, checks (b) and (d): the delete-window root re-check. A candidate blob
+    // is stale in both the `list` snapshot AND the `head` re-stat (so the freshness
+    // gate does not spare it), but a session records a fresh intent for the same
+    // content id in the delete window. A backend whose `head` reports a stale mtime
+    // and a root set scripted to answer the single-id probe drive the two branches:
+    // (b) a ref present before delete spares the blob; (d) a ref that appears only
+    // after delete is detected and alarmed via `deleted_while_referenced`.
+    struct StaleHeadStore {
+        id: AttachmentId,
+        mtime: u64,
+        deleted: Mutex<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl AttachmentStore for StaleHeadStore {
+        async fn put(
+            &self,
+            _bytes: Vec<u8>,
+            _meta: AttachmentCreateMeta,
+        ) -> Result<AttachmentRef, AttachmentStoreError> {
+            unreachable!("test does not put through this store")
+        }
+        async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
+            Err(AttachmentStoreError::NotFound(id.clone()))
+        }
+        async fn delete(&self, _id: &AttachmentId) -> Result<(), AttachmentStoreError> {
+            *self.deleted.lock().expect("lock") = true;
+            Ok(())
+        }
+        async fn list(&self) -> Result<Vec<StoredBlobRef>, AttachmentStoreError> {
+            Ok(vec![StoredBlobRef {
+                id: self.id.clone(),
+                last_modified_epoch_ms: Some(self.mtime),
+            }])
+        }
+        async fn head(
+            &self,
+            id: &AttachmentId,
+        ) -> Result<Option<StoredBlobRef>, AttachmentStoreError> {
+            // Stale re-stat: the freshness gate does not spare the blob, so the
+            // targeted root re-check is what must decide its fate.
+            Ok((id == &self.id).then(|| StoredBlobRef {
+                id: id.clone(),
+                last_modified_epoch_ms: Some(self.mtime),
+            }))
+        }
+    }
+
+    /// Root set whose single-id probe returns scripted answers in order — models
+    /// a ref appearing at a chosen point in the delete window. `live_attachment_refs`
+    /// is empty (the snapshot never saw the late ref).
+    struct ScriptedRootSet {
+        answers: Mutex<std::collections::VecDeque<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AttachmentRootSet for ScriptedRootSet {
+        async fn live_attachment_refs(
+            &self,
+            _intent_grace_cutoff_epoch_ms: u64,
+        ) -> Result<BTreeSet<AttachmentId>, crate::StoreError> {
+            Ok(BTreeSet::new())
+        }
+
+        async fn has_live_attachment_ref(
+            &self,
+            _id: &AttachmentId,
+            _intent_grace_cutoff_epoch_ms: u64,
+        ) -> Result<bool, crate::StoreError> {
+            Ok(self
+                .answers
+                .lock()
+                .expect("lock answers")
+                .pop_front()
+                .unwrap_or(false))
+        }
+    }
+
+    #[tokio::test]
+    async fn gc_pre_delete_root_recheck_spares_reappeared_ref() {
+        let now = now_epoch_ms();
+        const GRACE_MS: u64 = 60 * 60 * 1000;
+        let backend = StaleHeadStore {
+            id: AttachmentId::new("reappeared"),
+            // Well past the grace window: neither the snapshot nor the head re-stat
+            // spares it, so the single-id root re-check is the only guard left.
+            mtime: now.saturating_sub(GRACE_MS * 2),
+            deleted: Mutex::new(false),
+        };
+        // (b) sees a live ref: the probe answers true before the delete.
+        let root_set = ScriptedRootSet {
+            answers: Mutex::new([true].into_iter().collect()),
+        };
+        let report = reclaim_unreferenced_attachments(&root_set, &backend, GRACE_MS)
+            .await
+            .expect("sweep");
+        assert_eq!(
+            report.reclaimed_count, 0,
+            "pre-delete root re-check must spare the blob"
+        );
+        assert!(report.deleted_while_referenced.is_empty());
+        assert!(
+            !*backend.deleted.lock().expect("lock"),
+            "a blob re-referenced before delete must not be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_post_delete_root_recheck_alarms_on_window_ref() {
+        let now = now_epoch_ms();
+        const GRACE_MS: u64 = 60 * 60 * 1000;
+        let id = AttachmentId::new("window-ref");
+        let backend = StaleHeadStore {
+            id: id.clone(),
+            mtime: now.saturating_sub(GRACE_MS * 2),
+            deleted: Mutex::new(false),
+        };
+        // (b) sees no ref (delete proceeds); (d) sees a ref that appeared in the
+        // (b)->(c) window: detected and alarmed.
+        let root_set = ScriptedRootSet {
+            answers: Mutex::new([false, true].into_iter().collect()),
+        };
+        let report = reclaim_unreferenced_attachments(&root_set, &backend, GRACE_MS)
+            .await
+            .expect("sweep");
+        assert_eq!(report.reclaimed_count, 1, "the blob is deleted");
+        assert!(*backend.deleted.lock().expect("lock"), "delete happened");
+        assert_eq!(
+            report.deleted_while_referenced,
+            vec![id],
+            "a ref appearing in the delete window is recorded for the operator alarm"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_facade_tracks_successful_puts_until_commit_mark() {
+        let manifest: Arc<dyn AttachmentManifest> = Arc::new(RecordingManifest::default());
+        let store = SessionAttachmentStore::new(
             Arc::new(InMemoryAttachmentStore::new()),
-            manifest_for_store,
+            manifest,
             "session-1",
         );
 
         let reference = store.put(vec![8, 9, 10], meta()).await.expect("put");
-
-        assert_eq!(
-            manifest.intents.lock().expect("lock intents")[0].attachment_id,
-            reference.id
-        );
         assert_eq!(
             store.pending_manifest_commit_ids(),
             vec![reference.id.clone()]
@@ -1111,83 +1343,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_scoped_store_records_intent_timestamp_from_system_clock() {
-        let manifest = Arc::new(RecordingManifest::default());
-        let manifest_for_store: Arc<dyn AttachmentManifest> = manifest.clone();
-        let store = SessionScopedAttachmentStore::new(
-            Arc::new(InMemoryAttachmentStore::new()),
-            manifest_for_store,
-            "session-clock",
-        );
-
-        let before_put_epoch_ms = system_epoch_ms_for_test();
-        let reference = store.put(vec![11, 12, 13], meta()).await.expect("put");
-        let after_put_epoch_ms = system_epoch_ms_for_test();
-
-        let intents = manifest.intents.lock().expect("lock intents");
-        assert_eq!(intents.len(), 1);
-        let intent = &intents[0];
-        assert_eq!(intent.attachment_id, reference.id);
-        assert!(
-            intent.intent_at_epoch_ms > 1_000_000_000_000,
-            "intent timestamp should be a real epoch millis value, got {}",
-            intent.intent_at_epoch_ms
-        );
-        assert!(
-            intent.intent_at_epoch_ms >= before_put_epoch_ms.saturating_sub(1000),
-            "intent timestamp {} should be close to or after put start {}",
-            intent.intent_at_epoch_ms,
-            before_put_epoch_ms
-        );
-        assert!(
-            intent.intent_at_epoch_ms <= after_put_epoch_ms.saturating_add(1000),
-            "intent timestamp {} should be close to or before put finish {}",
-            intent.intent_at_epoch_ms,
-            after_put_epoch_ms
+    async fn ephemeral_facade_passes_reads_through_without_a_guard() {
+        let store = SessionAttachmentStore::in_memory();
+        let reference = store.put(vec![1, 2, 3], meta()).await.expect("put");
+        assert_eq!(
+            store.get(&reference.id).await.expect("get").bytes,
+            vec![1, 2, 3]
         );
     }
 
     #[test]
-    fn persistence_manifest_adapter_forwards_to_wrapped_runtime_persistence() {
-        let runtime = Arc::new(RecordingRuntimePersistence::default());
-        let persistence: Arc<dyn crate::RuntimePersistence> = runtime.clone();
-        let adapter = PersistenceManifestAdapter(persistence);
+    fn persistence_manifest_adapter_forwards_holds_ref() {
+        let runtime: Arc<dyn crate::RuntimePersistence> =
+            Arc::new(crate::InMemorySessionStore::new());
+        let adapter = PersistenceManifestAdapter(runtime);
         let attachment_id = AttachmentId::new("adapter-forwarding");
         let intent = AttachmentIntent {
             attachment_id: attachment_id.clone(),
             session_id: "adapter-session".to_string(),
-            canonical_uri: "sha256:adapter-forwarding".to_string(),
+            canonical_uri: attachment_uri(&attachment_id),
             intent_at_epoch_ms: 10,
         };
-
         adapter.record_intent(intent).expect("record intent");
-        let uncommitted = adapter
-            .list_uncommitted(10)
-            .expect("list uncommitted through adapter");
-        assert_eq!(uncommitted.len(), 1);
-        assert_eq!(uncommitted[0].attachment_id, attachment_id);
-        assert_eq!(uncommitted[0].session_id, "adapter-session");
-        assert_eq!(uncommitted[0].canonical_uri, "sha256:adapter-forwarding");
-        assert_eq!(uncommitted[0].intent_at_epoch_ms, 10);
-        assert!(uncommitted[0].committed_at_epoch_ms.is_none());
-
-        adapter
-            .commit_refs("adapter-session", std::slice::from_ref(&attachment_id))
-            .expect("commit refs through adapter");
         assert!(
             adapter
-                .list_uncommitted(10)
-                .expect("list after commit through adapter")
-                .is_empty()
+                .holds_ref("adapter-session", &attachment_id)
+                .expect("holds ref")
+        );
+        assert!(
+            !adapter
+                .holds_ref("other-session", &attachment_id)
+                .expect("no ref for other session")
         );
         assert_eq!(
-            runtime
-                .manifest
-                .committed
-                .lock()
-                .expect("lock committed attachments")
-                .as_slice(),
-            &[("adapter-session".to_string(), attachment_id)]
+            adapter.list_all_refs().expect("list all refs"),
+            vec![attachment_id]
         );
     }
 }

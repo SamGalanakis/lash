@@ -176,7 +176,14 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// Canonical schema version. There is no migration chain — older databases
 /// must be deleted before opening. See the [`SCHEMA`] doc comment for the
 /// rationale.
-pub(crate) const SCHEMA_VERSION: i32 = 9;
+///
+/// Bumped to 10 for the attachment three-layer cutover (ADR 0028): the
+/// `attachment_manifest` this schema gates carried, pre-cutover, committed refs
+/// and canonical URIs that named `sessions/<hash>/...` blob paths the flat
+/// content-addressed layout cannot read. Pre-10 session databases are rejected
+/// at open and recreated; the old `sessions/` blob trees are unreachable garbage
+/// operators delete manually.
+pub(crate) const SCHEMA_VERSION: i32 = 10;
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (
@@ -259,7 +266,13 @@ CREATE TABLE IF NOT EXISTS process_leases (
 // Bumped to 10: ADR 0020 added a per-store process-row `change_seq` plus the
 // process change clock. There is no migration chain — pre-10 process databases
 // are rejected at open and must be recreated.
-pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 10;
+//
+// Bumped to 11 for the completion-authority cutover (ADR 0027): terminal
+// `process_events` now carry a `completion_authority` in their payload, so the
+// replay-key payload hash of a pre-cutover terminal event no longer matches the
+// hash a cross-version retry would compute — a replay would spuriously diverge.
+// Rejecting pre-11 process databases and recreating them removes that hazard.
+pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 11;
 
 pub(crate) const TRIGGER_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS trigger_subscription_seq (

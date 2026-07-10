@@ -21,7 +21,7 @@ pub enum PluginOperationInvokeError {
 #[derive(Clone)]
 pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
-    pub attachment_store: Arc<dyn crate::AttachmentStore>,
+    pub attachment_store: Arc<crate::SessionAttachmentStore>,
     pub process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
     pub clock: Arc<dyn crate::Clock>,
     pub(crate) store: Option<Arc<dyn crate::store::RuntimePersistence>>,
@@ -55,7 +55,7 @@ impl RuntimeServices {
     pub fn new(plugins: Arc<PluginSession>) -> Self {
         Self {
             plugins,
-            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
             process_env_store: Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             clock: Arc::new(crate::SystemClock),
             store: None,
@@ -69,7 +69,7 @@ impl RuntimeServices {
 
     pub(crate) fn with_attachment_store(
         mut self,
-        attachment_store: Arc<dyn crate::AttachmentStore>,
+        attachment_store: Arc<crate::SessionAttachmentStore>,
     ) -> Self {
         self.attachment_store = attachment_store;
         self
@@ -91,7 +91,7 @@ impl PersistentRuntimeServices {
     ) -> Self {
         Self(RuntimeServices {
             plugins,
-            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
             process_env_store: Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             clock: Arc::new(crate::SystemClock),
             store: Some(store),

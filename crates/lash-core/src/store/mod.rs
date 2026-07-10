@@ -1,8 +1,10 @@
 //! The runtime's settled-session persistence contract and shared store types.
 
+mod attachment_manifest;
 mod lease_timings;
 pub mod queued_work;
 
+pub use attachment_manifest::{AttachmentIntent, AttachmentManifest, AttachmentManifestEntry};
 pub use lease_timings::{LeaseTimings, LeaseTimingsError};
 
 const PROC_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
@@ -621,129 +623,6 @@ impl SessionExecutionLeaseClaimOutcome {
     }
 }
 
-// =============================================================================
-// Attachment write-ahead manifest
-// =============================================================================
-
-/// A pending attachment write recorded *before* the bytes hit the
-/// [`AttachmentStore`](crate::AttachmentStore) backend.
-///
-/// The runtime calls [`AttachmentManifest::record_intent`] from the
-/// [`SessionScopedAttachmentStore`](crate::SessionScopedAttachmentStore)
-/// wrapper before each `put`, so the manifest is a durable record that
-/// "some bytes are about to land at this URI." When the turn that
-/// references the attachment commits successfully via
-/// [`SessionCommitStore::commit_runtime_state`], the same transaction
-/// stamps `committed_at_epoch_ms`. Periodic GC sweeps manifest rows
-/// whose intent has aged past a host-chosen threshold without ever
-/// being committed and deletes the corresponding bytes — that's how we
-/// reconcile orphaned files left behind by crashes between `put` and
-/// the next turn commit.
-#[derive(Clone, Debug)]
-pub struct AttachmentIntent {
-    pub attachment_id: crate::AttachmentId,
-    pub session_id: String,
-    /// Canonical, stable identity for the session-owned physical object.
-    /// Backends may map this identity onto their own path/key representation.
-    pub canonical_uri: String,
-    pub intent_at_epoch_ms: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct AttachmentManifestEntry {
-    pub attachment_id: crate::AttachmentId,
-    pub session_id: String,
-    pub canonical_uri: String,
-    pub intent_at_epoch_ms: u64,
-    pub committed_at_epoch_ms: Option<u64>,
-}
-
-/// The synchronous attachment-manifest surface required from every
-/// [`SessionCommitStore`]. Used by
-/// [`SessionScopedAttachmentStore`](crate::SessionScopedAttachmentStore)
-/// to record intent rows before `put` and by GC sweeps to reconcile
-/// orphans. See the [`AttachmentIntent`] doc comment for the full
-/// crash-safety story.
-///
-/// Backends with no attachment story (in-memory tests, mock stores)
-/// paste no-op impls via [`impl_noop_attachment_manifest!`] and
-/// participate transparently — `record_intent` is a no-op, the
-/// scoped wrapper still works, and GC sweeps return empty.
-pub trait AttachmentManifest: Send + Sync {
-    fn record_intent(&self, intent: AttachmentIntent) -> Result<(), StoreError>;
-
-    /// Mark a set of attachment ids as committed (i.e. now referenced
-    /// by a durable session-graph commit). Backends that store
-    /// commits and manifest in the same database stamp this inside
-    /// the commit transaction; the trait-level method is the
-    /// out-of-band entry point for hosts that want to commit an id
-    /// outside the normal turn-commit flow.
-    fn commit_refs(
-        &self,
-        session_id: &str,
-        attachment_ids: &[crate::AttachmentId],
-    ) -> Result<(), StoreError>;
-
-    /// Return manifest entries whose intent has aged past
-    /// `older_than_epoch_ms` without ever being committed. Hosts run
-    /// this periodically to find orphans left by crashes between
-    /// `record_intent` and the next turn commit.
-    fn list_uncommitted(
-        &self,
-        older_than_epoch_ms: u64,
-    ) -> Result<Vec<AttachmentManifestEntry>, StoreError>;
-
-    /// Remove one session's manifest row. Called by the GC coordinator after
-    /// that session's physical object has been removed.
-    fn forget(
-        &self,
-        session_id: &str,
-        attachment_id: &crate::AttachmentId,
-    ) -> Result<(), StoreError>;
-}
-
-/// Mixin macro for [`SessionCommitStore`] implementors that have no
-/// attachment-write story (mock backends, in-memory test stores,
-/// runtime-perf harnesses). Pastes no-op impls of every
-/// [`AttachmentManifest`] method.
-#[macro_export]
-macro_rules! impl_noop_attachment_manifest {
-    ($ty:ty) => {
-        impl $crate::AttachmentManifest for $ty {
-            fn record_intent(
-                &self,
-                _intent: $crate::AttachmentIntent,
-            ) -> ::std::result::Result<(), $crate::StoreError> {
-                Ok(())
-            }
-
-            fn commit_refs(
-                &self,
-                _session_id: &str,
-                _attachment_ids: &[$crate::AttachmentId],
-            ) -> ::std::result::Result<(), $crate::StoreError> {
-                Ok(())
-            }
-
-            fn list_uncommitted(
-                &self,
-                _older_than_epoch_ms: u64,
-            ) -> ::std::result::Result<Vec<$crate::AttachmentManifestEntry>, $crate::StoreError>
-            {
-                Ok(Vec::new())
-            }
-
-            fn forget(
-                &self,
-                _session_id: &str,
-                _attachment_id: &$crate::AttachmentId,
-            ) -> ::std::result::Result<(), $crate::StoreError> {
-                Ok(())
-            }
-        }
-    };
-}
-
 /// Reject a persisted record whose `schema_version` does not match the
 /// version this binary supports. Backends call this immediately after
 /// deserializing a record from durable storage.
@@ -1105,7 +984,7 @@ impl Default for SessionHeadMeta {
 ///
 /// The [`AttachmentManifest`] supertrait is required so the runtime can wrap
 /// any persistence backend with a
-/// [`SessionScopedAttachmentStore`](crate::SessionScopedAttachmentStore)
+/// [`SessionAttachmentStore`](crate::SessionAttachmentStore)
 /// without dual-trait casting. Backends with no attachment-write story can
 /// paste no-op manifest impls via [`impl_noop_attachment_manifest!`].
 #[async_trait::async_trait]

@@ -28,10 +28,6 @@ impl lash_core::AwaitEventResolver for RecordingDurableEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
-
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
-    }
 }
 
 #[async_trait]

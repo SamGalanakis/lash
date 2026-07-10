@@ -929,29 +929,10 @@ mod tests {
             self.inner.delete(id).await
         }
 
-        async fn put_for_session(
+        async fn list(
             &self,
-            session_id: &str,
-            bytes: Vec<u8>,
-            meta: lash_core::AttachmentCreateMeta,
-        ) -> Result<lash_core::AttachmentRef, lash_core::AttachmentStoreError> {
-            self.inner.put_for_session(session_id, bytes, meta).await
-        }
-
-        async fn get_for_session(
-            &self,
-            session_id: &str,
-            id: &lash_core::AttachmentId,
-        ) -> Result<lash_core::StoredAttachment, lash_core::AttachmentStoreError> {
-            self.inner.get_for_session(session_id, id).await
-        }
-
-        async fn delete_for_session(
-            &self,
-            session_id: &str,
-            id: &lash_core::AttachmentId,
-        ) -> Result<(), lash_core::AttachmentStoreError> {
-            self.inner.delete_for_session(session_id, id).await
+        ) -> Result<Vec<lash_core::StoredBlobRef>, lash_core::AttachmentStoreError> {
+            self.inner.list().await
         }
     }
 
@@ -1017,7 +998,9 @@ mod tests {
         let mut host = lash_core::RuntimeHostConfig::in_memory();
         host.providers.provider_resolver =
             Arc::new(lash_core::SingleProviderResolver::new(provider_handle));
-        host.durability.attachment_store = Arc::new(DurableMemoryAttachmentStore::default());
+        host.durability.attachment_store = Arc::new(lash_core::SessionAttachmentStore::ephemeral(
+            Arc::new(DurableMemoryAttachmentStore::default()),
+        ));
         host.durability.process_env_store = Arc::new(DurableMemoryProcessEnvStore::default());
         let started = Arc::new(AtomicUsize::new(0));
         let factories: Vec<Arc<dyn lash_core::PluginFactory>> = vec![

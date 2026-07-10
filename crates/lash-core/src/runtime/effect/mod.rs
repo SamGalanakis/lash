@@ -34,7 +34,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_effect_envelope_and_request_specs_round_trip_without_live_fields() {
-        let attachment_store = crate::InMemoryAttachmentStore::new();
+        let attachment_store = crate::SessionAttachmentStore::in_memory();
         let llm_request = CoreLlmRequest {
             model: "model".to_string(),
             messages: vec![LlmMessage::text(crate::llm::types::LlmRole::User, "hello")],

@@ -11,8 +11,8 @@ use crate::runtime::ProcessHandleGrantEntry;
 use crate::sansio::{CompletedToolCall, ExecutionEnvironmentSync, LlmCallError};
 use crate::tool_dispatch::ToolTriggerEffectOutcome;
 use crate::{
-    AttachmentCreateMeta, AttachmentRef, AttachmentStore, CausalRef, CheckpointDelivery,
-    ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
+    AttachmentCreateMeta, AttachmentRef, CausalRef, CheckpointDelivery, ExecResponse,
+    LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
     ProcessExecutionContext, ProcessListMode, ProcessRecord, ProcessRegistration,
     ProcessStartGrant, SessionScope,
 };
@@ -654,7 +654,7 @@ pub struct LlmRequestSpec {
 impl LlmRequestSpec {
     pub async fn from_request(
         request: &CoreLlmRequest,
-        attachment_store: &dyn AttachmentStore,
+        attachment_store: &crate::SessionAttachmentStore,
     ) -> Result<Self, RuntimeEffectControllerError> {
         Ok(Self {
             model: request.model.clone(),
@@ -699,7 +699,7 @@ impl LlmRequestSpec {
 
 async fn attachment_specs_from_attachments(
     attachments: &[LlmAttachment],
-    attachment_store: &dyn AttachmentStore,
+    attachment_store: &crate::SessionAttachmentStore,
 ) -> Result<Vec<LlmAttachmentSpec>, RuntimeEffectControllerError> {
     let mut specs = Vec::with_capacity(attachments.len());
     for attachment in attachments {
@@ -710,7 +710,7 @@ async fn attachment_specs_from_attachments(
 
 async fn attachment_spec_from_attachment(
     attachment: &LlmAttachment,
-    attachment_store: &dyn AttachmentStore,
+    attachment_store: &crate::SessionAttachmentStore,
 ) -> Result<LlmAttachmentSpec, RuntimeEffectControllerError> {
     if let Some(reference) = attachment.reference.as_ref() {
         return Ok(LlmAttachmentSpec {

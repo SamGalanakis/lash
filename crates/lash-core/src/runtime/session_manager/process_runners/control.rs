@@ -401,6 +401,9 @@ impl ProcessCapability {
     ) -> Result<crate::ProcessRecord, crate::PluginError> {
         let runner = self.command_runner(current, &scope)?;
         let session_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
+        // Session-visibility authorization: the caller must hold a live handle
+        // grant for the row. This scopes *which* rows this session may complete;
+        // it is the identity the completion authority carries as evidence.
         if !runner
             .registry()
             .has_handle_grant(&session_scope, process_id)
@@ -410,23 +413,20 @@ impl ProcessCapability {
                 "process handle `{process_id}` is not visible in this session"
             )));
         }
-        match runner.registry().get_process(process_id).await {
-            Some(record) if record.disposition != crate::RecoveryDisposition::ExternallyOwned => {
-                return Err(crate::PluginError::Session(format!(
-                    "process `{process_id}` is not externally-owned; only externally-owned rows may be completed out of band"
-                )));
-            }
-            None => {
-                return Err(crate::PluginError::Session(format!(
-                    "unknown process `{process_id}`"
-                )));
-            }
-            Some(_) => {}
-        }
+        // The disposition check (only ExternallyOwned rows may be completed out
+        // of band) now lives inside the registry's completion operation, keyed on
+        // this explicit authority, so it is enforced uniformly across backends
+        // rather than only here (ADR 0027).
         self.mark_current_process_sync_needed(current, session_id);
         runner
             .registry()
-            .complete_process(process_id, await_output)
+            .complete_process(
+                process_id,
+                await_output,
+                crate::ProcessCompletionAuthority::ExternalOwner {
+                    granted_to: session_scope.id().to_string(),
+                },
+            )
             .await
     }
 

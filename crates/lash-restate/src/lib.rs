@@ -72,13 +72,13 @@ use std::time::Duration;
 use lash_core::{
     AbandonEvidence, AbandonWriter, AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity,
     DurabilityTier, DurableProcessWorker, EffectHost, ExecutionScope, PluginError, ProcessAttach,
-    ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome, ProcessEventSink,
-    ProcessExecutionContext, ProcessExternalRef, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessRunHandle, ProcessWorkDriver, RecoveryDisposition, Resolution,
-    ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimeInvocation,
-    ScopedEffectController, watch_process_registry_with_sink,
+    ProcessAwaitOutput, ProcessCommand, ProcessCompletionAuthority, ProcessEffectOutcome,
+    ProcessEventSink, ProcessExecutionContext, ProcessExternalRef, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessWorkDriver, RecoveryDisposition,
+    Resolution, ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
+    RuntimeInvocation, ScopedEffectController, watch_process_registry_with_sink,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -125,6 +125,15 @@ fn restate_now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Completion authority for a row the Restate workflow ran itself. Restate's
+/// single-writer discipline is per-`process_id` workflow-key coalescing, not a
+/// Lash lease (ADR 0027); the workflow key is that `process_id`.
+fn workflow_key_authority(process_id: &str) -> ProcessCompletionAuthority {
+    ProcessCompletionAuthority::WorkflowKey {
+        workflow_key: process_id.to_string(),
+    }
 }
 
 fn restate_await_event_ingress_required() -> RuntimeError {
@@ -492,6 +501,33 @@ impl RestateIngressClient {
             })
     }
 
+    /// Invoke a no-argument object handler. Restate's ingress rejects calls to
+    /// zero-input handlers that carry a body or content-type, so this posts an
+    /// empty request and ignores the (empty or `null`) response payload.
+    pub async fn call_object_empty(
+        &self,
+        object: &str,
+        object_key: &str,
+        handler: &str,
+    ) -> Result<(), RestateHttpError> {
+        let path = format!("{object}/{object_key}/{handler}");
+        let url = format_restate_url(&self.ingress_url, &path);
+        let response =
+            self.http
+                .post(&url)
+                .send()
+                .await
+                .map_err(|source| RestateHttpError::Request {
+                    operation: "Restate object call",
+                    url: url.clone(),
+                    source,
+                })?;
+        if !response.status().is_success() {
+            return Err(status_error("Restate object call", url, response).await);
+        }
+        Ok(())
+    }
+
     pub async fn send_service_json<T: Serialize + ?Sized>(
         &self,
         service: &str,
@@ -829,10 +865,6 @@ impl AwaitEventResolver for RestateEffectHost {
         DurabilityTier::Durable
     }
 
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
-    }
-
     fn supports_durable_effects(&self) -> bool {
         true
     }
@@ -961,7 +993,7 @@ async fn update_restate_session_waits_via_ingress(
     let handler = if revoke { "revoke_all" } else { "cancel_all" };
     ingress
         .ingress
-        .call_object_json::<_, ()>("LashDurableWaitIndex", session_id, handler, &())
+        .call_object_empty("LashDurableWaitIndex", session_id, handler)
         .await
         .map_err(|err| RuntimeError::new("restate_await_event_session_update", err.to_string()))
 }
@@ -975,10 +1007,6 @@ struct RestateEffectHostController {
 impl AwaitEventResolver for RestateEffectHostController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
-    }
-
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
     }
 
     async fn resolve_await_event(
@@ -1154,6 +1182,7 @@ impl RestateProcessIngressRunner {
                     }),
                     control: None,
                 },
+                ProcessCompletionAuthority::ReconciledAbandon,
             )
             .await
             .map(|_| ())
@@ -1332,7 +1361,11 @@ where
                 control: None,
             };
             self.registry
-                .complete_process(&process_id, output.clone())
+                .complete_process(
+                    &process_id,
+                    output.clone(),
+                    workflow_key_authority(&process_id),
+                )
                 .await?;
             return Ok(output);
         }
@@ -1343,7 +1376,11 @@ where
         match output {
             Ok(output) => {
                 self.registry
-                    .complete_process(&process_id, output.clone())
+                    .complete_process(
+                        &process_id,
+                        output.clone(),
+                        workflow_key_authority(&process_id),
+                    )
                     .await?;
                 Ok(output)
             }
@@ -1357,7 +1394,11 @@ where
                 };
                 let _ = self
                     .registry
-                    .complete_process(&process_id, output.clone())
+                    .complete_process(
+                        &process_id,
+                        output.clone(),
+                        workflow_key_authority(&process_id),
+                    )
                     .await;
                 tracing::warn!(
                     process_id = %process_id,
@@ -2042,7 +2083,10 @@ macro_rules! impl_restate_controller_context {
                     'ctx: 'run,
                 {
                     let handler = if revoke { "revoke_all" } else { "cancel_all" };
-                    let request: restate_sdk::context::Request<'_, Json<()>, Json<()>> =
+                    // Zero-input handlers require an empty payload; `()`
+                    // serializes to empty bytes while `Json(())` would send a
+                    // JSON `null` body that Restate's input validation rejects.
+                    let request: restate_sdk::context::Request<'_, (), Json<()>> =
                         ContextClient::request(
                             self,
                             RequestTarget::object(
@@ -2050,7 +2094,7 @@ macro_rules! impl_restate_controller_context {
                                 session_id,
                                 handler,
                             ),
-                            Json(()),
+                            (),
                         );
                     let call = request.call();
                     Box::pin(async move {
@@ -2155,10 +2199,6 @@ where
 {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
-    }
-
-    fn requires_durable_attachment_store(&self) -> bool {
-        true
     }
 
     fn supports_durable_effects(&self) -> bool {

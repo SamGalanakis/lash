@@ -366,7 +366,7 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     }
@@ -416,7 +416,7 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     }
@@ -473,7 +473,7 @@ fn projection_policy_dispatch_context(
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     }
@@ -666,7 +666,7 @@ fn lazy_contract_dispatch_context(
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     }
@@ -723,7 +723,7 @@ fn hidden_member_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispat
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     }
@@ -762,7 +762,7 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     }
@@ -856,7 +856,7 @@ fn pending_dispatch_context(
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     }
@@ -918,7 +918,7 @@ fn parallel_dispatch_context(
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     }
@@ -1737,7 +1737,7 @@ fn serial_dispatch_context(
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     }
@@ -1894,7 +1894,7 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     });
@@ -2037,7 +2037,7 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     });

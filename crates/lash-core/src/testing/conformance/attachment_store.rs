@@ -14,6 +14,7 @@ where
     attachment_is_content_addressed(make()).await;
     attachment_get_unknown_is_not_found(make()).await;
     attachment_delete_removes_content_and_is_idempotent(make()).await;
+    attachment_list_enumerates_stored_blobs(make()).await;
     attachment_reports_declared_persistence(make(), expected_persistence);
 }
 
@@ -118,6 +119,58 @@ async fn attachment_delete_removes_content_and_is_idempotent(store: Arc<dyn Atta
         .delete(&AttachmentId::new("sha256:never-existed"))
         .await
         .expect("delete of unknown id is a no-op");
+}
+
+async fn attachment_list_enumerates_stored_blobs(store: Arc<dyn AttachmentStore>) {
+    // An empty store lists nothing.
+    assert!(
+        store.list().await.expect("list empty store").is_empty(),
+        "a fresh store must enumerate no blobs"
+    );
+
+    let first = store
+        .put(vec![1u8, 1, 1], attachment_meta())
+        .await
+        .expect("put first");
+    let second = store
+        .put(vec![2u8, 2, 2, 2], attachment_meta())
+        .await
+        .expect("put second");
+    // Idempotent duplicate put does not create a second listing.
+    store
+        .put(vec![1u8, 1, 1], attachment_meta())
+        .await
+        .expect("put duplicate");
+
+    let listed: std::collections::BTreeSet<AttachmentId> = store
+        .list()
+        .await
+        .expect("list populated store")
+        .into_iter()
+        .map(|blob| blob.id)
+        .collect();
+    assert!(listed.contains(&first.id), "list must include first blob");
+    assert!(listed.contains(&second.id), "list must include second blob");
+    assert_eq!(
+        listed.len(),
+        2,
+        "content-addressed dedup: one entry per blob"
+    );
+
+    // A deleted blob leaves the listing.
+    store.delete(&first.id).await.expect("delete first");
+    let after: std::collections::BTreeSet<AttachmentId> = store
+        .list()
+        .await
+        .expect("list after delete")
+        .into_iter()
+        .map(|blob| blob.id)
+        .collect();
+    assert!(
+        !after.contains(&first.id),
+        "deleted blob must not be listed"
+    );
+    assert!(after.contains(&second.id), "surviving blob stays listed");
 }
 
 fn attachment_reports_declared_persistence(

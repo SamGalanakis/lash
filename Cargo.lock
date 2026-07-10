@@ -3008,6 +3008,7 @@ name = "lash-s3-store"
 version = "0.0.0-dev"
 dependencies = [
  "async-trait",
+ "futures-util",
  "lash-core",
  "object_store",
  "serde_json",

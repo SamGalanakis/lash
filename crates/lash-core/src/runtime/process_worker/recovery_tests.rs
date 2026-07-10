@@ -250,6 +250,7 @@ async fn sweep_does_not_reconcile_trigger_delivery_pruned_with_terminal_process(
                 value: serde_json::json!({ "done": true }),
                 control: None,
             },
+            crate::ProcessCompletionAuthority::workflow_key(&delivery.process_id),
         )
         .await
         .expect("complete trigger delivery process");
@@ -461,6 +462,7 @@ async fn sweep_abandons_started_owner_bound_with_provably_dead_holder() {
                     value: serde_json::json!("revenant"),
                     control: None,
                 },
+                crate::ProcessCompletionAuthority::workflow_key("proc-ob-dead"),
             )
             .await
             .is_err(),

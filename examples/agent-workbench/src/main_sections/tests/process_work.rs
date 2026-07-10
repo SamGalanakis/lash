@@ -111,6 +111,7 @@ mod process_work_tests {
                     value: json!("done"),
                     control: None,
                 },
+                lash::process::ProcessCompletionAuthority::external_owner("test"),
             )
             .await
             .expect("complete process");

@@ -554,6 +554,45 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         )
         .await?;
     let session = opened_session.session;
+
+    // Best-effort attachment GC: reclaim content-addressed blobs that no live
+    // session references. This CLI install owns its blob directory exclusively,
+    // so a blob with no manifest ref across any session database is garbage. A
+    // generous grace period protects in-flight writes. The sweep runs in the
+    // background so it never delays an interactive session.
+    {
+        let attachments_dir = crate::paths::attachments_dir();
+        let sessions_dir = crate::session_log::sessions_dir();
+        tokio::spawn(async move {
+            // One hour: far larger than any live turn, so an in-flight put whose
+            // intent has not yet been observed is never swept.
+            const ATTACHMENT_GC_GRACE_MS: u64 = 60 * 60 * 1000;
+            let backend = FileAttachmentStore::new(attachments_dir);
+            let root_set = lash_sqlite_store::SqliteSessionStoreFactory::new(sessions_dir);
+            match lash::persistence::reclaim_unreferenced_attachments(
+                &root_set,
+                &backend,
+                ATTACHMENT_GC_GRACE_MS,
+            )
+            .await
+            {
+                Ok(report) => {
+                    if report.reclaimed_count > 0 || !report.failed_ids.is_empty() {
+                        tracing::info!(
+                            scanned = report.scanned_blob_count,
+                            reclaimed = report.reclaimed_count,
+                            failed = report.failed_ids.len(),
+                            "attachment gc sweep reclaimed unreferenced blobs"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "attachment gc sweep failed");
+                }
+            }
+        });
+    }
+
     if autonomous {
         plugins::apply_autonomous_tool_policy(&session)
             .await

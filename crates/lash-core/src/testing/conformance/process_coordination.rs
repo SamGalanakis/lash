@@ -33,7 +33,11 @@ pub(super) async fn awaiter_cross_task_completion_resolves_promptly(
         control: None,
     };
     registry
-        .complete_process("proc-await-cross-task", output.clone())
+        .complete_process(
+            "proc-await-cross-task",
+            output.clone(),
+            crate::ProcessCompletionAuthority::external_owner("test"),
+        )
         .await
         .expect("complete");
 
@@ -243,6 +247,7 @@ pub(super) async fn watched_decorator_preserves_registry_semantics(
                 value: serde_json::json!("done"),
                 control: None,
             },
+            crate::ProcessCompletionAuthority::external_owner("test"),
         )
         .await
         .expect("complete via decorator");
@@ -342,6 +347,7 @@ pub(super) async fn prune_respects_leases_grants_and_wake_acks(registry: Arc<dyn
                 value: serde_json::json!({ "n": 1 }),
                 control: None,
             },
+            crate::ProcessCompletionAuthority::external_owner("test"),
         )
         .await
         .expect("complete old");
@@ -377,6 +383,7 @@ pub(super) async fn prune_respects_leases_grants_and_wake_acks(registry: Arc<dyn
                 value: serde_json::json!({ "n": 2 }),
                 control: None,
             },
+            crate::ProcessCompletionAuthority::external_owner("test"),
         )
         .await
         .expect("complete recent");
@@ -522,6 +529,7 @@ pub(super) async fn prune_respects_filter(registry: Arc<dyn ProcessRegistry>) {
                     value: serde_json::Value::Null,
                     control: None,
                 },
+                crate::ProcessCompletionAuthority::external_owner("test"),
             )
             .await
             .expect("complete process");
@@ -574,6 +582,7 @@ pub(super) async fn prune_respects_watermark(registry: Arc<dyn ProcessRegistry>)
                 value: serde_json::Value::Null,
                 control: None,
             },
+            crate::ProcessCompletionAuthority::external_owner("test"),
         )
         .await
         .expect("complete before");
@@ -593,6 +602,7 @@ pub(super) async fn prune_respects_watermark(registry: Arc<dyn ProcessRegistry>)
                 value: serde_json::Value::Null,
                 control: None,
             },
+            crate::ProcessCompletionAuthority::external_owner("test"),
         )
         .await
         .expect("complete after");
@@ -642,6 +652,7 @@ pub(super) async fn prune_never_touches_non_terminal_rows(registry: Arc<dyn Proc
                 value: serde_json::Value::Null,
                 control: None,
             },
+            crate::ProcessCompletionAuthority::external_owner("test"),
         )
         .await
         .expect("complete terminal");
@@ -699,6 +710,7 @@ pub(super) async fn prune_removes_terminal_processes_older_than_cutoff(
                 value: serde_json::json!({ "n": 1 }),
                 control: None,
             },
+            crate::ProcessCompletionAuthority::external_owner("test"),
         )
         .await
         .expect("complete old");
@@ -722,6 +734,7 @@ pub(super) async fn prune_removes_terminal_processes_older_than_cutoff(
                 value: serde_json::json!({ "n": 2 }),
                 control: None,
             },
+            crate::ProcessCompletionAuthority::external_owner("test"),
         )
         .await
         .expect("complete fresh");

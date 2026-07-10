@@ -57,29 +57,8 @@ impl AttachmentStore for DurableAttachmentStore {
         self.inner.delete(id).await
     }
 
-    async fn put_for_session(
-        &self,
-        session_id: &str,
-        bytes: Vec<u8>,
-        meta: AttachmentCreateMeta,
-    ) -> Result<AttachmentRef, AttachmentStoreError> {
-        self.inner.put_for_session(session_id, bytes, meta).await
-    }
-
-    async fn get_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<StoredAttachment, AttachmentStoreError> {
-        self.inner.get_for_session(session_id, id).await
-    }
-
-    async fn delete_for_session(
-        &self,
-        session_id: &str,
-        id: &AttachmentId,
-    ) -> Result<(), AttachmentStoreError> {
-        self.inner.delete_for_session(session_id, id).await
+    async fn list(&self) -> Result<Vec<crate::StoredBlobRef>, AttachmentStoreError> {
+        self.inner.list().await
     }
 }
 
@@ -257,7 +236,8 @@ fn worker_with_store_tiers(
     let mut runtime_host = RuntimeHostConfig::in_memory();
     runtime_host.control.effect_host =
         Arc::new(crate::InlineEffectHost::new(Arc::new(DurableController)));
-    runtime_host.durability.attachment_store = attachment;
+    runtime_host.durability.attachment_store =
+        Arc::new(crate::SessionAttachmentStore::ephemeral(attachment));
     runtime_host.durability.process_env_store = process_env_store;
     let plugin_host = Arc::new(crate::PluginHost::new(Vec::new()));
     let factory: Arc<dyn SessionStoreFactory> = Arc::new(TierSessionStoreFactory {

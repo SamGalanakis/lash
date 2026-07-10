@@ -13,6 +13,7 @@ use super::process_filters::list_processes_filters_by_enriched_fields;
 use super::process_references::live_reference_summary_tracks_non_terminal_reference_counts;
 use super::*;
 
+mod completion_authority;
 mod lease_reclaim;
 
 /// Run the full [`ProcessRegistry`] conformance suite against the backend
@@ -54,6 +55,8 @@ pub async fn process_registry_with_expected_durability<F>(
     await_reads_terminal_materialized_output(make()).await;
     disposition_first_started_and_abandon_request_persist(make()).await;
     abandoned_terminal_round_trips_and_pins_writer_rules(make()).await;
+    completion_authority::completion_authority_validated_against_disposition(make()).await;
+    completion_authority::completion_authority_reads_live_disposition_not_stale(make()).await;
     wait_state_round_trips_filters_and_clears_on_terminal(make()).await;
     list_processes_filters_by_status_and_waiting(make()).await;
     list_processes_filters_by_enriched_fields(make()).await;
@@ -1064,6 +1067,7 @@ async fn terminal_and_cancel_events_require_keys(registry: Arc<dyn ProcessRegist
                 raw: None,
                 control: None,
             },
+            ProcessCompletionAuthority::external_owner("conformance"),
         )
         .await
         .expect("complete cancelled");
@@ -1090,6 +1094,7 @@ async fn await_reads_terminal_materialized_output(registry: Arc<dyn ProcessRegis
                 value: serde_json::json!({ "ok": true }),
                 control: None,
             },
+            ProcessCompletionAuthority::external_owner("conformance"),
         )
         .await
         .expect("complete");
@@ -1254,6 +1259,9 @@ async fn abandoned_terminal_round_trips_and_pins_writer_rules(registry: Arc<dyn 
                 evidence: Box::new(evidence.clone()),
                 control: None,
             },
+            // OwnerBound row: the unleased sweep-standin path is workflow-key
+            // authority (mirrors the Restate run handler abandoning a started row).
+            ProcessCompletionAuthority::workflow_key("proc-abandoned"),
         )
         .await
         .expect("abandon");
@@ -1292,6 +1300,7 @@ async fn abandoned_terminal_round_trips_and_pins_writer_rules(registry: Arc<dyn 
                     value: serde_json::json!("revenant"),
                     control: None,
                 },
+                ProcessCompletionAuthority::workflow_key("proc-abandoned"),
             )
             .await
             .is_err(),
@@ -1441,6 +1450,7 @@ async fn list_processes_filters_by_status_and_waiting(registry: Arc<dyn ProcessR
                 value: serde_json::Value::Null,
                 control: None,
             },
+            ProcessCompletionAuthority::external_owner("conformance"),
         )
         .await
         .expect("complete process");
@@ -1612,6 +1622,7 @@ async fn process_change_feed_orders_resumes_and_includes_terminal_transitions(
                 value: serde_json::json!("done"),
                 control: None,
             },
+            ProcessCompletionAuthority::external_owner("conformance"),
         )
         .await
         .expect("complete b");
@@ -1733,6 +1744,7 @@ async fn wait_state_round_trips_filters_and_clears_on_terminal(registry: Arc<dyn
                 value: serde_json::json!({ "done": true }),
                 control: None,
             },
+            ProcessCompletionAuthority::external_owner("conformance"),
         )
         .await
         .expect("complete waiting process");
@@ -1912,6 +1924,7 @@ async fn delete_session_revokes_handles_by_session(registry: Arc<dyn ProcessRegi
                 value: serde_json::Value::Null,
                 control: None,
             },
+            ProcessCompletionAuthority::external_owner("conformance"),
         )
         .await
         .expect("complete terminal");
@@ -2011,6 +2024,7 @@ async fn list_non_terminal_excludes_terminal_processes(registry: Arc<dyn Process
                 value: serde_json::Value::Null,
                 control: None,
             },
+            ProcessCompletionAuthority::external_owner("conformance"),
         )
         .await
         .expect("complete done");
@@ -2052,6 +2066,7 @@ async fn list_live_handle_grants_excludes_terminal_history(registry: Arc<dyn Pro
                 value: serde_json::Value::Null,
                 control: None,
             },
+            ProcessCompletionAuthority::external_owner("conformance"),
         )
         .await
         .expect("complete done");

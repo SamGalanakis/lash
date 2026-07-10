@@ -8,8 +8,8 @@ use tokio::sync::Mutex;
 use crate::plugin::PluginError;
 
 use super::events::{
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessTerminalState,
+    ProcessAwaitOutput, ProcessCompletionAuthority, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult, terminal_append_request,
 };
 use super::model::{
     AbandonRequest, PROCESS_LEASE_SCHEMA_VERSION, ProcessChangeCursor, ProcessExternalRef,
@@ -490,27 +490,74 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         &self,
         process_id: &str,
         await_output: ProcessAwaitOutput,
+        authority: ProcessCompletionAuthority,
     ) -> Result<ProcessRecord, PluginError> {
-        let event_type = match await_output.terminal_state() {
-            ProcessTerminalState::Completed => "process.completed",
-            ProcessTerminalState::Failed => "process.failed",
-            ProcessTerminalState::Cancelled => "process.cancelled",
-            ProcessTerminalState::Abandoned => "process.abandoned",
+        // Hold the `managed` lock across load→validate→append so no other
+        // completion can complete, prune, and re-register the row with a
+        // different disposition between the validation and the terminal append.
+        // The row we validate is the row we append to.
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
         };
-        self.append_event(
-            process_id,
-            ProcessEventAppendRequest::new(
-                event_type,
-                serde_json::json!({ "await_output": await_output }),
-            )
-            .with_replay_key(format!("process:{process_id}:terminal:{event_type}")),
-        )
-        .await?;
-        self.get_process(process_id).await.ok_or_else(|| {
-            PluginError::Session(format!(
-                "unknown process `{process_id}` after terminal event"
-            ))
-        })
+        authority.validate(process_id, record.record.disposition, &await_output)?;
+        let request = terminal_append_request(process_id, &await_output, Some(&authority));
+        let replay_lookup = request
+            .replay
+            .as_ref()
+            .and_then(|replay| record.keyed_events.get(replay.key.as_str()))
+            .map(|(hash, event)| (hash.clone(), event.clone()));
+        let sequence = record.events.len() as u64 + 1;
+        let prepared = prepare_process_event_append(
+            &record.record,
+            request,
+            sequence,
+            replay_lookup,
+            current_epoch_ms(),
+        )?;
+        match prepared {
+            super::ProcessEventAppendPlan::Replay {
+                repair_status,
+                occurred_at_ms,
+                ..
+            } => {
+                if let Some(status) = repair_status {
+                    super::apply_process_status_projection(
+                        &mut record.record,
+                        status,
+                        occurred_at_ms,
+                    );
+                    record.change_seq = self.next_change_seq().await;
+                }
+            }
+            super::ProcessEventAppendPlan::Insert {
+                event,
+                payload_hash,
+                status_update,
+                occurred_at_ms,
+                ..
+            } => {
+                if let Some(status) = status_update {
+                    super::apply_process_status_projection(
+                        &mut record.record,
+                        status,
+                        occurred_at_ms,
+                    );
+                } else {
+                    record.record.updated_at_ms = occurred_at_ms;
+                }
+                record.change_seq = self.next_change_seq().await;
+                if let Some(replay) = event.invocation.replay.clone() {
+                    record
+                        .keyed_events
+                        .insert(replay.key, (payload_hash, event.clone()));
+                }
+                record.events.push(event);
+            }
+        }
+        Ok(record.record.clone())
     }
 
     async fn complete_process_with_lease(
@@ -526,20 +573,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             )));
         };
         let now = current_epoch_ms();
-        let event_type = match await_output.terminal_state() {
-            ProcessTerminalState::Completed => "process.completed",
-            ProcessTerminalState::Failed => "process.failed",
-            ProcessTerminalState::Cancelled => "process.cancelled",
-            ProcessTerminalState::Abandoned => "process.abandoned",
-        };
-        let request = ProcessEventAppendRequest::new(
-            event_type,
-            serde_json::json!({ "await_output": await_output }),
-        )
-        .with_replay_key(format!(
-            "process:{}:terminal:{event_type}",
-            lease.process_id
-        ));
+        let request = terminal_append_request(&lease.process_id, &await_output, None);
         let replay_lookup = request
             .replay
             .as_ref()

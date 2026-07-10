@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use crate::{AttachmentCreateMeta, AttachmentRef, AttachmentStore, AttachmentStoreError};
+use crate::{AttachmentCreateMeta, AttachmentRef, AttachmentStoreError};
 
 #[derive(Clone)]
 pub struct ToolAttachmentClient {
-    pub(super) store: Arc<dyn AttachmentStore>,
+    pub(super) store: Arc<crate::SessionAttachmentStore>,
 }
 
 impl ToolAttachmentClient {

@@ -11,7 +11,7 @@ pub struct RuntimeExecutionContext<'run> {
     pub(super) session_id: String,
     pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
     process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
-    attachment_store: Arc<dyn crate::AttachmentStore>,
+    attachment_store: Arc<crate::SessionAttachmentStore>,
     chronological_projection: Arc<crate::ChronologicalProjection>,
     protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
     turn_context: crate::TurnContext,
@@ -124,7 +124,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         session_id: String,
         dispatch: Arc<ToolDispatchContext<'run>>,
         process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
-        attachment_store: Arc<dyn crate::AttachmentStore>,
+        attachment_store: Arc<crate::SessionAttachmentStore>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
@@ -200,7 +200,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             .or_else(|| Some(self.session_scope()))
     }
 
-    pub fn attachment_store(&self) -> Arc<dyn crate::AttachmentStore> {
+    pub fn attachment_store(&self) -> Arc<crate::SessionAttachmentStore> {
         Arc::clone(&self.attachment_store)
     }
 
@@ -784,7 +784,7 @@ mod tests {
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
             turn_context: crate::TurnContext::default(),
             clock: std::sync::Arc::new(crate::SystemClock),
         });
@@ -792,7 +792,7 @@ mod tests {
             "session".to_string(),
             dispatch,
             Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
-            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::SessionAttachmentStore::in_memory()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
             crate::TurnContext::default(),

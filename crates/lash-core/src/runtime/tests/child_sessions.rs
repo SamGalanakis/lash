@@ -170,7 +170,8 @@ async fn durable_managed_child_writes_to_its_own_attachment_namespace() {
     let root_store = Arc::new(RecordingStore::default());
     let bytes = Arc::new(crate::InMemoryAttachmentStore::new());
     let mut host_config = crate::RuntimeHostConfig::in_memory();
-    host_config.durability.attachment_store = bytes.clone();
+    host_config.durability.attachment_store =
+        Arc::new(crate::SessionAttachmentStore::ephemeral(bytes.clone()));
     let host = crate::EmbeddedRuntimeHost::new(host_config)
         .with_session_store_factory(Arc::new(child_factory.clone()));
     let state = RuntimeSessionState {
@@ -182,7 +183,7 @@ async fn durable_managed_child_writes_to_its_own_attachment_namespace() {
         host,
         crate::PersistentRuntimeServices::new(
             plugin_session_with_tools("root", Arc::new(AttachmentWritingTool)),
-            root_store,
+            Arc::clone(&root_store) as Arc<dyn crate::store::RuntimePersistence>,
         ),
         state,
     )
@@ -221,18 +222,36 @@ async fn durable_managed_child_writes_to_its_own_attachment_namespace() {
     lifecycle.start_turn(request).await.expect("child turn");
 
     let id = crate::attachments::content_id(&[4, 2, 4, 2]);
+    // The blob lives exactly once in the shared, flat backend...
     assert_eq!(
-        bytes
-            .get_for_session("attachment-child", &id)
-            .await
-            .expect("child attachment bytes")
-            .bytes,
+        bytes.get(&id).await.expect("child attachment bytes").bytes,
         vec![4, 2, 4, 2]
     );
-    assert!(matches!(
-        bytes.get_for_session("root", &id).await,
-        Err(crate::AttachmentStoreError::NotFound(_))
-    ));
+    // ...but reference isolation is now manifest-based: the child session holds
+    // the ref, the root session never does. A managed child starts with its own
+    // empty manifest, so it cannot resolve a blob the root put and vice versa.
+    let child_store = child_factory
+        .stores()
+        .into_iter()
+        .find(|store| {
+            store
+                .session_meta
+                .lock()
+                .expect("lock session meta")
+                .as_ref()
+                .is_some_and(|meta| meta.session_id == "attachment-child")
+        })
+        .expect("child store");
+    assert!(
+        crate::AttachmentManifest::holds_ref(&*child_store, "attachment-child", &id)
+            .expect("child manifest lookup"),
+        "child session must hold the ref it wrote"
+    );
+    assert!(
+        !crate::AttachmentManifest::holds_ref(&*root_store, "root", &id)
+            .expect("root manifest lookup"),
+        "root session must not hold a ref for the child's attachment"
+    );
 }
 
 #[tokio::test]
@@ -240,7 +259,8 @@ async fn same_session_rebuild_preserves_only_that_sessions_pending_attachment_id
     let root_store = Arc::new(RecordingStore::default());
     let bytes = Arc::new(crate::InMemoryAttachmentStore::new());
     let mut host_config = crate::RuntimeHostConfig::in_memory();
-    host_config.durability.attachment_store = bytes.clone();
+    host_config.durability.attachment_store =
+        Arc::new(crate::SessionAttachmentStore::ephemeral(bytes.clone()));
     let state = RuntimeSessionState {
         session_id: "root".to_string(),
         ..RuntimeSessionState::default()
@@ -342,9 +362,9 @@ async fn same_session_rebuild_preserves_only_that_sessions_pending_attachment_id
     );
     assert_eq!(
         bytes
-            .get_for_session("root", &second.id)
+            .get(&second.id)
             .await
-            .expect("rebuilt runtime uses root physical namespace")
+            .expect("rebuilt runtime shares the flat backend blob")
             .bytes,
         vec![4, 5, 6]
     );

@@ -361,6 +361,147 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
         }
         Ok(())
     }
+
+    async fn live_attachment_refs(
+        &self,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<std::collections::BTreeSet<lash_core::AttachmentId>, lash_core::StoreError> {
+        // Per-session-database topology: the factory owns the directory, so it
+        // computes the root set by unioning each session database's refs at
+        // sweep time (the ratified choice over a dual-written factory index).
+        let mut refs = std::collections::BTreeSet::new();
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            // No sessions written yet: an empty root set.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(refs),
+            Err(err) => {
+                return Err(lash_core::StoreError::Backend(format!(
+                    "read session store directory {}: {err}",
+                    self.root.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let path = entry
+                .map_err(|err| lash_core::StoreError::Backend(err.to_string()))?
+                .path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            // `-wal`/`-shm` sidecars carry the `.db-wal` / `.db-shm` extension,
+            // so they are not `.db` files at all — skip them.
+            if path.extension().and_then(|ext| ext.to_str()) != Some("db") {
+                continue;
+            }
+            // Per-session sidecar databases (`<primary>.effects.db`,
+            // `.processes.db`, `.triggers.db`, `.artifacts.db`, `.process-env.db`)
+            // ARE `.db` files, but are named on top of a primary session database
+            // filename that itself ends in `.db`, so they carry an interior `.db.`
+            // that a primary never does. Skip them — a sidecar (even a corrupt
+            // one) is not a session database and must not abort GC, distinctly
+            // from an *unreadable primary session* database, which must (below).
+            if !is_primary_session_db_name(file_name) {
+                tracing::warn!(
+                    path = %path.display(),
+                    "attachment GC: skipping sidecar database in sessions directory"
+                );
+                continue;
+            }
+            // A primary session database that fails to open might still hold live
+            // refs. Aborting the whole sweep is the safe choice: treating it as
+            // empty would let GC delete blobs it actually references.
+            let store = Store::open_with_options(&path, self.options)
+                .await
+                .map_err(|err| {
+                    lash_core::StoreError::Backend(format!(
+                        "attachment GC aborted: session database {} could not be opened: {err}",
+                        path.display()
+                    ))
+                })?;
+            // Reconcile crash orphans in this session database atomically: one
+            // conditional DELETE of uncommitted intents aged past the cutoff (no
+            // list-then-forget race against a concurrent `record_intent` refresh),
+            // then union what remains.
+            lash_core::AttachmentManifest::forget_aged_uncommitted_intents(
+                &store,
+                intent_grace_cutoff_epoch_ms,
+            )?;
+            refs.extend(lash_core::AttachmentManifest::list_all_refs(&store)?);
+        }
+        Ok(refs)
+    }
+
+    async fn has_live_attachment_ref(
+        &self,
+        id: &lash_core::AttachmentId,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<bool, lash_core::StoreError> {
+        // Targeted single-id probe: iterate the per-session databases only until
+        // the first hit rather than unioning every session's refs. Read-only — it
+        // does not reconcile aged intents (the reconciling snapshot already ran).
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                return Err(lash_core::StoreError::Backend(format!(
+                    "read session store directory {}: {err}",
+                    self.root.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let path = entry
+                .map_err(|err| lash_core::StoreError::Backend(err.to_string()))?
+                .path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if path.extension().and_then(|ext| ext.to_str()) != Some("db") {
+                continue;
+            }
+            if !is_primary_session_db_name(file_name) {
+                continue;
+            }
+            let store = Store::open_with_options(&path, self.options)
+                .await
+                .map_err(|err| {
+                    lash_core::StoreError::Backend(format!(
+                        "attachment GC root re-check aborted: session database {} could not be opened: {err}",
+                        path.display()
+                    ))
+                })?;
+            if lash_core::AttachmentManifest::has_live_ref_for_id(
+                &store,
+                id,
+                intent_grace_cutoff_epoch_ms,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Whether `file_name` is a primary session database rather than a per-session
+/// sidecar database.
+///
+/// A primary session database ends in `.db` with `.db` appearing *only* as the
+/// final extension. Sidecar databases are named by appending a suffix on top of
+/// the primary filename (which already ends in `.db`), e.g.
+/// `20260710_011120.db.effects.db` or `sess-<hash>.db.processes.db`, so they
+/// carry an interior `.db.` that a primary never does. This structural test is
+/// deliberately independent of how the primary base name is formed — both this
+/// factory's `<safe>-<hash>.db` names and the reference host's `<timestamp>.db`
+/// names are recognised as primaries — because the host, not the factory, owns
+/// the primary naming scheme in the shared sessions directory. (`-wal`/`-shm`
+/// sidecars are excluded earlier: they are not `.db` files at all.)
+fn is_primary_session_db_name(file_name: &str) -> bool {
+    let Some(stem) = file_name.strip_suffix(".db") else {
+        return false;
+    };
+    // A primary's stem is the base name with no further `.db` extension; a
+    // sidecar's stem still contains the primary's trailing `.db` (`...db.effects`).
+    !stem.contains(".db")
 }
 
 fn safe_session_db_file_name(session_id: &str) -> String {
@@ -615,6 +756,128 @@ mod tests {
         )
     }
 
+    #[test]
+    fn primary_session_db_names_exclude_sidecars() {
+        // Both primary naming schemes are recognised: this factory's
+        // `<safe>-<hash>.db` and the reference host's `<timestamp>.db`.
+        for primary in [
+            safe_session_db_file_name("sess-1"),
+            "20260710_011120.db".to_string(),
+        ] {
+            assert!(
+                is_primary_session_db_name(&primary),
+                "{primary} must be recognised as a primary session db"
+            );
+            // Sidecar databases suffixed on top of the primary `<name>.db` are not.
+            for suffix in [
+                "effects.db",
+                "processes.db",
+                "triggers.db",
+                "artifacts.db",
+                "process-env.db",
+            ] {
+                assert!(
+                    !is_primary_session_db_name(&format!("{primary}.{suffix}")),
+                    "sidecar {suffix} of {primary} must not be treated as a primary session db"
+                );
+            }
+            // WAL/SHM sidecars are not `.db` files at all.
+            assert!(!is_primary_session_db_name(&format!("{primary}-wal")));
+        }
+    }
+
+    // Fix D: the factory's root-set discovery iterates a directory that also holds
+    // per-session sidecar databases (`.effects.db`, `.processes.db`, ...). It must
+    // skip those without aborting, still surfacing the primary session database's
+    // committed refs.
+    #[tokio::test]
+    async fn live_attachment_refs_skips_sidecars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("sessions");
+        std::fs::create_dir_all(&root).expect("mkdir sessions");
+        let factory = SqliteSessionStoreFactory::new(&root);
+
+        // A primary session database with a committed attachment ref.
+        let primary = factory.path_for_session("sess-1");
+        let attachment_id = lash_core::AttachmentId::new("a".repeat(64));
+        {
+            let store = Store::open(&primary).await.expect("open primary");
+            lash_core::AttachmentManifest::record_intent(
+                &store,
+                lash_core::AttachmentIntent {
+                    attachment_id: attachment_id.clone(),
+                    session_id: "sess-1".to_string(),
+                    canonical_uri: format!("lash-attachment://sha256/{attachment_id}"),
+                    intent_at_epoch_ms: 1_000,
+                },
+            )
+            .expect("record intent");
+            lash_core::AttachmentManifest::commit_refs(
+                &store,
+                "sess-1",
+                std::slice::from_ref(&attachment_id),
+            )
+            .expect("commit ref");
+        }
+
+        // Sidecar databases the CLI drops next to the primary, plus a stray file.
+        let primary_name = primary
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("primary name")
+            .to_string();
+        for suffix in [
+            "effects.db",
+            "processes.db",
+            "triggers.db",
+            "artifacts.db",
+            "process-env.db",
+        ] {
+            std::fs::write(
+                root.join(format!("{primary_name}.{suffix}")),
+                b"not a sqlite database",
+            )
+            .expect("write sidecar");
+        }
+
+        // A cutoff of 0 ages out no intents; the committed ref survives. The
+        // corrupt sidecars are skipped, not opened, so discovery does not abort.
+        let refs = SessionStoreFactory::live_attachment_refs(&factory, 0)
+            .await
+            .expect("root discovery must not abort on sidecars");
+        assert!(
+            refs.contains(&attachment_id),
+            "the primary session's committed ref must be discovered"
+        );
+        assert_eq!(
+            refs.len(),
+            1,
+            "only the primary db contributes refs: {refs:?}"
+        );
+    }
+
+    // Fix D safety: an *unreadable primary* session database (as opposed to a
+    // sidecar) must abort the sweep — never be silently treated as empty, which
+    // would drop its refs and let GC delete blobs it references.
+    #[tokio::test]
+    async fn live_attachment_refs_aborts_on_unreadable_primary_session_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("sessions");
+        std::fs::create_dir_all(&root).expect("mkdir sessions");
+        let factory = SqliteSessionStoreFactory::new(&root);
+
+        // A file that reads as a primary session database name (no interior
+        // `.db.`) but is not a valid SQLite database.
+        std::fs::write(root.join("20260710_010101.db"), b"corrupt not-a-db")
+            .expect("write corrupt");
+
+        let result = SessionStoreFactory::live_attachment_refs(&factory, 0).await;
+        assert!(
+            result.is_err(),
+            "an unreadable primary session database must abort discovery, got {result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn sqlite_lashlang_artifact_store_round_trips_verified_module_artifacts() {
         let store = Store::memory().await.expect("memory store");
@@ -674,6 +937,7 @@ mod tests {
                         value: serde_json::json!({"ok": true}),
                         control: None,
                     },
+                    lash_core::ProcessCompletionAuthority::external_owner("session"),
                 )
                 .await
                 .expect("complete");

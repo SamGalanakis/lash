@@ -1,7 +1,8 @@
 use crate::plugin::PluginError;
 
 use super::events::{
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ProcessAwaitOutput, ProcessCompletionAuthority, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult,
 };
 use super::model::{
     AbandonRequest, ProcessChangeCursor, ProcessExternalRef, ProcessHandleDescriptor,
@@ -167,17 +168,30 @@ pub trait ProcessRegistry: Send + Sync {
         after_sequence: u64,
     ) -> Result<Vec<ProcessEvent>, PluginError>;
 
-    /// Complete a process without a Lash process lease.
+    /// Complete a process without a Lash process lease, under an explicit,
+    /// auditable completion authority.
     ///
-    /// This path is reserved for execution substrates that provide their own
-    /// single-writer authority (for example a workflow keyed by `process_id`) or
-    /// for externally-owned processes. Lash-owned workers must use
+    /// This path is reserved for writers whose single-writer discipline lives
+    /// *outside* the Lash lease: an external actor closing an externally-owned
+    /// row, a workflow-key-coalesced substrate completing a row it ran, or the
+    /// sweep reconciling an abandon request. The
+    /// [`ProcessCompletionAuthority`] names which of these applies; the
+    /// implementation MUST call
+    /// [`authority.validate`](ProcessCompletionAuthority::validate) against the
+    /// row's declared [`RecoveryDisposition`](super::model::RecoveryDisposition)
+    /// inside this operation, so a mismatched authority is rejected with a typed
+    /// error before any terminal event is appended, and MUST record the
+    /// authority on the terminal event as audit evidence (via
+    /// [`terminal_append_request`](super::events::terminal_append_request)).
+    ///
+    /// Lash-owned workers must instead use
     /// [`complete_process_with_lease`](Self::complete_process_with_lease), which
     /// fences the terminal append and lease release in one atomic operation.
     async fn complete_process(
         &self,
         process_id: &str,
         await_output: ProcessAwaitOutput,
+        authority: ProcessCompletionAuthority,
     ) -> Result<ProcessRecord, PluginError>;
 
     /// Atomically append the terminal output while the supplied process lease

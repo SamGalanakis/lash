@@ -26,12 +26,13 @@ pub use engine::{
     ProcessEngineRuntimeContext, ProcessEngineValidationContext,
 };
 pub use events::{
-    AbandonEvidence, AbandonWriter, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
-    ProcessEventAppendResult, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
-    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
-    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
-    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
-    validate_process_signal_name,
+    AbandonEvidence, AbandonWriter, ProcessAwaitOutput, ProcessCompletionAuthority, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessTerminalSemantics, ProcessTerminalSpec,
+    ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
+    ProcessWakeDelivery, ProcessWakeSpec, process_signal_event_type,
+    process_signal_name_from_event_type, process_signal_wait_key, terminal_append_request,
+    terminal_event_type_name, validate_process_signal_name,
 };
 pub use materialization::materialize_process_event_semantics;
 pub use model::{

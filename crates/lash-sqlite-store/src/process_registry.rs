@@ -966,27 +966,19 @@ impl ProcessRegistry for SqliteProcessRegistry {
         &self,
         process_id: &str,
         await_output: ProcessAwaitOutput,
+        authority: lash_core::ProcessCompletionAuthority,
     ) -> Result<ProcessRecord, lash_core::PluginError> {
-        let event_type = match await_output.terminal_state() {
-            lash_core::ProcessTerminalState::Completed => "process.completed",
-            lash_core::ProcessTerminalState::Failed => "process.failed",
-            lash_core::ProcessTerminalState::Cancelled => "process.cancelled",
-            lash_core::ProcessTerminalState::Abandoned => "process.abandoned",
-        };
-        self.append_event(
+        // Load, validate the authority against the row's declared disposition,
+        // and append the terminal event as one atomic transaction, so a
+        // concurrent complete→prune→re-register cannot slip a different
+        // disposition between the validation and the append.
+        super::process_registry_completion::complete_process(
+            self,
             process_id,
-            ProcessEventAppendRequest::new(
-                event_type,
-                serde_json::json!({ "await_output": await_output }),
-            )
-            .with_replay_key(format!("process:{process_id}:terminal:{event_type}")),
+            await_output,
+            authority,
         )
-        .await?;
-        self.get_process(process_id).await.ok_or_else(|| {
-            lash_core::PluginError::Session(format!(
-                "unknown process `{process_id}` after terminal event"
-            ))
-        })
+        .await
     }
 
     async fn complete_process_with_lease(

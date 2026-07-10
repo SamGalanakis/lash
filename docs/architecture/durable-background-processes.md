@@ -270,6 +270,13 @@ every registration:
   workers always use `complete_process_with_lease`. Recovery never claims the
   external work itself. External placeholders and detached commands declare it.
 
+The unleased `complete_process` path takes a required `ProcessCompletionAuthority`
+(`ExternalOwner` / `WorkflowKey` / `ReconciledAbandon`) that each backend
+validates against the row's disposition inside the completion operation and
+records on the terminal event as audit evidence — so who was allowed to close an
+unleased row is explicit and enforced uniformly, not left to per-caller
+convention (ADR 0027).
+
 Deriving the disposition from the input class was rejected (it re-hides the
 contract in a heuristic) and defaulting to `Rerunnable` was rejected (a producer
 that forgot the field would silently re-ship the exact unsoundness this removes),

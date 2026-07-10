@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::AttachmentStore;
 use crate::LlmRequest as CoreLlmRequest;
 use crate::LlmResponse;
 use crate::ProcessRecord;
@@ -332,10 +331,6 @@ pub trait AwaitEventResolver: Send + Sync {
         crate::DurabilityTier::Inline
     }
 
-    fn requires_durable_attachment_store(&self) -> bool {
-        false
-    }
-
     fn supports_durable_effects(&self) -> bool {
         false
     }
@@ -645,7 +640,7 @@ pub(super) struct LocalTurnEffectRunner<'a, 'run> {
 
 pub(super) struct LocalDirectEffectRunner {
     provider: ProviderHandle,
-    attachment_store: Arc<dyn AttachmentStore>,
+    attachment_store: Arc<crate::SessionAttachmentStore>,
 }
 
 struct LocalToolBatchEffectRunner<'run> {
@@ -819,7 +814,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
 
     pub(in crate::runtime) fn direct(
         provider: ProviderHandle,
-        attachment_store: Arc<dyn AttachmentStore>,
+        attachment_store: Arc<crate::SessionAttachmentStore>,
     ) -> Self {
         Self {
             state: RuntimeEffectLocalExecutorState::Runner(Box::new(LocalDirectEffectRunner {
@@ -1303,10 +1298,6 @@ impl Default for InlineEffectHost {
 impl AwaitEventResolver for InlineEffectHost {
     fn durability_tier(&self) -> crate::DurabilityTier {
         self.controller.durability_tier()
-    }
-
-    fn requires_durable_attachment_store(&self) -> bool {
-        self.controller.requires_durable_attachment_store()
     }
 
     fn supports_durable_effects(&self) -> bool {

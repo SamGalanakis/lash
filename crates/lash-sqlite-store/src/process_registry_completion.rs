@@ -3,6 +3,117 @@
 use super::process_registry::{process_lease_expired, tx_outcome};
 use super::*;
 
+/// Unleased terminal completion, validated and appended as one atomic unit.
+///
+/// The load, the authority-vs-disposition validation, and the terminal append
+/// all run inside a single `write_flow` transaction. Splitting validation
+/// (reading the row's `disposition`) from the append leaves a window in which a
+/// paused caller could re-validate against one disposition, then append after
+/// the row was completed, pruned, and re-registered with a *different*
+/// disposition. Holding one transaction across load→validate→append closes that
+/// window: the row we validate is the row we append to.
+pub(super) async fn complete_process(
+    registry: &SqliteProcessRegistry,
+    process_id: &str,
+    await_output: ProcessAwaitOutput,
+    authority: lash_core::ProcessCompletionAuthority,
+) -> Result<ProcessRecord, lash_core::PluginError> {
+    let process_id = process_id.to_string();
+    registry
+        .conn
+        .write_flow(move |tx| {
+            Ok(tx_outcome((|| {
+                let mut record = SqliteProcessRegistry::load_process_conn(tx, &process_id)?
+                    .ok_or_else(|| {
+                        lash_core::PluginError::Session(format!("unknown process `{process_id}`"))
+                    })?;
+                // Validate the authority against the row's declared disposition
+                // *inside* the transaction that appends, so a concurrent
+                // complete→prune→re-register with a different disposition cannot
+                // slip between the check and the append.
+                authority.validate(&process_id, record.disposition, &await_output)?;
+                let request =
+                    lash_core::terminal_append_request(&process_id, &await_output, Some(&authority));
+                let replay_lookup = request
+                    .replay
+                    .as_ref()
+                    .map(|replay| {
+                        SqliteProcessRegistry::load_event_by_key_conn(
+                            tx,
+                            &process_id,
+                            replay.key.as_str(),
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
+                let sequence = tx
+                    .query_row(
+                        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM process_events WHERE process_id = ?1",
+                        params![process_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(process_sqlite_error)? as u64;
+                let now = current_epoch_ms();
+                let prepared =
+                    prepare_process_event_append(&record, request, sequence, replay_lookup, now)?;
+                match prepared {
+                    lash_core::ProcessEventAppendPlan::Replay {
+                        repair_status,
+                        occurred_at_ms,
+                        ..
+                    } => {
+                        if let Some(status) = repair_status {
+                            lash_core::apply_process_status_projection(
+                                &mut record,
+                                status,
+                                occurred_at_ms,
+                            );
+                            SqliteProcessRegistry::save_process_conn(tx, &record)?;
+                        }
+                        Ok(record)
+                    }
+                    lash_core::ProcessEventAppendPlan::Insert {
+                        event,
+                        payload_hash,
+                        status_update,
+                        occurred_at_ms,
+                        ..
+                    } => {
+                        tx.execute(
+                            "INSERT INTO process_events (
+                                process_id, sequence, event_type, payload_hash, idempotency_key,
+                                occurred_at_ms, event_json
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                process_id,
+                                sequence as i64,
+                                event.event_type.as_str(),
+                                payload_hash.as_str(),
+                                event.invocation.replay_key(),
+                                occurred_at_ms as i64,
+                                process_encode_json(&event)?,
+                            ],
+                        )
+                        .map_err(process_sqlite_error)?;
+                        if let Some(status) = status_update {
+                            lash_core::apply_process_status_projection(
+                                &mut record,
+                                status,
+                                occurred_at_ms,
+                            );
+                        } else {
+                            record.updated_at_ms = occurred_at_ms;
+                        }
+                        SqliteProcessRegistry::save_process_conn(tx, &record)?;
+                        Ok(record)
+                    }
+                }
+            })()))
+        })
+        .await
+        .map_err(process_sqlite_error)?
+}
+
 pub(super) async fn complete_process_with_lease(
     registry: &SqliteProcessRegistry,
     lease: &ProcessLease,
@@ -18,17 +129,7 @@ pub(super) async fn complete_process_with_lease(
                         "unknown process `{process_id}`"
                     ))
                 })?;
-                let event_type = match await_output.terminal_state() {
-                    lash_core::ProcessTerminalState::Completed => "process.completed",
-                    lash_core::ProcessTerminalState::Failed => "process.failed",
-                    lash_core::ProcessTerminalState::Cancelled => "process.cancelled",
-                    lash_core::ProcessTerminalState::Abandoned => "process.abandoned",
-                };
-                let request = ProcessEventAppendRequest::new(
-                    event_type,
-                    serde_json::json!({ "await_output": await_output }),
-                )
-                .with_replay_key(format!("process:{process_id}:terminal:{event_type}"));
+                let request = lash_core::terminal_append_request(process_id, &await_output, None);
                 let replay_lookup = request
                     .replay
                     .as_ref()

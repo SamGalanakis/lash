@@ -124,8 +124,8 @@ pub use process::{
     InMemoryProcessExecutionEnvStore, ObservedProcess, ObservedProcessEvent, ObservedWorkItem,
     PROCESS_LEASE_SCHEMA_VERSION, ProcessAttach, ProcessAwaitOutput, ProcessAwaiter,
     ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
-    ProcessCancelSummary, ProcessChangeCursor, ProcessChangeHub, ProcessEngine,
-    ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
+    ProcessCancelSummary, ProcessChangeCursor, ProcessChangeHub, ProcessCompletionAuthority,
+    ProcessEngine, ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
     ProcessEngineRuntimeContext, ProcessEngineValidationContext, ProcessEvent,
     ProcessEventAppendPlan, ProcessEventAppendRequest, ProcessEventAppendResult,
     ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventSink, ProcessEventType,
@@ -147,7 +147,8 @@ pub use process::{
     process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
     process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
-    validate_process_signal_name, watch_process_registry, watch_process_registry_with_sink,
+    terminal_append_request, terminal_event_type_name, validate_process_signal_name,
+    watch_process_registry, watch_process_registry_with_sink,
 };
 pub use process_work_driver::{InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver};
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig, ProcessDrainReport};
@@ -1001,6 +1002,48 @@ pub trait SessionStoreFactory: Send + Sync {
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), String>;
+
+    /// The attachment GC root set across ALL sessions this factory owns,
+    /// reconciled against `intent_grace_cutoff_epoch_ms`: every committed ref,
+    /// plus every uncommitted intent younger than the cutoff. Intents at or
+    /// before the cutoff are crash orphans (their turn never committed and has
+    /// aged past the grace window) — the factory forgets them and excludes them,
+    /// so their blobs become collectable. Factories with no attachment story
+    /// default to empty; the durable factories override this (Postgres queries
+    /// and prunes the global manifest table; SQLite unions and reconciles its
+    /// per-session databases at sweep time). Exposed to the GC lever via the
+    /// blanket [`AttachmentRootSet`](crate::AttachmentRootSet) implementation.
+    async fn live_attachment_refs(
+        &self,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<std::collections::BTreeSet<crate::AttachmentId>, crate::store::StoreError> {
+        let _ = intent_grace_cutoff_epoch_ms;
+        Ok(std::collections::BTreeSet::new())
+    }
+
+    /// Whether ANY session this factory owns currently holds a GC-live ref for
+    /// `attachment_id` (a committed ref, or an uncommitted intent younger than
+    /// the cutoff). The single-id counterpart to
+    /// [`Self::live_attachment_refs`], used by the attachment GC lever's
+    /// delete-time root re-check so it need not re-materialize the whole root set
+    /// per candidate blob. The default re-materializes the root set and tests
+    /// membership; the durable factories override with a targeted single-id query
+    /// (Postgres one indexed `SELECT`; SQLite iterates its per-session databases
+    /// only until the first hit).
+    ///
+    /// Unlike [`Self::live_attachment_refs`], this MUST NOT forget aged intents —
+    /// it is a read-only probe run after the reconciling snapshot was already
+    /// taken.
+    async fn has_live_attachment_ref(
+        &self,
+        attachment_id: &crate::AttachmentId,
+        intent_grace_cutoff_epoch_ms: u64,
+    ) -> Result<bool, crate::store::StoreError> {
+        Ok(self
+            .live_attachment_refs(intent_grace_cutoff_epoch_ms)
+            .await?
+            .contains(attachment_id))
+    }
 }
 
 /// Generic runtime for CLI or programmatic embedding.
