@@ -75,7 +75,9 @@ pub async fn process_registry_with_expected_durability<F>(
     renewed_process_lease_survives_original_expiry(make()).await;
     completed_lease_releases_and_reclaim_bumps_fencing(make()).await;
     stale_lease_completion_cannot_release_live_lease(make()).await;
-    leased_terminal_completion_is_atomic_and_fenced(make()).await;
+    stale_process_lease_cannot_complete_or_disturb_current_owner(make()).await;
+    expired_process_lease_cannot_complete(make()).await;
+    leased_terminal_completion_replay_returns_existing_record(make()).await;
     lease_reclaim::process_lease_reclaim_contract(make()).await;
     prune_removes_terminal_processes_older_than_cutoff(make()).await;
     awaiter_cross_task_completion_resolves_promptly(make()).await;
@@ -2279,7 +2281,9 @@ async fn stale_lease_completion_cannot_release_live_lease(registry: Arc<dyn Proc
         .expect("the live owner can still renew");
 }
 
-async fn leased_terminal_completion_is_atomic_and_fenced(registry: Arc<dyn ProcessRegistry>) {
+async fn stale_process_lease_cannot_complete_or_disturb_current_owner(
+    registry: Arc<dyn ProcessRegistry>,
+) {
     let process_id = "proc-lease-terminal-fence";
     registry
         .register_process(registration(process_id))
@@ -2318,6 +2322,90 @@ async fn leased_terminal_completion_is_atomic_and_fenced(registry: Arc<dyn Proce
             .is_terminal(),
         "stale completion must leave the process non-terminal"
     );
+    let terminal_events = registry
+        .events_after(process_id, 0)
+        .await
+        .expect("events after stale completion")
+        .into_iter()
+        .filter(|event| event.semantics.terminal.is_some())
+        .count();
+    assert_eq!(
+        terminal_events, 0,
+        "a stale completion must not append a terminal event"
+    );
+    let lease_after_stale_completion = registry
+        .get_process_lease(process_id)
+        .await
+        .expect("read current lease after stale completion")
+        .expect("current owner must retain its lease");
+    assert_eq!(
+        serde_json::to_value(&lease_after_stale_completion)
+            .expect("serialize lease after stale completion"),
+        serde_json::to_value(&current).expect("serialize current lease"),
+        "a stale completion must not alter the current owner's lease"
+    );
+}
+
+async fn expired_process_lease_cannot_complete(registry: Arc<dyn ProcessRegistry>) {
+    let process_id = "proc-lease-terminal-expired";
+    registry
+        .register_process(registration(process_id))
+        .await
+        .expect("register");
+    let expired = registry
+        .claim_process_lease(process_id, &process_lease_owner("expired-owner"), 0)
+        .await
+        .expect("expired lease")
+        .acquired()
+        .expect("zero-TTL lease acquired");
+    let expired_result = registry
+        .complete_process_with_lease(
+            &expired,
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({"writer": "expired"}),
+                control: None,
+            },
+        )
+        .await;
+    assert!(
+        expired_result.is_err(),
+        "an expired lease must not complete a process"
+    );
+    assert!(
+        !registry
+            .get_process(process_id)
+            .await
+            .expect("process exists")
+            .is_terminal(),
+        "expired completion must leave the process non-terminal"
+    );
+    let terminal_events = registry
+        .events_after(process_id, 0)
+        .await
+        .expect("events after expired completion")
+        .into_iter()
+        .filter(|event| event.semantics.terminal.is_some())
+        .count();
+    assert_eq!(
+        terminal_events, 0,
+        "an expired completion must not append a terminal event"
+    );
+}
+
+async fn leased_terminal_completion_replay_returns_existing_record(
+    registry: Arc<dyn ProcessRegistry>,
+) {
+    let process_id = "proc-lease-terminal-replay";
+    registry
+        .register_process(registration(process_id))
+        .await
+        .expect("register");
+    let current = registry
+        .claim_process_lease(process_id, &process_lease_owner("current-owner"), 60_000)
+        .await
+        .expect("current lease")
+        .acquired()
+        .expect("current lease acquired");
 
     let output = ProcessAwaitOutput::Success {
         value: serde_json::json!({"writer": "current"}),
@@ -2336,10 +2424,15 @@ async fn leased_terminal_completion_is_atomic_and_fenced(registry: Arc<dyn Proce
             .is_none(),
         "terminal append and lease release must commit together"
     );
-    registry
+    let replayed = registry
         .complete_process_with_lease(&current, output)
         .await
         .expect("same leased terminal replay is idempotent");
+    assert_eq!(
+        serde_json::to_value(&replayed).expect("serialize replayed terminal record"),
+        serde_json::to_value(&completed).expect("serialize completed terminal record"),
+        "replaying the same terminal event must return the existing terminal record"
+    );
     let terminal_events = registry
         .events_after(process_id, 0)
         .await
