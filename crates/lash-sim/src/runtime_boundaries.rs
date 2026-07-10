@@ -560,18 +560,32 @@ impl RuntimeBoundaryHarness {
                 .map_err(|err| {
                     RuntimeBoundaryError::new(format!("abandon delivered wake claim failed: {err}"))
                 })?;
-            self.process_wake_delivered_dedupe_keys
-                .insert(dedupe_key.clone());
         }
         // Remove the batch this delivery enqueued (whether it was claimed here or
         // was a redelivery of an already-consumed wake) so no lingering queued
         // work leaks to a later claimant.
-        store
+        let settled = store
             .cancel_queued_work_batch(&session, &batch.batch_id)
             .await
             .map_err(|err| {
                 RuntimeBoundaryError::new(format!("settle delivered wake batch failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                RuntimeBoundaryError::new(format!(
+                    "settle delivered wake batch returned no removal for `{}`",
+                    batch.batch_id
+                ))
             })?;
+        if settled.batch_id != batch.batch_id {
+            return Err(RuntimeBoundaryError::new(format!(
+                "settle delivered wake removed `{}` instead of `{}`",
+                settled.batch_id, batch.batch_id
+            )));
+        }
+        if claimed_once {
+            self.process_wake_delivered_dedupe_keys
+                .insert(dedupe_key.clone());
+        }
         Ok(json!({
             "session": session,
             "process_wake": true,
@@ -960,14 +974,10 @@ impl RuntimeBoundaryHarness {
         lease: &lash_core::SessionExecutionLease,
         work: &WorkerOwnedWork,
     ) -> Result<WorkerFailover, RuntimeBoundaryError> {
-        // The crashed worker's claim is released on takeover so the work is
-        // reclaimable by the new lease owner.
-        store
-            .abandon_queued_work_claim(&work.claim)
-            .await
-            .map_err(|err| {
-                RuntimeBoundaryError::new(format!("release crashed worker claim failed: {err}"))
-            })?;
+        // The crashed worker's claim remains attached to the row here. The
+        // successor must reclaim through the generation-mismatch predicate;
+        // clearing the claim first would reduce this proof to the unclaimed-row
+        // path and mask a broken generation cutover.
         let resumed = store
             .claim_ready_queued_work_by_batch_ids(
                 session,
