@@ -598,11 +598,13 @@ impl RuntimeBoundaryHarness {
             "runtime_queued_work": {
                 "source_key": batch.source_key,
                 "work_class": batch.work_class().map(|class| format!("{class:?}")),
+                "enqueued": true,
                 "claimed": claimed_once,
                 "claimed_batch_count": claim.as_ref().map_or(0, |claim| claim.batches.len()),
                 "claim_fencing_token": claim.as_ref().map(|claim| claim.fencing_token),
                 "batch_id_present": !batch.batch_id.is_empty(),
                 "claim_id_present": claim.as_ref().is_some_and(|claim| !claim.claim_id.is_empty()),
+                "runtime_turn_id": claim.as_ref().map(|_| format!("wake-turn:{}", event.boundary_id)),
             },
         }))
     }

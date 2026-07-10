@@ -144,6 +144,39 @@ async fn process_wake_uses_runtime_queued_work_claim_and_dedupe() {
         .await
         .expect("duplicate wake");
 
+    let delivered = [
+        crate::scheduler::DeliveredBoundary {
+            schema: "test".to_string(),
+            sequence: 1,
+            scheduler: crate::scheduler::SchedulerDeliveryEvidence::default(),
+            boundary_id: "wake:first".to_string(),
+            actor_alias: "session-001".to_string(),
+            kind: BoundaryKind::ProcessWake,
+            at: 1,
+            label: "test".to_string(),
+            payload: json!({"dedupe_key": "wake/session-001/001"}),
+            observed: first.clone(),
+        },
+        crate::scheduler::DeliveredBoundary {
+            schema: "test".to_string(),
+            sequence: 2,
+            scheduler: crate::scheduler::SchedulerDeliveryEvidence::default(),
+            boundary_id: "wake:dupe".to_string(),
+            actor_alias: "session-001".to_string(),
+            kind: BoundaryKind::ProcessWake,
+            at: 2,
+            label: "test".to_string(),
+            payload: json!({"dedupe_key": "wake/session-001/001"}),
+            observed: duplicate.clone(),
+        },
+    ];
+    let verdict = crate::oracles::process_wake_at_most_once(&delivered);
+    assert!(
+        verdict.is_passed(),
+        "one logical wake must materialize into at most one runtime turn: {}",
+        verdict.message
+    );
+
     assert_eq!(first["claimed_once"], true);
     assert_eq!(duplicate["claimed_once"], false);
     assert_eq!(first["runtime_queued_work"]["claim_id_present"], true);

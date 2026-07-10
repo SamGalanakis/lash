@@ -414,6 +414,7 @@ pub(super) async fn run_generated_workload(
         generated_runtime_provider_matrix_oracle(&events),
         provider_turn_interleaving_depth(&events),
         process_wake_observed(&final_summary, &events),
+        process_wake_at_most_once(&events),
         process_never_double_started(&events),
         abandoned_requires_evidence(&events),
         tool_boundary_observed(&final_summary, &events),
