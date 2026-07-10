@@ -1428,26 +1428,30 @@ async fn process_wake_claimed_at_checkpoint_is_completed_when_turn_is_cancelled(
     ));
 }
 
-// Regression: a long-running turn must keep the queued-work claim it already
-// holds alive across the lease TTL instead of stealing the claim back from
-// itself. Queued-work batches are claimed at active-turn checkpoints, but --
-// unlike the session execution lease, which renews on a background cadence --
-// the claim is never renewed. So a turn that claims a batch at one checkpoint,
-// stalls past the claim TTL (here, a slow provider call), then crosses another
-// checkpoint re-runs `claim_ready_queued_work`; the store now treats the
-// turn's own expired rows as free and re-claims them under a bumped fencing
-// token. At finalization the original, now-stale claim can no longer complete
-// its rows and the commit fails with `QueuedWorkClaimExpired`.
+// Regression (ADR 0029): a long-running turn must keep the queued-work claim it
+// already holds alive across a stall, no matter how short the lease TTL is.
+// Queued-work batches are claimed at active-turn checkpoints under the session
+// execution lease's generation; the claim carries no TTL of its own and is live
+// exactly while that generation still holds the session lease. So a turn that
+// claims a batch at one checkpoint, stalls past the (tiny) lease TTL -- here a
+// slow provider call, while the session lease keeps renewing on its background
+// cadence and preserves its generation -- then crosses another checkpoint
+// re-runs `claim_ready_queued_work` under the *same* live generation, which can
+// never self-steal its own rows. At finalization the original claim still owns
+// its rows and the commit succeeds. Before generation fencing this failed with
+// `QueuedWorkClaimExpired` because the claim expired under the stalled owner.
 //
-// The turn is driven with an in-process `TurnInput` (not a store-claimed
-// pending input) so the queued-work claim is the only unrenewed store claim in
-// play -- otherwise the equally-unrenewed turn-input claim would expire first
-// and mask the queued-work failure this test pins down.
+// This test must FAIL if anyone reintroduces time- or renewal-based claim
+// invalidation. The turn is driven with an in-process `TurnInput` (not a
+// store-claimed pending input) so the queued-work claim is the store claim
+// under scrutiny; the equally-unrenewed turn-input claim is covered by the
+// conformance generation-supersession cases.
 #[tokio::test]
-async fn long_turn_keeps_queued_work_claim_alive_across_lease_ttl() {
+async fn long_turn_keeps_claims_live_across_session_lease_renewals() {
     // A tiny TTL keeps the test sub-second: the session execution lease renews
-    // every `renew_interval` and stays live, while the never-renewed queued-work
-    // claim lapses long before the stalled provider call returns.
+    // every `renew_interval` and keeps its generation live, so the queued-work
+    // claim pinned to that generation survives the stalled provider call by
+    // construction.
     let lease_ttl = std::time::Duration::from_millis(120);
     let provider_stall = std::time::Duration::from_millis(500);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1533,10 +1537,10 @@ async fn long_turn_keeps_queued_work_claim_alive_across_lease_ttl() {
     )
     .await;
 
-    // Correct behavior: the turn renews the claim it holds and commits, so the
-    // wake is completed exactly once. Today this fails with
-    // `QueuedWorkClaimExpired` because the second checkpoint re-steals the batch
-    // from the turn under a bumped fencing token.
+    // Correct behavior: the turn's claim stays live under its session-lease
+    // generation and commits, so the wake is completed exactly once. The second
+    // checkpoint re-runs `claim_ready_queued_work` under the same live
+    // generation and cannot re-steal the turn's own rows.
     let turn = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         runtime.run_turn_assembled(
