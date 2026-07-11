@@ -17,6 +17,6 @@ categories = ["asynchronous", "network-programming"]
 lash-sansio = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
-reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
+reqwest = { workspace = true, features = ["json", "query", "stream", "rustls", "http2"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
