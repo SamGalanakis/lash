@@ -87,6 +87,7 @@ pub enum ModelEffortValidationCategory {
     UnsupportedEffort,
     EffortNotConfigurable,
     EffortRequired,
+    MalformedCapability,
 }
 
 impl ModelEffortValidationCategory {
@@ -97,6 +98,7 @@ impl ModelEffortValidationCategory {
             Self::UnsupportedEffort => "unsupported_effort",
             Self::EffortNotConfigurable => "effort_not_configurable",
             Self::EffortRequired => "effort_required",
+            Self::MalformedCapability => "malformed_capability",
         }
     }
 }
@@ -144,6 +146,21 @@ impl ModelCapability {
         provider_kind: &str,
         requested: &ReasoningSelection,
     ) -> Result<ReasoningSelection, ModelEffortValidationError> {
+        if let Some(ReasoningCapability {
+            efforts,
+            encoding: ReasoningEncoding::Budget(budgets),
+            ..
+        }) = self.reasoning.as_ref()
+            && let Some(missing) = efforts.iter().find(|effort| !budgets.contains_key(*effort))
+        {
+            return Err(ModelEffortValidationError {
+                category: ModelEffortValidationCategory::MalformedCapability,
+                message: format!(
+                    "Malformed capability for model `{model}` on {provider_kind}: budget encoding is missing advertised effort `{missing}`."
+                ),
+            });
+        }
+
         match (self.reasoning.as_ref(), requested) {
             (None, ReasoningSelection::Effort(effort)) => Err(ModelEffortValidationError {
                 category: ModelEffortValidationCategory::EffortNotConfigurable,
@@ -359,6 +376,76 @@ mod tests {
             ModelEffortValidationCategory::EffortRequired.code(),
             "effort_required"
         );
+        assert_eq!(
+            ModelEffortValidationCategory::MalformedCapability.code(),
+            "malformed_capability"
+        );
+    }
+
+    #[test]
+    fn budget_encoding_completeness_is_validated_for_every_selection() {
+        struct Case {
+            name: &'static str,
+            selection: ReasoningSelection,
+        }
+
+        let cases = [
+            Case {
+                name: "provider_default",
+                selection: ReasoningSelection::ProviderDefault,
+            },
+            Case {
+                name: "disabled",
+                selection: ReasoningSelection::Disabled,
+            },
+            Case {
+                name: "effort",
+                selection: ReasoningSelection::Effort("low".to_string()),
+            },
+        ];
+
+        for case in cases {
+            let mut r = reasoning();
+            r.encoding = ReasoningEncoding::Budget(BTreeMap::from([
+                ("low".to_string(), 1024),
+                ("high".to_string(), 8192),
+            ]));
+            let error = capability(Some(r))
+                .validate_selection("m", "test", &case.selection)
+                .expect_err(case.name);
+            assert_eq!(
+                error.category,
+                ModelEffortValidationCategory::MalformedCapability,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                error.message,
+                "Malformed capability for model `m` on test: budget encoding is missing advertised effort `medium`.",
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn complete_budget_encoding_passes_integrity_validation() {
+        let mut r = reasoning();
+        r.encoding = ReasoningEncoding::Budget(BTreeMap::from([
+            ("low".to_string(), 1024),
+            ("medium".to_string(), 4096),
+            ("high".to_string(), 8192),
+            ("max".to_string(), 16384),
+        ]));
+
+        assert_eq!(
+            capability(Some(r)).validate_selection(
+                "m",
+                "test",
+                &ReasoningSelection::Effort("high".to_string())
+            ),
+            Ok(ReasoningSelection::Effort("high".to_string()))
+        );
     }
 
     #[test]
@@ -373,7 +460,9 @@ mod tests {
         r.aliases.insert("xhigh".to_string(), "max".to_string());
         r.encoding = ReasoningEncoding::Budget(BTreeMap::from([
             ("low".to_string(), 1024u32),
+            ("medium".to_string(), 4096u32),
             ("high".to_string(), 8192u32),
+            ("max".to_string(), 16384u32),
         ]));
         let cap = capability(Some(r));
         let json = serde_json::to_value(&cap).expect("serialize");
