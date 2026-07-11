@@ -69,9 +69,11 @@ impl AppState {
     /// lifecycle is stored somewhere else.
     async fn cancel_turns_for_session(&self, session_id: &str) -> Result<usize, AppError> {
         let active = self.active_restate_invocations.for_session(session_id);
-        let admin = lash_restate::RestateAdminClient::with_client(
-            self.restate_http.clone(),
+        let admin = lash_restate::RestateAdminClient::new(
+            lash_restate::RestateConnection::with_client(
             self.restate_admin_url.clone(),
+                self.restate_http.clone(),
+            ),
         );
         let mut cancelled = 0;
         for (turn_id, invocation_id) in active {

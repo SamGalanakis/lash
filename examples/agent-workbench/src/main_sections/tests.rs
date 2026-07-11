@@ -1700,9 +1700,11 @@ finish initial
         invocation_id: &lash_restate::RestateInvocationId,
         timeout: Duration,
     ) {
-        let admin = lash_restate::RestateAdminClient::with_client(
-            state.restate_http.clone(),
+        let admin = lash_restate::RestateAdminClient::new(
+            lash_restate::RestateConnection::with_client(
             state.restate_admin_url.clone(),
+                state.restate_http.clone(),
+            ),
         );
         let deadline = std::time::Instant::now() + timeout;
         loop {
@@ -1735,9 +1737,11 @@ finish initial
     }
 
     async fn assert_no_active_lash_restate_invocations(state: &AppState, timeout: Duration) {
-        let admin = lash_restate::RestateAdminClient::with_client(
-            state.restate_http.clone(),
+        let admin = lash_restate::RestateAdminClient::new(
+            lash_restate::RestateConnection::with_client(
             state.restate_admin_url.clone(),
+                state.restate_http.clone(),
+            ),
         );
         let deadline = std::time::Instant::now() + timeout;
         loop {
