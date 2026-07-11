@@ -80,16 +80,6 @@ fn turn_input_rejects_non_remote_safe_fields() {
         Err(RemoteProtocolError::NonRemoteSafeTurnInput(message))
             if message.contains("provider")
     ));
-
-    let mut input = lash_core::TurnInput::text("model");
-    input.turn_context.set_model(
-        lash_core::ModelSpec::from_token_limits("m", Default::default(), 100, None).expect("model"),
-    );
-    assert!(matches!(
-        RemoteTurnInput::try_from(input),
-        Err(RemoteProtocolError::NonRemoteSafeTurnInput(message))
-            if message.contains("model")
-    ));
 }
 
 #[test]

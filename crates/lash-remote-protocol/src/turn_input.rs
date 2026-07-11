@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::llm::RemoteModelIntent;
 use crate::prompt::RemotePromptLayer;
 use crate::registry_errors::{RemoteProtocolError, require_non_empty};
 use crate::tools::RemoteToolGrant;
@@ -107,8 +106,6 @@ pub struct RemoteTurnRequest {
     pub input: RemoteTurnInput,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_grants: Vec<RemoteToolGrant>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_intent: Option<RemoteModelIntent>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -128,9 +125,6 @@ impl RemoteTurnRequest {
         }
         self.input.validate()?;
         RemoteToolGrant::validate_all(&self.tool_grants)?;
-        if let Some(model_intent) = &self.model_intent {
-            model_intent.validate()?;
-        }
         Ok(())
     }
 }

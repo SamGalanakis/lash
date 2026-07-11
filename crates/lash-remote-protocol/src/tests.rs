@@ -110,12 +110,12 @@ fn remote_turn_request_json_round_trips() {
             prompt_layer: Some(RemotePromptLayer::new()),
         },
         tool_grants: vec![demo_grant("demo", "tools", "search")],
-        model_intent: Some(RemoteModelIntent::new("gpt-test")),
         metadata: HashMap::new(),
     };
 
     request.validate().expect("valid request");
     let value = serde_json::to_value(&request).expect("serialize");
+    assert!(value.get("model_intent").is_none());
     let decoded: RemoteTurnRequest = serde_json::from_value(value).expect("deserialize");
 
     assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
@@ -639,6 +639,23 @@ fn remote_session_observation_schema_includes_typed_kind_enums() {
 
 #[test]
 fn wrong_protocol_versions_are_rejected() {
+    let request = RemoteTurnRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION - 1,
+        session_id: "session".to_string(),
+        turn_id: "turn".to_string(),
+        idempotency_key: None,
+        input: RemoteTurnInput::text("hello"),
+        tool_grants: Vec::new(),
+        metadata: HashMap::new(),
+    };
+    assert!(matches!(
+        request.validate(),
+        Err(RemoteProtocolError::UnsupportedProtocolVersion {
+            actual: 8,
+            expected: 9,
+        })
+    ));
+
     let mut input = RemoteTurnInput::text("hello");
     input.protocol_version = REMOTE_PROTOCOL_VERSION + 1;
     assert!(matches!(
@@ -706,7 +723,6 @@ fn nested_protocol_versions_must_match_envelope() {
         idempotency_key: None,
         input: RemoteTurnInput::text("hello"),
         tool_grants: Vec::new(),
-        model_intent: None,
         metadata: HashMap::new(),
     };
     request.input.protocol_version = REMOTE_PROTOCOL_VERSION + 1;
@@ -718,7 +734,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 8);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 9);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());
@@ -879,6 +895,16 @@ fn assert_schema_has_protocol_version<T: JsonSchema>() {
     assert!(
         schema_text.contains("protocol_version"),
         "schema did not include protocol_version: {schema_text}"
+    );
+}
+
+#[test]
+fn remote_turn_request_schema_has_no_model_intent() {
+    let schema = schemars::schema_for!(RemoteTurnRequest);
+    let schema_json = serde_json::to_value(&schema).expect("schema json");
+    assert!(
+        !schema_json.to_string().contains("model_intent"),
+        "agent-turn schema must not expose a model intent: {schema_json}"
     );
 }
 

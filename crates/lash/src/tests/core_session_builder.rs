@@ -389,7 +389,7 @@ async fn provider_overrides_apply_at_core_session_turn_and_config_scopes() -> Re
 }
 
 #[tokio::test]
-async fn provider_only_overrides_use_provider_default_model_and_variant() -> Result<()> {
+async fn provider_only_overrides_keep_session_model_and_variant() -> Result<()> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let core = explicit_ephemeral_facets(LashCore::standard_builder())
         .provider(recording_text_provider(
@@ -431,22 +431,6 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
         .run()
         .await?;
     session
-        .turn(TurnInput::text("hello"))
-        .provider(recording_text_provider(
-            "manual-provider",
-            "manual-default-model",
-            Some("turn-variant"),
-            "manual",
-            Arc::clone(&seen),
-        ))
-        .model(model_spec(
-            "manual-model",
-            Some("manual-variant".to_string()),
-            200_000,
-        ))
-        .run()
-        .await?;
-    session
         .admin()
         .config()
         .update(SessionConfigPatch {
@@ -472,10 +456,6 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
             (
                 "core-model".to_string(),
                 lash_core::ReasoningSelection::Effort("core-variant".to_string()),
-            ),
-            (
-                "manual-model".to_string(),
-                lash_core::ReasoningSelection::Effort("manual-variant".to_string())
             ),
             (
                 "core-model".to_string(),

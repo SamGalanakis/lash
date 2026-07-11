@@ -30,11 +30,9 @@ pub use turn_input::*;
 pub use turn_result::*;
 pub use usage_activity::*;
 
-// Bumped to 8: model intent and process model variants now carry the closed
-// reasoning-selection enum, and reasoning capability includes a typed disable
-// encoding. Version-7 peers expect an optional string and cannot deserialize
-// the new tagged effort shape.
-pub const REMOTE_PROTOCOL_VERSION: u32 = 8;
+// Bumped to 9: agent-turn requests no longer carry a model intent. Session
+// construction is the sole model-selection seam for agent turns.
+pub const REMOTE_PROTOCOL_VERSION: u32 = 9;
 
 pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
     if actual == REMOTE_PROTOCOL_VERSION {

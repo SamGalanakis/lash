@@ -617,7 +617,6 @@ async fn run_user_turn(
     let output = session
         .turn(input)
         .turn_id(request.turn_id.clone())
-        .model(turn_model)
         .require_finish()
         .map_err(AppError::internal)?
         .effects(controller)

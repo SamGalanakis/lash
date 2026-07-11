@@ -104,7 +104,6 @@ pub struct TurnBuilder {
     pub(crate) cancels: TurnCancelRegistry,
     pub(crate) protocol_turn_options: Option<ProtocolTurnOptions>,
     pub(crate) provider: Option<ProviderHandle>,
-    pub(crate) model: Option<ModelSpec>,
     pub(crate) turn_id: Option<String>,
 }
 
@@ -121,11 +120,6 @@ impl TurnBuilder {
 
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
         self.provider = Some(provider);
-        self
-    }
-
-    pub fn model(mut self, model: ModelSpec) -> Self {
-        self.model = Some(model);
         self
     }
 
@@ -233,9 +227,6 @@ impl TurnBuilder {
         if let Some(provider) = self.provider {
             self.input.turn_context.set_provider(provider);
         }
-        if let Some(model) = self.model {
-            self.input.turn_context.set_model(model);
-        }
         if let Some(trace_turn_id) = trace_turn_id {
             self.input.trace_turn_id = Some(trace_turn_id);
         }
@@ -336,11 +327,6 @@ impl<'run> ScopedTurnBuilder<'run> {
 
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
         self.builder = self.builder.provider(provider);
-        self
-    }
-
-    pub fn model(mut self, model: ModelSpec) -> Self {
-        self.builder = self.builder.model(model);
         self
     }
 

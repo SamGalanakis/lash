@@ -26,7 +26,6 @@ fn remote_turn_request(
             prompt_layer: None,
         },
         tool_grants: Vec::new(),
-        model_intent: None,
         metadata: Default::default(),
     };
 

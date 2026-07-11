@@ -108,8 +108,9 @@ pub(crate) async fn send_message_restate(
         })
         .await?;
 
+    let turn_model = model_spec_for_chat_selection(&model_selection)?;
     let replay_cursor = state
-        .open_session(&chat_id)
+        .open_session(&chat_id, turn_model.clone())
         .await?
         .observe()
         .current_observation()
@@ -148,7 +149,7 @@ pub(crate) async fn send_message_restate(
         )));
     }
 
-    stream_turn_outbox(state, chat_id, turn_id, replay_cursor).await
+    stream_turn_outbox(state, chat_id, turn_id, replay_cursor, turn_model).await
 }
 
 #[cfg(feature = "restate")]
@@ -157,10 +158,11 @@ async fn stream_turn_outbox(
     chat_id: String,
     turn_id: String,
     replay_cursor: SessionCursor,
+    model: lash::ModelSpec,
 ) -> AppResult<Response> {
     let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
     let (item_tx, mut item_rx) = mpsc::channel::<StreamItem>(64);
-    let replay_session = state.open_session(&chat_id).await?;
+    let replay_session = state.open_session(&chat_id, model).await?;
     let mut replay = spawn_live_replay_forwarder(replay_session, replay_cursor, item_tx.clone());
     tokio::spawn(async move {
         let tx_for_replay = tx.clone();
@@ -245,7 +247,11 @@ async fn run_restate_chat_turn_and_persist(
         restate_sdk::prelude::WorkflowContext<'_>,
     >,
 ) -> AppResult<()> {
-    let session = state.open_session(&request.chat_id).await?;
+    let turn_model = model_spec_for_chat_selection(&ChatModelSelection {
+        model: request.model.clone(),
+        model_variant: request.model_variant.clone(),
+    })?;
+    let session = state.open_session(&request.chat_id, turn_model).await?;
     let turn_state = Arc::new(Mutex::new(TurnPersistenceState::default()));
     let ui_events = ChannelTurnEvents::outbox(
         state.clone(),
@@ -256,14 +262,9 @@ async fn run_restate_chat_turn_and_persist(
 
     let mut input = TurnInput::text(request.text.clone());
     input.trace_turn_id = Some(request.turn_id.clone());
-    let turn_model = model_spec_for_chat_selection(&ChatModelSelection {
-        model: request.model.clone(),
-        model_variant: request.model_variant.clone(),
-    })?;
     let output = session
         .turn(input)
         .turn_id(request.turn_id.clone())
-        .model(turn_model)
         .require_finish()?
         // Durable in-flight work crosses the EffectHost boundary; the terminal
         // product row below is derived from Lash's TurnOutput.

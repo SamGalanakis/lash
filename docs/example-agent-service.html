@@ -116,27 +116,23 @@ let core = lash::LashCore::rlm_builder(factory)
             <h2>Turn Path</h2>
             <p>The route stores the user message and UI replay board snapshot first, updates the canonical <code>chat_boards</code> row, opens the Lash session, then runs a turn with the chat's model selection.</p>
           </div>
-          <pre data-lang="rust" data-snippet="example_agent_service#service-turn"><code>let session = state.open_session(&amp;chat_id).await?;
+          <pre data-lang="rust" data-snippet="example_agent_service#service-turn"><code>let model = lash::ModelSpec::from_token_limits(
+    model_selection.model,
+    model_selection
+        .model_variant
+        .map(lash::provider::ReasoningSelection::Effort)
+        .unwrap_or_default(),
+    200_000,
+    None,
+)
+.expect("valid model metadata")
+.with_capability(adaptive_reasoning_capability());
+let session = state.open_session(&amp;chat_id, model).await?;
 let replay_cursor = session.observe().current_observation().cursor;
 
 use lash::rlm::RlmTurnBuilderExt as _;
 
-let turn = session
-    .turn(TurnInput::text(text))
-    .model(
-        lash::ModelSpec::from_token_limits(
-            model_selection.model,
-            model_selection
-                .model_variant
-                .map(lash::provider::ReasoningSelection::Effort)
-                .unwrap_or_default(),
-            200_000,
-            None,
-        )
-        .expect("valid model metadata")
-        .with_capability(adaptive_reasoning_capability()),
-    )
-    .require_finish()?;
+let turn = session.turn(TurnInput::text(text)).require_finish()?;
 
 let output = turn.stream_to(&amp;ui_events).await?;
 let assistant_text = assistant_text_for_persistence(

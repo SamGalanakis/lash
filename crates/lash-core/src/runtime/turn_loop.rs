@@ -1551,9 +1551,6 @@ impl LashRuntime {
         if let Some(provider) = turn_provider_override.as_ref() {
             turn_policy.provider_id = provider.kind().to_string();
         }
-        if let Some(model) = turn_context.model_spec() {
-            turn_policy.model = model.clone();
-        }
         let session_protocol_turn_options = self.state.effective_protocol_turn_options().clone();
         let effective_protocol_turn_options = protocol_turn_options
             .clone()
