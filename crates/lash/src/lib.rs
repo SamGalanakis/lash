@@ -222,14 +222,14 @@ pub mod remote {
     /// output specs, and provider metadata.
     pub mod llm {
         pub use lash_remote_protocol::llm::{
-            RemoteAttachmentRef, RemoteDiagnostic, RemoteGenerationOptions, RemoteLlmAttachment,
-            RemoteLlmContentBlock, RemoteLlmMessage, RemoteLlmOutputPart, RemoteLlmOutputSpec,
-            RemoteLlmRequest, RemoteLlmRequestScope, RemoteLlmResponse, RemoteLlmRole,
-            RemoteLlmTerminalReason, RemoteLlmToolChoice, RemoteLlmToolSpec, RemoteModelCapability,
-            RemoteModelIntent, RemoteProviderFailureKind, RemoteProviderMetadata,
-            RemoteProviderReasoningReplay, RemoteProviderReplayMeta, RemoteReasoningCapability,
-            RemoteReasoningDisableEncoding, RemoteReasoningEncoding, RemoteReasoningSelection,
-            RemoteResponseTextMeta, RemoteSchemaProjectionOverride,
+            RemoteAttachmentRef, RemoteDiagnostic, RemoteExecutionEvidence,
+            RemoteGenerationOptions, RemoteLlmAttachment, RemoteLlmContentBlock, RemoteLlmMessage,
+            RemoteLlmOutputPart, RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestScope,
+            RemoteLlmResponse, RemoteLlmRole, RemoteLlmTerminalReason, RemoteLlmToolChoice,
+            RemoteLlmToolSpec, RemoteModelCapability, RemoteModelIntent, RemoteProviderFailureKind,
+            RemoteProviderMetadata, RemoteProviderReasoningReplay, RemoteProviderReplayMeta,
+            RemoteReasoningCapability, RemoteReasoningDisableEncoding, RemoteReasoningEncoding,
+            RemoteReasoningSelection, RemoteResponseTextMeta, RemoteSchemaProjectionOverride,
         };
     }
 
@@ -433,7 +433,9 @@ pub mod provider {
     /// Request/response/error vocabulary of [`Provider::complete`],
     /// re-exported so hosts can implement provider decorators (admission
     /// gates, metrics taps) against the facade alone.
-    pub use lash_core::{LlmRequest, LlmRequestScope, LlmResponse, LlmTransportError};
+    pub use lash_core::{
+        ExecutionEvidence, LlmRequest, LlmRequestScope, LlmResponse, LlmTransportError,
+    };
     pub use lash_core::{
         LlmTimeouts, ModelCapability, Provider, ProviderComponents, ProviderFactory,
         ProviderHandle, ProviderOptions, ProviderSpec, ReasoningCapability,

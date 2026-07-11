@@ -510,6 +510,12 @@ mod tests {
         assert_eq!(visible, "Plan.\n");
         let response = lash_core::LlmResponse {
             full_text: raw_final.to_string(),
+            execution_evidence: Some(lash_core::ExecutionEvidence {
+                served_model: Some("provider/model".to_string()),
+                provider_response_id: Some("response-1".to_string()),
+                reasoning_output_tokens: Some(0),
+                provider_finish_reason: Some("stop".to_string()),
+            }),
             parts: vec![
                 lash_core::LlmOutputPart::Text {
                     text: raw_final.to_string(),
@@ -533,6 +539,13 @@ mod tests {
             "Plan.\n<lashlang>\nfinish \"ok\"\n</lashlang>"
         );
         assert_eq!(response.full_text.matches("<lashlang>").count(), 1);
+        assert_eq!(
+            response
+                .execution_evidence
+                .as_ref()
+                .and_then(|evidence| evidence.provider_response_id.as_deref()),
+            Some("response-1")
+        );
         assert!(matches!(
             response.parts.first(),
             Some(lash_core::LlmOutputPart::Reasoning { text, .. })

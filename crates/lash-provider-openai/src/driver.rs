@@ -258,6 +258,7 @@ fn complete_buffered_responses(
         provider_usage: state.provider_usage,
         request_body: None,
         http_summary: Some(CompletionEndpoint::Responses.http_summary(&url, false)),
+        execution_evidence: None,
     })
 }
 
@@ -276,6 +277,7 @@ fn complete_buffered_chat(
             LlmTransportError::new(format!("Invalid Chat Completions JSON: {e}"))
                 .with_raw(text.clone())
         })?;
+        state.capture_response_value(&value);
         state.provider_usage = value.get("usage").cloned();
         state.usage = usage_from_response_value(&value);
         let parts = OpenAiCompatibleProvider::chat_response_parts_from_value(&value);
@@ -322,6 +324,7 @@ fn complete_buffered_chat(
     } else {
         state.terminal_reason
     };
+    let execution_evidence = state.execution_evidence();
     Ok(LlmResponse {
         full_text: state.full_text,
         parts,
@@ -331,6 +334,7 @@ fn complete_buffered_chat(
         provider_usage: state.provider_usage,
         request_body: None,
         http_summary: Some(CompletionEndpoint::ChatCompletions.http_summary(&url, false)),
+        execution_evidence,
     })
 }
 
@@ -439,6 +443,7 @@ async fn drive_streaming_responses(
         provider_usage: state.provider_usage,
         request_body: None,
         http_summary: Some(CompletionEndpoint::Responses.http_summary(&url, true)),
+        execution_evidence: None,
     })
 }
 
@@ -499,6 +504,7 @@ async fn drive_streaming_chat(
     } else {
         state.terminal_reason
     };
+    let execution_evidence = state.execution_evidence();
     Ok(LlmResponse {
         full_text: state.full_text,
         parts,
@@ -508,5 +514,6 @@ async fn drive_streaming_chat(
         provider_usage: state.provider_usage,
         request_body: None,
         http_summary: Some(CompletionEndpoint::ChatCompletions.http_summary(&url, true)),
+        execution_evidence,
     })
 }

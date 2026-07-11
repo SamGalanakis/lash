@@ -202,12 +202,24 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         provider_usage: Some(serde_json::json!({"provider": "usage"})),
         request_body: Some("{}".to_string()),
         http_summary: Some("200".to_string()),
+        execution_evidence: Some(core_llm::ExecutionEvidence {
+            served_model: Some("openai/gpt-5.4-mini".to_string()),
+            provider_response_id: Some("response-1".to_string()),
+            reasoning_output_tokens: Some(0),
+            provider_finish_reason: Some("stop".to_string()),
+        }),
     };
     let remote = RemoteLlmResponse::from_core("request-1", response);
     remote.validate().expect("valid remote response");
     let core = core_llm::LlmResponse::from(remote);
     assert_eq!(core.full_text, "done");
     assert_eq!(core.terminal_reason, core_llm::LlmTerminalReason::Stop);
+    assert_eq!(
+        core.execution_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.reasoning_output_tokens),
+        Some(0)
+    );
     assert_eq!(
         core.provider_usage,
         Some(serde_json::json!({"provider": "usage"}))

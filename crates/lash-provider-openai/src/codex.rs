@@ -1637,6 +1637,7 @@ impl Provider for CodexProvider {
                 provider_usage,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", self.responses_url)),
+                execution_evidence: None,
             });
         }
 

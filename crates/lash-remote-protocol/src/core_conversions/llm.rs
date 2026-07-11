@@ -230,6 +230,7 @@ impl RemoteLlmResponse {
             provider_usage,
             request_body,
             http_summary,
+            execution_evidence,
         } = value;
         let mut diagnostics = Vec::new();
         if let Some(message) = terminal_diagnostic {
@@ -254,6 +255,7 @@ impl RemoteLlmResponse {
                 http_summary,
                 data: HashMap::new(),
             },
+            execution_evidence: execution_evidence.map(Into::into),
         }
     }
 }
@@ -269,6 +271,7 @@ impl From<RemoteLlmResponse> for core_llm::LlmResponse {
             terminal_reason,
             diagnostics,
             provider_metadata,
+            execution_evidence,
         } = value;
         let RemoteProviderMetadata {
             usage: provider_usage,
@@ -285,6 +288,41 @@ impl From<RemoteLlmResponse> for core_llm::LlmResponse {
             provider_usage,
             request_body,
             http_summary,
+            execution_evidence: execution_evidence.map(Into::into),
+        }
+    }
+}
+
+impl From<core_llm::ExecutionEvidence> for RemoteExecutionEvidence {
+    fn from(value: core_llm::ExecutionEvidence) -> Self {
+        let core_llm::ExecutionEvidence {
+            served_model,
+            provider_response_id,
+            reasoning_output_tokens,
+            provider_finish_reason,
+        } = value;
+        Self {
+            served_model,
+            provider_response_id,
+            reasoning_output_tokens,
+            provider_finish_reason,
+        }
+    }
+}
+
+impl From<RemoteExecutionEvidence> for core_llm::ExecutionEvidence {
+    fn from(value: RemoteExecutionEvidence) -> Self {
+        let RemoteExecutionEvidence {
+            served_model,
+            provider_response_id,
+            reasoning_output_tokens,
+            provider_finish_reason,
+        } = value;
+        Self {
+            served_model,
+            provider_response_id,
+            reasoning_output_tokens,
+            provider_finish_reason,
         }
     }
 }

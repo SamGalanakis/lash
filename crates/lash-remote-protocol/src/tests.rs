@@ -76,6 +76,12 @@ fn remote_llm_response_json_round_trips() {
         terminal_reason: RemoteLlmTerminalReason::Stop,
         diagnostics: Vec::new(),
         provider_metadata: RemoteProviderMetadata::default(),
+        execution_evidence: Some(RemoteExecutionEvidence {
+            served_model: Some("openai/gpt-5.4-mini".to_string()),
+            provider_response_id: Some("response-1".to_string()),
+            reasoning_output_tokens: Some(0),
+            provider_finish_reason: Some("stop".to_string()),
+        }),
     };
 
     response.validate().expect("valid response");
@@ -651,8 +657,8 @@ fn wrong_protocol_versions_are_rejected() {
     assert!(matches!(
         request.validate(),
         Err(RemoteProtocolError::UnsupportedProtocolVersion {
-            actual: 8,
-            expected: 9,
+            actual: 9,
+            expected: 10,
         })
     ));
 
@@ -734,7 +740,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 9);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 10);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());

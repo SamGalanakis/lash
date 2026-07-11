@@ -308,6 +308,7 @@ impl RuntimeTurnDriver<'_> {
                             provider_usage: None,
                             request_body: None,
                             http_summary: None,
+                            execution_evidence: None,
                         };
                         stream_accumulator.apply_to_response(&mut resp);
                         let resp = match self.transform_assistant_response(event_tx, resp).await {

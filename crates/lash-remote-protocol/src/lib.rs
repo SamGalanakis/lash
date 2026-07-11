@@ -30,9 +30,8 @@ pub use turn_input::*;
 pub use turn_result::*;
 pub use usage_activity::*;
 
-// Bumped to 9: agent-turn requests no longer carry a model intent. Session
-// construction is the sole model-selection seam for agent turns.
-pub const REMOTE_PROTOCOL_VERSION: u32 = 9;
+// Bumped to 10: LLM responses can carry provider-reported execution evidence.
+pub const REMOTE_PROTOCOL_VERSION: u32 = 10;
 
 pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
     if actual == REMOTE_PROTOCOL_VERSION {

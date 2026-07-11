@@ -148,6 +148,20 @@ pub struct RemoteLlmResponse {
     pub diagnostics: Vec<RemoteDiagnostic>,
     #[serde(default, skip_serializing_if = "RemoteProviderMetadata::is_empty")]
     pub provider_metadata: RemoteProviderMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_evidence: Option<RemoteExecutionEvidence>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteExecutionEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_finish_reason: Option<String>,
 }
 
 impl RemoteLlmResponse {

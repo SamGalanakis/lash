@@ -504,6 +504,22 @@ impl std::fmt::Debug for LlmEventSender {
     }
 }
 
+/// Facts reported by the provider about the execution that produced a response.
+///
+/// These fields must never be filled from request intent. In particular,
+/// `reasoning_output_tokens: Some(0)` is distinct from an unreported value.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionEvidence {
+    #[serde(default)]
+    pub served_model: Option<String>,
+    #[serde(default)]
+    pub provider_response_id: Option<String>,
+    #[serde(default)]
+    pub reasoning_output_tokens: Option<u64>,
+    #[serde(default)]
+    pub provider_finish_reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct LlmResponse {
     pub full_text: String,
@@ -514,6 +530,8 @@ pub struct LlmResponse {
     pub provider_usage: Option<serde_json::Value>,
     pub request_body: Option<String>,
     pub http_summary: Option<String>,
+    #[serde(default)]
+    pub execution_evidence: Option<ExecutionEvidence>,
 }
 
 #[derive(Clone, Debug)]

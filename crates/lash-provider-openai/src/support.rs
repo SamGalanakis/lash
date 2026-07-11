@@ -6,9 +6,9 @@ pub(crate) use std::collections::HashMap;
 
 pub(crate) use lash_core::llm::transport::{LlmTransportError, validate_image_attachments};
 pub(crate) use lash_core::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec,
-    LlmProviderTraceSender, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason,
-    LlmUsage, ProviderReplayMeta,
+    ExecutionEvidence, LlmAttachment, LlmContentBlock, LlmEventSender, LlmOutputPart,
+    LlmOutputSpec, LlmProviderTraceSender, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent,
+    LlmTerminalReason, LlmUsage, ProviderReplayMeta,
 };
 pub(crate) use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
 // `ResponseTextMeta` is only referenced by the crate's `#[cfg(test)]`

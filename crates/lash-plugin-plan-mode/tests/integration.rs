@@ -1202,6 +1202,7 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
                 provider_usage: None,
                 request_body: None,
                 http_summary: None,
+                execution_evidence: None,
             },
         )
         .await
