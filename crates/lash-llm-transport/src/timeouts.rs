@@ -1,7 +1,6 @@
-use std::future::Future;
 use std::time::Duration;
 
-use lash_core::{LlmTransportError, ProviderFailureKind};
+pub use lash_http_transport::{build_http_client, header_pairs, run_with_timeout};
 
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_CHUNK_TIMEOUT_MS: u64 = 120_000;
@@ -21,28 +20,6 @@ impl Default for LlmTimeouts {
     }
 }
 
-pub fn build_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .build()
-        .expect("failed to build reqwest client for llm transport")
-}
-
-pub fn header_pairs(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|value| (name.as_str().to_string(), value.to_string()))
-        })
-        .collect()
-}
-
-pub(crate) fn reqwest_error_is_retryable(error: &reqwest::Error) -> bool {
-    error.is_timeout() || error.is_connect() || error.is_body() || error.is_decode()
-}
-
 pub fn response_start_timeout(
     request_timeout: Option<Duration>,
     chunk_timeout: Duration,
@@ -57,28 +34,10 @@ pub fn response_start_timeout(
     })
 }
 
-pub async fn run_with_timeout<T, F>(
-    future: F,
-    timeout: Option<Duration>,
-    timeout_message: &str,
-) -> Result<T, LlmTransportError>
-where
-    F: Future<Output = Result<T, LlmTransportError>>,
-{
-    match timeout {
-        Some(duration) => tokio::time::timeout(duration, future).await.map_err(|_| {
-            LlmTransportError::new(timeout_message)
-                .with_kind(ProviderFailureKind::Timeout)
-                .retryable(true)
-                .with_code("timeout")
-        })?,
-        None => future.await,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash_core::LlmTransportError;
 
     #[test]
     fn streaming_response_start_timeout_prefers_chunk_deadline() {

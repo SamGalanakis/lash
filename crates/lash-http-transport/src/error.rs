@@ -1,0 +1,106 @@
+use lash_sansio::llm::types::{LlmTerminalReason, ProviderFailureKind};
+
+/// Failure crossing the host-configurable HTTP transport boundary.
+///
+/// The provider-oriented aliases retain the richer diagnostic fields because
+/// the HTTP seam is also the wire boundary for LLM providers.
+#[derive(Debug, thiserror::Error, Clone)]
+#[error("{message}")]
+pub struct HttpTransportError {
+    pub kind: ProviderFailureKind,
+    pub message: String,
+    pub retryable: bool,
+    pub status: Option<u16>,
+    pub raw: Option<String>,
+    pub code: Option<String>,
+    pub terminal_reason: LlmTerminalReason,
+    pub headers: Vec<(String, String)>,
+    pub retry_after: Option<std::time::Duration>,
+    pub request_body: Option<String>,
+}
+
+impl HttpTransportError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            kind: ProviderFailureKind::Unknown,
+            message: message.into(),
+            retryable: false,
+            status: None,
+            raw: None,
+            code: None,
+            terminal_reason: LlmTerminalReason::ProviderError,
+            headers: Vec::new(),
+            retry_after: None,
+            request_body: None,
+        }
+    }
+
+    pub fn with_kind(mut self, kind: ProviderFailureKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
+    }
+
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        if self.code.is_none() {
+            self.code = Some(status.to_string());
+        }
+        self
+    }
+
+    pub fn with_raw(mut self, raw: impl Into<String>) -> Self {
+        self.raw = Some(raw.into());
+        self
+    }
+
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    pub fn with_terminal_reason(mut self, reason: LlmTerminalReason) -> Self {
+        self.terminal_reason = reason;
+        self
+    }
+
+    pub fn with_headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers = headers
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect();
+        self.retry_after = retry_after_from_headers(&self.headers);
+        self
+    }
+
+    pub fn with_retry_after(mut self, retry_after: std::time::Duration) -> Self {
+        self.retry_after = Some(retry_after);
+        self
+    }
+
+    pub fn with_request_body(mut self, request_body: impl Into<String>) -> Self {
+        self.request_body = Some(request_body.into());
+        self
+    }
+}
+
+pub fn retry_after_from_headers(headers: &[(String, String)]) -> Option<std::time::Duration> {
+    let value = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))?
+        .1
+        .trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(std::time::Duration::from_secs(seconds));
+    }
+    None
+}

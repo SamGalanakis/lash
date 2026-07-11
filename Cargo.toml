@@ -7,6 +7,7 @@ members = [
     "crates/lash-core",
     "crates/lash-lashlang-runtime",
     "crates/lash-remote-protocol",
+    "crates/lash-http-transport",
     "crates/lash-llm-transport",
     "crates/lash-provider-auth",
     "crates/lash-sqlite-store",
@@ -54,6 +55,7 @@ default-members = [
     "crates/lash",
     "crates/lash-trace",
     "crates/lash-rlm-types",
+    "crates/lash-http-transport",
     "crates/lash-llm-transport",
     "crates/lash-llm-tools",
     "crates/lash-protocol-standard",
@@ -147,6 +149,7 @@ lash-cli = { path = "crates/lash-cli", version = "=0.0.0-dev" }
 lash-core = { path = "crates/lash-core", version = "=0.0.0-dev" }
 lash-export = { path = "crates/lash-export", version = "=0.0.0-dev" }
 lash-file-index = { path = "crates/lash-file-index", version = "=0.0.0-dev" }
+lash-http-transport = { path = "crates/lash-http-transport", version = "=0.0.0-dev" }
 lash-llm-tools = { path = "crates/lash-llm-tools", version = "=0.0.0-dev" }
 lash-llm-transport = { path = "crates/lash-llm-transport", version = "=0.0.0-dev" }
 lash-lashlang-runtime = { path = "crates/lash-lashlang-runtime", version = "=0.0.0-dev" }

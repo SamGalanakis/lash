@@ -2561,6 +2561,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hmac",
+ "lash-http-transport",
  "lash-sansio",
  "lash-trace",
  "proptest",
@@ -2644,6 +2645,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-http-transport"
+version = "0.0.0-dev"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "lash-sansio",
+ "reqwest 0.13.3",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "lash-lashlang-runtime"
 version = "0.0.0-dev"
 dependencies = [
@@ -2681,10 +2694,10 @@ dependencies = [
  "async-trait",
  "bytes",
  "lash-core",
+ "lash-http-transport",
  "lash-llm-transport",
  "lash-sansio",
  "proptest",
- "reqwest 0.13.3",
  "serde_json",
  "tokio",
 ]

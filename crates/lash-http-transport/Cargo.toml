@@ -1,0 +1,22 @@
+[package]
+name = "lash-http-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Host-configurable HTTP transport seam for Lash integrations."
+keywords = ["lash", "transport", "http", "async"]
+categories = ["asynchronous", "network-programming"]
+
+[dependencies]
+lash-sansio = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
