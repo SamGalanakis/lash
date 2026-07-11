@@ -93,6 +93,34 @@ pub(super) fn process_lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {
     crate::LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
 }
 
+const EXPIRING_PROCESS_LEASE_TTL_MS: u64 = 20;
+
+async fn claim_process_lease_after_expiry(
+    registry: &dyn ProcessRegistry,
+    process_id: &str,
+    owner: &crate::LeaseOwnerIdentity,
+    lease_ttl_ms: u64,
+) -> crate::ProcessLease {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match registry
+            .claim_process_lease(process_id, owner, lease_ttl_ms)
+            .await
+            .expect("claim after lease expiry resolves")
+        {
+            crate::ProcessLeaseClaimOutcome::Acquired(lease) => return lease,
+            crate::ProcessLeaseClaimOutcome::Busy { .. }
+                if tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            crate::ProcessLeaseClaimOutcome::Busy { holder } => {
+                panic!("lease was not claimable before the expiry deadline; holder: {holder:?}");
+            }
+        }
+    }
+}
+
 fn local_process_lease_owner(
     owner_id: &str,
     host_id: &str,
@@ -2149,21 +2177,22 @@ async fn superseded_process_lease_cannot_renew(registry: Arc<dyn ProcessRegistry
         .await
         .expect("register");
     let old = registry
-        .claim_process_lease("proc-lease-superseded", &process_lease_owner("owner-a"), 0)
+        .claim_process_lease(
+            "proc-lease-superseded",
+            &process_lease_owner("owner-a"),
+            EXPIRING_PROCESS_LEASE_TTL_MS,
+        )
         .await
         .expect("old lease")
         .acquired()
         .expect("old lease acquired");
-    registry
-        .claim_process_lease(
-            "proc-lease-superseded",
-            &process_lease_owner("owner-b"),
-            60_000,
-        )
-        .await
-        .expect("new owner claims the expired lease")
-        .acquired()
-        .expect("expired lease is claimable");
+    claim_process_lease_after_expiry(
+        registry.as_ref(),
+        "proc-lease-superseded",
+        &process_lease_owner("owner-b"),
+        60_000,
+    )
+    .await;
     let stale = registry.renew_process_lease(&old, 60_000).await;
     assert!(
         stale
@@ -2290,17 +2319,22 @@ async fn stale_process_lease_cannot_complete_or_disturb_current_owner(
         .await
         .expect("register");
     let stale = registry
-        .claim_process_lease(process_id, &process_lease_owner("stale-owner"), 0)
+        .claim_process_lease(
+            process_id,
+            &process_lease_owner("stale-owner"),
+            EXPIRING_PROCESS_LEASE_TTL_MS,
+        )
         .await
         .expect("stale lease")
         .acquired()
         .expect("stale lease acquired");
-    let current = registry
-        .claim_process_lease(process_id, &process_lease_owner("current-owner"), 60_000)
-        .await
-        .expect("current lease")
-        .acquired()
-        .expect("current lease acquired");
+    let current = claim_process_lease_after_expiry(
+        registry.as_ref(),
+        process_id,
+        &process_lease_owner("current-owner"),
+        60_000,
+    )
+    .await;
     let stale_result = registry
         .complete_process_with_lease(
             &stale,
@@ -2353,11 +2387,19 @@ async fn expired_process_lease_cannot_complete(registry: Arc<dyn ProcessRegistry
         .await
         .expect("register");
     let expired = registry
-        .claim_process_lease(process_id, &process_lease_owner("expired-owner"), 0)
+        .claim_process_lease(
+            process_id,
+            &process_lease_owner("expired-owner"),
+            EXPIRING_PROCESS_LEASE_TTL_MS,
+        )
         .await
         .expect("expired lease")
         .acquired()
-        .expect("zero-TTL lease acquired");
+        .expect("short lease acquired");
+    tokio::time::sleep(std::time::Duration::from_millis(
+        EXPIRING_PROCESS_LEASE_TTL_MS + 100,
+    ))
+    .await;
     let expired_result = registry
         .complete_process_with_lease(
             &expired,
