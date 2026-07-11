@@ -385,7 +385,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     println!("{}", result.assistant_message().unwrap_or_default());
     Ok(())
 }</code></pre>
-        <p>From there the runtime hands a backend more: <code>session.enqueue(...)</code> and <code>session.queued_turn()</code> drive app-owned queues, <code>turn.provider(…)</code> / <code>turn.model(…)</code> override the model per turn, and durable workflow hosts run turns with <code>.turn_id(...).effects(&amp;controller)</code>.</p>
+        <p>From there the runtime hands a backend more: <code>session.enqueue(...)</code> and <code>session.queued_turn()</code> drive app-owned queues, session construction selects the agent model, <code>turn.provider(…)</code> can supply a per-turn provider, and durable workflow hosts run turns with <code>.turn_id(...).effects(&amp;controller)</code>.</p>
         <a class="stanza__link" href="./quickstart.html">read the quickstart <span class="arrow" aria-hidden="true">→</span></a>
       </div>
     </section>

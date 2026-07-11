@@ -142,7 +142,7 @@ impl TryFrom<RemoteTurnRequest> for lash_core::TurnInput {
     fn try_from(value: RemoteTurnRequest) -> Result<Self, Self::Error> {
         value.validate()?;
         // Identity/routing fields are consumed by the transport layer, not the
-        // core turn input; tool grants and model intent are applied separately.
+        // core turn input; tool grants are applied separately.
         let RemoteTurnRequest {
             protocol_version: _,
             session_id: _,
@@ -150,7 +150,6 @@ impl TryFrom<RemoteTurnRequest> for lash_core::TurnInput {
             idempotency_key: _,
             input,
             tool_grants: _,
-            model_intent: _,
             metadata: _,
         } = value;
         input.try_into()
@@ -185,11 +184,6 @@ impl TryFrom<lash_core::TurnInput> for RemoteTurnInput {
         if turn_context.provider().is_some() {
             return Err(RemoteProtocolError::NonRemoteSafeTurnInput(
                 "per-turn provider overrides cannot cross a remote boundary".to_string(),
-            ));
-        }
-        if turn_context.model_spec().is_some() {
-            return Err(RemoteProtocolError::NonRemoteSafeTurnInput(
-                "per-turn model overrides cannot cross a remote boundary".to_string(),
             ));
         }
         let prompt_layer = (!turn_context.prompt_layer().is_empty())

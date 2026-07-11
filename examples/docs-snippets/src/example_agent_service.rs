@@ -73,8 +73,17 @@ struct AppState {
 }
 
 impl AppState {
-    async fn open_session(&self, chat_id: &str) -> anyhow::Result<LashSession> {
-        Ok(self.core.session(chat_id).open().await?)
+    async fn open_session(
+        &self,
+        chat_id: &str,
+        model: lash::ModelSpec,
+    ) -> anyhow::Result<LashSession> {
+        Ok(self
+            .core
+            .session(chat_id)
+            .session_spec(lash::SessionSpec::inherit().model(model))
+            .open()
+            .await?)
     }
 }
 
@@ -101,27 +110,23 @@ async fn service_turn(
     turn_state: Arc<Mutex<TurnUiState>>,
 ) -> anyhow::Result<()> {
     // docs:start:service-turn
-    let session = state.open_session(&chat_id).await?;
+    let model = lash::ModelSpec::from_token_limits(
+        model_selection.model,
+        model_selection
+            .model_variant
+            .map(lash::provider::ReasoningSelection::Effort)
+            .unwrap_or_default(),
+        200_000,
+        None,
+    )
+    .expect("valid model metadata")
+    .with_capability(adaptive_reasoning_capability());
+    let session = state.open_session(&chat_id, model).await?;
     let replay_cursor = session.observe().current_observation().cursor;
 
     use lash::rlm::RlmTurnBuilderExt as _;
 
-    let turn = session
-        .turn(TurnInput::text(text))
-        .model(
-            lash::ModelSpec::from_token_limits(
-                model_selection.model,
-                model_selection
-                    .model_variant
-                    .map(lash::provider::ReasoningSelection::Effort)
-                    .unwrap_or_default(),
-                200_000,
-                None,
-            )
-            .expect("valid model metadata")
-            .with_capability(adaptive_reasoning_capability()),
-        )
-        .require_finish()?;
+    let turn = session.turn(TurnInput::text(text)).require_finish()?;
 
     let output = turn.stream_to(&ui_events).await?;
     let assistant_text = assistant_text_for_persistence(

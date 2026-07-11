@@ -32,7 +32,7 @@
     </div>
     <aside class="contract">
       <strong>Contract</strong>
-      <p>Every top-level remote envelope carries <code>protocol_version</code>. Current code uses <code>REMOTE_PROTOCOL_VERSION == 7</code>; call <code>validate()</code> or <code>ensure_protocol_version(...)</code> before executing a received envelope.</p>
+      <p>Every top-level remote envelope carries <code>protocol_version</code>. Current code uses <code>REMOTE_PROTOCOL_VERSION == 9</code>; call <code>validate()</code> or <code>ensure_protocol_version(...)</code> before executing a received envelope.</p>
     </aside>
   </div>
 
@@ -81,7 +81,6 @@ let request = RemoteTurnRequest {
         prompt_layer: None,
     },
     tool_grants: Vec::new(),
-    model_intent: None,
     metadata: Default::default(),
 };
 
@@ -142,7 +141,7 @@ request.validate()?;</code></pre>
     <div class="listing">
       <div class="listing__row">
         <div class="listing__label">turn ingress</div>
-        <div class="listing__body"><p><code>RemoteTurnRequest</code> carries <code>session_id</code>, <code>turn_id</code>, optional idempotency key, <code>RemoteTurnInput</code>, remote tool grants, optional model intent, and metadata.</p></div>
+        <div class="listing__body"><p><code>RemoteTurnRequest</code> carries <code>session_id</code>, <code>turn_id</code>, optional idempotency key, <code>RemoteTurnInput</code>, remote tool grants, and metadata. Agent-turn model selection belongs to session construction, not the remote turn envelope.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">turn result</div>

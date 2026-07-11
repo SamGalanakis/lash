@@ -414,7 +414,6 @@ impl LiveTurnInputs {
 pub struct TurnContext {
     plugin_inputs: LiveTurnInputs,
     provider: Option<crate::ProviderHandle>,
-    model: Option<crate::ModelSpec>,
     prompt: crate::PromptLayer,
 }
 
@@ -436,14 +435,6 @@ impl TurnContext {
 
     pub fn provider(&self) -> Option<&crate::ProviderHandle> {
         self.provider.as_ref()
-    }
-
-    pub fn set_model(&mut self, model: crate::ModelSpec) {
-        self.model = Some(model);
-    }
-
-    pub fn model_spec(&self) -> Option<&crate::ModelSpec> {
-        self.model.as_ref()
     }
 
     pub fn plugin_input<T>(&self, plugin_id: &'static str) -> Option<&T>
@@ -505,7 +496,6 @@ impl fmt::Debug for TurnContext {
         f.debug_struct("TurnContext")
             .field("plugin_inputs", &self.plugin_inputs.plugin_ids())
             .field("has_provider", &self.provider.is_some())
-            .field("has_model", &self.model.is_some())
             .field("has_prompt_layer", &(!self.prompt.is_empty()))
             .finish()
     }

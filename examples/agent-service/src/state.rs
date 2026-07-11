@@ -4,7 +4,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use lash::persistence::LeaseOwnerIdentity;
-use lash::{LashCore, LashSession};
+use lash::{LashCore, LashSession, ModelSpec};
 use serde_json::json;
 
 use crate::db::AppDb;
@@ -100,10 +100,15 @@ impl AppStateData {
         &self.restate_http
     }
 
-    pub(crate) async fn open_session(&self, chat_id: &str) -> AppResult<LashSession> {
+    pub(crate) async fn open_session(
+        &self,
+        chat_id: &str,
+        model: ModelSpec,
+    ) -> AppResult<LashSession> {
         Ok(self
             .core
             .session(chat_id)
+            .session_spec(lash::SessionSpec::inherit().model(model))
             .plugin::<DemoPlugin>(DemoPluginConfig {
                 db: Arc::clone(&self.db),
             })

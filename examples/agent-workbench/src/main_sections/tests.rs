@@ -466,7 +466,6 @@ finish "observed through live replay"
 
         session
             .turn(lash::TurnInput::text("exercise observation stream"))
-            .model(model)
             .require_finish()
             .expect("require finish")
             .run()
@@ -564,7 +563,6 @@ finish "gap source"
 
         session
             .turn(lash::TurnInput::text("trim cursor"))
-            .model(model)
             .require_finish()
             .expect("require finish")
             .run()

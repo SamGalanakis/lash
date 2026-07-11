@@ -7,7 +7,6 @@ fn main() {
         idempotency_key: Some("session:turn".to_string()),
         input,
         tool_grants: Vec::new(),
-        model_intent: Some(lash::remote::llm::RemoteModelIntent::new("gpt-test")),
         metadata: std::collections::HashMap::new(),
     };
 

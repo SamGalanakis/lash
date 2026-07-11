@@ -233,9 +233,9 @@ pub(crate) async fn send_message(
         return send_message_restate(state, chat_id, text, user_message, model_selection).await;
     }
 
-    let session = state.open_session(&chat_id).await?;
-    let replay_cursor = session.observe().current_observation().cursor;
     let turn_model = model_spec_for_chat_selection(&model_selection)?;
+    let session = state.open_session(&chat_id, turn_model).await?;
+    let replay_cursor = session.observe().current_observation().cursor;
     let (tx, rx) = mpsc::channel::<StreamItem>(64);
     let mut replay = spawn_live_replay_forwarder(session.clone(), replay_cursor, tx.clone());
     let run_state = state.clone();
@@ -254,7 +254,6 @@ pub(crate) async fn send_message(
         let turn = session
             .turn(TurnInput::text(text))
             .turn_id(format!("agent-service-local-turn:{}", uuid::Uuid::new_v4()))
-            .model(turn_model)
             .require_finish();
         let turn = match turn {
             Ok(turn) => turn.stream_to(&ui_events).await.map(|result| TurnOutput {

@@ -513,7 +513,6 @@ impl LashSession {
             cancels: self.turn_cancels.clone(),
             protocol_turn_options: None,
             provider: None,
-            model: None,
             turn_id: None,
         }
     }
