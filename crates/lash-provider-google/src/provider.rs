@@ -105,6 +105,7 @@ impl GoogleOAuthProvider {
                 provider_usage,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", url)),
+                execution_evidence: None,
             });
         }
 
@@ -179,6 +180,7 @@ impl GoogleOAuthProvider {
             provider_usage,
             request_body,
             http_summary: Some(format!("HTTP POST {}", url)),
+            execution_evidence: None,
         })
     }
 

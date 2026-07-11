@@ -75,6 +75,7 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
                 provider_usage: None,
                 request_body: None,
                 http_summary: None,
+                execution_evidence: None,
             })
         })
         .build()

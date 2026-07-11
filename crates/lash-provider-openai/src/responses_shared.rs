@@ -583,6 +583,7 @@ pub fn response_from_stream_state(
         provider_usage: state.provider_usage,
         request_body,
         http_summary: Some(http_summary),
+        execution_evidence: None,
     }
 }
 

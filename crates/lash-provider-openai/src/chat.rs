@@ -472,7 +472,9 @@ impl OpenAiCompatibleProvider {
         {
             state.provider_usage = Some(usage.clone());
             merge_usage(&mut state.usage, &usage_from_usage_value(usage));
+            state.capture_reasoning_tokens(usage);
         }
+        state.capture_identity(event.id, event.model);
         state.final_response_raw = Some(raw.to_string());
         for choice in event.choices {
             if let Some(usage) = choice.usage.as_ref()
@@ -480,6 +482,14 @@ impl OpenAiCompatibleProvider {
             {
                 state.provider_usage = Some(usage.clone());
                 merge_usage(&mut state.usage, &usage_from_usage_value(usage));
+                state.capture_reasoning_tokens(usage);
+            }
+            if let Some(finish_reason) = choice.finish_reason {
+                if state.provider_finish_reason.is_none() && !finish_reason.is_empty() {
+                    state.provider_finish_reason = Some(finish_reason.to_string());
+                }
+                state.terminal_reason =
+                    terminal_reason_from_chat_finish_reason(finish_reason, state.terminal_reason);
             }
             let Some(delta) = choice.delta else {
                 continue;
@@ -501,10 +511,6 @@ impl OpenAiCompatibleProvider {
                     state.update_tool_call_delta(tool_call);
                 }
             }
-            if let Some(finish_reason) = choice.finish_reason {
-                state.terminal_reason =
-                    terminal_reason_from_chat_finish_reason(finish_reason, state.terminal_reason);
-            }
             if let Some(details) = delta.reasoning_details.as_ref() {
                 state.apply_reasoning_details(details);
             }
@@ -524,6 +530,10 @@ impl OpenAiCompatibleProvider {
 
 #[derive(Debug, Deserialize)]
 struct ChatSseEvent<'a> {
+    #[serde(default, borrow)]
+    id: Option<&'a str>,
+    #[serde(default, borrow)]
+    model: Option<&'a str>,
     #[serde(default)]
     error: Option<Value>,
     #[serde(default)]
@@ -577,9 +587,63 @@ pub(crate) struct ChatStreamState {
     pub(crate) tool_calls: HashMap<usize, ChatStreamingToolCall>,
     pub(crate) final_response_raw: Option<String>,
     pub(crate) terminal_reason: LlmTerminalReason,
+    pub(crate) provider_response_id: Option<String>,
+    pub(crate) served_model: Option<String>,
+    pub(crate) reasoning_output_tokens: Option<u64>,
+    pub(crate) provider_finish_reason: Option<String>,
 }
 
 impl ChatStreamState {
+    pub(crate) fn capture_response_value(&mut self, value: &Value) {
+        self.capture_identity(
+            value.get("id").and_then(Value::as_str),
+            value.get("model").and_then(Value::as_str),
+        );
+        if let Some(usage) = value.get("usage") {
+            self.capture_reasoning_tokens(usage);
+        }
+        self.provider_finish_reason = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_string);
+    }
+
+    pub(crate) fn capture_identity(&mut self, id: Option<&str>, model: Option<&str>) {
+        if self.provider_response_id.is_none()
+            && let Some(id) = id.filter(|value| !value.is_empty())
+        {
+            self.provider_response_id = Some(id.to_string());
+        }
+        if self.served_model.is_none()
+            && let Some(model) = model.filter(|value| !value.is_empty())
+        {
+            self.served_model = Some(model.to_string());
+        }
+    }
+
+    pub(crate) fn capture_reasoning_tokens(&mut self, usage: &Value) {
+        if let Some(tokens) = usage
+            .get("completion_tokens_details")
+            .and_then(|details| details.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+        {
+            self.reasoning_output_tokens = Some(tokens);
+        }
+    }
+
+    pub(crate) fn execution_evidence(&self) -> Option<ExecutionEvidence> {
+        let evidence = ExecutionEvidence {
+            served_model: self.served_model.clone(),
+            provider_response_id: self.provider_response_id.clone(),
+            reasoning_output_tokens: self.reasoning_output_tokens,
+            provider_finish_reason: self.provider_finish_reason.clone(),
+        };
+        (evidence != ExecutionEvidence::default()).then_some(evidence)
+    }
     pub(crate) fn push_text_delta(&mut self, piece: &str) {
         if piece.is_empty() {
             return;

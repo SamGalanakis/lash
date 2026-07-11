@@ -1163,6 +1163,86 @@ fn response_failed_server_error_is_retryable() {
     assert_eq!(err.message, "internal stream ended unexpectedly");
 }
 
+#[test]
+fn openrouter_buffered_wire_preserves_concrete_model_and_explicit_zero_reasoning() {
+    let value = json!({
+        "id": "gen-123",
+        "model": "anthropic/claude-sonnet-4.5",
+        "choices": [{
+            "message": { "role": "assistant", "content": "done" },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "completion_tokens_details": { "reasoning_tokens": 0 }
+        }
+    });
+    let mut state = ChatStreamState::default();
+    state.capture_response_value(&value);
+
+    assert_eq!(
+        state.execution_evidence(),
+        Some(ExecutionEvidence {
+            served_model: Some("anthropic/claude-sonnet-4.5".to_string()),
+            provider_response_id: Some("gen-123".to_string()),
+            reasoning_output_tokens: Some(0),
+            provider_finish_reason: Some("stop".to_string()),
+        })
+    );
+    assert_ne!(state.served_model.as_deref(), Some("openrouter/auto"));
+}
+
+#[test]
+fn openrouter_buffered_wire_keeps_absent_reasoning_distinct_from_zero() {
+    let mut state = ChatStreamState::default();
+    state.capture_reasoning_tokens(&json!({ "completion_tokens": 3 }));
+    assert_eq!(state.reasoning_output_tokens, None);
+
+    state.capture_reasoning_tokens(&json!({
+        "completion_tokens_details": { "reasoning_tokens": 0 }
+    }));
+    assert_eq!(state.reasoning_output_tokens, Some(0));
+}
+
+#[test]
+fn openrouter_stream_wire_retains_partial_identity_when_stream_ends_early() {
+    let mut state = ChatStreamState::default();
+    OpenAiCompatibleProvider::process_chat_sse_event(
+        r#"{"id":"gen-partial","model":"openai/gpt-5.4-mini","choices":[{"delta":{"content":"partial"}}]}"#,
+        &mut state,
+    )
+    .expect("partial SSE chunk parses");
+
+    assert_eq!(state.full_text, "partial");
+    assert_eq!(
+        state.execution_evidence(),
+        Some(ExecutionEvidence {
+            served_model: Some("openai/gpt-5.4-mini".to_string()),
+            provider_response_id: Some("gen-partial".to_string()),
+            reasoning_output_tokens: None,
+            provider_finish_reason: None,
+        })
+    );
+}
+
+#[test]
+fn openrouter_stream_wire_captures_first_stable_identity_and_terminal_facts() {
+    let mut state = ChatStreamState::default();
+    for raw in [
+        r#"{"id":"","model":"","choices":[{"delta":{"content":"ok"}}]}"#,
+        r#"{"id":"gen-first","model":"provider/model-a","choices":[{"delta":{}}]}"#,
+        r#"{"id":"gen-later","model":"provider/model-b","choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens_details":{"reasoning_tokens":7}}}"#,
+    ] {
+        OpenAiCompatibleProvider::process_chat_sse_event(raw, &mut state)
+            .expect("SSE chunk parses");
+    }
+
+    let evidence = state.execution_evidence().expect("observed evidence");
+    assert_eq!(evidence.provider_response_id.as_deref(), Some("gen-first"));
+    assert_eq!(evidence.served_model.as_deref(), Some("provider/model-a"));
+    assert_eq!(evidence.reasoning_output_tokens, Some(7));
+    assert_eq!(evidence.provider_finish_reason.as_deref(), Some("length"));
+}
+
 /// Cross-provider response-normalization conformance. The shared suite lives in
 /// `lash_llm_transport::conformance`; here we wrap this crate's (private) chat
 /// parsers in a `ProviderNormalizer` and supply OpenAI chat-API wire fixtures

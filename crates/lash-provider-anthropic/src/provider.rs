@@ -136,6 +136,7 @@ impl Provider for AnthropicProvider {
             provider_usage,
             request_body,
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
+            execution_evidence: None,
         })
     }
 

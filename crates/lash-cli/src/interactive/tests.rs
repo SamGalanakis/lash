@@ -264,6 +264,7 @@ async fn observation_test_session(
                 provider_usage: None,
                 request_body: None,
                 http_summary: None,
+                execution_evidence: None,
             })
         })
         .build()

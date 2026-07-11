@@ -60,6 +60,7 @@ impl Provider for MutatingProvider {
             provider_usage: None,
             request_body: None,
             http_summary: None,
+            execution_evidence: None,
         })
     }
 
@@ -107,6 +108,7 @@ impl Provider for FailingProvider {
             provider_usage: None,
             request_body: None,
             http_summary: None,
+            execution_evidence: None,
         })
     }
 
@@ -174,6 +176,7 @@ impl Provider for StatusFailingProvider {
             provider_usage: None,
             request_body: None,
             http_summary: None,
+            execution_evidence: None,
         })
     }
 
