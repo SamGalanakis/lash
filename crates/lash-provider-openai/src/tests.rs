@@ -2,7 +2,10 @@ use crate::support::*;
 use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
 use lash_core::llm::transport::ProviderFailureKind;
 use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolChoice, LlmToolSpec};
-use lash_core::provider::{CacheRetention, ModelCapability, ReasoningCapability};
+use lash_core::provider::{
+    CacheRetention, ModelCapability, ReasoningCapability, ReasoningEncoding,
+};
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -14,6 +17,20 @@ fn reasoning_capability() -> ModelCapability {
             disable: Some(lash_core::provider::ReasoningDisableEncoding::Effort(
                 "none".to_string(),
             )),
+            ..ReasoningCapability::default()
+        }),
+    }
+}
+
+fn budget_reasoning_capability() -> ModelCapability {
+    ModelCapability {
+        reasoning: Some(ReasoningCapability {
+            efforts: vec!["medium".to_string(), "high".to_string()],
+            default_effort: Some("medium".to_string()),
+            encoding: ReasoningEncoding::Budget(BTreeMap::from([
+                ("medium".to_string(), 4096),
+                ("high".to_string(), 16384),
+            ])),
             ..ReasoningCapability::default()
         }),
     }
@@ -173,6 +190,18 @@ fn responses_body_emits_reasoning_from_capability_variant() {
 }
 
 #[test]
+fn responses_body_emits_numeric_reasoning_from_budget_encoding() {
+    let provider = OpenAiProvider::new("key");
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
+    req.model_capability = budget_reasoning_capability();
+
+    let body = provider.build_responses_request_body(&req, true).unwrap();
+
+    assert_eq!(body["reasoning"], json!({ "max_tokens": 16384 }));
+}
+
+#[test]
 fn responses_body_emits_none_effort_for_disabled_selection() {
     let provider = OpenAiProvider::new("key");
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
@@ -297,6 +326,20 @@ fn chat_body_emits_reasoning_from_capability_variant() {
         .unwrap();
 
     assert_eq!(body["reasoning"], json!({ "effort": "high" }));
+}
+
+#[test]
+fn chat_body_emits_numeric_reasoning_from_budget_encoding() {
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.model = "openrouter/custom-model".to_string();
+    req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
+    req.model_capability = budget_reasoning_capability();
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(body["reasoning"], json!({ "max_tokens": 16384 }));
 }
 
 #[test]

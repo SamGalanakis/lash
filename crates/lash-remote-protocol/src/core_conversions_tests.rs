@@ -125,6 +125,7 @@ fn llm_request_and_response_round_trip_owned_dtos() {
                     "fast".to_string(),
                 )]),
                 encoding: core_llm::ReasoningEncoding::Budget(std::collections::BTreeMap::from([
+                    ("fast".to_string(), 1024u32),
                     ("slow".to_string(), 2048u32),
                 ])),
                 disable: Some(core_llm::ReasoningDisableEncoding::ToggleFalse),
@@ -179,10 +180,10 @@ fn llm_request_and_response_round_trip_owned_dtos() {
     );
     assert_eq!(
         reasoning.encoding,
-        core_llm::ReasoningEncoding::Budget(std::collections::BTreeMap::from([(
-            "slow".to_string(),
-            2048u32
-        )]))
+        core_llm::ReasoningEncoding::Budget(std::collections::BTreeMap::from([
+            ("fast".to_string(), 1024u32),
+            ("slow".to_string(), 2048u32)
+        ]))
     );
     assert_eq!(core.session_id(), "session-1");
     assert_eq!(core.agent_frame_id(), "session-1:frame:test");

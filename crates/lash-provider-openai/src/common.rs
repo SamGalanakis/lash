@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
 
 use lash_core::llm::types::LlmRequest;
-use lash_core::provider::{ReasoningDisableEncoding, ReasoningSelection};
+use lash_core::provider::{ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection};
 use lash_llm_transport::util::emit_provider_trace;
 use lash_llm_transport::{LlmHttpTransport, ReqwestLlmHttpTransport};
 
@@ -30,7 +30,13 @@ pub(crate) fn reasoning_config(req: &LlmRequest) -> Option<OpenAiReasoningConfig
     let reasoning = req.model_capability.reasoning.as_ref()?;
     match &req.model_variant {
         ReasoningSelection::ProviderDefault => None,
-        ReasoningSelection::Effort(effort) => Some(OpenAiReasoningConfig::Effort(effort.clone())),
+        ReasoningSelection::Effort(effort) => match &reasoning.encoding {
+            ReasoningEncoding::Effort => Some(OpenAiReasoningConfig::Effort(effort.clone())),
+            ReasoningEncoding::Budget(budgets) => budgets
+                .get(effort)
+                .copied()
+                .map(OpenAiReasoningConfig::Budget),
+        },
         ReasoningSelection::Disabled => match reasoning.disable.as_ref()? {
             ReasoningDisableEncoding::Native => {
                 Some(OpenAiReasoningConfig::Effort("none".to_string()))
