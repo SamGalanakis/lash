@@ -22,6 +22,7 @@ otel-trace = ["lash-trace/otel"]
 testing = []
 
 [dependencies]
+lash-http-transport = { workspace = true }
 lash-sansio = { workspace = true }
 lash-trace = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }

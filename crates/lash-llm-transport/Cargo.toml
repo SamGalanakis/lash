@@ -23,10 +23,10 @@ proptest-support = ["dep:proptest"]
 
 [dependencies]
 lash-core = { workspace = true }
+lash-http-transport = { workspace = true }
 lash-sansio = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
-reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 bytes = { workspace = true }
 serde_json = { workspace = true }
 proptest = { version = "1", optional = true }

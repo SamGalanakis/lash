@@ -4,13 +4,14 @@ use super::*;
 use bytes::{BufMut, Bytes, BytesMut};
 use http_body_util::{BodyExt, Empty, Full};
 use lash_core::{ProcessInput, ProcessRegistration};
+use lash_http_transport::{HttpResponse, HttpResponseBody, HttpTransport, HttpTransportError};
 use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use restate_sdk::prelude::Endpoint;
 use restate_sdk::service::Discoverable;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::LazyLock;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, RwLock};
 
 #[test]
 fn restate_effect_name_uses_lash_replay_key() {
@@ -4330,6 +4331,160 @@ async fn restate_ingress_client_parses_send_invocation_id() {
     assert!(requests[0].contains(r#""turn_id":"turn-1""#));
 }
 
+#[derive(Debug)]
+struct ScriptedHttpTransport {
+    requests: Mutex<Vec<HttpRequest>>,
+    responses: Mutex<VecDeque<HttpResponse>>,
+}
+
+impl ScriptedHttpTransport {
+    fn new(responses: impl IntoIterator<Item = HttpResponse>) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses.into_iter().collect()),
+        }
+    }
+
+    fn requests(&self) -> Vec<HttpRequest> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpTransport for ScriptedHttpTransport {
+    async fn send(
+        &self,
+        request: HttpRequest,
+        _timeout: Option<Duration>,
+    ) -> Result<HttpResponse, HttpTransportError> {
+        self.requests.lock().expect("requests lock").push(request);
+        self.responses
+            .lock()
+            .expect("responses lock")
+            .pop_front()
+            .ok_or_else(|| HttpTransportError::new("scripted transport exhausted"))
+    }
+}
+
+#[derive(Debug)]
+struct AuthorizationTransport {
+    inner: Arc<dyn HttpTransport>,
+    token: Arc<RwLock<String>>,
+}
+
+#[async_trait::async_trait]
+impl HttpTransport for AuthorizationTransport {
+    async fn send(
+        &self,
+        mut request: HttpRequest,
+        timeout: Option<Duration>,
+    ) -> Result<HttpResponse, HttpTransportError> {
+        let token = self.token.read().expect("token lock").clone();
+        request
+            .headers
+            .push(("authorization".to_string(), format!("Bearer {token}")));
+        self.inner.send(request, timeout).await
+    }
+}
+
+fn accepted_response(invocation_id: &str) -> HttpResponse {
+    HttpResponse {
+        status: 202,
+        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        body: HttpResponseBody::buffered(format!(
+            r#"{{"invocationId":"{invocation_id}","status":"Accepted"}}"#
+        )),
+    }
+}
+
+#[tokio::test]
+async fn host_transport_injects_authorization_on_ingress_submit() {
+    let scripted = Arc::new(ScriptedHttpTransport::new([accepted_response("inv_auth")]));
+    let token = Arc::new(RwLock::new("cloud-token".to_string()));
+    let decorated: Arc<dyn HttpTransport> = Arc::new(AuthorizationTransport {
+        inner: scripted.clone(),
+        token,
+    });
+    let connection = RestateConnection::with_transport("https://cloud.example", decorated);
+    let client = RestateIngressClient::new(connection);
+
+    client
+        .send_service_json("LashService", "run", &serde_json::json!({"input": "hello"}))
+        .await
+        .expect("authenticated ingress submit");
+
+    let requests = scripted.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("authorization") && value == "Bearer cloud-token"
+    }));
+}
+
+#[tokio::test]
+async fn ingress_unauthorized_error_mentions_status_401() {
+    let scripted: Arc<dyn HttpTransport> = Arc::new(ScriptedHttpTransport::new([HttpResponse {
+        status: 401,
+        headers: Vec::new(),
+        body: HttpResponseBody::buffered(r#"{"message":"missing bearer token"}"#),
+    }]));
+    let client = RestateIngressClient::new(RestateConnection::with_transport(
+        "https://cloud.example",
+        scripted,
+    ));
+
+    let error = client
+        .send_service_json("LashService", "run", &serde_json::json!({}))
+        .await
+        .expect_err("unauthorized submit must fail");
+
+    assert!(error.to_string().contains("status 401"), "{error}");
+    assert!(
+        error.to_string().contains("missing bearer token"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn authorization_decorator_reads_rotated_credentials_per_request() {
+    let scripted = Arc::new(ScriptedHttpTransport::new([
+        accepted_response("inv_first"),
+        accepted_response("inv_second"),
+    ]));
+    let token = Arc::new(RwLock::new("first-token".to_string()));
+    let decorated: Arc<dyn HttpTransport> = Arc::new(AuthorizationTransport {
+        inner: scripted.clone(),
+        token: Arc::clone(&token),
+    });
+    let client = RestateIngressClient::new(RestateConnection::with_transport(
+        "https://cloud.example",
+        decorated,
+    ));
+
+    client
+        .send_service_json("LashService", "run", &serde_json::json!({"attempt": 1}))
+        .await
+        .expect("first submit");
+    *token.write().expect("token lock") = "second-token".to_string();
+    client
+        .send_service_json("LashService", "run", &serde_json::json!({"attempt": 2}))
+        .await
+        .expect("second submit");
+
+    let authorization = scripted
+        .requests()
+        .into_iter()
+        .map(|request| {
+            request
+                .headers
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .expect("authorization header")
+                .1
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(authorization, ["Bearer first-token", "Bearer second-token"]);
+}
+
 #[tokio::test]
 async fn restate_ingress_client_accepts_previously_accepted_send() {
     let (base_url, _captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
@@ -4434,7 +4589,8 @@ async fn restate_process_attach_maps_ingress_error_to_plugin_error() {
         err.to_string()
             .contains("ingress await for process `process-1` failed")
     );
-    assert!(err.to_string().contains("500 Internal Server Error"));
+    assert!(err.to_string().contains("status 500"));
+    assert!(err.to_string().contains("boom"));
 }
 
 /// Like [`spawn_restate_http_capture`], but holds each accepted connection open

@@ -7,8 +7,8 @@ use lash_core::{
 };
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{
-    RestateAdminClient, RestateEffectHost, RestateIngressClient, RestateInvocationId,
-    RestateInvocationStatus, RestateProcessDeployment,
+    RestateAdminClient, RestateConnection, RestateEffectHost, RestateIngressClient,
+    RestateInvocationId, RestateInvocationStatus, RestateProcessDeployment,
 };
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
@@ -418,7 +418,7 @@ async fn submit_workflow(ingress_url: &str, request: &TurnRequest) -> Result<Res
         .http2_prior_knowledge()
         .build()
         .context("build Restate ingress client")?;
-    let ingress = RestateIngressClient::with_client(client, ingress_url.to_string());
+    let ingress = RestateIngressClient::new(RestateConnection::with_client(ingress_url, client));
     let deadline = Instant::now() + Duration::from_secs(120);
     let mut last_error = None;
     while Instant::now() < deadline {
@@ -477,7 +477,7 @@ async fn assert_no_active_lash_restate_invocations(admin_url: &str) -> Result<()
         .http2_prior_knowledge()
         .build()
         .context("build Restate admin client")?;
-    let admin = RestateAdminClient::with_client(client, admin_url.to_string());
+    let admin = RestateAdminClient::new(RestateConnection::with_client(admin_url, client));
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let active = admin
@@ -502,7 +502,7 @@ async fn assert_no_problem_lash_restate_invocations(admin_url: &str) -> Result<(
         .http2_prior_knowledge()
         .build()
         .context("build Restate admin client")?;
-    let admin = RestateAdminClient::with_client(client, admin_url.to_string());
+    let admin = RestateAdminClient::new(RestateConnection::with_client(admin_url, client));
     let service_filter = [TURN_WORKFLOW_NAME, "LashProcessWorkflow"]
         .into_iter()
         .map(|prefix| {

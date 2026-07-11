@@ -80,6 +80,10 @@ use lash_core::{
     RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
     RuntimeInvocation, ScopedEffectController, watch_process_registry_with_sink,
 };
+use lash_http_transport::{
+    HttpMethod, HttpRequest, HttpResponse, HttpTransport, HttpTransportError, ReqwestClient,
+    ReqwestHttpTransport, read_http_body_bytes,
+};
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
     SharedWorkflowContext, WorkflowContext,
@@ -337,45 +341,114 @@ pub enum RestateHttpError {
     Request {
         operation: &'static str,
         url: String,
-        source: reqwest::Error,
+        source: HttpTransportError,
     },
     #[error("{operation} returned status {status} for {url}: {body}")]
     Status {
         operation: &'static str,
         url: String,
-        status: reqwest::StatusCode,
+        status: u16,
         body: String,
+    },
+    #[error("{operation} request encode failed for {url}: {source}")]
+    Encode {
+        operation: &'static str,
+        url: String,
+        source: serde_json::Error,
     },
     #[error("{operation} response decode failed for {url}: {source}")]
     Decode {
         operation: &'static str,
         url: String,
-        source: reqwest::Error,
+        source: serde_json::Error,
     },
     #[error("Restate /send returned unexpected status `{status}` for {url}")]
     UnexpectedSendStatus { url: String, status: String },
 }
 
+/// Host-owned Restate ingress connectivity.
+///
+/// Authentication, mTLS, proxying, and credential rotation are operational
+/// policy supplied by the host through [`HttpTransport`], following
+/// [ADR 0014's operational-policy-stays-with-the-host principle](https://github.com/SamGalanakis/lash/blob/main/docs/adr/0014-operational-policy-stays-with-the-host.md).
+/// A host can use a configured reqwest client for static authentication:
+///
+/// ```no_run
+/// use lash_http_transport::reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+/// use lash_restate::RestateConnection;
+///
+/// let mut headers = HeaderMap::new();
+/// let mut authorization = HeaderValue::from_static("Bearer restate-cloud-token");
+/// authorization.set_sensitive(true);
+/// headers.insert(AUTHORIZATION, authorization);
+/// let client = lash_http_transport::ReqwestClient::builder()
+///     .default_headers(headers)
+///     .build()?;
+/// let connection = RestateConnection::with_client(
+///     "https://example.env.restate.cloud",
+///     client,
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Clone, Debug)]
-pub struct RestateIngressClient {
-    http: reqwest::Client,
+pub struct RestateConnection {
     ingress_url: String,
+    transport: Arc<dyn HttpTransport>,
 }
 
-impl RestateIngressClient {
+impl RestateConnection {
     pub fn new(ingress_url: impl Into<String>) -> Self {
-        Self::with_client(reqwest::Client::new(), ingress_url)
+        Self::with_transport(ingress_url, Arc::new(ReqwestHttpTransport::new()))
     }
 
-    pub fn with_client(http: reqwest::Client, ingress_url: impl Into<String>) -> Self {
+    pub fn with_transport(
+        ingress_url: impl Into<String>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
         Self {
-            http,
             ingress_url: ingress_url.into(),
+            transport,
         }
+    }
+
+    pub fn with_client(ingress_url: impl Into<String>, client: ReqwestClient) -> Self {
+        Self::with_transport(
+            ingress_url,
+            Arc::new(ReqwestHttpTransport::from_client(client)),
+        )
     }
 
     pub fn ingress_url(&self) -> &str {
         &self.ingress_url
+    }
+}
+
+impl From<&str> for RestateConnection {
+    fn from(ingress_url: &str) -> Self {
+        Self::new(ingress_url)
+    }
+}
+
+impl From<String> for RestateConnection {
+    fn from(ingress_url: String) -> Self {
+        Self::new(ingress_url)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RestateIngressClient {
+    connection: RestateConnection,
+}
+
+impl RestateIngressClient {
+    pub fn new(connection: impl Into<RestateConnection>) -> Self {
+        Self {
+            connection: connection.into(),
+        }
+    }
+
+    pub fn ingress_url(&self) -> &str {
+        self.connection.ingress_url()
     }
 
     pub async fn send_json_path<T: Serialize + ?Sized>(
@@ -383,30 +456,13 @@ impl RestateIngressClient {
         path: impl AsRef<str>,
         body: &T,
     ) -> Result<RestateInvocationId, RestateHttpError> {
-        let url = format_restate_url(&self.ingress_url, path.as_ref());
-        let response = self
-            .http
-            .post(&url)
-            .json(body)
-            .send()
-            .await
-            .map_err(|source| RestateHttpError::Request {
-                operation: "Restate /send",
-                url: url.clone(),
-                source,
-            })?;
-        if !response.status().is_success() {
+        let url = format_restate_url(self.connection.ingress_url(), path.as_ref());
+        let response = self.post_json("Restate /send", &url, body).await?;
+        if !response.is_success() {
             return Err(status_error("Restate /send", url, response).await);
         }
         let accepted: RestateSendResponse =
-            response
-                .json()
-                .await
-                .map_err(|source| RestateHttpError::Decode {
-                    operation: "Restate /send",
-                    url: url.clone(),
-                    source,
-                })?;
+            decode_response("Restate /send", &url, response).await?;
         if !matches_restate_accepted_status(&accepted.status) {
             return Err(RestateHttpError::UnexpectedSendStatus {
                 url,
@@ -439,29 +495,12 @@ impl RestateIngressClient {
         R: DeserializeOwned,
     {
         let path = format!("{workflow}/{workflow_key}/{handler}");
-        let url = format_restate_url(&self.ingress_url, &path);
-        let response = self
-            .http
-            .post(&url)
-            .json(body)
-            .send()
-            .await
-            .map_err(|source| RestateHttpError::Request {
-                operation: "Restate workflow call",
-                url: url.clone(),
-                source,
-            })?;
-        if !response.status().is_success() {
+        let url = format_restate_url(self.connection.ingress_url(), &path);
+        let response = self.post_json("Restate workflow call", &url, body).await?;
+        if !response.is_success() {
             return Err(status_error("Restate workflow call", url, response).await);
         }
-        response
-            .json::<R>()
-            .await
-            .map_err(|source| RestateHttpError::Decode {
-                operation: "Restate workflow call",
-                url,
-                source,
-            })
+        decode_response("Restate workflow call", &url, response).await
     }
 
     pub async fn call_object_json<T, R>(
@@ -476,29 +515,12 @@ impl RestateIngressClient {
         R: DeserializeOwned,
     {
         let path = format!("{object}/{object_key}/{handler}");
-        let url = format_restate_url(&self.ingress_url, &path);
-        let response = self
-            .http
-            .post(&url)
-            .json(body)
-            .send()
-            .await
-            .map_err(|source| RestateHttpError::Request {
-                operation: "Restate object call",
-                url: url.clone(),
-                source,
-            })?;
-        if !response.status().is_success() {
+        let url = format_restate_url(self.connection.ingress_url(), &path);
+        let response = self.post_json("Restate object call", &url, body).await?;
+        if !response.is_success() {
             return Err(status_error("Restate object call", url, response).await);
         }
-        response
-            .json::<R>()
-            .await
-            .map_err(|source| RestateHttpError::Decode {
-                operation: "Restate object call",
-                url,
-                source,
-            })
+        decode_response("Restate object call", &url, response).await
     }
 
     /// Invoke a no-argument object handler. Restate's ingress rejects calls to
@@ -511,18 +533,14 @@ impl RestateIngressClient {
         handler: &str,
     ) -> Result<(), RestateHttpError> {
         let path = format!("{object}/{object_key}/{handler}");
-        let url = format_restate_url(&self.ingress_url, &path);
-        let response =
-            self.http
-                .post(&url)
-                .send()
-                .await
-                .map_err(|source| RestateHttpError::Request {
-                    operation: "Restate object call",
-                    url: url.clone(),
-                    source,
-                })?;
-        if !response.status().is_success() {
+        let url = format_restate_url(self.connection.ingress_url(), &path);
+        let response = send_request(
+            &self.connection,
+            "Restate object call",
+            HttpRequest::post(&url, ""),
+        )
+        .await?;
+        if !response.is_success() {
             return Err(status_error("Restate object call", url, response).await);
         }
         Ok(())
@@ -548,6 +566,25 @@ impl RestateIngressClient {
         self.send_json_path(format!("{object}/{key}/{handler}/send"), body)
             .await
     }
+
+    async fn post_json<T: Serialize + ?Sized>(
+        &self,
+        operation: &'static str,
+        url: &str,
+        body: &T,
+    ) -> Result<HttpResponse, RestateHttpError> {
+        let body = serde_json::to_vec(body).map_err(|source| RestateHttpError::Encode {
+            operation,
+            url: url.to_string(),
+            source,
+        })?;
+        send_request(
+            &self.connection,
+            operation,
+            HttpRequest::post(url, body).with_header("content-type", "application/json"),
+        )
+        .await
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -559,24 +596,18 @@ struct RestateSendResponse {
 
 #[derive(Clone, Debug)]
 pub struct RestateAdminClient {
-    http: reqwest::Client,
-    admin_url: String,
+    connection: RestateConnection,
 }
 
 impl RestateAdminClient {
-    pub fn new(admin_url: impl Into<String>) -> Self {
-        Self::with_client(reqwest::Client::new(), admin_url)
-    }
-
-    pub fn with_client(http: reqwest::Client, admin_url: impl Into<String>) -> Self {
+    pub fn new(connection: impl Into<RestateConnection>) -> Self {
         Self {
-            http,
-            admin_url: admin_url.into(),
+            connection: connection.into(),
         }
     }
 
     pub fn admin_url(&self) -> &str {
-        &self.admin_url
+        self.connection.ingress_url()
     }
 
     pub async fn cancel_invocation(
@@ -647,31 +678,25 @@ impl RestateAdminClient {
             rows: Vec<T>,
         }
 
-        let url = format_restate_url(&self.admin_url, "query");
-        let response = self
-            .http
-            .post(&url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .json(&QueryRequest { query })
-            .send()
-            .await
-            .map_err(|source| RestateHttpError::Request {
+        let url = format_restate_url(self.connection.ingress_url(), "query");
+        let body = serde_json::to_vec(&QueryRequest { query }).map_err(|source| {
+            RestateHttpError::Encode {
                 operation: "Restate SQL query",
                 url: url.clone(),
                 source,
-            })?;
-        if !response.status().is_success() {
+            }
+        })?;
+        let request = HttpRequest::post(&url, body).with_headers([
+            ("accept", "application/json"),
+            ("content-type", "application/json"),
+        ]);
+        let response = send_request(&self.connection, "Restate SQL query", request).await?;
+        if !response.is_success() {
             return Err(status_error("Restate SQL query", url, response).await);
         }
-        response
-            .json::<QueryResponse<T>>()
+        decode_response::<QueryResponse<T>>("Restate SQL query", &url, response)
             .await
             .map(|response| response.rows)
-            .map_err(|source| RestateHttpError::Decode {
-                operation: "Restate SQL query",
-                url,
-                source,
-            })
     }
 
     async fn patch_invocation(
@@ -681,20 +706,16 @@ impl RestateAdminClient {
         operation: &'static str,
     ) -> Result<(), RestateHttpError> {
         let url = format_restate_url(
-            &self.admin_url,
+            self.connection.ingress_url(),
             &format!("invocations/{invocation_id}/{action}"),
         );
-        let response =
-            self.http
-                .patch(&url)
-                .send()
-                .await
-                .map_err(|source| RestateHttpError::Request {
-                    operation,
-                    url: url.clone(),
-                    source,
-                })?;
-        if response.status().is_success() {
+        let response = send_request(
+            &self.connection,
+            operation,
+            HttpRequest::new(HttpMethod::Patch, &url, ""),
+        )
+        .await?;
+        if response.is_success() {
             Ok(())
         } else {
             Err(status_error(operation, url, response).await)
@@ -745,16 +766,55 @@ fn format_restate_url(base_url: &str, path: &str) -> String {
 async fn status_error(
     operation: &'static str,
     url: String,
-    response: reqwest::Response,
+    response: HttpResponse,
 ) -> RestateHttpError {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let status = response.status;
+    let body = read_http_body_bytes(response.body, None, "Restate response body timed out")
+        .await
+        .map(|body| String::from_utf8_lossy(&body).into_owned())
+        .unwrap_or_default();
     RestateHttpError::Status {
         operation,
         url,
         status,
         body,
     }
+}
+
+async fn send_request(
+    connection: &RestateConnection,
+    operation: &'static str,
+    request: HttpRequest,
+) -> Result<HttpResponse, RestateHttpError> {
+    let url = request.url.clone();
+    connection
+        .transport
+        .send(request, None)
+        .await
+        .map_err(|source| RestateHttpError::Request {
+            operation,
+            url,
+            source,
+        })
+}
+
+async fn decode_response<T: DeserializeOwned>(
+    operation: &'static str,
+    url: &str,
+    response: HttpResponse,
+) -> Result<T, RestateHttpError> {
+    let body = read_http_body_bytes(response.body, None, "Restate response body timed out")
+        .await
+        .map_err(|source| RestateHttpError::Request {
+            operation,
+            url: url.to_string(),
+            source,
+        })?;
+    serde_json::from_slice(&body).map_err(|source| RestateHttpError::Decode {
+        operation,
+        url: url.to_string(),
+        source,
+    })
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -848,11 +908,11 @@ impl RestateEffectHost {
         Self::default()
     }
 
-    pub fn with_ingress_url(ingress_url: impl Into<String>) -> Self {
+    pub fn with_ingress_url(connection: impl Into<RestateConnection>) -> Self {
         Self {
             controller: Arc::new(RestateEffectHostController {
                 await_event_ingress: Some(RestateAwaitEventIngress {
-                    ingress: RestateIngressClient::new(ingress_url),
+                    ingress: RestateIngressClient::new(connection),
                 }),
             }),
         }
@@ -1078,9 +1138,12 @@ pub struct RestateProcessIngressRunner {
 impl RestateProcessIngressRunner {
     /// Build an ingress-client run handle over the given ingress base URL and
     /// process registry.
-    pub fn new(ingress_url: impl Into<String>, registry: Arc<dyn ProcessRegistry>) -> Self {
+    pub fn new(
+        connection: impl Into<RestateConnection>,
+        registry: Arc<dyn ProcessRegistry>,
+    ) -> Self {
         Self {
-            ingress: RestateIngressClient::new(ingress_url),
+            ingress: RestateIngressClient::new(connection),
             registry,
         }
     }
@@ -1243,8 +1306,11 @@ pub struct RestateProcessDeployment {
 }
 
 impl RestateProcessDeployment {
-    pub fn new(ingress_url: impl Into<String>, registry: Arc<dyn ProcessRegistry>) -> Self {
-        Self::new_with_sink(ingress_url, registry, None)
+    pub fn new(
+        connection: impl Into<RestateConnection>,
+        registry: Arc<dyn ProcessRegistry>,
+    ) -> Self {
+        Self::new_with_sink(connection, registry, None)
     }
 
     /// Like [`new`](Self::new), but installs a host-facing
@@ -1254,13 +1320,13 @@ impl RestateProcessDeployment {
     /// here; each appended event is pushed best-effort after its durable write.
     /// See [`ProcessEventSink`] for the freshness-not-truth contract.
     pub fn new_with_sink(
-        ingress_url: impl Into<String>,
+        connection: impl Into<RestateConnection>,
         registry: Arc<dyn ProcessRegistry>,
         sink: Option<Arc<dyn ProcessEventSink>>,
     ) -> Self {
         let (registry, hub) = watch_process_registry_with_sink(registry, sink);
         let ingress_runner = Arc::new(RestateProcessIngressRunner::new(
-            ingress_url,
+            connection,
             Arc::clone(&registry),
         ));
         let run_handle: Arc<dyn ProcessRunHandle> = ingress_runner.clone();

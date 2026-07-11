@@ -1189,10 +1189,10 @@ async fn submit_restate_workflow_json<T: Serialize>(
     workflow_key: &str,
     body: &T,
 ) -> Result<lash_restate::RestateInvocationId, AppError> {
-    lash_restate::RestateIngressClient::with_client(
+    lash_restate::RestateIngressClient::new(lash_restate::RestateConnection::with_client(
+        restate_ingress_url,
         restate_http.clone(),
-        restate_ingress_url.to_string(),
-    )
+    ))
     .send_workflow_json(workflow, workflow_key, "run", body)
     .await
     .map_err(|err| AppError::internal(format!("Restate submit failed: {err}")))
