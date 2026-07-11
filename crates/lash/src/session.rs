@@ -142,9 +142,7 @@ impl SessionBuilder {
                 requested: self.session_id,
             });
         }
-        let recorded_provider_id = state.policy.recorded_provider_id().to_string();
-        state.policy = policy.clone();
-        state.policy.provider_id = recorded_provider_id;
+        reconcile_loaded_state_policy(&mut state, &policy);
         self.open_resolved(policy, state, store).await
     }
 
@@ -173,9 +171,7 @@ impl SessionBuilder {
                         requested: self.session_id.clone(),
                     });
                 }
-                let recorded_provider_id = state.policy.recorded_provider_id().to_string();
-                state.policy = policy.clone();
-                state.policy.provider_id = recorded_provider_id;
+                reconcile_loaded_state_policy(&mut state, policy);
                 state
             }
             None => RuntimeSessionState {
@@ -301,10 +297,18 @@ pub(crate) async fn load_state_for_residency(
             requested: session_id.to_string(),
         });
     }
+    reconcile_loaded_state_policy(&mut state, policy);
+    Ok(state)
+}
+
+fn reconcile_loaded_state_policy(state: &mut RuntimeSessionState, policy: &SessionPolicy) {
     let recorded_provider_id = state.policy.recorded_provider_id().to_string();
     state.policy = policy.clone();
     state.policy.provider_id = recorded_provider_id;
-    Ok(state)
+    let reconciled_policy = state.policy.clone();
+    if let Some(frame) = state.current_agent_frame_mut() {
+        frame.assignment.policy = reconciled_policy;
+    }
 }
 
 async fn load_persisted_state_for_residency(

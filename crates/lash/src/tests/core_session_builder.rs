@@ -2,6 +2,112 @@ use super::*;
 use crate::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 use lash_lashlang_runtime::LashlangArtifactStore as _;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReconciliationTransformObservation {
+    max_context_tokens: Option<usize>,
+    session_model: String,
+}
+
+struct ReconciliationTransformProbe {
+    observations: Arc<std::sync::Mutex<Vec<ReconciliationTransformObservation>>>,
+}
+
+struct ReconciliationProbeFactory {
+    transform: Arc<dyn lash_core::TurnContextTransform>,
+}
+
+impl lash_core::PluginFactory for ReconciliationProbeFactory {
+    fn id(&self) -> &'static str {
+        "session-model-reconciliation-probe"
+    }
+
+    fn build(
+        &self,
+        _ctx: &lash_core::PluginSessionContext,
+    ) -> std::result::Result<Arc<dyn lash_core::SessionPlugin>, lash_core::PluginError> {
+        Ok(Arc::new(ReconciliationProbePlugin {
+            transform: Arc::clone(&self.transform),
+        }))
+    }
+}
+
+struct ReconciliationProbePlugin {
+    transform: Arc<dyn lash_core::TurnContextTransform>,
+}
+
+impl lash_core::SessionPlugin for ReconciliationProbePlugin {
+    fn id(&self) -> &'static str {
+        "session-model-reconciliation-probe"
+    }
+
+    fn register(
+        &self,
+        reg: &mut lash_core::PluginRegistrar,
+    ) -> std::result::Result<(), lash_core::PluginError> {
+        reg.context().prepare_turn(0, Arc::clone(&self.transform));
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl lash_core::TurnContextTransform for ReconciliationTransformProbe {
+    fn id(&self) -> &'static str {
+        "session-model-reconciliation-probe"
+    }
+
+    async fn transform(
+        &self,
+        ctx: &lash_core::TurnTransformContext<'_>,
+        input: lash_core::PreparedContext,
+    ) -> std::result::Result<lash_core::PreparedContext, lash_core::ContextError> {
+        let snapshot = ctx.sessions.snapshot_session(&ctx.session_id).await?;
+        self.observations
+            .lock()
+            .expect("reconciliation observations")
+            .push(ReconciliationTransformObservation {
+                max_context_tokens: ctx.max_context_tokens,
+                session_model: snapshot.policy.model.id,
+            });
+        Ok(input)
+    }
+}
+
+fn conflicting_reopen_state(session_id: &str) -> RuntimeSessionState {
+    let historical_policy = lash_core::SessionPolicy {
+        provider_id: "persisted-provider".to_string(),
+        model: model_spec("historical-model", None, 11_111),
+        ..Default::default()
+    };
+    let current_policy = lash_core::SessionPolicy {
+        provider_id: "persisted-provider".to_string(),
+        model: model_spec("current-frame-model", None, 22_222),
+        ..Default::default()
+    };
+    let mut state = RuntimeSessionState {
+        session_id: session_id.to_string(),
+        policy: historical_policy.clone(),
+        agent_frames: Vec::new(),
+        current_agent_frame_id: String::new(),
+        ..Default::default()
+    };
+    state.ensure_agent_frame_initialized();
+    state.append_agent_frame(lash_core::AgentFrameRecord::new(
+        format!("agent-frame:{session_id}:current"),
+        session_id,
+        None,
+        lash_core::AgentFrameReason::continue_as(),
+        None,
+        lash_core::AgentFrameAssignment::from_policy(current_policy),
+        Default::default(),
+    ));
+    state.policy = lash_core::SessionPolicy {
+        provider_id: "persisted-provider".to_string(),
+        model: model_spec("top-level-model", None, 33_333),
+        ..Default::default()
+    };
+    state
+}
+
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct CompileSurfaceToolConfig {
     tool_name: String,
@@ -914,7 +1020,7 @@ async fn persisted_provider_id_mismatch_fails_at_turn_execution() -> Result<()> 
 }
 
 #[tokio::test]
-async fn agent_frame_provider_id_mismatch_fails_at_turn_execution() -> Result<()> {
+async fn agent_frame_provider_id_mismatch_is_reconciled_on_open() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "frame-provider-mismatch".to_string(),
         policy: lash_core::SessionPolicy {
@@ -941,20 +1047,14 @@ async fn agent_frame_provider_id_mismatch_fails_at_turn_execution() -> Result<()
         .build()?;
 
     let session = core.session("frame-provider-mismatch").open().await?;
-    let err = match session.turn(TurnInput::text("must not run")).run().await {
-        Ok(_) => panic!("agent-frame provider mismatch should fail at turn execution"),
-        Err(err) => err,
-    };
-
-    assert!(matches!(
-        err,
-        EmbedError::Runtime(lash_core::RuntimeError {
-            code: lash_core::RuntimeErrorCode::Other(code),
-            message,
-        }) if code == "llm_provider"
-            && message.contains("other-provider")
-            && message.contains("frame-provider-mismatch")
-    ));
+    assert_eq!(
+        session.policy_snapshot().recorded_provider_id(),
+        "embed-test"
+    );
+    session
+        .turn(TurnInput::text("runs with reconciled provider"))
+        .run()
+        .await?;
     Ok(())
 }
 
@@ -1233,6 +1333,238 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
             .expect("app tool")
             .is_member(),
         "the host-removed tool is restored as a non-member"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reopen_reconciles_builder_model_across_all_runtime_consumers() -> Result<()> {
+    use lash_subagents::Capability as _;
+
+    let session_id = "reconcile-open";
+    let builder_model = model_spec("builder-model", None, 77_777);
+    let persisted = conflicting_reopen_state(session_id);
+    let historical_frame_id = persisted.agent_frames[0].frame_id.clone();
+    let store: Arc<dyn lash_core::RuntimePersistence> =
+        Arc::new(SnapshotStore::with_state(persisted));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let request_probe = Arc::clone(&requests);
+    let provider = crate::testing::TestProvider::builder()
+        .kind("persisted-provider")
+        .complete(move |request| {
+            let request_probe = Arc::clone(&request_probe);
+            async move {
+                request_probe
+                    .lock()
+                    .expect("reconciliation requests")
+                    .push(request.model);
+                let response_index = request_probe
+                    .lock()
+                    .expect("reconciliation requests")
+                    .len();
+                if response_index == 1 {
+                    Ok(text_response(&lashlang_block(
+                        r#"await control.continue_as({ task: "continue under reconciled policy" })?"#,
+                    )))
+                } else {
+                    Ok(text_response(&lashlang_block(
+                        r#"finish "reconciled""#,
+                    )))
+                }
+            }
+        })
+        .build()
+        .into_handle();
+    let transform_observations = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let transform = Arc::new(ReconciliationTransformProbe {
+        observations: Arc::clone(&transform_observations),
+    });
+    let probe_factory = Arc::new(ReconciliationProbeFactory { transform });
+    let core = explicit_ephemeral_facets(rlm_core_builder())
+        .provider(provider)
+        .model(builder_model.clone())
+        .plugin(probe_factory)
+        .build()?;
+    let session = core
+        .session(session_id)
+        .store(Arc::clone(&store))
+        .open()
+        .await?;
+
+    let policy = session.policy_snapshot();
+    assert_eq!(policy.model, builder_model);
+    println!(
+        "consumer 1 policy_snapshot: model={} context_window_tokens={}",
+        policy.model.id,
+        policy.model.context_window_tokens()
+    );
+
+    session
+        .turn(TurnInput::text("verify reconciliation"))
+        .run()
+        .await?;
+
+    let observations = transform_observations
+        .lock()
+        .expect("reconciliation observations")
+        .clone();
+    assert!(!observations.is_empty());
+    assert!(observations.iter().all(|observation| {
+        observation.max_context_tokens == Some(77_777)
+            && observation.session_model == "builder-model"
+    }));
+    println!(
+        "consumer 2 TurnTransformContext.max_context_tokens: {:?}",
+        observations[0].max_context_tokens
+    );
+    println!(
+        "consumer 4 context.sessions().model(): {}",
+        observations[0].session_model
+    );
+
+    let requests = requests.lock().expect("reconciliation requests").clone();
+    assert!(!requests.is_empty());
+    assert!(requests.iter().all(|model| model == "builder-model"));
+    println!("consumer 3 primary LlmRequest.model: {}", requests[0]);
+
+    let writer = session.runtime.writer();
+    let runtime = writer.lock().await;
+    let state = runtime.export_persisted_state();
+    drop(runtime);
+    let historical = state
+        .agent_frames
+        .iter()
+        .find(|frame| frame.frame_id == historical_frame_id)
+        .expect("historical frame remains");
+    assert_eq!(historical.assignment.policy.model.id, "historical-model");
+    let current = state.current_agent_frame().expect("current follow frame");
+    assert_eq!(current.assignment.policy.model, builder_model);
+
+    let tier = lash_subagents::TierCapability::new(
+        "inherited",
+        None,
+        lash_subagents::TierPluginSource::CurrentSessionFork,
+    );
+    let parent_snapshot = state.to_snapshot();
+    let session_spec = lash_core::SessionSpec::inherit();
+    let tool_access = lash_core::SessionToolAccess::default();
+    let child = tier
+        .build_session_request(lash_subagents::SubagentSpawnContext {
+            parent_session_id: session_id,
+            parent_snapshot: &parent_snapshot,
+            session_spec: &session_spec,
+            base_tool_access: &tool_access,
+            final_answer_format: lash_subagents::RlmFinalAnswerFormat::RawFinalValue,
+            output_schema: None,
+            seed: Default::default(),
+            parent_subagent: None,
+            caused_by: None,
+        })
+        .expect("inherited child request");
+    let child_policy = child.policy.expect("child policy");
+    assert_eq!(child_policy.model, builder_model);
+    println!(
+        "consumer 5 child tier inheritance: model={} context_window_tokens={}",
+        child_policy.model.id,
+        child_policy.model.context_window_tokens()
+    );
+
+    let execution_env = state.process_execution_env_spec(&policy);
+    assert_eq!(execution_env.policy.model, builder_model);
+    println!(
+        "consumer 6 ProcessExecutionEnvSpec.policy: model={} context_window_tokens={}",
+        execution_env.policy.model.id,
+        execution_env.policy.model.context_window_tokens()
+    );
+    println!(
+        "consumer 7 continue_as follow frame: model={} context_window_tokens={}; historical_frame_model={}",
+        current.assignment.policy.model.id,
+        current.assignment.policy.model.context_window_tokens(),
+        historical.assignment.policy.model.id
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_with_state_reconciles_only_the_current_frame() -> Result<()> {
+    let session_id = "reconcile-open-with-state";
+    let persisted = conflicting_reopen_state(session_id);
+    let historical_frame_id = persisted.agent_frames[0].frame_id.clone();
+    let builder_model = model_spec("builder-model", None, 77_777);
+    let core = explicit_ephemeral_facets(LashCore::standard_builder())
+        .provider(mock_provider())
+        .model(builder_model.clone())
+        .build()?;
+
+    let session = core.session(session_id).open_with_state(persisted).await?;
+    let writer = session.runtime.writer();
+    let state = writer.lock().await.export_persisted_state();
+    assert_eq!(state.policy.model, builder_model);
+    assert_eq!(
+        state
+            .current_agent_frame()
+            .expect("current frame")
+            .assignment
+            .policy
+            .model,
+        builder_model
+    );
+    assert_eq!(
+        state
+            .agent_frames
+            .iter()
+            .find(|frame| frame.frame_id == historical_frame_id)
+            .expect("historical frame")
+            .assignment
+            .policy
+            .model
+            .id,
+        "historical-model"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_worker_state_load_reconciles_only_the_current_frame() -> Result<()> {
+    let session_id = "reconcile-queued-worker";
+    let persisted = conflicting_reopen_state(session_id);
+    let historical_frame_id = persisted.agent_frames[0].frame_id.clone();
+    let store = SnapshotStore::with_state(persisted);
+    let policy = lash_core::SessionPolicy {
+        provider_id: "builder-provider".to_string(),
+        model: model_spec("builder-model", None, 77_777),
+        session_id: Some(session_id.to_string()),
+        ..Default::default()
+    };
+
+    let state = crate::session::load_state_for_residency(
+        lash_core::Residency::KeepAll,
+        session_id,
+        &policy,
+        &store,
+    )
+    .await?;
+    assert_eq!(state.policy.model, policy.model);
+    assert_eq!(
+        state
+            .current_agent_frame()
+            .expect("current frame")
+            .assignment
+            .policy
+            .model,
+        policy.model
+    );
+    assert_eq!(
+        state
+            .agent_frames
+            .iter()
+            .find(|frame| frame.frame_id == historical_frame_id)
+            .expect("historical frame")
+            .assignment
+            .policy
+            .model
+            .id,
+        "historical-model"
     );
     Ok(())
 }
