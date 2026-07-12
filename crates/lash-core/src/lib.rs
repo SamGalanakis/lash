@@ -61,8 +61,9 @@ pub use direct::{
     DirectRequest, DirectRole,
 };
 pub use lash_sansio::llm::types::{
-    ExecutionEvidence, GenerationOptions, LlmOutputPart, LlmRequest, LlmRequestScope, LlmResponse,
-    LlmTerminalReason,
+    AttemptOutcome, AttemptRecord, ExecutionEvidence, GenerationOptions, LlmCallId, LlmCallRecord,
+    LlmOutputPart, LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalReason, NormalizedError,
+    ProtocolPosition, RetryDecision,
 };
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
@@ -323,9 +324,10 @@ pub use plugin_stack::PluginStack;
 pub use provider::{
     CacheRetention, EmptyProviderResolver, LlmTimeouts, MapProviderResolver, ModelCapability,
     ModelEffortValidationCategory, ModelEffortValidationError, Provider, ProviderBinding,
-    ProviderComponents, ProviderFactory, ProviderHandle, ProviderOptions, ProviderResolutionError,
-    ProviderSpec, ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding,
-    ReasoningSelection, RequestTimeout, RuntimeProviderResolver, SingleProviderResolver,
+    ProviderCompletion, ProviderCompletionError, ProviderComponents, ProviderFactory,
+    ProviderHandle, ProviderOptions, ProviderResolutionError, ProviderSpec, ReasoningCapability,
+    ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection, RequestTimeout,
+    RuntimeProviderResolver, SingleProviderResolver,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;

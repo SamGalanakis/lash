@@ -248,7 +248,7 @@ impl DirectLlmClient {
                         self.clock.as_ref(),
                     );
                 }
-                Ok(response)
+                Ok(response.into_response())
             }
             Err(error) => {
                 if let Some(llm_call_id) = llm_call_id {
@@ -269,7 +269,7 @@ impl DirectLlmClient {
                         self.clock.as_ref(),
                     );
                 }
-                Err(DirectLlmError::from(Box::new(error)))
+                Err(DirectLlmError::from(Box::new(error.error)))
             }
         }
     }

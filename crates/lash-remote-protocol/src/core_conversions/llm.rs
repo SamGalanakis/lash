@@ -298,12 +298,14 @@ impl From<core_llm::ExecutionEvidence> for RemoteExecutionEvidence {
         let core_llm::ExecutionEvidence {
             served_model,
             provider_response_id,
+            provider_request_id,
             reasoning_output_tokens,
             provider_finish_reason,
         } = value;
         Self {
             served_model,
             provider_response_id,
+            provider_request_id,
             reasoning_output_tokens,
             provider_finish_reason,
         }
@@ -315,12 +317,14 @@ impl From<RemoteExecutionEvidence> for core_llm::ExecutionEvidence {
         let RemoteExecutionEvidence {
             served_model,
             provider_response_id,
+            provider_request_id,
             reasoning_output_tokens,
             provider_finish_reason,
         } = value;
         Self {
             served_model,
             provider_response_id,
+            provider_request_id,
             reasoning_output_tokens,
             provider_finish_reason,
         }

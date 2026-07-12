@@ -79,6 +79,7 @@ fn remote_llm_response_json_round_trips() {
         execution_evidence: Some(RemoteExecutionEvidence {
             served_model: Some("openai/gpt-5.4-mini".to_string()),
             provider_response_id: Some("response-1".to_string()),
+            provider_request_id: Some("request-1".to_string()),
             reasoning_output_tokens: Some(0),
             provider_finish_reason: Some("stop".to_string()),
         }),

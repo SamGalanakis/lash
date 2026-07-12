@@ -3,11 +3,39 @@ use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
 use lash_core::llm::transport::ProviderFailureKind;
 use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolChoice, LlmToolSpec};
 use lash_core::provider::{
-    CacheRetention, ModelCapability, ReasoningCapability, ReasoningEncoding,
+    CacheRetention, ModelCapability, ProviderHandle, ProviderReliability, ReasoningCapability,
+    ReasoningEncoding,
 };
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+
+#[derive(Debug)]
+struct ScriptedHttpTransport {
+    responses: std::sync::Mutex<VecDeque<(u16, Vec<(String, String)>, &'static str)>>,
+}
+
+#[async_trait]
+impl LlmHttpTransport for ScriptedHttpTransport {
+    async fn send(
+        &self,
+        _request: LlmHttpRequest,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<lash_llm_transport::LlmHttpResponse, LlmTransportError> {
+        let (status, headers, body) = self
+            .responses
+            .lock()
+            .expect("script lock")
+            .pop_front()
+            .expect("scripted response");
+        Ok(lash_llm_transport::LlmHttpResponse {
+            status,
+            headers,
+            body: LlmHttpBody::buffered(body),
+        })
+    }
+}
 
 fn reasoning_capability() -> ModelCapability {
     ModelCapability {
@@ -1184,11 +1212,78 @@ fn openrouter_buffered_wire_preserves_concrete_model_and_explicit_zero_reasoning
         Some(ExecutionEvidence {
             served_model: Some("anthropic/claude-sonnet-4.5".to_string()),
             provider_response_id: Some("gen-123".to_string()),
+            provider_request_id: None,
             reasoning_output_tokens: Some(0),
             provider_finish_reason: Some("stop".to_string()),
         })
     );
     assert_ne!(state.served_model.as_deref(), Some("openrouter/auto"));
+}
+
+#[tokio::test]
+async fn openrouter_handle_records_failed_request_id_then_served_model_evidence() {
+    let transport = Arc::new(ScriptedHttpTransport {
+        responses: std::sync::Mutex::new(VecDeque::from([
+            (
+                503,
+                vec![("x-request-id".to_string(), "req-failed".to_string())],
+                r#"{"error":{"message":"temporarily unavailable"}}"#,
+            ),
+            (
+                200,
+                vec![("x-request-id".to_string(), "req-success".to_string())],
+                r#"{"id":"gen-123","model":"anthropic/claude-sonnet-4.5","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"completion_tokens_details":{"reasoning_tokens":0}}}"#,
+            ),
+        ])),
+    });
+    let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_options(ProviderOptions {
+            reliability: ProviderReliability::default()
+                .max_attempts(2)
+                .base_delay_ms(0)
+                .max_delay_ms(0),
+            ..ProviderOptions::default()
+        })
+        .with_transport(transport);
+    let mut handle = ProviderHandle::new(provider.into_components());
+    let mut req = request(Vec::new());
+    req.model = "openrouter/auto".to_string();
+
+    let completion = handle.complete(req).await.expect("retry succeeds");
+    assert_eq!(completion.call_record.attempts.len(), 2);
+    let failed = &completion.call_record.attempts[0];
+    assert_eq!(failed.outcome, lash_core::AttemptOutcome::Failed);
+    assert_eq!(
+        failed
+            .error
+            .as_ref()
+            .unwrap()
+            .provider_request_id
+            .as_deref(),
+        Some("req-failed")
+    );
+    assert_eq!(failed.error.as_ref().unwrap().http_status, Some(503));
+    assert_eq!(
+        failed
+            .evidence
+            .as_ref()
+            .unwrap()
+            .provider_request_id
+            .as_deref(),
+        Some("req-failed")
+    );
+
+    let evidence = completion.call_record.attempts[1]
+        .evidence
+        .as_ref()
+        .expect("success evidence");
+    assert_eq!(
+        evidence.served_model.as_deref(),
+        Some("anthropic/claude-sonnet-4.5")
+    );
+    assert_eq!(evidence.provider_request_id.as_deref(), Some("req-success"));
+    assert_eq!(evidence.reasoning_output_tokens, Some(0));
+    assert!(completion.call_record.attempts[1].usage.is_some());
 }
 
 #[test]
@@ -1218,6 +1313,7 @@ fn openrouter_stream_wire_retains_partial_identity_when_stream_ends_early() {
         Some(ExecutionEvidence {
             served_model: Some("openai/gpt-5.4-mini".to_string()),
             provider_response_id: Some("gen-partial".to_string()),
+            provider_request_id: None,
             reasoning_output_tokens: None,
             provider_finish_reason: None,
         })

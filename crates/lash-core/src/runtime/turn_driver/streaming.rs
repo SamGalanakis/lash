@@ -357,7 +357,11 @@ impl RuntimeTurnDriver<'_> {
                         break Err(err);
                     }
                     match result {
-                        Ok(mut resp) => {
+                        Ok(completion) => {
+                            // ADR 0032 step 1 stops at ProviderHandle. Carrying
+                            // this record into the durable turn result is the
+                            // next protocol/journal change.
+                            let mut resp = completion.into_response();
                             if response_usage_is_empty(&resp.usage) {
                                 resp.usage = streamed_usage.clone();
                             }
@@ -368,15 +372,18 @@ impl RuntimeTurnDriver<'_> {
                             };
                             break Ok(resp)
                         }
-                        Err(e) => break Err(LlmCallError {
-                            message: e.message,
-                            retryable: e.retryable,
-                            kind: e.kind,
-                            raw: e.raw,
-                            code: e.code,
-                            terminal_reason: e.terminal_reason,
-                            request_body: e.request_body,
-                        }),
+                        Err(e) => {
+                            let e = e.error;
+                            break Err(LlmCallError {
+                                message: e.message,
+                                retryable: e.retryable,
+                                kind: e.kind,
+                                raw: e.raw,
+                                code: e.code,
+                                terminal_reason: e.terminal_reason,
+                                request_body: e.request_body,
+                            });
+                        }
                     }
                 }
             }
