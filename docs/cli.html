@@ -5,325 +5,38 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
-<title>using the cli · lash docs</title>
+<title>lash CLI · lash docs</title>
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
-<link rel="icon" href="./favicon.ico" sizes="32x32">
-<link rel="apple-touch-icon" href="./apple-touch-icon.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
 <link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
 <script src="./docs.js?v=7" defer></script>
-<script src="./syntax.js" defer></script>
 </head>
-<body class="docs-page" data-cover-source="<code>crates/lash-cli</code>.">
+<body class="docs-page" data-cover-source="external: SamGalanakis/lash-cli">
   <a class="skip-link" href="#content">skip to content</a>
-<section class="opener">
+  <section class="opener">
     <h1 class="opener__title">using<span class="slash">/</span>cli</h1>
-    <p class="opener__lede">The <code>lash</code> binary, maintained in the independent <a href="https://github.com/SamGalanakis/lash-cli"><code>lash-cli</code> repository</a>, runs an interactive terminal UI by default, autonomous single-shot modes under <code>--print</code>, a JSONL event stream under <code>--mode json</code>, an stdin/stdout RPC loop under <code>--mode rpc</code>, and administrative flows like <code>--export</code> and <code>--reset</code>. It is the first-party Host Application and a worked embedding example; the runtime crates remain the reusable product surface documented here. This page enumerates the user-visible CLI surface.</p>
+    <p class="opener__lede"><code>lash-cli</code> is the independently released first-party terminal Host Application for Lash. Its repository owns the executable, TUI, configuration, command reference, installer, and product documentation.</p>
   </section>
-
   <main class="body" id="content">
-<div class="section" id="first-run">
-          <div class="section-header">
-            <h2>First Run</h2>
-            <p>If <code>~/.lash/config.json</code> does not exist, <code>lash</code> launches the setup wizard. The wizard provisions an active provider, collects credentials, and writes the config file before dropping you into the TUI.</p>
-          </div>
-          <pre data-lang="console"><code>$ lash
-# Setup wizard:
-# 1. Choose a provider (Anthropic, OpenAI, OpenAI-compatible, Codex, Google OAuth)
-# 2. Paste API key (or run OAuth / device-code flow)
-# 3. Optionally paste a Tavily API key for the built-in web-search tool
-# 4. Drop into the interactive TUI</code></pre>
-          <p>Re-run the wizard at any time with <code>lash --provider</code>. Use <code>/provider</code> from inside a session to switch providers without restarting.</p>
-        </div>
-
-        <div class="section" id="slash-commands">
-          <div class="section-header">
-            <h2>Slash Commands</h2>
-            <p>Type a <code>/</code> at the start of the prompt to invoke a command. Tab-completion is available. Skill names registered in <code>~/.lash/skills/</code> or <code>.agents/lash/skills/</code> appear as additional <code>/&lt;skill&gt;</code> commands.</p>
-          </div>
-          <div class="table">
-            <table>
-              <thead><tr><th>Command</th><th>Aliases</th><th>Usage</th><th>Description</th></tr></thead>
-              <tbody>
-                <tr><td><code>/clear</code></td><td><code>/new</code></td><td><code>/clear</code></td><td>Reset conversation</td></tr>
-                <tr><td><code>/compact</code></td><td>—</td><td><code>/compact [focus instructions]</code></td><td>Open a compaction Agent Frame seeded by a summary</td></tr>
-                <tr><td><code>/controls</code></td><td>—</td><td><code>/controls</code></td><td>Show keyboard shortcuts</td></tr>
-                <tr><td><code>/fork</code></td><td>—</td><td><code>/fork</code></td><td>Open a forked session in a new terminal</td></tr>
-                <tr><td><code>/tree</code></td><td>—</td><td><code>/tree</code></td><td>Browse and switch branches in the current session</td></tr>
-                <tr><td><code>/version</code></td><td>—</td><td><code>/version</code></td><td>Show <code>lash-cli</code> and <code>lash-sansio</code> versions</td></tr>
-                <tr><td><code>/info</code></td><td><code>/status</code></td><td><code>/info</code></td><td>Show current session/runtime info</td></tr>
-                <tr><td><code>/model</code></td><td>—</td><td><code>/model [name]</code></td><td>Show or switch the LLM model</td></tr>
-                <tr><td><code>/variant</code></td><td>—</td><td><code>/variant [name]</code></td><td>Show or switch the model variant (e.g. <code>high</code>, <code>max</code>)</td></tr>
-                <tr><td><code>/mode</code></td><td>—</td><td><code>/mode [name]</code></td><td>Show the session's execution mode (<code>standard</code> / <code>rlm</code>); it is locked for the session, so changing it requires a new session started with <code>--execution-mode</code></td></tr>
-                <tr><td><code>/provider</code></td><td><code>/login</code></td><td><code>/provider</code></td><td>Switch, add, or re-authenticate providers</td></tr>
-                <tr><td><code>/logout</code></td><td>—</td><td><code>/logout</code></td><td>Remove stored credentials for active provider</td></tr>
-                <tr><td><code>/retry</code></td><td>—</td><td><code>/retry</code></td><td>Replay the previous turn payload</td></tr>
-                <tr><td><code>/resume</code></td><td><code>/continue</code></td><td><code>/resume [id-or-name]</code></td><td>Search sessions or resume by id/name (interactive picker if no arg)</td></tr>
-                <tr><td><code>/skills</code></td><td>—</td><td><code>/skills</code></td><td>Browse loaded skills</td></tr>
-                <tr><td><code>/help</code></td><td><code>/?</code></td><td><code>/help</code></td><td>Open the commands and shortcuts overlay</td></tr>
-                <tr><td><code>/exit</code></td><td><code>/quit</code></td><td><code>/exit</code></td><td>Quit</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="section" id="keyboard-shortcuts">
-          <div class="section-header">
-            <h2>Keyboard Shortcuts</h2>
-            <p>The TUI uses a small, consistent set of shortcuts. The full list is also available in-session via <code>/controls</code>.</p>
-          </div>
-          <div class="two-col">
-            <article class="panel">
-              <h3>History navigation</h3>
-              <dl class="def-list">
-                <dt><kbd>PageUp</kbd> / <kbd>PageDown</kbd></dt><dd>Scroll history or the active document overlay.</dd>
-                <dt><kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Cycle the input-draft history when not navigating a suggestion popup.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Prompt editing</h3>
-              <dl class="def-list">
-                <dt><kbd>Enter</kbd></dt><dd>Submit immediately when idle; while a turn is active, inject at the earliest safe runtime boundary.</dd>
-                <dt><kbd>Tab</kbd></dt><dd>Accept an autocomplete suggestion when the popup is open; with a draft, submit immediately when idle or queue a next-turn draft while active.</dd>
-                <dt><kbd>Ctrl+U</kbd></dt><dd>Delete draft text from the cursor to the start of the line.</dd>
-                <dt><kbd>Ctrl+K</kbd></dt><dd>Delete draft text from the cursor to the end of the line.</dd>
-                <dt><kbd>Ctrl+←</kbd> / <kbd>Ctrl+→</kbd></dt><dd>Move the cursor by word.</dd>
-                <dt><kbd>Home</kbd> / <kbd>End</kbd></dt><dd>Jump to the start / end of the prompt.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Selection &amp; clipboard</h3>
-              <dl class="def-list">
-                <dt><kbd>Ctrl+Shift+C</kbd></dt><dd>Copy the current selection or the last assistant response. Configure via <code>LASH_COPY_BINDING</code> if the default conflicts with your terminal.</dd>
-                <dt><kbd>Ctrl+C</kbd></dt><dd>Close a popup or overlay, cancel the active turn, clear a non-empty draft, or quit from an idle empty prompt.</dd>
-                <dt><kbd>Esc</kbd></dt><dd>Close overlays, pickers, and modal flows.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Command palette</h3>
-              <dl class="def-list">
-                <dt><kbd>Ctrl+P</kbd></dt><dd>Open the command palette settings overlay: a searchable list of <em>Settings</em> actions (theme, model, variant, provider, execution mode, logout) and <em>Session</em> actions (new, resume, tree, fork), each annotated with the equivalent slash command.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Pickers &amp; multi-select</h3>
-              <dl class="def-list">
-                <dt><kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>k</kbd> / <kbd>j</kbd></dt><dd>Move selection.</dd>
-                <dt><kbd>Space</kbd></dt><dd>Toggle a multi-select option when supported.</dd>
-                <dt><kbd>Tab</kbd> / <kbd>BackTab</kbd></dt><dd>Add / remove a note on a selection when supported.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Background process dock</h3>
-              <dl class="def-list">
-                <dt><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd></dt><dd>With an empty prompt, cycle focus through the dock of background processes. The dock lists only processes granted to the current session.</dd>
-                <dt><kbd>Enter</kbd></dt><dd>Open an overview of the focused process.</dd>
-                <dt><kbd>Delete</kbd></dt><dd>Cancel the focused process.</dd>
-              </dl>
-              <p>A running process shows <code>running</code>; a terminal one shows its outcome — <code>success</code>, <code>error</code>, <code>cancelled</code>, or <code>abandoned</code>. <code>abandoned</code> (ADR 0019) means the owner was lost without recording an outcome and renders in the failure style, like <code>error</code>. A detached command (<code>shell.start</code> with <code>detach: true</code>) never appears in the dock: it returns immediately with <code>status: "detached"</code> and is owned by the host/OS, not tracked as a session process.</p>
-            </article>
-          </div>
-        </div>
-
-        <div class="section" id="cli-flags">
-          <div class="section-header">
-            <h2>CLI Flags</h2>
-            <p>Run <code>lash --help</code> for the full list. The most common flags, grouped by purpose:</p>
-          </div>
-          <div class="def-list-grid">
-            <article class="panel">
-              <h3>Provider &amp; model</h3>
-              <dl class="def-list">
-                <dt><code>--provider</code></dt><dd>Re-run the provider setup wizard.</dd>
-                <dt><code>--model &lt;name&gt;</code></dt><dd>Override the default model for this session.</dd>
-                <dt><code>--variant &lt;name&gt;</code></dt><dd>Override the model-native variant (e.g. <code>high</code>, <code>max</code>, <code>xhigh</code>).</dd>
-                <dt><code>--api-key &lt;key&gt;</code></dt><dd>One-shot API key for OpenAI or OpenAI-compatible providers.</dd>
-                <dt><code>--base-url &lt;url&gt;</code></dt><dd>Base URL for the LLM API (OpenAI-compatible).</dd>
-                <dt><code>--tavily-api-key &lt;key&gt;</code> <span class="micro-label">(env <code>TAVILY_API_KEY</code>)</span></dt><dd>Tavily key for the bundled web-search tool.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Execution</h3>
-              <dl class="def-list">
-                <dt><code>--execution-mode &lt;mode&gt;</code></dt><dd><code>standard</code> (default) or <code>rlm</code>.</dd>
-                <dt><code>-c</code>, <code>--context-approach &lt;approach&gt;</code></dt><dd>For standard mode: <code>rolling_history</code> or <code>observational_memory</code>.</dd>
-                <dt><code>--rlm-var name=&lt;json&gt;</code></dt><dd>Repeatable. Project a read-only bound variable into the RLM autonomous turn.</dd>
-                <dt><code>--rlm-vars-file &lt;path&gt;</code></dt><dd>Same as above but load the projections from a JSON object file.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Session</h3>
-              <dl class="def-list">
-                <dt><code>--resume &lt;id_or_name&gt;</code></dt><dd>Resume by session id, name, or legacy <code>.db</code> filename.</dd>
-                <dt><code>--resume-prompt &lt;prompt&gt;</code></dt><dd>Send a prompt right after resume.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Output modes</h3>
-              <dl class="def-list">
-                <dt><code>-p</code>, <code>--print &lt;prompt&gt;</code></dt><dd>Autonomous: run the prompt once, write the answer to stdout, exit. See <em>Print mode</em> below.</dd>
-                <dt><code>--mode &lt;interactive|json|rpc&gt;</code></dt><dd>Select the host surface. <code>interactive</code> is the TUI default; <code>json</code> requires <code>--print</code> and writes JSONL events to stdout; <code>rpc</code> reads LF-delimited requests from stdin and writes LF-delimited records to stdout.</dd>
-                <dt><code>--await-background-work</code></dt><dd>In autonomous mode, wait for plugin background work before exiting.</dd>
-                <dt><code>--turn-usage-json &lt;path&gt;</code></dt><dd>In autonomous mode, write per-turn and cumulative usage JSON to a file.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Debug &amp; tracing</h3>
-              <dl class="def-list">
-                <dt><code>--debug</code></dt><dd>Detailed lifecycle/debug logs plus per-session LLM traces.</dd>
-                <dt><code>--trace-level &lt;standard|extended&gt;</code></dt><dd>Trace detail. Default <code>standard</code>.</dd>
-                <dt><code>--debug-ui-trace trace.json</code></dt><dd>Record the live TUI session as a replayable UI trace plus a final snapshot.</dd>
-                <dt><code>--debug-ui-trace-interval-ms &lt;ms&gt;</code></dt><dd>When recording a UI trace, also capture numbered checkpoint snapshots at the given interval.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Observational memory</h3>
-              <dl class="def-list">
-                <dt><code>--om-observation-message-tokens &lt;tokens&gt;</code></dt><dd>Observe recent raw history after this many new message tokens.</dd>
-                <dt><code>--om-observation-buffer-tokens &lt;tokens&gt;</code></dt><dd>Keep this much message-token slack before observation pressure starts.</dd>
-                <dt><code>--om-observation-block-after-tokens &lt;tokens&gt;</code></dt><dd>Block new turns once unobserved message tokens pass this threshold.</dd>
-                <dt><code>--om-observation-max-tokens-per-batch &lt;tokens&gt;</code></dt><dd>Cap the raw-history slice sent to one observer pass.</dd>
-                <dt><code>--om-previous-observer-tokens &lt;tokens&gt;</code></dt><dd>Budget previous observer notes included in a fresh observation pass.</dd>
-                <dt><code>--om-reflection-observation-tokens &lt;tokens&gt;</code></dt><dd>Target observation-token volume before reflection becomes useful.</dd>
-                <dt><code>--om-reflection-buffer-activation-percent &lt;percent&gt;</code></dt><dd>Start reflection when the reflection buffer reaches this percentage.</dd>
-                <dt><code>--om-reflection-block-after-tokens &lt;tokens&gt;</code></dt><dd>Block new turns once pending reflection material passes this threshold.</dd>
-              </dl>
-            </article>
-            <article class="panel">
-              <h3>Admin</h3>
-              <dl class="def-list">
-                <dt><code>--reset</code></dt><dd>Delete <code>~/.lash/</code> and <code>~/.cache/lash/</code> and exit.</dd>
-                <dt><code>--info</code></dt><dd>Print current config / runtime info and exit.</dd>
-                <dt><code>--check-update</code> / <code>--update</code></dt><dd>Check / install the latest release.</dd>
-                <dt><code>--export &lt;db&gt;</code></dt><dd>Export a persisted session database. Combine with <code>--export-format html|json</code>, <code>--export-trace &lt;jsonl&gt;</code>, and <code>--export-out &lt;path&gt;</code>.</dd>
-              </dl>
-            </article>
-          </div>
-        </div>
-
-        <div class="section" id="print-mode">
-          <div class="section-header">
-            <h2>Print Mode</h2>
-            <p><code>lash --print "&lt;prompt&gt;"</code> runs Lash autonomously: it boots, executes the prompt, prints the settled <code>TurnFinish::AssistantMessage</code> prose to stdout, and exits. Print mode runs without a TUI; status and tool output go to stderr. An autonomous system prompt is injected so the assistant completes the task without asking for input.</p>
-            <p>Each completed tool call prints a one-line status marker to stderr: <code>[tool] &lt;name&gt; · &lt;status&gt; · &lt;duration&gt;</code>, where <code>status</code> is <code>ok</code>, <code>error</code>, or <code>cancelled</code> and the duration is dropped when it is negligible. The <code>&lt;name&gt;</code> is the runtime tool name (<code>exec_command</code>, not the <code>shell.exec</code> surface path); see <a href="./reporting.html#tool-names">Reporting channels → Tool names</a>.</p>
-          </div>
-          <pre data-lang="console"><code>$ lash --print "Summarise this branch's changes in two bullets."
-# Assistant prose to stdout, tool/lifecycle logs to stderr:
-#   [tool] exec_command · ok · 41ms
-#   [tool] read_file · ok
-
-$ lash --print "Investigate the latest test failure." \
-       --await-background-work \
-       --turn-usage-json out/usage.json</code></pre>
-        </div>
-
-        <div class="section" id="json-and-rpc-modes">
-          <div class="section-header">
-            <h2>JSON &amp; RPC Modes</h2>
-            <p><code>--mode json</code> and <code>--mode rpc</code> are machine-facing CLI surfaces. They do not enter the TUI and they reserve stdout for LF-delimited JSON records. The stream is versioned: the opening <code>turn_start</code> record (and the RPC <code>ready</code> record) carries <code>protocol_version: 1</code>, so a consumer can pin the wire shape before parsing the rest.</p>
-          </div>
-          <pre data-lang="console"><code>$ lash --mode json --print "Summarise this repository."
-{"type":"turn_start","protocol_version":1,"stream_id":1}
-{"type":"event","stream_id":1,"activity":{"id":"a1","correlation_id":"c1","type":"model_request_started","protocol_iteration":0}}
-{"type":"event","stream_id":1,"activity":{"id":"a2","correlation_id":"call-3","type":"tool_call_completed","call_id":"call-3","name":"exec_command","args":{"...":"..."},"output":{"...":"..."},"duration_ms":41}}
-{"type":"turn_finish","stream_id":1,"ok":true,"cancelled":false,"assistant_text":"...","outcome":{...},"usage":{...},"children_usage":[],"errors":[],"execution":{...},"tool_calls":[...]}</code></pre>
-          <p>Each <code>event</code> wraps one <code>TurnActivity</code>: an <code>id</code>, a <code>correlation_id</code>, and a flattened <code>TurnEvent</code> tagged by <code>type</code>. Tool events report the runtime tool name (<code>exec_command</code>), not the <code>shell.exec</code> surface path; for the full event vocabulary and stability contract see <a href="./reporting.html">Reporting channels</a>.</p>
-          <p>RPC mode starts a reusable session and reads one JSON object per line from stdin. It opens with a <code>ready</code> record (<code>{"type":"ready","protocol_version":1,"protocol":"lash.rpc.v1","methods":["prompt","ping","shutdown"]}</code>). A <code>prompt</code> request streams <code>turn_start</code>, <code>event</code>, and <code>turn_finish</code> records tagged with the request <code>id</code>, then writes a final <code>response</code>.</p>
-          <pre data-lang="json"><code>{"id":1,"method":"prompt","params":{"prompt":"List the top-level crates."}}
-{"id":2,"method":"shutdown"}</code></pre>
-        </div>
-
-        <div class="section" id="config-file">
-          <div class="section-header">
-            <h2>Config File</h2>
-            <p>Configuration lives at <code>~/.lash/config.json</code> (overridable via the <code>LASH_HOME</code> environment variable). The schema is defined by <code>LashConfig</code> in <code>lash-cli</code> and uses <code>serde(deny_unknown_fields)</code>, so unknown top-level fields are rejected to catch typos.</p>
-          </div>
-          <pre data-lang="json"><code>{
-  "active_provider": "openai",
-  "providers": {
-    "openai": { "type": "openai", "api_key": "sk-..." },
-    "anthropic": {
-      "type": "anthropic",
-      "api_key": "sk-ant-...",
-      "options": {
-        "cache_retention": "long",
-        "max_output_tokens": 16384
-      }
-    }
-  },
-  "auxiliary_secrets": {
-    "tavily_api_key": "tvly-..."
-  },
-  "mcp_servers": {
-    "docs": {
-      "transport": "stdio",
-      "command": "uvx",
-      "args": ["mcp-server-docs"]
-    }
-  },
-  "agent_models": {},
-  "model_defaults": {
-    "openai": { "model": "openai/gpt-5.5", "variant": "medium" }
-  }
-}</code></pre>
-          <div class="table">
-            <table>
-              <thead><tr><th>Field</th><th>Type</th><th>Purpose</th></tr></thead>
-              <tbody>
-                <tr><td><code>active_provider</code></td><td>string</td><td>Key of the currently active provider; must exist in <code>providers</code>.</td></tr>
-                <tr><td><code>providers</code></td><td>map</td><td>Per-provider credentials and metadata, keyed by provider kind. Shared provider tuning lives under <code>options</code>, including <code>cache_retention</code> (<code>none</code> | <code>short</code> | <code>long</code>) and <code>max_output_tokens</code>.</td></tr>
-                <tr><td><code>auxiliary_secrets</code></td><td>object</td><td>Secrets for non-LLM services. Currently <code>tavily_api_key</code>.</td></tr>
-                <tr><td><code>mcp_servers</code></td><td>map</td><td>MCP server configs by name. Discriminated by <code>transport</code>: <code>stdio</code>, <code>streamable_http</code>, or <code>sse</code>.</td></tr>
-                <tr><td><code>agent_models</code></td><td>map</td><td>User-overridable model names per subagent capability.</td></tr>
-                <tr><td><code>model_defaults</code></td><td>map</td><td>Fresh-session model + variant default per provider kind. Session resumes ignore this and use the persisted head.</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="section" id="environment-variables">
-          <div class="section-header">
-            <h2>Environment Variables</h2>
-            <p>The CLI reads a small set of environment variables; most are overrides for paths or behavior the config file doesn't cover.</p>
-          </div>
-          <div class="table">
-            <table>
-              <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
-              <tbody>
-                <tr><td><code>LASH_HOME</code></td><td>Override the root data directory (defaults to <code>~/.lash/</code>).</td></tr>
-                <tr><td><code>OPENAI_API_KEY</code> / <code>OPENAI_COMPATIBLE_API_KEY</code></td><td>Provider API keys used during setup or one-shot sessions when no stored key is configured.</td></tr>
-                <tr><td><code>OPENROUTER_API_KEY</code></td><td>OpenRouter API key accepted as an OpenAI-compatible shortcut when <code>--base-url</code> points at <code>https://openrouter.ai/api/v1</code>.</td></tr>
-                <tr><td><code>TAVILY_API_KEY</code></td><td>Tavily API key for the bundled web search tool. Alternative to <code>--tavily-api-key</code> and the config file.</td></tr>
-                <tr><td><code>LASH_GOOGLE_CLIENT_ID</code> / <code>LASH_GOOGLE_CLIENT_SECRET</code></td><td>Override the OAuth client credentials used by the Google / Code Assist provider.</td></tr>
-                <tr><td><code>CODE_ASSIST_ENDPOINT</code> / <code>CODE_ASSIST_API_VERSION</code></td><td>Override the Google Code Assist API endpoint and version for provider integration testing.</td></tr>
-                <tr><td><code>LASH_COPY_BINDING</code></td><td>Override the copy keystroke: <code>ctrl-shift-c</code> (default) or <code>ctrl-y</code>. <code>Ctrl+C</code> stays reserved for cancel semantics, so <code>ctrl-c</code> falls back to the default.</td></tr>
-                <tr><td><code>LASH_LOG</code></td><td><code>tracing-subscriber</code> log filter (e.g. <code>debug</code>, <code>warn</code>, <code>lash=trace</code>).</td></tr>
-                <tr><td><code>LASH_NO_OSC52</code></td><td>Disable OSC 52 clipboard escape sequences.</td></tr>
-                <tr><td><code>LASH_INSTALL_DIR</code></td><td>Override the install dir used by <code>--update</code>.</td></tr>
-                <tr><td><code>LASH_REPO</code></td><td>Override the GitHub repo used by <code>--check-update</code> / <code>--update</code>.</td></tr>
-                <tr><td><code>LASH_TOKIO_STACK_BYTES</code></td><td>Override the worker-thread stack size used by the CLI Tokio runtime.</td></tr>
-                <tr><td><code>GOOGLE_CLOUD_PROJECT[_ID]</code></td><td>Google Cloud project ID for the Gemini / Code Assist provider.</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="section" id="resume-fork">
-          <div class="section-header">
-            <h2>Resume &amp; Fork</h2>
-            <p>Every session has a UUID and a generated human-readable name. <code>--resume &lt;id_or_name&gt;</code> accepts either, plus the legacy <code>.db</code> filename for old sessions. Without an argument, <code>/resume</code> opens an interactive picker showing the 50 most recent sessions sorted by recency. The picker hides zero-turn sessions when any non-empty session exists; direct <code>/resume &lt;id-or-name&gt;</code> may still target any session.</p>
-          </div>
-          <p><code>/fork</code> branches the current session at the current message and opens the fork in a new terminal window. Lash resolves the launcher from the running executable and falls back to finding <code>lash</code> on <code>$PATH</code> if that binary isn't launchable. The launched fork runs <code>lash --resume &lt;new-session-id&gt;</code> in the new terminal.</p>
-        </div>
+    <div class="section">
+      <div class="section-header">
+        <h2>CLI documentation moved</h2>
+        <p>The canonical CLI reference now ships with the application so it changes and releases with the code it describes.</p>
+      </div>
+      <div class="card-grid card-grid--two">
+        <a class="card" href="https://samgalanakis.github.io/lash-cli/">
+          <span class="card__label">application docs</span>
+          <h3>Open the CLI reference</h3>
+          <p>Setup, providers, slash commands, key bindings, flags, configuration, autonomous modes, and session flows.</p>
+        </a>
+        <a class="card" href="https://samgalanakis.github.io/lash-cli/architecture.html">
+          <span class="card__label">host architecture</span>
+          <h3>See how the CLI composes Lash</h3>
+          <p>Application ownership, local crates, the SDK dependency boundary, and execution-mode composition.</p>
+        </a>
+      </div>
+      <p>Source and releases remain at <a href="https://github.com/SamGalanakis/lash-cli"><code>SamGalanakis/lash-cli</code></a>. The rest of this site documents the reusable Lash SDK.</p>
+    </div>
   </main>
-
-  <section class="pager" aria-label="chapter navigation">
-  <div class="pager__rail">read on &middot;</div>
-  <div class="pager__main">
-  </div>
-</section>
 </body>
 </html>
