@@ -11,9 +11,11 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+type ScriptedHttpResponse = (u16, Vec<(String, String)>, &'static str);
+
 #[derive(Debug)]
 struct ScriptedHttpTransport {
-    responses: std::sync::Mutex<VecDeque<(u16, Vec<(String, String)>, &'static str)>>,
+    responses: std::sync::Mutex<VecDeque<ScriptedHttpResponse>>,
 }
 
 #[async_trait]
