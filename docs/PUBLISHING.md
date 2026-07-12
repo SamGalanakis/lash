@@ -18,8 +18,9 @@ release publishes them all together, in dependency order.
   `lash-plugin-tool-output-budget`, `lash-llm-tools`).
 - **Not published:** anything marked `publish = false` — the CLI (`lash-cli`),
   TUI crates, examples, E2E harnesses, and dev/internal tooling
-  (`lash-harness-opt`, `lash-perf`, `lash-trace-viewer`, `lash-export`,
-  `lash-file-index`, `lash-autoresearch`).
+  (`lash-perf`, `lash-trace-viewer`, `lash-export`, `lash-file-index`,
+  `lash-autoresearch`). Harness evolution lives in the separate
+  [`lash-evolve`](https://github.com/SamGalanakis/lash-evolve) repository.
 
 Because of the exact `=` version pins, a published crate's internal deps must
 already be on crates.io at the same version — so it is **all-or-nothing**:

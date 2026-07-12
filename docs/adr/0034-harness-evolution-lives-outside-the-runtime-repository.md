@@ -1,0 +1,3 @@
+# Harness evolution lives outside the runtime repository
+
+Lash owns the stable runtime, plugin and protocol contracts, and its reference Execution Modes; `lash-evolve` owns optimization, evaluation, candidate worktrees, and mutable Harness Packages. Keeping them in separate repositories makes Lash and the evaluator external to candidate mutation, lets evolution move on an experimental release cycle, and continuously tests whether published Lash contracts are sufficient for independently developed Execution Modes. Interactive runtime features such as autoresearch may remain in Lash, but generic harness optimization and candidate code do not.
