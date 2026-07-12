@@ -1,6 +1,6 @@
 name: Performance
 
-# The heavyweight performance guard deliberately does NOT run per push (see
+# The heavyweight runtime performance checks deliberately do not run per push (see
 # ci.yml); this nightly run is the sole enforcement point for the budgets in
 # scripts/perf_guard_budgets.json — without it the budget system gates
 # nothing.
@@ -32,8 +32,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
@@ -48,13 +46,15 @@ jobs:
         with:
           tool: protoc
 
-      - name: Run full performance guard
+      - name: Run full runtime performance checks
         run: |
-          python3 scripts/profile_guard.py --profile full --release --cli-cargo-feature fff-zlob --enforce --out .benchmarks/perf-guard/full.json
+          python3 scripts/profile_runtime.py --profile full --release --enforce-budgets --out .benchmarks/perf-guard/runtime.json
+          python3 scripts/profile_lashlang.py --iterations 2500 --profile-iterations 2500 --enforce-budgets --out .benchmarks/perf-guard/lashlang.json
 
-      - name: Publish performance guard summary
+      - name: Publish performance summaries
         run: |
-          python3 scripts/perfreport.py .benchmarks/perf-guard/full.json >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/perfreport.py .benchmarks/perf-guard/runtime.json >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/perfreport.py .benchmarks/perf-guard/lashlang.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload performance guard artifacts
         uses: actions/upload-artifact@v4

@@ -5,10 +5,6 @@ repo := justfile_directory()
 default:
   @just --list
 
-dev *args:
-  cargo build --manifest-path "{{repo}}/crates/lash-cli/Cargo.toml"
-  cd "${LASH_DEV_LAUNCH_CWD:-{{invocation_directory()}}}" && exec "{{repo}}/target/debug/lash" "$@"
-
 agent-workbench port='3030':
   ./scripts/agent-workbench-dev.sh up --port "{{port}}"
 
@@ -159,7 +155,8 @@ confidence-full:
   bash "{{repo}}/scripts/confidence-gate.sh" full
 
 perf-guard:
-  python3 "{{repo}}/scripts/profile_guard.py" --profile quick --release --cli-cargo-feature fff-zlob --skip-dhat --enforce --out "{{repo}}/.benchmarks/perf-guard/local.json"
+  python3 "{{repo}}/scripts/profile_runtime.py" --profile quick --release --enforce-budgets --out "{{repo}}/.benchmarks/perf-guard/runtime-local.json"
+  python3 "{{repo}}/scripts/profile_lashlang.py" --iterations 500 --profile-iterations 500 --enforce-budgets --out "{{repo}}/.benchmarks/perf-guard/lashlang-local.json"
 
 release-version-test:
   python3 "{{repo}}/scripts/test_release_version.py"

@@ -257,14 +257,14 @@ fn ready_plan_markdown() -> &'static str {
 
 ## Files
 - crates/lash/src/plugin_builtin/plan_mode.rs
-- crates/lash-tui-extensions/src/lib.rs
+- host-ui/src/plan_panel.rs
 
 ## Risks
 - Status/panel sync could drift if toggle handling is incomplete.
 
 ## Verification
 - cargo test -p lash --lib
-- cargo test -p lash-tui-extensions
+- cargo test -p host-ui
 "#
 }
 

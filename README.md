@@ -95,19 +95,18 @@ See each example's README for environment knobs and Restate recipes.
 
 ## The CLI
 
-`lash-cli` is a first-party terminal frontend on top of the library — patch-based editing, shell execution, file/web search, planning, subagents, session resume, live token accounting. Not the product, but a fully featured way to drive the runtime and a useful end-to-end reference.
+[`lash-cli`](https://github.com/SamGalanakis/lash-cli) is the first-party terminal Host Application on top of the library — patch-based editing, shell execution, file/web search, planning, subagents, session resume, and live token accounting. It releases independently and is also a useful end-to-end embedding reference.
 
 ![lash TUI](screenshot.png)
 
 ```bash
-curl -fsSL https://github.com/SamGalanakis/lash/releases/latest/download/install_lash.sh | bash
-# or: cargo build -p lash-cli --release
+curl -fsSL https://github.com/SamGalanakis/lash-cli/releases/latest/download/install_lash.sh | bash
 
 lash                           # interactive TUI
 lash -p "summarize this repo"  # single-shot to stdout
 ```
 
-CLI reference: <https://lash.run/cli.html>.
+CLI source and releases: <https://github.com/SamGalanakis/lash-cli>. CLI reference: <https://lash.run/cli.html>.
 
 ## Contributing
 

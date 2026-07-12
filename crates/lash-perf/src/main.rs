@@ -1,7 +1,7 @@
 //! `lash-perf` — developer-only synthetic runtime benchmark binary.
 //!
 //! Driven by `scripts/profile_runtime.py` and
-//! `scripts/profile_runtime_stack.py` (via `scripts/profile_guard.py`).
+//! `scripts/profile_runtime_stack.py`.
 //! It runs provider-free runtime scenarios against in-process fixtures and
 //! writes a structured JSON report.
 
