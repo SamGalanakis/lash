@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -57,7 +57,7 @@ jobs:
           python3 scripts/perfreport.py .benchmarks/perf-guard/lashlang.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload performance guard artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: perf-guard-full
           path: .benchmarks/perf-guard/*

@@ -42,7 +42,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -64,7 +64,7 @@ jobs:
 
       - name: Upload confidence artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: confidence-artifacts
           path: target/confidence/**
@@ -81,7 +81,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload sim search artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: confidence-sim-search-${{ matrix.shard }}
           path: target/confidence/sim-search/**

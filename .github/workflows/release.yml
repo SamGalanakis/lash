@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Check out main with release history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
@@ -97,7 +97,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare-release.outputs.release_tag }}
 
@@ -119,12 +119,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare-release.outputs.release_tag }}
 
       - name: Check out release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare-release.outputs.release_sha }}
           path: .release-tools
@@ -174,7 +174,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare-release.outputs.release_tag }}
           # Full history + tags: release_notes.py walks previous-tag..tag to
@@ -191,7 +191,7 @@ jobs:
         run: python3 scripts/release_notes.py collect --end "${RELEASE_TAG}" --out "${{ runner.temp }}/RELEASE_NOTES.md"
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: ${{ runner.temp }}/RELEASE_NOTES.md

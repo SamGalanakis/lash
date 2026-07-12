@@ -124,7 +124,7 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Graph To UI Projection</h2>
-            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; UI and exports choose readable order. <code>lash-export</code> walks an entire session tree: <code>load_tree_from_paths</code> assembles a <code>LoadedSessionTree</code> from the SQLite store and trace JSONL, and <code>render_tree</code> emits a multi-view HTML.</p>
+            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; external hosts choose readable UI and export order. The first-party CLI projects the same read model into its timeline and its separately maintained session exporter.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Read projection path</div>
@@ -135,10 +135,10 @@ flowchart LR
   Graph --> ReadModel["internal SessionReadModel cache<br/>active_events, messages"]
   ReadModel --> View["SessionReadView"]
   View --> Chrono["ChronologicalProjection"]
-  Chrono --> Timeline["lash-cli UiTimeline"]
-  Chrono --> Export["lash-export HTML/JSON"]
+  Chrono --> Timeline["external lash-cli UiTimeline"]
+  Chrono --> Export["external lash-export HTML/JSON"]
   Chrono --> RlmHistory["RLM history projection"]
-  Timeline --> Render["render_block_into<br/>lash-tui Frame"]
+  Timeline --> Render["external lash-tui Frame"]
             </div>
           </div>
         </div>
@@ -159,7 +159,7 @@ flowchart TD
   Usage --> Deltas["usage deltas<br/>host reports"]
   Runtime --> Trace["provider JSONL trace<br/>LLM started/completed"]
   Runtime --> Store["session store<br/>SQLite or Postgres"]
-  Trace --> Export["lash-export prompt snapshots<br/>context %, cache-read %, token bars"]
+  Trace --> Export["external lash-export<br/>prompt and usage views"]
   Store --> Export
             </div>
           </div>

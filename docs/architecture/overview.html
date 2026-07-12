@@ -38,7 +38,6 @@ flowchart TD
   subgraph Host["Host applications"]
     CLI["external lash-cli<br/>TUI, setup, resume/fork, --print"]
     Facade["lash (facade)<br/>app-facing core/session/turn API"]
-    Export["lash-export<br/>multi-session tree &rarr; HTML / JSON"]
     TraceViewer["lash-trace-viewer<br/>JSONL trace browser"]
   end
 
@@ -71,9 +70,7 @@ flowchart TD
   end
 
   CLI --> Facade
-  CLI --> L
   Facade --> L
-  Export --> Read
   TraceViewer --> Trace
   L --> Env
   L --> S
@@ -102,9 +99,9 @@ flowchart TD
             <p>These figures are workspace-level and exclude generated build output.</p>
           </div>
           <div class="stats">
-            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">45</span><span class="stat-note">Runtime core, facade, CLI/TUI, providers, plugins (including MCP), language/runtime integration, export, tracing, file-index, harness optimizer, the deterministic-simulation harness, examples, and the distributed E2E harness.</span></article>
-            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~361k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
-            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">789</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, examples, and trace/export utilities.</span></article>
+            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">37</span><span class="stat-note">Runtime core, facade, providers, protocol and tool plugins, language/runtime integration, tracing, stores, simulation, examples, and distributed E2E.</span></article>
+            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~335k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
+            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">672</span><span class="stat-note">Includes SDK crates, tests, examples, simulation, trace-viewer, and distributed-service utilities.</span></article>
             <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang and can switch to a fresh AgentFrame via <code>continue_as</code>.</span></article>
           </div>
         </div>

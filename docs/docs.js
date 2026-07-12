@@ -267,7 +267,7 @@
     {
       label: "Internals",
       tier: "internals",
-      summary: "Understand why the runtime is split into facade, core, protocol, language, provider, store, and export crates.",
+      summary: "Understand why the SDK is split into facade, core, protocol, language, provider, store, trace, and tooling crates.",
       href: "architecture/index.html",
       items: [
         {
@@ -341,7 +341,7 @@
     {
       label: "lash CLI",
       tier: "cli",
-      summary: "The reference terminal application built on the runtime. Use it to try lash without writing code and as a worked embedding example — it is not required to build on lash.",
+      summary: "The independently released first-party terminal Host Application. Its own repository owns product documentation and releases.",
       href: "cli.html",
       items: [
         {
