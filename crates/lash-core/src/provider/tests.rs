@@ -19,6 +19,41 @@ struct FailingProvider {
     retryable: bool,
 }
 
+#[derive(Clone, Debug)]
+struct TerminalProvider {
+    reason: LlmTerminalReason,
+    text: &'static str,
+}
+
+#[async_trait::async_trait]
+impl Provider for TerminalProvider {
+    fn kind(&self) -> &'static str {
+        "terminal"
+    }
+
+    fn options(&self) -> ProviderOptions {
+        ProviderOptions::default()
+    }
+
+    fn set_options(&mut self, _options: ProviderOptions) {}
+
+    fn serialize_config(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        Ok(LlmResponse {
+            full_text: self.text.to_string(),
+            terminal_reason: self.reason,
+            ..LlmResponse::default()
+        })
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
+    }
+}
+
 impl FailingProvider {
     fn into_components(self) -> ProviderComponents {
         ProviderComponents::new(Box::new(self))
@@ -398,12 +433,59 @@ fn generation_policy_prefers_request_then_provider_then_default() {
 async fn transport_mutations_are_visible_after_completion_returns() {
     let mut handle = ProviderHandle::new(MutatingProvider::default().into_components());
 
-    handle.complete(empty_request()).await.expect("complete");
+    let completion = handle.complete(empty_request()).await.expect("complete");
 
     assert_eq!(
         handle.to_spec().config["marker"],
         serde_json::json!("complete")
     );
+    assert_eq!(completion.call_record.attempts.len(), 1);
+    assert_eq!(
+        completion.call_record.attempts[0].outcome,
+        AttemptOutcome::Completed
+    );
+    assert_eq!(
+        completion.call_record.attempts[0].protocol_position,
+        ProtocolPosition::TerminalObserved
+    );
+}
+
+#[tokio::test]
+async fn provider_handle_records_aborted_and_interrupted_outcomes() {
+    for (reason, text, expected_outcome, expected_position) in [
+        (
+            LlmTerminalReason::Cancelled,
+            "partial",
+            AttemptOutcome::Aborted,
+            ProtocolPosition::OutputStarted,
+        ),
+        (
+            LlmTerminalReason::Unknown,
+            "",
+            AttemptOutcome::Interrupted,
+            ProtocolPosition::ResponseObserved,
+        ),
+    ] {
+        let mut handle = ProviderHandle::new(ProviderComponents::new(Box::new(TerminalProvider {
+            reason,
+            text,
+        })));
+        let completion = handle.complete(empty_request()).await.expect("completion");
+        assert_eq!(completion.call_record.attempts[0].outcome, expected_outcome);
+        assert_eq!(
+            completion.call_record.attempts[0].protocol_position,
+            expected_position
+        );
+    }
+}
+
+#[test]
+fn attempt_diagnostics_are_redacted_and_bounded() {
+    let message = format!("Bearer sk-secret api_key=also-secret {}", "x".repeat(2_000));
+    let diagnostic = bounded_redacted_diagnostic(&message).expect("diagnostic");
+    assert!(!diagnostic.contains("sk-secret"));
+    assert!(!diagnostic.contains("also-secret"));
+    assert!(diagnostic.chars().count() <= MAX_ATTEMPT_DIAGNOSTIC_CHARS);
 }
 
 #[tokio::test]
@@ -437,12 +519,34 @@ async fn provider_handle_retries_retryable_failures_in_shared_executor() {
     };
     let mut handle = ProviderHandle::new(provider.into_components());
 
-    handle
+    let completion = handle
         .complete(empty_request())
         .await
         .expect("eventual success");
 
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(completion.call_record.attempts.len(), 3);
+    assert_eq!(
+        completion
+            .call_record
+            .attempts
+            .iter()
+            .map(|attempt| attempt.outcome)
+            .collect::<Vec<_>>(),
+        vec![
+            AttemptOutcome::Failed,
+            AttemptOutcome::Failed,
+            AttemptOutcome::Completed,
+        ]
+    );
+    assert!(
+        completion
+            .call_record
+            .attempts
+            .iter()
+            .all(|attempt| attempt.retry_budget_consumed)
+    );
+    assert_eq!(completion.call_record.attempts[2].evidence, None);
 }
 
 #[tokio::test]
@@ -522,7 +626,7 @@ async fn provider_handle_throttle_with_retry_after_does_not_consume_attempts() {
     let mut handle =
         ProviderHandle::new(provider.into_components()).with_clock(Arc::clone(&clock) as _);
 
-    handle
+    let completion = handle
         .complete(empty_request())
         .await
         .expect("success after deferred throttle waits");
@@ -530,6 +634,13 @@ async fn provider_handle_throttle_with_retry_after_does_not_consume_attempts() {
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
     // Each deference honored the provider-stated 5s Retry-After.
     assert_eq!(clock.slept(), Duration::from_secs(15));
+    assert_eq!(completion.call_record.attempts.len(), 4);
+    assert!(
+        completion.call_record.attempts[..3]
+            .iter()
+            .all(|attempt| !attempt.retry_budget_consumed)
+    );
+    assert!(completion.call_record.attempts[3].retry_budget_consumed);
 }
 
 #[tokio::test]

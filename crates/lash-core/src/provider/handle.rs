@@ -61,6 +61,47 @@ pub struct ProviderHandle {
     components: ProviderComponents,
 }
 
+/// Successful provider-handle outcome with the sealed attempt history that
+/// produced it. The inner provider response remains available through
+/// `Deref` for source-compatible field access.
+#[derive(Debug)]
+pub struct ProviderCompletion {
+    pub response: LlmResponse,
+    pub call_record: LlmCallRecord,
+}
+
+impl std::ops::Deref for ProviderCompletion {
+    type Target = LlmResponse;
+
+    fn deref(&self) -> &Self::Target {
+        &self.response
+    }
+}
+
+impl ProviderCompletion {
+    pub fn into_response(self) -> LlmResponse {
+        self.response
+    }
+}
+
+/// Failed provider-handle outcome. The transport error is preserved intact,
+/// and `call_record` makes all sealed attempts observable at this seam.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct ProviderCompletionError {
+    #[source]
+    pub error: LlmTransportError,
+    pub call_record: LlmCallRecord,
+}
+
+impl std::ops::Deref for ProviderCompletionError {
+    type Target = LlmTransportError;
+
+    fn deref(&self) -> &Self::Target {
+        &self.error
+    }
+}
+
 impl ProviderHandle {
     pub fn new(components: ProviderComponents) -> Self {
         Self { components }
@@ -105,19 +146,56 @@ impl ProviderHandle {
     pub async fn complete(
         &mut self,
         request: LlmRequest,
-    ) -> Result<LlmResponse, LlmTransportError> {
+    ) -> Result<ProviderCompletion, ProviderCompletionError> {
         let reliability = self.options().reliability;
         let attempts = reliability.retry.attempts();
+        let observe_execution = matches!(self.kind(), "openai" | "openai-compatible");
         let mut attempt = 0;
+        let call_id = LlmCallId(uuid::Uuid::new_v4().to_string());
+        let mut records = Vec::new();
         // Cumulative time already spent deferring to provider throttles
         // without consuming attempts, bounded by the policy's budget.
         let throttle_budget = Duration::from_millis(reliability.retry.throttle_wait_budget_ms);
         let mut throttle_waited = Duration::ZERO;
         loop {
             let _permit = self.components.rate_limiter.admit(&request).await;
+            let clock = self.components.rate_limiter.clock();
+            let started_at = clock.timestamp_ms();
+            let started = clock.now();
             let result = self.components.provider.complete(request.clone()).await;
             match result {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    let outcome = success_outcome(response.terminal_reason);
+                    records.push(AttemptRecord {
+                        ordinal: records.len() as u32 + 1,
+                        started_at,
+                        duration: clock.now().saturating_duration_since(started),
+                        outcome,
+                        protocol_position: success_protocol_position(&response, outcome),
+                        retry_budget_consumed: true,
+                        retry_decision: None,
+                        error: None,
+                        evidence: observe_execution
+                            .then(|| response.execution_evidence.clone())
+                            .flatten(),
+                        usage: observe_execution
+                            .then(|| {
+                                response
+                                    .provider_usage
+                                    .as_ref()
+                                    .map(|_| response.usage.clone())
+                            })
+                            .flatten(),
+                    });
+                    return Ok(ProviderCompletion {
+                        response,
+                        call_record: LlmCallRecord {
+                            call_id,
+                            label: None,
+                            attempts: records,
+                        },
+                    });
+                }
                 Err(failure) => {
                     let failure = self.components.failure_classifier.classify(failure);
                     // Throttle deference: when the provider signals a throttle
@@ -141,6 +219,19 @@ impl ProviderHandle {
                         // overflow the budget check, not panic the ladder.
                         if throttle_waited.saturating_add(charge) <= throttle_budget {
                             throttle_waited += charge;
+                            records.push(failure_attempt_record(
+                                records.len() as u32 + 1,
+                                started_at,
+                                clock.now().saturating_duration_since(started),
+                                &failure,
+                                observe_execution,
+                                false,
+                                Some(RetryDecision {
+                                    scheduled: true,
+                                    delay: Some(wait),
+                                    reason: Some("provider_retry_after".to_string()),
+                                }),
+                            ));
                             tracing::debug!(
                                 target: "lash_core::provider::reliability",
                                 provider = self.kind(),
@@ -164,11 +255,49 @@ impl ProviderHandle {
                         }
                     }
                     if attempt + 1 >= attempts || !failure.retryable {
-                        return Err(failure);
+                        let reason = if !failure.retryable {
+                            "not_retryable"
+                        } else {
+                            "retry_budget_exhausted"
+                        };
+                        records.push(failure_attempt_record(
+                            records.len() as u32 + 1,
+                            started_at,
+                            clock.now().saturating_duration_since(started),
+                            &failure,
+                            observe_execution,
+                            true,
+                            Some(RetryDecision {
+                                scheduled: false,
+                                delay: None,
+                                reason: Some(reason.to_string()),
+                            }),
+                        ));
+                        return Err(ProviderCompletionError {
+                            error: failure,
+                            call_record: LlmCallRecord {
+                                call_id,
+                                label: None,
+                                attempts: records,
+                            },
+                        });
                     }
                     let delay = reliability
                         .retry
                         .delay_for_attempt(attempt, failure.retry_after);
+                    records.push(failure_attempt_record(
+                        records.len() as u32 + 1,
+                        started_at,
+                        clock.now().saturating_duration_since(started),
+                        &failure,
+                        observe_execution,
+                        true,
+                        Some(RetryDecision {
+                            scheduled: true,
+                            delay: Some(delay),
+                            reason: Some("retryable_failure".to_string()),
+                        }),
+                    ));
                     tracing::debug!(
                         target: "lash_core::provider::reliability",
                         provider = self.kind(),
@@ -222,6 +351,109 @@ impl ProviderHandle {
         }
         Ok(())
     }
+}
+
+fn success_outcome(reason: LlmTerminalReason) -> AttemptOutcome {
+    match reason {
+        LlmTerminalReason::Cancelled => AttemptOutcome::Aborted,
+        LlmTerminalReason::Unknown => AttemptOutcome::Interrupted,
+        _ => AttemptOutcome::Completed,
+    }
+}
+
+fn success_protocol_position(response: &LlmResponse, outcome: AttemptOutcome) -> ProtocolPosition {
+    if outcome == AttemptOutcome::Completed {
+        ProtocolPosition::TerminalObserved
+    } else if !response.full_text.is_empty() || !response.parts.is_empty() {
+        ProtocolPosition::OutputStarted
+    } else {
+        ProtocolPosition::ResponseObserved
+    }
+}
+
+fn failure_attempt_record(
+    ordinal: u32,
+    started_at: u64,
+    duration: Duration,
+    failure: &LlmTransportError,
+    observe_execution: bool,
+    retry_budget_consumed: bool,
+    retry_decision: Option<RetryDecision>,
+) -> AttemptRecord {
+    let provider_request_id = observe_execution
+        .then(|| header_value(&failure.headers, "x-request-id"))
+        .flatten();
+    let evidence = provider_request_id
+        .clone()
+        .map(|provider_request_id| ExecutionEvidence {
+            provider_request_id: Some(provider_request_id),
+            ..ExecutionEvidence::default()
+        });
+    AttemptRecord {
+        ordinal,
+        started_at,
+        duration,
+        outcome: match (failure.terminal_reason, failure.kind) {
+            (LlmTerminalReason::Cancelled, _) => AttemptOutcome::Aborted,
+            (_, ProviderFailureKind::Timeout | ProviderFailureKind::Stream) => {
+                AttemptOutcome::Interrupted
+            }
+            _ => AttemptOutcome::Failed,
+        },
+        protocol_position: match failure.kind {
+            ProviderFailureKind::Stream => ProtocolPosition::OutputStarted,
+            _ if failure.status.is_some() => ProtocolPosition::ResponseObserved,
+            _ => ProtocolPosition::NoResponse,
+        },
+        retry_budget_consumed,
+        retry_decision,
+        error: Some(NormalizedError {
+            class: failure.kind.code().to_string(),
+            provider_code: failure.code.clone(),
+            http_status: failure.status,
+            provider_request_id,
+            retry_after: failure.retry_after,
+            diagnostic: bounded_redacted_diagnostic(&failure.message),
+        }),
+        evidence,
+        usage: None,
+    }
+}
+
+fn header_value(headers: &[(String, String)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+}
+
+pub(super) const MAX_ATTEMPT_DIAGNOSTIC_CHARS: usize = 1_024;
+
+pub(super) fn bounded_redacted_diagnostic(message: &str) -> Option<String> {
+    let mut redacted = Vec::new();
+    let mut redact_next = false;
+    for word in message.split_whitespace() {
+        let lower = word.to_ascii_lowercase();
+        if redact_next
+            || lower.starts_with("sk-")
+            || lower.contains("api_key=")
+            || lower.contains("api-key=")
+            || lower.contains("authorization:")
+        {
+            redacted.push("[REDACTED]");
+            redact_next = false;
+        } else {
+            redacted.push(word);
+            redact_next =
+                lower == "bearer" || lower.ends_with("api_key=") || lower.ends_with("api-key=");
+        }
+    }
+    let diagnostic: String = redacted
+        .join(" ")
+        .chars()
+        .take(MAX_ATTEMPT_DIAGNOSTIC_CHARS)
+        .collect();
+    (!diagnostic.is_empty()).then_some(diagnostic)
 }
 
 impl std::fmt::Debug for ProviderHandle {

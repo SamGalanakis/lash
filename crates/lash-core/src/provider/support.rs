@@ -6,7 +6,10 @@ pub(super) use serde::de::{self, Visitor};
 pub(super) use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub(super) use crate::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
-pub(super) use crate::llm::types::{LlmContentBlock, LlmRequest, LlmResponse};
+pub(super) use crate::llm::types::{
+    AttemptOutcome, AttemptRecord, ExecutionEvidence, LlmCallId, LlmCallRecord, LlmContentBlock,
+    LlmRequest, LlmResponse, LlmTerminalReason, NormalizedError, ProtocolPosition, RetryDecision,
+};
 
 pub(super) use super::handle::*;
 pub(super) use super::options::*;

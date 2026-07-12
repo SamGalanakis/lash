@@ -514,10 +514,93 @@ pub struct ExecutionEvidence {
     pub served_model: Option<String>,
     #[serde(default)]
     pub provider_response_id: Option<String>,
+    /// Transport request identifier reported by the provider (for example,
+    /// OpenRouter's `x-request-id`). This is distinct from the response's
+    /// protocol-level identifier and may be present on failed attempts.
+    #[serde(default)]
+    pub provider_request_id: Option<String>,
     #[serde(default)]
     pub reasoning_output_tokens: Option<u64>,
     #[serde(default)]
     pub provider_finish_reason: Option<String>,
+}
+
+/// Lash-owned identity for one logical LLM call, spanning all transport
+/// attempts made by the retry owner.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct LlmCallId(pub String);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptOutcome {
+    Completed,
+    Failed,
+    Aborted,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolPosition {
+    NoResponse,
+    ResponseObserved,
+    OutputStarted,
+    TerminalObserved,
+}
+
+/// A journal-safe projection of a provider/transport failure.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NormalizedError {
+    pub class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<std::time::Duration>,
+    /// Redacted, size-bounded diagnostic excerpt; never a raw response body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetryDecision {
+    pub scheduled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay: Option<std::time::Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttemptRecord {
+    pub ordinal: u32,
+    /// Wall-clock epoch milliseconds read from the injected runtime clock.
+    pub started_at: u64,
+    pub duration: std::time::Duration,
+    pub outcome: AttemptOutcome,
+    pub protocol_position: ProtocolPosition,
+    pub retry_budget_consumed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_decision: Option<RetryDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<NormalizedError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ExecutionEvidence>,
+    /// Provider-reported usage only. Absence is not zero usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LlmUsage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LlmCallRecord {
+    pub call_id: LlmCallId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub attempts: Vec<AttemptRecord>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -538,4 +621,56 @@ pub struct LlmResponse {
 pub struct ModelSelection {
     pub model: &'static str,
     pub variant: Option<&'static str>,
+}
+
+#[cfg(test)]
+mod attempt_record_tests {
+    use super::*;
+
+    #[test]
+    fn attempt_contract_round_trips_closed_outcomes_and_preserves_optional_zero() {
+        for (outcome, position) in [
+            (
+                AttemptOutcome::Completed,
+                ProtocolPosition::TerminalObserved,
+            ),
+            (AttemptOutcome::Failed, ProtocolPosition::ResponseObserved),
+            (AttemptOutcome::Aborted, ProtocolPosition::OutputStarted),
+            (AttemptOutcome::Interrupted, ProtocolPosition::NoResponse),
+        ] {
+            let record = LlmCallRecord {
+                call_id: LlmCallId("call-1".to_string()),
+                label: Some("test".to_string()),
+                attempts: vec![AttemptRecord {
+                    ordinal: 1,
+                    started_at: 42,
+                    duration: std::time::Duration::from_millis(7),
+                    outcome,
+                    protocol_position: position,
+                    retry_budget_consumed: true,
+                    retry_decision: None,
+                    error: None,
+                    evidence: Some(ExecutionEvidence {
+                        reasoning_output_tokens: Some(0),
+                        ..ExecutionEvidence::default()
+                    }),
+                    usage: None,
+                }],
+            };
+            let decoded: LlmCallRecord =
+                serde_json::from_value(serde_json::to_value(&record).unwrap()).unwrap();
+            assert_eq!(decoded, record);
+            assert_eq!(
+                decoded.attempts[0]
+                    .evidence
+                    .as_ref()
+                    .unwrap()
+                    .reasoning_output_tokens,
+                Some(0)
+            );
+        }
+
+        let absent = ExecutionEvidence::default();
+        assert_eq!(absent.reasoning_output_tokens, None);
+    }
 }

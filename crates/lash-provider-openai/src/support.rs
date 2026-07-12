@@ -28,8 +28,8 @@ pub(crate) use lash_llm_transport::util::{
     OPENAI_IMAGE_MIMES, emit_provider_trace, extract_error_detail,
 };
 pub(crate) use lash_llm_transport::{
-    LlmHttpBody, LlmHttpMethod, LlmHttpRequest, LlmHttpTransport, header_contains,
-    http_error_envelope, read_http_body_text,
+    LlmHttpBody, LlmHttpMethod, LlmHttpRequest, LlmHttpTransport, first_header_value,
+    header_contains, http_error_envelope, read_http_body_text,
 };
 
 pub(crate) use crate::chat::*;

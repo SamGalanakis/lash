@@ -513,6 +513,7 @@ mod tests {
             execution_evidence: Some(lash_core::ExecutionEvidence {
                 served_model: Some("provider/model".to_string()),
                 provider_response_id: Some("response-1".to_string()),
+                provider_request_id: None,
                 reasoning_output_tokens: Some(0),
                 provider_finish_reason: Some("stop".to_string()),
             }),

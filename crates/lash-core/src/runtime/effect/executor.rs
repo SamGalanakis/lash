@@ -1144,7 +1144,8 @@ impl LocalDirectEffectRunner {
         self.provider
             .complete(request)
             .await
-            .map_err(llm_call_error_from_transport)
+            .map(|completion| completion.into_response())
+            .map_err(|failure| llm_call_error_from_transport(failure.error))
     }
 }
 

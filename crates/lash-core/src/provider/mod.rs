@@ -22,7 +22,10 @@ mod tests;
 mod traits;
 
 pub use factory::ProviderFactory;
-pub use handle::{ProviderComponents, ProviderHandle, UnconfiguredProvider};
+pub use handle::{
+    ProviderCompletion, ProviderCompletionError, ProviderComponents, ProviderHandle,
+    UnconfiguredProvider,
+};
 pub use lash_sansio::llm::capability::{
     ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError,
     ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection,

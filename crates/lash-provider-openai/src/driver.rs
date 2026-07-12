@@ -156,9 +156,10 @@ pub(crate) async fn complete(
         ));
     }
 
+    let provider_request_id = first_header_value(&resp.headers, "x-request-id").map(str::to_string);
     let is_sse = header_contains(&resp.headers, "content-type", "text/event-stream");
 
-    if is_sse {
+    let response = if is_sse {
         drive_streaming_response(
             provider,
             endpoint,
@@ -180,7 +181,30 @@ pub(crate) async fn complete(
             timeouts.request_timeout,
         )
         .await
+    };
+    let mut response = match response {
+        Ok(response) => response,
+        Err(mut failure) => {
+            if let Some(provider_request_id) = provider_request_id
+                && !failure
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("x-request-id"))
+            {
+                failure
+                    .headers
+                    .push(("x-request-id".to_string(), provider_request_id));
+            }
+            return Err(failure);
+        }
+    };
+    if let Some(provider_request_id) = provider_request_id {
+        response
+            .execution_evidence
+            .get_or_insert_with(ExecutionEvidence::default)
+            .provider_request_id = Some(provider_request_id);
     }
+    Ok(response)
 }
 
 async fn complete_buffered_response(

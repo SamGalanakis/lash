@@ -639,6 +639,7 @@ impl ChatStreamState {
         let evidence = ExecutionEvidence {
             served_model: self.served_model.clone(),
             provider_response_id: self.provider_response_id.clone(),
+            provider_request_id: None,
             reasoning_output_tokens: self.reasoning_output_tokens,
             provider_finish_reason: self.provider_finish_reason.clone(),
         };
