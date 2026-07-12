@@ -108,7 +108,10 @@ pub async fn refresh_tokens(refresh: &str) -> Result<OAuthTokens, OAuthError> {
             .as_str()
             .or(body["error"].as_str())
             .unwrap_or("token refresh failed");
-        return Err(OAuthError::TokenExchange(err.to_string()));
+        return Err(OAuthError::TokenEndpoint {
+            status: status.as_u16(),
+            message: err.to_string(),
+        });
     }
 
     let now = now_secs();

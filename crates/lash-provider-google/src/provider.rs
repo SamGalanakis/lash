@@ -3,6 +3,7 @@
 //! request/stream executor, and project-id resolution.
 
 use crate::support::*;
+use std::sync::Arc;
 
 impl GoogleOAuthProvider {
     fn should_retry_inline(err: &LlmTransportError) -> bool {
@@ -272,18 +273,19 @@ impl Provider for GoogleOAuthProvider {
     }
 
     fn serialize_config(&self) -> serde_json::Value {
+        let credential = self.credentials.snapshot();
         let mut map = serde_json::Map::new();
         map.insert(
             "access_token".to_string(),
-            serde_json::Value::String(self.access_token.clone()),
+            serde_json::Value::String(credential.access_token),
         );
         map.insert(
             "refresh_token".to_string(),
-            serde_json::Value::String(self.refresh_token.clone()),
+            serde_json::Value::String(credential.refresh_token),
         );
         map.insert(
             "expires_at".to_string(),
-            serde_json::Value::Number(self.expires_at.into()),
+            serde_json::Value::Number(credential.expires_at.into()),
         );
         if let Some(project_id) = &self.project_id {
             map.insert(
@@ -296,6 +298,33 @@ impl Provider for GoogleOAuthProvider {
     }
 
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        if self.attempt_credential.is_none() {
+            let manager = Arc::clone(&self.credentials);
+            let provider = self.clone();
+            let (response, project_id) = manager
+                .execute(move |lease| {
+                    let mut provider = provider.clone();
+                    let req = req.clone();
+                    provider.attempt_credential = Some(lease);
+                    async move {
+                        let result = Box::pin(provider.complete(req)).await;
+                        match result {
+                            Ok(response) => Ok((response, provider.project_id.clone())),
+                            Err(error) if error.status == Some(401) => {
+                                Err(CredentialCallError::PreOutputAuth(error))
+                            }
+                            Err(error) => Err(CredentialCallError::Failed(error)),
+                        }
+                    }
+                })
+                .await
+                .map_err(|error| match error {
+                    CredentialExecuteError::Credential(error) => credential_transport_error(error),
+                    CredentialExecuteError::Call(error) => error,
+                })?;
+            self.project_id = project_id;
+            return Ok(response);
+        }
         validate_image_attachments(
             &req,
             &[
@@ -309,7 +338,11 @@ impl Provider for GoogleOAuthProvider {
         )?;
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
-        let access_token = self.access_token.clone();
+        let credential = self
+            .attempt_credential
+            .take()
+            .expect("credential attempt is configured");
+        let access_token = credential.value.access_token;
         if self.project_id.is_none() {
             let hint = std::env::var("GOOGLE_CLOUD_PROJECT")
                 .ok()
@@ -330,7 +363,7 @@ impl Provider for GoogleOAuthProvider {
 
         let (attachment_parts, used_uploaded_files) = self
             .prepare_attachment_parts(&access_token, project_id.as_deref(), &req.attachments)
-            .await;
+            .await?;
         let contents = if used_uploaded_files {
             Self::build_contents_with_attachment_parts(&req, &attachment_parts)
         } else {
