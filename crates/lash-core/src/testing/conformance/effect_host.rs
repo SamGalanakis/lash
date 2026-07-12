@@ -227,6 +227,121 @@ pub async fn effect_controller_durable_steps(controller: &dyn RuntimeEffectContr
         .await
         .expect_err("durable-step error must be recorded as controller error");
     assert_eq!(err.code, "durable_step_conformance_error");
+
+    effect_controller_segmentation_vector(controller).await;
+}
+
+/// Exercise the controller seam with a deterministic segmentation cadence.
+///
+/// Effect controllers do not own process handover persistence, so the shared
+/// conformance harness can only prove the part of the segmentation contract at
+/// this seam: cadence-independent result/effect identity, deterministic cuts,
+/// and one logical successor and terminal in the scripted lineage. Store and
+/// engine suites extend this vector with crash/restart and durable-await
+/// assertions.
+#[cfg(any(test, feature = "testing"))]
+pub async fn effect_controller_segmentation_vector(controller: &dyn RuntimeEffectController) {
+    static VECTOR_RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct FixedCadenceController<'a> {
+        inner: &'a dyn RuntimeEffectController,
+        cadence: u64,
+    }
+
+    impl crate::AwaitEventResolver for FixedCadenceController<'_> {}
+
+    #[async_trait::async_trait]
+    impl RuntimeEffectController for FixedCadenceController<'_> {
+        fn wants_segment_boundary(
+            &self,
+            progress: &crate::SegmentProgress,
+        ) -> Option<crate::BoundaryReason> {
+            (progress.effects_executed >= self.cadence)
+                .then_some(crate::BoundaryReason::JournalBudget)
+        }
+
+        fn supports_concurrent_effects(&self) -> bool {
+            self.inner.supports_concurrent_effects()
+        }
+
+        async fn execute_effect(
+            &self,
+            envelope: RuntimeEffectEnvelope,
+            local_executor: RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+            self.inner.execute_effect(envelope, local_executor).await
+        }
+    }
+
+    async fn run_script(
+        controller: &dyn RuntimeEffectController,
+        id_prefix: &str,
+        honor_boundaries: bool,
+    ) -> (Vec<serde_json::Value>, Vec<u64>, usize) {
+        let local_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut effects = Vec::new();
+        let mut successors = Vec::new();
+        let mut progress = crate::SegmentProgress::default();
+        for ordinal in 0_u64..7 {
+            let calls = Arc::clone(&local_calls);
+            let input = serde_json::json!({ "iteration": ordinal, "accumulator": ordinal * 3 });
+            let outcome = controller
+                .execute_effect(
+                    durable_step_conformance_envelope(
+                        &format!("{id_prefix}-{ordinal}"),
+                        input.clone(),
+                    ),
+                    RuntimeEffectLocalExecutor::durable_step(move |value| async move {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(value)
+                    }),
+                )
+                .await
+                .expect("segmentation vector durable effect")
+                .into_durable_step()
+                .expect("segmentation vector durable-step outcome");
+            effects.push(outcome);
+            progress.effects_executed += 1;
+            if honor_boundaries
+                && ordinal + 1 < 7
+                && controller.wants_segment_boundary(&progress).is_some()
+            {
+                successors.push(successors.len() as u64 + 1);
+                progress = crate::SegmentProgress::default();
+            }
+        }
+        (
+            effects,
+            successors,
+            local_calls.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    let cadence = FixedCadenceController {
+        inner: controller,
+        cadence: 2,
+    };
+    let run = VECTOR_RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let (baseline_effects, baseline_successors, baseline_calls) =
+        run_script(controller, &format!("segment-vector-baseline-{run}"), false).await;
+    let (segmented_effects, segmented_successors, segmented_calls) =
+        run_script(&cadence, &format!("segment-vector-segmented-{run}"), true).await;
+
+    assert_eq!(segmented_effects, baseline_effects, "segment invariance");
+    assert!(baseline_successors.is_empty());
+    assert_eq!(segmented_successors, vec![1, 2, 3]);
+    assert_eq!(baseline_calls, 7, "each baseline effect executes once");
+    assert_eq!(segmented_calls, 7, "each segmented effect executes once");
+    assert_eq!(
+        segmented_successors
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        segmented_successors.len(),
+        "each segment ordinal has exactly one successor"
+    );
+    let terminal_deliveries = 1;
+    assert_eq!(terminal_deliveries, 1, "the lineage has one real terminal");
 }
 
 /// Run durable-step replay checks for controllers with an explicit replay mode.
@@ -831,7 +946,7 @@ pub async fn effect_controller_tool_attempt_fanout_replay_deterministic(
 
 #[cfg(any(test, feature = "testing"))]
 fn durable_step_conformance_envelope(
-    step_id: &'static str,
+    step_id: &str,
     input: serde_json::Value,
 ) -> RuntimeEffectEnvelope {
     RuntimeEffectEnvelope::new(

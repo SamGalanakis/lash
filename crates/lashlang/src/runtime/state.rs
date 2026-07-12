@@ -77,7 +77,7 @@ impl<'de> Deserialize<'de> for Snapshot {
     }
 }
 
-fn snapshot_record_from_json(map: serde_json::Map<String, serde_json::Value>) -> Record {
+pub(crate) fn snapshot_record_from_json(map: serde_json::Map<String, serde_json::Value>) -> Record {
     let mut record = record_with_capacity(map.len());
     for (key, value) in map {
         record.insert(key, snapshot_value_from_json(value));
@@ -85,7 +85,7 @@ fn snapshot_record_from_json(map: serde_json::Map<String, serde_json::Value>) ->
     record
 }
 
-fn snapshot_value_from_json(value: serde_json::Value) -> Value {
+pub(crate) fn snapshot_value_from_json(value: serde_json::Value) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(value) => Value::Bool(value),

@@ -892,6 +892,7 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
                     &RestateProcessWorkflowInput {
                         registration,
                         execution_context,
+                        segment_ordinal: 0,
                     },
                 )
                 .await?;
@@ -2588,12 +2589,14 @@ struct RecordingRunner {
 
 #[async_trait::async_trait]
 impl RestateProcessRunner for RecordingRunner {
-    async fn run_process(
+    async fn run_process_segment(
         &self,
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
         scoped_effect_controller: lash_core::ScopedEffectController<'_>,
-    ) -> Result<ProcessAwaitOutput, PluginError> {
+        _handover: Option<lash_core::SegmentHandover>,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<lash_core::ProcessRunOutcome, PluginError> {
         self.ran
             .lock()
             .expect("runner ran lock")
@@ -2612,7 +2615,8 @@ impl RestateProcessRunner for RecordingRunner {
         Ok(ProcessAwaitOutput::Success {
             value: serde_json::json!({"ok": true}),
             control: None,
-        })
+        }
+        .into())
     }
 
     async fn request_process_cancel(
@@ -2625,6 +2629,614 @@ impl RestateProcessRunner for RecordingRunner {
             .push(request);
         Ok(())
     }
+}
+
+struct SegmentedRecordingRunner {
+    outcomes: Mutex<VecDeque<lash_core::ProcessRunOutcome>>,
+    handovers: Mutex<Vec<Option<lash_core::SegmentHandover>>>,
+    runs: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl RestateProcessRunner for SegmentedRecordingRunner {
+    async fn run_process_segment(
+        &self,
+        _registration: ProcessRegistration,
+        _execution_context: ProcessExecutionContext,
+        _scoped_effect_controller: lash_core::ScopedEffectController<'_>,
+        handover: Option<lash_core::SegmentHandover>,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<lash_core::ProcessRunOutcome, PluginError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        self.handovers
+            .lock()
+            .expect("segment handovers lock")
+            .push(handover);
+        self.outcomes
+            .lock()
+            .expect("segment outcomes lock")
+            .pop_front()
+            .ok_or_else(|| PluginError::Session("unexpected duplicate segment run".to_string()))
+    }
+
+    async fn request_process_cancel(
+        &self,
+        _request: RestateProcessCancelRequest,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+fn inline_process_scope(process_id: &str) -> lash_core::ScopedEffectController<'static> {
+    lash_core::ScopedEffectController::shared(
+        Arc::new(lash_core::InlineRuntimeEffectController),
+        lash_core::ExecutionScope::process(process_id.to_string()),
+    )
+    .expect("inline process scope")
+}
+
+#[tokio::test]
+async fn durable_segment_handover_resumes_once_and_terminalizes_once() {
+    let continuation = lash_core::SegmentHandover {
+        reason: lash_core::BoundaryReason::JournalBudget,
+        program_hash: Some("program-v1".to_string()),
+        engine_state: vec![1, 2, 3],
+    };
+    let terminal = ProcessAwaitOutput::Success {
+        value: serde_json::json!({"result": 42}),
+        control: None,
+    };
+    let runner = Arc::new(SegmentedRecordingRunner {
+        outcomes: Mutex::new(VecDeque::from([
+            lash_core::ProcessRunOutcome::SegmentBoundary(continuation.clone()),
+            terminal.clone().into(),
+        ])),
+        handovers: Mutex::new(Vec::new()),
+        runs: AtomicUsize::new(0),
+    });
+    let registry = process_registry();
+    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let registration = rerunnable_registration("segmented-durable");
+    let _record = registry
+        .register_process(registration.clone())
+        .await
+        .expect("register segmented process");
+    let first_context = Arc::new(ReplayableRecordingContext::default());
+    let first_controller = RestateRuntimeEffectController::new(first_context.clone());
+
+    let first = workflow
+        .run_registration(
+            registration.clone(),
+            ProcessExecutionContext::default(),
+            first_controller
+                .scoped_effect_controller(ExecutionScope::process("segmented-durable"))
+                .expect("durable first-segment scope"),
+            0,
+            None,
+        )
+        .await
+        .expect("run first segment");
+    let lash_core::ProcessRunOutcome::SegmentBoundary(first_handover) = first else {
+        panic!("first incarnation must end at a segment boundary");
+    };
+    let persisted = lash_core::PersistedSegmentHandover {
+        segment_ordinal: 1,
+        program_hash: "program-v1".to_string(),
+        handover: first_handover,
+    };
+    registry
+        .put_segment_handover("segmented-durable", persisted.clone())
+        .await
+        .expect("persist before successor schedule");
+    registry
+        .put_segment_handover("segmented-durable", persisted.clone())
+        .await
+        .expect("crash recovery repeats the persist idempotently");
+    assert_eq!(
+        process_segment_workflow_key("segmented-durable", 1),
+        "segmented-durable#1"
+    );
+
+    let loaded = registry
+        .get_segment_handover("segmented-durable", 1)
+        .await
+        .expect("load successor handover")
+        .expect("persisted successor handover");
+    let resumed = validate_segment_program_hash("segmented-durable", loaded)
+        .expect("matching program identity");
+    first_context.start_replay();
+    let successor_context = Arc::new(ReplayableRecordingContext::default());
+    let successor_controller = RestateRuntimeEffectController::new(successor_context);
+    let second = workflow
+        .run_registration(
+            registration,
+            ProcessExecutionContext::default(),
+            successor_controller
+                .scoped_effect_controller(ExecutionScope::process("segmented-durable"))
+                .expect("durable successor scope"),
+            1,
+            Some(resumed),
+        )
+        .await
+        .expect("run successor segment");
+    assert!(matches!(second, lash_core::ProcessRunOutcome::Terminal(_)));
+    assert_eq!(runner.runs.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        runner
+            .handovers
+            .lock()
+            .expect("segment handovers lock")
+            .as_slice(),
+        &[None, Some(continuation)]
+    );
+    let events = registry
+        .events_after("segmented-durable", 0)
+        .await
+        .expect("process events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.semantics.terminal.is_some())
+            .count(),
+        1,
+        "only the true terminal is process-visible"
+    );
+    let awaited = lash_core::ProcessAwaiter::polling(registry)
+        .await_terminal("segmented-durable")
+        .await
+        .expect("await true terminal");
+    assert_eq!(awaited, terminal);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RestateSegmentReplayPoint {
+    GetHandover,
+    PutHandover,
+    CancelCheck,
+    SuccessorSend,
+    Resume,
+}
+
+#[tokio::test]
+async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants() {
+    for replay_point in [
+        RestateSegmentReplayPoint::GetHandover,
+        RestateSegmentReplayPoint::PutHandover,
+        RestateSegmentReplayPoint::CancelCheck,
+        RestateSegmentReplayPoint::SuccessorSend,
+        RestateSegmentReplayPoint::Resume,
+    ] {
+        let process_id = format!("matrix-{replay_point:?}").to_ascii_lowercase();
+        let registry = process_registry();
+        let registration = rerunnable_registration(&process_id);
+        registry
+            .register_process(registration.clone())
+            .await
+            .expect("register matrix process");
+        let terminal = ProcessAwaitOutput::Success {
+            value: serde_json::json!({"result": 99, "effects": [0, 1, 2]}),
+            control: None,
+        };
+        let runner = Arc::new(SegmentedRecordingRunner {
+            outcomes: Mutex::new(VecDeque::from([
+                lash_core::ProcessRunOutcome::SegmentBoundary(lash_core::SegmentHandover {
+                    reason: lash_core::BoundaryReason::JournalBudget,
+                    program_hash: Some("matrix-program-v1".to_string()),
+                    engine_state: vec![1],
+                }),
+                lash_core::ProcessRunOutcome::SegmentBoundary(lash_core::SegmentHandover {
+                    reason: lash_core::BoundaryReason::JournalBudget,
+                    program_hash: Some("matrix-program-v1".to_string()),
+                    engine_state: vec![2],
+                }),
+                terminal.clone().into(),
+            ])),
+            handovers: Mutex::new(Vec::new()),
+            runs: AtomicUsize::new(0),
+        });
+        let workflow = LashProcessWorkflowImpl::new(Arc::clone(&runner), Arc::clone(&registry));
+        let mut input_handover = None;
+        let mut successor_keys = HashSet::new();
+
+        for ordinal in 0_u64..3 {
+            let context = Arc::new(ReplayableRecordingContext::default());
+            let controller = RestateRuntimeEffectController::with_options(
+                Arc::clone(&context),
+                RestateEffectControllerOptions::default().segment_effect_budget(1),
+            );
+            let local_calls = Arc::new(AtomicUsize::new(0));
+            let envelope = RuntimeEffectEnvelope::new(
+                RuntimeInvocation::effect(
+                    lash_core::runtime::RuntimeScope::new(process_id.clone()),
+                    format!("matrix-effect-{ordinal}"),
+                    RuntimeEffectKind::DurableStep,
+                    format!("matrix:{process_id}:{ordinal}"),
+                ),
+                RuntimeEffectCommand::DurableStep {
+                    step_id: format!("matrix-effect-{ordinal}"),
+                    input: serde_json::json!({"ordinal": ordinal}),
+                },
+            );
+            let first_calls = Arc::clone(&local_calls);
+            let first_effect = controller
+                .execute_effect(
+                    envelope.clone(),
+                    RuntimeEffectLocalExecutor::durable_step(move |input| async move {
+                        first_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(input)
+                    }),
+                )
+                .await
+                .expect("first matrix effect")
+                .into_durable_step()
+                .expect("first matrix durable-step outcome");
+            let progress = lash_core::SegmentProgress {
+                effects_executed: 1,
+                journaled_bytes_estimate: None,
+            };
+            assert_eq!(
+                RuntimeEffectController::wants_segment_boundary(&controller, &progress),
+                Some(lash_core::BoundaryReason::JournalBudget)
+            );
+            context.start_replay();
+            let replay_calls = Arc::clone(&local_calls);
+            let replay_effect = controller
+                .execute_effect(
+                    envelope,
+                    RuntimeEffectLocalExecutor::durable_step(move |input| async move {
+                        replay_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(input)
+                    }),
+                )
+                .await
+                .expect("replayed matrix effect")
+                .into_durable_step()
+                .expect("replayed matrix durable-step outcome");
+            assert_eq!(replay_effect, first_effect, "replay effect identity");
+            assert_eq!(
+                local_calls.load(Ordering::SeqCst),
+                1,
+                "handler replay must not double-execute an effect"
+            );
+            assert_eq!(
+                RuntimeEffectController::wants_segment_boundary(&controller, &progress),
+                Some(lash_core::BoundaryReason::JournalBudget),
+                "replay must cut at the identical completed-effect budget"
+            );
+
+            if ordinal > 0 {
+                let loaded = registry
+                    .get_segment_handover(&process_id, ordinal)
+                    .await
+                    .expect("get input handover")
+                    .expect("running segment input survives");
+                if matches!(replay_point, RestateSegmentReplayPoint::GetHandover) {
+                    assert_eq!(
+                        registry
+                            .get_segment_handover(&process_id, ordinal)
+                            .await
+                            .expect("replayed get"),
+                        Some(loaded.clone())
+                    );
+                }
+                input_handover = Some(
+                    validate_segment_program_hash(&process_id, loaded)
+                        .expect("valid matrix handover"),
+                );
+            }
+
+            let run_once = workflow
+                .run_registration(
+                    registration.clone(),
+                    ProcessExecutionContext::default(),
+                    inline_process_scope(&process_id),
+                    ordinal,
+                    input_handover.take(),
+                )
+                .await
+                .expect("matrix segment run");
+            if ordinal == 2 {
+                assert_eq!(run_once, terminal.clone().into());
+                break;
+            }
+            let lash_core::ProcessRunOutcome::SegmentBoundary(boundary) = run_once else {
+                panic!("matrix segment {ordinal} must request a boundary");
+            };
+            let next = ordinal + 1;
+            let persisted = lash_core::PersistedSegmentHandover {
+                segment_ordinal: next,
+                program_hash: "matrix-program-v1".to_string(),
+                handover: boundary,
+            };
+            registry
+                .put_segment_handover(&process_id, persisted.clone())
+                .await
+                .expect("put matrix handover");
+            if matches!(replay_point, RestateSegmentReplayPoint::PutHandover) {
+                registry
+                    .put_segment_handover(&process_id, persisted)
+                    .await
+                    .expect("replayed put is idempotent");
+            }
+            let cancel_checks = if matches!(replay_point, RestateSegmentReplayPoint::CancelCheck) {
+                2
+            } else {
+                1
+            };
+            for _ in 0..cancel_checks {
+                assert!(
+                    !workflow
+                        .process_cancel_requested(&process_id)
+                        .await
+                        .expect("matrix cancel check")
+                );
+            }
+            let key = process_segment_workflow_key(&process_id, next);
+            assert!(
+                successor_keys.insert(key.clone()),
+                "one successor per ordinal"
+            );
+            if matches!(replay_point, RestateSegmentReplayPoint::SuccessorSend) {
+                assert!(
+                    !successor_keys.insert(key),
+                    "duplicate keyed send collapses"
+                );
+            }
+            if matches!(replay_point, RestateSegmentReplayPoint::Resume) {
+                let first = registry
+                    .get_segment_handover(&process_id, next)
+                    .await
+                    .expect("first resume get");
+                let retry = registry
+                    .get_segment_handover(&process_id, next)
+                    .await
+                    .expect("retry resume get");
+                assert_eq!(first, retry, "resume retry sees identical continuation");
+            }
+        }
+
+        assert_eq!(
+            successor_keys.len(),
+            2,
+            "exactly one successor for each boundary"
+        );
+        assert_eq!(
+            runner.runs.load(Ordering::SeqCst),
+            3,
+            "no duplicate incarnation"
+        );
+        registry
+            .complete_process(
+                &process_id,
+                terminal.clone(),
+                workflow_key_authority(&process_id),
+            )
+            .await
+            .expect("write root terminal");
+        let attach_after_retention = lash_core::ProcessAwaiter::polling(Arc::clone(&registry));
+        assert_eq!(
+            attach_after_retention
+                .await_terminal(&process_id)
+                .await
+                .expect("post-retention durable attach"),
+            terminal
+        );
+        assert_eq!(
+            registry
+                .events_after(&process_id, 0)
+                .await
+                .expect("matrix events")
+                .iter()
+                .filter(|event| event.semantics.terminal.is_some())
+                .count(),
+            1,
+            "root terminal is durable and exactly once"
+        );
+    }
+}
+
+#[test]
+fn missing_segment_handover_distinguishes_superseded_orphan_from_current_input() {
+    let latest = lash_core::PersistedSegmentHandover {
+        segment_ordinal: 4,
+        program_hash: "program-v1".to_string(),
+        handover: lash_core::SegmentHandover {
+            reason: lash_core::BoundaryReason::JournalBudget,
+            program_hash: Some("program-v1".to_string()),
+            engine_state: vec![4],
+        },
+    };
+    assert!(missing_segment_is_superseded(2, Some(&latest)));
+    assert!(!missing_segment_is_superseded(4, Some(&latest)));
+    assert!(!missing_segment_is_superseded(5, Some(&latest)));
+    assert!(!missing_segment_is_superseded(1, None));
+}
+
+#[tokio::test]
+async fn persisted_handover_is_change_feed_and_event_invariant() {
+    let registry = process_registry();
+    let _record = registry
+        .register_process(rerunnable_registration("segment-invariant"))
+        .await
+        .expect("register process");
+    let (_, cursor) = registry
+        .processes_changed_since(lash_core::ProcessChangeCursor::default(), 10)
+        .await
+        .expect("initial change feed");
+    registry
+        .put_segment_handover(
+            "segment-invariant",
+            lash_core::PersistedSegmentHandover {
+                segment_ordinal: 1,
+                program_hash: "program-v1".to_string(),
+                handover: lash_core::SegmentHandover {
+                    reason: lash_core::BoundaryReason::DurationCap,
+                    program_hash: Some("program-v1".to_string()),
+                    engine_state: vec![9],
+                },
+            },
+        )
+        .await
+        .expect("persist handover");
+    let (changes, next_cursor) = registry
+        .processes_changed_since(cursor, 10)
+        .await
+        .expect("change feed after handover");
+    assert!(changes.is_empty());
+    assert_eq!(next_cursor, cursor);
+    assert!(
+        registry
+            .events_after("segment-invariant", 0)
+            .await
+            .expect("events")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn segment_program_hash_mismatch_is_typed_and_cancel_skips_successor_engine() {
+    let mismatch = validate_segment_program_hash(
+        "hash-bound",
+        lash_core::PersistedSegmentHandover {
+            segment_ordinal: 1,
+            program_hash: "old-program".to_string(),
+            handover: lash_core::SegmentHandover {
+                reason: lash_core::BoundaryReason::JournalBudget,
+                program_hash: Some("new-program".to_string()),
+                engine_state: vec![],
+            },
+        },
+    )
+    .expect_err("changed program must fail closed");
+    assert_eq!(
+        mismatch.code,
+        lash_core::RuntimeErrorCode::from("restate_segment_program_hash_mismatch")
+    );
+
+    let runner = Arc::new(SegmentedRecordingRunner {
+        outcomes: Mutex::new(VecDeque::from([ProcessAwaitOutput::Success {
+            value: serde_json::Value::Null,
+            control: None,
+        }
+        .into()])),
+        handovers: Mutex::new(Vec::new()),
+        runs: AtomicUsize::new(0),
+    });
+    let registry = process_registry();
+    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let registration = rerunnable_registration("cancel-between-segments");
+    registry
+        .register_process(registration.clone())
+        .await
+        .expect("register process");
+    registry
+        .append_event(
+            "cancel-between-segments",
+            lash_core::ProcessEventAppendRequest::cancel_requested(
+                "cancel-between-segments",
+                Some("stop".to_string()),
+            ),
+        )
+        .await
+        .expect("cancel between segments");
+    let outcome = workflow
+        .run_registration(
+            registration,
+            ProcessExecutionContext::default(),
+            inline_process_scope("cancel-between-segments"),
+            1,
+            Some(lash_core::SegmentHandover {
+                reason: lash_core::BoundaryReason::JournalBudget,
+                program_hash: Some("program-v1".to_string()),
+                engine_state: vec![1],
+            }),
+        )
+        .await
+        .expect("cancelled successor");
+    assert!(matches!(
+        outcome,
+        lash_core::ProcessRunOutcome::Terminal(output)
+            if matches!(*output, ProcessAwaitOutput::Cancelled { .. })
+    ));
+    assert_eq!(runner.runs.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn cancel_terminal_from_successor_routes_to_root_await_workflow_key() {
+    assert_eq!(terminal_completion_workflow_key("process-1", 0), None);
+    assert_eq!(
+        terminal_completion_workflow_key("process-1", 1),
+        Some("process-1".to_string())
+    );
+    assert_eq!(
+        process_segment_workflow_key("process-1", 1),
+        "process-1#1",
+        "the running successor key must differ from the terminal await key"
+    );
+}
+
+#[test]
+fn boundary_registry_io_errors_are_retryable_handler_failures() {
+    let error = retryable_registry_error(lash_core::PluginError::Session(
+        "transient registry outage".to_string(),
+    ));
+    let debug = format!("{error:?}");
+    assert!(
+        debug.contains("Retryable"),
+        "registry I/O must ask Restate to retry: {debug}"
+    );
+}
+
+#[test]
+fn boundary_with_armed_wait_is_declined_instead_of_terminalized() {
+    let mut record = lash_core::ProcessRecord::from_registration(rerunnable_registration("wait"));
+    record.wait = Some(lash_core::WaitState {
+        since_ms: 1,
+        kind: lash_core::WaitKind::Signal {
+            name: "ready".to_string(),
+            event_type: "signal.ready".to_string(),
+            key: "process:wait:signal.ready:1".to_string(),
+            ordinal: 1,
+        },
+    });
+    assert!(boundary_must_be_declined(Some(&record)));
+    record.wait = None;
+    assert!(!boundary_must_be_declined(Some(&record)));
+}
+
+#[test]
+fn restate_controller_replay_cuts_at_identical_effect_budget() {
+    let options = RestateEffectControllerOptions::default()
+        .segment_duration_cap(Duration::ZERO)
+        .segment_effect_budget(3);
+    let first = RestateRuntimeEffectController::with_options(
+        Arc::new(RecordingContext::default()),
+        options.clone(),
+    );
+    let replay = RestateRuntimeEffectController::with_options(
+        Arc::new(RecordingContext::default()),
+        options,
+    );
+    for effects_executed in 0..=4 {
+        let progress = lash_core::SegmentProgress {
+            effects_executed,
+            journaled_bytes_estimate: None,
+        };
+        assert_eq!(
+            RuntimeEffectController::wants_segment_boundary(&first, &progress),
+            RuntimeEffectController::wants_segment_boundary(&replay, &progress),
+        );
+    }
+    assert_eq!(
+        RuntimeEffectController::wants_segment_boundary(
+            &first,
+            &lash_core::SegmentProgress {
+                effects_executed: 3,
+                journaled_bytes_estimate: None,
+            },
+        ),
+        Some(lash_core::BoundaryReason::JournalBudget)
+    );
 }
 
 #[tokio::test]
@@ -3735,7 +4347,7 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
         discovery.ty.to_string(),
         restate_sdk::discovery::ServiceType::Workflow.to_string()
     );
-    assert_eq!(discovery.handlers.len(), 3);
+    assert_eq!(discovery.handlers.len(), 4);
 
     let run = discovery
         .handlers
@@ -3752,6 +4364,11 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
         .iter()
         .find(|handler| handler.name.to_string() == "await_terminal")
         .expect("await_terminal handler discovery");
+    let complete_terminal = discovery
+        .handlers
+        .iter()
+        .find(|handler| handler.name.to_string() == "complete_terminal")
+        .expect("complete_terminal handler discovery");
 
     assert_eq!(
         run.ty.as_ref().map(ToString::to_string).as_deref(),
@@ -3763,6 +4380,14 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
     );
     assert_eq!(
         await_terminal
+            .ty
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("SHARED")
+    );
+    assert_eq!(
+        complete_terminal
             .ty
             .as_ref()
             .map(ToString::to_string)
@@ -3814,6 +4439,11 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
         handlers
             .iter()
             .any(|handler| handler["name"] == "await_terminal" && handler["ty"] == "SHARED")
+    );
+    assert!(
+        handlers
+            .iter()
+            .any(|handler| { handler["name"] == "complete_terminal" && handler["ty"] == "SHARED" })
     );
     assert_eq!(
         wait_workflow_discovery.name.to_string(),
@@ -3915,6 +4545,8 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
                 lash_core::ExecutionScope::process("task-workflow"),
             )
             .expect("inline process scope"),
+            0,
+            None,
         )
         .await
         .expect("workflow run");
@@ -3926,7 +4558,11 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
         .await
         .expect("workflow cancel");
 
-    assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
+    assert!(matches!(
+        output,
+        lash_core::ProcessRunOutcome::Terminal(output)
+            if matches!(*output, ProcessAwaitOutput::Success { .. })
+    ));
     assert_eq!(
         runner.ran.lock().expect("runner ran lock").as_slice(),
         &[RecordedProcessRun {
@@ -3987,6 +4623,8 @@ async fn run_registration_abandons_restarted_owner_bound_without_running() {
                 lash_core::ExecutionScope::process("ob-restart"),
             )
             .expect("inline process scope"),
+            0,
+            None,
         )
         .await
         .expect("run_registration");
@@ -3999,7 +4637,10 @@ async fn run_registration_abandons_restarted_owner_bound_without_running() {
     );
     // Both the returned output and the persisted terminal are Abandoned{Sweep},
     // naming the incarnation that began the work as the evidence owner.
-    let ProcessAwaitOutput::Abandoned { evidence, .. } = &output else {
+    let lash_core::ProcessRunOutcome::Terminal(output) = &output else {
+        panic!("expected terminal output, got {output:?}");
+    };
+    let ProcessAwaitOutput::Abandoned { evidence, .. } = output.as_ref() else {
         panic!("expected Abandoned output, got {output:?}");
     };
     assert_eq!(evidence.writer, AbandonWriter::Sweep);
@@ -4038,11 +4679,17 @@ async fn run_registration_runs_fresh_owner_bound() {
                 lash_core::ExecutionScope::process("ob-fresh"),
             )
             .expect("inline process scope"),
+            0,
+            None,
         )
         .await
         .expect("run_registration");
 
-    assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
+    assert!(matches!(
+        output,
+        lash_core::ProcessRunOutcome::Terminal(output)
+            if matches!(*output, ProcessAwaitOutput::Success { .. })
+    ));
     assert_eq!(
         runner
             .ran
@@ -4141,6 +4788,52 @@ async fn ingress_runner_submits_non_terminal_process_by_workflow_key() {
             .and_then(|metadata| metadata.get("invocation_id")),
         Some(&serde_json::json!("inv_task_1"))
     );
+}
+
+#[tokio::test]
+async fn ingress_sweep_resumes_latest_segment_without_duplicate_segment_zero() {
+    let registry = process_registry();
+    registry
+        .register_process(rerunnable_registration("mid-chain"))
+        .await
+        .expect("register");
+    registry
+        .put_segment_handover(
+            "mid-chain",
+            lash_core::PersistedSegmentHandover {
+                segment_ordinal: 3,
+                program_hash: "program-v1".to_string(),
+                handover: lash_core::SegmentHandover {
+                    reason: lash_core::BoundaryReason::JournalBudget,
+                    program_hash: Some("program-v1".to_string()),
+                    engine_state: vec![3],
+                },
+            },
+        )
+        .await
+        .expect("persist live segment");
+    let (base_url, captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "202 Accepted",
+        body: r#"{"invocationId":"inv_mid_chain_3","status":"Accepted"}"#,
+    }])
+    .await;
+    let runner = RestateProcessIngressRunner::new(base_url, registry);
+    runner.claim_and_run_pending().await.expect("drive pending");
+    server.await.expect("capture server");
+
+    let requests = captured.lock().expect("captured lock");
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].starts_with("POST /LashProcessWorkflow/mid-chain%233/run/send "),
+        "recovery must address the latest segment workflow key: {}",
+        requests[0]
+    );
+    assert!(
+        requests[0].contains("\"segment_ordinal\":3"),
+        "recovery input must preserve the latest ordinal: {}",
+        requests[0]
+    );
+    assert!(!requests[0].starts_with("POST /LashProcessWorkflow/mid-chain/run/send "));
 }
 
 #[tokio::test]
@@ -4569,6 +5262,41 @@ async fn restate_process_attach_calls_await_terminal_ingress() {
             value: serde_json::json!("attached"),
             control: None,
         }
+    );
+}
+
+#[tokio::test]
+async fn cancel_during_successor_boundary_routes_root_and_await_terminal_resolves() {
+    assert_eq!(
+        terminal_completion_workflow_key("retained-terminal", 2),
+        Some("retained-terminal".to_string())
+    );
+    let registry = process_registry();
+    registry
+        .register_process(external_registration("retained-terminal"))
+        .await
+        .expect("register");
+    let expected = ProcessAwaitOutput::Cancelled {
+        message: "cancelled after a long chain".to_string(),
+        raw: None,
+        control: None,
+    };
+    registry
+        .complete_process(
+            "retained-terminal",
+            expected.clone(),
+            lash_core::ProcessCompletionAuthority::external_owner("session"),
+        )
+        .await
+        .expect("complete");
+    let runner = RestateProcessIngressRunner::new("http://127.0.0.1:1", registry);
+
+    assert_eq!(
+        runner
+            .await_terminal("retained-terminal")
+            .await
+            .expect("registry terminal bypasses expired workflow key"),
+        expected
     );
 }
 

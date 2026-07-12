@@ -11,10 +11,11 @@ pub use envelope::{
     ToolCallLaunch,
 };
 pub use executor::{
-    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, EffectHost, ExecutionScope,
-    ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController, Resolution,
-    ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectController,
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, BoundaryReason, EffectHost,
+    ExecutionScope, ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController,
+    Resolution, ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectLocalExecutor, ScopedEffectController,
+    SegmentProgress,
 };
 pub use lash_sansio::CausalRef;
 

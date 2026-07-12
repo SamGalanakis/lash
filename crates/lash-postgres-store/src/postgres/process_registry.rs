@@ -48,6 +48,107 @@ impl ProcessRegistry for PostgresProcessRegistry {
         Ok(record)
     }
 
+    async fn put_segment_handover(
+        &self,
+        process_id: &str,
+        handover: PersistedSegmentHandover,
+    ) -> Result<(), PluginError> {
+        let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
+        if load_process_tx(&mut tx, process_id).await?.is_none() {
+            return Err(PluginError::Session(format!("unknown process `{process_id}`")));
+        }
+        let encoded = serde_json::to_string(&handover).map_err(process_decode_error)?;
+        let existing = sqlx::query(
+            "SELECT handover_json FROM lash_process_segment_handovers
+             WHERE process_id = $1 AND segment_ordinal = $2 FOR UPDATE",
+        )
+        .bind(process_id)
+        .bind(handover.segment_ordinal as i64)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        if let Some(existing) = existing {
+            let existing: String = existing.get("handover_json");
+            if existing != encoded {
+                return Err(PluginError::Session(format!(
+                    "process `{process_id}` segment {} handover conflict",
+                    handover.segment_ordinal
+                )));
+            }
+        } else {
+            sqlx::query(
+                "DELETE FROM lash_process_segment_handovers
+                 WHERE process_id = $1 AND segment_ordinal < $2 - 1",
+            )
+            .bind(process_id)
+            .bind(handover.segment_ordinal as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(plugin_sqlx_error)?;
+            sqlx::query(
+                "INSERT INTO lash_process_segment_handovers
+                 (process_id, segment_ordinal, handover_json) VALUES ($1, $2, $3)",
+            )
+            .bind(process_id)
+            .bind(handover.segment_ordinal as i64)
+            .bind(encoded)
+            .execute(&mut *tx)
+            .await
+            .map_err(plugin_sqlx_error)?;
+        }
+        tx.commit().await.map_err(plugin_sqlx_error)?;
+        Ok(())
+    }
+
+    async fn get_segment_handover(
+        &self,
+        process_id: &str,
+        segment_ordinal: u64,
+    ) -> Result<Option<PersistedSegmentHandover>, PluginError> {
+        let row = sqlx::query(
+            "SELECT handover_json FROM lash_process_segment_handovers
+             WHERE process_id = $1 AND segment_ordinal = $2",
+        )
+        .bind(process_id)
+        .bind(segment_ordinal as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        row.map(|row| {
+            serde_json::from_str(row.get::<String, _>("handover_json").as_str())
+                .map_err(process_decode_error)
+        })
+        .transpose()
+    }
+
+    async fn latest_segment_handover(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<PersistedSegmentHandover>, PluginError> {
+        let row = sqlx::query(
+            "SELECT handover_json FROM lash_process_segment_handovers
+             WHERE process_id = $1 ORDER BY segment_ordinal DESC LIMIT 1",
+        )
+        .bind(process_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(plugin_sqlx_error)?;
+        row.map(|row| {
+            serde_json::from_str(row.get::<String, _>("handover_json").as_str())
+                .map_err(process_decode_error)
+        })
+        .transpose()
+    }
+
+    async fn delete_segment_handovers(&self, process_id: &str) -> Result<(), PluginError> {
+        sqlx::query("DELETE FROM lash_process_segment_handovers WHERE process_id = $1")
+            .bind(process_id)
+            .execute(&self.pool)
+            .await
+            .map_err(plugin_sqlx_error)?;
+        Ok(())
+    }
+
     async fn set_external_ref(
         &self,
         process_id: &str,
@@ -785,6 +886,13 @@ impl ProcessRegistry for PostgresProcessRegistry {
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {
         load_process(&self.pool, process_id).await.ok().flatten()
+    }
+
+    async fn try_get_process(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessRecord>, PluginError> {
+        load_process(&self.pool, process_id).await
     }
 
     async fn list_processes(

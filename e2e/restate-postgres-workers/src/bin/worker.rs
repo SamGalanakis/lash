@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use lash_restate_postgres_workers_e2e::{
     DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT,
-    EXPECTED_PARENT_DURABLE_INPUT_TEXT, HealthResponse, TurnRequest, TurnResponse, TurnScenario,
-    build_e2e_core, default_session_child_originator_scope_pattern,
+    EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, HealthResponse, TurnRequest,
+    TurnResponse, TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
     default_session_originator_scope_id, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
     process_registry_from_storage, record_terminal_result, record_turn_activity,
     record_worker_event, required_env, s3_store_from_env,
@@ -290,6 +290,7 @@ impl AppState {
                 TurnScenario::DurableWaitProbe => {
                     lash_restate_postgres_workers_e2e::EXPECTED_DURABLE_WAIT_TEXT
                 }
+                TurnScenario::SegmentLoop => EXPECTED_SEGMENT_LOOP_TEXT,
             })
             .to_string();
         let response = TurnResponse {
@@ -446,6 +447,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
             "Run the E2E foreground durable wait scenario. workflow_id={} durable_wait_probe=true",
             request.workflow_id
         ),
+        TurnScenario::SegmentLoop => format!(
+            "Run the E2E segmented authored loop control pair. workflow_id={} segment_loop=true",
+            request.workflow_id
+        ),
     }
 }
 
@@ -576,7 +581,19 @@ async fn async_main() -> Result<()> {
 
     let core = state.build_core()?;
     let process_worker = DurableProcessWorker::new(core.durable_process_worker_config()?);
-    let process_workflow = deployment.workflow(process_worker);
+    let process_workflow = deployment
+        .workflow(process_worker)
+        .with_segment_effect_budget_selector(|registration| match &*registration.input {
+            lash_core::ProcessInput::Engine { payload, .. }
+                if payload
+                    .pointer("/args/force_segmentation")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true) =>
+            {
+                3
+            }
+            _ => 10_000,
+        });
 
     let port = env("WORKER_PORT", "18100");
     let addr: SocketAddr = format!("0.0.0.0:{port}")

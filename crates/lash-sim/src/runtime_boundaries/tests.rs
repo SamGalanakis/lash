@@ -406,3 +406,204 @@ async fn worker_stale_process_completion_is_fenced_by_sqlite_registry() {
         "each generated worker boundary must own an independent SQLite process proof"
     );
 }
+
+#[derive(Clone, Copy, Debug)]
+enum SegmentCrashPoint {
+    BeforeHandoverPersist,
+    AfterPersistBeforeSuccessor,
+    DuringSuccessorResume,
+}
+
+fn sqlite_segment_harness(root: &std::path::Path) -> RuntimeBoundaryHarness {
+    std::fs::create_dir_all(root).expect("create SQLite segment harness directory");
+    let clock = crate::clock::SimClock::new();
+    let factory: Arc<dyn SessionStoreFactory> = Arc::new(
+        lash_sqlite_store::SqliteSessionStoreFactory::new(root.join("sessions"))
+            .with_clock(clock.clone()),
+    );
+    RuntimeBoundaryHarness::new(
+        factory,
+        RuntimeEffectReplayStore::sqlite_file(root.join("effects.sqlite")),
+        clock,
+    )
+}
+
+async fn run_seeded_segment_effect(
+    harness: &mut RuntimeBoundaryHarness,
+    process_id: &str,
+    effect_ordinal: u64,
+) -> Value {
+    harness
+        .complete_durable_effect(&event(
+            BoundaryKind::DurableEffect,
+            &format!("{process_id}:effect:{effect_ordinal}"),
+            json!({
+                "durable_key": format!("{process_id}:effect:{effect_ordinal}"),
+                "result": {"ordinal": effect_ordinal, "value": effect_ordinal * 11},
+            }),
+        ))
+        .await
+        .expect("seeded durable effect")
+}
+
+#[tokio::test]
+async fn sqlite_seeded_segment_crash_matrix_preserves_results_and_effect_identity() {
+    let seed = 0x5eed_u64;
+    let budget = 2 + seed % 3;
+    let effect_count = budget * 2 + 1;
+
+    for crash_point in [
+        SegmentCrashPoint::BeforeHandoverPersist,
+        SegmentCrashPoint::AfterPersistBeforeSuccessor,
+        SegmentCrashPoint::DuringSuccessorResume,
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut baseline = sqlite_segment_harness(&temp.path().join("baseline"));
+        let mut baseline_results = Vec::new();
+        for effect in 0..effect_count {
+            baseline_results.push(
+                run_seeded_segment_effect(&mut baseline, "unsegmented", effect)
+                    .await["runtime_effect_outcome"]
+                    .clone(),
+            );
+        }
+
+        let root = temp.path().join("segmented");
+        let process_id = format!("segmented-{crash_point:?}").to_ascii_lowercase();
+        let mut harness = sqlite_segment_harness(&root);
+        let registry = harness
+            .ensure_worker_process_registry()
+            .await
+            .expect("SQLite process registry");
+        registry
+            .register_process(ProcessRegistration::new(
+                process_id.clone(),
+                ProcessInput::External {
+                    metadata: json!({"seed": seed, "budget": budget}),
+                },
+                RecoveryDisposition::Rerunnable,
+                ProcessProvenance::host(),
+            ))
+            .await
+            .expect("register seeded process");
+
+        let mut segmented_results = Vec::new();
+        for effect in 0..budget {
+            segmented_results.push(
+                run_seeded_segment_effect(&mut harness, &process_id, effect)
+                    .await["runtime_effect_outcome"]
+                    .clone(),
+            );
+        }
+        let handover = lash_core::PersistedSegmentHandover {
+            segment_ordinal: 1,
+            program_hash: "sim-seeded-program-v1".to_string(),
+            handover: lash_core::SegmentHandover {
+                reason: lash_core::BoundaryReason::JournalBudget,
+                program_hash: Some("sim-seeded-program-v1".to_string()),
+                engine_state: budget.to_le_bytes().to_vec(),
+            },
+        };
+
+        match crash_point {
+            SegmentCrashPoint::BeforeHandoverPersist => {
+                harness = sqlite_segment_harness(&root);
+                harness
+                    .ensure_worker_process_registry()
+                    .await
+                    .expect("reopen registry")
+                    .put_segment_handover(&process_id, handover.clone())
+                    .await
+                    .expect("persist recovered handover");
+            }
+            SegmentCrashPoint::AfterPersistBeforeSuccessor => {
+                registry
+                    .put_segment_handover(&process_id, handover.clone())
+                    .await
+                    .expect("persist handover");
+                harness = sqlite_segment_harness(&root);
+                harness
+                    .ensure_worker_process_registry()
+                    .await
+                    .expect("reopen registry")
+                    .put_segment_handover(&process_id, handover.clone())
+                    .await
+                    .expect("idempotent handover replay");
+            }
+            SegmentCrashPoint::DuringSuccessorResume => {
+                registry
+                    .put_segment_handover(&process_id, handover.clone())
+                    .await
+                    .expect("persist handover");
+                harness = sqlite_segment_harness(&root);
+                segmented_results.push(
+                    run_seeded_segment_effect(&mut harness, &process_id, budget)
+                        .await["runtime_effect_outcome"]
+                        .clone(),
+                );
+                harness = sqlite_segment_harness(&root);
+                let replay = run_seeded_segment_effect(&mut harness, &process_id, budget).await;
+                assert_eq!(
+                    replay["replayed"], true,
+                    "resume replay must not re-execute"
+                );
+            }
+        }
+
+        let start = if matches!(crash_point, SegmentCrashPoint::DuringSuccessorResume) {
+            budget + 1
+        } else {
+            budget
+        };
+        for effect in start..effect_count {
+            segmented_results.push(
+                run_seeded_segment_effect(&mut harness, &process_id, effect)
+                    .await["runtime_effect_outcome"]
+                    .clone(),
+            );
+        }
+        assert_eq!(segmented_results, baseline_results, "result identity");
+
+        let registry = harness
+            .ensure_worker_process_registry()
+            .await
+            .expect("final registry");
+        assert_eq!(
+            registry
+                .latest_segment_handover(&process_id)
+                .await
+                .expect("latest handover")
+                .expect("live successor")
+                .segment_ordinal,
+            1,
+            "restart must leave an addressable successor"
+        );
+        let terminal = ProcessAwaitOutput::Success {
+            value: json!({"effects": effect_count, "seed": seed}),
+            control: None,
+        };
+        registry
+            .complete_process(
+                &process_id,
+                terminal.clone(),
+                lash_core::ProcessCompletionAuthority::workflow_key(&process_id),
+            )
+            .await
+            .expect("complete real terminal");
+        assert_eq!(
+            lash_core::ProcessAwaiter::polling(Arc::clone(&registry))
+                .await_terminal(&process_id)
+                .await
+                .expect("terminal after crash matrix"),
+            terminal
+        );
+        let terminal_events = registry
+            .events_after(&process_id, 0)
+            .await
+            .expect("terminal events")
+            .into_iter()
+            .filter(|event| event.semantics.terminal.is_some())
+            .count();
+        assert_eq!(terminal_events, 1, "terminal is written once");
+    }
+}

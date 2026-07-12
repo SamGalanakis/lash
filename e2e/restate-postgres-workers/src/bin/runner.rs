@@ -13,10 +13,10 @@ use lash_restate::{
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
     EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_DURABLE_WAIT_TEXT, EXPECTED_FINAL_TEXT,
-    EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_TOOL_BATCH_TEXT, ProcessSignalRequest,
-    TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario, build_e2e_core,
-    e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env, expected_attachment_bytes,
-    process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
+    EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, EXPECTED_TOOL_BATCH_TEXT,
+    ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
+    build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
+    expected_attachment_bytes, process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -251,9 +251,20 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &tool_batch_failover_request.workflow_id).await?;
     assert_tool_batch_response(&tool_batch_failover_response)?;
 
+    let segment_loop_request = TurnRequest {
+        workflow_id: "e2e-segment-loop".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::SegmentLoop,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &segment_loop_request).await?;
+    let segment_loop_response =
+        wait_for_terminal_result(storage.pool(), &segment_loop_request.workflow_id).await?;
+    assert_segment_loop_response(&segment_loop_response)?;
+
     drive_durable_wait_index_scenarios(&storage, &ingress_url, &admin_url).await?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 17).await?;
+    let responses = wait_for_terminal_results(storage.pool(), 18).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -857,6 +868,42 @@ fn assert_tool_batch_response(response: &TurnResponse) -> Result<()> {
     anyhow::ensure!(
         keys == [Some("slow"), Some("fast")],
         "tool-batch result order was not source order: {}",
+        response.final_value
+    );
+    Ok(())
+}
+
+fn assert_segment_loop_response(response: &TurnResponse) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == EXPECTED_SEGMENT_LOOP_TEXT,
+        "workflow `{}` segmented-loop final mismatch: {}",
+        response.workflow_id,
+        response.final_text
+    );
+    let control = response
+        .final_value
+        .get("control")
+        .context("segmented-loop response missing non-segmenting control")?;
+    let segmented = response
+        .final_value
+        .get("segmented")
+        .context("segmented-loop response missing segmented result")?;
+    anyhow::ensure!(
+        segmented == control,
+        "segmentation changed the authored loop result: {}",
+        response.final_value
+    );
+    anyhow::ensure!(
+        segmented.get("total").and_then(Value::as_i64) == Some(28),
+        "segmented loop did not execute all iterations: {}",
+        response.final_value
+    );
+    anyhow::ensure!(
+        segmented
+            .get("values")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.len() == 8),
+        "segmented loop observable effect sequence has the wrong length: {}",
         response.final_value
     );
     Ok(())

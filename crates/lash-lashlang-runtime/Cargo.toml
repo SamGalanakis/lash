@@ -33,4 +33,5 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }

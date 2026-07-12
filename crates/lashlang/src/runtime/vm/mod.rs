@@ -12,18 +12,24 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
-
 use crate::ast::UnaryOp;
 use crate::lexer::Span;
 use crate::{
     LashlangExecutionChild, LashlangExecutionObservation, LashlangExecutionSite,
     ProcessBranchSelection,
 };
+use rustc_hash::FxHashMap;
 
+mod continuation;
 mod control;
 mod effects;
 
+#[cfg(test)]
+use continuation::TestSuspension;
+pub use continuation::{
+    ContinuationError, VmContinuation, VmIteratorContinuation, VmIteratorCursor,
+    VmProfileContinuation, VmRunOutcome,
+};
 use control::{VmMode, VmStep};
 use effects::VmEffect;
 
@@ -34,9 +40,10 @@ use super::schema::{
 };
 use super::value::ProjectedValue;
 use super::{
-    Chunk, ExecutionHost, ExecutionScratch, Instruction, InstructionProfileTag, IntrinsicOp,
-    LASH_HOST_DESCRIPTOR_TYPE_KEY, LASH_HOST_DESCRIPTOR_VALUE_KEY, LASH_TYPE_KEY, ListValue, Name,
-    ProfileAccumulator, ProfileReport, ProjectedBindings, RuntimeError, Value,
+    Chunk, CompiledProgram, ExecutionHost, ExecutionOutcome, ExecutionScratch, ImageValue,
+    Instruction, InstructionProfileTag, IntrinsicOp, LASH_HOST_DESCRIPTOR_TYPE_KEY,
+    LASH_HOST_DESCRIPTOR_VALUE_KEY, LASH_TYPE_KEY, ListValue, Name, ProfileAccumulator,
+    ProfileReport, ProjectedBindings, ResourceHandle, RuntimeError, State, Value,
     add_assign_index_number, add_values, as_number, assign_path, eval_binary_values,
     eval_compare_values, eval_number_binary_values, eval_number_compare_values,
     eval_number_numeric_binary_value, execute_compiled_format, execute_compiled_format_direct,
@@ -209,7 +216,7 @@ impl SlotState {
     }
 }
 
-pub(crate) struct Vm<'a, H> {
+pub struct Vm<'a, H> {
     chunk: &'a Chunk,
     ip: usize,
     stack: Vec<Value>,
@@ -222,6 +229,8 @@ pub(crate) struct Vm<'a, H> {
     profile: Option<ProfileAccumulator>,
     validation_plans: FxHashMap<usize, (Arc<Record>, ValidationPlan)>,
     pending_error_span: Option<Span>,
+    #[cfg(test)]
+    test_suspension: TestSuspension,
 }
 
 #[derive(Clone)]
@@ -238,49 +247,40 @@ fn validation_plan_cache_entry(schema: &Value) -> Option<(usize, Arc<Record>)> {
 }
 
 impl<'a, H: ExecutionHost> Vm<'a, H> {
-    pub(crate) fn new_with_mode(
-        chunk: &'a Chunk,
-        slots: SlotState,
-        host: &'a H,
-        mode: ExecutionMode,
-    ) -> Self {
-        Self {
-            chunk,
-            ip: 0,
-            stack: Vec::new(),
-            last_value: None,
-            slots,
-            host,
-            mode: VmMode::from(mode),
-            iter_stack: Vec::new(),
-            lashlang_execution_occurrences: FxHashMap::default(),
-            profile: None,
-            validation_plans: FxHashMap::default(),
-            pending_error_span: None,
+    /// Builds a VM from authored globals for an externally driven execution.
+    pub fn from_state(program: &'a CompiledProgram, state: &mut State, host: &'a H) -> Self {
+        let projected = host.projected_bindings();
+        let slots = SlotState::from_globals(
+            std::mem::take(&mut state.globals),
+            &program.chunk.slot_names,
+            &projected,
+        );
+        let mut vm = Self::new_with_mode(&program.chunk, slots, host, host.execution_mode());
+        if host.profile_execution() {
+            vm.enable_profile();
+        }
+        vm
+    }
+
+    /// Emits the accumulated profile after an externally driven VM finishes.
+    pub fn flush_profile(&mut self, program: &CompiledProgram, host: &H) {
+        if host.profile_execution() {
+            let mut profile = self.take_profile();
+            profile.compile_stats = program.compile_stats;
+            host.observe_profile(profile);
         }
     }
 
-    pub(crate) fn new_with_scratch_and_mode(
-        chunk: &'a Chunk,
-        slots: SlotState,
-        host: &'a H,
-        scratch: &mut ExecutionScratch,
-        mode: ExecutionMode,
-    ) -> Self {
-        Self {
-            chunk,
-            ip: 0,
-            stack: std::mem::take(&mut scratch.stack),
-            last_value: None,
-            slots,
-            host,
-            mode: VmMode::from(mode),
-            iter_stack: std::mem::take(&mut scratch.iter_stack),
-            lashlang_execution_occurrences: FxHashMap::default(),
-            profile: None,
-            validation_plans: FxHashMap::default(),
-            pending_error_span: None,
-        }
+    #[cfg(test)]
+    pub(crate) fn suspend_after_instructions(&mut self, count: usize) {
+        assert!(count > 0, "suspension budget must be positive");
+        self.test_suspension = TestSuspension::AfterInstructions(count);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn suspend_after_effects(&mut self, count: usize) {
+        assert!(count > 0, "suspension budget must be positive");
+        self.test_suspension = TestSuspension::AfterEffects(count);
     }
 
     pub(crate) fn enable_profile(&mut self) {
@@ -1507,7 +1507,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
 
     fn record_assignment(&mut self, _slot: usize) {}
 
-    pub(crate) fn into_globals(self) -> Record {
+    pub fn into_globals(self) -> Record {
         self.slots.into_globals(&self.chunk.slot_names)
     }
 

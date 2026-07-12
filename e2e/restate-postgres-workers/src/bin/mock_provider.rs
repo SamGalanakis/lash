@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_restate_postgres_workers_e2e::{
     EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_DURABLE_WAIT_TEXT,
-    EXPECTED_FINAL_TEXT, EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_TOOL_BATCH_TEXT,
-    EXPECTED_WAKE_TEXT, ensure_e2e_schema, env, record_provider_call, required_env,
+    EXPECTED_FINAL_TEXT, EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT,
+    EXPECTED_TOOL_BATCH_TEXT, EXPECTED_WAKE_TEXT, ensure_e2e_schema, env, record_provider_call,
+    required_env,
 };
 
 #[derive(Clone)]
@@ -79,6 +80,7 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
             "durable_wait_probe",
             durable_wait_probe_script(&workflow_id),
         ),
+        MockScenario::SegmentLoop => ("segment_loop", segment_loop_script(&workflow_id)),
         MockScenario::KitchenSink => ("kitchen_sink", kitchen_sink_script(&workflow_id, fail_once)),
     };
     let response = json!({
@@ -181,10 +183,12 @@ enum MockScenario {
     ParentDurableInputAfterChild,
     ToolBatch,
     DurableWaitProbe,
+    SegmentLoop,
 }
 
 fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
     [
+        ("segment_loop=true", MockScenario::SegmentLoop),
         ("durable_wait_probe=true", MockScenario::DurableWaitProbe),
         ("tool_batch=true", MockScenario::ToolBatch),
         (
@@ -224,6 +228,49 @@ fn latest_fail_once_marker(text: &str) -> Option<bool> {
         "false" => Some(false),
         _ => None,
     }
+}
+
+fn segment_loop_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Execute the same authored loop once without segmentation and once with a forced
+three-effect segment budget.
+
+<lashlang>
+process effect_loop(tools: Tools, workflow_id: str, force_segmentation: bool) {{
+  n = 0
+  total = 0
+  values = []
+  while n < 8 {{
+    lookup = await tools.app_lookup({{ key: "segment-loop" }})?
+    total = total + n
+    values = values + [lookup.value]
+    n = n + 1
+  }}
+  finish {{ total: total, values: values }}
+}}
+
+control_handle = start effect_loop(
+  tools: tools,
+  workflow_id: "{workflow_id}",
+  force_segmentation: false
+)
+segmented_handle = start effect_loop(
+  tools: tools,
+  workflow_id: "{workflow_id}",
+  force_segmentation: true
+)
+control = (await control_handle)?
+segmented = (await segmented_handle)?
+finish {{
+  workflow_id: "{workflow_id}",
+  control: control,
+  segmented: segmented,
+  final: "{EXPECTED_SEGMENT_LOOP_TEXT}"
+}}
+</lashlang>
+"#
+    )
 }
 
 fn kitchen_sink_script(workflow_id: &str, fail_once: bool) -> String {
@@ -554,6 +601,7 @@ mod tests {
             tool_batch_script("e2e-test", false),
             tool_batch_script("e2e-test", true),
             durable_wait_probe_script("e2e-test"),
+            segment_loop_script("e2e-test"),
         ];
 
         for script in scripts {

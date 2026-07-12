@@ -11,7 +11,8 @@ use lash_trace::{
     TraceLashlangMap, TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangStatus, TraceRecord,
     TraceRuntimeScope, TraceRuntimeSubject, TraceSink,
 };
-use lashlang::ExecutionHostError;
+use lashlang::{ExecutionHost, ExecutionHostError};
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -24,11 +25,76 @@ use crate::{
     resolve_lashlang_module_operation,
 };
 
+static SEGMENT_BOUNDARY_DECLINED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+fn record_segment_boundary_decline(error: &dyn std::fmt::Display, message: &'static str) {
+    let declined_total = SEGMENT_BOUNDARY_DECLINED_TOTAL
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    tracing::warn!(error = %error, declined_total, "{message}");
+}
+
+fn trace_lifecycle_for_segment(
+    is_initial_segment: bool,
+    output: &lash_core::ProcessRunOutcome,
+) -> (bool, bool) {
+    (
+        is_initial_segment,
+        matches!(output, lash_core::ProcessRunOutcome::Terminal(_)),
+    )
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LashlangSegmentState {
+    vm: lashlang::VmContinuation,
+    sleep_sequence: u64,
+    event_sequence: u64,
+    signal_send_sequence: u64,
+    signal_wait_ordinals: BTreeMap<String, u64>,
+}
+
+fn lashlang_program_hash(input: &LashlangProcessInput) -> String {
+    let identity = serde_json::to_vec(&(
+        "lashlang-bytecode",
+        lashlang::BYTECODE_FORMAT_VERSION,
+        &input.module_ref,
+        &input.process_ref,
+        &input.host_requirements_ref,
+        &input.process_name,
+    ))
+    .expect("lashlang program identity should serialize");
+    format!("sha256:{:x}", Sha256::digest(identity))
+}
+
+fn validate_lashlang_program_hash(
+    persisted: Option<&str>,
+    current: &str,
+) -> Result<(), Box<lash_core::ProcessAwaitOutput>> {
+    if let Some(persisted) = persisted
+        && persisted != current
+    {
+        return Err(Box::new(process_lashlang_failure(
+            "restate_segment_program_hash_mismatch",
+            format!(
+                "lashlang segment program identity mismatch: persisted {persisted}, current {current}"
+            ),
+            None,
+        )));
+    }
+    Ok(())
+}
+
 pub async fn run_lashlang_process(
     engine: LashlangProcessEngine,
-    context: lash_core::ProcessEngineRunContext<'_>,
+    mut context: lash_core::ProcessEngineRunContext<'_>,
     payload: serde_json::Value,
-) -> lash_core::ProcessAwaitOutput {
+) -> lash_core::ProcessRunOutcome {
+    let handover = context.take_handover();
+    let is_initial_segment = handover.is_none();
+    let persisted_program_hash = handover
+        .as_ref()
+        .and_then(|handover| handover.program_hash.clone());
+    let segment_controller = context.scoped_effect_controller();
     let phase_probe = context.turn_phase_probe();
     let input = match LashlangProcessInput::from_payload(payload) {
         Ok(input) => input,
@@ -37,7 +103,8 @@ pub async fn run_lashlang_process(
                 "process_payload_invalid",
                 format!("invalid lashlang process payload: {err}"),
                 None,
-            );
+            )
+            .into();
         }
     };
     let artifact = {
@@ -53,7 +120,8 @@ pub async fn run_lashlang_process(
                     "process_module_artifact_missing",
                     format!("missing lashlang module artifact `{}`", input.module_ref),
                     None,
-                );
+                )
+                .into();
             }
             Err(err) => {
                 return process_lashlang_failure(
@@ -63,7 +131,8 @@ pub async fn run_lashlang_process(
                         input.module_ref
                     ),
                     None,
-                );
+                )
+                .into();
             }
         }
     };
@@ -75,7 +144,8 @@ pub async fn run_lashlang_process(
                 input.process_name, input.host_requirements_ref, artifact.host_requirements_ref
             ),
             None,
-        );
+        )
+        .into();
     }
     if artifact.process_ref(&input.process_name) != Some(&input.process_ref) {
         return process_lashlang_failure(
@@ -85,7 +155,8 @@ pub async fn run_lashlang_process(
                 input.module_ref, input.process_name, input.process_ref
             ),
             None,
-        );
+        )
+        .into();
     }
     let (tool_catalog, host_environment) = {
         let _phase = context.named_phase("rlm_process.resolve_environment");
@@ -96,7 +167,8 @@ pub async fn run_lashlang_process(
                     "process_tool_catalog_failed",
                     err.to_string(),
                     None,
-                );
+                )
+                .into();
             }
         };
         let surface = engine
@@ -106,7 +178,8 @@ pub async fn run_lashlang_process(
         let host_environment = match surface.host_environment(&tool_catalog) {
             Ok(host_environment) => host_environment,
             Err(err) => {
-                return process_lashlang_failure("process_host_environment_invalid", err, None);
+                return process_lashlang_failure("process_host_environment_invalid", err, None)
+                    .into();
             }
         };
         if let Err(err) = lashlang_host_environment_satisfies_requirements(
@@ -120,7 +193,8 @@ pub async fn run_lashlang_process(
                     input.process_name
                 ),
                 None,
-            );
+            )
+            .into();
         }
         (tool_catalog, host_environment)
     };
@@ -141,10 +215,31 @@ pub async fn run_lashlang_process(
                     "process_compile_failed",
                     format!("failed to compile process `{}`: {err}", input.process_name),
                     None,
-                );
+                )
+                .into();
             }
         }
     };
+    let segment_state: Option<LashlangSegmentState> = match handover {
+        Some(handover) => match serde_json::from_slice(&handover.engine_state) {
+            Ok(state) => Some(state),
+            Err(err) => {
+                return process_lashlang_failure(
+                    "process_segment_handover_invalid",
+                    format!("invalid lashlang segment handover: {err}"),
+                    None,
+                )
+                .into();
+            }
+        },
+        None => None,
+    };
+    let current_program_hash = lashlang_program_hash(&input);
+    if let Err(output) =
+        validate_lashlang_program_hash(persisted_program_hash.as_deref(), &current_program_hash)
+    {
+        return (*output).into();
+    }
     let process_id = context.registration().id.clone();
     let session_id = context.session_id().to_string();
     let lashlang_execution_trace = LashlangProcessExecutionTrace::new(
@@ -156,7 +251,9 @@ pub async fn run_lashlang_process(
         input.process_ref.clone(),
         input.process_name.clone(),
     );
-    lashlang_execution_trace.emit_started(&artifact);
+    if is_initial_segment {
+        lashlang_execution_trace.emit_started(&artifact);
+    }
     let registry = context.registry();
     let cancellation = context.cancellation_token();
     let (ctx, guard, mut state) = {
@@ -168,7 +265,8 @@ pub async fn run_lashlang_process(
                     "process_run_context_failed",
                     err.to_string(),
                     None,
-                );
+                )
+                .into();
             }
         };
         let (ctx, guard) = runtime_context.into_parts();
@@ -179,6 +277,18 @@ pub async fn run_lashlang_process(
         let state = lashlang::State::from_snapshot(lashlang::Snapshot { globals });
         (ctx, guard, state)
     };
+    let sleep_sequence = segment_state
+        .as_ref()
+        .map_or(0, |state| state.sleep_sequence);
+    let event_sequence = segment_state
+        .as_ref()
+        .map_or(0, |state| state.event_sequence);
+    let signal_send_sequence = segment_state
+        .as_ref()
+        .map_or(0, |state| state.signal_send_sequence);
+    let signal_wait_ordinals = segment_state
+        .as_ref()
+        .map_or_else(BTreeMap::new, |state| state.signal_wait_ordinals.clone());
     let host = LashlangProcessHost {
         ctx,
         host_environment,
@@ -186,15 +296,24 @@ pub async fn run_lashlang_process(
         registry,
         process_id: process_id.clone(),
         lashlang_execution_trace: lashlang_execution_trace.clone(),
-        sleep_sequence: AtomicU64::new(0),
-        event_sequence: AtomicU64::new(0),
-        signal_send_sequence: AtomicU64::new(0),
-        signal_wait_ordinals: tokio::sync::Mutex::new(BTreeMap::new()),
+        sleep_sequence: AtomicU64::new(sleep_sequence),
+        event_sequence: AtomicU64::new(event_sequence),
+        signal_send_sequence: AtomicU64::new(signal_send_sequence),
+        signal_wait_ordinals: tokio::sync::Mutex::new(signal_wait_ordinals),
     };
     let env = lashlang::ExecutionEnvironment::new(&host).process();
     let output = {
         let _phase = host.ctx.named_phase("rlm_process.execute");
-        execute_lashlang(compiled, &mut state, &env, cancellation.clone()).await
+        execute_lashlang(
+            compiled,
+            &mut state,
+            &env,
+            cancellation.clone(),
+            segment_controller.controller(),
+            &host,
+            (segment_state, current_program_hash),
+        )
+        .await
     };
     drop(env);
     drop(host);
@@ -203,7 +322,11 @@ pub async fn run_lashlang_process(
             lash_core::runtime::RuntimeNamedPhase::begin(phase_probe, "rlm_process.shutdown");
         guard.shutdown().await;
     }
-    lashlang_execution_trace.emit_finished(&output);
+    if trace_lifecycle_for_segment(is_initial_segment, &output).1
+        && let lash_core::ProcessRunOutcome::Terminal(output) = &output
+    {
+        lashlang_execution_trace.emit_finished(output);
+    }
     output
 }
 
@@ -212,15 +335,100 @@ async fn execute_lashlang(
     state: &mut lashlang::State,
     env: &lashlang::ExecutionEnvironment<'_, LashlangProcessHost<'_>>,
     cancellation: CancellationToken,
-) -> lash_core::ProcessAwaitOutput {
-    let mut execution = Box::pin(lashlang::execute(compiled.as_ref(), state, env));
-    tokio::select! {
-        _ = cancellation.cancelled() => process_lashlang_cancelled("lashlang process was cancelled"),
-        result = execution.as_mut() => {
-            if cancellation.is_cancelled() {
-                process_lashlang_cancelled("lashlang process was cancelled")
-            } else {
-                process_lashlang_execution_result(result)
+    controller: &dyn lash_core::RuntimeEffectController,
+    host: &LashlangProcessHost<'_>,
+    segment: (Option<LashlangSegmentState>, String),
+) -> lash_core::ProcessRunOutcome {
+    let (segment_state, program_hash) = segment;
+    let mut vm = if let Some(segment_state) = segment_state {
+        match lashlang::Vm::resume_from(segment_state.vm, compiled.as_ref(), env) {
+            Ok(vm) => vm,
+            Err(err) => {
+                return process_lashlang_failure(
+                    "process_segment_resume_failed",
+                    format!("failed to resume lashlang segment: {err}"),
+                    None,
+                )
+                .into();
+            }
+        }
+    } else {
+        lashlang::Vm::from_state(compiled.as_ref(), state, env)
+    };
+    let mut progress = lash_core::SegmentProgress::default();
+    loop {
+        let execution = if env.trace_runtime_errors() {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return process_lashlang_cancelled("lashlang process was cancelled").into();
+                }
+                result = vm.run_process_traced_until_effect() => {
+                    result.map_err(|failure| {
+                        let error = failure.error.clone();
+                        env.observe_runtime_failure(failure);
+                        error
+                    })
+                }
+            }
+        } else {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return process_lashlang_cancelled("lashlang process was cancelled").into();
+                }
+                result = vm.run_process_until_effect() => result,
+            }
+        };
+        if cancellation.is_cancelled() {
+            return process_lashlang_cancelled("lashlang process was cancelled").into();
+        }
+        match execution {
+            Ok(lashlang::VmRunOutcome::Complete(output)) => {
+                vm.flush_profile(compiled.as_ref(), env);
+                return process_lashlang_execution_result(Ok(output)).into();
+            }
+            Err(err) => {
+                vm.flush_profile(compiled.as_ref(), env);
+                return process_lashlang_execution_result(Err(err)).into();
+            }
+            Ok(lashlang::VmRunOutcome::EffectCompleted) => {
+                progress.effects_executed += 1;
+                let Some(reason) = controller.wants_segment_boundary(&progress) else {
+                    continue;
+                };
+                match vm.suspend() {
+                    Ok(continuation) => {
+                        let segment_state = LashlangSegmentState {
+                            vm: continuation,
+                            sleep_sequence: host.sleep_sequence.load(Ordering::Relaxed),
+                            event_sequence: host.event_sequence.load(Ordering::Relaxed),
+                            signal_send_sequence: host.signal_send_sequence.load(Ordering::Relaxed),
+                            signal_wait_ordinals: host.signal_wait_ordinals.lock().await.clone(),
+                        };
+                        match serde_json::to_vec(&segment_state) {
+                            Ok(engine_state) => {
+                                return lash_core::ProcessRunOutcome::SegmentBoundary(
+                                    lash_core::SegmentHandover {
+                                        reason,
+                                        program_hash: Some(program_hash.clone()),
+                                        engine_state,
+                                    },
+                                );
+                            }
+                            Err(err) => {
+                                record_segment_boundary_decline(
+                                    &err,
+                                    "lashlang segment continuation was not serializable; continuing",
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        record_segment_boundary_decline(
+                            &err,
+                            "lashlang segment boundary declined at non-capturable point",
+                        );
+                    }
+                }
             }
         }
     }
@@ -1110,5 +1318,60 @@ pub fn lashlang_type_expr_schema(ty: &lashlang::TypeExpr) -> serde_json::Value {
         lashlang::TypeExpr::Union(variants) => serde_json::json!({
             "anyOf": variants.iter().map(lashlang_type_expr_schema).collect::<Vec<_>>()
         }),
+    }
+}
+
+#[cfg(test)]
+mod segment_trace_tests {
+    use super::{
+        SEGMENT_BOUNDARY_DECLINED_TOTAL, record_segment_boundary_decline,
+        trace_lifecycle_for_segment, validate_lashlang_program_hash,
+    };
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn multi_segment_trace_emits_one_started_and_one_finished() {
+        let boundary = || {
+            lash_core::ProcessRunOutcome::SegmentBoundary(lash_core::SegmentHandover {
+                reason: lash_core::BoundaryReason::JournalBudget,
+                program_hash: Some("program-v1".to_string()),
+                engine_state: Vec::new(),
+            })
+        };
+        let terminal = lash_core::ProcessRunOutcome::from(lash_core::ProcessAwaitOutput::Success {
+            value: serde_json::Value::Null,
+            control: None,
+        });
+        let lifecycle = [
+            trace_lifecycle_for_segment(true, &boundary()),
+            trace_lifecycle_for_segment(false, &boundary()),
+            trace_lifecycle_for_segment(false, &terminal),
+        ];
+        assert_eq!(lifecycle.iter().filter(|(started, _)| *started).count(), 1);
+        assert_eq!(
+            lifecycle.iter().filter(|(_, finished)| *finished).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn resume_rejects_changed_bytecode_program_hash_with_typed_failure() {
+        let output = validate_lashlang_program_hash(Some("sha256:old"), "sha256:current")
+            .expect_err("changed bytecode identity must fail closed");
+        assert!(matches!(
+            *output,
+            lash_core::ProcessAwaitOutput::Failure { code, .. }
+                if code == "restate_segment_program_hash_mismatch"
+        ));
+    }
+
+    #[test]
+    fn declined_boundary_is_warned_and_counted() {
+        let before = SEGMENT_BOUNDARY_DECLINED_TOTAL.load(Ordering::Relaxed);
+        record_segment_boundary_decline(&"projected state", "test boundary decline");
+        assert_eq!(
+            SEGMENT_BOUNDARY_DECLINED_TOTAL.load(Ordering::Relaxed),
+            before + 1
+        );
     }
 }

@@ -10,7 +10,8 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
         registry: Arc<dyn crate::ProcessRegistry>,
         scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> crate::ProcessAwaitOutput {
+        handover: Option<crate::SegmentHandover>,
+    ) -> crate::ProcessRunOutcome {
         let input = Arc::clone(&registration.input);
         // Hybrid process model by design:
         // - ToolCall, SessionTurn, and External are kernel primitives because
@@ -19,7 +20,7 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
         // This split keeps core process coordination explicit without pulling
         // language-specific runtimes into the kernel.
         match input.as_ref() {
-            crate::ProcessInput::ToolCall { call } => {
+            crate::ProcessInput::ToolCall { call } => crate::ProcessRunOutcome::Terminal(Box::new(
                 self.run_process_tool_call(ProcessToolCallRun {
                     registration,
                     registry: Arc::clone(&registry),
@@ -28,13 +29,13 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                     scoped_effect_controller,
                     cancellation,
                 })
-                .await
-            }
+                .await,
+            )),
             crate::ProcessInput::SessionTurn {
                 create_request,
                 turn_input,
                 ..
-            } => {
+            } => crate::ProcessRunOutcome::Terminal(Box::new(
                 self.run_process_session_turn(
                     registration,
                     *create_request.clone(),
@@ -42,12 +43,14 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                     scoped_effect_controller,
                     cancellation,
                 )
-                .await
-            }
+                .await,
+            )),
             crate::ProcessInput::Engine { kind, payload } => {
                 let engine = match self.current.host.core.process_engines.require(kind) {
                     Ok(engine) => engine,
-                    Err(err) => return process_engine_failure("process_engine_missing", err),
+                    Err(err) => {
+                        return process_engine_failure("process_engine_missing", err).into();
+                    }
                 };
                 let engine_context = self.process_engine_run_context(
                     registration,
@@ -55,6 +58,7 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                     registry,
                     scoped_effect_controller,
                     cancellation,
+                    handover,
                 );
                 engine.run(engine_context, payload.clone()).await
             }
@@ -68,7 +72,8 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                 message: "externally-owned process must not be executed by lash".to_string(),
                 raw: None,
                 control: None,
-            },
+            }
+            .into(),
         }
     }
 }
@@ -81,6 +86,7 @@ impl RuntimeSessionServices {
         registry: Arc<dyn crate::ProcessRegistry>,
         scoped_effect_controller: crate::ScopedEffectController<'run>,
         cancellation: tokio_util::sync::CancellationToken,
+        handover: Option<crate::SegmentHandover>,
     ) -> crate::ProcessEngineRunContext<'run> {
         let session_id = self.current.session_id.clone();
         let plugins = Arc::clone(&self.current.plugins);
@@ -100,6 +106,7 @@ impl RuntimeSessionServices {
         let execution_context_for_runtime = execution_context.clone();
         let registry_for_runtime = Arc::clone(&registry);
         let cancellation_for_runtime = cancellation.clone();
+        let controller_for_context = scoped_effect_controller.clone();
         let builder = Box::new(move |tool_catalog: Arc<crate::ToolCatalog>| {
             let run_context = ProcessRunContext::builder(&services)
                 .tool_catalog(tool_catalog)
@@ -150,6 +157,8 @@ impl RuntimeSessionServices {
             process_registry_available,
             cancellation,
             self.current.turn_phase_probe.clone(),
+            controller_for_context,
+            handover,
             builder,
         )
     }

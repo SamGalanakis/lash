@@ -22,8 +22,9 @@ pub use awaiter::{
     watch_process_registry_with_sink,
 };
 pub use engine::{
-    ProcessEngine, ProcessEngineRegistry, ProcessEngineRunContext, ProcessEngineRunGuard,
-    ProcessEngineRuntimeContext, ProcessEngineValidationContext,
+    PersistedSegmentHandover, ProcessEngine, ProcessEngineRegistry, ProcessEngineRunContext,
+    ProcessEngineRunGuard, ProcessEngineRuntimeContext, ProcessEngineValidationContext,
+    ProcessRunOutcome, SegmentHandover,
 };
 pub use events::{
     AbandonEvidence, AbandonWriter, ProcessAwaitOutput, ProcessCompletionAuthority, ProcessEvent,

@@ -57,8 +57,12 @@ pub(crate) use record::{Symbol, intern_symbol, lookup_symbol, record_with_capaci
 pub(crate) use schema::{
     ValidationPlan, compile_schema_value, execute_validate_builtin, execute_validation_plan,
 };
+pub(crate) use vm::SlotState;
 #[allow(unused_imports)]
-pub(crate) use vm::*;
+pub use vm::{
+    ContinuationError, Vm, VmContinuation, VmIteratorContinuation, VmIteratorCursor,
+    VmProfileContinuation, VmRunOutcome,
+};
 // Re-exports of helpers that live in the focused submodules but need to be
 // reachable via `use super::*` from sibling submodules + via `super::name`
 // from `vm.rs` / `compiler.rs`. These look "unused" from mod.rs's POV but

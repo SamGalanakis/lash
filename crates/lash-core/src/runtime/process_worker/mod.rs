@@ -228,6 +228,35 @@ impl DurableProcessWorker {
         scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: CancellationToken,
     ) -> Result<ProcessAwaitOutput, PluginError> {
+        let mut handover = None;
+        loop {
+            match self
+                .run_process_segment_with_scoped_effect_controller(
+                    registration.clone(),
+                    execution_context.clone(),
+                    scoped_effect_controller.clone(),
+                    cancellation.clone(),
+                    handover,
+                )
+                .await?
+            {
+                crate::ProcessRunOutcome::Terminal(output) => return Ok(*output),
+                crate::ProcessRunOutcome::SegmentBoundary(next) => handover = Some(next),
+            }
+        }
+    }
+
+    /// Run exactly one engine segment. Durable substrates use this method so a
+    /// non-terminal boundary can end the current substrate invocation; inline
+    /// callers continue to use the looping `run_process_with_*` methods.
+    pub async fn run_process_segment_with_scoped_effect_controller(
+        &self,
+        registration: ProcessRegistration,
+        execution_context: ProcessExecutionContext,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
+        cancellation: CancellationToken,
+        handover: Option<crate::SegmentHandover>,
+    ) -> Result<crate::ProcessRunOutcome, PluginError> {
         self.ensure_stable_process_id(&registration)?;
         self.ensure_durable_store_facets()?;
         // Externally-owned rows are never executed by lash (ADR 0019). Reject the
@@ -281,6 +310,7 @@ impl DurableProcessWorker {
                 Arc::clone(&self.config.process_registry),
                 scoped_effect_controller,
                 cancellation,
+                handover,
             )
             .await)
     }
@@ -731,36 +761,58 @@ impl DurableProcessWorker {
         let process_id = record.id.clone();
         let registration = registration_from_record(record);
         let execution_context = ProcessExecutionContext::default();
-        match self
-            .run_process_with_lease_renewal(registration, execution_context, lease.clone())
-            .await
-        {
-            // Ran to a terminal outcome (success or a process-level failure) while
-            // holding the lease: this owner is the single writer of the terminal.
-            Ok(output) => self.complete_and_release(&lease, &process_id, output).await,
-            // The lease was lost mid-run — another owner reclaimed the expired
-            // lease and is now running this process. Do NOT write a terminal
-            // outcome or release the lease: that would race the new owner and
-            // could record a succeeded process as Failed. Leave the row to the
-            // lease holder; it will finish (or another sweep retries it).
-            Err(RecoverFailure::LeaseLost(err)) => {
-                tracing::warn!(
-                    process_id = %process_id,
-                    error = %err,
-                    "process recovery lost its lease mid-run; deferring to the new owner",
-                );
-            }
-            // The process could not be run at all (rebuild/store-facet failure):
-            // terminalize as a recovery failure so the row leaves the worklist.
-            Err(RecoverFailure::Run(err)) => {
-                let output = ProcessAwaitOutput::Failure {
-                    class: crate::ToolFailureClass::Execution,
-                    code: "process_recovery_failed".to_string(),
-                    message: err.to_string(),
-                    raw: None,
-                    control: None,
-                };
-                self.complete_and_release(&lease, &process_id, output).await;
+        let mut handover = None;
+        loop {
+            match self
+                .run_process_with_lease_renewal(
+                    registration.clone(),
+                    execution_context.clone(),
+                    lease.clone(),
+                    handover,
+                )
+                .await
+            {
+                // Ran to a terminal outcome (success or a process-level failure) while
+                // holding the lease: this owner is the single writer of the terminal.
+                Ok(crate::ProcessRunOutcome::Terminal(output)) => {
+                    self.complete_and_release(&lease, &process_id, *output)
+                        .await;
+                    return;
+                }
+                Ok(crate::ProcessRunOutcome::SegmentBoundary(next)) => {
+                    tracing::debug!(
+                        process_id = %process_id,
+                        reason = ?next.reason,
+                        "process crossed an in-memory segment boundary",
+                    );
+                    handover = Some(next);
+                }
+                // The lease was lost mid-run — another owner reclaimed the expired
+                // lease and is now running this process. Do NOT write a terminal
+                // outcome or release the lease: that would race the new owner and
+                // could record a succeeded process as Failed. Leave the row to the
+                // lease holder; it will finish (or another sweep retries it).
+                Err(RecoverFailure::LeaseLost(err)) => {
+                    tracing::warn!(
+                        process_id = %process_id,
+                        error = %err,
+                        "process recovery lost its lease mid-run; deferring to the new owner",
+                    );
+                    return;
+                }
+                // The process could not be run at all (rebuild/store-facet failure):
+                // terminalize as a recovery failure so the row leaves the worklist.
+                Err(RecoverFailure::Run(err)) => {
+                    let output = ProcessAwaitOutput::Failure {
+                        class: crate::ToolFailureClass::Execution,
+                        code: "process_recovery_failed".to_string(),
+                        message: err.to_string(),
+                        raw: None,
+                        control: None,
+                    };
+                    self.complete_and_release(&lease, &process_id, output).await;
+                    return;
+                }
             }
         }
     }
@@ -825,7 +877,8 @@ impl DurableProcessWorker {
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
         mut lease: ProcessLease,
-    ) -> Result<ProcessAwaitOutput, RecoverFailure> {
+        handover: Option<crate::SegmentHandover>,
+    ) -> Result<crate::ProcessRunOutcome, RecoverFailure> {
         let process_id = registration.id.clone();
         let cancellation = CancellationToken::new();
         let cancel_watcher = {
@@ -855,7 +908,25 @@ impl DurableProcessWorker {
                 }
             })
         };
-        let pending = self.run_process(registration, execution_context, cancellation.clone());
+        let scoped_effect_controller = self
+            .config
+            .runtime_host
+            .control
+            .effect_host
+            .scoped_static(crate::ExecutionScope::process(registration.id.clone()))
+            .map_err(|err| RecoverFailure::Run(PluginError::Session(err.to_string())))?
+            .ok_or_else(|| {
+                RecoverFailure::Run(PluginError::Session(
+                    "process worker effect host must provide a static process scope".to_string(),
+                ))
+            })?;
+        let pending = self.run_process_segment_with_scoped_effect_controller(
+            registration,
+            execution_context,
+            scoped_effect_controller,
+            cancellation.clone(),
+            handover,
+        );
         tokio::pin!(pending);
         loop {
             tokio::select! {

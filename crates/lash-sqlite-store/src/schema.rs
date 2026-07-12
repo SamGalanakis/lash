@@ -266,6 +266,14 @@ CREATE TABLE IF NOT EXISTS process_leases (
     FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS process_segment_handovers (
+    process_id       TEXT NOT NULL,
+    segment_ordinal  INTEGER NOT NULL,
+    handover_json    TEXT NOT NULL,
+    PRIMARY KEY (process_id, segment_ordinal),
+    FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
+);
+
 ";
 
 // Bumped to 10: ADR 0020 added a per-store process-row `change_seq` plus the
@@ -277,7 +285,7 @@ CREATE TABLE IF NOT EXISTS process_leases (
 // replay-key payload hash of a pre-cutover terminal event no longer matches the
 // hash a cross-version retry would compute — a replay would spuriously diverge.
 // Rejecting pre-11 process databases and recreating them removes that hazard.
-pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 11;
+pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 12;
 
 pub(crate) const TRIGGER_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS trigger_subscription_seq (

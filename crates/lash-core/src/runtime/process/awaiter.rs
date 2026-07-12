@@ -352,6 +352,35 @@ impl ProcessRegistry for WatchedProcessRegistry {
         Ok(record)
     }
 
+    async fn put_segment_handover(
+        &self,
+        process_id: &str,
+        handover: crate::PersistedSegmentHandover,
+    ) -> Result<(), PluginError> {
+        self.inner.put_segment_handover(process_id, handover).await
+    }
+
+    async fn get_segment_handover(
+        &self,
+        process_id: &str,
+        segment_ordinal: u64,
+    ) -> Result<Option<crate::PersistedSegmentHandover>, PluginError> {
+        self.inner
+            .get_segment_handover(process_id, segment_ordinal)
+            .await
+    }
+
+    async fn latest_segment_handover(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<crate::PersistedSegmentHandover>, PluginError> {
+        self.inner.latest_segment_handover(process_id).await
+    }
+
+    async fn delete_segment_handovers(&self, process_id: &str) -> Result<(), PluginError> {
+        self.inner.delete_segment_handovers(process_id).await
+    }
+
     async fn set_external_ref(
         &self,
         process_id: &str,
@@ -552,6 +581,13 @@ impl ProcessRegistry for WatchedProcessRegistry {
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {
         self.inner.get_process(process_id).await
+    }
+
+    async fn try_get_process(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessRecord>, PluginError> {
+        self.inner.try_get_process(process_id).await
     }
 
     async fn list_processes(
