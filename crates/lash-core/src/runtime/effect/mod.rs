@@ -4,10 +4,11 @@ mod executor;
 mod outcome;
 
 pub use envelope::{
-    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome, RuntimeInvocation,
-    RuntimeReplay, RuntimeScope, RuntimeSubject, ToolAttemptEffectOutcome, ToolAttemptLaunch,
-    ToolBatchEffectOutcome, ToolCallLaunch,
+    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome,
+    RuntimeDirectLlmOutcome, RuntimeEffectCommand, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectOutcome, RuntimeInvocation, RuntimeLlmCallOutcome, RuntimeReplay, RuntimeScope,
+    RuntimeSubject, ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome,
+    ToolCallLaunch,
 };
 pub use executor::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, EffectHost, ExecutionScope,

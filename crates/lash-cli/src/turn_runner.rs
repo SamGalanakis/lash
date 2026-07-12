@@ -179,6 +179,7 @@ async fn runtime_error_turn_result(session: &LashSession, message: String) -> la
         },
         usage: TokenUsage::default(),
         children_usage: Vec::new(),
+        llm_calls: Vec::new(),
         tool_calls: Vec::new(),
         errors: vec![TurnIssue {
             kind: "runtime".to_string(),

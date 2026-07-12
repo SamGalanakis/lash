@@ -217,9 +217,17 @@ pub(crate) struct MockCall {
 }
 
 pub(crate) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
+    mock_provider_with_kind("mock", calls)
+}
+
+pub(crate) fn mock_openai_compatible_provider(calls: Vec<MockCall>) -> TestProvider {
+    mock_provider_with_kind("openai-compatible", calls)
+}
+
+fn mock_provider_with_kind(kind: &'static str, calls: Vec<MockCall>) -> TestProvider {
     let calls = Arc::new(Mutex::new(calls));
     TestProvider::builder()
-        .kind("mock")
+        .kind(kind)
         .requires_streaming(true)
         .complete(move |req| {
             let calls = Arc::clone(&calls);

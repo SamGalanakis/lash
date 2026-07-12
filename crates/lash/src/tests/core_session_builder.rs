@@ -1771,6 +1771,7 @@ fn turn_result_total_usage_sums_parent_and_children() {
                 },
             },
         ],
+        llm_calls: Vec::new(),
         tool_calls: Vec::new(),
         execution: ExecutionSummary::default(),
         errors: Vec::new(),

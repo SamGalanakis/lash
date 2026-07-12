@@ -44,7 +44,7 @@ pub use crate::turn::{
 };
 pub use lash_core::{
     AwaitEventKey, AwaitEventWaitIdentity, ExecutionSummary, ExternalCompletionError, InputItem,
-    ModelLimits, ModelSpec, PendingTurnInput, PendingTurnInputCancelOutcome,
+    LlmCallRecord, ModelLimits, ModelSpec, PendingTurnInput, PendingTurnInputCancelOutcome,
     PendingTurnInputCancelResult, PendingTurnInputCancelTarget,
     PendingTurnInputSuffixCancelOutcome, PluginStack, Resolution, ResolveOutcome, SessionCommand,
     SessionCommandReceipt, SessionCreateRequest, SessionSpec, SessionStartPoint, TurnActivity,
@@ -143,7 +143,7 @@ pub mod direct {
     };
     pub use lash_core::{
         DirectCompletion, DirectJsonSchema, DirectLlmClient, DirectLlmCompletion, DirectLlmError,
-        DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
+        DirectLlmResult, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
     };
 }
 

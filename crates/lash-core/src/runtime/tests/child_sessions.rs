@@ -459,7 +459,7 @@ async fn forked_child_session_filters_hidden_tool_state_before_rebind() {
 
 #[tokio::test]
 async fn parent_turn_receives_live_child_token_usage_events() {
-    let transport = mock_provider(vec![
+    let transport = mock_openai_compatible_provider(vec![
         MockCall {
             stream_events: vec![
                 LlmStreamEvent::Part(LlmOutputPart::ToolCall {
@@ -476,7 +476,14 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                     reasoning_output_tokens: 0,
                 }),
             ],
-            response: Ok(LlmResponse::default()),
+            response: Ok(LlmResponse {
+                execution_evidence: Some(crate::ExecutionEvidence {
+                    served_model: Some("parent-first".to_string()),
+                    reasoning_output_tokens: Some(0),
+                    ..Default::default()
+                }),
+                ..LlmResponse::default()
+            }),
         },
         MockCall {
             stream_events: vec![LlmStreamEvent::Usage(LlmUsage {
@@ -492,6 +499,11 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                     text: "child session".to_string(),
                     response_meta: None,
                 }],
+                execution_evidence: Some(crate::ExecutionEvidence {
+                    served_model: Some("child-only".to_string()),
+                    reasoning_output_tokens: Some(99),
+                    ..Default::default()
+                }),
                 ..LlmResponse::default()
             }),
         },
@@ -503,6 +515,11 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                     text: "done".to_string(),
                     response_meta: None,
                 }],
+                execution_evidence: Some(crate::ExecutionEvidence {
+                    served_model: Some("parent-second".to_string()),
+                    reasoning_output_tokens: Some(7),
+                    ..Default::default()
+                }),
                 ..LlmResponse::default()
             }),
         },
@@ -603,6 +620,33 @@ async fn parent_turn_receives_live_child_token_usage_events() {
     assert_eq!(child_entry.usage.output_tokens, 2);
     assert_eq!(child_entry.usage.cache_read_input_tokens, 4);
     assert_eq!(child_entry.usage.reasoning_output_tokens, 1);
+
+    assert_eq!(turn.llm_calls.len(), 2);
+    let parent_evidence = turn
+        .llm_calls
+        .iter()
+        .map(|call| {
+            call.attempts[0]
+                .evidence
+                .as_ref()
+                .expect("parent attempt evidence")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parent_evidence[0].served_model.as_deref(),
+        Some("parent-first")
+    );
+    assert_eq!(parent_evidence[0].reasoning_output_tokens, Some(0));
+    assert_eq!(
+        parent_evidence[1].served_model.as_deref(),
+        Some("parent-second")
+    );
+    assert_eq!(parent_evidence[1].reasoning_output_tokens, Some(7));
+    assert!(
+        parent_evidence
+            .iter()
+            .all(|evidence| evidence.served_model.as_deref() != Some("child-only"))
+    );
 
     let usage = runtime.usage_report();
     assert_eq!(usage.by_source["subagent"].usage.input_tokens, 7);

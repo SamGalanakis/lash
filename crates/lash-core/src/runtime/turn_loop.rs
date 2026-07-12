@@ -1735,6 +1735,7 @@ impl LashRuntime {
             turn_index,
             turn_pipeline,
             llm_stream_summaries: HashMap::new(),
+            llm_calls: Vec::new(),
             next_llm_ordinal: 0,
             session_services: manager,
             protocol_turn_options: effective_protocol_turn_options,
@@ -1788,6 +1789,7 @@ impl LashRuntime {
             session,
             policy,
             turn_pipeline,
+            llm_calls,
             pending_queue_claims,
             pending_turn_input_claims,
             ..
@@ -1799,7 +1801,7 @@ impl LashRuntime {
             .finish_turn(
                 TurnFinishInput {
                     turn_pipeline,
-                    assembler,
+                    assembler: assembler.with_llm_calls(llm_calls),
                     new_messages,
                     policy,
                     turn_index,

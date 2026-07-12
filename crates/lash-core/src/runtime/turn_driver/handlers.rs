@@ -38,7 +38,7 @@ impl RuntimeTurnDriver<'_> {
                 return Ok(());
             }
         }
-        let (result, text_streamed) = match self
+        let (result, text_streamed, call_record) = match self
             .invoke_turn_llm_effect(machine, id, request, event_tx, cancel)
             .await
         {
@@ -48,6 +48,9 @@ impl RuntimeTurnDriver<'_> {
                 return Ok(());
             }
         };
+        if let Some(call_record) = call_record {
+            self.llm_calls.push(call_record);
+        }
         if let Ok(response) = &result {
             let usage = crate::runtime::effect::token_usage_from_llm(&response.usage);
             self.turn_pipeline.state_mut().last_prompt_usage = normalize_prompt_usage(&usage);

@@ -717,6 +717,7 @@ mod tests {
                 ..TokenUsage::default()
             },
             children_usage: Vec::new(),
+            llm_calls: Vec::new(),
             tool_calls: vec![ToolCallRecord {
                 call_id: Some("call-1".to_string()),
                 tool: "read_file".to_string(),

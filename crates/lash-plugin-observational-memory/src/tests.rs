@@ -103,6 +103,11 @@ fn post_persist_context_with_completion(
                 Ok(DirectCompletion {
                     text: completion_text,
                     usage: Default::default(),
+                    llm_call: lash_core::LlmCallRecord {
+                        call_id: lash_core::LlmCallId("observational-memory-test".to_string()),
+                        label: None,
+                        attempts: Vec::new(),
+                    },
                 })
             },
         ),
