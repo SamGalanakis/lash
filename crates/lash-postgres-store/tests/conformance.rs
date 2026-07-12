@@ -183,7 +183,7 @@ async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
     // Restore the correct version BEFORE asserting so a failed assert never leaves
     // the shared database wedged for other cases.
     sqlx::query(
-        "UPDATE lash_schema_versions SET version = 12 WHERE component = 'lash-postgres-store'",
+        "UPDATE lash_schema_versions SET version = 13 WHERE component = 'lash-postgres-store'",
     )
     .execute(&pool)
     .await
@@ -194,7 +194,7 @@ async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
         Err(err) => err.to_string(),
     };
     assert!(
-        message.contains("version 11") && message.contains("expected 12"),
+        message.contains("version 11") && message.contains("expected 13"),
         "expected a schema-version mismatch error, got: {message}"
     );
 }
