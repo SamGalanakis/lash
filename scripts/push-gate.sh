@@ -4,7 +4,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
 
-ci_features="${LASH_CI_FEATURES:--F lash-cli/fff-zlob -F lash-cli/bench}"
+ci_features="${LASH_CI_FEATURES:-}"
 port_base="${LASH_PUSH_GATE_PORT_BASE:-$((20000 + ($$ % 20000)))}"
 postgres_container=""
 
@@ -19,57 +19,6 @@ step() {
   printf '\n==> %s\n' "$*"
 }
 
-ci_zig_version() {
-  awk -F= '/^LASH_CI_ZIG_VERSION=/ { print $2 }' .github/ci-toolchain.env
-}
-
-ensure_ci_zig() {
-  local expected
-  expected="$(ci_zig_version)"
-  if [ -z "$expected" ]; then
-    echo "Could not read LASH_CI_ZIG_VERSION from .github/ci-toolchain.env" >&2
-    exit 1
-  fi
-  if command -v zig >/dev/null 2>&1 && [ "$(zig version)" = "$expected" ]; then
-    return
-  fi
-
-  local os arch target tool_root zig_dir archive url
-  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-  arch="$(uname -m)"
-  case "$arch" in
-    x86_64|amd64) arch="x86_64" ;;
-    aarch64|arm64) arch="aarch64" ;;
-    *)
-      echo "Unsupported architecture for Zig bootstrap: $arch" >&2
-      exit 1
-      ;;
-  esac
-  case "$os" in
-    linux) target="${arch}-linux" ;;
-    darwin) target="${arch}-macos" ;;
-    *)
-      echo "Unsupported OS for Zig bootstrap: $os" >&2
-      exit 1
-      ;;
-  esac
-
-  tool_root="${LASH_PUSH_GATE_TOOL_DIR:-$repo/target/push-gate-tools}"
-  zig_dir="${tool_root}/zig-${target}-${expected}"
-  if [ ! -x "${zig_dir}/zig" ]; then
-    mkdir -p "$zig_dir"
-    archive="${tool_root}/zig-${target}-${expected}.tar.xz"
-    url="https://ziglang.org/download/${expected}/zig-${target}-${expected}.tar.xz"
-    step "Bootstrap Zig ${expected}"
-    curl -fsSL "$url" -o "$archive"
-    tar -xJf "$archive" -C "$zig_dir" --strip-components=1
-  fi
-  export PATH="${zig_dir}:$PATH"
-  if [ "$(zig version)" != "$expected" ]; then
-    echo "Expected Zig $expected, got $(zig version)" >&2
-    exit 1
-  fi
-}
 
 configure_bindgen_headers() {
   if [ -n "${BINDGEN_EXTRA_CLANG_ARGS:-}" ]; then
@@ -87,7 +36,6 @@ run_release_script_tests() {
   step "Release automation script tests"
   python3 scripts/test_release_version.py
   python3 scripts/test_publish_workspace.py
-  python3 scripts/test_profile_guard.py
   python3 scripts/test_release_notes.py
 }
 
@@ -154,7 +102,6 @@ run_postgres_conformance() {
     cargo test -p lash-postgres-store --locked
 }
 
-ensure_ci_zig
 configure_bindgen_headers
 
 step "Formatting"

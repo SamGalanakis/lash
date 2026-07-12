@@ -30,7 +30,7 @@ elif [ "$lane" = "fast" ] && [ "$fast_shard" != "all" ]; then
 else
   out_dir="${out_root}/${lane}"
 fi
-ci_features="${LASH_CI_FEATURES:--F lash-cli/fff-zlob -F lash-cli/bench}"
+ci_features="${LASH_CI_FEATURES:-}"
 critical_packages=(lash-core lashlang lash-protocol-rlm lash-protocol-standard)
 # The two micro lanes (deterministic sim unit/oracle suite + perf-guard
 # identity checks) share one shard: sequentially they finish well under the
@@ -964,11 +964,6 @@ write_postgres_effect_history_status() {
   "smallest_required_api_change": "none"
 }
 EOF
-}
-
-run_perf_identity_checks() {
-  step "Performance guard identity checks"
-  python3 scripts/test_profile_guard.py
 }
 
 run_local_backend_conformance() {
@@ -2043,7 +2038,6 @@ run_fast_shard() {
       ;;
     sim-unit-perf-guards)
       run_sim_unit_suite
-      run_perf_identity_checks
       write_fast_shard_summary "$fast_shard"
       ;;
     sim-generated)
@@ -2118,7 +2112,6 @@ write_sim_lane_declarations
 write_full_lane_prerequisites
 write_postgres_effect_history_status
 write_restate_postgres_workers_e2e_lane_status
-run_perf_identity_checks
 
 if [ "$lane" = "default" ] || [ "$lane" = "broad" ] || [ "$lane" = "full" ]; then
   run_local_backend_conformance

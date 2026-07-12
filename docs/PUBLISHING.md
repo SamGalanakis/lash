@@ -16,10 +16,10 @@ release publishes them all together, in dependency order.
   a-la-carte capability crates (`lash-tools`, `lash-plugin-mcp`,
   `lash-subagents`, `lash-plugin-plan-mode`,
   `lash-plugin-tool-output-budget`, `lash-llm-tools`).
-- **Not published:** anything marked `publish = false` — the CLI (`lash-cli`),
-  TUI crates, examples, E2E harnesses, and dev/internal tooling
-  (`lash-perf`, `lash-trace-viewer`, `lash-export`, `lash-file-index`,
-  `lash-autoresearch`). Harness evolution lives in the separate
+- **Not published:** anything marked `publish = false` — examples, E2E
+  harnesses, and dev/internal tooling (`lash-perf`, `lash-trace-viewer`). The
+  CLI product and its private crates live in
+  [`lash-cli`](https://github.com/SamGalanakis/lash-cli). Harness evolution lives in the separate
   [`lash-evolve`](https://github.com/SamGalanakis/lash-evolve) repository.
 
 Because of the exact `=` version pins, a published crate's internal deps must
@@ -46,16 +46,16 @@ time (`scripts/release_version.py stamp`, `scripts/publish_workspace.py
    `[workspace.metadata.release].channel` and the existing `v*` tags. The
    workflow tags that exact commit and is idempotent when retried.
 4. `release.yml` validates `cargo metadata --locked`, then:
-   - `build-release-assets` stamps the real version into its tag checkout and
-     builds the CLI binaries, so `lash --version` reports the release version.
    - `publish-crates` runs
      `python3 .release-tools/scripts/publish_workspace.py --version <version>`,
      which stamps the manifests + lockfile and publishes every crate in
      topological dependency layers (crates in a layer publish concurrently, one
      crates.io visibility wait per layer). Already-published versions are
      skipped, so a failed run can be re-run to resume.
-   - the `publish` job builds the GitHub release with the curated notes and the
-     packaged assets.
+   - the `publish` job builds the SDK GitHub release with the curated notes.
+
+The independent `lash-cli` Release workflow owns binary artifacts, checksums,
+the installer, and `lash --version` stamping.
 
 The main CI workflow also runs:
 

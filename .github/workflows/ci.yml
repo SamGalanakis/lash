@@ -22,14 +22,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # One feature set for every cargo invocation in this workflow so the
-  # dependency graph resolves (and compiles) exactly once per profile.
-  # fff-zlob is required by the CLI-owned grep crate (fff-search build.rs needs
-  # the zig-backed zlob under CI); bench keeps lash-cli's UI-bench code compiling
-  # on every push without running the heavyweight performance guard in CI/CD.
-  LASH_CI_FEATURES: >-
-    -F lash-cli/fff-zlob
-    -F lash-cli/bench
+  LASH_CI_FEATURES: ""
 
 jobs:
   # Sole writer of the shared linux-debug cache and the doctest gate. It builds
@@ -47,8 +40,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
@@ -74,23 +65,17 @@ jobs:
         run: |
           python3 scripts/test_release_version.py
           python3 scripts/test_publish_workspace.py
-          python3 scripts/test_profile_guard.py
           python3 scripts/test_confidence_gate_ci_contract.py
           python3 scripts/test_release_notes.py
 
       # Compiles every target of every workspace crate — libs, bins, tests,
       # examples, and benches. This subsumes the old standalone checks for
-      # docs-snippets and the perf harness (lash-perf + lash-cli's bench
-      # feature), which would otherwise only break post-merge. It also warms the
+      # docs-snippets and the runtime perf harness, which would otherwise only break post-merge. It also warms the
       # dependency graph the test-shard matrix restores.
       - name: Check workspace (all targets)
         run: |
           # shellcheck disable=SC2086
           cargo check --workspace --all-targets --locked ${LASH_CI_FEATURES}
-
-      - name: Smoke release CLI stack guard
-        run: |
-          python3 scripts/profile_cli_release_stack.py --scenario info_standard --stack-bytes 2m --timeout-seconds 30 --cargo-feature fff-zlob --out .benchmarks/perf-guard/ci-cli-release-stack.json
 
       - name: Check lash-runtime feature boundary
         run: |
@@ -140,8 +125,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
@@ -181,8 +164,6 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
@@ -202,7 +183,7 @@ jobs:
       # `cargo fmt --all --check` and the same `--all-targets` clippy the local
       # push gate runs, plus the two boundary guards that otherwise gate nothing.
       # The clippy feature set mirrors the test-doc workspace check so the
-      # dependency graph resolves identically (fff-zlob + bench).
+      # dependency graph resolves identically.
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -238,8 +219,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
@@ -384,8 +363,8 @@ jobs:
         run: bash scripts/ci-stack-budget.sh
 
   # Cross-target compile gate. Release-profile link coverage is split by
-  # platform: x86_64 Linux is built by linux-release-cache, while the cross
-  # targets are type-checked here and fully linked by release.yml.
+  # platform: x86_64 Linux is built by linux-release-cache, while cross
+  # targets are type-checked here.
   cross-check:
     name: Check (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -412,8 +391,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
@@ -435,7 +412,7 @@ jobs:
         run: brew install llvm
 
       - name: Check release target
-        run: cargo check --locked --release -p lash-cli --features fff-zlob --target ${{ matrix.target }}
+        run: cargo check --locked --release --workspace --target ${{ matrix.target }}
 
   linux-release-cache:
     name: Build Linux release cache
@@ -448,8 +425,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
@@ -468,8 +443,8 @@ jobs:
       - name: Setup sccache
         uses: ./.github/actions/setup-sccache
 
-      - name: Build release binary
-        run: cargo build --locked --release -p lash-cli --features fff-zlob --target x86_64-unknown-linux-gnu
+      - name: Build release workspace
+        run: cargo build --locked --release --workspace --target x86_64-unknown-linux-gnu
 
   restate-e2e:
     name: Restate E2E (${{ matrix.name }})
@@ -491,8 +466,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2

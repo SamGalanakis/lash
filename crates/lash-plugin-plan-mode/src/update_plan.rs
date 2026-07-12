@@ -14,8 +14,8 @@
 //! Gating: the plugin's [`PluginFactory::build`] returns an inert
 //! `SessionPlugin` whenever the session has a parent (i.e. the session
 //! is a subagent, compaction child, or any other non-root session).
-//! Interactive-vs-batch gating is handled by the registration site in
-//! `crates/lash-cli/src/bootstrap.rs`.
+//! Interactive-vs-batch gating is host policy; the first-party implementation
+//! lives in the external `lash-cli` Host Application.
 
 use std::sync::{Arc, Mutex};
 
@@ -224,10 +224,9 @@ fn planning_prompt_contributions() -> Vec<PromptContribution> {
     vec![PromptContribution::guidance("Planning", PLANNING_GUIDANCE)]
 }
 
-/// Public plugin factory. Callers that want this plugin installed
-/// (`lash-cli` under `profile.interactive_extras`) push an instance
-/// onto the plugin factory list. In non-root sessions the factory
-/// returns an inert plugin that registers nothing.
+/// Public plugin factory. Host applications that want this plugin installed
+/// push an instance onto their plugin factory list. In non-root sessions the
+/// factory returns an inert plugin that registers nothing.
 pub struct UpdatePlanPluginFactory;
 
 impl UpdatePlanPluginFactory {

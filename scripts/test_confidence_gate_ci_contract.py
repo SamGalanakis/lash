@@ -182,22 +182,17 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
             self.assertIn(snippet, workflow)
         self.assertNotIn("\n  push:\n", workflow)
 
-    def test_release_asset_builds_overlap_full_perf_guard(self) -> None:
+    def test_runtime_release_publishes_sdk_without_host_assets(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-        perf_guard = workflow_job_block(workflow, "perf-guard-full")
-        build_assets = workflow_job_block(workflow, "build-release-assets")
         publish = workflow_job_block(workflow, "publish")
         publish_crates = workflow_job_block(workflow, "publish-crates")
 
-        self.assertIn("needs: [prepare-release, validate-release-ref]", perf_guard)
-        self.assertIn("needs: [prepare-release, validate-release-ref]", build_assets)
-        self.assertNotIn("perf-guard-full", build_assets)
-        self.assertIn("needs: [prepare-release, build-release-assets, perf-guard-full]", publish)
-        self.assertIn(
-            "needs: [prepare-release, validate-release-ref, perf-guard-full]",
-            publish_crates,
-        )
+        self.assertNotIn("build-release-assets", workflow)
+        self.assertNotIn("perf-guard-full", workflow)
+        self.assertNotIn("install_lash.sh", workflow)
+        self.assertIn("needs: [prepare-release, publish-crates]", publish)
+        self.assertIn("needs: [prepare-release, validate-release-ref]", publish_crates)
 
     def test_broad_lane_is_manual_or_scheduled_confidence_not_ci_cd(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -367,10 +362,8 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         self.assertIn("[workspace.metadata.release]", cargo)
         self.assertNotIn("0.1.0-alpha.", cargo)
 
-        # The version is stamped into the ephemeral tag checkout at packaging
-        # time: binaries built from the stamped tree, crates pinned to the real
-        # version.
-        self.assertIn("release_version.py stamp", release)
+        # The publisher stamps the ephemeral checkout before packaging crates.
+        # Host-application binary stamping belongs to lash-cli's release.
         self.assertIn("publish_workspace.py --version", release)
 
     def test_release_notes_are_gated_only_when_a_manual_release_is_cut(self) -> None:
@@ -401,7 +394,7 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         for job_id in ("test-doc", "test-shard", "confidence-fast", "linux-release-cache"):
             block = workflow_job_block(workflow, job_id)
             self.assertIn("./.github/actions/setup-sccache", block)
-        self.assertIn("./.github/actions/setup-sccache", release)
+        self.assertNotIn("cargo build", release)
 
     def test_ci_has_no_staging_or_automatic_release_path(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

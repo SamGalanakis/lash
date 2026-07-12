@@ -26,9 +26,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   LASH_CONFIDENCE_BOOTSTRAP: "1"
-  LASH_CI_FEATURES: >-
-    -F lash-cli/fff-zlob
-    -F lash-cli/bench
+  LASH_CI_FEATURES: ""
 
 jobs:
   confidence:
@@ -49,8 +47,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
@@ -90,8 +86,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2

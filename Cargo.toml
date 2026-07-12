@@ -25,21 +25,13 @@ members = [
     "crates/lash-llm-tools",
     "crates/lash-tool-support",
     "crates/lash-tools",
-    "crates/lash-search-tools",
     "crates/lash-standard-plugins",
     "crates/lash-provider-anthropic",
     "crates/lash-provider-google",
     "crates/lash-provider-openai",
     "crates/lash-sim",
     "crates/lash-subagents",
-    "crates/lash-tui-extensions",
-    "crates/lash-tui",
-    "crates/lash-autoresearch",
-    "crates/lash-debug-cli-harness",
-    "crates/lash-cli",
     "crates/lash-perf",
-    "crates/lash-export",
-    "crates/lash-file-index",
     "crates/lashlang",
     "examples/agent-service",
     "examples/agent-workbench",
@@ -143,11 +135,7 @@ uuid = "1"
 # rewrites every `=` pin (and the lockfile) in the release workflow's ephemeral
 # tag checkout, so published crates depend on the real release version.
 lash = { package = "lash-runtime", path = "crates/lash", version = "=0.0.0-dev" }
-lash-autoresearch = { path = "crates/lash-autoresearch", version = "=0.0.0-dev" }
-lash-cli = { path = "crates/lash-cli", version = "=0.0.0-dev" }
 lash-core = { path = "crates/lash-core", version = "=0.0.0-dev" }
-lash-export = { path = "crates/lash-export", version = "=0.0.0-dev" }
-lash-file-index = { path = "crates/lash-file-index", version = "=0.0.0-dev" }
 lash-http-transport = { path = "crates/lash-http-transport", version = "=0.0.0-dev" }
 lash-llm-tools = { path = "crates/lash-llm-tools", version = "=0.0.0-dev" }
 lash-llm-transport = { path = "crates/lash-llm-transport", version = "=0.0.0-dev" }
@@ -171,12 +159,9 @@ lash-rlm-types = { path = "crates/lash-rlm-types", version = "=0.0.0-dev" }
 lash-sansio = { path = "crates/lash-sansio", version = "=0.0.0-dev" }
 lash-standard-plugins = { path = "crates/lash-standard-plugins", version = "=0.0.0-dev" }
 lash-subagents = { path = "crates/lash-subagents", version = "=0.0.0-dev" }
-lash-search-tools = { path = "crates/lash-search-tools", version = "=0.0.0-dev" }
 lash-tool-support = { path = "crates/lash-tool-support", version = "=0.0.0-dev" }
 lash-tools = { path = "crates/lash-tools", version = "=0.0.0-dev" }
 lash-trace = { path = "crates/lash-trace", version = "=0.0.0-dev" }
-lash-tui = { path = "crates/lash-tui", version = "=0.0.0-dev" }
-lash-tui-extensions = { path = "crates/lash-tui-extensions", version = "=0.0.0-dev" }
 lash-sqlite-store = { path = "crates/lash-sqlite-store", version = "=0.0.0-dev" }
 lashlang = { path = "crates/lashlang", version = "=0.0.0-dev" }
 [profile.release]

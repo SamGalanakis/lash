@@ -96,7 +96,7 @@ pub async fn run_cli(
     let profiler = dhat::start_dhat_profiler(
         dhat_out_path.clone(),
         dhat_frames,
-        "runtime perf dhat profiling requires a lash-cli build with --features dhat-heap",
+        "runtime perf dhat profiling requires a lash-perf build with --features dhat-heap",
     )?;
     let mut results = Vec::with_capacity(runs * scenarios.len());
     for _ in 0..runs {
