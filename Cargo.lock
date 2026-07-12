@@ -2621,30 +2621,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-harness-opt"
-version = "0.0.0-dev"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "dirs 6.0.0",
- "lash-cli",
- "lash-core",
- "lash-protocol-rlm",
- "lash-rlm-types",
- "lash-runtime",
- "lash-sansio",
- "lash-trace",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
 name = "lash-http-transport"
 version = "0.0.0-dev"
 dependencies = [
@@ -6424,7 +6400,6 @@ checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 
