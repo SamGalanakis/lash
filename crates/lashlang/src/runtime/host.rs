@@ -115,7 +115,7 @@ pub struct ProcessSignal {
     pub payload: Value,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExecutionMode {
     #[default]
     Foreground,

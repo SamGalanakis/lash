@@ -57,16 +57,16 @@ use lash_core::store::{
 use lash_core::{
     AbandonRequest, AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
     BlobRef, DeliveryPolicy, DurabilityTier, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness,
-    MergeKey, PROCESS_LEASE_SCHEMA_VERSION, ProcessAwaitOutput, ProcessChangeCursor, ProcessEvent,
-    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseClaimOutcome,
-    ProcessLeaseCompletion, ProcessListFilter, ProcessLiveReferenceSummary, ProcessPruneReport,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted, QueuedWorkStore,
-    RuntimePersistence, SessionCommitStore, SessionExecutionLease,
-    SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
-    SessionExecutionLeaseStore, SessionMeta, SessionPickerInfo, SessionReadScope, SessionScope,
-    SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, StoreMaintenance,
-    TurnInputStore, VacuumReport,
+    MergeKey, PROCESS_LEASE_SCHEMA_VERSION, PersistedSegmentHandover, ProcessAwaitOutput,
+    ProcessChangeCursor, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
+    ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessListFilter,
+    ProcessLiveReferenceSummary, ProcessPruneReport, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessStarted, QueuedWorkStore, RuntimePersistence, SessionCommitStore,
+    SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
+    SessionExecutionLeaseFence, SessionExecutionLeaseStore, SessionMeta, SessionPickerInfo,
+    SessionReadScope, SessionScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
+    StoreError, StoreMaintenance, TurnInputStore, VacuumReport,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -875,6 +875,87 @@ mod tests {
         assert!(
             result.is_err(),
             "an unreadable primary session database must abort discovery, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn segment_handover_persist_keeps_current_input_for_crash_replay() {
+        let registry = SqliteProcessRegistry::memory()
+            .await
+            .expect("memory registry");
+        registry
+            .register_process(registration("segment-crash"))
+            .await
+            .expect("register");
+        let handover = |segment_ordinal| PersistedSegmentHandover {
+            segment_ordinal,
+            program_hash: "program-v1".to_string(),
+            handover: lash_core::SegmentHandover {
+                reason: lash_core::BoundaryReason::JournalBudget,
+                program_hash: Some("program-v1".to_string()),
+                engine_state: vec![segment_ordinal as u8],
+            },
+        };
+        registry
+            .put_segment_handover("segment-crash", handover(1))
+            .await
+            .expect("persist current segment input");
+        registry
+            .put_segment_handover("segment-crash", handover(2))
+            .await
+            .expect("persist successor before send");
+
+        assert_eq!(
+            registry
+                .get_segment_handover("segment-crash", 1)
+                .await
+                .expect("replay read"),
+            Some(handover(1)),
+            "a crash before successor send must leave segment 1 replayable"
+        );
+        assert_eq!(
+            registry
+                .latest_segment_handover("segment-crash")
+                .await
+                .expect("latest handover"),
+            Some(handover(2))
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_segment_handover_cleanup_removes_continuation_state() {
+        let registry = SqliteProcessRegistry::memory()
+            .await
+            .expect("memory registry");
+        registry
+            .register_process(registration("segment-terminal"))
+            .await
+            .expect("register");
+        registry
+            .put_segment_handover(
+                "segment-terminal",
+                PersistedSegmentHandover {
+                    segment_ordinal: 1,
+                    program_hash: "program-v1".to_string(),
+                    handover: lash_core::SegmentHandover {
+                        reason: lash_core::BoundaryReason::JournalBudget,
+                        program_hash: Some("program-v1".to_string()),
+                        engine_state: vec![7],
+                    },
+                },
+            )
+            .await
+            .expect("persist handover");
+        registry
+            .delete_segment_handovers("segment-terminal")
+            .await
+            .expect("terminal cleanup");
+        assert!(
+            registry
+                .latest_segment_handover("segment-terminal")
+                .await
+                .expect("latest handover")
+                .is_none()
         );
     }
 

@@ -406,6 +406,16 @@ pub trait EffectHost: AwaitEventResolver {
 /// Boundary for nondeterministic runtime work.
 #[async_trait::async_trait]
 pub trait RuntimeEffectController: AwaitEventResolver {
+    /// Advises an engine to end the current in-process execution segment at a
+    /// quiescent point. Engines may decline when live state is not capturable,
+    /// but must make progress before returning another decline. In particular,
+    /// an engine must not repeatedly return the same boundary and unchanged
+    /// durable-wait state in one invocation; a host may bound and retry such a
+    /// non-progressing invocation.
+    fn wants_segment_boundary(&self, _progress: &SegmentProgress) -> Option<BoundaryReason> {
+        None
+    }
+
     /// Whether this controller can safely accept overlapping `execute_effect`
     /// calls from one runtime coordinator.
     ///
@@ -424,6 +434,19 @@ pub trait RuntimeEffectController: AwaitEventResolver {
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError>;
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SegmentProgress {
+    pub effects_executed: u64,
+    pub journaled_bytes_estimate: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundaryReason {
+    JournalBudget,
+    DurationCap,
 }
 
 /// Runtime-internal handle for effect-controller references carried through
@@ -537,7 +560,8 @@ pub(crate) trait ProcessRunner: Send + Sync {
         registry: Arc<dyn ProcessRegistry>,
         scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: CancellationToken,
-    ) -> crate::ProcessAwaitOutput;
+        handover: Option<crate::SegmentHandover>,
+    ) -> crate::ProcessRunOutcome;
 }
 
 pub struct ProcessLocalExecution {

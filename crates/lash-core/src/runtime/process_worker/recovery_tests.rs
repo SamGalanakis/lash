@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::*;
@@ -168,6 +169,132 @@ async fn await_terminal(registry: &Arc<dyn ProcessRegistry>, process_id: &str) {
     .await
     .expect("recovered process reaches terminal within the sweep")
     .expect("recovered process terminal output");
+}
+
+struct BoundaryThenTerminalEngine {
+    runs: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::ProcessEngine for BoundaryThenTerminalEngine {
+    fn kind(&self) -> &'static str {
+        "boundary-test"
+    }
+
+    async fn run(
+        &self,
+        mut context: crate::ProcessEngineRunContext<'_>,
+        _payload: serde_json::Value,
+    ) -> crate::ProcessRunOutcome {
+        let run = self.runs.fetch_add(1, Ordering::SeqCst);
+        let record = context
+            .registry()
+            .get_process(&context.registration().id)
+            .await
+            .expect("process remains registered between segments");
+        assert!(!record.is_terminal(), "boundary must not write a terminal");
+        if run == 0 {
+            assert!(context.take_handover().is_none());
+            crate::ProcessRunOutcome::SegmentBoundary(crate::SegmentHandover {
+                reason: crate::BoundaryReason::JournalBudget,
+                program_hash: Some("program-v1".to_string()),
+                engine_state: vec![1, 2, 3],
+            })
+        } else {
+            assert_eq!(
+                context
+                    .take_handover()
+                    .expect("handover reaches re-entry")
+                    .engine_state,
+                vec![1, 2, 3]
+            );
+            crate::ProcessRunOutcome::Terminal(Box::new(ProcessAwaitOutput::Success {
+                value: serde_json::json!({ "segments": 2 }),
+                control: None,
+            }))
+        }
+    }
+}
+
+#[tokio::test]
+async fn segment_boundary_reenters_in_memory_without_premature_terminal() {
+    struct Factory;
+
+    #[async_trait::async_trait]
+    impl SessionStoreFactory for Factory {
+        async fn create_store(
+            &self,
+            _request: &crate::SessionStoreCreateRequest,
+        ) -> Result<Arc<dyn crate::RuntimePersistence>, String> {
+            Ok(Arc::new(InMemorySessionStore::default()))
+        }
+
+        async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    let registry: Arc<dyn ProcessRegistry> = Arc::new(TestLocalProcessRegistry::default());
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut runtime_host = RuntimeHostConfig::in_memory();
+    runtime_host.process_engines =
+        crate::ProcessEngineRegistry::new().with_engine(Arc::new(BoundaryThenTerminalEngine {
+            runs: Arc::clone(&runs),
+        }));
+    let policy = crate::SessionPolicy {
+        provider_id: "test".to_string(),
+        model: crate::ModelSpec::from_token_limits("test-model", Default::default(), 16_384, None)
+            .expect("valid model spec"),
+        ..crate::SessionPolicy::default()
+    };
+    let env_spec =
+        crate::ProcessExecutionEnvSpec::new(crate::PluginOptions::default(), policy.clone());
+    let env_ref = crate::persist_process_execution_env(
+        runtime_host.durability.process_env_store.as_ref(),
+        &env_spec,
+    )
+    .await
+    .expect("persist process env");
+    let worker = DurableProcessWorker::new(
+        DurableProcessWorkerConfig::new(
+            Arc::new(PluginHost::new(Vec::new())),
+            runtime_host,
+            Arc::new(Factory),
+            Arc::clone(&registry),
+        )
+        .with_session_policy(policy)
+        .with_lease_owner(local_owner("segment-worker", "host-a", "start-a")),
+    );
+    registry
+        .register_process(
+            ProcessRegistration::new(
+                "segmented-process",
+                ProcessInput::Engine {
+                    kind: "boundary-test".to_string(),
+                    payload: serde_json::json!({}),
+                },
+                RecoveryDisposition::Rerunnable,
+                crate::ProcessProvenance::host(),
+            )
+            .with_execution_env_ref(Some(env_ref)),
+        )
+        .await
+        .expect("register process");
+
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("drive process");
+    await_terminal(&registry, "segmented-process").await;
+    let final_record = registry
+        .get_process("segmented-process")
+        .await
+        .expect("process exists");
+    assert_eq!(runs.load(Ordering::SeqCst), 2, "{:?}", final_record.status);
+    assert!(matches!(
+        final_record.status,
+        ProcessStatus::Completed { .. }
+    ));
 }
 
 #[tokio::test]

@@ -1,5 +1,6 @@
 use crate::plugin::PluginError;
 
+use super::engine::PersistedSegmentHandover;
 use super::events::{
     ProcessAwaitOutput, ProcessCompletionAuthority, ProcessEvent, ProcessEventAppendRequest,
     ProcessEventAppendResult,
@@ -41,6 +42,31 @@ pub trait ProcessRegistry: Send + Sync {
         &self,
         registration: ProcessRegistration,
     ) -> Result<ProcessRecord, PluginError>;
+
+    /// Persist the bounded engine continuation for exactly one segment.
+    /// Repeating an identical write is an idempotent no-op; conflicting data
+    /// for the same `(process_id, segment_ordinal)` is rejected.
+    async fn put_segment_handover(
+        &self,
+        process_id: &str,
+        handover: PersistedSegmentHandover,
+    ) -> Result<(), PluginError>;
+
+    /// Load the continuation for an exact process segment ordinal.
+    async fn get_segment_handover(
+        &self,
+        process_id: &str,
+        segment_ordinal: u64,
+    ) -> Result<Option<PersistedSegmentHandover>, PluginError>;
+
+    /// Load the highest persisted segment ordinal for recovery.
+    async fn latest_segment_handover(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<PersistedSegmentHandover>, PluginError>;
+
+    /// Remove all cross-segment execution state once the process is terminal.
+    async fn delete_segment_handovers(&self, process_id: &str) -> Result<(), PluginError>;
 
     /// Attach a durable backend reference to a registered process.
     ///
@@ -242,6 +268,15 @@ pub trait ProcessRegistry: Send + Sync {
     async fn clear_process_wait(&self, process_id: &str) -> Result<ProcessRecord, PluginError>;
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord>;
+
+    /// Fallible process lookup for correctness-critical execution paths where
+    /// a transient store failure must not be mistaken for an absent row.
+    async fn try_get_process(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessRecord>, PluginError> {
+        Ok(self.get_process(process_id).await)
+    }
 
     async fn list_processes(
         &self,

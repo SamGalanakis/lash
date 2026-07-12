@@ -24,14 +24,14 @@ use lash_core::store::{
 use lash_core::{
     AbandonRequest, AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
     AwaitEventResolver, BlobRef, DeliveryPolicy, DurabilityTier, EffectHost, ExecutionScope,
-    GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey, ProcessAwaitOutput,
-    ProcessChangeCursor, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
-    ProcessLeaseCompletion, ProcessLiveReferenceSummary, ProcessPruneReport, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessStarted, QueuedWorkStore, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimePersistence,
-    ScopedEffectController, SessionCommitStore, SessionExecutionLease,
+    GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey, PersistedSegmentHandover,
+    ProcessAwaitOutput, ProcessChangeCursor, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessLease, ProcessLeaseCompletion, ProcessLiveReferenceSummary, ProcessPruneReport,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted, QueuedWorkStore,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
+    RuntimePersistence, ScopedEffectController, SessionCommitStore, SessionExecutionLease,
     SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
     SessionExecutionLeaseStore, SessionMeta, SessionNodeRecord, SessionReadScope, SessionScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, StoreMaintenance,
@@ -64,7 +64,7 @@ const SCHEMA_COMPONENT: &str = "lash-postgres-store";
 // `claim_expires_at_ms` columns with a single `claim_session_lease_generation`
 // pinning the session-execution-lease generation the claim was taken under. This
 // is a reject-and-recreate boundary; pre-12 databases are rejected at open.
-const SCHEMA_VERSION: i32 = 12;
+const SCHEMA_VERSION: i32 = 13;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]

@@ -251,6 +251,12 @@ pub(super) fn validate_process_registration(
             "process id must be a non-empty string".to_string(),
         ));
     }
+    if registration.id.contains('#') {
+        return Err(PluginError::Session(format!(
+            "process id `{}` contains reserved segment separator `#`",
+            registration.id
+        )));
+    }
     match registration.input.as_ref() {
         super::model::ProcessInput::ToolCall { .. } | super::model::ProcessInput::Engine { .. } => {
             if registration.env_ref.is_none() {
@@ -295,4 +301,25 @@ pub(super) fn validate_process_registration(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_process_registration;
+    use crate::{ProcessInput, ProcessProvenance, ProcessRegistration, RecoveryDisposition};
+
+    #[test]
+    fn process_id_rejects_reserved_segment_separator() {
+        let registration = ProcessRegistration::new(
+            "foo#1",
+            ProcessInput::External {
+                metadata: serde_json::Value::Null,
+            },
+            RecoveryDisposition::ExternallyOwned,
+            ProcessProvenance::host(),
+        );
+        let error = prepare_process_registration(registration)
+            .expect_err("segment separator must be rejected");
+        assert!(error.to_string().contains("reserved segment separator `#`"));
+    }
 }

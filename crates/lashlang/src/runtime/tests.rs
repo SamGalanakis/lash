@@ -1060,3 +1060,4 @@ async fn compiler_keeps_assignment_hot_paths_specialized() {
 include!("tests/compiler_cases.rs");
 include!("tests/projection_cases.rs");
 include!("tests/async_and_cache_cases.rs");
+include!("tests/continuation_cases.rs");

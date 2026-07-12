@@ -140,6 +140,49 @@ fn workflow_key_authority(process_id: &str) -> ProcessCompletionAuthority {
     }
 }
 
+fn process_segment_workflow_key(process_id: &str, segment_ordinal: u64) -> String {
+    if segment_ordinal == 0 {
+        process_id.to_string()
+    } else {
+        format!("{process_id}#{segment_ordinal}")
+    }
+}
+
+fn terminal_completion_workflow_key(process_id: &str, segment_ordinal: u64) -> Option<String> {
+    (segment_ordinal > 0).then(|| process_id.to_string())
+}
+
+fn retryable_registry_error(error: PluginError) -> HandlerError {
+    HandlerError::from(error)
+}
+
+fn boundary_must_be_declined(record: Option<&ProcessRecord>) -> bool {
+    record.is_some_and(|record| record.wait.is_some())
+}
+
+fn missing_segment_is_superseded(
+    requested_ordinal: u64,
+    latest: Option<&lash_core::PersistedSegmentHandover>,
+) -> bool {
+    latest.is_some_and(|handover| handover.segment_ordinal > requested_ordinal)
+}
+
+fn validate_segment_program_hash(
+    process_id: &str,
+    persisted: lash_core::PersistedSegmentHandover,
+) -> Result<lash_core::SegmentHandover, RuntimeError> {
+    if persisted.handover.program_hash.as_deref() != Some(persisted.program_hash.as_str()) {
+        return Err(RuntimeError::new(
+            "restate_segment_program_hash_mismatch",
+            format!(
+                "process `{process_id}` segment {} handover program identity is inconsistent",
+                persisted.segment_ordinal
+            ),
+        ));
+    }
+    Ok(persisted.handover)
+}
+
 fn restate_await_event_ingress_required() -> RuntimeError {
     RuntimeError::new(
         "restate_await_event_ingress_required",
@@ -242,6 +285,24 @@ fn restate_process_terminal_output(
             control: None,
         }),
     }
+}
+
+fn resolve_process_terminal_promise<'ctx, C>(
+    context: &C,
+    process_id: &str,
+    output: &ProcessAwaitOutput,
+) -> HandlerResult<()>
+where
+    C: ContextPromises<'ctx>,
+{
+    let key = restate_process_terminal_await_key(process_id)
+        .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+    let resolution = restate_process_terminal_resolution(output)
+        .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+    let payload = serde_json::to_string(&resolution)
+        .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+    context.resolve_promise(&key.promise_key(), payload);
+    Ok(())
 }
 
 async fn resolve_restate_await_event<'ctx, C>(
@@ -479,6 +540,7 @@ impl RestateIngressClient {
         handler: &str,
         body: &T,
     ) -> Result<RestateInvocationId, RestateHttpError> {
+        let workflow_key = restate_path_component(workflow_key);
         self.send_json_path(format!("{workflow}/{workflow_key}/{handler}/send"), body)
             .await
     }
@@ -494,6 +556,7 @@ impl RestateIngressClient {
         T: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        let workflow_key = restate_path_component(workflow_key);
         let path = format!("{workflow}/{workflow_key}/{handler}");
         let url = format_restate_url(self.connection.ingress_url(), &path);
         let response = self.post_json("Restate workflow call", &url, body).await?;
@@ -585,6 +648,21 @@ impl RestateIngressClient {
         )
         .await
     }
+}
+
+fn restate_path_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -834,12 +912,14 @@ pub struct RestateProcessCancelRequest {
 
 #[async_trait::async_trait]
 pub trait RestateProcessRunner: Send + Sync + 'static {
-    async fn run_process(
+    async fn run_process_segment(
         &self,
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
         scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<ProcessAwaitOutput, PluginError>;
+        handover: Option<lash_core::SegmentHandover>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<lash_core::ProcessRunOutcome, PluginError>;
 
     async fn request_process_cancel(
         &self,
@@ -864,18 +944,21 @@ impl RestateCoreProcessRunner {
 
 #[async_trait::async_trait]
 impl RestateProcessRunner for RestateCoreProcessRunner {
-    async fn run_process(
+    async fn run_process_segment(
         &self,
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
         scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<ProcessAwaitOutput, PluginError> {
+        handover: Option<lash_core::SegmentHandover>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<lash_core::ProcessRunOutcome, PluginError> {
         self.worker
-            .run_process_with_scoped_effect_controller(
+            .run_process_segment_with_scoped_effect_controller(
                 registration,
                 execution_context,
                 scoped_effect_controller,
-                tokio_util::sync::CancellationToken::new(),
+                cancellation,
+                handover,
             )
             .await
     }
@@ -1168,6 +1251,11 @@ impl RestateProcessIngressRunner {
         {
             return Ok(());
         }
+        let latest_handover = self.registry.latest_segment_handover(&process_id).await?;
+        let segment_ordinal = latest_handover
+            .as_ref()
+            .map_or(0, |handover| handover.segment_ordinal);
+        let workflow_key = process_segment_workflow_key(&process_id, segment_ordinal);
         let registration = ProcessRegistration {
             id: record.id,
             input: record.input,
@@ -1183,11 +1271,12 @@ impl RestateProcessIngressRunner {
             .ingress
             .send_workflow_json(
                 "LashProcessWorkflow",
-                &process_id,
+                &workflow_key,
                 "run",
                 &RestateProcessWorkflowInput {
                     registration,
                     execution_context,
+                    segment_ordinal,
                 },
             )
             .await
@@ -1277,6 +1366,13 @@ impl ProcessRunHandle for RestateProcessIngressRunner {
 #[async_trait::async_trait]
 impl ProcessAttach for RestateProcessIngressRunner {
     async fn await_terminal(&self, process_id: &str) -> Result<ProcessAwaitOutput, PluginError> {
+        let record = self.registry.try_get_process(process_id).await?;
+        if let Some(output) = record
+            .as_ref()
+            .and_then(|record| record.status.await_output())
+        {
+            return Ok(output.clone());
+        }
         self.ingress
             .call_workflow_json::<_, ProcessAwaitOutput>(
                 "LashProcessWorkflow",
@@ -1354,7 +1450,12 @@ impl RestateProcessDeployment {
 pub trait LashProcessWorkflow {
     async fn run(
         input: Json<RestateProcessWorkflowInput>,
-    ) -> HandlerResult<Json<ProcessAwaitOutput>>;
+    ) -> HandlerResult<Json<RestateProcessWorkflowOutput>>;
+
+    #[shared]
+    async fn complete_terminal(
+        request: Json<RestateProcessCompleteRequest>,
+    ) -> HandlerResult<Json<()>>;
 
     #[shared]
     async fn await_terminal(
@@ -1370,6 +1471,21 @@ pub struct RestateProcessWorkflowInput {
     pub registration: ProcessRegistration,
     #[serde(default, skip_serializing_if = "ProcessExecutionContext::is_empty")]
     pub execution_context: ProcessExecutionContext,
+    #[serde(default)]
+    pub segment_ordinal: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RestateProcessWorkflowOutput {
+    Terminal { output: Box<ProcessAwaitOutput> },
+    SegmentChained { next_segment_ordinal: u64 },
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct RestateProcessCompleteRequest {
+    pub process_id: String,
+    pub output: ProcessAwaitOutput,
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -1380,11 +1496,35 @@ pub struct RestateProcessAwaitRequest {
 pub struct LashProcessWorkflowImpl<R> {
     runner: Arc<R>,
     registry: Arc<dyn ProcessRegistry>,
+    segment_duration_cap: Option<Duration>,
+    segment_effect_budget: Arc<dyn Fn(&ProcessRegistration) -> u64 + Send + Sync>,
 }
 
 impl<R> LashProcessWorkflowImpl<R> {
     pub fn new(runner: Arc<R>, registry: Arc<dyn ProcessRegistry>) -> Self {
-        Self { runner, registry }
+        Self {
+            runner,
+            registry,
+            segment_duration_cap: None,
+            segment_effect_budget: Arc::new(|_| 10_000),
+        }
+    }
+
+    pub fn with_segment_duration_cap(mut self, cap: Duration) -> Self {
+        self.segment_duration_cap = Some(cap);
+        self
+    }
+
+    /// Select a deterministic completed-effect budget from immutable process
+    /// registration data. This is primarily useful for conformance/e2e pairs
+    /// that run the same artifact with and without forced segmentation; the
+    /// production default remains 10,000 completed effects per incarnation.
+    pub fn with_segment_effect_budget_selector(
+        mut self,
+        selector: impl Fn(&ProcessRegistration) -> u64 + Send + Sync + 'static,
+    ) -> Self {
+        self.segment_effect_budget = Arc::new(selector);
+        self
     }
 }
 
@@ -1397,7 +1537,9 @@ where
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
         scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<ProcessAwaitOutput, PluginError> {
+        segment_ordinal: u64,
+        handover: Option<lash_core::SegmentHandover>,
+    ) -> Result<lash_core::ProcessRunOutcome, PluginError> {
         let process_id = registration.id.clone();
         // ADR 0019: refuse to re-execute an already-started OwnerBound row. A
         // fresh OwnerBound row has `first_started == None` (the runner records
@@ -1408,9 +1550,10 @@ where
         // no other owner may re-execute), so complete it as Abandoned instead and
         // return that output; the normal `run` tail then resolves the durable
         // promise so awaiters still unblock. Rerunnable rows are never affected.
-        if let Some(record) = self.registry.get_process(&process_id).await
+        if let Some(record) = self.registry.try_get_process(&process_id).await?
             && record.disposition == RecoveryDisposition::OwnerBound
             && record.first_started.is_some()
+            && segment_ordinal == 0
         {
             // Writer attribution = Sweep: the Restate run handler is standing in
             // as the crash-recovery sweep for the durable tier. The engine
@@ -1433,23 +1576,62 @@ where
                     workflow_key_authority(&process_id),
                 )
                 .await?;
-            return Ok(output);
+            return Ok(output.into());
         }
-        let output = self
+        if self.process_cancel_requested(&process_id).await? {
+            let output = ProcessAwaitOutput::Cancelled {
+                message: format!("process `{process_id}` was cancelled"),
+                raw: None,
+                control: None,
+            };
+            self.registry
+                .complete_process(
+                    &process_id,
+                    output.clone(),
+                    workflow_key_authority(&process_id),
+                )
+                .await?;
+            return Ok(output.into());
+        }
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let cancel_watcher = {
+            let registry = Arc::clone(&self.registry);
+            let process_id = process_id.clone();
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                let awaiter = lash_core::ProcessAwaiter::polling(registry);
+                if awaiter
+                    .await_event(&process_id, "process.cancel_requested", 0)
+                    .await
+                    .is_ok()
+                {
+                    cancellation.cancel();
+                }
+            })
+        };
+        let outcome = self
             .runner
-            .run_process(registration, execution_context, scoped_effect_controller)
+            .run_process_segment(
+                registration,
+                execution_context,
+                scoped_effect_controller,
+                handover,
+                cancellation,
+            )
             .await;
-        match output {
-            Ok(output) => {
+        cancel_watcher.abort();
+        match outcome {
+            Ok(lash_core::ProcessRunOutcome::Terminal(output)) => {
                 self.registry
                     .complete_process(
                         &process_id,
-                        output.clone(),
+                        (*output).clone(),
                         workflow_key_authority(&process_id),
                     )
                     .await?;
-                Ok(output)
+                Ok(lash_core::ProcessRunOutcome::Terminal(output))
             }
+            Ok(boundary @ lash_core::ProcessRunOutcome::SegmentBoundary(_)) => Ok(boundary),
             Err(err) => {
                 let output = ProcessAwaitOutput::Failure {
                     class: lash_core::ToolFailureClass::Execution,
@@ -1471,9 +1653,18 @@ where
                     error = %err,
                     "Restate process runner failed; completed process with failure output",
                 );
-                Ok(output)
+                Ok(output.into())
             }
         }
+    }
+
+    async fn process_cancel_requested(&self, process_id: &str) -> Result<bool, PluginError> {
+        Ok(self
+            .registry
+            .events_after(process_id, 0)
+            .await?
+            .iter()
+            .any(|event| event.event_type == "process.cancel_requested"))
     }
 
     async fn cancel_registration(
@@ -1501,29 +1692,259 @@ where
         &self,
         ctx: WorkflowContext<'_>,
         Json(input): Json<RestateProcessWorkflowInput>,
-    ) -> HandlerResult<Json<ProcessAwaitOutput>> {
+    ) -> HandlerResult<Json<RestateProcessWorkflowOutput>> {
         let process_id = input.registration.id.clone();
-        let controller = RestateRuntimeEffectController::new(ctx);
-        let scoped_effect_controller = controller
-            .scoped_effect_controller(ExecutionScope::process(process_id.clone()))
-            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
-        let output = self
-            .run_registration(
-                input.registration,
-                input.execution_context,
-                scoped_effect_controller,
-            )
+        let _record = self
+            .registry
+            .try_get_process(&process_id)
             .await
-            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
-        let key = restate_process_terminal_await_key(&process_id)
-            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
-        let resolution = restate_process_terminal_resolution(&output)
-            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
-        let payload = serde_json::to_string(&resolution)
-            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
-        let promise_key = key.promise_key();
-        controller.context().resolve_promise(&promise_key, payload);
-        Ok(Json(output))
+            .map_err(HandlerError::from)?
+            .ok_or_else(|| {
+                HandlerError::from(TerminalError::new(format!(
+                    "unknown process `{process_id}`"
+                )))
+            })?;
+        let mut handover = if input.segment_ordinal == 0 {
+            None
+        } else {
+            let persisted = self
+                .registry
+                .get_segment_handover(&process_id, input.segment_ordinal)
+                .await
+                .map_err(HandlerError::from)?;
+            let Some(persisted) = persisted else {
+                let latest = self
+                    .registry
+                    .latest_segment_handover(&process_id)
+                    .await
+                    .map_err(HandlerError::from)?;
+                if missing_segment_is_superseded(input.segment_ordinal, latest.as_ref()) {
+                    tracing::debug!(
+                        process_id,
+                        segment_ordinal = input.segment_ordinal,
+                        latest_segment_ordinal = latest.as_ref().map(|value| value.segment_ordinal),
+                        "ignoring retried superseded process segment"
+                    );
+                    return Ok(Json(RestateProcessWorkflowOutput::SegmentChained {
+                        next_segment_ordinal: latest
+                            .expect("superseded classification requires latest handover")
+                            .segment_ordinal,
+                    }));
+                }
+                return Err(HandlerError::from(TerminalError::new(format!(
+                    "missing persisted handover for process `{process_id}` segment {}",
+                    input.segment_ordinal
+                ))));
+            };
+            match validate_segment_program_hash(&process_id, persisted) {
+                Ok(handover) => Some(handover),
+                Err(err) => {
+                    let output = ProcessAwaitOutput::Failure {
+                        class: lash_core::ToolFailureClass::Execution,
+                        code: err.code.to_string(),
+                        message: err.message.clone(),
+                        raw: None,
+                        control: None,
+                    };
+                    self.registry
+                        .complete_process(
+                            &process_id,
+                            output.clone(),
+                            workflow_key_authority(&process_id),
+                        )
+                        .await
+                        .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+                    self.registry
+                        .delete_segment_handovers(&process_id)
+                        .await
+                        .map_err(HandlerError::from)?;
+                    let request: restate_sdk::context::Request<
+                        '_,
+                        Json<RestateProcessCompleteRequest>,
+                        Json<()>,
+                    > = ContextClient::request(
+                        &ctx,
+                        RequestTarget::workflow(
+                            "LashProcessWorkflow",
+                            process_id.clone(),
+                            "complete_terminal",
+                        ),
+                        Json(RestateProcessCompleteRequest {
+                            process_id: process_id.clone(),
+                            output: output.clone(),
+                        }),
+                    );
+                    request.call().await?;
+                    return Ok(Json(RestateProcessWorkflowOutput::Terminal {
+                        output: Box::new(output),
+                    }));
+                }
+            }
+        };
+        let mut options = RestateEffectControllerOptions::default()
+            .segment_effect_budget((self.segment_effect_budget)(&input.registration));
+        if let Some(cap) = self.segment_duration_cap {
+            options = options.segment_duration_cap(cap);
+        }
+        let controller = RestateRuntimeEffectController::with_options(ctx, options);
+        let outcome = loop {
+            let scoped_effect_controller = controller
+                .scoped_effect_controller(ExecutionScope::process(process_id.clone()))
+                .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+            let outcome = self
+                .run_registration(
+                    input.registration.clone(),
+                    input.execution_context.clone(),
+                    scoped_effect_controller,
+                    input.segment_ordinal,
+                    handover,
+                )
+                .await
+                .map_err(HandlerError::from)?;
+            if let lash_core::ProcessRunOutcome::SegmentBoundary(boundary) = &outcome {
+                let current = self
+                    .registry
+                    .try_get_process(&process_id)
+                    .await
+                    .map_err(retryable_registry_error)?;
+                if boundary_must_be_declined(current.as_ref()) {
+                    handover = Some(boundary.clone());
+                    continue;
+                }
+            }
+            break outcome;
+        };
+        match outcome {
+            lash_core::ProcessRunOutcome::Terminal(output) => {
+                let output = *output;
+                self.registry
+                    .delete_segment_handovers(&process_id)
+                    .await
+                    .map_err(HandlerError::from)?;
+                if terminal_completion_workflow_key(&process_id, input.segment_ordinal).is_none() {
+                    resolve_process_terminal_promise(controller.context(), &process_id, &output)?;
+                } else {
+                    let request: restate_sdk::context::Request<
+                        '_,
+                        Json<RestateProcessCompleteRequest>,
+                        Json<()>,
+                    > = ContextClient::request(
+                        controller.context(),
+                        RequestTarget::workflow(
+                            "LashProcessWorkflow",
+                            process_id.clone(),
+                            "complete_terminal",
+                        ),
+                        Json(RestateProcessCompleteRequest {
+                            process_id: process_id.clone(),
+                            output: output.clone(),
+                        }),
+                    );
+                    request.call().await?;
+                }
+                Ok(Json(RestateProcessWorkflowOutput::Terminal {
+                    output: Box::new(output),
+                }))
+            }
+            lash_core::ProcessRunOutcome::SegmentBoundary(handover) => {
+                let next_segment_ordinal = input.segment_ordinal.saturating_add(1);
+                self.registry
+                    .put_segment_handover(
+                        &process_id,
+                        lash_core::PersistedSegmentHandover {
+                            segment_ordinal: next_segment_ordinal,
+                            program_hash: handover.program_hash.clone().ok_or_else(|| {
+                                HandlerError::from(TerminalError::new(format!(
+                                    "process `{process_id}` segment handover omitted its program identity"
+                                )))
+                            })?,
+                            handover,
+                        },
+                    )
+                    .await
+                    .map_err(HandlerError::from)?;
+                if self
+                    .process_cancel_requested(&process_id)
+                    .await
+                    .map_err(HandlerError::from)?
+                {
+                    let output = ProcessAwaitOutput::Cancelled {
+                        message: format!("process `{process_id}` was cancelled between segments"),
+                        raw: None,
+                        control: None,
+                    };
+                    self.registry
+                        .complete_process(
+                            &process_id,
+                            output.clone(),
+                            workflow_key_authority(&process_id),
+                        )
+                        .await
+                        .map_err(HandlerError::from)?;
+                    self.registry
+                        .delete_segment_handovers(&process_id)
+                        .await
+                        .map_err(HandlerError::from)?;
+                    if terminal_completion_workflow_key(&process_id, input.segment_ordinal)
+                        .is_none()
+                    {
+                        resolve_process_terminal_promise(
+                            controller.context(),
+                            &process_id,
+                            &output,
+                        )?;
+                    } else {
+                        let request: restate_sdk::context::Request<
+                            '_,
+                            Json<RestateProcessCompleteRequest>,
+                            Json<()>,
+                        > = ContextClient::request(
+                            controller.context(),
+                            RequestTarget::workflow(
+                                "LashProcessWorkflow",
+                                process_id.clone(),
+                                "complete_terminal",
+                            ),
+                            Json(RestateProcessCompleteRequest {
+                                process_id: process_id.clone(),
+                                output: output.clone(),
+                            }),
+                        );
+                        request.call().await?;
+                    }
+                    return Ok(Json(RestateProcessWorkflowOutput::Terminal {
+                        output: Box::new(output),
+                    }));
+                }
+                let successor_key = process_segment_workflow_key(&process_id, next_segment_ordinal);
+                let request: restate_sdk::context::Request<
+                    '_,
+                    Json<RestateProcessWorkflowInput>,
+                    Json<RestateProcessWorkflowOutput>,
+                > = ContextClient::request(
+                    controller.context(),
+                    RequestTarget::workflow("LashProcessWorkflow", successor_key, "run"),
+                    Json(RestateProcessWorkflowInput {
+                        registration: input.registration,
+                        execution_context: input.execution_context,
+                        segment_ordinal: next_segment_ordinal,
+                    }),
+                );
+                let _ = request.send().invocation_id().await?;
+                Ok(Json(RestateProcessWorkflowOutput::SegmentChained {
+                    next_segment_ordinal,
+                }))
+            }
+        }
+    }
+
+    async fn complete_terminal(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+        Json(request): Json<RestateProcessCompleteRequest>,
+    ) -> HandlerResult<Json<()>> {
+        resolve_process_terminal_promise(&ctx, &request.process_id, &request.output)?;
+        Ok(Json(()))
     }
 
     async fn cancel(
@@ -1805,9 +2226,21 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
 }
 
 /// Configuration for [`RestateRuntimeEffectController`].
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RestateEffectControllerOptions {
     run_retry_policy: Option<RunRetryPolicy>,
+    segment_duration_cap: Option<Duration>,
+    segment_effect_budget: u64,
+}
+
+impl Default for RestateEffectControllerOptions {
+    fn default() -> Self {
+        Self {
+            run_retry_policy: None,
+            segment_duration_cap: None,
+            segment_effect_budget: 10_000,
+        }
+    }
 }
 
 impl RestateEffectControllerOptions {
@@ -1824,12 +2257,30 @@ impl RestateEffectControllerOptions {
         self.run_retry_policy = Some(policy);
         self
     }
+
+    /// Request a segment boundary once this handler incarnation has lived for
+    /// at least `cap`. The actual cut remains the engine's quiescent post-effect
+    /// point, shared with journal-budget boundaries.
+    pub fn segment_duration_cap(mut self, cap: Duration) -> Self {
+        self.segment_duration_cap = Some(cap);
+        self
+    }
+
+    /// Set the deterministic maximum number of completed effects in one
+    /// Restate invocation. Replay observes the same progress and cuts at the
+    /// same post-effect point.
+    pub fn segment_effect_budget(mut self, effects: u64) -> Self {
+        self.segment_effect_budget = effects.max(1);
+        self
+    }
 }
 
 impl fmt::Debug for RestateEffectControllerOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RestateEffectControllerOptions")
             .field("run_retry_policy", &self.run_retry_policy)
+            .field("segment_duration_cap", &self.segment_duration_cap)
+            .field("segment_effect_budget", &self.segment_effect_budget)
             .finish()
     }
 }
@@ -1963,6 +2414,7 @@ macro_rules! impl_restate_controller_context {
                         Json(RestateProcessWorkflowInput {
                             registration,
                             execution_context,
+                            segment_ordinal: 0,
                         }),
                     );
                     let handle = request.send();
@@ -2334,6 +2786,14 @@ where
 {
     fn supports_concurrent_effects(&self) -> bool {
         false
+    }
+
+    fn wants_segment_boundary(
+        &self,
+        progress: &lash_core::SegmentProgress,
+    ) -> Option<lash_core::BoundaryReason> {
+        (progress.effects_executed >= self.options.segment_effect_budget)
+            .then_some(lash_core::BoundaryReason::JournalBudget)
     }
 
     async fn execute_effect(

@@ -12,6 +12,39 @@ use super::model::{
 };
 use super::registry::ProcessRegistry;
 
+/// Opaque engine-owned state carried between in-process execution segments.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SegmentHandover {
+    pub reason: crate::BoundaryReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_hash: Option<String>,
+    pub engine_state: Vec<u8>,
+}
+
+/// The single bounded continuation durably retained for a process incarnation.
+///
+/// This is registry-internal execution state: it is deliberately not a process
+/// event and therefore never appears in change feeds or provenance.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedSegmentHandover {
+    pub segment_ordinal: u64,
+    pub program_hash: String,
+    pub handover: SegmentHandover,
+}
+
+/// Result of one process invocation. A segment boundary is never terminal.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProcessRunOutcome {
+    Terminal(Box<ProcessAwaitOutput>),
+    SegmentBoundary(SegmentHandover),
+}
+
+impl From<ProcessAwaitOutput> for ProcessRunOutcome {
+    fn from(output: ProcessAwaitOutput) -> Self {
+        Self::Terminal(Box::new(output))
+    }
+}
+
 pub type ProcessEngineShutdownFuture<'run> = Pin<Box<dyn Future<Output = ()> + Send + 'run>>;
 
 pub struct ProcessEngineRunGuard<'run> {
@@ -89,6 +122,8 @@ pub struct ProcessEngineRunContext<'run> {
     process_registry_available: bool,
     cancellation: CancellationToken,
     turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
+    scoped_effect_controller: crate::ScopedEffectController<'run>,
+    handover: Option<SegmentHandover>,
     runtime_context_builder: Option<RuntimeContextBuilder<'run>>,
 }
 
@@ -106,6 +141,8 @@ impl<'run> ProcessEngineRunContext<'run> {
         process_registry_available: bool,
         cancellation: CancellationToken,
         turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
+        scoped_effect_controller: crate::ScopedEffectController<'run>,
+        handover: Option<SegmentHandover>,
         runtime_context_builder: RuntimeContextBuilder<'run>,
     ) -> Self {
         Self {
@@ -120,6 +157,8 @@ impl<'run> ProcessEngineRunContext<'run> {
             process_registry_available,
             cancellation,
             turn_phase_probe,
+            scoped_effect_controller,
+            handover,
             runtime_context_builder: Some(runtime_context_builder),
         }
     }
@@ -162,6 +201,18 @@ impl<'run> ProcessEngineRunContext<'run> {
 
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation.clone()
+    }
+
+    pub fn effect_controller(&self) -> &dyn crate::RuntimeEffectController {
+        self.scoped_effect_controller.controller()
+    }
+
+    pub fn scoped_effect_controller(&self) -> crate::ScopedEffectController<'run> {
+        self.scoped_effect_controller.clone()
+    }
+
+    pub fn take_handover(&mut self) -> Option<SegmentHandover> {
+        self.handover.take()
     }
 
     #[doc(hidden)]
@@ -244,7 +295,7 @@ pub trait ProcessEngine: Send + Sync {
         &self,
         context: ProcessEngineRunContext<'_>,
         payload: serde_json::Value,
-    ) -> ProcessAwaitOutput;
+    ) -> ProcessRunOutcome;
 
     fn identity(&self, payload: &serde_json::Value) -> ProcessIdentity {
         let _ = payload;

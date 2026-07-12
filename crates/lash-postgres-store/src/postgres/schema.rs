@@ -198,6 +198,13 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             lease_expires_at_ms BIGINT NOT NULL DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS lash_process_segment_handovers (
+            process_id TEXT NOT NULL REFERENCES lash_processes(process_id) ON DELETE CASCADE,
+            segment_ordinal BIGINT NOT NULL,
+            handover_json TEXT NOT NULL,
+            PRIMARY KEY (process_id, segment_ordinal)
+        );
+
         CREATE TABLE IF NOT EXISTS lash_runtime_effect_replay (
             scope_id TEXT NOT NULL,
             replay_key TEXT NOT NULL,

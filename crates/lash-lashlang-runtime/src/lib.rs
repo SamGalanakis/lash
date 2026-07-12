@@ -827,7 +827,7 @@ impl lash_core::ProcessEngine for LashlangProcessEngine {
         &self,
         context: lash_core::ProcessEngineRunContext<'_>,
         payload: serde_json::Value,
-    ) -> lash_core::ProcessAwaitOutput {
+    ) -> lash_core::ProcessRunOutcome {
         process::run_lashlang_process(self.clone(), context, payload).await
     }
 
@@ -874,6 +874,55 @@ pub use typed_output::parse_output_schema;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EveryNEffectsController(usize);
+
+    #[async_trait::async_trait]
+    impl lash_core::AwaitEventResolver for EveryNEffectsController {}
+
+    #[async_trait::async_trait]
+    impl lash_core::RuntimeEffectController for EveryNEffectsController {
+        fn wants_segment_boundary(
+            &self,
+            progress: &lash_core::SegmentProgress,
+        ) -> Option<lash_core::BoundaryReason> {
+            progress
+                .effects_executed
+                .is_multiple_of(self.0 as u64)
+                .then_some(lash_core::BoundaryReason::JournalBudget)
+        }
+
+        async fn execute_effect(
+            &self,
+            _envelope: lash_core::RuntimeEffectEnvelope,
+            _local_executor: lash_core::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<lash_core::RuntimeEffectOutcome, lash_core::RuntimeEffectControllerError>
+        {
+            unreachable!("predicate test does not execute effects")
+        }
+    }
+
+    #[test]
+    fn every_n_controller_requests_boundaries_and_inline_default_does_not() {
+        let progress = lash_core::SegmentProgress {
+            effects_executed: 2,
+            journaled_bytes_estimate: None,
+        };
+        assert_eq!(
+            lash_core::RuntimeEffectController::wants_segment_boundary(
+                &EveryNEffectsController(2),
+                &progress,
+            ),
+            Some(lash_core::BoundaryReason::JournalBudget)
+        );
+        assert_eq!(
+            lash_core::RuntimeEffectController::wants_segment_boundary(
+                &lash_core::InlineRuntimeEffectController,
+                &progress,
+            ),
+            None
+        );
+    }
 
     #[test]
     fn process_input_serializes_as_generic_engine_payload() {

@@ -39,6 +39,7 @@ pub const EXPECTED_DURABLE_INPUT_TEXT: &str = "durable-input-complete";
 pub const EXPECTED_PARENT_DURABLE_INPUT_TEXT: &str = "parent-durable-input-complete";
 pub const EXPECTED_TOOL_BATCH_TEXT: &str = "tool-batch-complete";
 pub const EXPECTED_DURABLE_WAIT_TEXT: &str = "durable-wait-observed";
+pub const EXPECTED_SEGMENT_LOOP_TEXT: &str = "segment-loop-complete";
 pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
 pub const ATTACHMENT_MIME: &str = "image/png";
 pub const E2E_PRODUCT_STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
@@ -142,6 +143,7 @@ pub enum TurnScenario {
     ParentDurableInputAfterChild,
     ToolBatch,
     DurableWaitProbe,
+    SegmentLoop,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
