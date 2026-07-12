@@ -4,6 +4,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use lash_provider_auth::{Credential, CredentialManager, CredentialRefresher, RefreshCause};
 
 use crate::support::*;
 
@@ -25,12 +28,94 @@ pub(crate) struct UploadedAttachmentRef {
     pub(crate) uri: String,
 }
 
+#[derive(Clone)]
+pub(crate) struct GoogleCredential {
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: String,
+    pub(crate) expires_at: u64,
+}
+
+impl std::fmt::Debug for GoogleCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GoogleCredential")
+            .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for GoogleCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GoogleCredential([REDACTED])")
+    }
+}
+
+impl Credential for GoogleCredential {
+    fn expires_at(&self) -> Option<SystemTime> {
+        (self.expires_at != 0)
+            .then(|| UNIX_EPOCH.checked_add(Duration::from_secs(self.expires_at)))
+            .flatten()
+    }
+}
+
+#[derive(Debug)]
+struct GoogleCredentialRefresher;
+
+#[async_trait]
+impl CredentialRefresher<GoogleCredential> for GoogleCredentialRefresher {
+    async fn refresh(
+        &self,
+        current: &GoogleCredential,
+        _cause: RefreshCause,
+    ) -> Result<GoogleCredential, CredentialError> {
+        let tokens = crate::oauth::refresh_tokens(&current.refresh_token)
+            .await
+            .map_err(credential_error_from_oauth)?;
+        Ok(GoogleCredential {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_at: tokens.expires_at,
+        })
+    }
+}
+
+fn credential_error_from_oauth(error: lash_provider_auth::OAuthError) -> CredentialError {
+    let detail = error.to_string().to_ascii_lowercase();
+    if detail.contains("invalid_grant") || detail.contains("invalid grant") {
+        CredentialError::invalid_grant()
+    } else if matches!(
+        error,
+        lash_provider_auth::OAuthError::Http(_)
+            | lash_provider_auth::OAuthError::TokenEndpoint {
+                status: 408 | 429 | 500..=599,
+                ..
+            }
+    ) {
+        CredentialError::transient()
+    } else {
+        CredentialError::new(CredentialErrorKind::Other, false)
+    }
+}
+
+pub(crate) fn credential_transport_error(error: CredentialError) -> LlmTransportError {
+    let code = match error.kind {
+        CredentialErrorKind::InvalidGrant => "credential_invalid_grant",
+        CredentialErrorKind::Transient => "credential_refresh_transient",
+        CredentialErrorKind::Other => "credential_refresh_failed",
+    };
+    LlmTransportError::new(error.to_string())
+        .with_kind(lash_core::ProviderFailureKind::Auth)
+        .with_code(code)
+        .retryable(error.retryable)
+}
+
 /// Google OAuth (Gemini via Code Assist) provider.
 #[derive(Clone, Debug)]
 pub struct GoogleOAuthProvider {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: u64,
+    pub(crate) credentials: Arc<CredentialManager<GoogleCredential>>,
+    pub(crate) attempt_credential: Option<Lease<GoogleCredential>>,
     pub project_id: Option<String>,
     pub options: ProviderOptions,
     pub(crate) transport: Arc<dyn LlmHttpTransport>,
@@ -50,10 +135,17 @@ impl GoogleOAuthProvider {
         refresh_token: impl Into<String>,
         expires_at: u64,
     ) -> Self {
-        Self {
+        let credential = GoogleCredential {
             access_token: access_token.into(),
             refresh_token: refresh_token.into(),
             expires_at,
+        };
+        Self {
+            credentials: Arc::new(CredentialManager::new(
+                credential,
+                Arc::new(GoogleCredentialRefresher),
+            )),
+            attempt_credential: None,
             project_id: None,
             options: ProviderOptions::default(),
             transport: Arc::clone(&DEFAULT_HTTP_TRANSPORT),
@@ -118,13 +210,24 @@ impl ProviderFactory for GoogleOAuthProviderFactory {
         let cfg: GoogleProviderConfig =
             serde_json::from_value(config).map_err(|err| err.to_string())?;
         Ok(GoogleOAuthProvider {
-            access_token: cfg.access_token,
-            refresh_token: cfg.refresh_token,
-            expires_at: cfg.expires_at,
             project_id: cfg.project_id,
             options: cfg.options,
-            transport: Arc::clone(&DEFAULT_HTTP_TRANSPORT),
+            ..GoogleOAuthProvider::new(cfg.access_token, cfg.refresh_token, cfg.expires_at)
         }
         .into_components())
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_grant_maps_to_visible_non_retryable_auth_transport_error() {
+        let error = credential_transport_error(CredentialError::invalid_grant());
+        assert_eq!(error.kind, lash_core::ProviderFailureKind::Auth);
+        assert_eq!(error.code.as_deref(), Some("credential_invalid_grant"));
+        assert!(!error.retryable);
+        assert!(error.message.contains("sign in again"));
     }
 }

@@ -211,7 +211,7 @@ impl GoogleOAuthProvider {
         access_token: &str,
         project_id: Option<&str>,
         attachments: &[LlmAttachment],
-    ) -> (Vec<Value>, bool) {
+    ) -> Result<(Vec<Value>, bool), LlmTransportError> {
         let mut parts = Vec::with_capacity(attachments.len());
         let mut used_uploaded_files = false;
 
@@ -234,10 +234,11 @@ impl GoogleOAuthProvider {
                         }
                     }));
                 }
+                Err(error) if error.status == Some(401) => return Err(error),
                 Err(_) => parts.push(Self::inline_attachment_part(att)),
             }
         }
 
-        (parts, used_uploaded_files)
+        Ok((parts, used_uploaded_files))
     }
 }

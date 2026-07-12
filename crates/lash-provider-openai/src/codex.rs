@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
@@ -31,6 +31,10 @@ use lash_llm_transport::{
     LlmHttpMethod, LlmHttpRequest, LlmHttpTransport, first_header_value, header_contains,
     http_error_envelope, openai_terminal_reason_from_response_value,
     openai_usage_from_response_value, read_http_body_text,
+};
+use lash_provider_auth::{
+    Credential, CredentialCallError, CredentialError, CredentialErrorKind, CredentialExecuteError,
+    CredentialManager, CredentialRefresher, Lease, RefreshCause,
 };
 
 pub mod oauth;
@@ -111,15 +115,17 @@ struct CodexWebsocketSessionEntry {
     continuation: Option<CodexContinuation>,
     busy: bool,
     last_used: Instant,
+    credential_generation: u64,
 }
 
 impl CodexWebsocketSessionEntry {
-    fn reserved() -> Self {
+    fn reserved(credential_generation: u64) -> Self {
         Self {
             connection: None,
             continuation: None,
             busy: true,
             last_used: Instant::now(),
+            credential_generation,
         }
     }
 }
@@ -130,6 +136,96 @@ struct CodexWebsocketLease {
     reusable: bool,
     reused: bool,
     continuation: Option<CodexContinuation>,
+    credential_generation: u64,
+}
+
+#[derive(Clone)]
+struct CodexCredential {
+    access_token: String,
+    refresh_token: String,
+    expires_at: u64,
+    account_id: Option<String>,
+}
+
+impl std::fmt::Debug for CodexCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodexCredential")
+            .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field(
+                "account_id",
+                &self.account_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Display for CodexCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CodexCredential([REDACTED])")
+    }
+}
+
+impl Credential for CodexCredential {
+    fn expires_at(&self) -> Option<SystemTime> {
+        (self.expires_at != 0)
+            .then(|| UNIX_EPOCH.checked_add(Duration::from_secs(self.expires_at)))
+            .flatten()
+    }
+}
+
+#[derive(Debug)]
+struct CodexCredentialRefresher;
+
+#[async_trait]
+impl CredentialRefresher<CodexCredential> for CodexCredentialRefresher {
+    async fn refresh(
+        &self,
+        current: &CodexCredential,
+        _cause: RefreshCause,
+    ) -> Result<CodexCredential, CredentialError> {
+        let tokens = oauth::refresh_tokens(&current.refresh_token)
+            .await
+            .map_err(credential_error_from_oauth)?;
+        Ok(CodexCredential {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_at: tokens.expires_at,
+            account_id: tokens.account_id.or_else(|| current.account_id.clone()),
+        })
+    }
+}
+
+fn credential_error_from_oauth(error: lash_provider_auth::OAuthError) -> CredentialError {
+    let detail = error.to_string().to_ascii_lowercase();
+    if detail.contains("invalid_grant") || detail.contains("invalid grant") {
+        CredentialError::invalid_grant()
+    } else if matches!(
+        error,
+        lash_provider_auth::OAuthError::Http(_)
+            | lash_provider_auth::OAuthError::TokenEndpoint {
+                status: 408 | 429 | 500..=599,
+                ..
+            }
+    ) {
+        CredentialError::transient()
+    } else {
+        CredentialError::new(CredentialErrorKind::Other, false)
+    }
+}
+
+fn credential_transport_error(error: CredentialError) -> LlmTransportError {
+    let code = match error.kind {
+        CredentialErrorKind::InvalidGrant => "credential_invalid_grant",
+        CredentialErrorKind::Transient => "credential_refresh_transient",
+        CredentialErrorKind::Other => "credential_refresh_failed",
+    };
+    LlmTransportError::new(error.to_string())
+        .with_kind(ProviderFailureKind::Auth)
+        .with_code(code)
+        .retryable(error.retryable)
 }
 
 #[derive(Clone, Debug)]
@@ -182,10 +278,8 @@ struct CodexWebsocketRetryState {
 /// tool-result image folding, and Codex error/quota classification.
 #[derive(Clone, Debug)]
 pub struct CodexProvider {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: u64,
-    pub account_id: Option<String>,
+    credentials: Arc<CredentialManager<CodexCredential>>,
+    attempt_credential: Option<Lease<CodexCredential>>,
     pub options: ProviderOptions,
     pub(crate) transport: CodexTransport,
     websocket_sessions: CodexWebsocketSessionCache,
@@ -205,11 +299,18 @@ impl CodexProvider {
         refresh_token: impl Into<String>,
         expires_at: u64,
     ) -> Self {
-        Self {
+        let credential = CodexCredential {
             access_token: access_token.into(),
             refresh_token: refresh_token.into(),
             expires_at,
             account_id: None,
+        };
+        Self {
+            credentials: Arc::new(CredentialManager::new(
+                credential,
+                Arc::new(CodexCredentialRefresher),
+            )),
+            attempt_credential: None,
             options: ProviderOptions {
                 reliability: ProviderReliability::codex(),
                 ..ProviderOptions::default()
@@ -223,7 +324,12 @@ impl CodexProvider {
     }
 
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
-        self.account_id = account_id;
+        let mut credential = self.credentials.snapshot();
+        credential.account_id = account_id;
+        self.credentials = Arc::new(CredentialManager::new(
+            credential,
+            Arc::new(CodexCredentialRefresher),
+        ));
         self
     }
 
@@ -636,6 +742,15 @@ impl CodexProvider {
         }
     }
 
+    fn evict_websocket_sessions_for_generation(
+        sessions: &mut CodexWebsocketSessions,
+        credential_generation: u64,
+    ) {
+        sessions
+            .by_scope
+            .retain(|_, entry| entry.credential_generation == credential_generation);
+    }
+
     /// Drain the WebSocket session cache, sending a proper Close frame on every
     /// idle cached connection before dropping it.
     ///
@@ -723,6 +838,7 @@ impl CodexProvider {
         &self,
         req: &LlmRequest,
         connect_timeout: Duration,
+        credential: &CodexCredential,
     ) -> Result<CodexWsStream, CodexWebSocketAttemptError> {
         let mut ws_request =
             self.websocket_url
@@ -739,16 +855,16 @@ impl CodexProvider {
         let headers = ws_request.headers_mut();
         headers.insert(
             "Authorization",
-            HeaderValue::from_str(&format!("Bearer {}", self.access_token)).map_err(|error| {
-                CodexWebSocketAttemptError {
+            HeaderValue::from_str(&format!("Bearer {}", credential.access_token)).map_err(
+                |error| CodexWebSocketAttemptError {
                     error: LlmTransportError::new(format!(
                         "Invalid Codex WebSocket authorization header: {error}"
                     )),
                     events_seen: false,
                     output_started: false,
                     stale_previous_response: false,
-                }
-            })?,
+                },
+            )?,
         );
         headers.insert(
             "OpenAI-Beta",
@@ -793,7 +909,7 @@ impl CodexProvider {
         })?;
         headers.insert("session-id", session_value);
         headers.insert("x-client-request-id", request_value);
-        if let Some(account_id) = self.account_id.as_deref() {
+        if let Some(account_id) = credential.account_id.as_deref() {
             headers.insert(
                 "ChatGPT-Account-ID",
                 HeaderValue::from_str(account_id).map_err(|error| CodexWebSocketAttemptError {
@@ -818,22 +934,35 @@ impl CodexProvider {
                 output_started: false,
                 stale_previous_response: false,
             })?;
-        connect
-            .map(|(websocket, _)| websocket)
-            .map_err(|error| CodexWebSocketAttemptError {
-                error: LlmTransportError::new(format!("Codex WebSocket connect failed: {error}"))
+        connect.map(|(websocket, _)| websocket).map_err(|error| {
+            let status = match &error {
+                tokio_tungstenite::tungstenite::Error::Http(response) => {
+                    Some(response.status().as_u16())
+                }
+                _ => None,
+            };
+            let mut transport_error =
+                LlmTransportError::new(format!("Codex WebSocket connect failed: {error}"))
                     .retryable(true)
-                    .with_code("websocket_connect"),
+                    .with_code("websocket_connect");
+            if let Some(status) = status {
+                transport_error = transport_error.with_status(status);
+            }
+            CodexWebSocketAttemptError {
+                error: transport_error,
                 events_seen: false,
                 output_started: false,
                 stale_previous_response: false,
-            })
+            }
+        })
     }
 
     async fn acquire_websocket(
         &self,
         req: &LlmRequest,
         connect_timeout: Duration,
+        credential: &CodexCredential,
+        credential_generation: u64,
     ) -> Result<CodexWebsocketLease, CodexWebSocketAttemptError> {
         let scope_key = req.continuation_key();
 
@@ -851,6 +980,7 @@ impl CodexProvider {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             Self::prune_idle_websocket_sessions(&mut sessions);
             Self::enforce_websocket_session_cache_cap(&mut sessions);
+            Self::evict_websocket_sessions_for_generation(&mut sessions, credential_generation);
             if let Some(entry) = sessions.by_scope.get_mut(&scope_key) {
                 if entry.busy {
                     AcquireDecision::ConnectEphemeral
@@ -863,15 +993,17 @@ impl CodexProvider {
                         reusable: true,
                         reused: true,
                         continuation: entry.continuation.clone(),
+                        credential_generation,
                     }))
                 } else {
-                    *entry = CodexWebsocketSessionEntry::reserved();
+                    *entry = CodexWebsocketSessionEntry::reserved(credential_generation);
                     AcquireDecision::ConnectReusable(scope_key.clone())
                 }
             } else {
-                sessions
-                    .by_scope
-                    .insert(scope_key.clone(), CodexWebsocketSessionEntry::reserved());
+                sessions.by_scope.insert(
+                    scope_key.clone(),
+                    CodexWebsocketSessionEntry::reserved(credential_generation),
+                );
                 AcquireDecision::ConnectReusable(scope_key.clone())
             }
         };
@@ -879,17 +1011,23 @@ impl CodexProvider {
         match decision {
             AcquireDecision::Reuse(lease) => Ok(*lease),
             AcquireDecision::ConnectEphemeral => {
-                let websocket = self.connect_websocket(req, connect_timeout).await?;
+                let websocket = self
+                    .connect_websocket(req, connect_timeout, credential)
+                    .await?;
                 Ok(CodexWebsocketLease {
                     websocket,
                     scope_key: None,
                     reusable: false,
                     reused: false,
                     continuation: None,
+                    credential_generation,
                 })
             }
             AcquireDecision::ConnectReusable(scope_key) => {
-                let websocket = match self.connect_websocket(req, connect_timeout).await {
+                let websocket = match self
+                    .connect_websocket(req, connect_timeout, credential)
+                    .await
+                {
                     Ok(websocket) => websocket,
                     Err(error) => {
                         self.remove_websocket_scope(&scope_key);
@@ -902,6 +1040,7 @@ impl CodexProvider {
                     reusable: true,
                     reused: false,
                     continuation: None,
+                    credential_generation,
                 })
             }
         }
@@ -932,6 +1071,7 @@ impl CodexProvider {
                 continuation,
                 busy: false,
                 last_used: Instant::now(),
+                credential_generation: lease.credential_generation,
             },
         );
         Self::prune_idle_websocket_sessions(&mut sessions);
@@ -961,6 +1101,8 @@ impl CodexProvider {
     async fn complete_websocket(
         &self,
         req: LlmRequest,
+        credential: &CodexCredential,
+        credential_generation: u64,
     ) -> Result<LlmResponse, CodexWebSocketAttemptError> {
         let full_body =
             self.build_request_body(&req, true)
@@ -977,7 +1119,9 @@ impl CodexProvider {
         let mut retry_state = CodexWebsocketRetryState::default();
         let mut allow_cached_context = self.websocket_continuation_enabled();
         loop {
-            let lease = self.acquire_websocket(&req, connect_timeout).await?;
+            let lease = self
+                .acquire_websocket(&req, connect_timeout, credential, credential_generation)
+                .await?;
             let reused_connection = lease.reused;
             let plan = self.websocket_request_plan(
                 &full_body,
@@ -1385,20 +1529,21 @@ impl Provider for CodexProvider {
     }
 
     fn serialize_config(&self) -> serde_json::Value {
+        let credential = self.credentials.snapshot();
         let mut map = serde_json::Map::new();
         map.insert(
             "access_token".to_string(),
-            serde_json::Value::String(self.access_token.clone()),
+            serde_json::Value::String(credential.access_token),
         );
         map.insert(
             "refresh_token".to_string(),
-            serde_json::Value::String(self.refresh_token.clone()),
+            serde_json::Value::String(credential.refresh_token),
         );
         map.insert(
             "expires_at".to_string(),
-            serde_json::Value::Number(self.expires_at.into()),
+            serde_json::Value::Number(credential.expires_at.into()),
         );
-        if let Some(account_id) = &self.account_id {
+        if let Some(account_id) = &credential.account_id {
             map.insert(
                 "account_id".to_string(),
                 serde_json::Value::String(account_id.clone()),
@@ -1426,6 +1571,35 @@ impl Provider for CodexProvider {
     }
 
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        if self.attempt_credential.is_none() {
+            let manager = Arc::clone(&self.credentials);
+            let provider = self.clone();
+            return manager
+                .execute(move |lease| {
+                    let mut provider = provider.clone();
+                    let req = req.clone();
+                    provider.attempt_credential = Some(lease);
+                    async move {
+                        match Box::pin(provider.complete(req)).await {
+                            Ok(response) => Ok(response),
+                            Err(error) if error.status == Some(401) => {
+                                Err(CredentialCallError::PreOutputAuth(error))
+                            }
+                            Err(error) => Err(CredentialCallError::Failed(error)),
+                        }
+                    }
+                })
+                .await
+                .map_err(|error| match error {
+                    CredentialExecuteError::Credential(error) => credential_transport_error(error),
+                    CredentialExecuteError::Call(error) => error,
+                });
+        }
+        let credential_lease = self
+            .attempt_credential
+            .take()
+            .expect("credential attempt is configured");
+        let credential = &credential_lease.value;
         if !matches!(self.transport, CodexTransport::Sse) {
             let fallback_reason = matches!(self.transport, CodexTransport::Auto)
                 .then(|| self.websocket_fallback_reason(&req))
@@ -1447,7 +1621,10 @@ impl Provider for CodexProvider {
                     "Skipping Codex WebSocket for session with active Auto fallback"
                 );
             } else {
-                match self.complete_websocket(req.clone()).await {
+                match self
+                    .complete_websocket(req.clone(), credential, credential_lease.generation)
+                    .await
+                {
                     Ok(response) => {
                         self.clear_websocket_fallback(&req);
                         return Ok(response);
@@ -1471,8 +1648,8 @@ impl Provider for CodexProvider {
         }
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
-        let access_token = self.access_token.clone();
-        let account_id = self.account_id.clone();
+        let access_token = credential.access_token.clone();
+        let account_id = credential.account_id.clone();
         let timeouts = self.options.llm_timeouts();
 
         let body = self.build_request_body(&req, stream_events.is_some())?;
@@ -1755,16 +1932,10 @@ impl ProviderFactory for CodexProviderFactory {
         let cfg: CodexProviderConfig =
             serde_json::from_value(config).map_err(|err| err.to_string())?;
         Ok(CodexProvider {
-            access_token: cfg.access_token,
-            refresh_token: cfg.refresh_token,
-            expires_at: cfg.expires_at,
-            account_id: cfg.account_id,
             options: cfg.options,
             transport: cfg.transport,
-            websocket_sessions: CodexWebsocketSessionCache::default(),
-            responses_url: CodexProvider::CODEX_RESPONSES_URL.to_string(),
-            websocket_url: CodexProvider::CODEX_RESPONSES_WS_URL.to_string(),
-            http_transport: DEFAULT_HTTP_TRANSPORT.clone(),
+            ..CodexProvider::new(cfg.access_token, cfg.refresh_token, cfg.expires_at)
+                .with_account_id(cfg.account_id)
         }
         .into_components())
     }
@@ -2305,6 +2476,7 @@ mod tests {
                 continuation: None,
                 busy: false,
                 last_used: now - SESSION_WEBSOCKET_CACHE_TTL - Duration::from_secs(1),
+                credential_generation: 0,
             },
         );
         sessions.by_scope.insert(
@@ -2314,6 +2486,7 @@ mod tests {
                 continuation: None,
                 busy: true,
                 last_used: now - SESSION_WEBSOCKET_CACHE_TTL - Duration::from_secs(1),
+                credential_generation: 0,
             },
         );
 
@@ -2331,6 +2504,7 @@ mod tests {
                     continuation: None,
                     busy: false,
                     last_used: now - Duration::from_secs((100 - index) as u64),
+                    credential_generation: 0,
                 },
             );
         }
@@ -2343,6 +2517,36 @@ mod tests {
             "scope-{}",
             MAX_SESSION_WEBSOCKET_CACHE_ENTRIES + 2
         )));
+    }
+
+    #[test]
+    fn codex_websocket_scope_cache_evicts_rotated_credentials() {
+        let mut sessions = CodexWebsocketSessions::default();
+        sessions.by_scope.insert(
+            "old".to_string(),
+            CodexWebsocketSessionEntry {
+                connection: None,
+                continuation: None,
+                busy: false,
+                last_used: Instant::now(),
+                credential_generation: 4,
+            },
+        );
+        sessions.by_scope.insert(
+            "current".to_string(),
+            CodexWebsocketSessionEntry {
+                connection: None,
+                continuation: None,
+                busy: false,
+                last_used: Instant::now(),
+                credential_generation: 5,
+            },
+        );
+
+        CodexProvider::evict_websocket_sessions_for_generation(&mut sessions, 5);
+
+        assert!(!sessions.by_scope.contains_key("old"));
+        assert!(sessions.by_scope.contains_key("current"));
     }
 
     async fn assert_trace_cached_delta_for_transport(transport: CodexTransport) {

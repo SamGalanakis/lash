@@ -7,6 +7,13 @@
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
+mod credential;
+
+pub use credential::{
+    Credential, CredentialCallError, CredentialError, CredentialErrorKind, CredentialExecuteError,
+    CredentialManager, CredentialPolicy, CredentialRefresher, Lease, RefreshCause,
+};
+
 #[derive(Debug)]
 pub struct OAuthTokens {
     pub access_token: String,
@@ -20,6 +27,8 @@ pub enum OAuthError {
     Http(#[from] reqwest::Error),
     #[error("Token exchange failed: {0}")]
     TokenExchange(String),
+    #[error("Token endpoint returned HTTP {status}: {message}")]
+    TokenEndpoint { status: u16, message: String },
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
