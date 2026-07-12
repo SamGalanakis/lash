@@ -20,10 +20,13 @@ an open label describing why the call ran; the label vocabulary is host- and
 plugin-supplied, not a core enumeration — internal machinery that makes model calls labels
 its own work through the same interface.
 
-"What produced the final output" is a tagged provenance value, never an index inference:
+(Superseded in part by ADR 0033: the "tagged final-output provenance" idea below was
+over-reach — a turn has no single producing model to attribute, so lash does not compute
+one. Per-call evidence and the per-call ledger stand; higher-level attribution is host
+policy.) ~~"What produced the final output" is a tagged provenance value, never an index inference:
 final output can come from a model call, from a terminal value or tool result without any
 assistant text (an RLM Final Value ends a turn this way), from host synthesis, or from
-nothing (incomplete). Turn activity and trace records project the same evidence types
+nothing (incomplete).~~ Turn activity and trace records project the same evidence types
 rather than defining parallel shapes, and the remote mirrors carry them behind a protocol
 version bump. Providers implement extraction independently; a provider that cannot report a
 field leaves it absent rather than guessing.
