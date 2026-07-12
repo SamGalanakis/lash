@@ -569,6 +569,17 @@ pub enum ToolAttemptLaunch {
     },
 }
 
+pub type RuntimeLlmCallOutcome = (
+    Result<LlmResponse, LlmCallError>,
+    bool,
+    Option<crate::LlmCallRecord>,
+);
+
+pub type RuntimeDirectLlmOutcome = (
+    Result<LlmResponse, LlmCallError>,
+    Option<crate::LlmCallRecord>,
+);
+
 /// Serializable result of a runtime effect command.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -577,9 +588,16 @@ pub enum RuntimeEffectOutcome {
     LlmCall {
         result: Result<LlmResponse, LlmCallError>,
         text_streamed: bool,
+        /// Sealed provider-attempt history. Older journal entries and calls
+        /// interrupted before the provider handle returns have no record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_record: Option<crate::LlmCallRecord>,
     },
     Direct {
         result: Result<LlmResponse, LlmCallError>,
+        /// Sealed provider-attempt history for this single direct call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_record: Option<crate::LlmCallRecord>,
     },
     ToolAttempt {
         launch: ToolAttemptLaunch,
@@ -748,14 +766,13 @@ async fn attachment_spec_from_attachment(
 }
 
 impl RuntimeEffectOutcome {
-    pub fn into_llm_call(
-        self,
-    ) -> Result<(Result<LlmResponse, LlmCallError>, bool), RuntimeEffectControllerError> {
+    pub fn into_llm_call(self) -> Result<RuntimeLlmCallOutcome, RuntimeEffectControllerError> {
         match self {
             Self::LlmCall {
                 result,
                 text_streamed,
-            } => Ok((result, text_streamed)),
+                call_record,
+            } => Ok((result, text_streamed, call_record)),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::LlmCall,
                 other.kind(),
@@ -765,9 +782,12 @@ impl RuntimeEffectOutcome {
 
     pub fn into_direct_response(
         self,
-    ) -> Result<Result<LlmResponse, LlmCallError>, RuntimeEffectControllerError> {
+    ) -> Result<RuntimeDirectLlmOutcome, RuntimeEffectControllerError> {
         match self {
-            Self::Direct { result } => Ok(result),
+            Self::Direct {
+                result,
+                call_record,
+            } => Ok((result, call_record)),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::Direct,
                 other.kind(),

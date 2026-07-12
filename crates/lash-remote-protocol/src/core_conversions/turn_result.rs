@@ -43,6 +43,9 @@ impl RemoteTurnResult {
             execution,
             token_usage,
             children_usage,
+            // ADR 0032 aggregation is local-only in this step. The remote
+            // protocol mirror is intentionally deferred.
+            llm_calls: _,
             tool_calls,
             errors,
         } = turn;

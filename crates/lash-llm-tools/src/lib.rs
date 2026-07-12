@@ -399,6 +399,11 @@ mod tests {
                 Ok(lash_core::DirectCompletion {
                     text: manager.response_text.clone(),
                     usage: lash_core::TokenUsage::default(),
+                    llm_call: lash_core::LlmCallRecord {
+                        call_id: lash_core::LlmCallId("llm-tools-test".to_string()),
+                        label: None,
+                        attempts: Vec::new(),
+                    },
                 })
             }
         });

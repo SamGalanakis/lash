@@ -62,7 +62,7 @@ impl RuntimeTurnDriver<'_> {
         request: Arc<LlmRequest>,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
-    ) -> Result<(Result<LlmResponse, LlmCallError>, bool), RuntimeEffectControllerError> {
+    ) -> Result<RuntimeLlmCallOutcome, RuntimeEffectControllerError> {
         let invocation = self.turn_effect_invocation(machine, id, RuntimeEffectKind::LlmCall)?;
         self.execute_typed_turn_effect(
             machine,
@@ -173,10 +173,10 @@ impl RuntimeTurnDriver<'_> {
         invocation: crate::RuntimeInvocation,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
-    ) -> (Result<LlmResponse, LlmCallError>, bool) {
+    ) -> RuntimeLlmCallOutcome {
         let request = (*request).clone();
         if let Err(err) = validate_generation_options(&self.policy.model, &request.generation) {
-            return (Err(err), false);
+            return (Err(err), false, None);
         }
         let request = match crate::attachments::resolve_llm_request_attachments(
             request,
@@ -197,6 +197,7 @@ impl RuntimeTurnDriver<'_> {
                         request_body: None,
                     }),
                     false,
+                    None,
                 );
             }
         };
@@ -255,6 +256,7 @@ impl RuntimeTurnDriver<'_> {
             reasoning_correlation: &mut reasoning_correlation,
             abort_requested: &mut abort_requested,
         };
+        let mut call_record = None;
         let result = loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -358,10 +360,11 @@ impl RuntimeTurnDriver<'_> {
                     }
                     match result {
                         Ok(completion) => {
-                            // ADR 0032 step 1 stops at ProviderHandle. Carrying
-                            // this record into the durable turn result is the
-                            // next protocol/journal change.
-                            let mut resp = completion.into_response();
+                            let crate::ProviderCompletion {
+                                response: mut resp,
+                                call_record: completed_call_record,
+                            } = completion;
+                            call_record = Some(completed_call_record);
                             if response_usage_is_empty(&resp.usage) {
                                 resp.usage = streamed_usage.clone();
                             }
@@ -373,7 +376,11 @@ impl RuntimeTurnDriver<'_> {
                             break Ok(resp)
                         }
                         Err(e) => {
-                            let e = e.error;
+                            let crate::ProviderCompletionError {
+                                error: e,
+                                call_record: failed_call_record,
+                            } = e;
+                            call_record = Some(failed_call_record);
                             break Err(LlmCallError {
                                 message: e.message,
                                 retryable: e.retryable,
@@ -439,7 +446,7 @@ impl RuntimeTurnDriver<'_> {
             self.llm_stream_summaries
                 .insert(protocol_iteration, debug.summary);
         }
-        (result, text_streamed)
+        (result, text_streamed, call_record)
     }
 
     async fn finish_assistant_stream_hooks(

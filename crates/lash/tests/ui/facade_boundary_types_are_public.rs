@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash::direct::{
-    DirectLlmClient, DirectLlmError, DirectRequest, LlmAttachment, LlmEventSender, LlmOutputPart,
-    LlmUsage,
+    DirectLlmClient, DirectLlmError, DirectLlmResult, DirectRequest, LlmAttachment, LlmEventSender,
+    LlmOutputPart, LlmUsage,
 };
 use lash::durability::RuntimeHostConfig;
 use lash::messages::MessageRole;
@@ -25,7 +25,7 @@ use lash::plugins::{
     ToolCallHookContext, ToolCatalogContribution, ToolResultHookContext,
 };
 use lash::provider::{
-    LlmResponse, ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy,
+    ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy,
 };
 use lash::runtime::AdvancedLashCoreBuilder;
 use lash::tools::{ToolActivation, ToolCallRecord, ToolOutputContract};
@@ -332,7 +332,7 @@ fn context_compactor_types_are_nameable() -> PluginSpec {
 async fn direct_response_type_is_nameable(
     client: &mut DirectLlmClient,
     request: DirectRequest,
-) -> Result<LlmResponse, DirectLlmError> {
+) -> Result<DirectLlmResult, DirectLlmError> {
     client.complete(request).await
 }
 

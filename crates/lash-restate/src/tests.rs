@@ -1867,6 +1867,8 @@ async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
         replay_turn.outcome,
         lash_core::TurnOutcome::Finished(_)
     ));
+    assert_eq!(first_turn.llm_calls.len(), 1);
+    assert_eq!(replay_turn.llm_calls, first_turn.llm_calls);
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
 
     let conn = rusqlite::Connection::open(dir.path().join("session.db"))

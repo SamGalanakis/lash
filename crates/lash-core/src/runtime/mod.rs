@@ -98,11 +98,11 @@ pub use effect::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, CausalRef, EffectHost,
     ExecutionScope, ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController,
     LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, Resolution,
-    ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeReplay,
-    RuntimeScope, RuntimeSubject, ScopedEffectController, ToolAttemptEffectOutcome,
-    ToolAttemptLaunch, ToolBatchEffectOutcome, ToolCallLaunch,
+    ResolveOutcome, RuntimeAwaitEventOptions, RuntimeDirectLlmOutcome, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
+    RuntimeLlmCallOutcome, RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
+    ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome, ToolCallLaunch,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};
@@ -646,6 +646,10 @@ pub struct AssembledTurn {
     /// `TurnResult`) sums both.
     #[serde(default)]
     pub children_usage: Vec<TokenLedgerEntry>,
+    /// Provider calls made by this session during the turn, in protocol order.
+    /// Child-session calls remain on the child turn result.
+    #[serde(default)]
+    pub llm_calls: Vec<crate::LlmCallRecord>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]

@@ -893,6 +893,13 @@ pub struct TurnResult {
     /// etc.). Empty unless the turn spawned children.
     #[serde(default)]
     pub children_usage: Vec<TokenLedgerEntry>,
+    /// Provider calls made by the parent session during this turn, in protocol
+    /// order. Child-session calls remain on each child's result. This is the
+    /// complete lash-side model attribution surface: a turn has no single
+    /// producing model, so lash exposes the per-call ledger and the host
+    /// composes any higher-level view from it (ADR 0033).
+    #[serde(default)]
+    pub llm_calls: Vec<LlmCallRecord>,
     pub tool_calls: Vec<ToolCallRecord>,
     pub execution: ExecutionSummary,
     pub errors: Vec<TurnIssue>,
@@ -906,6 +913,7 @@ impl TurnResult {
             assistant_output: turn.assistant_output,
             usage: turn.token_usage,
             children_usage: turn.children_usage,
+            llm_calls: turn.llm_calls,
             tool_calls: turn.tool_calls,
             execution: turn.execution,
             errors: turn.errors,

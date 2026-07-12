@@ -153,11 +153,11 @@ pub(crate) async fn apply_direct_outcome(
     usage_source: &str,
     caused_by: Option<&CausalRef>,
     outcome: RuntimeEffectOutcome,
-) -> Result<(LlmResponse, TokenUsage), PluginError> {
-    let result = outcome
+) -> Result<(LlmResponse, TokenUsage, crate::LlmCallRecord), PluginError> {
+    let (result, call_record) = outcome
         .into_direct_response()
         .map_err(|err| PluginError::Session(err.to_string()))?;
-    apply_direct_llm_result(
+    let (response, usage) = apply_direct_llm_result(
         current,
         usage_capability,
         request,
@@ -166,7 +166,13 @@ pub(crate) async fn apply_direct_outcome(
         caused_by,
         result,
     )
-    .await
+    .await?;
+    let call_record = call_record.ok_or_else(|| {
+        PluginError::Session(
+            "direct LLM effect completed without a provider call record".to_string(),
+        )
+    })?;
+    Ok((response, usage, call_record))
 }
 
 async fn apply_direct_llm_result(

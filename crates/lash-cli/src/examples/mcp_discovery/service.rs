@@ -279,6 +279,11 @@ mod tests {
                 Ok(DirectCompletion {
                     text,
                     usage: TokenUsage::default(),
+                    llm_call: lash_core::LlmCallRecord {
+                        call_id: lash_core::LlmCallId("mcp-discovery-test".to_string()),
+                        label: None,
+                        attempts: Vec::new(),
+                    },
                 })
             }),
         )

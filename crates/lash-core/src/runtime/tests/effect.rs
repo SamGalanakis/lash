@@ -156,6 +156,7 @@ impl RuntimeEffectController for RecordingEffectController {
                         ..LlmResponse::default()
                     }),
                     text_streamed: false,
+                    call_record: None,
                 })
             }
             RuntimeEffectCommand::ToolAttempt {
@@ -259,6 +260,11 @@ impl RuntimeEffectController for RecordingEffectController {
                         }],
                         usage,
                         ..LlmResponse::default()
+                    }),
+                    call_record: Some(crate::LlmCallRecord {
+                        call_id: crate::LlmCallId("direct-effect-test".to_string()),
+                        label: None,
+                        attempts: Vec::new(),
                     }),
                 })
             }
@@ -1092,6 +1098,7 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
                             ..LlmResponse::default()
                         }),
                         text_streamed: false,
+                        call_record: None,
                     })
                 }
                 RuntimeEffectCommand::Checkpoint { .. } => Ok(RuntimeEffectOutcome::Checkpoint {
@@ -1663,6 +1670,7 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
 
     assert_eq!(completion.text, "direct answer");
     assert_eq!(completion.usage.input_tokens, 7);
+    assert_eq!(completion.llm_call.call_id.0, "direct-effect-test");
     assert_eq!(recorder.count_kind(RuntimeEffectKind::Direct), 1);
     assert!(recorder.records().iter().any(|record| {
         record.kind == RuntimeEffectKind::Direct
@@ -1863,6 +1871,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
 
     assert_eq!(completion.response.full_text, "raw direct answer");
     assert_eq!(completion.usage.output_tokens, 6);
+    assert_eq!(completion.llm_call.call_id.0, "direct-effect-test");
     assert_eq!(recorder.count_kind(RuntimeEffectKind::Direct), 1);
     let ledger = runtime.shared_token_ledger.lock().expect("token ledger");
     assert_eq!(ledger.len(), 1);

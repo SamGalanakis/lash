@@ -711,6 +711,7 @@ fn remote_turn_result_maps_core_semantics() {
                 reasoning_output_tokens: 0,
             },
         }],
+        llm_calls: Vec::new(),
         tool_calls: Vec::new(),
         errors: Vec::new(),
     };

@@ -531,6 +531,7 @@ fn reconcile_text_snapshot(existing: &mut String, snapshot: &str) {
 
 pub(super) struct TurnAssembler {
     pub(super) tool_calls: Vec<ToolCallRecord>,
+    pub(super) llm_calls: Vec<crate::LlmCallRecord>,
     pub(super) token_usage: TokenUsage,
     pub(super) last_llm_usage: Option<TokenUsage>,
     /// Latest `cumulative` reported by each child session, keyed by
@@ -555,6 +556,7 @@ impl TurnAssembler {
     pub(super) fn new() -> Self {
         Self {
             tool_calls: Vec::new(),
+            llm_calls: Vec::new(),
             token_usage: TokenUsage::default(),
             last_llm_usage: None,
             child_cumulatives: BTreeMap::new(),
@@ -635,6 +637,11 @@ impl TurnAssembler {
             }
             _ => {}
         }
+    }
+
+    pub(super) fn with_llm_calls(mut self, llm_calls: Vec<crate::LlmCallRecord>) -> Self {
+        self.llm_calls = llm_calls;
+        self
     }
 
     pub(super) fn finish(
@@ -735,6 +742,7 @@ impl TurnAssembler {
             },
             token_usage: self.token_usage,
             children_usage,
+            llm_calls: self.llm_calls,
             tool_calls: self.tool_calls,
             errors: issues,
         }

@@ -57,8 +57,8 @@ pub use chronological::{
     ChronologicalEntry, ChronologicalPayload, ChronologicalProjection, visit_turn_view,
 };
 pub use direct::{
-    DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
-    DirectRequest, DirectRole,
+    DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectLlmResult, DirectMessage,
+    DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
 };
 pub use lash_sansio::llm::types::{
     AttemptOutcome, AttemptRecord, ExecutionEvidence, GenerationOptions, LlmCallId, LlmCallRecord,

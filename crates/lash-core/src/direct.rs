@@ -131,6 +131,28 @@ pub enum DirectLlmError {
     Transport(#[from] Box<LlmTransportError>),
 }
 
+/// Successful single-shot direct LLM result with the sealed provider-attempt
+/// history that produced it.
+#[derive(Clone, Debug)]
+pub struct DirectLlmResult {
+    pub response: LlmResponse,
+    pub llm_call: crate::LlmCallRecord,
+}
+
+impl std::ops::Deref for DirectLlmResult {
+    type Target = LlmResponse;
+
+    fn deref(&self) -> &Self::Target {
+        &self.response
+    }
+}
+
+impl DirectLlmResult {
+    pub fn into_response(self) -> LlmResponse {
+        self.response
+    }
+}
+
 pub struct DirectLlmClient {
     provider: ProviderHandle,
     trace_sink: Option<Arc<dyn TraceSink>>,
@@ -174,7 +196,7 @@ impl DirectLlmClient {
     pub async fn complete(
         &mut self,
         mut request: DirectRequest,
-    ) -> Result<LlmResponse, DirectLlmError> {
+    ) -> Result<DirectLlmResult, DirectLlmError> {
         // Validate the requested effort against the capability that travels
         // with the request, and write the resolved (alias-normalized) effort
         // back so the provider never sees an un-clamped value.
@@ -248,7 +270,10 @@ impl DirectLlmClient {
                         self.clock.as_ref(),
                     );
                 }
-                Ok(response.into_response())
+                Ok(DirectLlmResult {
+                    response: response.response,
+                    llm_call: response.call_record,
+                })
             }
             Err(error) => {
                 if let Some(llm_call_id) = llm_call_id {
@@ -492,6 +517,7 @@ mod tests {
             .expect("direct completion should delegate");
 
         assert_eq!(response.full_text, "provider delegated response");
+        assert_eq!(response.llm_call.attempts.len(), 1);
         let captured = captured_request
             .lock()
             .expect("capture lock")

@@ -201,7 +201,8 @@ impl DirectCompletionCapability {
         context: DirectInvocationContext<'_>,
         plan: DirectEffectPlan,
         caused_by: Option<crate::CausalRef>,
-    ) -> Result<(crate::LlmResponse, crate::TokenUsage), crate::PluginError> {
+    ) -> Result<(crate::LlmResponse, crate::TokenUsage, crate::LlmCallRecord), crate::PluginError>
+    {
         let current = context.current;
         let DirectEffectPlan {
             provider,
@@ -259,10 +260,11 @@ impl DirectCompletionCapability {
                 caused_by.as_ref(),
             )
             .await?;
-        let (response, usage) = self.run_direct_effect(context, plan, caused_by).await?;
+        let (response, usage, llm_call) = self.run_direct_effect(context, plan, caused_by).await?;
         Ok(crate::DirectCompletion {
             text: response.full_text,
             usage,
+            llm_call,
         })
     }
 
@@ -283,7 +285,11 @@ impl DirectCompletionCapability {
                 None,
             )
             .await?;
-        let (response, usage) = self.run_direct_effect(context, plan, None).await?;
-        Ok(crate::DirectLlmCompletion { response, usage })
+        let (response, usage, llm_call) = self.run_direct_effect(context, plan, None).await?;
+        Ok(crate::DirectLlmCompletion {
+            response,
+            usage,
+            llm_call,
+        })
     }
 }

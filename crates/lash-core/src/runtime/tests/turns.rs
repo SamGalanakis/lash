@@ -609,6 +609,8 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
             .iter()
             .any(|issue| issue.kind == "llm_provider" && issue.retryable == Some(true))
     );
+    assert_eq!(turn.llm_calls.len(), 1);
+    assert_eq!(turn.llm_calls[0].attempts.len(), 4);
 }
 
 #[tokio::test]
@@ -654,6 +656,8 @@ async fn provider_failure_surfaces_typed_kind_and_retryability_on_turn_issue() {
         Some(crate::ProviderFailureKind::Validation)
     );
     assert_eq!(issue.code.as_deref(), Some("400"));
+    assert_eq!(turn.llm_calls.len(), 1);
+    assert_eq!(turn.llm_calls[0].attempts.len(), 1);
 }
 
 #[tokio::test]

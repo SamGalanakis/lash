@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::LlmRequest as CoreLlmRequest;
-use crate::LlmResponse;
 use crate::ProcessRecord;
 use crate::ProcessRegistry;
 use crate::provider::ProviderHandle;
@@ -17,8 +16,8 @@ use crate::sansio::LlmCallError;
 use crate::{PluginError, RuntimeError, RuntimeErrorCode};
 
 use super::envelope::{
-    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectOutcome,
+    ProcessCommand, ProcessEffectOutcome, RuntimeDirectLlmOutcome, RuntimeEffectCommand,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome,
 };
 use super::outcome::llm_call_error_from_transport;
 
@@ -1002,7 +1001,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
         match envelope.command {
             RuntimeEffectCommand::LlmCall { request } => {
                 let protocol_iteration = runner.machine.protocol_iteration();
-                let (result, text_streamed) = runner
+                let (result, text_streamed, call_record) = runner
                     .driver
                     .run_llm_call(
                         Arc::new((*request).into_request(None, None)),
@@ -1015,6 +1014,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 Ok(RuntimeEffectOutcome::LlmCall {
                     result,
                     text_streamed,
+                    call_record,
                 })
             }
             RuntimeEffectCommand::ToolBatch { batch } => {
@@ -1094,14 +1094,18 @@ impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
         envelope: RuntimeEffectEnvelope,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match envelope.command {
-            RuntimeEffectCommand::Direct { request, .. } => Ok(RuntimeEffectOutcome::Direct {
-                result: self
+            RuntimeEffectCommand::Direct { request, .. } => {
+                let (result, call_record) = self
                     .run_direct_llm_request((*request).into_request(
                         crate::session_model::transport_stream_events(&self.provider, None),
                         None,
                     ))
-                    .await,
-            }),
+                    .await;
+                Ok(RuntimeEffectOutcome::Direct {
+                    result,
+                    call_record,
+                })
+            }
             RuntimeEffectCommand::Sleep { duration_ms } => {
                 sleep_with_cancellation(
                     duration_ms,
@@ -1123,29 +1127,36 @@ impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
 }
 
 impl LocalDirectEffectRunner {
-    async fn run_direct_llm_request(
-        &mut self,
-        request: CoreLlmRequest,
-    ) -> Result<LlmResponse, LlmCallError> {
-        let request = crate::attachments::resolve_llm_request_attachments(
+    async fn run_direct_llm_request(&mut self, request: CoreLlmRequest) -> RuntimeDirectLlmOutcome {
+        let request = match crate::attachments::resolve_llm_request_attachments(
             request,
             self.attachment_store.as_ref(),
         )
         .await
-        .map_err(|err| LlmCallError {
-            message: err.to_string(),
-            retryable: false,
-            kind: crate::ProviderFailureKind::Unknown,
-            raw: None,
-            code: Some("attachment_resolution_failed".to_string()),
-            terminal_reason: crate::LlmTerminalReason::ProviderError,
-            request_body: None,
-        })?;
-        self.provider
-            .complete(request)
-            .await
-            .map(|completion| completion.into_response())
-            .map_err(|failure| llm_call_error_from_transport(failure.error))
+        {
+            Ok(request) => request,
+            Err(err) => {
+                return (
+                    Err(LlmCallError {
+                        message: err.to_string(),
+                        retryable: false,
+                        kind: crate::ProviderFailureKind::Unknown,
+                        raw: None,
+                        code: Some("attachment_resolution_failed".to_string()),
+                        terminal_reason: crate::LlmTerminalReason::ProviderError,
+                        request_body: None,
+                    }),
+                    None,
+                );
+            }
+        };
+        match self.provider.complete(request).await {
+            Ok(completion) => (Ok(completion.response), Some(completion.call_record)),
+            Err(failure) => (
+                Err(llm_call_error_from_transport(failure.error)),
+                Some(failure.call_record),
+            ),
+        }
     }
 }
 
