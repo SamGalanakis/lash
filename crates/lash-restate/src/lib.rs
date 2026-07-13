@@ -431,7 +431,7 @@ pub enum RestateHttpError {
 ///
 /// Authentication, mTLS, proxying, and credential rotation are operational
 /// policy supplied by the host through [`HttpTransport`], following
-/// [ADR 0014's operational-policy-stays-with-the-host principle](https://github.com/SamGalanakis/lash/blob/main/docs/adr/0014-operational-policy-stays-with-the-host.md).
+/// [ADR 0014's operational-policy-stays-with-the-host principle](https://github.com/Ascending-AI/lash/blob/main/docs/adr/0014-operational-policy-stays-with-the-host.md).
 /// A host can use a configured reqwest client for static authentication:
 ///
 /// ```no_run
