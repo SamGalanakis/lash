@@ -157,7 +157,7 @@ publish layers without touching crates.io.
 ### Upgrade to Trusted Publishing (recommended, after bootstrap)
 
 Once every crate exists on crates.io, configure a trusted publisher for each
-(crate settings → Trusted Publishing → repo `SamGalanakis/lash`, workflow
+(crate settings → Trusted Publishing → repo `Ascending-AI/lash`, workflow
 `release.yml`), then in `publish-crates`:
 
 - add `id-token: write` to `permissions`,

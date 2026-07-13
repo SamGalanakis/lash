@@ -1,7 +1,7 @@
 # Contributing to Lash
 
 Feature requests and bug reports are welcome — open an
-[issue](https://github.com/SamGalanakis/lash/issues).
+[issue](https://github.com/Ascending-AI/lash/issues).
 
 At this alpha stage, detailed write-ups help more than drive-by PRs. The
 internals are still moving fast, so open an issue before starting a substantial
