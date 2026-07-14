@@ -1,5 +1,6 @@
 use super::*;
 use crate::AttachmentStore as _;
+use crate::ToolProvider as _;
 
 struct AttachmentWritingTool;
 
@@ -105,11 +106,9 @@ async fn inherited_child_session_carries_parent_tool_state() {
         .session_lifecycle_service()
         .expect("session lifecycle");
     let mut snapshot = manager.tool_state("root").await.expect("tool state");
-    assert!(
-        snapshot
-            .remove(&crate::ToolId::from("tool:memory_probe"))
-            .is_some()
-    );
+    snapshot
+        .set_membership(&crate::ToolId::from("tool:memory_probe"), false)
+        .expect("opt out of parent tool");
     manager
         .apply_tool_state("root", snapshot)
         .await
@@ -138,7 +137,7 @@ async fn inherited_child_session_carries_parent_tool_state() {
         .collect::<Vec<_>>();
     assert!(
         !tool_names.contains(&"memory_probe"),
-        "inherited child should receive the parent's dynamic snapshot, got {tool_names:?}"
+        "inherited child should receive the parent's membership policy, got {tool_names:?}"
     );
 }
 
@@ -370,43 +369,37 @@ async fn same_session_rebuild_preserves_only_that_sessions_pending_attachment_id
     );
 }
 
-struct RootOnlyMemoryProbeFactory;
+struct MemoryProbeFactory;
 
-impl crate::plugin::PluginFactory for RootOnlyMemoryProbeFactory {
+impl crate::plugin::PluginFactory for MemoryProbeFactory {
     fn id(&self) -> &'static str {
         "root_only_memory_probe"
     }
 
     fn build(
         &self,
-        ctx: &crate::plugin::PluginSessionContext,
+        _ctx: &crate::plugin::PluginSessionContext,
     ) -> Result<Arc<dyn crate::plugin::SessionPlugin>, crate::PluginError> {
-        Ok(Arc::new(RootOnlyMemoryProbePlugin {
-            active: ctx.is_root_session(),
-        }))
+        Ok(Arc::new(MemoryProbePlugin))
     }
 }
 
-struct RootOnlyMemoryProbePlugin {
-    active: bool,
-}
+struct MemoryProbePlugin;
 
-impl crate::plugin::SessionPlugin for RootOnlyMemoryProbePlugin {
+impl crate::plugin::SessionPlugin for MemoryProbePlugin {
     fn id(&self) -> &'static str {
         "root_only_memory_probe"
     }
 
     fn register(&self, reg: &mut crate::plugin::PluginRegistrar) -> Result<(), crate::PluginError> {
-        if self.active {
-            reg.tools().provider(Arc::new(MemoryProbeTool))?;
-        }
+        reg.tools().provider(Arc::new(MemoryProbeTool))?;
         Ok(())
     }
 }
 
 #[tokio::test]
-async fn forked_child_session_filters_hidden_tool_state_before_rebind() {
-    let plugin_host = crate::PluginHost::new(vec![Arc::new(RootOnlyMemoryProbeFactory)]);
+async fn forked_child_session_keeps_hidden_live_tool_non_executable_across_rebuild() {
+    let plugin_host = crate::PluginHost::new(vec![Arc::new(MemoryProbeFactory)]);
     let plugin_session = plugin_host.build_session("root", None).expect("plugins");
     let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
@@ -444,7 +437,51 @@ async fn forked_child_session_filters_hidden_tool_state_before_rebind() {
             }),
         )
         .await
-        .expect("hidden root-only state should not poison fork");
+        .expect("hidden tool policy should survive fork");
+
+    let child_handle = runtime
+        .managed_sessions
+        .lock()
+        .await
+        .get(&handle.session_id)
+        .cloned()
+        .expect("managed child runtime");
+    let tool_id = crate::ToolId::from("tool:memory_probe");
+    let execute_hidden = |registry: Arc<crate::ToolRegistry>| {
+        let tool_id = tool_id.clone();
+        async move {
+            registry
+                .execute_by_id(
+                    &tool_id,
+                    &json!({}),
+                    &crate::testing::mock_tool_context(),
+                    None,
+                )
+                .await
+        }
+    };
+
+    let registry = {
+        let child = child_handle.runtime.lock().await;
+        child
+            .session
+            .as_ref()
+            .expect("child session")
+            .plugins()
+            .tool_registry()
+    };
+    assert!(
+        !registry
+            .export_state()
+            .get(&crate::ToolId::from("tool:memory_probe"))
+            .expect("hidden entry retained as policy")
+            .is_member()
+    );
+    let result = execute_hidden(Arc::clone(&registry)).await;
+    assert!(
+        !result.is_success(),
+        "hidden id must not execute: {result:?}"
+    );
 
     let catalog = manager
         .tool_catalog(&handle.session_id)
@@ -455,6 +492,30 @@ async fn forked_child_session_filters_hidden_tool_state_before_rebind() {
         .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
         .collect::<Vec<_>>();
     assert!(!tool_names.contains(&"memory_probe"));
+
+    {
+        let mut child = child_handle.runtime.lock().await;
+        child
+            .refresh_session_tool_catalog()
+            .await
+            .expect("rebuild child catalog from live sources");
+        child_handle.publish_from(&child);
+    }
+    let result = execute_hidden(registry).await;
+    assert!(
+        !result.is_success(),
+        "hidden id must remain non-executable after rebuild: {result:?}"
+    );
+    let rebuilt_catalog = manager
+        .tool_catalog(&handle.session_id)
+        .await
+        .expect("rebuilt tool catalog");
+    assert!(
+        rebuilt_catalog
+            .iter()
+            .all(|tool| tool["name"] != json!("memory_probe")),
+        "hidden tool must remain absent after live re-enumeration"
+    );
 }
 
 #[tokio::test]

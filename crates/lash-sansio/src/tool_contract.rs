@@ -284,7 +284,7 @@ impl std::fmt::Display for ToolId {
 /// there is no per-manifest tier. The optional compact contract is the
 /// catalog-facing projection of the resolved contract; full schemas stay in
 /// [`ToolContract`].
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolManifest {
     pub id: ToolId,
     pub name: String,

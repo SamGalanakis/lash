@@ -133,13 +133,15 @@ impl LashRuntime {
         Ok(generation)
     }
 
-    /// Restore a persisted tool-state snapshot, adopting its generation.
+    /// Restore a persisted tool-state snapshot over the live source surface.
     ///
     /// Unlike [`apply_tool_state`](Self::apply_tool_state) — a generation-checked
     /// delta that requires the snapshot to match the current generation and
-    /// bumps it — this restores the exact persisted surface idempotently, so a
-    /// cold resume of a session whose surface reached generation ≥ 2 succeeds
-    /// (a delta-apply onto a fresh base-1 registry would be rejected).
+    /// bumps it — this adopts the persisted generation when the reconciled
+    /// surface is unchanged. A live-surface change bumps once, marking the
+    /// snapshot dirty for the next commit. A cold resume whose surface reached
+    /// generation ≥ 2 still succeeds because this is not a delta apply onto the
+    /// fresh base-1 registry.
     ///
     /// Persisted tools that no registered source resolves become orphans
     /// (kept as non-members, rebound when their source returns) and are listed
