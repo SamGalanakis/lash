@@ -550,6 +550,13 @@ fn rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool
 
 #[test]
 fn rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal() {
+    let initial_nodes = vec![serde_json::json!({
+        "kind": "message",
+        "message": {
+            "role": "user",
+            "parts": [{"kind": "text", "content": "seed"}]
+        }
+    })];
     RlmProtocolScenario::new(EXEC_TOOL_CONTROL_FRAME_SWITCH.display_name)
         .user_message("run a custom frame-switch tool")
         .llm_response(vec![text_part(&lashlang_block(
@@ -565,7 +572,7 @@ fn rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal() {
                 output: lash_core::ToolCallOutput::success(serde_json::json!({"ok": true}))
                     .with_control(lash_core::ToolControl::SwitchAgentFrame {
                         frame_id: "next-frame".to_string(),
-                        initial_nodes: Vec::new(),
+                        initial_nodes: initial_nodes.clone(),
                         task: Some("continue".to_string()),
                     }),
                 duration_ms: 3,
@@ -583,6 +590,11 @@ fn rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal() {
             done: Some(true),
             no_tool_call_events: true,
             agent_frame_switch: Some(("next-frame", "continue")),
+            turn_outcome: Some(lash_sansio::TurnOutcome::AgentFrameSwitch {
+                frame_id: "next-frame".to_string(),
+                task: "continue".to_string(),
+                initial_nodes,
+            }),
             trajectory_last: Some(RlmTrajectoryExpectation {
                 code: "x = await tools.custom_frame_switch({})?",
                 output: Vec::new(),

@@ -657,6 +657,7 @@ impl RlmProtocolExpectations {
                     lash_sansio::TurnOutcome::AgentFrameSwitch {
                         frame_id: actual_frame_id,
                         task: actual_task,
+                        ..
                     } if actual_frame_id == frame_id && actual_task == task
                 )),
                 "{scenario_name} missing agent-frame switch outcome for {frame_id}: {:?}",

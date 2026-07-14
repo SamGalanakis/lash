@@ -16,8 +16,11 @@ impl RuntimeTurnDriver<'_> {
         }
         match self.before_llm_call(machine, &request).await {
             Ok(Some(crate::ProtocolLlmCallAction::SwitchAgentFrame { frame_id, task })) => {
-                machine
-                    .finish_with_outcome(crate::TurnOutcome::AgentFrameSwitch { frame_id, task });
+                machine.finish_with_outcome(crate::TurnOutcome::AgentFrameSwitch {
+                    frame_id,
+                    task,
+                    initial_nodes: Vec::new(),
+                });
                 return Ok(());
             }
             Ok(None) => {}

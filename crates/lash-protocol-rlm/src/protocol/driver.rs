@@ -372,12 +372,13 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
     match record.output.control.as_ref()? {
         lash_core::ToolControl::SwitchAgentFrame {
             frame_id,
+            initial_nodes,
             task: Some(task),
-            ..
         } if !frame_id.trim().is_empty() && !task.trim().is_empty() => {
             Some(TurnOutcome::AgentFrameSwitch {
                 frame_id: frame_id.clone(),
                 task: task.clone(),
+                initial_nodes: initial_nodes.clone(),
             })
         }
         lash_core::ToolControl::Finish { value } => {

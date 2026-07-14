@@ -101,7 +101,7 @@ impl From<lash_core::TurnOutcome> for RemoteTurnOutcome {
             lash_core::TurnOutcome::Finished(finish) => Self::Finished {
                 finish: finish.into(),
             },
-            lash_core::TurnOutcome::AgentFrameSwitch { frame_id, task } => {
+            lash_core::TurnOutcome::AgentFrameSwitch { frame_id, task, .. } => {
                 Self::AgentFrameSwitch { frame_id, task }
             }
             lash_core::TurnOutcome::Stopped(stop) => Self::Stopped { stop: stop.into() },

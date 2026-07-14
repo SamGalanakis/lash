@@ -484,7 +484,7 @@ impl TurnBoundary {
             state.set_execution_state_snapshot(execution_state_snapshot);
         }
         materialize_terminal_output(state, outcome, clock.as_ref());
-        materialize_agent_frame_switch(state, outcome, tool_calls, clock.as_ref());
+        materialize_agent_frame_switch(state, outcome, clock.as_ref());
         let progress_graph = match &self.stage {
             TurnCommitStage::Drafting(draft) => {
                 Some(draft.graph_commit(draft.state().graph_replace_required))
@@ -681,28 +681,19 @@ fn materialize_terminal_output(
 fn materialize_agent_frame_switch(
     state: &mut RuntimeSessionState,
     outcome: &TurnOutcome,
-    tool_calls: &[ToolCallRecord],
     clock: &dyn crate::Clock,
 ) {
-    let TurnOutcome::AgentFrameSwitch { frame_id, .. } = outcome else {
+    let TurnOutcome::AgentFrameSwitch {
+        frame_id,
+        initial_nodes,
+        ..
+    } = outcome
+    else {
         return;
     };
     if frame_id.trim().is_empty() || state.current_agent_frame_id == *frame_id {
         return;
     }
-    let control = tool_calls
-        .iter()
-        .find_map(|record| match &record.output.control {
-            Some(crate::ToolControl::SwitchAgentFrame {
-                frame_id: control_frame_id,
-                initial_nodes,
-                task,
-            }) if control_frame_id == frame_id => Some((initial_nodes, task)),
-            _ => None,
-        });
-    let empty_nodes = Vec::new();
-    let empty_task = None;
-    let (initial_nodes, _task) = control.unwrap_or((&empty_nodes, &empty_task));
     let nodes = initial_nodes
         .iter()
         .filter_map(|value| {
@@ -889,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_frame_switch_keeps_session_and_tags_initial_nodes_to_new_frame() {
+    fn agent_frame_switch_materializes_outcome_seed_without_tool_call_event() {
         let graph = SessionGraph::from_active_read_state(&[text_message(
             "u0",
             MessageRole::User,
@@ -903,27 +894,13 @@ mod tests {
             MessageRole::User,
             "seed message",
         ));
-        let tool_calls = vec![crate::ToolCallRecord {
-            call_id: Some("continue-call".to_string()),
-            tool: "continue_as".to_string(),
-            args: serde_json::json!({ "task": "next task" }),
-            output: crate::ToolCallOutput::success(serde_json::json!({ "ok": true })).with_control(
-                crate::ToolControl::SwitchAgentFrame {
-                    frame_id: frame_id.clone(),
-                    initial_nodes: vec![serde_json::to_value(seed_node).expect("seed node json")],
-                    task: Some("next task".to_string()),
-                },
-            ),
-            duration_ms: 1,
-        }];
-
         materialize_agent_frame_switch(
             &mut state,
             &TurnOutcome::AgentFrameSwitch {
                 frame_id: frame_id.clone(),
                 task: "next task".to_string(),
+                initial_nodes: vec![serde_json::to_value(seed_node).expect("seed node json")],
             },
-            &tool_calls,
             &crate::SystemClock,
         );
 

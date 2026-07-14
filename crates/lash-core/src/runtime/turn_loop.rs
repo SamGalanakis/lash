@@ -1130,7 +1130,7 @@ impl LashRuntime {
                 .await?;
             frame_stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
             let switched_frame = match &turn.outcome {
-                TurnOutcome::AgentFrameSwitch { frame_id, task } => {
+                TurnOutcome::AgentFrameSwitch { frame_id, task, .. } => {
                     Some((frame_id.clone(), task.clone()))
                 }
                 _ => None,
