@@ -4,35 +4,14 @@ impl ToolRegistry {
     /// differ from the persisted manifest because names are model-facing
     /// aliases, not authority identity.
     fn try_rebind_orphan(&self, tool_id: &ToolId) -> Option<ToolManifest> {
-        let sources = self
-            .sources
+        self.refresh_sources().ok()?;
+        self.state
             .read()
-            .expect("tool source lock poisoned")
-            .iter()
-            .map(|(source_id, source)| (source_id.clone(), Arc::clone(source)))
-            .collect::<Vec<_>>();
-        for (source_id, source) in sources {
-            let Some(manifest) = source.resolve_manifest_by_id(tool_id) else {
-                continue;
-            };
-            let manifest = manifest_with_compact_contract(source.as_ref(), manifest);
-            let mut state = self
-                .state
-                .write()
-                .expect("tool registry state lock poisoned");
-            let existing = state.tools.get(tool_id)?;
-            if !existing.is_orphaned() {
-                return Some(existing.view_manifest());
-            }
-            // Preserve host membership state across the rebind.
-            let member = existing.member;
-            let mut rebound = ToolRegistryEntry::new(manifest.clone(), source_id);
-            rebound.member = member;
-            state.tools.insert(tool_id.clone(), rebound);
-            state.generation += 1;
-            return Some(manifest);
-        }
-        None
+            .expect("tool registry state lock poisoned")
+            .tools
+            .get(tool_id)
+            .filter(|entry| !entry.is_orphaned())
+            .map(ToolRegistryEntry::view_manifest)
     }
 
     /// Resolve the source for a registry entry, distinguishing "unknown tool"
@@ -188,7 +167,7 @@ impl ToolProvider for ToolRegistry {
             }
             state.tools.insert(
                 manifest.id.clone(),
-                ToolRegistryEntry::new(manifest.clone(), source_id),
+                bound_tool_entry(manifest.clone(), source_id, &self.hidden_tool_names),
             );
             state.generation += 1;
             return Some(manifest);
@@ -241,7 +220,7 @@ impl ToolProvider for ToolRegistry {
             }
             state.tools.insert(
                 id.clone(),
-                ToolRegistryEntry::new(manifest.clone(), source_id),
+                bound_tool_entry(manifest.clone(), source_id, &self.hidden_tool_names),
             );
             state.generation += 1;
             return Some(manifest);

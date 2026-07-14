@@ -547,6 +547,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_restore_adds_newly_advertised_tools_and_marks_state_dirty() {
+        let names = Arc::new(std::sync::Mutex::new(vec!["dynamic_one".to_string()]));
+        let provider: Arc<dyn ToolProvider> = Arc::new(DynamicToolProvider {
+            names: Arc::clone(&names),
+        });
+        let source = ToolRegistry::from_tool_providers(vec![Arc::clone(&provider)])
+            .expect("source registry");
+        let snapshot = source.export_state();
+
+        names
+            .lock()
+            .expect("dynamic tool names lock")
+            .push("dynamic_two".to_string());
+        let resumed =
+            ToolRegistry::from_tool_providers(vec![provider]).expect("cold resume registry");
+        let report = resumed
+            .restore_state(snapshot.clone())
+            .expect("restore live surface");
+
+        assert_eq!(report.generation, snapshot.generation() + 1);
+        let entry = resumed
+            .export_state()
+            .get(&tool_id("dynamic_two"))
+            .expect("new live tool persisted")
+            .clone();
+        assert!(entry.is_member());
+        let result = resumed
+            .execute_by_id(
+                &tool_id("dynamic_two"),
+                &json!({}),
+                &test_tool_context(),
+                None,
+            )
+            .await;
+        assert!(result.is_success(), "new live tool executes: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn fork_with_state_adds_newly_advertised_tools() {
+        let names = Arc::new(std::sync::Mutex::new(vec!["dynamic_one".to_string()]));
+        let provider: Arc<dyn ToolProvider> = Arc::new(DynamicToolProvider {
+            names: Arc::clone(&names),
+        });
+        let registry = ToolRegistry::from_tool_providers(vec![provider]).expect("registry");
+        let snapshot = registry.export_state();
+        names
+            .lock()
+            .expect("dynamic tool names lock")
+            .push("dynamic_two".to_string());
+
+        let fork = registry.fork_with_state(snapshot).expect("live fork");
+        assert!(
+            fork.export_state()
+                .get(&tool_id("dynamic_two"))
+                .is_some_and(ToolStateEntry::is_member)
+        );
+        let result = fork
+            .execute_by_id(
+                &tool_id("dynamic_two"),
+                &json!({}),
+                &test_tool_context(),
+                None,
+            )
+            .await;
+        assert!(result.is_success(), "forked live tool executes: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn composed_catalog_adds_newly_advertised_base_tools() {
+        let names = Arc::new(std::sync::Mutex::new(vec!["dynamic_one".to_string()]));
+        let provider: Arc<dyn ToolProvider> = Arc::new(DynamicToolProvider {
+            names: Arc::clone(&names),
+        });
+        let registry = ToolRegistry::from_tool_providers(vec![provider]).expect("registry");
+        names
+            .lock()
+            .expect("dynamic tool names lock")
+            .push("dynamic_two".to_string());
+
+        let composed = registry
+            .compose_session_catalog(true, Vec::new())
+            .expect("composed live catalog");
+        assert!(
+            composed
+                .export_state()
+                .get(&tool_id("dynamic_two"))
+                .is_some_and(ToolStateEntry::is_member)
+        );
+        let result = composed
+            .execute_by_id(
+                &tool_id("dynamic_two"),
+                &json!({}),
+                &test_tool_context(),
+                None,
+            )
+            .await;
+        assert!(
+            result.is_success(),
+            "composed live tool executes: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_manifest_exact_resolves_and_routes_to_owner() {
         let manifest_resolutions = Arc::new(AtomicUsize::new(0));
         let contract_resolutions = Arc::new(AtomicUsize::new(0));
@@ -982,6 +1085,40 @@ mod tests {
         assert!(result.is_success(), "rebound tool executes: {result:?}");
     }
 
+    #[test]
+    fn restore_uses_live_manifest_and_preserves_membership_for_same_id() {
+        struct UpdatedMockTool;
+
+        #[async_trait::async_trait]
+        impl ToolProvider for UpdatedMockTool {
+            fn tool_manifests(&self) -> Vec<ToolManifest> {
+                manifests(vec![test_tool("mock_tool", "live manifest")])
+            }
+
+            fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+                contract_from(vec![test_tool("mock_tool", "live manifest")], name)
+            }
+
+            async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+                ToolResult::ok(json!("updated"))
+            }
+        }
+
+        let source = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("source");
+        let mut snapshot = source.export_state();
+        snapshot
+            .set_membership(&tool_id("mock_tool"), false)
+            .expect("opt out");
+        let target =
+            ToolRegistry::from_tool_provider(Arc::new(UpdatedMockTool)).expect("target registry");
+
+        target.restore_state(snapshot).expect("restore");
+        let exported = target.export_state();
+        let entry = exported.get(&tool_id("mock_tool")).expect("same id");
+        assert_eq!(entry.manifest().description, "live manifest");
+        assert!(!entry.is_member(), "membership remains attached to the id");
+    }
+
     #[tokio::test]
     async fn orphan_rebinds_lazily_via_resolve_manifest() {
         // `NamedExactSource` advertises nothing, so reconcile-on-upsert cannot
@@ -1011,7 +1148,59 @@ mod tests {
     }
 
     #[test]
-    fn restore_orphans_when_same_name_resolves_with_different_id() {
+    fn restore_binds_snapshot_id_from_source_that_advertises_nothing() {
+        let source_registry = ToolRegistry::empty();
+        source_registry
+            .upsert_source(Arc::new(NamedExactSource { id: "exact-a" }))
+            .expect("source registered");
+        assert!(source_registry.resolve_manifest("host_only").is_some());
+        let snapshot = source_registry.export_state();
+
+        let target = ToolRegistry::empty();
+        target
+            .upsert_source(Arc::new(NamedExactSource { id: "exact-a" }))
+            .expect("lazy source registered before restore");
+        let report = target.restore_state(snapshot).expect("lazy id binds");
+
+        assert!(report.orphaned.is_empty());
+        let exported = target.export_state();
+        let entry = exported
+            .get(&tool_id("host_only"))
+            .expect("snapshot-only id retained");
+        assert!(!entry.is_orphaned());
+        assert!(entry.is_member());
+    }
+
+    #[tokio::test]
+    async fn hidden_lazy_resolved_tool_is_not_executable_by_id() {
+        let target = ToolRegistry::empty_with_hidden_tools(
+            ["host_only".to_string()].into_iter().collect(),
+        );
+        target
+            .upsert_source(Arc::new(NamedExactSource { id: "exact-a" }))
+            .expect("lazy source registered");
+
+        let result = target
+            .execute_by_id(
+                &tool_id("host_only"),
+                &json!({}),
+                &test_tool_context(),
+                None,
+            )
+            .await;
+
+        assert!(!result.is_success(), "hidden lazy id must not execute");
+        assert!(
+            !target
+                .export_state()
+                .get(&tool_id("host_only"))
+                .expect("lazy tool recorded")
+                .is_member()
+        );
+    }
+
+    #[test]
+    fn restore_drops_superseded_orphan_and_does_not_transfer_opt_out() {
         struct ReplacedSearchTool;
         #[async_trait::async_trait]
         impl ToolProvider for ReplacedSearchTool {
@@ -1032,26 +1221,29 @@ mod tests {
             }
         }
 
-        let snapshot = snapshot_with_external_tool();
+        let mut snapshot = snapshot_with_external_tool();
+        snapshot
+            .set_membership(&tool_id("mcp__demo__search"), false)
+            .expect("opt out old id");
         let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target");
         target
             .add_tool_provider(Arc::new(ReplacedSearchTool))
             .expect("replacement registered");
         let report = target
             .restore_state(snapshot)
-            .expect("same name with a different id does not satisfy the old grant");
-        assert_eq!(report.orphaned, vec![tool_id("mcp__demo__search")]);
+            .expect("same name with a different id supersedes the old orphan");
+        assert!(report.orphaned.is_empty());
 
         let exported = target.export_state();
         assert!(
-            exported
-                .get(&tool_id("mcp__demo__search"))
-                .expect("old grant is kept")
-                .is_orphaned()
+            !exported.contains(&tool_id("mcp__demo__search")),
+            "the old unresolved grant is superseded by the live name"
         );
         assert!(
-            !exported.contains(&crate::ToolId::from("tool:replaced")),
-            "the replacement is a distinct tool id, not a restore match"
+            exported
+                .get(&crate::ToolId::from("tool:replaced"))
+                .is_some_and(ToolStateEntry::is_member),
+            "membership policy is per id, so the replacement defaults to member"
         );
     }
 

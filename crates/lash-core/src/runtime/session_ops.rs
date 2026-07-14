@@ -22,8 +22,9 @@ impl LashRuntime {
             // Restore the persisted tool catalog so the live registry matches the
             // state being installed (mirrors `from_host_state`). Without this the
             // registry keeps its prior generation/tools and silently diverges from
-            // `state`. `restore_state` adopts the snapshot's generation, so a
-            // surface that reached generation >= 2 restores cleanly.
+            // `state`. `restore_state` accepts the snapshot's generation, so a
+            // surface that reached generation >= 2 restores cleanly; live
+            // changes bump once so the next commit captures them.
             if let Some(tool_state) = state.tool_state_snapshot.clone() {
                 let report = session
                     .plugins()

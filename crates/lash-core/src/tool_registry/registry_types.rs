@@ -1,4 +1,4 @@
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct ToolRegistryEntry {
     manifest: ToolManifest,
     binding: ToolBinding,
@@ -79,6 +79,10 @@ pub enum ReconfigureError {
 pub struct ToolRegistry {
     sources: Arc<RwLock<BTreeMap<String, Arc<dyn ToolSourceExecutor>>>>,
     state: Arc<RwLock<ToolRegistryState>>,
+    /// Authority exclusions are part of registry policy, not snapshot shape.
+    /// Keeping them at this seam prevents a live-source rebuild from granting
+    /// a hidden tool merely because its id was absent from the snapshot.
+    hidden_tool_names: Arc<BTreeSet<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

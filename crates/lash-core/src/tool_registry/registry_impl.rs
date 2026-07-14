@@ -8,10 +8,18 @@ impl ToolRegistry {
         Ok(registry)
     }
 
+    #[cfg(test)]
     pub(crate) fn from_tool_providers(
         providers: Vec<Arc<dyn ToolProvider>>,
     ) -> Result<Self, ReconfigureError> {
-        let registry = Self::empty();
+        Self::from_tool_providers_with_hidden_tools(providers, BTreeSet::new())
+    }
+
+    pub(crate) fn from_tool_providers_with_hidden_tools(
+        providers: Vec<Arc<dyn ToolProvider>>,
+        hidden_tool_names: BTreeSet<String>,
+    ) -> Result<Self, ReconfigureError> {
+        let registry = Self::empty_with_hidden_tools(hidden_tool_names);
         registry.upsert_source(Arc::new(ToolProviderGroupSource::new(
             PLUGIN_TOOL_SOURCE_ID,
             providers,
@@ -20,6 +28,10 @@ impl ToolRegistry {
     }
 
     pub(crate) fn empty() -> Self {
+        Self::empty_with_hidden_tools(BTreeSet::new())
+    }
+
+    fn empty_with_hidden_tools(hidden_tool_names: BTreeSet<String>) -> Self {
         Self {
             sources: Arc::new(RwLock::new(BTreeMap::new())),
             state: Arc::new(RwLock::new(ToolRegistryState {
@@ -27,6 +39,7 @@ impl ToolRegistry {
                 tools: BTreeMap::new(),
                 next_live_source_id: 0,
             })),
+            hidden_tool_names: Arc::new(hidden_tool_names),
         }
     }
 
@@ -54,10 +67,15 @@ impl ToolRegistry {
             });
         }
 
-        validate_unique_manifest_entries(next.entries().values())?;
         let rebound = {
             let sources = self.sources.read().expect("tool source lock poisoned");
-            rebind_tool_state_entries(next.entries(), &sources, RebindMode::RejectUnresolved)?
+            reconcile_tool_state_entries(
+                next.entries(),
+                &sources,
+                ReconcileMode::SnapshotSurface,
+                None,
+                &self.hidden_tool_names,
+            )?
         };
 
         let mut state = self
@@ -75,36 +93,41 @@ impl ToolRegistry {
         Ok(state.generation)
     }
 
-    /// Restore a persisted [`ToolState`] snapshot onto a freshly-built registry,
-    /// adopting the snapshot's generation verbatim.
+    /// Restore a persisted [`ToolState`] snapshot onto a freshly-built registry.
     ///
     /// Unlike [`apply_state`](Self::apply_state) — which applies an incremental
     /// *delta* expected at the current generation and bumps it by one — a
-    /// restore reconstructs the exact persisted state regardless of the fresh
-    /// registry's base generation, and does **not** bump. This is idempotent: a
-    /// snapshot exported at generation `G` restores to generation `G`, so a
-    /// re-export round-trips. Cold rebuilds (the durable process worker, session
-    /// resume) restore a session whose tool catalog reached generation `G ≥ 2`
-    /// onto a base registry at generation 1 — `apply_state` would reject that
-    /// (`expected G, actual 1`); `restore_state` adopts `G`. Entries are still
-    /// rebound to the live sources, so source identity is reconnected.
+    /// restore rebuilds from the current live source surface and overlays the
+    /// snapshot's per-id membership. A byte-equivalent surface remains at `G`;
+    /// a new tool, refreshed manifest, rebound orphan, or superseded orphan
+    /// bumps to `G + 1` so persistence captures the served surface. Cold
+    /// rebuilds can therefore restore a session whose catalog reached
+    /// generation `G ≥ 2` onto a base registry at generation 1 without the
+    /// generation fence used by [`apply_state`](Self::apply_state).
     ///
     /// Restore is tolerant of missing sources: a persisted tool that no current
     /// source resolves becomes an orphaned entry (kept with its last-known
     /// manifest, excluded from the catalog as a non-member, rebound when its
     /// source returns) instead of failing the whole restore. Tool id is the
-    /// registry identity; the live manifest wins on rebind, with the persisted
-    /// Tool Catalog membership preserved. Multiple sources resolving the same id
-    /// or advertised name still fail because execution authority and
-    /// model-facing names must both be unambiguous.
+    /// registry identity; the live manifest wins on rebind, with persisted Tool
+    /// Catalog membership preserved per id. Newly advertised ids are members by
+    /// default. Consequently an opt-out does not transfer when a provider
+    /// replaces a tool with a new id, even if it reuses the same name. Multiple
+    /// sources resolving the same id or advertised name still fail because
+    /// execution authority and model-facing names must both be unambiguous.
     pub fn restore_state(
         &self,
         snapshot: ToolState,
     ) -> Result<ToolRestoreReport, ReconfigureError> {
-        validate_unique_manifest_entries(snapshot.entries().values())?;
         let rebound = {
             let sources = self.sources.read().expect("tool source lock poisoned");
-            rebind_tool_state_entries(snapshot.entries(), &sources, RebindMode::OrphanUnresolved)?
+            reconcile_tool_state_entries(
+                snapshot.entries(),
+                &sources,
+                ReconcileMode::LiveSurface,
+                None,
+                &self.hidden_tool_names,
+            )?
         };
 
         let mut state = self
@@ -112,7 +135,7 @@ impl ToolRegistry {
             .write()
             .expect("tool registry state lock poisoned");
         state.tools = rebound.tools;
-        state.generation = snapshot.generation();
+        state.generation = reconciled_generation(snapshot.generation(), rebound.changed)?;
         Ok(ToolRestoreReport {
             generation: state.generation,
             orphaned: rebound.orphaned,
@@ -144,9 +167,10 @@ impl ToolRegistry {
         context_providers: Vec<Arc<dyn ToolProvider>>,
     ) -> Result<Self, ReconfigureError> {
         let registry = if include_base_tools {
+            self.refresh_sources()?;
             self.fork_with_state(self.export_state())?
         } else {
-            Self::empty()
+            Self::empty_with_hidden_tools((*self.hidden_tool_names).clone())
         };
         registry.upsert_overlay_source(Arc::new(ToolProviderGroupSource::new(
             "context",
@@ -175,92 +199,37 @@ impl ToolRegistry {
         policy: SourceReconcilePolicy,
     ) -> Result<u64, ReconfigureError> {
         let source_id = source.id().to_string();
-        let advertised_tools = source
-            .advertised_tools()
-            .into_iter()
-            .map(|manifest| manifest_with_compact_contract(source.as_ref(), manifest))
-            .collect::<Vec<_>>();
-        validate_unique_manifests(advertised_tools.iter())?;
-        let mut state = self
-            .state
-            .write()
-            .expect("tool registry state lock poisoned");
-        let previous_membership = state
-            .tools
+        let mut sources = self
+            .sources
+            .read()
+            .expect("tool source lock poisoned")
             .iter()
-            .map(|(id, entry)| (id.clone(), entry.member))
+            .map(|(id, source)| (id.clone(), Arc::clone(source)))
             .collect::<BTreeMap<_, _>>();
-        {
-            let advertised_names = advertised_tools
-                .iter()
-                .map(|manifest| manifest.name.as_str())
-                .collect::<BTreeSet<_>>();
-            let advertised_ids = advertised_tools
-                .iter()
-                .map(|manifest| &manifest.id)
-                .collect::<BTreeSet<_>>();
-            match policy {
-                SourceReconcilePolicy::RejectExternalConflicts => {
-                    // Orphans never conflict: a live advertisement supersedes a
-                    // tool that is currently unresolvable. Matching id means the
-                    // source came back, with its catalog membership preserved
-                    // via `previous_membership`.
-                    for manifest in &advertised_tools {
-                        if let Some(existing) = state.tools.get(&manifest.id)
-                            && let Some(existing_source) = existing.binding.source_id()
-                            && existing_source != source_id
-                        {
-                            return Err(ReconfigureError::Validation(format!(
-                                "duplicate tool id `{}` from source `{}` conflicts with source `{}`",
-                                manifest.id, source_id, existing_source
-                            )));
-                        }
-                        if let Some((existing_id, existing_source)) =
-                            state.tools.iter().find_map(|(id, entry)| {
-                                let existing_source = entry.binding.source_id()?;
-                                (existing_source != source_id && entry.manifest.name == manifest.name)
-                                    .then(|| (id.clone(), existing_source.to_string()))
-                            })
-                        {
-                            return Err(ReconfigureError::Validation(format!(
-                                "duplicate tool name `{}` from source `{}` conflicts with tool id `{}` from source `{}`",
-                                manifest.name, source_id, existing_id, existing_source
-                            )));
-                        }
-                    }
-                    state.tools.retain(|id, entry| match &entry.binding {
-                        // Drop this source's previous surface; it is re-inserted
-                        // from the fresh advertisement below.
-                        ToolBinding::Bound(bound) => bound != &source_id,
-                        // Drop orphans the fresh advertisement supersedes by id,
-                        // or by name when a different grant now owns the alias.
-                        ToolBinding::Orphaned => {
-                            !advertised_ids.contains(id)
-                                && !advertised_names.contains(&entry.manifest.name.as_str())
-                        }
-                    });
-                }
-                SourceReconcilePolicy::OverlayReplacingConflicts => {
-                    state.tools.retain(|id, entry| {
-                        entry.binding.source_id() != Some(source_id.as_str())
-                            && !advertised_ids.contains(id)
-                            && !advertised_names.contains(&entry.manifest.name.as_str())
-                    });
-                }
-            }
-        }
-        for manifest in advertised_tools {
-            let id = manifest.id.clone();
-            let member = previous_membership.get(&id).copied().unwrap_or(true);
-            let mut entry = ToolRegistryEntry::new(manifest, source_id.clone());
-            entry.member = member;
-            state.tools.insert(id, entry);
-        }
+        sources.insert(source_id.clone(), Arc::clone(&source));
+        let snapshot = self.export_state();
+        let preferred_source_id = (policy == SourceReconcilePolicy::OverlayReplacingConflicts)
+            .then_some(source_id.as_str());
+        let reconciled = reconcile_tool_state_entries(
+            snapshot.entries(),
+            &sources,
+            ReconcileMode::LiveSurface,
+            preferred_source_id,
+            &self.hidden_tool_names,
+        )?;
+
         self.sources
             .write()
             .expect("tool source lock poisoned")
             .insert(source_id, source);
-        state.generation += 1;
+        let mut state = self
+            .state
+            .write()
+            .expect("tool registry state lock poisoned");
+        state.tools = reconciled.tools;
+        if reconciled.changed {
+            state.generation = reconciled_generation(state.generation, true)?;
+        }
         Ok(state.generation)
     }
 
@@ -273,14 +242,26 @@ impl ToolRegistry {
             .sources
             .read()
             .expect("tool source lock poisoned")
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut generation = self.generation();
-        for source in sources {
-            generation = self.upsert_source(source)?;
+            .iter()
+            .map(|(id, source)| (id.clone(), Arc::clone(source)))
+            .collect::<BTreeMap<_, _>>();
+        let snapshot = self.export_state();
+        let reconciled = reconcile_tool_state_entries(
+            snapshot.entries(),
+            &sources,
+            ReconcileMode::LiveSurface,
+            None,
+            &self.hidden_tool_names,
+        )?;
+        let mut state = self
+            .state
+            .write()
+            .expect("tool registry state lock poisoned");
+        state.tools = reconciled.tools;
+        if reconciled.changed {
+            state.generation = reconciled_generation(state.generation, true)?;
         }
-        Ok(generation)
+        Ok(state.generation)
     }
 
     pub(crate) fn remove_source_id(&self, source_id: &str) -> Result<u64, ReconfigureError> {
@@ -309,12 +290,14 @@ impl ToolRegistry {
             .iter()
             .map(|(k, v)| (k.clone(), Arc::clone(v)))
             .collect::<BTreeMap<_, _>>();
-        validate_unique_manifest_entries(snapshot.entries().values())?;
-        // Tolerant like `restore_state`: a fork mirrors whatever the parent
-        // registry holds, including orphans whose sources are still absent.
-        let rebound =
-            rebind_tool_state_entries(snapshot.entries(), &sources, RebindMode::OrphanUnresolved)?;
-        let generation = snapshot.generation.max(1);
+        let rebound = reconcile_tool_state_entries(
+            snapshot.entries(),
+            &sources,
+            ReconcileMode::LiveSurface,
+            None,
+            &self.hidden_tool_names,
+        )?;
+        let generation = reconciled_generation(snapshot.generation.max(1), rebound.changed)?;
         Ok(Self {
             sources: Arc::new(RwLock::new(sources)),
             state: Arc::new(RwLock::new(ToolRegistryState {
@@ -322,6 +305,16 @@ impl ToolRegistry {
                 tools: rebound.tools,
                 next_live_source_id: 0,
             })),
+            hidden_tool_names: Arc::clone(&self.hidden_tool_names),
         })
     }
+}
+
+fn reconciled_generation(generation: u64, changed: bool) -> Result<u64, ReconfigureError> {
+    if !changed {
+        return Ok(generation);
+    }
+    generation.checked_add(1).ok_or_else(|| {
+        ReconfigureError::Validation("tool registry generation overflow".to_string())
+    })
 }

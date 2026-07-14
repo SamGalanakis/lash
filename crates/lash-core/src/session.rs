@@ -171,12 +171,9 @@ impl Session {
                 .iter()
                 .zip(&tool_providers)
                 .all(|(current, next)| Arc::ptr_eq(current, next));
-        if self.include_base_tools == include_base_tools
+        let overlay_unchanged = self.include_base_tools == include_base_tools
             && self.context_prompt_contributions == prompt_contributions
-            && tool_providers_unchanged
-        {
-            return Ok(());
-        }
+            && tool_providers_unchanged;
         let registry = self
             .services
             .plugins
@@ -187,7 +184,9 @@ impl Session {
                 crate::PluginError::Session(format!("failed to build session tool registry: {err}"))
             })?;
         self.include_base_tools = include_base_tools;
-        self.context_overlay_revision = self.context_overlay_revision.wrapping_add(1);
+        if !overlay_unchanged {
+            self.context_overlay_revision = self.context_overlay_revision.wrapping_add(1);
+        }
         self.context_tools = tool_providers;
         self.tool_registry = registry;
         self.context_prompt_contributions = prompt_contributions;

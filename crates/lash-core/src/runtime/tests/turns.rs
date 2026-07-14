@@ -1,4 +1,5 @@
 use super::*;
+use crate::ToolProvider as _;
 
 fn lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {
     crate::LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
@@ -121,6 +122,198 @@ impl crate::Clock for StepExpiryClock {
     async fn sleep_until(&self, deadline: std::time::Instant) {
         tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
     }
+}
+
+struct FrameRotatingDynamicTool {
+    rotated: Arc<AtomicBool>,
+}
+
+fn rotating_tool_definition(name: &str) -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        format!("tool:{name}"),
+        name,
+        "Exercise live tool discovery across an AgentFrame rotation",
+        crate::ToolDefinition::default_input_schema(),
+        json!({ "type": "object", "additionalProperties": true }),
+    )
+}
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for FrameRotatingDynamicTool {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        let mut manifests = vec![
+            rotating_tool_definition("rotate_surface").manifest(),
+            rotating_tool_definition("curated_before_rotation").manifest(),
+        ];
+        if self.rotated.load(Ordering::SeqCst) {
+            manifests.push(rotating_tool_definition("new_after_rotation").manifest());
+            manifests.push(rotating_tool_definition("hidden_after_rotation").manifest());
+        }
+        manifests
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        self.tool_manifests()
+            .into_iter()
+            .any(|manifest| manifest.name == name)
+            .then(|| Arc::new(rotating_tool_definition(name).contract()))
+    }
+
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        match call.name {
+            "rotate_surface" => {
+                self.rotated.store(true, Ordering::SeqCst);
+                crate::ToolResult::ok(json!({ "rotated": true })).with_control(
+                    crate::ToolControl::SwitchAgentFrame {
+                        frame_id: "live-surface-frame".to_string(),
+                        initial_nodes: Vec::new(),
+                        task: Some("call the newly available tool".to_string()),
+                    },
+                )
+            }
+            "new_after_rotation" => crate::ToolResult::ok(json!({ "called": call.name }))
+                .with_control(crate::ToolControl::Finish {
+                    value: json!("new tool executed").into(),
+                }),
+            "curated_before_rotation" | "hidden_after_rotation" => {
+                crate::ToolResult::ok(json!({ "called": call.name }))
+            }
+            name => crate::ToolResult::err_fmt(format_args!("unknown rotating tool `{name}`")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn continue_as_frame_rotation_reconciles_newly_advertised_tool() {
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "rotate-call".to_string(),
+                    tool_name: "rotate_surface".to_string(),
+                    input_json: "{}".to_string(),
+                    replay: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "new-tool-call".to_string(),
+                    tool_name: "new_after_rotation".to_string(),
+                    input_json: "{}".to_string(),
+                    replay: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let tools: Arc<dyn crate::ToolProvider> = Arc::new(FrameRotatingDynamicTool {
+        rotated: Arc::new(AtomicBool::new(false)),
+    });
+    let mut factories = crate::testing::test_standard_protocol_factories();
+    factories.push(Arc::new(StaticPluginFactory::new(
+        "frame_rotating_tools",
+        crate::PluginSpec::new().with_tool_provider(tools),
+    )));
+    let plugins = crate::PluginHost::new(factories)
+        .build_session_with_parent(
+            "root",
+            Some("parent".to_string()),
+            None,
+            crate::plugin::SessionAuthorityContext {
+                tool_access: crate::SessionToolAccess {
+                    tools: Vec::new(),
+                    hidden_tools: ["hidden_after_rotation".to_string()].into_iter().collect(),
+                },
+                ..crate::plugin::SessionAuthorityContext::default()
+            },
+        )
+        .expect("frame child plugins");
+    let mut runtime = LashRuntime::from_embedded_state(
+        standard_test_policy(),
+        test_host_config(),
+        crate::RuntimeServices::new(plugins),
+        RuntimeSessionState::default(),
+    )
+    .await
+    .expect("frame child runtime");
+    set_runtime_provider(&mut runtime, transport.into_handle());
+    let mut curated = runtime.tool_state().expect("pre-rotation tool state");
+    curated
+        .set_membership(&crate::ToolId::from("tool:curated_before_rotation"), false)
+        .expect("opt out before rotation");
+    runtime
+        .apply_tool_state(curated)
+        .await
+        .expect("apply pre-rotation curation");
+
+    let run = runtime
+        .stream_turn_with_agent_frames(
+            TurnInput::text("rotate the frame"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "live-surface-frame-rotation"),
+            ),
+        )
+        .await
+        .expect("AgentFrame run");
+
+    assert_eq!(run.frame_switch_count(), 1);
+    let final_turn = run.final_turn().expect("final frame");
+    assert!(
+        matches!(
+            &final_turn.outcome,
+            TurnOutcome::Finished(TurnFinish::ToolValue { tool_name, value })
+                if tool_name == "new_after_rotation" && *value == json!("new tool executed")
+        ),
+        "new tool must be callable in the follow frame: {:?}",
+        final_turn.outcome
+    );
+    let catalog_names = runtime
+        .active_tool_catalog_shared()
+        .expect("post-rotation model catalog")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    assert!(catalog_names.contains(&"new_after_rotation".to_string()));
+    assert!(!catalog_names.contains(&"hidden_after_rotation".to_string()));
+    assert!(!catalog_names.contains(&"curated_before_rotation".to_string()));
+
+    let registry = runtime
+        .session
+        .as_ref()
+        .expect("frame child session")
+        .plugins()
+        .tool_registry();
+    let post_rotation_state = registry.export_state();
+    assert!(
+        !post_rotation_state
+            .get(&crate::ToolId::from("tool:curated_before_rotation"))
+            .expect("curated entry survives rotation")
+            .is_member()
+    );
+    assert!(
+        !post_rotation_state
+            .get(&crate::ToolId::from("tool:hidden_after_rotation"))
+            .expect("new hidden entry is retained as denied policy")
+            .is_member()
+    );
+    let hidden_result = registry
+        .execute_by_id(
+            &crate::ToolId::from("tool:hidden_after_rotation"),
+            &json!({}),
+            &crate::testing::mock_tool_context(),
+            None,
+        )
+        .await;
+    assert!(
+        !hidden_result.is_success(),
+        "new hidden id must not execute after frame rotation: {hidden_result:?}"
+    );
 }
 
 struct ExpireLeaseAtFinalCommit {
