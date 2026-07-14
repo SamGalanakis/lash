@@ -33,16 +33,6 @@ impl OpenAiCompatibleProvider {
         })
     }
 
-    fn chat_text_or_parts(mut parts: Vec<Value>) -> Value {
-        if parts.len() == 1
-            && parts[0].get("__lash_cache_breakpoint").is_none()
-            && let Some(text) = parts[0].get("text").and_then(Value::as_str)
-        {
-            return json!(text);
-        }
-        Value::Array(std::mem::take(&mut parts))
-    }
-
     fn build_chat_messages(req: &LlmRequest) -> Vec<Value> {
         let mut messages = Vec::new();
         for msg in &req.messages {
@@ -127,7 +117,7 @@ impl OpenAiCompatibleProvider {
             {
                 let mut wire_message = json!({ "role": role });
                 if !text_parts.is_empty() {
-                    wire_message["content"] = Self::chat_text_or_parts(text_parts);
+                    wire_message["content"] = Value::Array(text_parts);
                 } else if matches!(msg.role, LlmRole::Assistant) {
                     wire_message["content"] = Value::Null;
                 }
