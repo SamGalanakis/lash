@@ -111,6 +111,11 @@ fn continue_as_switch_frame(args: &Value) -> Result<ContinueAsResult, String> {
                 .map_err(|err| format!("failed to encode continue_as frame seed node: {err}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    for (index, node) in initial_nodes.iter().enumerate() {
+        serde_json::from_value::<lash_core::SessionAppendNode>(node.clone()).map_err(|err| {
+            format!("failed to validate continue_as frame seed node {index}: {err}")
+        })?;
+    }
 
     Ok(ContinueAsResult {
         value: json!({

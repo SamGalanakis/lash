@@ -1,3 +1,79 @@
+async fn enqueue_queued_work_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    batch: &QueuedWorkBatchDraft,
+) -> Result<QueuedWorkBatch, StoreError> {
+    if let Some(source_key) = batch.source_key.as_deref() {
+        let existing_id: Option<String> = sqlx::query_scalar(
+            "SELECT batch_id FROM lash_queued_work_batches
+             WHERE session_id = $1 AND source_key = $2",
+        )
+        .bind(&batch.session_id)
+        .bind(source_key)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(store_sqlx_error)?;
+        if let Some(batch_id) = existing_id {
+            return load_queued_batch(tx, &batch_id).await?.ok_or_else(|| {
+                StoreError::Backend("queued work source row disappeared".to_string())
+            });
+        }
+    }
+    let now = current_epoch_ms();
+    let enqueue_seq: i64 = sqlx::query_scalar(
+        "SELECT nextval(pg_get_serial_sequence(
+            'lash_queued_work_batches',
+            'enqueue_seq'
+         ))",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(store_sqlx_error)?;
+    let batch_id = derive_batch_id(
+        &batch.session_id,
+        batch.source_key.as_deref(),
+        now,
+        Some(enqueue_seq as u64),
+    );
+    sqlx::query(
+        "INSERT INTO lash_queued_work_batches (
+            enqueue_seq, batch_id, session_id, source_key, delivery_policy, slot_policy,
+            merge_key_json, available_at_ms, enqueued_at_ms
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(enqueue_seq)
+    .bind(&batch_id)
+    .bind(&batch.session_id)
+    .bind(&batch.source_key)
+    .bind(batch.delivery_policy.as_str())
+    .bind(batch.slot_policy.as_str())
+    .bind(encode_json(&batch.merge_key))
+    .bind(batch.available_at_ms as i64)
+    .bind(now as i64)
+    .execute(&mut **tx)
+    .await
+    .map_err(store_sqlx_error)?;
+    for (index, payload) in batch.payloads.iter().enumerate() {
+        let item_id = format!("{batch_id}:item:{index}");
+        sqlx::query(
+            "INSERT INTO lash_queued_work_items (batch_id, item_index, item_id, payload_json)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&batch_id)
+        .bind(index as i32)
+        .bind(item_id)
+        .bind(encode_json(payload))
+        .execute(&mut **tx)
+        .await
+        .map_err(store_sqlx_error)?;
+    }
+    let queued = load_queued_batch(tx, &batch_id)
+        .await?
+        .ok_or_else(|| StoreError::Backend("queued work insert disappeared".to_string()))?;
+    debug_assert_eq!(queued.enqueue_seq, enqueue_seq as u64);
+    Ok(queued)
+}
+
 #[async_trait::async_trait]
 impl SessionCommitStore for PostgresSessionStore {
     fn durability_tier(&self) -> DurabilityTier {
@@ -397,10 +473,21 @@ impl SessionCommitStore for PostgresSessionStore {
             &commit.committed_attachment_ids,
         )
         .await?;
+        let mut enqueued_queue_batches = Vec::new();
+        for batch in &commit.enqueued_queue_batches {
+            if batch.session_id != commit.session_id {
+                return Err(StoreError::SessionBindingMismatch {
+                    bound_session_id: commit.session_id.clone(),
+                    attempted_session_id: batch.session_id.clone(),
+                });
+            }
+            enqueued_queue_batches.push(enqueue_queued_work_tx(&mut tx, batch).await?);
+        }
         let result = RuntimeCommitResult {
             head_revision: next_revision,
             checkpoint_ref,
             manifest,
+            enqueued_queue_batches,
         };
         if let Some(completed) = &commit.turn_commit {
             sqlx::query(
@@ -716,84 +803,7 @@ impl QueuedWorkStore for PostgresSessionStore {
         batch: QueuedWorkBatchDraft,
     ) -> Result<QueuedWorkBatch, StoreError> {
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
-        if let Some(source_key) = batch.source_key.as_deref() {
-            let existing_id: Option<String> = sqlx::query_scalar(
-                "SELECT batch_id FROM lash_queued_work_batches
-                 WHERE session_id = $1 AND source_key = $2",
-            )
-            .bind(&batch.session_id)
-            .bind(source_key)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(store_sqlx_error)?;
-            if let Some(batch_id) = existing_id {
-                let existing = load_queued_batch(&mut tx, &batch_id)
-                    .await?
-                    .ok_or_else(|| {
-                        StoreError::Backend("queued work source row disappeared".to_string())
-                    })?;
-                tx.commit().await.map_err(store_sqlx_error)?;
-                return Ok(existing);
-            }
-        }
-        let now = current_epoch_ms();
-        // Allocate the durable ordering key first and also use it as the batch-id
-        // nonce. PostgreSQL can enqueue multiple source-key-less batches for the
-        // same session within one millisecond (and across many store handles or
-        // hosts), so timestamp alone is not a unique identity source. Sequence
-        // values are database-global and are intentionally not rolled back.
-        let enqueue_seq: i64 = sqlx::query_scalar(
-            "SELECT nextval(pg_get_serial_sequence(
-                'lash_queued_work_batches',
-                'enqueue_seq'
-             ))",
-        )
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(store_sqlx_error)?;
-        let batch_id = derive_batch_id(
-            &batch.session_id,
-            batch.source_key.as_deref(),
-            now,
-            Some(enqueue_seq as u64),
-        );
-        sqlx::query(
-            "INSERT INTO lash_queued_work_batches (
-                enqueue_seq, batch_id, session_id, source_key, delivery_policy, slot_policy,
-                merge_key_json, available_at_ms, enqueued_at_ms
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        )
-        .bind(enqueue_seq)
-        .bind(&batch_id)
-        .bind(&batch.session_id)
-        .bind(&batch.source_key)
-        .bind(batch.delivery_policy.as_str())
-        .bind(batch.slot_policy.as_str())
-        .bind(encode_json(&batch.merge_key))
-        .bind(batch.available_at_ms as i64)
-        .bind(now as i64)
-        .execute(&mut *tx)
-        .await
-        .map_err(store_sqlx_error)?;
-        for (index, payload) in batch.payloads.iter().enumerate() {
-            let item_id = format!("{batch_id}:item:{index}");
-            sqlx::query(
-                "INSERT INTO lash_queued_work_items (batch_id, item_index, item_id, payload_json)
-                 VALUES ($1, $2, $3, $4)",
-            )
-            .bind(&batch_id)
-            .bind(index as i32)
-            .bind(item_id)
-            .bind(encode_json(payload))
-            .execute(&mut *tx)
-            .await
-            .map_err(store_sqlx_error)?;
-        }
-        let queued = load_queued_batch(&mut tx, &batch_id)
-            .await?
-            .ok_or_else(|| StoreError::Backend("queued work insert disappeared".to_string()))?;
-        debug_assert_eq!(queued.enqueue_seq, enqueue_seq as u64);
+        let queued = enqueue_queued_work_tx(&mut tx, &batch).await?;
         tx.commit().await.map_err(store_sqlx_error)?;
         Ok(queued)
     }
@@ -1028,6 +1038,113 @@ impl QueuedWorkStore for PostgresSessionStore {
             .map_err(store_sqlx_error)?
             .rows_affected();
             if changed == 0 {
+                tx.rollback().await.map_err(store_sqlx_error)?;
+                return Ok(None);
+            }
+        }
+        tx.commit().await.map_err(store_sqlx_error)?;
+        Ok(Some(QueuedWorkClaim {
+            session_id: session_id.to_string(),
+            claim_id: lease.claim_id,
+            owner: owner.clone(),
+            lease_token: lease.lease_token,
+            fencing_token: lease.fencing_token,
+            session_lease_generation: lease.session_lease_generation,
+            batches: selected_batches,
+        }))
+    }
+
+    async fn claim_ready_queued_work_by_batch_ids(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        boundary: QueuedWorkClaimBoundary,
+        batch_ids: &[String],
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        if batch_ids.is_empty() {
+            return Ok(None);
+        }
+        let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
+        ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
+        let generation = session_execution_lease.fencing_token;
+        let now = postgres_transaction_epoch_ms(&mut tx).await?;
+        let mut selected = Vec::new();
+        let mut selected_batches = Vec::new();
+        for batch_id in batch_ids {
+            let row = sqlx::query(
+                "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                        slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
+                 FROM lash_queued_work_batches
+                 WHERE session_id = $1 AND batch_id = $2 AND available_at_ms <= $3
+                   AND (claim_token IS NULL OR claim_session_lease_generation <> $4)
+                 FOR UPDATE",
+            )
+            .bind(session_id)
+            .bind(batch_id)
+            .bind(now as i64)
+            .bind(generation as i64)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?;
+            let Some(row) = row else {
+                tx.rollback().await.map_err(store_sqlx_error)?;
+                return Ok(None);
+            };
+            let row = queued_batch_row(row)?;
+            let batch = queued_work_batch_from_row(&mut tx, row.clone()).await?;
+            if batch.work_class() != Some(lash_core::runtime::QueuedWorkClass::TurnWork) {
+                tx.rollback().await.map_err(store_sqlx_error)?;
+                return Ok(None);
+            }
+            selected.push(row);
+            selected_batches.push(batch);
+        }
+        let candidates = selected
+            .iter()
+            .map(|row| ClaimCandidate {
+                enqueue_seq: row.enqueue_seq,
+                claim_fencing_token: row.claim_fencing_token,
+                work_class: lash_core::runtime::QueuedWorkClass::TurnWork,
+                delivery_policy: row.delivery_policy,
+                slot_policy: row.slot_policy,
+                merge_key: row.merge_key.clone(),
+            })
+            .collect::<Vec<_>>();
+        if select_turn_work_claim_prefix(&candidates, boundary, candidates.len())
+            != candidates.len()
+        {
+            tx.rollback().await.map_err(store_sqlx_error)?;
+            return Ok(None);
+        }
+        let lease =
+            QueuedWorkClaimLease::derive(&candidates[0], session_id, owner, now, generation);
+        let liveness_json = encode_liveness(&owner.liveness)?;
+        for row in &selected {
+            let changed = sqlx::query(
+                "UPDATE lash_queued_work_batches
+                 SET claim_id = $3, claim_owner_id = $4,
+                     claim_owner_incarnation_id = $5, claim_owner_liveness_json = $6,
+                     claim_token = $7, claim_fencing_token = claim_fencing_token + 1,
+                     claim_session_lease_generation = $8
+                 WHERE session_id = $1 AND batch_id = $2
+                   AND (claim_token IS NULL OR claim_session_lease_generation <> $8)",
+            )
+            .bind(session_id)
+            .bind(&row.batch_id)
+            .bind(&lease.claim_id)
+            .bind(&owner.owner_id)
+            .bind(&owner.incarnation_id)
+            .bind(&liveness_json)
+            .bind(&lease.lease_token)
+            .bind(generation as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?
+            .rows_affected();
+            if changed != 1 {
                 tx.rollback().await.map_err(store_sqlx_error)?;
                 return Ok(None);
             }

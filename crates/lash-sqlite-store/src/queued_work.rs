@@ -117,6 +117,65 @@ pub(crate) fn load_queued_batch_by_id_conn(
         .transpose()
 }
 
+pub(crate) fn enqueue_queued_work_conn(
+    conn: &Connection,
+    batch: &QueuedWorkBatchDraft,
+    now: u64,
+    nonce: u64,
+) -> Result<QueuedWorkBatch, StoreError> {
+    if let Some(source_key) = batch.source_key.as_deref() {
+        let existing_id: Option<String> = conn
+            .query_row(
+                "SELECT batch_id FROM queued_work_batches
+                 WHERE session_id = ?1 AND source_key = ?2",
+                params![batch.session_id, source_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        if let Some(batch_id) = existing_id {
+            return load_queued_batch_by_id_conn(conn, &batch_id)?.ok_or_else(|| {
+                StoreError::Backend("queued work source row disappeared".to_string())
+            });
+        }
+    }
+    let batch_id = derive_batch_id(
+        &batch.session_id,
+        batch.source_key.as_deref(),
+        now,
+        Some(nonce),
+    );
+    conn.execute(
+        "INSERT INTO queued_work_batches (
+            batch_id, session_id, source_key, delivery_policy, slot_policy,
+            merge_key_json, available_at_ms, enqueued_at_ms
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            batch_id,
+            batch.session_id,
+            batch.source_key.as_deref(),
+            batch.delivery_policy.as_str(),
+            batch.slot_policy.as_str(),
+            encode_json(&batch.merge_key),
+            batch.available_at_ms as i64,
+            now as i64,
+        ],
+    )
+    .map_err(sqlite_error)?;
+    for (index, payload) in batch.payloads.iter().enumerate() {
+        let item_id = format!("{batch_id}:item:{index}");
+        conn.execute(
+            "INSERT INTO queued_work_items (batch_id, item_index, item_id, payload_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![batch_id, index as i64, item_id, encode_json(payload)],
+        )
+        .map_err(sqlite_error)?;
+    }
+    load_queued_batch_by_id_conn(conn, &batch_id)?
+        .ok_or_else(|| StoreError::Backend("queued work insert disappeared".to_string()))
+}
+
 pub(crate) fn ensure_queued_work_completion_conn(
     conn: &Connection,
     completed: &QueuedWorkCompletion,

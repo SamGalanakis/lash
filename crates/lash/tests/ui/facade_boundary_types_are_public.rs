@@ -64,6 +64,7 @@ impl SessionCommitStore for FacadeStore {
             head_revision: commit.expected_head_revision.unwrap_or_default() + 1,
             checkpoint_ref: "checkpoint".to_string().into(),
             manifest,
+            enqueued_queue_batches: Vec::new(),
         })
     }
 
@@ -228,6 +229,17 @@ impl QueuedWorkStore for FacadeStore {
         Ok(None)
     }
 
+    async fn claim_ready_queued_work_by_batch_ids(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
+        _owner: &LeaseOwnerIdentity,
+        _boundary: QueuedWorkClaimBoundary,
+        _batch_ids: &[String],
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        Ok(None)
+    }
+
     async fn abandon_queued_work_claim(&self, _claim: &QueuedWorkClaim) -> Result<(), StoreError> {
         Ok(())
     }
@@ -289,6 +301,7 @@ fn persistence_types_are_nameable(
         )),
         completed_queue_claims: Vec::new(),
         completed_turn_input_claims: Vec::new(),
+        enqueued_queue_batches: Vec::new(),
         interrupted_turn_input_turn_id: None,
         committed_attachment_ids: Vec::new(),
     }

@@ -412,6 +412,8 @@ pub struct RuntimeCommit {
     pub turn_commit: Option<RuntimeTurnCommitStamp>,
     pub completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     pub completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupted_turn_input_turn_id: Option<String>,
     /// Attachment ids whose bytes are referenced by this commit and
@@ -429,6 +431,8 @@ pub struct RuntimeCommitResult {
     pub head_revision: u64,
     pub checkpoint_ref: BlobRef,
     pub manifest: SessionCheckpoint,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enqueued_queue_batches: Vec<crate::QueuedWorkBatch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -772,6 +776,7 @@ impl RuntimeCommit {
             turn_commit: None,
             completed_queue_claims: Vec::new(),
             completed_turn_input_claims: Vec::new(),
+            enqueued_queue_batches: Vec::new(),
             interrupted_turn_input_turn_id: None,
             committed_attachment_ids: Vec::new(),
         }
@@ -796,6 +801,7 @@ impl RuntimeCommit {
             turn_commit: None,
             completed_queue_claims: Vec::new(),
             completed_turn_input_claims: Vec::new(),
+            enqueued_queue_batches: Vec::new(),
             interrupted_turn_input_turn_id: None,
             committed_attachment_ids: Vec::new(),
         }
@@ -1206,10 +1212,9 @@ pub trait QueuedWorkStore: Send + Sync {
     /// project queued work into a UI can claim the exact batch ids they
     /// rendered instead of reconstructing authority from local draft state.
     ///
-    /// Provided derivation: preserves the ordered queue contract by claiming
-    /// the next ready group and returning it only when the durable ids match
-    /// exactly, abandoning the claim otherwise. Backends may override it with
-    /// a native query; none currently need to.
+    /// This selection is intentionally allowed to bypass earlier unrelated
+    /// ready work. The logical-turn driver uses it to reclaim an atomic outbox
+    /// handoff immediately, preserving foreground frame-chain ordering.
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         session_id: &str,
@@ -1217,33 +1222,7 @@ pub trait QueuedWorkStore: Send + Sync {
         owner: &LeaseOwnerIdentity,
         boundary: crate::QueuedWorkClaimBoundary,
         batch_ids: &[String],
-    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError> {
-        if batch_ids.is_empty() {
-            return Ok(None);
-        }
-        let Some(claim) = self
-            .claim_ready_queued_work(
-                session_id,
-                session_execution_lease,
-                owner,
-                boundary,
-                batch_ids.len(),
-            )
-            .await?
-        else {
-            return Ok(None);
-        };
-        let claimed_ids = claim
-            .batches
-            .iter()
-            .map(|batch| batch.batch_id.as_str())
-            .collect::<Vec<_>>();
-        if claimed_ids == batch_ids.iter().map(String::as_str).collect::<Vec<_>>() {
-            return Ok(Some(claim));
-        }
-        self.abandon_queued_work_claim(&claim).await?;
-        Ok(None)
-    }
+    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
 
     /// Release a held queued-work claim without completing it.
     async fn abandon_queued_work_claim(

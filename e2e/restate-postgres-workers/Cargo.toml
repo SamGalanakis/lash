@@ -17,6 +17,10 @@ path = "src/bin/mock_provider.rs"
 name = "lash-e2e-runner"
 path = "src/bin/runner.rs"
 
+[[bin]]
+name = "lash-e2e-frame-crash"
+path = "src/bin/frame_crash.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }

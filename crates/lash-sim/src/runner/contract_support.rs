@@ -694,9 +694,14 @@ pub(super) fn turn_outcome_contract_json(outcome: &lash_core::TurnOutcome) -> Va
             "kind": "finished",
             "finish": format!("{other:?}"),
         }),
-        lash_core::TurnOutcome::AgentFrameSwitch { frame_id, task } => json!({
+        lash_core::TurnOutcome::AgentFrameSwitch {
+            frame_id,
+            initial_nodes,
+            task,
+        } => json!({
             "kind": "agent_frame_switch",
             "frame_id": frame_id,
+            "initial_nodes": initial_nodes,
             "task": task,
         }),
     }
