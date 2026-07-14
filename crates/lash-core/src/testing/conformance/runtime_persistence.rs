@@ -2714,6 +2714,24 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
         .expect("claim queue")
         .expect("queue claim");
     assert_eq!(claim.batches[0].batch_id, batch.batch_id);
+    let input = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft(
+            "root",
+            "atomic pending input",
+        ))
+        .await
+        .expect("enqueue atomic pending input");
+    let input_claim = store
+        .claim_next_turn_inputs(
+            "root",
+            &session_lease.fence(),
+            &lease_owner("queue-owner"),
+            1,
+        )
+        .await
+        .expect("claim atomic pending input")
+        .expect("atomic pending input claim");
+    assert_eq!(input_claim.inputs[0].input_id, input.input_id);
     let state = RuntimeSessionState {
         session_id: "root".to_string(),
         turn_index: 41,
@@ -2743,6 +2761,7 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
                 .clone()
                 .with_session_execution_lease(session_lease.fence())
                 .with_turn_commit(turn_commit.clone())
+                .completing_turn_input_claim(input_claim.completion())
                 .completing_queue_claim(stale_queue_completion),
         )
         .await
@@ -2766,6 +2785,36 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
         "rejected queue completion must preserve queued work"
     );
 
+    let mut cross_session_outbox = base_commit.clone();
+    cross_session_outbox.enqueued_queue_batches[0].session_id = "other-session".to_string();
+    let err = store
+        .commit_runtime_state(
+            cross_session_outbox
+                .with_session_execution_lease(session_lease.fence())
+                .completing_queue_claim(claim.completion())
+                .completing_turn_input_claim(input_claim.completion()),
+        )
+        .await
+        .expect_err("outbox enqueue failure must reject the whole final commit");
+    assert!(matches!(err, StoreError::SessionBindingMismatch { .. }));
+    assert!(
+        store
+            .load_session(SessionReadScope::FullGraph)
+            .await
+            .expect("load after rejected outbox enqueue")
+            .is_none(),
+        "rejected outbox enqueue must roll back session state"
+    );
+    assert_eq!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("list after rejected outbox enqueue")
+            .len(),
+        1,
+        "rejected outbox enqueue must roll back inbound queue completion"
+    );
+
     let first = store
         .commit_runtime_state(
             base_commit
@@ -2773,6 +2822,7 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
                 .with_session_execution_lease(session_lease.fence())
                 .releasing_session_execution_lease(session_lease.completion())
                 .with_turn_commit(turn_commit.clone())
+                .completing_turn_input_claim(input_claim.completion())
                 .completing_queue_claim(claim.completion()),
         )
         .await
@@ -2787,6 +2837,7 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
                     "turn-atomic",
                     commit_hash,
                 ))
+                .completing_turn_input_claim(input_claim.completion())
                 .completing_queue_claim(claim.completion()),
         )
         .await
@@ -2814,6 +2865,14 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
             .iter()
             .map(|batch| batch.batch_id.as_str())
             .eq([first.enqueued_queue_batches[0].batch_id.as_str()])
+    );
+    assert!(
+        store
+            .list_pending_turn_inputs("root")
+            .await
+            .expect("list inputs after accepted atomic commit")
+            .is_empty(),
+        "accepted switch commit must complete inbound input with the outbox enqueue"
     );
 }
 

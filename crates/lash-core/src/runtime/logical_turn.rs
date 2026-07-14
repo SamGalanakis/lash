@@ -272,8 +272,27 @@ impl LashRuntime {
                         format!("agent-frame handoff did not target frame `{frame_id}`"),
                     ));
                 }
+                let materialized = claim.materialize_for_turn();
+                let follow_turn_id = agent_frame_follow_turn_id(&root_trace_turn_id, turns.len());
+                crate::trace::emit_trace(
+                    &self.host.core.tracing.trace_sink,
+                    &self.host.core.tracing.trace_context,
+                    lash_trace::TraceContext::default()
+                        .for_session(self.state.session_id.clone())
+                        .for_turn_index(self.state.turn_index + 1)
+                        .for_turn(follow_turn_id),
+                    lash_trace::TraceEvent::Custom {
+                        name: "queued_work.claimed".to_string(),
+                        payload: super::turn_loop::queued_work_trace_payload(
+                            crate::QueuedWorkClaimBoundary::Idle,
+                            &claim,
+                            &materialized.turn_causes,
+                        ),
+                    },
+                    self.host.core.clock.as_ref(),
+                );
                 (
-                    claim.materialize_for_turn().input,
+                    materialized.input,
                     LogicalTurnClaims::new(vec![claim], Vec::new()),
                 )
             };

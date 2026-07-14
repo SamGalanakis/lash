@@ -684,6 +684,16 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
                 attempted_session_id: commit.session_id,
             });
         }
+        if let Some(batch) = commit
+            .enqueued_queue_batches
+            .iter()
+            .find(|batch| batch.session_id != commit.session_id)
+        {
+            return Err(crate::store::StoreError::SessionBindingMismatch {
+                bound_session_id: commit.session_id.clone(),
+                attempted_session_id: batch.session_id.clone(),
+            });
+        }
         if let Some(completed) = &commit.turn_commit {
             if completed.session_id != commit.session_id {
                 return Err(crate::store::StoreError::RuntimeTurnCommitConflict {

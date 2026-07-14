@@ -162,6 +162,20 @@ pub(in crate::runtime) fn queued_work_completion_trace_payload(
     })
 }
 
+pub(in crate::runtime) fn turn_input_completion_trace_payload(
+    completions: &[crate::TurnInputCompletion],
+) -> serde_json::Value {
+    serde_json::json!({
+        "claims": completions.iter().map(|completion| {
+            serde_json::json!({
+                "session_id": completion.session_id,
+                "claim_id": completion.claim_id,
+                "input_ids": completion.input_ids,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
 async fn emit_queued_work_started_to_sink(
     events: &dyn TurnActivitySink,
     boundary: crate::QueuedWorkClaimBoundary,
@@ -482,6 +496,7 @@ impl LashRuntime {
         self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
         self.mark_phase_begin(RuntimeTurnPhase::FinalCommit);
         let queued_work_completion_trace = commit_effects.completed_queue_claims.clone();
+        let turn_input_completion_trace = commit_effects.completed_turn_input_claims.clone();
         let pending_attachment_ids = self
             .host
             .core
@@ -553,6 +568,21 @@ impl LashRuntime {
                 lash_trace::TraceEvent::Custom {
                     name: "queued_work.completed".to_string(),
                     payload: queued_work_completion_trace_payload(&queued_work_completion_trace),
+                },
+                self.host.core.clock.as_ref(),
+            );
+        }
+        if !turn_input_completion_trace.is_empty() {
+            crate::trace::emit_trace(
+                &self.host.core.tracing.trace_sink,
+                &self.host.core.tracing.trace_context,
+                lash_trace::TraceContext::default()
+                    .for_session(returned_turn.state.session_id.clone())
+                    .for_turn_index(returned_turn.state.turn_index)
+                    .for_turn(trace_turn_id.clone()),
+                lash_trace::TraceEvent::Custom {
+                    name: "turn_input.completed".to_string(),
+                    payload: turn_input_completion_trace_payload(&turn_input_completion_trace),
                 },
                 self.host.core.clock.as_ref(),
             );
