@@ -39,6 +39,29 @@ impl LlmHttpTransport for ScriptedHttpTransport {
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingHttpTransport {
+    requests: std::sync::Mutex<Vec<LlmHttpRequest>>,
+}
+
+#[async_trait]
+impl LlmHttpTransport for RecordingHttpTransport {
+    async fn send(
+        &self,
+        request: LlmHttpRequest,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<lash_llm_transport::LlmHttpResponse, LlmTransportError> {
+        self.requests.lock().expect("request lock").push(request);
+        Ok(lash_llm_transport::LlmHttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: LlmHttpBody::buffered(
+                r#"{"id":"gen-123","model":"test-model","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#,
+            ),
+        })
+    }
+}
+
 fn reasoning_capability() -> ModelCapability {
     ModelCapability {
         reasoning: Some(ReasoningCapability {
@@ -85,6 +108,67 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         generation: lash_core::GenerationOptions::default(),
         provider_trace: None,
     }
+}
+
+fn count_object_key(value: &Value, key: &str) -> usize {
+    match value {
+        Value::Object(object) => {
+            usize::from(object.contains_key(key))
+                + object
+                    .values()
+                    .map(|value| count_object_key(value, key))
+                    .sum::<usize>()
+        }
+        Value::Array(array) => array.iter().map(|value| count_object_key(value, key)).sum(),
+        _ => 0,
+    }
+}
+
+#[tokio::test]
+async fn openrouter_request_body_uses_bounded_session_affinity_field() {
+    let transport = Arc::new(RecordingHttpTransport::default());
+    let mut provider =
+        OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL).with_transport(transport.clone());
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    let session_id = format!("{}étrailing", "s".repeat(255));
+    req.scope.session_id = session_id.clone();
+
+    provider.complete(req).await.expect("request succeeds");
+
+    let requests = transport.requests.lock().expect("request lock");
+    let wire_request = requests.first().expect("captured request");
+    let body: Value = serde_json::from_slice(&wire_request.body).expect("request body");
+    let expected = session_id.chars().take(256).collect::<String>();
+    assert_eq!(body["session_id"], expected);
+    assert_eq!(
+        body["session_id"]
+            .as_str()
+            .expect("session id")
+            .chars()
+            .count(),
+        256
+    );
+    assert!(
+        wire_request
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("session_id"))
+    );
+}
+
+#[tokio::test]
+async fn non_openrouter_request_body_omits_session_affinity_field() {
+    let transport = Arc::new(RecordingHttpTransport::default());
+    let mut provider = OpenAiCompatibleProvider::new("key", "https://api.together.xyz/v1")
+        .with_transport(transport.clone());
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    provider.complete(req).await.expect("request succeeds");
+
+    let requests = transport.requests.lock().expect("request lock");
+    let wire_request = requests.first().expect("captured request");
+    let body: Value = serde_json::from_slice(&wire_request.body).expect("request body");
+    assert!(body.get("session_id").is_none());
 }
 
 #[test]
@@ -428,6 +512,103 @@ fn openrouter_claude_chat_body_marks_anthropic_cache_breakpoints() {
         body["messages"][1]["content"][0]["cache_control"],
         json!({ "type": "ephemeral" })
     );
+}
+
+#[test]
+fn openrouter_gemini_chat_body_emits_one_ephemeral_explicit_breakpoint() {
+    let mut req = request(vec![
+        LlmMessage::text(LlmRole::System, "stable system prompt"),
+        LlmMessage::new(
+            LlmRole::User,
+            vec![
+                LlmContentBlock::Text {
+                    text: "older stable history".into(),
+                    response_meta: None,
+                    cache_breakpoint: true,
+                },
+                LlmContentBlock::Text {
+                    text: "latest stable history".into(),
+                    response_meta: None,
+                    cache_breakpoint: true,
+                },
+                LlmContentBlock::Text {
+                    text: "dynamic current iteration".into(),
+                    response_meta: None,
+                    cache_breakpoint: false,
+                },
+            ],
+        ),
+    ]);
+    req.model = "google/Gemini-2.5-Pro".to_string();
+    req.tools = Arc::new(vec![LlmToolSpec {
+        name: "search".to_string(),
+        description: "Search".to_string(),
+        input_schema: json!({"type": "object"}).into(),
+        output_schema: json!({}).into(),
+    }]);
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_options(ProviderOptions {
+            cache_retention: CacheRetention::Long,
+            ..ProviderOptions::default()
+        })
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(count_object_key(&body, "cache_control"), 1);
+    assert_eq!(
+        body["messages"][1]["content"][1]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+    assert!(
+        body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert!(body["messages"][0]["content"].is_array());
+    assert!(body["tools"][0].get("cache_control").is_none());
+    assert_eq!(count_object_key(&body, "ttl"), 0);
+    assert_eq!(count_object_key(&body, "__lash_cache_breakpoint"), 0);
+}
+
+#[test]
+fn openrouter_gemini_chat_body_falls_back_to_last_message_text() {
+    let mut req = request(vec![
+        LlmMessage::text(LlmRole::System, "stable system prompt"),
+        LlmMessage::text(LlmRole::User, "last stable text"),
+    ]);
+    req.model = "google/gemini-2.5-flash".to_string();
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(count_object_key(&body, "cache_control"), 1);
+    assert_eq!(
+        body["messages"][1]["content"][0]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+    assert!(body["messages"][0]["content"].is_array());
+}
+
+#[test]
+fn non_openrouter_gemini_chat_body_strips_breakpoint_without_emitting_cache_control() {
+    let mut req = request(vec![LlmMessage::new(
+        LlmRole::User,
+        vec![LlmContentBlock::Text {
+            text: "stable history".into(),
+            response_meta: None,
+            cache_breakpoint: true,
+        }],
+    )]);
+    req.model = "google/gemini-2.5-pro".to_string();
+
+    let body = OpenAiCompatibleProvider::new("key", "https://api.together.xyz/v1")
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(count_object_key(&body, "cache_control"), 0);
+    assert_eq!(count_object_key(&body, "__lash_cache_breakpoint"), 0);
 }
 
 #[test]

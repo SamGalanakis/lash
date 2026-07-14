@@ -96,15 +96,14 @@ impl<'de> Deserialize<'de> for RequestTimeout {
 }
 
 /// Prompt-cache lifetime hint. Providers translate this into their own
-/// wire dialect (Anthropic `cache_control` TTL, OpenRouter-Claude
-/// `cache_control` markers via Chat Completions, OpenAI Responses
-/// `prompt_cache_key` / `prompt_cache_retention`). Providers without a
-/// cache-control concept (Google, Codex) read the value but emit nothing
-/// for it.
+/// wire dialect (Anthropic and OpenRouter Claude/Gemini `cache_control`,
+/// OpenAI Responses and Codex `prompt_cache_key`, and OpenAI
+/// `prompt_cache_retention`). Providers without a cache-control concept,
+/// such as direct Google, read the value but emit nothing for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CacheRetention {
-    /// Do not emit any cache_control markers.
+    /// Do not emit any prompt-cache hints.
     None,
     /// Default Anthropic ephemeral window (5 minutes).
     #[default]
