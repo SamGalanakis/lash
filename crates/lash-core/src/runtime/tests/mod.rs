@@ -23,6 +23,7 @@ mod persistence;
 mod projection;
 mod runtime_scenarios;
 mod stream_accumulator;
+mod tool_surface_lifecycle;
 mod tracing;
 mod turns;
 mod usage;
