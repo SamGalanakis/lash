@@ -607,31 +607,9 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for StandardDriver {
 
         for outcome in completed {
             if terminal_outcome.is_none() && outcome.output.is_success() {
-                terminal_outcome = match outcome.output.control.as_ref() {
-                    Some(lash_core::ToolControl::SwitchAgentFrame {
-                        frame_id,
-                        task: Some(task),
-                        ..
-                    }) if !frame_id.trim().is_empty() && !task.trim().is_empty() => {
-                        Some(TurnOutcome::AgentFrameSwitch {
-                            frame_id: frame_id.clone(),
-                            task: task.clone(),
-                        })
-                    }
-                    Some(lash_core::ToolControl::Finish { value }) => {
-                        Some(TurnOutcome::Finished(TurnFinish::ToolValue {
-                            tool_name: outcome.tool_name.clone(),
-                            value: value.to_json_value(),
-                        }))
-                    }
-                    Some(lash_core::ToolControl::Fail { failure }) => {
-                        Some(TurnOutcome::Stopped(TurnStop::ToolError {
-                            tool_name: outcome.tool_name.clone(),
-                            value: failure.to_json_value(),
-                        }))
-                    }
-                    _ => None,
-                };
+                terminal_outcome = outcome.output.control.as_ref().and_then(|control| {
+                    lash_core::turn_outcome_from_tool_control(&outcome.tool_name, control)
+                });
             }
 
             append_model_return_parts(&mut result_parts, outcome.model_return);

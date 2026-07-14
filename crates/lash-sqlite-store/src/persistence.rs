@@ -113,6 +113,10 @@ impl SessionCommitStore for Store {
     ) -> Result<RuntimeCommitResult, StoreError> {
         let blob_profile = self.options.blob_profile;
         let now = self.clock.timestamp_ms();
+        let enqueue_nonce_start = self.commit_count.fetch_add(
+            commit.enqueued_queue_batches.len() as u64,
+            AtomicOrdering::Relaxed,
+        );
         let result = self
             .conn
             .write_flow(move |tx| {
@@ -421,10 +425,26 @@ impl SessionCommitStore for Store {
                                 .map_err(sqlite_error)?;
                         }
                     }
+                    let mut enqueued_queue_batches = Vec::new();
+                    for (index, batch) in commit.enqueued_queue_batches.iter().enumerate() {
+                        if batch.session_id != commit.session_id {
+                            return Err(StoreError::SessionBindingMismatch {
+                                bound_session_id: commit.session_id.clone(),
+                                attempted_session_id: batch.session_id.clone(),
+                            });
+                        }
+                        enqueued_queue_batches.push(enqueue_queued_work_conn(
+                            tx,
+                            batch,
+                            now,
+                            enqueue_nonce_start.saturating_add(index as u64),
+                        )?);
+                    }
                     let result = RuntimeCommitResult {
                         head_revision: next_revision,
                         checkpoint_ref: stored_checkpoint.checkpoint_ref,
                         manifest: stored_checkpoint.manifest,
+                        enqueued_queue_batches,
                     };
                     if let Some(completed) = &commit.turn_commit {
                         tx.execute(
@@ -763,61 +783,7 @@ impl QueuedWorkStore for Store {
         let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
-                let outcome: Result<QueuedWorkBatch, StoreError> = (|| {
-                    if let Some(source_key) = batch.source_key.as_deref() {
-                        let existing_id: Option<String> = tx
-                            .query_row(
-                                "SELECT batch_id
-                                 FROM queued_work_batches
-                                 WHERE session_id = ?1 AND source_key = ?2",
-                                params![batch.session_id, source_key],
-                                |row| row.get(0),
-                            )
-                            .optional()
-                            .map_err(sqlite_error)?;
-                        if let Some(batch_id) = existing_id {
-                            let existing = load_queued_batch_by_id_conn(tx, &batch_id)?
-                                .ok_or_else(|| {
-                                    StoreError::Backend(
-                                        "queued work source row disappeared".to_string(),
-                                    )
-                                })?;
-                            return Ok(existing);
-                        }
-                    }
-                    let batch_id =
-                        derive_batch_id(&batch.session_id, batch.source_key.as_deref(), now, Some(nonce));
-                    tx.execute(
-                        "INSERT INTO queued_work_batches (
-                            batch_id, session_id, source_key, delivery_policy, slot_policy,
-                            merge_key_json, available_at_ms, enqueued_at_ms
-                         )
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![
-                            batch_id,
-                            batch.session_id,
-                            batch.source_key.as_deref(),
-                            batch.delivery_policy.as_str(),
-                            batch.slot_policy.as_str(),
-                            encode_json(&batch.merge_key),
-                            batch.available_at_ms as i64,
-                            now as i64,
-                        ],
-                    )
-                    .map_err(sqlite_error)?;
-                    for (index, payload) in batch.payloads.iter().enumerate() {
-                        let item_id = format!("{batch_id}:item:{index}");
-                        tx.execute(
-                            "INSERT INTO queued_work_items (batch_id, item_index, item_id, payload_json)
-                             VALUES (?1, ?2, ?3, ?4)",
-                            params![batch_id, index as i64, item_id, encode_json(payload)],
-                        )
-                        .map_err(sqlite_error)?;
-                    }
-                    load_queued_batch_by_id_conn(tx, &batch_id)?.ok_or_else(|| {
-                        StoreError::Backend("queued work insert disappeared".to_string())
-                    })
-                })();
+                let outcome = enqueue_queued_work_conn(tx, &batch, now, nonce);
                 // Roll back the partially-inserted batch/items on a
                 // `StoreError` while still returning the typed error.
                 match outcome {
@@ -1149,6 +1115,135 @@ impl QueuedWorkStore for Store {
                 match outcome {
                     Ok(TxOutcome::Commit(value)) => Ok(TxOutcome::Commit(Ok(value))),
                     Ok(TxOutcome::Rollback(value)) => Ok(TxOutcome::Rollback(Ok(value))),
+                    Err(err) => Ok(TxOutcome::Rollback(Err(err))),
+                }
+            })
+            .await
+            .map_err(sqlite_error)?
+    }
+
+    async fn claim_ready_queued_work_by_batch_ids(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        boundary: QueuedWorkClaimBoundary,
+        batch_ids: &[String],
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        if batch_ids.is_empty() {
+            return Ok(None);
+        }
+        let session_id = session_id.to_string();
+        let fence = session_execution_lease.clone();
+        let owner = owner.clone();
+        let batch_ids = batch_ids.to_vec();
+        let now = self.clock.timestamp_ms();
+        self.conn
+            .write_flow(move |tx| {
+                let outcome: Result<Option<QueuedWorkClaim>, StoreError> = (|| {
+                    ensure_session_execution_lease_conn(tx, &session_id, &fence, now)?;
+                    let generation = fence.fencing_token;
+                    let mut rows = Vec::new();
+                    let mut batches = Vec::new();
+                    for batch_id in &batch_ids {
+                        let row = tx
+                            .query_row(
+                                "SELECT enqueue_seq, batch_id, session_id, source_key,
+                                        delivery_policy, slot_policy, merge_key_json,
+                                        available_at_ms, enqueued_at_ms, claim_fencing_token,
+                                        claim_owner_id, claim_owner_incarnation_id,
+                                        claim_owner_liveness_json, claim_token,
+                                        claim_session_lease_generation
+                                 FROM queued_work_batches
+                                 WHERE session_id = ?1 AND batch_id = ?2
+                                   AND available_at_ms <= ?3
+                                   AND (claim_token IS NULL
+                                        OR claim_session_lease_generation <> ?4)",
+                                params![session_id, batch_id, now as i64, generation as i64],
+                                queued_batch_row_from_sql,
+                            )
+                            .optional()
+                            .map_err(sqlite_error)?;
+                        let Some(row) = row else {
+                            return Ok(None);
+                        };
+                        let batch = queued_work_batch_from_conn(tx, row.clone())?;
+                        if batch.work_class() != Some(lash_core::runtime::QueuedWorkClass::TurnWork)
+                        {
+                            return Ok(None);
+                        }
+                        rows.push(row);
+                        batches.push(batch);
+                    }
+                    let candidates = rows
+                        .iter()
+                        .map(|row| {
+                            Ok(ClaimCandidate {
+                                enqueue_seq: row.enqueue_seq,
+                                claim_fencing_token: row.claim_fencing_token,
+                                work_class: lash_core::runtime::QueuedWorkClass::TurnWork,
+                                delivery_policy: decode_delivery_policy(
+                                    row.delivery_policy.clone(),
+                                )?,
+                                slot_policy: decode_slot_policy(row.slot_policy.clone())?,
+                                merge_key: decode_merge_key(row.merge_key_json.clone())?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, StoreError>>()?;
+                    if select_turn_work_claim_prefix(&candidates, boundary, candidates.len())
+                        != candidates.len()
+                    {
+                        return Ok(None);
+                    }
+                    let lease = QueuedWorkClaimLease::derive(
+                        &candidates[0],
+                        &session_id,
+                        &owner,
+                        now,
+                        generation,
+                    );
+                    let owner_liveness_json = encode_liveness(&owner.liveness)?;
+                    for row in &rows {
+                        let changed = tx
+                            .execute(
+                                "UPDATE queued_work_batches
+                                 SET claim_id = ?3, claim_owner_id = ?4,
+                                     claim_owner_incarnation_id = ?5,
+                                     claim_owner_liveness_json = ?6, claim_token = ?7,
+                                     claim_fencing_token = claim_fencing_token + 1,
+                                     claim_session_lease_generation = ?8
+                                 WHERE session_id = ?1 AND batch_id = ?2
+                                   AND (claim_token IS NULL
+                                        OR claim_session_lease_generation <> ?8)",
+                                params![
+                                    session_id,
+                                    row.batch_id,
+                                    lease.claim_id,
+                                    owner.owner_id,
+                                    owner.incarnation_id,
+                                    owner_liveness_json,
+                                    lease.lease_token,
+                                    generation as i64,
+                                ],
+                            )
+                            .map_err(sqlite_error)?;
+                        if changed != 1 {
+                            return Ok(None);
+                        }
+                    }
+                    Ok(Some(QueuedWorkClaim {
+                        session_id,
+                        claim_id: lease.claim_id,
+                        owner,
+                        lease_token: lease.lease_token,
+                        fencing_token: lease.fencing_token,
+                        session_lease_generation: lease.session_lease_generation,
+                        batches,
+                    }))
+                })();
+                match outcome {
+                    Ok(Some(value)) => Ok(TxOutcome::Commit(Ok(Some(value)))),
+                    Ok(None) => Ok(TxOutcome::Rollback(Ok(None))),
                     Err(err) => Ok(TxOutcome::Rollback(Err(err))),
                 }
             })

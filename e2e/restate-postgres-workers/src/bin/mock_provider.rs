@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_restate_postgres_workers_e2e::{
     EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_DURABLE_WAIT_TEXT,
-    EXPECTED_FINAL_TEXT, EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT,
-    EXPECTED_TOOL_BATCH_TEXT, EXPECTED_WAKE_TEXT, ensure_e2e_schema, env, record_provider_call,
-    required_env,
+    EXPECTED_FINAL_TEXT, EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
+    EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, EXPECTED_TOOL_BATCH_TEXT,
+    EXPECTED_WAKE_TEXT, ensure_e2e_schema, env, record_provider_call, required_env,
 };
 
 #[derive(Clone)]
@@ -81,6 +81,46 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
             durable_wait_probe_script(&workflow_id),
         ),
         MockScenario::SegmentLoop => ("segment_loop", segment_loop_script(&workflow_id)),
+        MockScenario::FrameSwitchQueuedStart => (
+            "frame_switch_queued_start",
+            frame_switch_start_script(&workflow_id, "frame_switch_queued_follow=true"),
+        ),
+        MockScenario::FrameSwitchPreparedStart => (
+            "frame_switch_prepared_start",
+            frame_switch_start_script(&workflow_id, "frame_switch_prepared_follow=true"),
+        ),
+        MockScenario::FrameSwitchCrashStart => (
+            "frame_switch_crash_start",
+            frame_switch_start_script(&workflow_id, "frame_switch_crash_follow=true"),
+        ),
+        MockScenario::FrameSwitchCancelStart => (
+            "frame_switch_cancel_start",
+            frame_switch_start_script(&workflow_id, "frame_switch_cancel_follow=true"),
+        ),
+        MockScenario::FrameSwitchQueuedFollow => (
+            "frame_switch_queued_follow",
+            frame_switch_follow_script(&workflow_id),
+        ),
+        MockScenario::FrameSwitchPreparedFollow => (
+            "frame_switch_prepared_follow",
+            frame_switch_follow_script(&workflow_id),
+        ),
+        MockScenario::FrameSwitchCrashFollow => (
+            "frame_switch_crash_follow",
+            frame_switch_follow_script(&workflow_id),
+        ),
+        MockScenario::FrameSwitchCancelFollow => (
+            "frame_switch_cancel_follow",
+            frame_switch_cancel_follow_script(&workflow_id),
+        ),
+        MockScenario::FrameSwitchPending => (
+            "frame_switch_pending",
+            frame_switch_pending_script(&workflow_id),
+        ),
+        MockScenario::FrameSwitchPostCancel => (
+            "frame_switch_post_cancel",
+            frame_switch_post_cancel_script(&workflow_id),
+        ),
         MockScenario::KitchenSink => ("kitchen_sink", kitchen_sink_script(&workflow_id, fail_once)),
     };
     let response = json!({
@@ -114,6 +154,12 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
     .await
     {
         tracing::error!(workflow_id, scenario, error = %err, "failed to record provider call");
+    }
+    if scenario == "frame_switch_queued_start" {
+        // Hold the first physical turn after the provider boundary is observable
+        // so the worker can enqueue a second item while the logical chain is
+        // active, before the switch commit claims anything else.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     Json(response)
 }
@@ -184,10 +230,60 @@ enum MockScenario {
     ToolBatch,
     DurableWaitProbe,
     SegmentLoop,
+    FrameSwitchQueuedStart,
+    FrameSwitchPreparedStart,
+    FrameSwitchCrashStart,
+    FrameSwitchCancelStart,
+    FrameSwitchQueuedFollow,
+    FrameSwitchPreparedFollow,
+    FrameSwitchCrashFollow,
+    FrameSwitchCancelFollow,
+    FrameSwitchPending,
+    FrameSwitchPostCancel,
 }
 
 fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
     [
+        (
+            "frame_switch_prepared_follow=true",
+            MockScenario::FrameSwitchPreparedFollow,
+        ),
+        (
+            "frame_switch_cancel_follow=true",
+            MockScenario::FrameSwitchCancelFollow,
+        ),
+        (
+            "frame_switch_crash_follow=true",
+            MockScenario::FrameSwitchCrashFollow,
+        ),
+        (
+            "frame_switch_queued_follow=true",
+            MockScenario::FrameSwitchQueuedFollow,
+        ),
+        (
+            "frame_switch_prepared_start=true",
+            MockScenario::FrameSwitchPreparedStart,
+        ),
+        (
+            "frame_switch_queued_start=true",
+            MockScenario::FrameSwitchQueuedStart,
+        ),
+        (
+            "frame_switch_crash_start=true",
+            MockScenario::FrameSwitchCrashStart,
+        ),
+        (
+            "frame_switch_cancel_start=true",
+            MockScenario::FrameSwitchCancelStart,
+        ),
+        (
+            "frame_switch_pending=true",
+            MockScenario::FrameSwitchPending,
+        ),
+        (
+            "frame_switch_post_cancel=true",
+            MockScenario::FrameSwitchPostCancel,
+        ),
         ("segment_loop=true", MockScenario::SegmentLoop),
         ("durable_wait_probe=true", MockScenario::DurableWaitProbe),
         ("tool_batch=true", MockScenario::ToolBatch),
@@ -209,6 +305,83 @@ fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
     .filter_map(|(marker, scenario)| text.rfind(marker).map(|idx| (idx, scenario)))
     .max_by_key(|(idx, _)| *idx)
     .map(|(_, scenario)| scenario)
+}
+
+fn frame_switch_start_script(workflow_id: &str, follow_marker: &str) -> String {
+    format!(
+        r#"
+Switch to a fresh frame and carry the non-empty baton seed.
+
+<lashlang>
+await control.continue_as({{
+  task: "Complete the durable follow-on. workflow_id={workflow_id} {follow_marker}",
+  seed: {{ baton: "seed:{workflow_id}" }}
+}})?
+</lashlang>
+"#
+    )
+}
+
+fn frame_switch_follow_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Read the seeded baton and finish.
+
+<lashlang>
+finish {{
+  workflow_id: "{workflow_id}",
+  seed_visible: baton,
+  follow_on: true,
+  final: "{EXPECTED_FRAME_SWITCH_TEXT}"
+}}
+</lashlang>
+"#
+    )
+}
+
+fn frame_switch_cancel_follow_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Wait for cancellation in the follow-on frame.
+
+<lashlang>
+gate = await tools.cancel_gate({{ workflow_id: "{workflow_id}" }})?
+finish {{ gate: gate, final: "unreachable" }}
+</lashlang>
+"#
+    )
+}
+
+fn frame_switch_pending_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Finish the pre-existing second queued item.
+
+<lashlang>
+finish {{
+  workflow_id: "{workflow_id}",
+  pending_item: true,
+  final: "pending-after-frame-switch"
+}}
+</lashlang>
+"#
+    )
+}
+
+fn frame_switch_post_cancel_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Prove the cancelled session remains usable.
+
+<lashlang>
+finish {{
+  workflow_id: "{workflow_id}",
+  session_usable: true,
+  final: "{EXPECTED_FRAME_SWITCH_CANCEL_TEXT}"
+}}
+</lashlang>
+"#
+    )
 }
 
 fn extract_latest_marker(text: &str, marker: &str) -> Option<String> {

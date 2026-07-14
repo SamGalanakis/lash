@@ -96,13 +96,15 @@ impl LashRuntime {
             .with_clock(Arc::clone(&host.core.clock));
         let mut session = Session::new(services.clone(), &state.session_id).await?;
         if let Some(tool_state) = state.tool_state_snapshot.clone() {
-            // Cold rebuild restores the exact persisted tool catalog, adopting
-            // the snapshot's generation. `apply_state` (a delta-apply that
+            // Cold rebuild reconciles the persisted catalog over live tools,
+            // adopting its generation when the surface is unchanged.
+            // `apply_state` (a delta-apply that
             // requires `snapshot.generation == base` and bumps) would reject a
             // session whose surface reached generation ≥ 2 onto a fresh base-1
             // registry — the worker-rebuild / restart divergence. `restore_state`
-            // adopts the snapshot's generation wholesale, so any generation
-            // rebuilds.
+            // is not generation-fenced against the fresh registry, so any
+            // persisted generation rebuilds. A changed live surface bumps once
+            // to make the next commit capture it.
             let report = session
                 .plugins()
                 .tool_registry()

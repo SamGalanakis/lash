@@ -1,4 +1,5 @@
 use super::*;
+use crate::ToolProvider as _;
 
 fn lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {
     crate::LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
@@ -121,6 +122,198 @@ impl crate::Clock for StepExpiryClock {
     async fn sleep_until(&self, deadline: std::time::Instant) {
         tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
     }
+}
+
+struct FrameRotatingDynamicTool {
+    rotated: Arc<AtomicBool>,
+}
+
+fn rotating_tool_definition(name: &str) -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        format!("tool:{name}"),
+        name,
+        "Exercise live tool discovery across an AgentFrame rotation",
+        crate::ToolDefinition::default_input_schema(),
+        json!({ "type": "object", "additionalProperties": true }),
+    )
+}
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for FrameRotatingDynamicTool {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        let mut manifests = vec![
+            rotating_tool_definition("rotate_surface").manifest(),
+            rotating_tool_definition("curated_before_rotation").manifest(),
+        ];
+        if self.rotated.load(Ordering::SeqCst) {
+            manifests.push(rotating_tool_definition("new_after_rotation").manifest());
+            manifests.push(rotating_tool_definition("hidden_after_rotation").manifest());
+        }
+        manifests
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        self.tool_manifests()
+            .into_iter()
+            .any(|manifest| manifest.name == name)
+            .then(|| Arc::new(rotating_tool_definition(name).contract()))
+    }
+
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        match call.name {
+            "rotate_surface" => {
+                self.rotated.store(true, Ordering::SeqCst);
+                crate::ToolResult::ok(json!({ "rotated": true })).with_control(
+                    crate::ToolControl::SwitchAgentFrame {
+                        frame_id: "live-surface-frame".to_string(),
+                        initial_nodes: Vec::new(),
+                        task: Some("call the newly available tool".to_string()),
+                    },
+                )
+            }
+            "new_after_rotation" => crate::ToolResult::ok(json!({ "called": call.name }))
+                .with_control(crate::ToolControl::Finish {
+                    value: json!("new tool executed").into(),
+                }),
+            "curated_before_rotation" | "hidden_after_rotation" => {
+                crate::ToolResult::ok(json!({ "called": call.name }))
+            }
+            name => crate::ToolResult::err_fmt(format_args!("unknown rotating tool `{name}`")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn continue_as_frame_rotation_reconciles_newly_advertised_tool() {
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "rotate-call".to_string(),
+                    tool_name: "rotate_surface".to_string(),
+                    input_json: "{}".to_string(),
+                    replay: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "new-tool-call".to_string(),
+                    tool_name: "new_after_rotation".to_string(),
+                    input_json: "{}".to_string(),
+                    replay: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let tools: Arc<dyn crate::ToolProvider> = Arc::new(FrameRotatingDynamicTool {
+        rotated: Arc::new(AtomicBool::new(false)),
+    });
+    let mut factories = crate::testing::test_standard_protocol_factories();
+    factories.push(Arc::new(StaticPluginFactory::new(
+        "frame_rotating_tools",
+        crate::PluginSpec::new().with_tool_provider(tools),
+    )));
+    let plugins = crate::PluginHost::new(factories)
+        .build_session_with_parent(
+            "root",
+            Some("parent".to_string()),
+            None,
+            crate::plugin::SessionAuthorityContext {
+                tool_access: crate::SessionToolAccess {
+                    tools: Vec::new(),
+                    hidden_tools: ["hidden_after_rotation".to_string()].into_iter().collect(),
+                },
+                ..crate::plugin::SessionAuthorityContext::default()
+            },
+        )
+        .expect("frame child plugins");
+    let mut runtime = LashRuntime::from_embedded_state(
+        standard_test_policy(),
+        test_host_config(),
+        crate::RuntimeServices::new(plugins),
+        RuntimeSessionState::default(),
+    )
+    .await
+    .expect("frame child runtime");
+    set_runtime_provider(&mut runtime, transport.into_handle());
+    let mut curated = runtime.tool_state().expect("pre-rotation tool state");
+    curated
+        .set_membership(&crate::ToolId::from("tool:curated_before_rotation"), false)
+        .expect("opt out before rotation");
+    runtime
+        .apply_tool_state(curated)
+        .await
+        .expect("apply pre-rotation curation");
+
+    let run = runtime
+        .stream_turn_with_agent_frames(
+            TurnInput::text("rotate the frame"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "live-surface-frame-rotation"),
+            ),
+        )
+        .await
+        .expect("AgentFrame run");
+
+    assert_eq!(run.frame_switch_count(), 1);
+    let final_turn = run.final_turn().expect("final frame");
+    assert!(
+        matches!(
+            &final_turn.outcome,
+            TurnOutcome::Finished(TurnFinish::ToolValue { tool_name, value })
+                if tool_name == "new_after_rotation" && *value == json!("new tool executed")
+        ),
+        "new tool must be callable in the follow frame: {:?}",
+        final_turn.outcome
+    );
+    let catalog_names = runtime
+        .active_tool_catalog_shared()
+        .expect("post-rotation model catalog")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    assert!(catalog_names.contains(&"new_after_rotation".to_string()));
+    assert!(!catalog_names.contains(&"hidden_after_rotation".to_string()));
+    assert!(!catalog_names.contains(&"curated_before_rotation".to_string()));
+
+    let registry = runtime
+        .session
+        .as_ref()
+        .expect("frame child session")
+        .plugins()
+        .tool_registry();
+    let post_rotation_state = registry.export_state();
+    assert!(
+        !post_rotation_state
+            .get(&crate::ToolId::from("tool:curated_before_rotation"))
+            .expect("curated entry survives rotation")
+            .is_member()
+    );
+    assert!(
+        !post_rotation_state
+            .get(&crate::ToolId::from("tool:hidden_after_rotation"))
+            .expect("new hidden entry is retained as denied policy")
+            .is_member()
+    );
+    let hidden_result = registry
+        .execute_by_id(
+            &crate::ToolId::from("tool:hidden_after_rotation"),
+            &json!({}),
+            &crate::testing::mock_tool_context(),
+            None,
+        )
+        .await;
+    assert!(
+        !hidden_result.is_success(),
+        "new hidden id must not execute after frame rotation: {hidden_result:?}"
+    );
 }
 
 struct ExpireLeaseAtFinalCommit {
@@ -1586,6 +1779,553 @@ async fn long_turn_keeps_claims_live_across_session_lease_renewals() {
 // provider execution, and the API distinction between "ran a turn" and
 // command-only `None`. Runtime Scenarios own the store-level command-before
 // turn-work gate and command-only drain invariants.
+#[tokio::test]
+async fn queued_frame_switch_finishes_follow_on_before_next_queued_turn() {
+    let store = Arc::new(RecordingStore::default());
+    let captured_store = Arc::clone(&store);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
+    let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_call_index = Arc::clone(&call_index);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |request| {
+            let store = Arc::clone(&captured_store);
+            let requests = Arc::clone(&captured_requests);
+            let call_index = Arc::clone(&captured_call_index);
+            async move {
+                requests.lock().expect("request capture lock").push(request);
+                match call_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 => {
+                        enqueue_idle_turn_input(store.as_ref(), "root", "second queued turn").await;
+                        Ok(LlmResponse {
+                            parts: vec![LlmOutputPart::ToolCall {
+                                call_id: "switch-call".to_string(),
+                                tool_name: "terminal_tool_0".to_string(),
+                                input_json: serde_json::json!({}).to_string(),
+                                replay: None,
+                            }],
+                            ..LlmResponse::default()
+                        })
+                    }
+                    1 => Ok(LlmResponse {
+                        full_text: "follow-on complete".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "follow-on complete".to_string(),
+                            response_meta: None,
+                        }],
+                        ..LlmResponse::default()
+                    }),
+                    2 => Ok(LlmResponse {
+                        full_text: "second queued complete".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "second queued complete".to_string(),
+                            response_meta: None,
+                        }],
+                        ..LlmResponse::default()
+                    }),
+                    index => panic!("unexpected provider call {index}"),
+                }
+            }
+        })
+        .build();
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(TerminalControlTool {
+            controls: vec![crate::ToolControl::SwitchAgentFrame {
+                frame_id: "queued-follow-frame".to_string(),
+                initial_nodes: Vec::new(),
+                task: Some("run follow-on task".to_string()),
+            }],
+        }),
+        transport,
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+    let first = enqueue_idle_turn_input(store.as_ref(), "root", "first queued turn").await;
+
+    let first_result = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "queued-frame-chain"),
+        ))
+        .await
+        .expect("queued frame chain succeeds")
+        .expect("queued frame chain returns its terminal turn");
+
+    assert_eq!(
+        first_result.assistant_output.safe_text,
+        "follow-on complete"
+    );
+    let pending_after_follow =
+        crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
+            .await
+            .expect("pending inputs after frame follow");
+    assert_eq!(pending_after_follow.len(), 1);
+    assert_ne!(pending_after_follow[0].input_id, first.input_id);
+    let requests_after_follow = requests.lock().expect("request capture lock").clone();
+    assert_eq!(requests_after_follow.len(), 2);
+    assert!(request_contains_text(
+        &requests_after_follow[1],
+        "run follow-on task"
+    ));
+    assert!(!request_contains_text(
+        &requests_after_follow[1],
+        "second queued turn"
+    ));
+
+    let second_result = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "second-queued-after-frame-chain"),
+        ))
+        .await
+        .expect("second queued turn succeeds")
+        .expect("second queued turn runs after the frame chain");
+
+    assert_eq!(
+        second_result.assistant_output.safe_text,
+        "second queued complete"
+    );
+    assert!(
+        crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
+            .await
+            .expect("pending inputs after second turn")
+            .is_empty()
+    );
+    let requests = requests.lock().expect("request capture lock");
+    assert_eq!(requests.len(), 3);
+    assert!(request_contains_text(&requests[2], "second queued turn"));
+}
+
+#[tokio::test]
+async fn committed_frame_handoff_survives_before_inline_claim_and_pump_recovers_it() {
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_call_index = Arc::clone(&call_index);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_| {
+            let call_index = Arc::clone(&captured_call_index);
+            async move {
+                match call_index.fetch_add(1, Ordering::SeqCst) {
+                    0 => Ok(LlmResponse {
+                        parts: vec![LlmOutputPart::ToolCall {
+                            call_id: "switch-call".to_string(),
+                            tool_name: "terminal_tool_0".to_string(),
+                            input_json: "{}".to_string(),
+                            replay: None,
+                        }],
+                        ..LlmResponse::default()
+                    }),
+                    1 => Ok(LlmResponse {
+                        full_text: "recovered follow-on".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "recovered follow-on".to_string(),
+                            response_meta: None,
+                        }],
+                        ..LlmResponse::default()
+                    }),
+                    index => panic!("unexpected provider call {index}"),
+                }
+            }
+        })
+        .build();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(TerminalControlTool {
+            controls: vec![crate::ToolControl::SwitchAgentFrame {
+                frame_id: "recovery-frame".to_string(),
+                initial_nodes: Vec::new(),
+                task: Some("recover this handoff".to_string()),
+            }],
+        }),
+        transport,
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+    let inbound = enqueue_idle_turn_input(store.as_ref(), "root", "start switch").await;
+    store.fail_next_exact_queue_claim();
+
+    let first = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "handoff-crash-window"),
+        ))
+        .await;
+    assert!(
+        first.is_err(),
+        "simulated post-commit claim failure must surface"
+    );
+
+    let inputs = crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
+        .await
+        .expect("list inbound input after switch commit");
+    assert!(
+        inputs
+            .iter()
+            .all(|input| input.input_id != inbound.input_id)
+    );
+    let queued = crate::store::QueuedWorkStore::list_pending_queued_work(store.as_ref(), "root")
+        .await
+        .expect("list committed handoff");
+    assert_eq!(queued.len(), 1);
+    assert!(matches!(
+        &queued[0].items[0].payload,
+        crate::QueuedWorkPayload::AgentFrameTask { frame_id, task, .. }
+            if frame_id == "recovery-frame" && task == "recover this handoff"
+    ));
+
+    let recovered = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "handoff-pump-recovery"),
+        ))
+        .await
+        .expect("pump recovery succeeds")
+        .expect("pump runs durable handoff");
+    assert_eq!(recovered.assistant_output.safe_text, "recovered follow-on");
+    assert!(
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queue after recovery")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn mid_chain_cancellation_commits_one_cancelled_terminal_and_settles_handoff() {
+    let store = Arc::new(RecordingStore::default());
+    let captured_store = Arc::clone(&store);
+    let cancel = CancellationToken::new();
+    let cancel_after_switch = cancel.clone();
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_| {
+            let store = Arc::clone(&captured_store);
+            let cancel = cancel_after_switch.clone();
+            async move {
+                store.set_claim_after_lease_validation_hook(Arc::new(move || cancel.cancel()));
+                Ok(LlmResponse {
+                    parts: vec![LlmOutputPart::ToolCall {
+                        call_id: "switch-call".to_string(),
+                        tool_name: "terminal_tool_0".to_string(),
+                        input_json: "{}".to_string(),
+                        replay: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build();
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(TerminalControlTool {
+            controls: vec![crate::ToolControl::SwitchAgentFrame {
+                frame_id: "cancelled-frame".to_string(),
+                initial_nodes: Vec::new(),
+                task: Some("cancel before running".to_string()),
+            }],
+        }),
+        transport,
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+    enqueue_idle_turn_input(store.as_ref(), "root", "start cancellable switch").await;
+
+    let terminal = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            cancel,
+            named_turn_scope("root", "mid-chain-cancel"),
+        ))
+        .await
+        .expect("cancelled chain assembles")
+        .expect("cancelled terminal turn");
+    assert!(matches!(
+        terminal.outcome,
+        TurnOutcome::Stopped(TurnStop::Cancelled)
+    ));
+    assert!(
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queue after cancellation")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn claimed_normalization_failure_commits_and_settles_input() {
+    let (mut runtime, store) =
+        standard_runtime_with_transport_and_queue_store(mock_provider(Vec::new())).await;
+    let inbound = crate::store::TurnInputStore::enqueue_pending_turn_input(
+        store.as_ref(),
+        crate::PendingTurnInputDraft::new(
+            "root",
+            crate::TurnInputIngress::NextTurn,
+            TurnInput::items([InputItem::image_ref("missing-image")]),
+        ),
+    )
+    .await
+    .expect("enqueue invalid input");
+
+    let terminal = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "invalid-claimed-input"),
+        ))
+        .await
+        .expect("invalid input assembles")
+        .expect("invalid terminal turn");
+    assert!(matches!(
+        terminal.outcome,
+        TurnOutcome::Stopped(TurnStop::InvalidInput)
+    ));
+    let inputs = crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
+        .await
+        .expect("list completed invalid input");
+    assert!(
+        inputs
+            .iter()
+            .all(|input| input.input_id != inbound.input_id)
+    );
+}
+
+#[tokio::test]
+async fn claimed_plugin_abort_commits_and_settles_input() {
+    let plugin = Arc::new(RuntimeTestPluginFactory {
+        build: Arc::new(|_| {
+            Ok(Arc::new(RuntimeTestPlugin {
+                before_turn: Some(Arc::new(|_| {
+                    Box::pin(async {
+                        Ok(vec![crate::PluginDirective::AbortTurn {
+                            code: "blocked".to_string(),
+                            message: "plugin stopped claimed turn".to_string(),
+                        }])
+                    })
+                })),
+                checkpoint: None,
+                tool_result_projector: None,
+                runtime_event: None,
+                external_registrar: None,
+            }))
+        }),
+    });
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        vec![plugin],
+        Arc::new(EmptyTools),
+        mock_provider(Vec::new()),
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+    let inbound = enqueue_idle_turn_input(store.as_ref(), "root", "abort this input").await;
+
+    let terminal = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "claimed-plugin-abort"),
+        ))
+        .await
+        .expect("plugin abort assembles")
+        .expect("plugin abort terminal turn");
+    assert!(matches!(
+        terminal.outcome,
+        TurnOutcome::Stopped(TurnStop::PluginAbort)
+    ));
+    let inputs = crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
+        .await
+        .expect("list completed aborted input");
+    assert!(
+        inputs
+            .iter()
+            .all(|input| input.input_id != inbound.input_id)
+    );
+}
+
+#[tokio::test]
+async fn stream_prepared_turn_follows_agent_frame_switch() {
+    let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_call_index = Arc::clone(&call_index);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_| {
+            let call_index = Arc::clone(&captured_call_index);
+            async move {
+                match call_index.fetch_add(1, Ordering::SeqCst) {
+                    0 => Ok(LlmResponse {
+                        parts: vec![LlmOutputPart::ToolCall {
+                            call_id: "prepared-switch".to_string(),
+                            tool_name: "terminal_tool_0".to_string(),
+                            input_json: "{}".to_string(),
+                            replay: None,
+                        }],
+                        ..LlmResponse::default()
+                    }),
+                    1 => Ok(LlmResponse {
+                        full_text: "prepared follow-on complete".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "prepared follow-on complete".to_string(),
+                            response_meta: None,
+                        }],
+                        ..LlmResponse::default()
+                    }),
+                    index => panic!("unexpected provider call {index}"),
+                }
+            }
+        })
+        .build();
+    let mut runtime = runtime_with_plugins_and_tools(
+        Vec::new(),
+        Arc::new(TerminalControlTool {
+            controls: vec![crate::ToolControl::SwitchAgentFrame {
+                frame_id: "prepared-follow-frame".to_string(),
+                initial_nodes: Vec::new(),
+                task: Some("finish prepared follow-on".to_string()),
+            }],
+        }),
+        transport,
+    )
+    .await;
+    let messages = crate::MessageSequence::from_owned(vec![Message {
+        id: "prepared-user".to_string(),
+        role: MessageRole::User,
+        parts: vec![Part {
+            id: "prepared-user.p0".to_string(),
+            kind: PartKind::Text,
+            content: "prepared input".to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]
+        .into(),
+        origin: None,
+    }]);
+
+    let terminal = runtime
+        .stream_prepared_turn(
+            messages,
+            None,
+            None,
+            None,
+            crate::TurnContext::default(),
+            Vec::new(),
+            "prepared-chain".to_string(),
+            1,
+            &NoopEventSink,
+            &NoopTurnActivitySink,
+            named_turn_scope("root", "prepared-chain"),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .expect("prepared logical turn succeeds");
+    assert_eq!(
+        terminal.assistant_output.safe_text,
+        "prepared follow-on complete"
+    );
+    assert_eq!(call_index.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn frame_switch_limit_commits_terminal_error_and_settles_claim() {
+    let switch_count = crate::runtime::logical_turn::MAX_AGENT_FRAME_SWITCHES;
+    let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_call_index = Arc::clone(&call_index);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_| {
+            let call_index = Arc::clone(&captured_call_index);
+            async move {
+                let index = call_index.fetch_add(1, Ordering::SeqCst);
+                Ok(LlmResponse {
+                    parts: vec![LlmOutputPart::ToolCall {
+                        call_id: format!("switch-{index}"),
+                        tool_name: format!("terminal_tool_{index}"),
+                        input_json: "{}".to_string(),
+                        replay: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build();
+    let controls = (0..switch_count)
+        .map(|index| crate::ToolControl::SwitchAgentFrame {
+            frame_id: format!("bounded-frame-{index}"),
+            initial_nodes: Vec::new(),
+            task: Some(format!("continue bounded chain {index}")),
+        })
+        .collect();
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(TerminalControlTool { controls }),
+        transport,
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+    let inbound = enqueue_idle_turn_input(store.as_ref(), "root", "start bounded chain").await;
+
+    let terminal = runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "bounded-frame-chain"),
+        ))
+        .await
+        .expect("bounded chain terminalizes")
+        .expect("bounded chain returns terminal turn");
+    assert!(matches!(
+        terminal.outcome,
+        TurnOutcome::Stopped(TurnStop::RuntimeError)
+    ));
+    assert!(
+        terminal
+            .errors
+            .iter()
+            .any(|issue| { issue.message.contains("exceeded the limit of") })
+    );
+    assert_eq!(call_index.load(Ordering::SeqCst), switch_count);
+    assert!(
+        crate::store::QueuedWorkStore::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queue after bounded chain")
+            .is_empty()
+    );
+    let inputs = crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
+        .await
+        .expect("inputs after bounded chain");
+    assert!(
+        inputs
+            .iter()
+            .all(|input| input.input_id != inbound.input_id)
+    );
+}
+
 #[tokio::test]
 async fn leading_session_command_drains_before_queued_turn() {
     let transport = mock_provider(vec![MockCall {

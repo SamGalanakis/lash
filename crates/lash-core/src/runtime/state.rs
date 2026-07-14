@@ -475,6 +475,56 @@ impl Default for RuntimeSessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct DynamicSnapshotTools {
+        names: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for DynamicSnapshotTools {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            self.names
+                .lock()
+                .expect("dynamic snapshot names")
+                .iter()
+                .map(|name| {
+                    crate::ToolDefinition::raw(
+                        format!("tool:{name}"),
+                        name,
+                        "dynamic snapshot tool",
+                        crate::ToolDefinition::default_input_schema(),
+                        serde_json::json!({}),
+                    )
+                    .manifest()
+                })
+                .collect()
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            self.names
+                .lock()
+                .expect("dynamic snapshot names")
+                .iter()
+                .any(|candidate| candidate == name)
+                .then(|| {
+                    Arc::new(
+                        crate::ToolDefinition::raw(
+                            format!("tool:{name}"),
+                            name,
+                            "dynamic snapshot tool",
+                            crate::ToolDefinition::default_input_schema(),
+                            serde_json::json!({}),
+                        )
+                        .contract(),
+                    )
+                })
+        }
+
+        async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
+            crate::ToolResult::ok(serde_json::json!("ok"))
+        }
+    }
 
     #[test]
     fn session_snapshot_serialization_excludes_runtime_only_fields_and_round_trips() {
@@ -534,6 +584,40 @@ mod tests {
                 .iter()
                 .all(|frame| frame.execution_state_snapshot.is_none())
         );
+    }
+
+    #[test]
+    fn reconciled_generation_forces_next_plugin_snapshot_export() {
+        let names = Arc::new(Mutex::new(vec!["dynamic_one".to_string()]));
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(DynamicSnapshotTools {
+            names: Arc::clone(&names),
+        });
+        let plugins = crate::runtime::tests::helpers::plugin_session_with_tools("root", tools);
+        let snapshot = plugins.tool_registry().export_state();
+        let persisted_generation = snapshot.generation();
+        let mut state = RuntimeSessionState {
+            tool_state_ref: Some("persisted-tool-state".to_string().into()),
+            tool_state_generation: Some(persisted_generation),
+            ..RuntimeSessionState::default()
+        };
+
+        names
+            .lock()
+            .expect("dynamic snapshot names")
+            .push("dynamic_two".to_string());
+        let report = plugins
+            .tool_registry()
+            .restore_state(snapshot)
+            .expect("live surface restore");
+        assert_eq!(report.generation, persisted_generation + 1);
+
+        state.refresh_plugin_snapshots(&plugins);
+        let refreshed = state
+            .tool_state_snapshot
+            .as_ref()
+            .expect("generation change re-exports the tool snapshot");
+        assert_eq!(refreshed.generation(), report.generation);
+        assert!(refreshed.contains(&crate::ToolId::from("tool:dynamic_two")));
     }
 }
 

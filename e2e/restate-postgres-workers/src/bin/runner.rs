@@ -13,10 +13,12 @@ use lash_restate::{
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
     EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_DURABLE_WAIT_TEXT, EXPECTED_FINAL_TEXT,
+    EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
     EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, EXPECTED_TOOL_BATCH_TEXT,
     ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
     build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
-    expected_attachment_bytes, process_registry_from_storage, reset_e2e_rows, s3_store_from_env,
+    expected_attachment_bytes, process_registry_from_storage, record_terminal_result,
+    reset_e2e_rows, s3_store_from_env,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -262,15 +264,52 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &segment_loop_request.workflow_id).await?;
     assert_segment_loop_response(&segment_loop_response)?;
 
+    let frame_queued_request = TurnRequest {
+        workflow_id: "e2e-frame-switch-queued".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::FrameSwitchQueued,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &frame_queued_request).await?;
+    let frame_queued_response =
+        wait_for_terminal_result(storage.pool(), &frame_queued_request.workflow_id).await?;
+    assert_frame_switch_queued_response(&frame_queued_response)?;
+
+    let frame_prepared_request = TurnRequest {
+        workflow_id: "e2e-frame-switch-prepared".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::FrameSwitchPrepared,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &frame_prepared_request).await?;
+    let frame_prepared_response =
+        wait_for_terminal_result(storage.pool(), &frame_prepared_request.workflow_id).await?;
+    assert_frame_switch_prepared_response(&frame_prepared_response)?;
+
+    let frame_crash_response = drive_frame_switch_crash_process(&storage).await?;
+    assert_frame_switch_crash_response(&frame_crash_response)?;
+
+    let frame_cancel_request = TurnRequest {
+        workflow_id: "e2e-frame-switch-cancel".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::FrameSwitchCancel,
+        signal: None,
+    };
+    submit_workflow(&ingress_url, &frame_cancel_request).await?;
+    let frame_cancel_response =
+        wait_for_terminal_result(storage.pool(), &frame_cancel_request.workflow_id).await?;
+    assert_frame_switch_cancel_response(&frame_cancel_response)?;
+
     drive_durable_wait_index_scenarios(&storage, &ingress_url, &admin_url).await?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 18).await?;
+    let responses = wait_for_terminal_results(storage.pool(), 22).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
     assert_worker_distribution(storage.pool()).await?;
     assert_failover(storage.pool()).await?;
     assert_provider_calls(storage.pool()).await?;
+    assert_frame_switch_provider_order(storage.pool()).await?;
     assert_tool_and_turn_telemetry(storage.pool()).await?;
     assert_tool_batch_side_effects(storage.pool()).await?;
     assert_durable_input_steps(storage.pool()).await?;
@@ -333,6 +372,54 @@ async fn wait_for_postgres(database_url: &str) -> Result<PostgresStorage> {
         "Postgres did not become ready: {}",
         last_error.unwrap_or_else(|| "unknown error".to_string())
     )
+}
+
+async fn drive_frame_switch_crash_process(storage: &PostgresStorage) -> Result<TurnResponse> {
+    let binary = env(
+        "LASH_E2E_FRAME_CRASH_BIN",
+        "/usr/local/bin/lash-e2e-frame-crash",
+    );
+    for (mode, expected_code) in [("commit", 76), ("mid-follow", 77)] {
+        let output = tokio::process::Command::new(&binary)
+            .arg(mode)
+            .output()
+            .await
+            .with_context(|| format!("run frame-crash subprocess mode `{mode}`"))?;
+        anyhow::ensure!(
+            output.status.code() == Some(expected_code),
+            "frame-crash mode `{mode}` exited {:?}, expected {expected_code}; stdout={} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+    let output = tokio::process::Command::new(&binary)
+        .arg("recover")
+        .output()
+        .await
+        .context("run frame-crash recovery subprocess")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "frame-crash recovery failed; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let final_value: Value =
+        serde_json::from_slice(&output.stdout).context("decode frame-crash recovery result")?;
+    let response = TurnResponse {
+        workflow_id: "e2e-frame-switch-crash".to_string(),
+        worker_id: "frame-crash-subprocess".to_string(),
+        process_id: String::new(),
+        process_ids: Vec::new(),
+        attachment_id: String::new(),
+        final_text: EXPECTED_FRAME_SWITCH_TEXT.to_string(),
+        final_value,
+        streamed_event_count: 0,
+        replay_cursor: None,
+        queued_turn_ran: true,
+    };
+    record_terminal_result(storage.pool(), &response).await?;
+    Ok(response)
 }
 
 async fn wait_for_minio(store: &impl lash::persistence::AttachmentStore) -> Result<()> {
@@ -905,6 +992,143 @@ fn assert_segment_loop_response(response: &TurnResponse) -> Result<()> {
             .is_some_and(|values| values.len() == 8),
         "segmented loop observable effect sequence has the wrong length: {}",
         response.final_value
+    );
+    Ok(())
+}
+
+fn assert_frame_switch_queued_response(response: &TurnResponse) -> Result<()> {
+    let value = &response.final_value;
+    anyhow::ensure!(
+        response.final_text == EXPECTED_FRAME_SWITCH_TEXT
+            && value.get("seed_visible").and_then(Value::as_str)
+                == Some("seed:e2e-frame-switch-queued")
+            && value.get("follow_on").and_then(Value::as_bool) == Some(true),
+        "queued frame-switch seed/follow-on mismatch: {value}"
+    );
+    for field in [
+        "first_completed",
+        "second_pending_before_drain",
+        "second_completed",
+        "queue_empty",
+        "inputs_empty",
+    ] {
+        anyhow::ensure!(
+            value.get(field).and_then(Value::as_bool) == Some(true),
+            "queued frame-switch invariant `{field}` failed: {value}"
+        );
+    }
+    Ok(())
+}
+
+fn assert_frame_switch_crash_response(response: &TurnResponse) -> Result<()> {
+    let value = &response.final_value;
+    anyhow::ensure!(
+        response.final_text == EXPECTED_FRAME_SWITCH_TEXT
+            && value.get("seed_visible").and_then(Value::as_str)
+                == Some("seed:e2e-frame-switch-crash")
+            && value.get("follow_on").and_then(Value::as_bool) == Some(true)
+            && value
+                .get("recovered_after_commit_exit")
+                .and_then(Value::as_bool)
+                == Some(true)
+            && value
+                .get("mid_follow_on_recovered")
+                .and_then(Value::as_bool)
+                == Some(true)
+            && value.get("queue_empty").and_then(Value::as_bool) == Some(true)
+            && value.get("inputs_empty").and_then(Value::as_bool) == Some(true),
+        "crash-recovered frame-switch invariant mismatch: {value}"
+    );
+    Ok(())
+}
+
+fn assert_frame_switch_prepared_response(response: &TurnResponse) -> Result<()> {
+    let value = &response.final_value;
+    anyhow::ensure!(
+        response.final_text == EXPECTED_FRAME_SWITCH_TEXT
+            && value.get("seed_visible").and_then(Value::as_str)
+                == Some("seed:e2e-frame-switch-prepared")
+            && value.get("follow_on").and_then(Value::as_bool) == Some(true),
+        "prepared frame-switch did not follow the task with its seed: {value}"
+    );
+    Ok(())
+}
+
+fn assert_frame_switch_cancel_response(response: &TurnResponse) -> Result<()> {
+    let value = &response.final_value;
+    anyhow::ensure!(
+        response.final_text == EXPECTED_FRAME_SWITCH_CANCEL_TEXT
+            && value.get("terminal_cancelled").and_then(Value::as_bool) == Some(true)
+            && value.get("cancel_count").and_then(Value::as_u64) == Some(1)
+            && value.get("claims_settled").and_then(Value::as_bool) == Some(true)
+            && value.get("session_usable").and_then(Value::as_bool) == Some(true),
+        "mid-chain cancellation invariant mismatch: {value}"
+    );
+    Ok(())
+}
+
+async fn assert_frame_switch_provider_order(pool: &sqlx::PgPool) -> Result<()> {
+    let queued: Vec<String> = sqlx::query_scalar(
+        "SELECT scenario FROM lash_e2e_provider_calls
+         WHERE workflow_id = 'e2e-frame-switch-queued'
+         ORDER BY call_id",
+    )
+    .fetch_all(pool)
+    .await
+    .context("load queued frame-switch provider order")?;
+    anyhow::ensure!(
+        queued
+            == [
+                "frame_switch_queued_start",
+                "frame_switch_queued_follow",
+                "frame_switch_pending",
+            ],
+        "queued frame-switch provider order changed: {queued:?}"
+    );
+    let crash: Vec<String> = sqlx::query_scalar(
+        "SELECT scenario FROM lash_e2e_provider_calls
+         WHERE workflow_id = 'e2e-frame-switch-crash'
+         ORDER BY call_id",
+    )
+    .fetch_all(pool)
+    .await
+    .context("load crash frame-switch provider calls")?;
+    anyhow::ensure!(
+        crash == ["frame_switch_crash_start", "frame_switch_crash_follow"],
+        "crash recovery duplicated or lost a physical turn: {crash:?}"
+    );
+    let prepared: Vec<String> = sqlx::query_scalar(
+        "SELECT scenario FROM lash_e2e_provider_calls
+         WHERE workflow_id = 'e2e-frame-switch-prepared'
+         ORDER BY call_id",
+    )
+    .fetch_all(pool)
+    .await
+    .context("load prepared frame-switch provider calls")?;
+    anyhow::ensure!(
+        prepared
+            == [
+                "frame_switch_prepared_start",
+                "frame_switch_prepared_follow"
+            ],
+        "prepared frame-switch provider order changed: {prepared:?}"
+    );
+    let cancel: Vec<String> = sqlx::query_scalar(
+        "SELECT scenario FROM lash_e2e_provider_calls
+         WHERE workflow_id = 'e2e-frame-switch-cancel'
+         ORDER BY call_id",
+    )
+    .fetch_all(pool)
+    .await
+    .context("load cancelled frame-switch provider calls")?;
+    anyhow::ensure!(
+        cancel.first().map(String::as_str) == Some("frame_switch_cancel_start")
+            && cancel.last().map(String::as_str) == Some("frame_switch_post_cancel")
+            && cancel.len() >= 3
+            && cancel[1..cancel.len() - 1]
+                .iter()
+                .all(|scenario| scenario == "frame_switch_cancel_follow"),
+        "cancelled frame-switch provider order changed: {cancel:?}"
     );
     Ok(())
 }

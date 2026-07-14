@@ -1323,12 +1323,13 @@ mod test_protocol_fakes {
                     terminal_outcome = match outcome.output.control.as_ref() {
                         Some(crate::ToolControl::SwitchAgentFrame {
                             frame_id,
+                            initial_nodes,
                             task: Some(task),
-                            ..
                         }) if !frame_id.trim().is_empty() && !task.trim().is_empty() => {
                             Some(TurnOutcome::AgentFrameSwitch {
                                 frame_id: frame_id.clone(),
                                 task: task.clone(),
+                                initial_nodes: initial_nodes.clone(),
                             })
                         }
                         Some(crate::ToolControl::Finish { value }) => {

@@ -222,7 +222,12 @@ pub enum SessionEvent {
 #[serde(rename_all = "snake_case")]
 pub enum TurnOutcome {
     Finished(TurnFinish),
-    AgentFrameSwitch { frame_id: String, task: String },
+    AgentFrameSwitch {
+        frame_id: String,
+        task: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        initial_nodes: Vec<serde_json::Value>,
+    },
     Stopped(TurnStop),
 }
 
@@ -385,7 +390,7 @@ pub fn model_tool_specs(tools: &[ToolDefinition]) -> Vec<LlmToolSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorEnvelope, SessionEvent};
+    use super::{ErrorEnvelope, SessionEvent, TurnOutcome};
     use crate::llm::types::{LlmTerminalReason, ProviderFailureKind};
 
     // ─── ErrorEnvelope durable-snapshot compatibility ──────────────────
@@ -489,6 +494,35 @@ mod tests {
             assert_eq!(json, serde_json::json!(kind.code()));
             let round: ProviderFailureKind = serde_json::from_value(json).expect("decode kind");
             assert_eq!(round, kind);
+        }
+    }
+
+    #[test]
+    fn agent_frame_switch_decodes_legacy_event_without_initial_nodes() {
+        let legacy = r#"{
+            "type":"turn_outcome",
+            "outcome":{
+                "agent_frame_switch":{
+                    "frame_id":"frame-2",
+                    "task":"continue"
+                }
+            }
+        }"#;
+        let event: SessionEvent = serde_json::from_str(legacy).expect("legacy frame switch event");
+        match event {
+            SessionEvent::TurnOutcome {
+                outcome:
+                    TurnOutcome::AgentFrameSwitch {
+                        frame_id,
+                        task,
+                        initial_nodes,
+                    },
+            } => {
+                assert_eq!(frame_id, "frame-2");
+                assert_eq!(task, "continue");
+                assert!(initial_nodes.is_empty());
+            }
+            other => panic!("expected agent-frame switch event, got {other:?}"),
         }
     }
 }

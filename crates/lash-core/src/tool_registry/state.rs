@@ -24,7 +24,7 @@ fn is_default_member(member: &bool) -> bool {
     *member
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolStateEntry {
     manifest: ToolManifest,
     /// True when this tool was not resolvable from any registered source at
@@ -107,6 +107,10 @@ impl ToolState {
         self.tools.get(id)
     }
 
+    /// Edit a manifest in an explicit [`ToolRegistry::apply_state`] delta.
+    ///
+    /// Automatic rebuilds replace stored manifests with their live versions,
+    /// so this is not a persistent source-curation mechanism.
     pub fn manifest_mut(&mut self, id: &ToolId) -> Option<&mut ToolManifest> {
         Arc::make_mut(&mut self.tools)
             .get_mut(id)
@@ -142,10 +146,11 @@ impl ToolState {
         Ok(())
     }
 
-    pub fn retain(&mut self, mut keep: impl FnMut(&ToolId, &ToolStateEntry) -> bool) {
-        Arc::make_mut(&mut self.tools).retain(|id, entry| keep(id, entry));
-    }
-
+    /// Delete a tool in an explicit [`ToolRegistry::apply_state`] delta.
+    ///
+    /// Deletion intentionally removes the entry for that delta only. Use
+    /// [`Self::set_membership`] for curation that must survive a rebuild from
+    /// live sources.
     pub fn remove(&mut self, id: &ToolId) -> Option<ToolStateEntry> {
         Arc::make_mut(&mut self.tools).remove(id)
     }

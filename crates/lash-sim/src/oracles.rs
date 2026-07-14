@@ -90,6 +90,218 @@ pub const WORKER_STALE_COMPLETION_ORACLE: &str = "sim.oracle.worker-stale-comple
 pub const GENERATED_SUSPEND_RESUME_ORACLE: &str = "sim.oracle.generated-suspend-resume.v1";
 pub const GENERATED_FINAL_VALUE_ORACLE: &str =
     "sim.oracle.generated-final-value-semantic-channel.v1";
+pub const FRAME_SWITCH_SEED_ORACLE: &str = "sim.oracle.frame-switch-seed.v1";
+pub const LOGICAL_TURN_CLAIM_EXACTLY_ONCE_ORACLE: &str =
+    "sim.oracle.logical-turn-claim-exactly-once.v1";
+pub const FRAME_SWITCH_OUTBOX_ATOMICITY_ORACLE: &str =
+    "sim.oracle.frame-switch-outbox-atomicity.v1";
+pub const FRAME_SWITCH_ORDERING_ORACLE: &str = "sim.oracle.frame-switch-ordering.v1";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameSwitchSeedObservation {
+    pub protocol: String,
+    pub expected_nodes: Vec<Value>,
+    pub observed_nodes: Vec<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameSwitchCommitObservation {
+    pub turn_id: String,
+    pub inbound_claim_completed: bool,
+    pub follow_on_enqueued: bool,
+}
+
+/// Require every frame-switch seed to materialize in full. Comparing canonical
+/// node values catches both the historical empty-frame regression and partial
+/// application/reordering of producer-validated nodes.
+pub fn frame_switch_seeds(observations: &[FrameSwitchSeedObservation]) -> OracleVerdict {
+    for observation in observations {
+        if observation.expected_nodes.is_empty() {
+            return OracleVerdict::failed(
+                FRAME_SWITCH_SEED_ORACLE,
+                format!(
+                    "{} frame-switch observation carried no seed nodes",
+                    observation.protocol
+                ),
+            );
+        }
+        if observation.observed_nodes != observation.expected_nodes {
+            return OracleVerdict::failed(
+                FRAME_SWITCH_SEED_ORACLE,
+                format!(
+                    "{} frame seed changed: expected {:?}, observed {:?}",
+                    observation.protocol, observation.expected_nodes, observation.observed_nodes
+                ),
+            );
+        }
+    }
+    if observations.is_empty() {
+        return OracleVerdict::failed(
+            FRAME_SWITCH_SEED_ORACLE,
+            "no frame-switch seed observations were supplied",
+        );
+    }
+    OracleVerdict::passed(
+        FRAME_SWITCH_SEED_ORACLE,
+        format!(
+            "{} frame-switch seeds materialized completely",
+            observations.len()
+        ),
+    )
+}
+
+/// Match runtime claim/completion trace records by `(claim kind, claim id)` and
+/// require a single terminal settlement for every claimed ingress.
+pub fn logical_turn_claims_settle_exactly_once(
+    records: &[lash_core::TraceRecord],
+) -> OracleVerdict {
+    let mut claimed = BTreeMap::<(String, String), usize>::new();
+    let mut completed = BTreeMap::<(String, String), usize>::new();
+    for record in records {
+        let lash_core::TraceEvent::Custom { name, payload } = &record.event else {
+            continue;
+        };
+        match name.as_str() {
+            "queued_work.claimed" | "turn_input.claimed" => {
+                let Some(claim_id) = payload.get("claim_id").and_then(Value::as_str) else {
+                    return OracleVerdict::failed(
+                        LOGICAL_TURN_CLAIM_EXACTLY_ONCE_ORACLE,
+                        format!("{name} trace omitted claim_id"),
+                    );
+                };
+                *claimed
+                    .entry((
+                        name.trim_end_matches(".claimed").to_string(),
+                        claim_id.to_string(),
+                    ))
+                    .or_default() += 1;
+            }
+            "queued_work.completed" | "turn_input.completed" => {
+                let Some(claims) = payload.get("claims").and_then(Value::as_array) else {
+                    return OracleVerdict::failed(
+                        LOGICAL_TURN_CLAIM_EXACTLY_ONCE_ORACLE,
+                        format!("{name} trace omitted claims"),
+                    );
+                };
+                for claim in claims {
+                    let Some(claim_id) = claim.get("claim_id").and_then(Value::as_str) else {
+                        return OracleVerdict::failed(
+                            LOGICAL_TURN_CLAIM_EXACTLY_ONCE_ORACLE,
+                            format!("{name} trace contained a claim without claim_id"),
+                        );
+                    };
+                    *completed
+                        .entry((
+                            name.trim_end_matches(".completed").to_string(),
+                            claim_id.to_string(),
+                        ))
+                        .or_default() += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if claimed.is_empty() {
+        return OracleVerdict::failed(
+            LOGICAL_TURN_CLAIM_EXACTLY_ONCE_ORACLE,
+            "no claimed ingress was observed",
+        );
+    }
+    for (claim, claim_count) in &claimed {
+        let completion_count = completed.get(claim).copied().unwrap_or_default();
+        if *claim_count != 1 || completion_count != 1 {
+            return OracleVerdict::failed(
+                LOGICAL_TURN_CLAIM_EXACTLY_ONCE_ORACLE,
+                format!(
+                    "{} claim `{}` was claimed {claim_count} times and settled {completion_count} times",
+                    claim.0, claim.1
+                ),
+            );
+        }
+    }
+    if let Some((claim, count)) = completed
+        .iter()
+        .find(|(claim, count)| !claimed.contains_key(*claim) || **count != 1)
+    {
+        return OracleVerdict::failed(
+            LOGICAL_TURN_CLAIM_EXACTLY_ONCE_ORACLE,
+            format!(
+                "{} claim `{}` had {count} terminal settlements without one matching claim",
+                claim.0, claim.1
+            ),
+        );
+    }
+    OracleVerdict::passed(
+        LOGICAL_TURN_CLAIM_EXACTLY_ONCE_ORACLE,
+        format!("{} ingress claims settled exactly once", claimed.len()),
+    )
+}
+
+pub fn frame_switch_outbox_is_atomic(
+    observations: &[FrameSwitchCommitObservation],
+) -> OracleVerdict {
+    if observations.is_empty() {
+        return OracleVerdict::failed(
+            FRAME_SWITCH_OUTBOX_ATOMICITY_ORACLE,
+            "no claimed frame-switch commit was observed",
+        );
+    }
+    if let Some(observation) = observations
+        .iter()
+        .find(|observation| !observation.inbound_claim_completed || !observation.follow_on_enqueued)
+    {
+        return OracleVerdict::failed(
+            FRAME_SWITCH_OUTBOX_ATOMICITY_ORACLE,
+            format!(
+                "switch commit `{}` exposed inbound_completed={} follow_on_enqueued={}",
+                observation.turn_id,
+                observation.inbound_claim_completed,
+                observation.follow_on_enqueued
+            ),
+        );
+    }
+    OracleVerdict::passed(
+        FRAME_SWITCH_OUTBOX_ATOMICITY_ORACLE,
+        format!(
+            "{} switch commits exposed claim completion and follow-on enqueue together",
+            observations.len()
+        ),
+    )
+}
+
+pub fn frame_switch_follow_on_precedes_pending(
+    completion_order: &[String],
+    follow_on: &str,
+    pending_at_chain_start: &[String],
+) -> OracleVerdict {
+    let Some(follow_index) = completion_order.iter().position(|item| item == follow_on) else {
+        return OracleVerdict::failed(
+            FRAME_SWITCH_ORDERING_ORACLE,
+            format!("follow-on `{follow_on}` never completed"),
+        );
+    };
+    for pending in pending_at_chain_start {
+        let Some(pending_index) = completion_order.iter().position(|item| item == pending) else {
+            return OracleVerdict::failed(
+                FRAME_SWITCH_ORDERING_ORACLE,
+                format!("pending item `{pending}` never completed"),
+            );
+        };
+        if pending_index < follow_index {
+            return OracleVerdict::failed(
+                FRAME_SWITCH_ORDERING_ORACLE,
+                format!("pending item `{pending}` completed before follow-on `{follow_on}`"),
+            );
+        }
+    }
+    OracleVerdict::passed(
+        FRAME_SWITCH_ORDERING_ORACLE,
+        format!(
+            "follow-on `{follow_on}` completed before {} pre-existing queued items",
+            pending_at_chain_start.len()
+        ),
+    )
+}
 
 fn is_suspend_resume(event: &DeliveredBoundary) -> bool {
     event
@@ -4273,13 +4485,17 @@ fn rlm_protocol_execution_fact(
             require_rlm_exec_code(result, "x = await tools.custom_frame_switch({})?", contract)?;
             require_rlm_checkpoint(result, "before_completion", contract)?;
             require_rlm_no_tool_call_event(result, contract)?;
-            require_rlm_agent_frame_switch(result, "next-frame", "continue", contract)?;
+            require_rlm_agent_frame_switch(result, "next-frame", "continue", 1, contract)?;
             require_rlm_trajectory_error(result, None, contract)?;
             json!({
                 "done": true,
                 "exec_code": "x = await tools.custom_frame_switch({})?",
                 "checkpoint": "before_completion",
-                "agent_frame_switch": { "frame_id": "next-frame", "task": "continue" },
+                "agent_frame_switch": {
+                    "frame_id": "next-frame",
+                    "task": "continue",
+                    "initial_node_count": 1,
+                },
                 "tool_call_event": false,
             })
         }
@@ -4759,6 +4975,7 @@ fn require_rlm_agent_frame_switch(
     result: &Value,
     frame_id: &str,
     task: &str,
+    initial_node_count: usize,
     contract: &str,
 ) -> Result<(), String> {
     if result
@@ -4770,12 +4987,16 @@ fn require_rlm_agent_frame_switch(
             outcome.get("kind").and_then(Value::as_str) == Some("agent_frame_switch")
                 && outcome.get("frame_id").and_then(Value::as_str) == Some(frame_id)
                 && outcome.get("task").and_then(Value::as_str) == Some(task)
+                && outcome
+                    .get("initial_nodes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|nodes| nodes.len() == initial_node_count)
         })
     {
         Ok(())
     } else {
         Err(format!(
-            "{contract} missing AgentFrameSwitch outcome `{frame_id}` / `{task}`"
+            "{contract} missing AgentFrameSwitch outcome `{frame_id}` / `{task}` with {initial_node_count} seed nodes"
         ))
     }
 }

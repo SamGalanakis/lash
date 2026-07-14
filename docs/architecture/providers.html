@@ -80,13 +80,13 @@
 
         <div class="section">
           <div class="section-header">
-            <h2>Claude Cache Markers</h2>
-            <p>For Anthropic and OpenRouter Claude on Chat Completions, shared <code>ProviderOptions.cache_retention</code> controls Anthropic-style <code>cache_control</code> markers in the request:</p>
+            <h2>OpenRouter Cache-Control Markers</h2>
+            <p>For direct Anthropic requests and OpenRouter-served Claude or Gemini on Chat Completions, shared <code>ProviderOptions.cache_retention</code> controls the <code>cache_control</code> dialect used in the request:</p>
           </div>
           <div class="def-list-grid">
             <article class="panel"><h3><code>none</code></h3><p>No markers emitted. Each request is treated as fresh.</p></article>
-            <article class="panel"><h3><code>short</code></h3><p>Emits <code>{"type":"ephemeral"}</code> at the canonical breakpoints. Default 5-minute cache lifetime per Anthropic semantics.</p></article>
-            <article class="panel"><h3><code>long</code></h3><p>Adds <code>"ttl":"1h"</code> to the ephemeral marker for longer-lived caching.</p></article>
+            <article class="panel"><h3><code>short</code></h3><p>Emits <code>{"type":"ephemeral"}</code> at the provider-specific breakpoints for the default short cache window.</p></article>
+            <article class="panel"><h3><code>long</code></h3><p>Adds <code>"ttl":"1h"</code> where the Claude dialect supports it. OpenRouter Gemini remains plain ephemeral because it does not support the one-hour TTL.</p></article>
           </div>
           <p>Breakpoints are placed at:</p>
           <ol class="bullets">
@@ -94,13 +94,13 @@
             <li>The last tool definition in the request.</li>
             <li>Any explicit <code>LlmContentBlock::Text.cache_breakpoint</code> the runtime asks for.</li>
           </ol>
-          <p>When no explicit breakpoint is set, the provider falls back to the last user/assistant text content so prompt caching still works for sessions without explicit cache instrumentation.</p>
+          <p>Claude requests use all three canonical placements. OpenRouter Gemini emits exactly one marker: the explicit text breakpoint when present, otherwise the last user/assistant text content. Internal breakpoint markers are always removed from the wire request.</p>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>RLM Prompt Caching</h2>
-            <p>RLM projects chronological history as append-only chat-shaped messages: user inputs remain user messages, prior RLM steps become assistant messages, tool observations become user messages, and the mutable current-iteration/finalization prompt stays as the final user message. The rolling <code>cache_breakpoint</code> is placed on the last <em>stable</em> history text block, so OpenRouter Claude caches a real prefix instead of a rewritten history blob each turn.</p>
+            <p>RLM projects chronological history as append-only chat-shaped messages: user inputs remain user messages, prior RLM steps become assistant messages, tool observations become user messages, and the mutable current-iteration/finalization prompt stays as the final user message. The rolling <code>cache_breakpoint</code> is placed on the last <em>stable</em> history text block, so OpenRouter Claude and Gemini cache a real prefix instead of a rewritten history blob each turn.</p>
           </div>
           <p>The result: long RLM sessions get the same cache-hit rate as native multi-turn chats, even though Lashlang-driven reasoning regenerates a fresh prompt on every iteration.</p>
         </div>

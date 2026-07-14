@@ -18,6 +18,7 @@ use crate::store::RuntimePersistence;
 
 mod attachments;
 mod maintenance;
+mod queued_work;
 
 #[derive(Clone)]
 struct InMemoryQueuedBatch {
@@ -159,6 +160,8 @@ pub struct InMemorySessionStore {
         Mutex<HashMap<(String, crate::AttachmentId), crate::AttachmentManifestEntry>>,
     #[cfg(test)]
     claim_after_lease_validation_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    fail_next_exact_queue_claim: std::sync::atomic::AtomicBool,
 }
 
 impl InMemorySessionStore {
@@ -186,6 +189,8 @@ impl InMemorySessionStore {
             attachment_manifest: Mutex::new(HashMap::new()),
             #[cfg(test)]
             claim_after_lease_validation_hook: Mutex::new(None),
+            #[cfg(test)]
+            fail_next_exact_queue_claim: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -207,6 +212,12 @@ impl InMemorySessionStore {
             .claim_after_lease_validation_hook
             .lock()
             .expect("lock claim validation hook") = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_exact_queue_claim(&self) {
+        self.fail_next_exact_queue_claim
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn verify_session_execution_lease(
@@ -324,6 +335,57 @@ impl InMemorySessionStore {
                 batch.batch_id
             ))
         })
+    }
+
+    fn enqueue_queued_work_in_memory(
+        &self,
+        batch: crate::QueuedWorkBatchDraft,
+    ) -> crate::QueuedWorkBatch {
+        let mut queued = self.queued_work.lock().expect("lock queued work");
+        if let Some(source_key) = batch.source_key.as_deref()
+            && let Some(existing) = queued.iter().find(|entry| {
+                entry.batch.session_id == batch.session_id
+                    && entry.batch.source_key.as_deref() == Some(source_key)
+            })
+        {
+            return existing.batch.clone();
+        }
+        let mut next_seq = self
+            .queued_work_next_seq
+            .lock()
+            .expect("lock queued work seq");
+        *next_seq = next_seq.saturating_add(1);
+        let batch_id = format!("recording-qwb-{next_seq}");
+        let stored = crate::QueuedWorkBatch {
+            batch_id: batch_id.clone(),
+            session_id: batch.session_id,
+            enqueue_seq: *next_seq,
+            source_key: batch.source_key,
+            delivery_policy: batch.delivery_policy,
+            slot_policy: batch.slot_policy,
+            merge_key: batch.merge_key,
+            available_at_ms: batch.available_at_ms,
+            enqueued_at_ms: self.clock.timestamp_ms(),
+            items: batch
+                .payloads
+                .into_iter()
+                .enumerate()
+                .map(|(index, payload)| crate::QueuedWorkItem {
+                    item_id: format!("{batch_id}:item:{index}"),
+                    payload,
+                })
+                .collect(),
+        };
+        queued.push(InMemoryQueuedBatch {
+            batch: stored.clone(),
+            claim_id: None,
+            claim_token: None,
+            claim_owner: None,
+            claim_fencing_token: 0,
+            claim_session_lease_generation: 0,
+        });
+        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
+        stored
     }
 
     fn claim_ready_queued_work_in_memory(
@@ -622,6 +684,16 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
                 attempted_session_id: commit.session_id,
             });
         }
+        if let Some(batch) = commit
+            .enqueued_queue_batches
+            .iter()
+            .find(|batch| batch.session_id != commit.session_id)
+        {
+            return Err(crate::store::StoreError::SessionBindingMismatch {
+                bound_session_id: commit.session_id.clone(),
+                attempted_session_id: batch.session_id.clone(),
+            });
+        }
         if let Some(completed) = &commit.turn_commit {
             if completed.session_id != commit.session_id {
                 return Err(crate::store::StoreError::RuntimeTurnCommitConflict {
@@ -806,6 +878,11 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
             head_revision,
             checkpoint_ref,
             manifest,
+            enqueued_queue_batches: commit
+                .enqueued_queue_batches
+                .into_iter()
+                .map(|batch| self.enqueue_queued_work_in_memory(batch))
+                .collect(),
         };
         if let Some(completed) = &commit.turn_commit {
             self.runtime_turn_commits
@@ -1222,181 +1299,6 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
             }
         }
         Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::store::QueuedWorkStore for InMemorySessionStore {
-    async fn enqueue_queued_work(
-        &self,
-        batch: crate::QueuedWorkBatchDraft,
-    ) -> Result<crate::QueuedWorkBatch, crate::store::StoreError> {
-        let mut queued = self.queued_work.lock().expect("lock queued work");
-        if let Some(source_key) = batch.source_key.as_deref()
-            && let Some(existing) = queued.iter().find(|entry| {
-                entry.batch.session_id == batch.session_id
-                    && entry.batch.source_key.as_deref() == Some(source_key)
-            })
-        {
-            return Ok(existing.batch.clone());
-        }
-        let mut next_seq = self
-            .queued_work_next_seq
-            .lock()
-            .expect("lock queued work seq");
-        *next_seq = next_seq.saturating_add(1);
-        let batch_id = format!("recording-qwb-{next_seq}");
-        let enqueued_at_ms = self.clock.timestamp_ms();
-        let payloads = batch.payloads;
-        let stored = crate::QueuedWorkBatch {
-            batch_id: batch_id.clone(),
-            session_id: batch.session_id,
-            enqueue_seq: *next_seq,
-            source_key: batch.source_key,
-            delivery_policy: batch.delivery_policy,
-            slot_policy: batch.slot_policy,
-            merge_key: batch.merge_key,
-            available_at_ms: batch.available_at_ms,
-            enqueued_at_ms,
-            items: payloads
-                .into_iter()
-                .enumerate()
-                .map(|(index, payload)| crate::QueuedWorkItem {
-                    item_id: format!("{batch_id}:item:{index}"),
-                    payload,
-                })
-                .collect(),
-        };
-        queued.push(InMemoryQueuedBatch {
-            batch: stored.clone(),
-            claim_id: None,
-            claim_token: None,
-            claim_owner: None,
-            claim_fencing_token: 0,
-            claim_session_lease_generation: 0,
-        });
-        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
-        Ok(stored)
-    }
-
-    async fn claim_leading_ready_session_command(
-        &self,
-        session_id: &str,
-        session_execution_lease: &crate::SessionExecutionLeaseFence,
-        owner: &crate::LeaseOwnerIdentity,
-    ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
-        self.claim_ready_queued_work_in_memory(
-            session_id,
-            session_execution_lease,
-            owner,
-            InMemoryQueuedWorkClaimKind::LeadingSessionCommand,
-        )
-    }
-
-    async fn claim_ready_queued_work(
-        &self,
-        session_id: &str,
-        session_execution_lease: &crate::SessionExecutionLeaseFence,
-        owner: &crate::LeaseOwnerIdentity,
-        boundary: crate::QueuedWorkClaimBoundary,
-        max_batches: usize,
-    ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
-        self.claim_ready_queued_work_in_memory(
-            session_id,
-            session_execution_lease,
-            owner,
-            InMemoryQueuedWorkClaimKind::TurnWork {
-                boundary,
-                max_batches,
-            },
-        )
-    }
-
-    async fn abandon_queued_work_claim(
-        &self,
-        claim: &crate::QueuedWorkClaim,
-    ) -> Result<(), crate::store::StoreError> {
-        let mut queued = self.queued_work.lock().expect("lock queued work");
-        for entry in queued.iter_mut() {
-            if entry.batch.session_id == claim.session_id
-                && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
-                && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
-            {
-                entry.claim_id = None;
-                entry.claim_token = None;
-                entry.claim_owner = None;
-                entry.claim_session_lease_generation = 0;
-            }
-        }
-        Ok(())
-    }
-
-    async fn cancel_queued_work_batch(
-        &self,
-        session_id: &str,
-        batch_id: &str,
-    ) -> Result<Option<crate::QueuedWorkBatch>, crate::store::StoreError> {
-        let _transaction = self
-            .write_transaction
-            .lock()
-            .expect("lock in-memory write transaction");
-        let now = self.clock.timestamp_ms();
-        let live_generation = self.live_session_lease_generation(session_id, now);
-        let mut queued = self.queued_work.lock().expect("lock queued work");
-        let Some(index) = queued.iter().position(|entry| {
-            entry.batch.session_id == session_id && entry.batch.batch_id == batch_id
-        }) else {
-            return Ok(None);
-        };
-        let entry = &queued[index];
-        if entry.claim_token.is_some()
-            && live_generation == Some(entry.claim_session_lease_generation)
-        {
-            return Ok(None);
-        }
-        Ok(Some(queued.remove(index).batch))
-    }
-
-    async fn list_queued_work(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<crate::QueuedWorkBatch>, crate::store::StoreError> {
-        let mut batches = self
-            .queued_work
-            .lock()
-            .expect("lock queued work")
-            .iter()
-            .filter(|entry| entry.batch.session_id == session_id)
-            .map(|entry| entry.batch.clone())
-            .collect::<Vec<_>>();
-        batches.sort_by_key(|batch| batch.enqueue_seq);
-        Ok(batches)
-    }
-
-    async fn list_pending_queued_work(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<crate::QueuedWorkBatch>, crate::store::StoreError> {
-        let _transaction = self
-            .write_transaction
-            .lock()
-            .expect("lock in-memory write transaction");
-        let now = self.clock.timestamp_ms();
-        let live_generation = self.live_session_lease_generation(session_id, now);
-        let mut batches = self
-            .queued_work
-            .lock()
-            .expect("lock queued work")
-            .iter()
-            .filter(|entry| {
-                entry.batch.session_id == session_id
-                    && (entry.claim_token.is_none()
-                        || live_generation != Some(entry.claim_session_lease_generation))
-            })
-            .map(|entry| entry.batch.clone())
-            .collect::<Vec<_>>();
-        batches.sort_by_key(|batch| batch.enqueue_seq);
-        Ok(batches)
     }
 }
 

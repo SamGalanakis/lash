@@ -60,10 +60,6 @@ impl ManagedSessionCapability {
         let turn = {
             let mut runtime_guard = runtime.runtime.lock().await;
             let result = Box::pin(async {
-                runtime_guard
-                    .refresh_session_tool_catalog()
-                    .await
-                    .map_err(|err| crate::PluginError::Session(err.to_string()))?;
                 let run = runtime_guard
                     .stream_turn_with_agent_frames(
                         input,

@@ -369,31 +369,7 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
     if !record.output.is_success() {
         return None;
     }
-    match record.output.control.as_ref()? {
-        lash_core::ToolControl::SwitchAgentFrame {
-            frame_id,
-            task: Some(task),
-            ..
-        } if !frame_id.trim().is_empty() && !task.trim().is_empty() => {
-            Some(TurnOutcome::AgentFrameSwitch {
-                frame_id: frame_id.clone(),
-                task: task.clone(),
-            })
-        }
-        lash_core::ToolControl::Finish { value } => {
-            Some(TurnOutcome::Finished(TurnFinish::ToolValue {
-                tool_name: record.tool.clone(),
-                value: value.to_json_value(),
-            }))
-        }
-        lash_core::ToolControl::Fail { failure } => {
-            Some(TurnOutcome::Stopped(TurnStop::ToolError {
-                tool_name: record.tool.clone(),
-                value: failure.to_json_value(),
-            }))
-        }
-        lash_core::ToolControl::SwitchAgentFrame { .. } => None,
-    }
+    lash_core::turn_outcome_from_tool_control(&record.tool, record.output.control.as_ref()?)
 }
 
 fn trajectory_entry(

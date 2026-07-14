@@ -4,6 +4,13 @@ use std::borrow::Cow;
 
 const PROVIDER: &str = "OpenAI-compatible";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CacheBreakpointDiagnostics {
+    pub(crate) requested: usize,
+    pub(crate) emitted: usize,
+    pub(crate) dropped: usize,
+}
+
 impl OpenAiCompatibleProvider {
     fn model_is_anthropic_claude(model: &str) -> bool {
         let model = model.to_ascii_lowercase();
@@ -11,15 +18,27 @@ impl OpenAiCompatibleProvider {
         model.contains("claude") || model.contains("anthropic/")
     }
 
-    fn openrouter_claude_request(&self, req: &LlmRequest) -> bool {
-        base_url_is_openrouter(&self.base_url) && Self::model_is_anthropic_claude(&req.model)
+    fn model_is_google_gemini(model: &str) -> bool {
+        model.to_ascii_lowercase().contains("gemini")
     }
 
-    fn chat_cache_control_value(cache_retention: CacheRetention) -> Option<Value> {
+    fn openrouter_cache_control_request(&self, req: &LlmRequest) -> bool {
+        base_url_is_openrouter(&self.base_url)
+            && (Self::model_is_anthropic_claude(&req.model)
+                || Self::model_is_google_gemini(&req.model))
+    }
+
+    fn chat_cache_control_value(
+        cache_retention: CacheRetention,
+        extended_ttl: bool,
+    ) -> Option<Value> {
         match cache_retention {
             CacheRetention::None => None,
             CacheRetention::Short => Some(json!({ "type": "ephemeral" })),
-            CacheRetention::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
+            CacheRetention::Long if extended_ttl => {
+                Some(json!({ "type": "ephemeral", "ttl": "1h" }))
+            }
+            CacheRetention::Long => Some(json!({ "type": "ephemeral" })),
         }
     }
 
@@ -31,16 +50,6 @@ impl OpenAiCompatibleProvider {
                 "url": format!("data:{};base64,{}", att.mime, b64),
             },
         })
-    }
-
-    fn chat_text_or_parts(mut parts: Vec<Value>) -> Value {
-        if parts.len() == 1
-            && parts[0].get("__lash_cache_breakpoint").is_none()
-            && let Some(text) = parts[0].get("text").and_then(Value::as_str)
-        {
-            return json!(text);
-        }
-        Value::Array(std::mem::take(&mut parts))
     }
 
     fn build_chat_messages(req: &LlmRequest) -> Vec<Value> {
@@ -127,7 +136,7 @@ impl OpenAiCompatibleProvider {
             {
                 let mut wire_message = json!({ "role": role });
                 if !text_parts.is_empty() {
-                    wire_message["content"] = Self::chat_text_or_parts(text_parts);
+                    wire_message["content"] = Value::Array(text_parts);
                 } else if matches!(msg.role, LlmRole::Assistant) {
                     wire_message["content"] = Value::Null;
                 }
@@ -174,17 +183,6 @@ impl OpenAiCompatibleProvider {
         let Some(content) = message.get_mut("content") else {
             return false;
         };
-        if let Some(text) = content.as_str() {
-            if text.is_empty() {
-                return false;
-            }
-            *content = json!([{
-                "type": "text",
-                "text": text,
-                "cache_control": cache_control,
-            }]);
-            return true;
-        }
         let Some(parts) = content.as_array_mut() else {
             return false;
         };
@@ -230,21 +228,69 @@ impl OpenAiCompatibleProvider {
         }
     }
 
-    fn apply_anthropic_cache_control(
+    fn apply_openrouter_cache_control(
         &self,
         req: &LlmRequest,
         cache_retention: CacheRetention,
         messages: &mut [Value],
         tools: &mut [Value],
-    ) {
-        if !self.openrouter_claude_request(req) {
+    ) -> CacheBreakpointDiagnostics {
+        let requested = req
+            .messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .filter(|block| {
+                matches!(
+                    block,
+                    LlmContentBlock::Text {
+                        cache_breakpoint: true,
+                        ..
+                    }
+                )
+            })
+            .count();
+        if !self.openrouter_cache_control_request(req) {
             Self::strip_internal_cache_markers(messages);
-            return;
+            return CacheBreakpointDiagnostics {
+                requested,
+                emitted: 0,
+                dropped: requested,
+            };
         }
-        let Some(cache_control) = Self::chat_cache_control_value(cache_retention) else {
+        let gemini_request = Self::model_is_google_gemini(&req.model);
+        let Some(cache_control) = Self::chat_cache_control_value(cache_retention, !gemini_request)
+        else {
             Self::strip_internal_cache_markers(messages);
-            return;
+            return CacheBreakpointDiagnostics {
+                requested,
+                emitted: 0,
+                dropped: requested,
+            };
         };
+
+        if gemini_request {
+            let applied_explicit_breakpoint = messages.iter_mut().rev().any(|message| {
+                Self::add_cache_control_to_marked_text_content(message, &cache_control)
+            });
+            if !applied_explicit_breakpoint {
+                for message in messages.iter_mut().rev() {
+                    if matches!(
+                        message.get("role").and_then(Value::as_str),
+                        Some("user" | "assistant")
+                    ) && Self::add_cache_control_to_text_content(message, &cache_control)
+                    {
+                        break;
+                    }
+                }
+            }
+            Self::strip_internal_cache_markers(messages);
+            let emitted = usize::from(applied_explicit_breakpoint);
+            return CacheBreakpointDiagnostics {
+                requested,
+                emitted,
+                dropped: requested.saturating_sub(emitted),
+            };
+        }
 
         for message in messages.iter_mut() {
             if matches!(
@@ -281,6 +327,12 @@ impl OpenAiCompatibleProvider {
             }
         }
         Self::strip_internal_cache_markers(messages);
+        let emitted = usize::from(applied_explicit_breakpoint);
+        CacheBreakpointDiagnostics {
+            requested,
+            emitted,
+            dropped: requested.saturating_sub(emitted),
+        }
     }
 
     pub(crate) fn build_chat_request_body(
@@ -288,6 +340,15 @@ impl OpenAiCompatibleProvider {
         req: &LlmRequest,
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
+        self.build_chat_request_body_with_diagnostics(req, stream)
+            .map(|(body, _)| body)
+    }
+
+    pub(crate) fn build_chat_request_body_with_diagnostics(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<(Value, CacheBreakpointDiagnostics), LlmTransportError> {
         validate_image_attachments(req, OPENAI_IMAGE_MIMES, "OpenAI")?;
         let compat = self.resolved_compat(CompletionEndpoint::ChatCompletions);
         let mut messages = Self::build_chat_messages(req);
@@ -299,7 +360,12 @@ impl OpenAiCompatibleProvider {
             DEFAULT_MAX_OUTPUT_TOKENS,
             (),
         );
-        self.apply_anthropic_cache_control(req, policy.cache_retention, &mut messages, &mut tools);
+        let cache_diagnostics = self.apply_openrouter_cache_control(
+            req,
+            policy.cache_retention,
+            &mut messages,
+            &mut tools,
+        );
         let mut body = json!({
             "model": req.model,
             "messages": messages,
@@ -342,7 +408,7 @@ impl OpenAiCompatibleProvider {
                 }
             };
         }
-        Ok(body)
+        Ok((body, cache_diagnostics))
     }
 
     fn chat_message_text(message: &Value) -> String {

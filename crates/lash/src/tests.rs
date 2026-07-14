@@ -241,6 +241,7 @@ impl lash_core::SessionCommitStore for SnapshotStore {
             head_revision: 8,
             checkpoint_ref: lash_core::BlobRef("checkpoint".to_string()),
             manifest: lash_core::store::SessionCheckpoint::default(),
+            enqueued_queue_batches: Vec::new(),
         };
         if let Some(completed) = &commit.turn_commit {
             self.runtime_turn_commits
@@ -437,6 +438,20 @@ impl lash_core::QueuedWorkStore for SnapshotStore {
         _owner: &lash_core::LeaseOwnerIdentity,
         _boundary: lash_core::runtime::QueuedWorkClaimBoundary,
         _max_batches: usize,
+    ) -> std::result::Result<
+        Option<lash_core::runtime::QueuedWorkClaim>,
+        lash_core::store::StoreError,
+    > {
+        Ok(None)
+    }
+
+    async fn claim_ready_queued_work_by_batch_ids(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _boundary: lash_core::runtime::QueuedWorkClaimBoundary,
+        _batch_ids: &[String],
     ) -> std::result::Result<
         Option<lash_core::runtime::QueuedWorkClaim>,
         lash_core::store::StoreError,
@@ -798,6 +813,20 @@ impl lash_core::QueuedWorkStore for BoundSessionStore {
         _owner: &lash_core::LeaseOwnerIdentity,
         _boundary: lash_core::runtime::QueuedWorkClaimBoundary,
         _max_batches: usize,
+    ) -> std::result::Result<
+        Option<lash_core::runtime::QueuedWorkClaim>,
+        lash_core::store::StoreError,
+    > {
+        Ok(None)
+    }
+
+    async fn claim_ready_queued_work_by_batch_ids(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _boundary: lash_core::runtime::QueuedWorkClaimBoundary,
+        _batch_ids: &[String],
     ) -> std::result::Result<
         Option<lash_core::runtime::QueuedWorkClaim>,
         lash_core::store::StoreError,

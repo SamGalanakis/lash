@@ -266,7 +266,7 @@ enum ToolBinding {
     Bound(String),
     /// Persisted in a session snapshot but not resolvable from any currently
     /// registered source. Remains a non-member; execution fails loudly;
-    /// rebinds when a source re-advertises the same (name, id).
+    /// rebinds when a source resolves the same id (the live name may evolve).
     Orphaned,
 }
 

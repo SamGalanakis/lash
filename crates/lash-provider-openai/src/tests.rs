@@ -39,6 +39,29 @@ impl LlmHttpTransport for ScriptedHttpTransport {
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingHttpTransport {
+    requests: std::sync::Mutex<Vec<LlmHttpRequest>>,
+}
+
+#[async_trait]
+impl LlmHttpTransport for RecordingHttpTransport {
+    async fn send(
+        &self,
+        request: LlmHttpRequest,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<lash_llm_transport::LlmHttpResponse, LlmTransportError> {
+        self.requests.lock().expect("request lock").push(request);
+        Ok(lash_llm_transport::LlmHttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: LlmHttpBody::buffered(
+                r#"{"id":"gen-123","model":"test-model","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#,
+            ),
+        })
+    }
+}
+
 fn reasoning_capability() -> ModelCapability {
     ModelCapability {
         reasoning: Some(ReasoningCapability {
@@ -85,6 +108,67 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         generation: lash_core::GenerationOptions::default(),
         provider_trace: None,
     }
+}
+
+fn count_object_key(value: &Value, key: &str) -> usize {
+    match value {
+        Value::Object(object) => {
+            usize::from(object.contains_key(key))
+                + object
+                    .values()
+                    .map(|value| count_object_key(value, key))
+                    .sum::<usize>()
+        }
+        Value::Array(array) => array.iter().map(|value| count_object_key(value, key)).sum(),
+        _ => 0,
+    }
+}
+
+#[tokio::test]
+async fn openrouter_request_body_uses_bounded_session_affinity_field() {
+    let transport = Arc::new(RecordingHttpTransport::default());
+    let mut provider =
+        OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL).with_transport(transport.clone());
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    let session_id = format!("{}étrailing", "s".repeat(255));
+    req.scope.session_id = session_id.clone();
+
+    provider.complete(req).await.expect("request succeeds");
+
+    let requests = transport.requests.lock().expect("request lock");
+    let wire_request = requests.first().expect("captured request");
+    let body: Value = serde_json::from_slice(&wire_request.body).expect("request body");
+    let expected = session_id.chars().take(256).collect::<String>();
+    assert_eq!(body["session_id"], expected);
+    assert_eq!(
+        body["session_id"]
+            .as_str()
+            .expect("session id")
+            .chars()
+            .count(),
+        256
+    );
+    assert!(
+        wire_request
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("session_id"))
+    );
+}
+
+#[tokio::test]
+async fn non_openrouter_request_body_omits_session_affinity_field() {
+    let transport = Arc::new(RecordingHttpTransport::default());
+    let mut provider = OpenAiCompatibleProvider::new("key", "https://api.together.xyz/v1")
+        .with_transport(transport.clone());
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    provider.complete(req).await.expect("request succeeds");
+
+    let requests = transport.requests.lock().expect("request lock");
+    let wire_request = requests.first().expect("captured request");
+    let body: Value = serde_json::from_slice(&wire_request.body).expect("request body");
+    assert!(body.get("session_id").is_none());
 }
 
 #[test]
@@ -431,6 +515,103 @@ fn openrouter_claude_chat_body_marks_anthropic_cache_breakpoints() {
 }
 
 #[test]
+fn openrouter_gemini_chat_body_emits_one_ephemeral_explicit_breakpoint() {
+    let mut req = request(vec![
+        LlmMessage::text(LlmRole::System, "stable system prompt"),
+        LlmMessage::new(
+            LlmRole::User,
+            vec![
+                LlmContentBlock::Text {
+                    text: "older stable history".into(),
+                    response_meta: None,
+                    cache_breakpoint: true,
+                },
+                LlmContentBlock::Text {
+                    text: "latest stable history".into(),
+                    response_meta: None,
+                    cache_breakpoint: true,
+                },
+                LlmContentBlock::Text {
+                    text: "dynamic current iteration".into(),
+                    response_meta: None,
+                    cache_breakpoint: false,
+                },
+            ],
+        ),
+    ]);
+    req.model = "google/Gemini-2.5-Pro".to_string();
+    req.tools = Arc::new(vec![LlmToolSpec {
+        name: "search".to_string(),
+        description: "Search".to_string(),
+        input_schema: json!({"type": "object"}).into(),
+        output_schema: json!({}).into(),
+    }]);
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_options(ProviderOptions {
+            cache_retention: CacheRetention::Long,
+            ..ProviderOptions::default()
+        })
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(count_object_key(&body, "cache_control"), 1);
+    assert_eq!(
+        body["messages"][1]["content"][1]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+    assert!(
+        body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert!(body["messages"][0]["content"].is_array());
+    assert!(body["tools"][0].get("cache_control").is_none());
+    assert_eq!(count_object_key(&body, "ttl"), 0);
+    assert_eq!(count_object_key(&body, "__lash_cache_breakpoint"), 0);
+}
+
+#[test]
+fn openrouter_gemini_chat_body_falls_back_to_last_message_text() {
+    let mut req = request(vec![
+        LlmMessage::text(LlmRole::System, "stable system prompt"),
+        LlmMessage::text(LlmRole::User, "last stable text"),
+    ]);
+    req.model = "google/gemini-2.5-flash".to_string();
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(count_object_key(&body, "cache_control"), 1);
+    assert_eq!(
+        body["messages"][1]["content"][0]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+    assert!(body["messages"][0]["content"].is_array());
+}
+
+#[test]
+fn non_openrouter_gemini_chat_body_strips_breakpoint_without_emitting_cache_control() {
+    let mut req = request(vec![LlmMessage::new(
+        LlmRole::User,
+        vec![LlmContentBlock::Text {
+            text: "stable history".into(),
+            response_meta: None,
+            cache_breakpoint: true,
+        }],
+    )]);
+    req.model = "google/gemini-2.5-pro".to_string();
+
+    let body = OpenAiCompatibleProvider::new("key", "https://api.together.xyz/v1")
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(count_object_key(&body, "cache_control"), 0);
+    assert_eq!(count_object_key(&body, "__lash_cache_breakpoint"), 0);
+}
+
+#[test]
 fn chat_tools_use_projected_openai_schema_and_preserve_override() {
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model = "anthropic/claude-sonnet-4.6".to_string();
@@ -618,6 +799,60 @@ fn openrouter_claude_chat_body_prefers_explicit_text_cache_breakpoint() {
     );
 }
 
+fn without_cache_control(mut value: Value) -> Value {
+    if let Some(parts) = value.get_mut("content").and_then(Value::as_array_mut) {
+        for part in parts {
+            part.as_object_mut()
+                .map(|object| object.remove("cache_control"));
+        }
+    }
+    value
+}
+
+#[test]
+fn openrouter_chat_history_shape_is_stable_when_cache_breakpoint_moves() {
+    for model in [
+        "anthropic/claude-sonnet-4.6",
+        "google/gemini-3.1-pro-preview",
+    ] {
+        let history = |text: &'static str, cache_breakpoint| {
+            LlmMessage::new(
+                LlmRole::User,
+                vec![LlmContentBlock::Text {
+                    text: text.into(),
+                    response_meta: None,
+                    cache_breakpoint,
+                }],
+            )
+        };
+        let mut previous = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            history("stable history one", true),
+            LlmMessage::text(LlmRole::User, "dynamic iteration one"),
+        ]);
+        previous.model = model.to_string();
+        let mut next = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            history("stable history one", false),
+            history("stable history two", true),
+            LlmMessage::text(LlmRole::User, "dynamic iteration two"),
+        ]);
+        next.model = model.to_string();
+
+        let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+        let previous_body = provider.build_chat_request_body(&previous, true).unwrap();
+        let next_body = provider.build_chat_request_body(&next, true).unwrap();
+        let previous_history = without_cache_control(previous_body["messages"][1].clone());
+        let next_history = without_cache_control(next_body["messages"][1].clone());
+
+        assert_eq!(
+            serde_json::to_vec(&previous_history).unwrap(),
+            serde_json::to_vec(&next_history).unwrap(),
+            "earlier history wire shape changed for {model}"
+        );
+    }
+}
+
 #[test]
 fn cache_retention_none_removes_chat_cache_markers() {
     let mut req = request(vec![
@@ -634,8 +869,16 @@ fn cache_retention_none_removes_chat_cache_markers() {
         .build_chat_request_body(&req, true)
         .unwrap();
 
-    assert!(body["messages"][0]["content"].is_string());
-    assert!(body["messages"][1]["content"].is_string());
+    assert!(body["messages"][0]["content"].is_array());
+    assert!(body["messages"][1]["content"].is_array());
+    assert!(
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .all(|part| part.get("__lash_cache_breakpoint").is_none())
+    );
     assert!(body.get("tools").is_none());
 }
 
@@ -979,6 +1222,32 @@ fn chat_usage_payload_maps_canonical_token_buckets() {
             cache_read_input_tokens: 5,
             cache_write_input_tokens: 4,
             reasoning_output_tokens: 3,
+        }
+    );
+}
+
+#[test]
+fn openrouter_gemini_production_usage_payload_maps_zero_cache_buckets() {
+    let usage = lash_llm_transport::openai_usage_from_usage_value(&json!({
+        "prompt_tokens": 6370,
+        "completion_tokens": 7,
+        "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "video_tokens": 0
+        },
+        "cost": 0.003206
+    }));
+
+    assert_eq!(
+        usage,
+        lash_core::llm::types::LlmUsage {
+            input_tokens: 6370,
+            output_tokens: 7,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
         }
     );
 }

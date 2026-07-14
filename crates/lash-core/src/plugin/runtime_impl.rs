@@ -195,13 +195,6 @@ impl PluginHost {
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();
-        let mut tool_snapshot = tool_snapshot;
-        if let Some(snapshot) = &mut tool_snapshot {
-            let hidden_tools = &authority.tool_access.hidden_tools;
-            if !hidden_tools.is_empty() {
-                snapshot.retain(|_, entry| !hidden_tools.contains(&entry.manifest().name));
-            }
-        }
         let mut plugins = Vec::new();
         let mut reg = PluginRegistrar::new();
         for factory in self.factories() {
@@ -232,22 +225,28 @@ impl PluginHost {
             })?;
         let registry = match tool_snapshot {
             Some(snapshot) => Arc::new(
-                crate::ToolRegistry::from_tool_providers(contributions.tool_providers.clone())
-                    .map_err(|err| {
-                        PluginError::Registration(format!("failed to build tool registry: {err}"))
-                    })?
-                    .fork_with_state(snapshot)
-                    .map_err(|err| {
-                        PluginError::Session(format!(
-                            "tool state cannot be applied to this plugin host session: {err}"
-                        ))
-                    })?,
+                crate::ToolRegistry::from_tool_providers_with_hidden_tools(
+                    contributions.tool_providers.clone(),
+                    authority.tool_access.hidden_tools.clone(),
+                )
+                .map_err(|err| {
+                    PluginError::Registration(format!("failed to build tool registry: {err}"))
+                })?
+                .fork_with_state(snapshot)
+                .map_err(|err| {
+                    PluginError::Session(format!(
+                        "tool state cannot be applied to this plugin host session: {err}"
+                    ))
+                })?,
             ),
             None => Arc::new(
-                crate::ToolRegistry::from_tool_providers(contributions.tool_providers.clone())
-                    .map_err(|err| {
-                        PluginError::Registration(format!("failed to build tool registry: {err}"))
-                    })?,
+                crate::ToolRegistry::from_tool_providers_with_hidden_tools(
+                    contributions.tool_providers.clone(),
+                    authority.tool_access.hidden_tools.clone(),
+                )
+                .map_err(|err| {
+                    PluginError::Registration(format!("failed to build tool registry: {err}"))
+                })?,
             ),
         };
         let tools = Arc::clone(&registry) as Arc<dyn ToolProvider>;
