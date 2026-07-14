@@ -550,13 +550,12 @@ fn rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool
 
 #[test]
 fn rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal() {
-    let initial_nodes = vec![serde_json::json!({
-        "kind": "message",
-        "message": {
-            "role": "user",
-            "parts": [{"kind": "text", "content": "seed"}]
-        }
-    })];
+    let initial_nodes = vec![
+        serde_json::to_value(lash_core::SessionAppendNode::message(
+            lash_core::PluginMessage::text(lash_core::MessageRole::User, "seed"),
+        ))
+        .expect("serialize valid frame seed"),
+    ];
     RlmProtocolScenario::new(EXEC_TOOL_CONTROL_FRAME_SWITCH.display_name)
         .user_message("run a custom frame-switch tool")
         .llm_response(vec![text_part(&lashlang_block(

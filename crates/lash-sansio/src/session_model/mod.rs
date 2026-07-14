@@ -225,7 +225,7 @@ pub enum TurnOutcome {
     AgentFrameSwitch {
         frame_id: String,
         task: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         initial_nodes: Vec<serde_json::Value>,
     },
     Stopped(TurnStop),

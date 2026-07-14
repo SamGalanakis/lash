@@ -696,14 +696,9 @@ fn materialize_agent_frame_switch(
     }
     let nodes = initial_nodes
         .iter()
-        .filter_map(|value| {
-            match serde_json::from_value::<crate::SessionAppendNode>(value.clone()) {
-                Ok(node) => Some(node),
-                Err(err) => {
-                    tracing::warn!("failed to decode agent frame initial node: {err}");
-                    None
-                }
-            }
+        .map(|value| {
+            serde_json::from_value::<crate::SessionAppendNode>(value.clone())
+                .expect("agent frame seed nodes are validated by the protocol producer")
         })
         .collect::<Vec<_>>();
     super::open_agent_frame_in_state_with_clock(
