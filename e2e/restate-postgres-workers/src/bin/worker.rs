@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use lash::durability::DurableProcessWorker;
 use lash::observe::SessionResume;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput};
-use lash_core::{ExecutionScope, LeaseOwnerIdentity, ProcessEventAppendRequest};
+use lash_core::{
+    ExecutionScope, LeaseOwnerIdentity, ProcessEventAppendRequest, TurnOutcome, TurnStop,
+};
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{
     LashDurableWaitIndex, LashDurableWaitIndexImpl, LashDurableWaitWorkflow,
@@ -17,9 +19,11 @@ use std::fmt::Display;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use lash_restate_postgres_workers_e2e::{
     DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT,
+    EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
     EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, HealthResponse, TurnRequest,
     TurnResponse, TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
     default_session_originator_scope_id, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
@@ -119,6 +123,17 @@ impl AppState {
 
         if request.scenario == TurnScenario::DrainQueued {
             return Box::pin(self.drain_queued_turn_with_restate(&controller, &core, request))
+                .await
+                .map(Json);
+        }
+
+        if request.scenario == TurnScenario::FrameSwitchQueued {
+            return Box::pin(self.frame_switch_queued(&controller, &core, request))
+                .await
+                .map(Json);
+        }
+        if request.scenario == TurnScenario::FrameSwitchCancel {
+            return Box::pin(self.frame_switch_cancel(&controller, &core, request))
                 .await
                 .map(Json);
         }
@@ -258,6 +273,186 @@ impl AppState {
         .await
     }
 
+    async fn frame_switch_queued(
+        &self,
+        controller: &RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+        core: &lash::LashCore,
+        request: TurnRequest,
+    ) -> HandlerResult<TurnResponse> {
+        let session = open_e2e_session(core, &request.workflow_id).await?;
+        let first = session
+            .enqueue(TurnInput::text(format!(
+                "Run queued frame switch. workflow_id={} frame_switch_queued_start=true",
+                request.workflow_id
+            )))
+            .id(format!("{}:first", request.workflow_id))
+            .send()
+            .await
+            .map_err(terminal_error)?;
+        let enqueue_session = session.clone();
+        let enqueue_pool = self.storage.pool().clone();
+        let enqueue_workflow_id = request.workflow_id.clone();
+        let enqueue_second = tokio::spawn(async move {
+            wait_for_provider_scenario(
+                &enqueue_pool,
+                &enqueue_workflow_id,
+                "frame_switch_queued_start",
+            )
+            .await?;
+            enqueue_session
+                .enqueue(TurnInput::text(format!(
+                    "Run pending item. workflow_id={enqueue_workflow_id} frame_switch_pending=true"
+                )))
+                .id(format!("{enqueue_workflow_id}:second"))
+                .send()
+                .await
+                .map_err(anyhow::Error::from)
+        });
+        let first_turn = session
+            .queued_turn()
+            .drain_id(format!("{}:first-drain", request.workflow_id))
+            .effects(controller)
+            .run()
+            .await
+            .map_err(terminal_error)?
+            .ok_or_else(|| terminal_error("first queued frame-switch turn did not run"))?;
+        let first_value = first_turn.final_value().cloned().ok_or_else(|| {
+            terminal_error("queued frame-switch follow-on produced no final value")
+        })?;
+        let second = enqueue_second
+            .await
+            .map_err(terminal_error)?
+            .map_err(terminal_error)?;
+        let pending_after_follow = session
+            .pending_turn_inputs()
+            .await
+            .map_err(terminal_error)?;
+        let first_completed = pending_after_follow
+            .iter()
+            .all(|input| input.input_id != first.input_id);
+        let second_pending_before_drain = pending_after_follow
+            .iter()
+            .any(|input| input.input_id == second.input_id);
+        let second_turn = session
+            .queued_turn()
+            .drain_id(format!("{}:second-drain", request.workflow_id))
+            .effects(controller)
+            .run()
+            .await
+            .map_err(terminal_error)?
+            .ok_or_else(|| terminal_error("second queued turn did not run"))?;
+        let second_value = second_turn
+            .final_value()
+            .cloned()
+            .ok_or_else(|| terminal_error("second queued turn produced no final value"))?;
+        let queue_empty = session
+            .queued_work()
+            .await
+            .map_err(terminal_error)?
+            .is_empty();
+        let inputs_empty = session
+            .pending_turn_inputs()
+            .await
+            .map_err(terminal_error)?
+            .is_empty();
+        self.finish_response(
+            &request,
+            json!({
+                "final": EXPECTED_FRAME_SWITCH_TEXT,
+                "seed_visible": first_value.get("seed_visible").cloned().unwrap_or_default(),
+                "follow_on": first_value.get("follow_on").cloned().unwrap_or_default(),
+                "first_completed": first_completed,
+                "second_pending_before_drain": second_pending_before_drain,
+                "second_completed": second_value.get("pending_item").cloned().unwrap_or_default(),
+                "queue_empty": queue_empty,
+                "inputs_empty": inputs_empty,
+            }),
+            0,
+            None,
+            true,
+        )
+        .await
+    }
+
+    async fn frame_switch_cancel(
+        &self,
+        controller: &RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+        core: &lash::LashCore,
+        request: TurnRequest,
+    ) -> HandlerResult<TurnResponse> {
+        let session = open_e2e_session(core, &request.workflow_id).await?;
+        session
+            .enqueue(TurnInput::text(format!(
+                "Run cancellable frame switch. workflow_id={} frame_switch_cancel_start=true",
+                request.workflow_id
+            )))
+            .id(format!("{}:cancel-original", request.workflow_id))
+            .send()
+            .await
+            .map_err(terminal_error)?;
+        let cancel_session = session.clone();
+        let cancel_pool = self.storage.pool().clone();
+        let cancel_workflow_id = request.workflow_id.clone();
+        let canceller = tokio::spawn(async move {
+            wait_for_cancel_gate(&cancel_pool, &cancel_workflow_id).await?;
+            Ok::<usize, anyhow::Error>(cancel_session.cancel_running_turns())
+        });
+        let cancelled = session
+            .queued_turn()
+            .drain_id(format!("{}:cancel-drain", request.workflow_id))
+            .effects(controller)
+            .run()
+            .await
+            .map_err(terminal_error)?
+            .ok_or_else(|| terminal_error("cancellable queued turn did not run"))?;
+        let cancel_count = canceller
+            .await
+            .map_err(terminal_error)?
+            .map_err(terminal_error)?;
+        let terminal_cancelled = matches!(
+            cancelled.result.outcome,
+            TurnOutcome::Stopped(TurnStop::Cancelled)
+        );
+        let claims_settled = session
+            .queued_work()
+            .await
+            .map_err(terminal_error)?
+            .is_empty()
+            && session
+                .pending_turn_inputs()
+                .await
+                .map_err(terminal_error)?
+                .is_empty();
+        let usable = session
+            .turn(TurnInput::text(format!(
+                "Run after cancellation. workflow_id={} frame_switch_post_cancel=true",
+                request.workflow_id
+            )))
+            .turn_id(format!("{}:post-cancel", request.workflow_id))
+            .effects(controller)
+            .run()
+            .await
+            .map_err(terminal_error)?;
+        let usable_value = usable
+            .final_value()
+            .cloned()
+            .ok_or_else(|| terminal_error("post-cancel turn produced no final value"))?;
+        self.finish_response(
+            &request,
+            json!({
+                "final": EXPECTED_FRAME_SWITCH_CANCEL_TEXT,
+                "terminal_cancelled": terminal_cancelled,
+                "cancel_count": cancel_count,
+                "claims_settled": claims_settled,
+                "session_usable": usable_value.get("session_usable").cloned().unwrap_or_default(),
+            }),
+            0,
+            None,
+            true,
+        )
+        .await
+    }
+
     async fn finish_response(
         &self,
         request: &TurnRequest,
@@ -291,6 +486,10 @@ impl AppState {
                     lash_restate_postgres_workers_e2e::EXPECTED_DURABLE_WAIT_TEXT
                 }
                 TurnScenario::SegmentLoop => EXPECTED_SEGMENT_LOOP_TEXT,
+                TurnScenario::FrameSwitchQueued | TurnScenario::FrameSwitchPrepared => {
+                    EXPECTED_FRAME_SWITCH_TEXT
+                }
+                TurnScenario::FrameSwitchCancel => EXPECTED_FRAME_SWITCH_CANCEL_TEXT,
             })
             .to_string();
         let response = TurnResponse {
@@ -451,7 +650,82 @@ fn prompt_for_request(request: &TurnRequest) -> String {
             "Run the E2E segmented authored loop control pair. workflow_id={} segment_loop=true",
             request.workflow_id
         ),
+        TurnScenario::FrameSwitchQueued => format!(
+            "Run the queued frame-switch scenario. workflow_id={} frame_switch_queued_start=true",
+            request.workflow_id
+        ),
+        TurnScenario::FrameSwitchPrepared => format!(
+            "Run the prepared frame-switch scenario. workflow_id={} frame_switch_prepared_start=true",
+            request.workflow_id
+        ),
+        TurnScenario::FrameSwitchCancel => format!(
+            "Run the cancellation frame-switch scenario. workflow_id={} frame_switch_cancel_start=true",
+            request.workflow_id
+        ),
     }
+}
+
+async fn open_e2e_session(
+    core: &lash::LashCore,
+    workflow_id: &str,
+) -> HandlerResult<lash::LashSession> {
+    let owner_id = format!("E2eTurnWorkflow/{workflow_id}/run");
+    Ok(core
+        .session(DEFAULT_SESSION_ID)
+        .session_execution_owner(LeaseOwnerIdentity::opaque(
+            owner_id.clone(),
+            format!("{owner_id}/incarnation"),
+        ))
+        .open()
+        .await
+        .map_err(terminal_error)?)
+}
+
+async fn wait_for_cancel_gate(pool: &sqlx::PgPool, workflow_id: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let started: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM lash_e2e_tool_events
+                WHERE workflow_id = $1 AND tool_name = 'cancel_gate'
+            )",
+        )
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await
+        .context("poll cancel_gate start")?;
+        if started {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("timed out waiting for cancel_gate in `{workflow_id}`")
+}
+
+async fn wait_for_provider_scenario(
+    pool: &sqlx::PgPool,
+    workflow_id: &str,
+    scenario: &str,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let observed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM lash_e2e_provider_calls
+                WHERE workflow_id = $1 AND scenario = $2
+            )",
+        )
+        .bind(workflow_id)
+        .bind(scenario)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("poll provider scenario `{scenario}`"))?;
+        if observed {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("timed out waiting for provider scenario `{scenario}` in `{workflow_id}`")
 }
 
 #[derive(Clone)]

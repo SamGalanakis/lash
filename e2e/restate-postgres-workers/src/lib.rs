@@ -40,6 +40,8 @@ pub const EXPECTED_PARENT_DURABLE_INPUT_TEXT: &str = "parent-durable-input-compl
 pub const EXPECTED_TOOL_BATCH_TEXT: &str = "tool-batch-complete";
 pub const EXPECTED_DURABLE_WAIT_TEXT: &str = "durable-wait-observed";
 pub const EXPECTED_SEGMENT_LOOP_TEXT: &str = "segment-loop-complete";
+pub const EXPECTED_FRAME_SWITCH_TEXT: &str = "frame-switch-complete";
+pub const EXPECTED_FRAME_SWITCH_CANCEL_TEXT: &str = "frame-switch-cancel-complete";
 pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
 pub const ATTACHMENT_MIME: &str = "image/png";
 pub const E2E_PRODUCT_STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
@@ -144,6 +146,9 @@ pub enum TurnScenario {
     ToolBatch,
     DurableWaitProbe,
     SegmentLoop,
+    FrameSwitchQueued,
+    FrameSwitchPrepared,
+    FrameSwitchCancel,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -363,19 +368,26 @@ pub async fn reset_e2e_rows(pool: &PgPool) -> Result<()> {
             .await
             .with_context(|| format!("reset e2e rows with `{statement}`"))?;
     }
-    for statement in [
-        "DELETE FROM lash_sessions WHERE session_id = $1",
-        "DELETE FROM lash_graph_nodes WHERE session_id = $1",
-        "DELETE FROM lash_usage_deltas WHERE session_id = $1",
-        "DELETE FROM lash_session_meta WHERE session_id = $1",
-        "DELETE FROM lash_runtime_turn_commits WHERE session_id = $1",
-        "DELETE FROM lash_attachment_manifest WHERE session_id = $1",
+    for session_id in [
+        DEFAULT_SESSION_ID,
+        "restate-postgres-workers-frame-crash-e2e",
     ] {
-        sqlx::query(statement)
-            .bind(DEFAULT_SESSION_ID)
-            .execute(pool)
-            .await
-            .with_context(|| format!("reset e2e session rows with `{statement}`"))?;
+        for statement in [
+            "DELETE FROM lash_sessions WHERE session_id = $1",
+            "DELETE FROM lash_graph_nodes WHERE session_id = $1",
+            "DELETE FROM lash_usage_deltas WHERE session_id = $1",
+            "DELETE FROM lash_session_meta WHERE session_id = $1",
+            "DELETE FROM lash_runtime_turn_commits WHERE session_id = $1",
+            "DELETE FROM lash_attachment_manifest WHERE session_id = $1",
+            "DELETE FROM lash_session_execution_leases WHERE session_id = $1",
+            "DELETE FROM lash_pending_turn_inputs WHERE session_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(session_id)
+                .execute(pool)
+                .await
+                .with_context(|| format!("reset e2e session rows with `{statement}`"))?;
+        }
     }
     Ok(())
 }
@@ -588,6 +600,11 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
         )) as Arc<dyn EffectHost>)
         .trigger_store(trigger_store)
         .process_work_driver(config.process_work_driver)
+        // Restate turns must enter through an explicit handler-scoped effect
+        // controller. The harness drains durable ingress from its workflow
+        // handlers, so an ambient local queue pump would race those handlers
+        // and cannot legally execute their effects.
+        .disable_queued_work_driver()
         .plugin(Arc::new(E2ePluginFactory {
             pool: config.storage.pool().clone(),
             worker_id: config.worker_id.clone(),
@@ -914,6 +931,21 @@ fn e2e_tool_provider(
                 }),
                 LashlangToolBinding::new(["tools"], "durable_wait_probe"),
             ),
+            e2e_tool_definition(
+                "tool:cancel_gate",
+                "cancel_gate",
+                "Block a follow-on frame until the public turn-cancel API signals cancellation.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": { "type": "string" }
+                    },
+                    "required": ["workflow_id"],
+                    "additionalProperties": false
+                }),
+                serde_json::json!({ "type": "object" }),
+                LashlangToolBinding::new(["tools"], "cancel_gate"),
+            ),
         ],
         E2eTools {
             pool,
@@ -963,6 +995,7 @@ impl E2eTools {
             "crash_once" => Box::pin(self.crash_once(call)),
             "durable_input_request" => Box::pin(self.durable_input_request(call)),
             "durable_wait_probe" => Box::pin(self.durable_wait_probe(call)),
+            "cancel_gate" => Box::pin(self.cancel_gate(call)),
             other => {
                 Box::pin(
                     async move { ToolResult::err_fmt(format_args!("unknown e2e tool `{other}`")) },
@@ -1195,6 +1228,31 @@ impl E2eTools {
             std::process::exit(75);
         }
         ToolResult::ok(result)
+    }
+
+    async fn cancel_gate(&self, call: ToolCall<'_>) -> ToolResult {
+        let workflow_id = workflow_id_from_args(call.context.session_id(), call.args);
+        let started = serde_json::json!({
+            "waiting": true,
+            "worker_id": self.worker_id,
+        });
+        let _ = record_tool_event(
+            &self.pool,
+            &workflow_id,
+            &self.worker_id,
+            call.name,
+            call.context.tool_call_id(),
+            call.args.to_owned(),
+            started,
+        )
+        .await;
+        let Some(cancel) = call.context.cancellation_token().cloned() else {
+            return ToolResult::err(serde_json::json!(
+                "cancel_gate requires a turn cancellation token"
+            ));
+        };
+        cancel.cancelled().await;
+        ToolResult::err(serde_json::json!("cancel_gate cancelled"))
     }
 
     async fn durable_input_request(&self, call: ToolCall<'_>) -> ToolResult {
