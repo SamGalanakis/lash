@@ -493,38 +493,10 @@ impl RlmContextProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::Provider;
     use lash_core::session_model::{
         ConversationRecord, MessageRole, Part, PartKind, PruneState, SessionEventRecord,
     };
-    use lash_http_transport::HttpTransportError;
-    use lash_llm_transport::{LlmHttpBody, LlmHttpRequest, LlmHttpResponse, LlmHttpTransport};
-    use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
     use lash_rlm_types::{RlmProtocolEvent, RlmTrajectoryEntry};
-
-    #[derive(Debug, Default)]
-    struct CapturingTransport {
-        bodies: std::sync::Mutex<Vec<Vec<u8>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmHttpTransport for CapturingTransport {
-        async fn send(
-            &self,
-            request: LlmHttpRequest,
-            _timeout: Option<std::time::Duration>,
-        ) -> Result<LlmHttpResponse, HttpTransportError> {
-            self.bodies
-                .lock()
-                .expect("capture lock")
-                .push(request.body.to_vec());
-            Ok(LlmHttpResponse {
-                status: 400,
-                headers: Vec::new(),
-                body: LlmHttpBody::buffered("{}"),
-            })
-        }
-    }
 
     fn user_event(id: &str, text: &str) -> SessionEventRecord {
         SessionEventRecord::Conversation(ConversationRecord {
@@ -644,47 +616,6 @@ mod tests {
             protocol_iteration,
             use_tools: false,
         })
-    }
-
-    fn serialize_openrouter_request(request: LlmRequest) -> serde_json::Value {
-        let capture = Arc::new(CapturingTransport::default());
-        let mut provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
-            .with_transport(capture.clone());
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime")
-            .block_on(async move {
-                let _ = provider.complete(request).await;
-            });
-        let body = capture
-            .bodies
-            .lock()
-            .expect("capture lock")
-            .pop()
-            .expect("captured request body");
-        serde_json::from_slice(&body).expect("request JSON")
-    }
-
-    fn stable_prompt_prefix_bytes(body: &serde_json::Value, message_count: usize) -> Vec<u8> {
-        // `cache_control` is the provider's deliberately moving breakpoint
-        // directive, not prompt content. Remove only that annotation before
-        // comparing the serialized prompt prefix; roles, part shape, and text
-        // remain byte-for-byte significant.
-        let mut prefix =
-            body["messages"].as_array().expect("messages array")[..message_count].to_vec();
-        for message in &mut prefix {
-            if let Some(parts) = message
-                .get_mut("content")
-                .and_then(serde_json::Value::as_array_mut)
-            {
-                for part in parts {
-                    part.as_object_mut()
-                        .map(|object| object.remove("cache_control"));
-                }
-            }
-        }
-        serde_json::to_vec(&prefix).expect("serialize stable prompt prefix")
     }
 
     fn message_text(message: &LlmMessage) -> String {
@@ -1187,53 +1118,6 @@ mod tests {
         let scratch = tail.find("- `scratch_note` = saved").expect("scratch row");
         let zeta = tail.find("- `zeta` = 3").expect("zeta row");
         assert!(alpha < scratch && scratch < zeta, "{tail}");
-    }
-
-    #[test]
-    fn openrouter_rlm_prompt_prefix_is_byte_stable_across_iterations() {
-        let previous_events = vec![user_event("u1", "inspect"), step_event(0, "value = 1", "1")];
-        let mut next_events = previous_events.clone();
-        next_events.push(step_event(1, "scratch_note = \"saved\"", "saved"));
-        let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
-        let previous_bound = rendered_bound_variables(&mut cache, serde_json::json!({}));
-        let next_bound =
-            rendered_bound_variables(&mut cache, serde_json::json!({ "scratch_note": "saved" }));
-        let projector = projector(1000);
-
-        for model in [
-            "anthropic/claude-sonnet-4.6",
-            "google/gemini-3.1-pro-preview",
-        ] {
-            *projector
-                .bound_variables_prompt
-                .write()
-                .expect("bound variables write") = Arc::clone(&previous_bound);
-            let previous_request =
-                project_iteration_request(&projector, &previous_events, 0, model);
-            let stable_message_count = previous_request.messages.len() - 1;
-            *projector
-                .bound_variables_prompt
-                .write()
-                .expect("bound variables write") = Arc::clone(&next_bound);
-            let next_request = project_iteration_request(&projector, &next_events, 1, model);
-            let previous_body = serialize_openrouter_request(previous_request.as_ref().clone());
-            let next_body = serialize_openrouter_request(next_request.as_ref().clone());
-
-            assert_eq!(
-                stable_prompt_prefix_bytes(&previous_body, stable_message_count),
-                stable_prompt_prefix_bytes(&next_body, stable_message_count),
-                "RLM prompt prefix changed for {model}"
-            );
-            assert!(
-                next_body["messages"]
-                    .as_array()
-                    .expect("messages")
-                    .iter()
-                    .take(stable_message_count)
-                    .all(|message| message["content"].is_array()),
-                "stable prefix text shape changed for {model}"
-            );
-        }
     }
 
     #[test]

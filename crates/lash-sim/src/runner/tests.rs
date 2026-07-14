@@ -1,4 +1,167 @@
 use super::*;
+use lash_llm_transport::{LlmHttpRequest, LlmHttpResponse};
+use lash_provider_openai::OPENROUTER_BASE_URL;
+
+#[derive(Debug)]
+struct CapturingLlmHttpTransport {
+    inner: ScriptedLlmHttpTransport,
+    bodies: Mutex<Vec<Vec<u8>>>,
+}
+
+#[async_trait::async_trait]
+impl LlmHttpTransport for CapturingLlmHttpTransport {
+    async fn send(
+        &self,
+        request: LlmHttpRequest,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<LlmHttpResponse, LlmTransportError> {
+        self.bodies
+            .lock()
+            .expect("capture lock")
+            .push(request.body.to_vec());
+        self.inner.send(request, timeout).await
+    }
+}
+
+fn stable_prompt_prefix_bytes(body: &Value, message_count: usize) -> Vec<u8> {
+    // `cache_control` is the provider's deliberately moving breakpoint
+    // directive, not prompt content. Remove only that annotation before
+    // comparing the serialized prompt prefix; roles, part shape, and text
+    // remain byte-for-byte significant.
+    let mut prefix = body["messages"].as_array().expect("messages array")[..message_count].to_vec();
+    for message in &mut prefix {
+        if let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) {
+            for part in parts {
+                part.as_object_mut()
+                    .map(|object| object.remove("cache_control"));
+            }
+        }
+    }
+    serde_json::to_vec(&prefix).expect("serialize stable prompt prefix")
+}
+
+fn wire_message_text(message: &Value) -> String {
+    match &message["content"] {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        content => panic!("unexpected message content: {content}"),
+    }
+}
+
+#[tokio::test]
+async fn openrouter_rlm_prompt_prefix_is_byte_stable_across_iterations() {
+    for model in [
+        "anthropic/claude-sonnet-4.6",
+        "google/gemini-3.1-pro-preview",
+    ] {
+        let responses = vec![
+            "<lashlang>\nscratch_note = \"saved\"\nprint scratch_note\n</lashlang>".to_string(),
+            "RLM work is complete.".to_string(),
+        ];
+        let mut scripts = runtime_provider_scripts_for_texts(OPENAI_COMPATIBLE, &responses)
+            .expect("OpenRouter RLM scripts");
+        for script in &mut scripts {
+            script.endpoint.path = "/api/v1/chat/completions".to_string();
+            script
+                .request_match
+                .body
+                .get_mut("model")
+                .expect("model request matcher")
+                .equals = Some(json!(model));
+        }
+        let capture = Arc::new(CapturingLlmHttpTransport {
+            inner: ScriptedLlmHttpTransport::from_scripts(scripts),
+            bodies: Mutex::new(Vec::new()),
+        });
+        let provider = OpenAiCompatibleProvider::new("test-key", OPENROUTER_BASE_URL)
+            .with_transport(capture.clone());
+        let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+            Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+        );
+        let core = lash::LashCore::rlm_builder(factory)
+            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+            .process_env_store(Arc::new(
+                lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+            ))
+            .store_factory(Arc::new(
+                lash::persistence::InMemorySessionStoreFactory::new(),
+            ))
+            .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
+                as Arc<dyn lash_core::ProcessRegistry>)
+            .provider(ProviderHandle::new(provider.into_components()))
+            .model(
+                lash_core::ModelSpec::from_token_limits(model, Default::default(), 200_000, None)
+                    .expect("model limits"),
+            )
+            .build()
+            .expect("RLM prefix-stability core");
+        let session = core
+            .session(format!("prefix-stability-{}", model.replace('/', "-")))
+            .open_fresh()
+            .await
+            .expect("RLM prefix-stability session");
+
+        let output = session
+            .turn(lash::TurnInput::text("inspect"))
+            .run()
+            .await
+            .expect("RLM prefix-stability turn");
+        assert!(
+            output.is_success(),
+            "RLM turn failed for {model}: {output:?}"
+        );
+
+        let bodies = capture.bodies.lock().expect("capture lock");
+        assert_eq!(bodies.len(), 2, "expected two RLM iterations for {model}");
+        let previous_body: Value = serde_json::from_slice(&bodies[0]).expect("first request JSON");
+        let next_body: Value = serde_json::from_slice(&bodies[1]).expect("second request JSON");
+        let previous_messages = previous_body["messages"].as_array().expect("messages");
+        let next_messages = next_body["messages"].as_array().expect("messages");
+        let stable_message_count = previous_messages.len() - 1;
+
+        assert_eq!(
+            stable_prompt_prefix_bytes(&previous_body, stable_message_count),
+            stable_prompt_prefix_bytes(&next_body, stable_message_count),
+            "RLM prompt prefix changed for {model}"
+        );
+        assert!(
+            next_messages
+                .iter()
+                .take(stable_message_count)
+                .all(|message| message["content"].is_array()),
+            "stable prefix text shape changed for {model}"
+        );
+        assert_eq!(
+            wire_message_text(&previous_messages[0]),
+            wire_message_text(&next_messages[0]),
+            "RLM system prompt changed for {model}"
+        );
+        assert!(
+            wire_message_text(previous_messages.last().expect("first volatile tail"))
+                .contains("=== CURRENT ITERATION: 1 ==="),
+            "first volatile suffix was not last for {model}"
+        );
+        let next_tail = wire_message_text(next_messages.last().expect("second volatile tail"));
+        assert!(
+            next_tail.contains("=== CURRENT ITERATION: 2 ===")
+                && next_tail.contains("- `scratch_note` = saved"),
+            "updated volatile suffix was not last for {model}: {next_tail}"
+        );
+        assert!(
+            next_messages
+                .iter()
+                .take(stable_message_count)
+                .all(|message| !wire_message_text(message).contains("scratch_note")),
+            "volatile bound variables leaked into the stable prefix for {model}"
+        );
+    }
+}
 
 #[tokio::test]
 async fn attachment_owner_sweep_is_deterministic_across_memory_and_sqlite() {
