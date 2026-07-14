@@ -187,6 +187,12 @@
           kind: "guide",
         },
         {
+          title: "Prompt-cache diagnosis",
+          href: "cache-diagnosis.html",
+          summary: "Detect prompt-cache regressions by lane, inspect request and response evidence, and map failures to executable regression tests.",
+          kind: "runbook",
+        },
+        {
           title: "Remote protocol",
           href: "remote-protocol.html",
           summary: "Versioned DTOs for HTTP, queues, callbacks, workflow handlers, activity streams, triggers, and host-owned tool grants.",
