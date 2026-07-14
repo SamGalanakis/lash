@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lash_core::plugin::{CodeExecutorPlugin, ProtocolSessionContext};
-use lash_core::{PromptContribution, SessionError, SessionEventRecord};
+use lash_core::{SessionError, SessionEventRecord};
 use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface, SharedDeferredToolResolver};
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmProtocolEvent};
 
@@ -10,7 +10,9 @@ use crate::executor::{RlmExecutionState, RlmLashlangExecutionTraceConfig, execut
 use crate::projection::{
     ProjectionResolver, RlmProjectedBindings, RlmProjectionExtension, decode_rlm_protocol_event,
 };
-use crate::rlm_support::{BoundVariableRenderCache, render_bound_variables};
+use crate::rlm_support::{
+    BoundVariableRenderCache, SharedBoundVariablesPrompt, render_bound_variables,
+};
 
 pub(super) struct RlmRuntimeState {
     projection_resolver: Arc<dyn ProjectionResolver>,
@@ -22,6 +24,7 @@ pub(super) struct RlmRuntimeState {
     execution: tokio::sync::Mutex<Option<RlmExecutionState>>,
     active_agent_frame_id: tokio::sync::Mutex<Option<String>>,
     bound_variable_render_cache: tokio::sync::Mutex<BoundVariableRenderCache>,
+    bound_variables_prompt: SharedBoundVariablesPrompt,
 }
 
 impl RlmRuntimeState {
@@ -32,6 +35,11 @@ impl RlmRuntimeState {
         deferred_tool_resolver: Option<SharedDeferredToolResolver>,
         lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
     ) -> Result<Self, SessionError> {
+        let mut bound_variable_render_cache = BoundVariableRenderCache::default();
+        let bound_variables_prompt = Arc::new(std::sync::RwLock::new(render_bound_variables(
+            &mut bound_variable_render_cache,
+            &[],
+        )));
         Ok(Self {
             execution: tokio::sync::Mutex::new(Some(RlmExecutionState::new()?)),
             projection_resolver,
@@ -41,9 +49,8 @@ impl RlmRuntimeState {
             lashlang_execution_trace_config,
             session_projected_bindings: tokio::sync::Mutex::new(RlmProjectedBindings::new()),
             active_agent_frame_id: tokio::sync::Mutex::new(None),
-            bound_variable_render_cache: tokio::sync::Mutex::new(
-                BoundVariableRenderCache::default(),
-            ),
+            bound_variable_render_cache: tokio::sync::Mutex::new(bound_variable_render_cache),
+            bound_variables_prompt,
         })
     }
 
@@ -54,13 +61,18 @@ impl RlmRuntimeState {
         RlmProjectionExtension::prompt_contributions_for(&bindings)
     }
 
-    pub(super) async fn bound_variables_prompt_contribution(
-        &self,
-        history_len: usize,
-    ) -> PromptContribution {
+    pub(super) fn shared_bound_variables_prompt(&self) -> SharedBoundVariablesPrompt {
+        Arc::clone(&self.bound_variables_prompt)
+    }
+
+    async fn refresh_bound_variables_prompt(&self) {
         let globals = self.bound_variable_values().await;
         let mut cache = self.bound_variable_render_cache.lock().await;
-        render_bound_variables(&mut cache, &globals, history_len).await
+        let rendered = render_bound_variables(&mut cache, &globals);
+        *self
+            .bound_variables_prompt
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = rendered;
     }
 
     /// Live top-level variables for the "Bound Variables" prompt section: the
@@ -104,6 +116,8 @@ impl RlmRuntimeState {
             .merge(extension.bindings.clone())
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         *guard = merged;
+        drop(guard);
+        self.refresh_bound_variables_prompt().await;
         Ok(())
     }
 
@@ -134,8 +148,8 @@ impl RlmRuntimeState {
         state: &lash_core::runtime::RuntimeSessionState,
     ) -> Result<(), SessionError> {
         let mut active_agent_frame_id = self.active_agent_frame_id.lock().await;
-        let mut execution = self.execution.lock().await;
-        let execution = execution
+        let mut execution_guard = self.execution.lock().await;
+        let execution = execution_guard
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
         if active_agent_frame_id.as_deref() != Some(state.current_agent_frame_id.as_str()) {
@@ -157,6 +171,9 @@ impl RlmRuntimeState {
                     .await?;
             }
         }
+        drop(execution_guard);
+        drop(active_agent_frame_id);
+        self.refresh_bound_variables_prompt().await;
         Ok(())
     }
 
@@ -164,8 +181,8 @@ impl RlmRuntimeState {
         &self,
         nodes: &[lash_core::SessionAppendNode],
     ) -> Result<(), SessionError> {
-        let mut execution = self.execution.lock().await;
-        let execution = execution
+        let mut execution_guard = self.execution.lock().await;
+        let execution = execution_guard
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
         let protected_names = self.protected_projected_binding_names().await;
@@ -178,6 +195,8 @@ impl RlmRuntimeState {
                     .await?;
             }
         }
+        drop(execution_guard);
+        self.refresh_bound_variables_prompt().await;
         Ok(())
     }
 
@@ -207,10 +226,14 @@ impl RlmRuntimeState {
         match result {
             Ok((state, response)) => {
                 *guard = Some(state);
+                drop(guard);
+                self.refresh_bound_variables_prompt().await;
                 Ok(response)
             }
             Err(err) => {
                 *guard = Some(RlmExecutionState::new()?);
+                drop(guard);
+                self.refresh_bound_variables_prompt().await;
                 Err(err)
             }
         }
@@ -238,12 +261,14 @@ impl RlmRuntimeState {
     }
 
     pub(super) async fn restore_execution_state(&self, data: &[u8]) -> Result<(), SessionError> {
-        self.execution
-            .lock()
-            .await
+        let mut execution = self.execution.lock().await;
+        execution
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?
-            .restore_execution_state(data)
+            .restore_execution_state(data)?;
+        drop(execution);
+        self.refresh_bound_variables_prompt().await;
+        Ok(())
     }
 
     async fn apply_seed_or_globals_event(
@@ -353,4 +378,53 @@ pub(super) fn reject_reserved_projected_binding_names(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::projection::ProjectionRegistry;
+
+    #[test]
+    fn executing_code_refreshes_the_driver_bound_variables_snapshot() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let state = RlmRuntimeState::new(
+                    Arc::new(ProjectionRegistry::new()),
+                    lashlang::global_in_memory_lashlang_artifact_store(),
+                    LashlangSurface::new(
+                        lashlang::LashlangAbilities::default(),
+                        lashlang::LashlangLanguageFeatures::default(),
+                        lashlang::LashlangHostCatalog::new(),
+                    ),
+                    None,
+                    RlmLashlangExecutionTraceConfig::default(),
+                )
+                .expect("runtime state");
+                let prompt = state.shared_bound_variables_prompt();
+                assert!(!prompt.read().expect("prompt read").contains("scratch_note"));
+
+                state
+                    .execute_code(
+                        lash_core::testing::code_execution_context(),
+                        lash_core::ExecRequest {
+                            language: "lashlang".to_string(),
+                            code: "scratch_note = \"after execution\"".to_string(),
+                            accept_finish: true,
+                        },
+                    )
+                    .await
+                    .expect("execute code");
+
+                assert!(
+                    prompt
+                        .read()
+                        .expect("prompt read")
+                        .contains("- `scratch_note` = after execution")
+                );
+            });
+    }
 }

@@ -1,19 +1,20 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, RwLock};
 
-use lash_core::PromptContribution;
 use lash_core::PromptUsage;
 use lash_rlm_types::{RlmCreateExtras, RlmTermination};
 use lashlang::{
-    BudgetedJsonProjectionConfig, BudgetedJsonProjector, Value as FlowValue,
-    ValueProjectionContext, ValueProjector,
+    BudgetedJsonProjectionConfig, BudgetedJsonProjector, Value as FlowValue, ValueProjectionContext,
 };
 
 pub(crate) const PRINT_HISTORY_PROJECTION_CONFIG: BudgetedJsonProjectionConfig =
     BudgetedJsonProjectionConfig::new(50 * 1024, 2_000, 6);
 pub(crate) const BOUND_VARIABLE_PROJECTION_CONFIG: BudgetedJsonProjectionConfig =
     BudgetedJsonProjectionConfig::new(1024, 40, 3);
+
+pub(crate) type SharedBoundVariablesPrompt = Arc<RwLock<Arc<str>>>;
 
 pub(crate) fn print_history_projector() -> BudgetedJsonProjector {
     BudgetedJsonProjector::new(PRINT_HISTORY_PROJECTION_CONFIG)
@@ -80,19 +81,18 @@ pub fn format_budget_suffix(
 /// section without value previews.
 #[derive(Debug, Default)]
 pub(crate) struct BoundVariableRenderCache {
-    next_ordinal: usize,
     entries: BTreeMap<String, BoundVariableRenderCacheEntry>,
 }
 
 #[derive(Clone, Debug)]
 struct BoundVariableRenderCacheEntry {
-    ordinal: usize,
     /// Cheap structural hash of the variable's value. When it matches, the
-    /// expensive rebuild (serialize / shape inference / preview) is skipped and
-    /// the cached `shape` + `line` are reused.
+    /// expensive rebuild (serialize / shape inference / preview) is skipped.
     value_hash: u64,
     shape: Option<JsonShape>,
-    line: String,
+    inline: Option<String>,
+    size_hint: Option<String>,
+    preview: Option<String>,
 }
 
 /// The expensive-to-compute parts of a variable's rendering.
@@ -103,25 +103,22 @@ struct BuiltRow {
     preview: Option<String>,
 }
 
-/// One variable resolved for this render pass — either reused from the cache
-/// (`cached_line` set) or freshly built.
+/// One variable resolved for this render pass, either from cached value-derived
+/// data or a fresh build. Registry-dependent lines are always rendered after
+/// sorting so schema names remain deterministic.
 struct WorkRow {
     name: String,
-    ordinal: usize,
-    unchanged: bool,
     value_hash: u64,
     shape: Option<JsonShape>,
     inline: Option<String>,
     size_hint: Option<String>,
     preview: Option<String>,
-    cached_line: Option<String>,
 }
 
-pub(crate) async fn render_bound_variables(
+pub(crate) fn render_bound_variables(
     cache: &mut BoundVariableRenderCache,
     globals: &[(String, FlowValue)],
-    history_len: usize,
-) -> PromptContribution {
+) -> Arc<str> {
     let mut lines = vec![
         "These variables are already bound in lashlang. Access them directly in `<lashlang>` blocks; do not recreate them manually.".to_string(),
         "Small values are shown in full; larger ones show only a truncated preview (record keys, or the head and tail of a list/string) — but the variable still holds its COMPLETE value. A short preview never means state was lost; `print` the variable (or the part you need) to see the rest.".to_string(),
@@ -136,58 +133,36 @@ pub(crate) async fn render_bound_variables(
     // structural value hash); only rebuild changed/new ones. Rebuilding —
     // serialize, shape inference, preview — is the expensive part, so this is
     // the win for globals that are stable across prompt builds.
-    let mut next_ordinal = cache.next_ordinal;
     let mut rows: Vec<WorkRow> = Vec::with_capacity(globals.len());
     for (name, value) in globals {
         let hash = value_hash(value);
         match cache.entries.get(name) {
             Some(entry) if entry.value_hash == hash => rows.push(WorkRow {
                 name: name.clone(),
-                ordinal: entry.ordinal,
-                unchanged: true,
                 value_hash: hash,
                 shape: entry.shape.clone(),
-                inline: None,
-                size_hint: None,
-                preview: None,
-                cached_line: Some(entry.line.clone()),
+                inline: entry.inline.clone(),
+                size_hint: entry.size_hint.clone(),
+                preview: entry.preview.clone(),
             }),
-            existing => {
-                let ordinal = existing.map(|entry| entry.ordinal).unwrap_or_else(|| {
-                    let ordinal = next_ordinal;
-                    next_ordinal += 1;
-                    ordinal
-                });
-                let built = build_bound_variable_row(value).await;
+            _ => {
+                let built = build_bound_variable_row(value);
                 rows.push(WorkRow {
                     name: name.clone(),
-                    ordinal,
-                    unchanged: false,
                     value_hash: hash,
                     shape: built.shape,
                     inline: built.inline,
                     size_hint: built.size_hint,
                     preview: built.preview,
-                    cached_line: None,
                 });
             }
         }
     }
-    cache.next_ordinal = next_ordinal;
 
-    // Stable order: unchanged rows first (so their schema names stay fixed and
-    // the prompt prefix stays cacheable for the provider), then by first-seen
-    // ordinal. This ordering is what makes reusing a cached line safe.
-    rows.sort_by(|left, right| {
-        right
-            .unchanged
-            .cmp(&left.unchanged)
-            .then_with(|| left.ordinal.cmp(&right.ordinal))
-            .then_with(|| left.name.cmp(&right.name))
-    });
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
 
-    // Rebuild the schema registry from every row's shape in stable order so
-    // names are deterministic and match those baked into cached lines.
+    // Rebuild the schema registry from every row's shape in name order so its
+    // generated type names are deterministic.
     let mut registry = SchemaRegistry::default();
     for row in &rows {
         if let Some(shape) = &row.shape {
@@ -200,17 +175,16 @@ pub(crate) async fn render_bound_variables(
     lines.push("- `history`: `list<HistoryItem>`, read-only".to_string());
     for row in &rows {
         let line = render_row_line(row, &registry);
-        if row.cached_line.is_none() {
-            cache.entries.insert(
-                row.name.clone(),
-                BoundVariableRenderCacheEntry {
-                    ordinal: row.ordinal,
-                    value_hash: row.value_hash,
-                    shape: row.shape.clone(),
-                    line: line.clone(),
-                },
-            );
-        }
+        cache.entries.insert(
+            row.name.clone(),
+            BoundVariableRenderCacheEntry {
+                value_hash: row.value_hash,
+                shape: row.shape.clone(),
+                inline: row.inline.clone(),
+                size_hint: row.size_hint.clone(),
+                preview: row.preview.clone(),
+            },
+        );
         lines.push(line);
     }
 
@@ -227,20 +201,10 @@ pub(crate) async fn render_bound_variables(
         lines.push("```".to_string());
     }
 
-    lines.push(String::new());
-    lines.push("Runtime notes:".to_string());
-    lines.push(format!(
-        "- `history` currently has {history_len} {}",
-        history_count_unit(history_len)
-    ));
-
-    PromptContribution::guidance("Bound Variables", lines.join("\n"))
+    Arc::from(lines.join("\n"))
 }
 
 fn render_row_line(row: &WorkRow, registry: &SchemaRegistry) -> String {
-    if let Some(cached) = &row.cached_line {
-        return cached.clone();
-    }
     if let Some(inline) = &row.inline {
         // Value shown explicitly; no type/size hint needed.
         return format!("- `{}` = {inline}", row.name);
@@ -265,13 +229,10 @@ fn render_row_line(row: &WorkRow, registry: &SchemaRegistry) -> String {
     line
 }
 
-async fn build_bound_variable_row(value: &FlowValue) -> BuiltRow {
-    let projected = bound_variable_projector()
-        .project(ValueProjectionContext::new(value))
-        .await;
-    let full = BudgetedJsonProjector::unbounded()
-        .project(ValueProjectionContext::new(value))
-        .await;
+fn build_bound_variable_row(value: &FlowValue) -> BuiltRow {
+    let projected = bound_variable_projector().project_blocking(ValueProjectionContext::new(value));
+    let full =
+        BudgetedJsonProjector::unbounded().project_blocking(ValueProjectionContext::new(value));
     if projected == full {
         return BuiltRow {
             inline: Some(projected),
@@ -340,10 +301,6 @@ fn hash_json_value<H: Hasher>(value: &serde_json::Value, hasher: &mut H) {
             }
         }
     }
-}
-
-fn history_count_unit(count: usize) -> &'static str {
-    if count == 1 { "entry" } else { "entries" }
 }
 
 fn render_value_size_hint(value: &serde_json::Value) -> Option<String> {
@@ -669,14 +626,6 @@ mod bound_variable_tests {
     use super::*;
     use serde_json::json;
 
-    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime")
-            .block_on(future)
-    }
-
     fn globals(value: serde_json::Value) -> Vec<(String, FlowValue)> {
         value
             .as_object()
@@ -686,23 +635,17 @@ mod bound_variable_tests {
             .collect()
     }
 
-    fn render_with_cache(
-        cache: &mut BoundVariableRenderCache,
-        value: serde_json::Value,
-        history_len: usize,
-    ) -> String {
+    fn render_with_cache(cache: &mut BoundVariableRenderCache, value: serde_json::Value) -> String {
         let globals = globals(value);
-        block_on(render_bound_variables(cache, &globals, history_len))
-            .content
-            .to_string()
+        render_bound_variables(cache, &globals).to_string()
     }
 
     #[test]
     fn small_values_render_inline_without_type_or_size() {
         let g = globals(json!({ "inventory": ["lantern", "sword"], "count": 3 }));
         let mut cache = BoundVariableRenderCache::default();
-        let rendered = block_on(render_bound_variables(&mut cache, &g, 0));
-        let s = &rendered.content;
+        let rendered = render_bound_variables(&mut cache, &g);
+        let s = &rendered;
         assert!(s.contains("- `inventory` = [\"lantern\",\"sword\"]"), "{s}");
         assert!(s.contains("- `count` = 3"), "{s}");
         // Inline values carry no redundant type/size hint.
@@ -715,8 +658,8 @@ mod bound_variable_tests {
         let big: Vec<String> = (0..500).map(|i| format!("item-{i}")).collect();
         let g = globals(json!({ "big": big }));
         let mut cache = BoundVariableRenderCache::default();
-        let rendered = block_on(render_bound_variables(&mut cache, &g, 0));
-        let s = &rendered.content;
+        let rendered = render_bound_variables(&mut cache, &g);
+        let s = &rendered;
         assert!(s.contains("- `big`:"), "{s}");
         assert!(s.contains("len=500"), "{s}");
         assert!(s.contains("items omitted"), "{s}");
@@ -731,9 +674,7 @@ mod bound_variable_tests {
         );
         let g = globals(json!({ "map": rooms }));
         let mut cache = BoundVariableRenderCache::default();
-        let s = block_on(render_bound_variables(&mut cache, &g, 0))
-            .content
-            .to_string();
+        let s = render_bound_variables(&mut cache, &g).to_string();
         assert!(s.contains("`map`:"), "{s}"); // type still shown
         assert!(s.contains("keys=30"), "{s}"); // size still shown
         assert!(s.contains("≈ {"), "{s}"); // preview present
@@ -746,9 +687,7 @@ mod bound_variable_tests {
         let items: Vec<_> = (0..40).map(|i| json!(format!("note-{i:02}"))).collect();
         let g = globals(json!({ "notes": items }));
         let mut cache = BoundVariableRenderCache::default();
-        let s = block_on(render_bound_variables(&mut cache, &g, 0))
-            .content
-            .to_string();
+        let s = render_bound_variables(&mut cache, &g).to_string();
         assert!(s.contains("len=40"), "{s}");
         assert!(s.contains("note-00"), "{s}"); // head retained
         assert!(s.contains("note-39"), "{s}"); // tail retained
@@ -756,9 +695,9 @@ mod bound_variable_tests {
     }
 
     #[test]
-    fn history_len_renders_in_tail_runtime_notes() {
+    fn history_is_listed_without_volatile_length() {
         let mut cache = BoundVariableRenderCache::default();
-        let s = render_with_cache(&mut cache, json!({ "task": "ship" }), 7);
+        let s = render_with_cache(&mut cache, json!({ "task": "ship" }));
 
         assert!(
             s.contains("- `history`: `list<HistoryItem>`, read-only"),
@@ -769,65 +708,57 @@ mod bound_variable_tests {
             "{s}"
         );
 
-        let task_idx = s.find("- `task` = ship").expect("task row");
-        let notes_idx = s.find("Runtime notes:").expect("runtime notes");
-        let history_len_idx = s
-            .find("- `history` currently has 7 entries")
-            .expect("history len note");
-        assert!(task_idx < notes_idx, "{s}");
-        assert!(notes_idx < history_len_idx, "{s}");
+        assert!(!s.contains("Runtime notes:"), "{s}");
+        assert!(!s.contains("currently has"), "{s}");
     }
 
     #[test]
-    fn unchanged_rows_stay_before_changed_rows() {
+    fn rows_remain_sorted_by_name_when_values_change() {
         let mut cache = BoundVariableRenderCache::default();
         let _ = render_with_cache(
             &mut cache,
             json!({ "a": "old", "b": "steady", "c": "steady" }),
-            0,
         );
 
         let s = render_with_cache(
             &mut cache,
             json!({ "a": "new", "b": "steady", "c": "steady" }),
-            0,
         );
 
+        let a_idx = s.find("- `a` = new").expect("a row");
         let b_idx = s.find("- `b` = steady").expect("b row");
         let c_idx = s.find("- `c` = steady").expect("c row");
-        let a_idx = s.find("- `a` = new").expect("a row");
+        assert!(a_idx < b_idx, "{s}");
         assert!(b_idx < c_idx, "{s}");
-        assert!(c_idx < a_idx, "{s}");
     }
 
     #[test]
-    fn new_rows_append_after_unchanged_rows() {
+    fn new_rows_are_inserted_in_name_order() {
         let mut cache = BoundVariableRenderCache::default();
-        let _ = render_with_cache(&mut cache, json!({ "b": 1 }), 0);
+        let _ = render_with_cache(&mut cache, json!({ "b": 1 }));
 
-        let s = render_with_cache(&mut cache, json!({ "a": 2, "b": 1 }), 0);
+        let s = render_with_cache(&mut cache, json!({ "a": 2, "b": 1 }));
 
         let b_idx = s.find("- `b` = 1").expect("b row");
         let a_idx = s.find("- `a` = 2").expect("a row");
-        assert!(b_idx < a_idx, "{s}");
+        assert!(a_idx < b_idx, "{s}");
     }
 
     #[test]
-    fn new_rows_do_not_rename_unchanged_row_schema() {
+    fn new_rows_recompute_schema_names_from_stable_name_order() {
         let mut cache = BoundVariableRenderCache::default();
         let large = "z".repeat(2_000);
-        let _ = render_with_cache(&mut cache, json!({ "z": { "id": 1, "body": large } }), 0);
+        let _ = render_with_cache(&mut cache, json!({ "z": { "id": 1, "body": large } }));
 
         let large = "z".repeat(2_000);
         let s = render_with_cache(
             &mut cache,
             json!({ "a": { "id": 2, "body": large }, "z": { "id": 1, "body": large } }),
-            0,
         );
 
-        let z_idx = s.find("- `z`: `Z`, keys=2").expect("z row");
-        let a_idx = s.find("- `a`: `Z`, keys=2").expect("a row");
-        assert!(z_idx < a_idx, "{s}");
+        let a_idx = s.find("- `a`: `A`, keys=2").expect("a row");
+        let z_idx = s.find("- `z`: `A`, keys=2").expect("z row");
+        assert!(a_idx < z_idx, "{s}");
     }
 
     #[test]
@@ -836,30 +767,28 @@ mod bound_variable_tests {
         let _ = render_with_cache(
             &mut cache,
             json!({ "big": (0..40).collect::<Vec<_>>(), "steady": "same" }),
-            0,
         );
 
         let s = render_with_cache(
             &mut cache,
             json!({ "big": (0..41).collect::<Vec<_>>(), "steady": "same" }),
-            0,
         );
 
-        let steady_idx = s.find("- `steady` = same").expect("steady row");
         let big_idx = s.find("- `big`: `list[int]`, len=41").expect("big row");
-        assert!(steady_idx < big_idx, "{s}");
+        let steady_idx = s.find("- `steady` = same").expect("steady row");
+        assert!(big_idx < steady_idx, "{s}");
     }
 
     #[test]
-    fn removed_rows_do_not_keep_stale_order_slots() {
+    fn removed_rows_do_not_affect_name_order() {
         let mut cache = BoundVariableRenderCache::default();
-        let _ = render_with_cache(&mut cache, json!({ "a": 1, "b": 2 }), 0);
-        let _ = render_with_cache(&mut cache, json!({ "b": 2 }), 0);
+        let _ = render_with_cache(&mut cache, json!({ "a": 1, "b": 2 }));
+        let _ = render_with_cache(&mut cache, json!({ "b": 2 }));
 
-        let s = render_with_cache(&mut cache, json!({ "a": 1, "b": 2 }), 0);
+        let s = render_with_cache(&mut cache, json!({ "a": 1, "b": 2 }));
 
-        let b_idx = s.find("- `b` = 2").expect("b row");
         let a_idx = s.find("- `a` = 1").expect("a row");
-        assert!(b_idx < a_idx, "{s}");
+        let b_idx = s.find("- `b` = 2").expect("b row");
+        assert!(a_idx < b_idx, "{s}");
     }
 }

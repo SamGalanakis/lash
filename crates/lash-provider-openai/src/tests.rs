@@ -618,6 +618,60 @@ fn openrouter_claude_chat_body_prefers_explicit_text_cache_breakpoint() {
     );
 }
 
+fn without_cache_control(mut value: Value) -> Value {
+    if let Some(parts) = value.get_mut("content").and_then(Value::as_array_mut) {
+        for part in parts {
+            part.as_object_mut()
+                .map(|object| object.remove("cache_control"));
+        }
+    }
+    value
+}
+
+#[test]
+fn openrouter_chat_history_shape_is_stable_when_cache_breakpoint_moves() {
+    for model in [
+        "anthropic/claude-sonnet-4.6",
+        "google/gemini-3.1-pro-preview",
+    ] {
+        let history = |text: &'static str, cache_breakpoint| {
+            LlmMessage::new(
+                LlmRole::User,
+                vec![LlmContentBlock::Text {
+                    text: text.into(),
+                    response_meta: None,
+                    cache_breakpoint,
+                }],
+            )
+        };
+        let mut previous = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            history("stable history one", true),
+            LlmMessage::text(LlmRole::User, "dynamic iteration one"),
+        ]);
+        previous.model = model.to_string();
+        let mut next = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            history("stable history one", false),
+            history("stable history two", true),
+            LlmMessage::text(LlmRole::User, "dynamic iteration two"),
+        ]);
+        next.model = model.to_string();
+
+        let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+        let previous_body = provider.build_chat_request_body(&previous, true).unwrap();
+        let next_body = provider.build_chat_request_body(&next, true).unwrap();
+        let previous_history = without_cache_control(previous_body["messages"][1].clone());
+        let next_history = without_cache_control(next_body["messages"][1].clone());
+
+        assert_eq!(
+            serde_json::to_vec(&previous_history).unwrap(),
+            serde_json::to_vec(&next_history).unwrap(),
+            "earlier history wire shape changed for {model}"
+        );
+    }
+}
+
 #[test]
 fn cache_retention_none_removes_chat_cache_markers() {
     let mut req = request(vec![
@@ -634,8 +688,16 @@ fn cache_retention_none_removes_chat_cache_markers() {
         .build_chat_request_body(&req, true)
         .unwrap();
 
-    assert!(body["messages"][0]["content"].is_string());
-    assert!(body["messages"][1]["content"].is_string());
+    assert!(body["messages"][0]["content"].is_array());
+    assert!(body["messages"][1]["content"].is_array());
+    assert!(
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .all(|part| part.get("__lash_cache_breakpoint").is_none())
+    );
     assert!(body.get("tools").is_none());
 }
 

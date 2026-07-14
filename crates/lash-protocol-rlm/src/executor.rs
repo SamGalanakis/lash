@@ -1616,15 +1616,12 @@ mod tests {
 
             let globals = state.bound_variable_values(&BTreeSet::new());
             let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
-            let rendered =
-                crate::rlm_support::render_bound_variables(&mut cache, &globals, 0).await;
+            let rendered = crate::rlm_support::render_bound_variables(&mut cache, &globals);
 
             assert!(
-                rendered
-                    .content
-                    .contains("- `scratch_note` = after execution"),
+                rendered.contains("- `scratch_note` = after execution"),
                 "{}",
-                rendered.content
+                rendered
             );
         });
     }
@@ -1683,14 +1680,11 @@ mod tests {
             let globals = state.bound_variable_values(&exclude);
 
             let mut warm = crate::rlm_support::BoundVariableRenderCache::default();
-            let _ = crate::rlm_support::render_bound_variables(&mut warm, &globals, 50).await;
+            let _ = crate::rlm_support::render_bound_variables(&mut warm, &globals);
             let t2 = std::time::Instant::now();
             let mut s2 = 0usize;
             for _ in 0..n {
-                s2 += crate::rlm_support::render_bound_variables(&mut warm, &globals, 50)
-                    .await
-                    .content
-                    .len();
+                s2 += crate::rlm_support::render_bound_variables(&mut warm, &globals).len();
             }
             let warm_us = t2.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
 
@@ -1698,10 +1692,7 @@ mod tests {
             let mut s3 = 0usize;
             for _ in 0..n {
                 let mut cold = crate::rlm_support::BoundVariableRenderCache::default();
-                s3 += crate::rlm_support::render_bound_variables(&mut cold, &globals, 50)
-                    .await
-                    .content
-                    .len();
+                s3 += crate::rlm_support::render_bound_variables(&mut cold, &globals).len();
             }
             let cold_us = t3.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
 
@@ -1762,9 +1753,7 @@ mod tests {
 
             let globals = state.bound_variable_values(&BTreeSet::new());
             let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
-            let rendered =
-                crate::rlm_support::render_bound_variables(&mut cache, &globals, 0).await;
-            let s = rendered.content.to_string();
+            let s = crate::rlm_support::render_bound_variables(&mut cache, &globals).to_string();
 
             // Large record -> type + keys=N + projector preview.
             assert!(s.contains("`big_map`:"), "{s}");

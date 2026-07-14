@@ -12,9 +12,7 @@ use super::runtime_state::{RlmCodeExecutor, RlmRuntimeState};
 use super::tool_args::normalize_projected_tool_args;
 use crate::driver::SharedPromptUsage;
 use crate::executor::RlmLashlangExecutionTraceConfig;
-use crate::projection::{
-    ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectionExtension, rlm_history_projection,
-};
+use crate::projection::{ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectionExtension};
 use crate::stream_mask;
 
 #[allow(clippy::too_many_arguments)]
@@ -51,6 +49,7 @@ pub(super) fn register_rlm_protocol_plugin(
         config,
         lashlang_surface,
         last_prompt_usage: Arc::clone(&last_prompt_usage),
+        bound_variables_prompt: runtime_state.shared_bound_variables_prompt(),
     }))?;
     reg.tools()
         .provider(Arc::new(crate::control_tools::RlmControlToolsProvider))?;
@@ -60,7 +59,6 @@ pub(super) fn register_rlm_protocol_plugin(
         Box::pin(async move { normalize_projected_tool_args(ctx) })
     }));
 
-    register_bound_variables_prompt_contributor(reg, Arc::clone(&runtime_state));
     register_projected_bindings_prompt_contributor(reg, Arc::clone(&protocol_session));
 
     // Per-turn `prompt_usage` is captured here and passed to the projector via a
@@ -81,24 +79,6 @@ pub(super) fn register_rlm_protocol_plugin(
 
     stream_mask::register_stream_mask(reg)?;
     Ok(())
-}
-
-fn register_bound_variables_prompt_contributor(
-    reg: &mut PluginRegistrar,
-    runtime_state: Arc<RlmRuntimeState>,
-) {
-    let bound_vars_hook: lash_core::plugin::PromptContributor = Arc::new(move |ctx| {
-        let runtime_state = Arc::clone(&runtime_state);
-        Box::pin(async move {
-            let history_len = rlm_history_projection(&ctx.state.chronological_projection()).len();
-            Ok(vec![
-                runtime_state
-                    .bound_variables_prompt_contribution(history_len)
-                    .await,
-            ])
-        })
-    });
-    reg.prompt().contribute(bound_vars_hook);
 }
 
 fn register_projected_bindings_prompt_contributor(

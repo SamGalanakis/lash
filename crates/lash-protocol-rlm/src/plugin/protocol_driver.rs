@@ -5,17 +5,21 @@ use lash_core::{ProtocolBuildInput, TurnDriverPreamble};
 use lash_lashlang_runtime::LashlangSurface;
 
 use super::RlmProtocolPluginConfig;
-use crate::driver::{RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble};
+use crate::driver::{
+    RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble_with_bound_variables,
+};
+use crate::rlm_support::SharedBoundVariablesPrompt;
 
 pub(super) struct RlmProtocolDriver {
     pub(super) config: RlmProtocolPluginConfig,
     pub(super) lashlang_surface: LashlangSurface,
     pub(super) last_prompt_usage: SharedPromptUsage,
+    pub(super) bound_variables_prompt: SharedBoundVariablesPrompt,
 }
 
 impl ProtocolDriverPlugin for RlmProtocolDriver {
     fn build_preamble(&self, input: ProtocolBuildInput) -> TurnDriverPreamble {
-        build_rlm_preamble(
+        build_rlm_preamble_with_bound_variables(
             input,
             RlmProjectorConfig {
                 max_output_chars: self.config.max_output_chars,
@@ -24,6 +28,7 @@ impl ProtocolDriverPlugin for RlmProtocolDriver {
                 prompt_features: self.config.prompt_features,
                 lashlang_surface: self.lashlang_surface.clone(),
             },
+            Arc::clone(&self.bound_variables_prompt),
         )
     }
 }
