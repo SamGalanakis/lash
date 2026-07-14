@@ -1,3 +1,8 @@
+#[cfg(test)]
+use super::logical_turn::agent_frame_follow_turn_id;
+use super::logical_turn::{
+    LogicalTurnClaims, LogicalTurnStart, PhysicalTurnExecution, PreparedLogicalTurn,
+};
 use super::*;
 
 fn trace_fields_from_outcome(
@@ -47,15 +52,13 @@ fn session_head_refresh_error(err: SessionError) -> RuntimeError {
 }
 
 #[derive(Clone, Copy)]
-enum SessionExecutionLeaseReleasePolicy {
-    FinalCommit,
+pub(super) enum SessionExecutionLeaseReleasePolicy {
     KeepOnAgentFrameSwitch,
 }
 
 impl SessionExecutionLeaseReleasePolicy {
     fn should_release(self, outcome: &TurnOutcome) -> bool {
         match self {
-            Self::FinalCommit => true,
             Self::KeepOnAgentFrameSwitch => {
                 !matches!(outcome, TurnOutcome::AgentFrameSwitch { .. })
             }
@@ -66,6 +69,7 @@ impl SessionExecutionLeaseReleasePolicy {
 fn queued_work_payload_type(payload: &crate::QueuedWorkPayload) -> &'static str {
     match payload {
         crate::QueuedWorkPayload::ProcessWake { .. } => "process_wake",
+        crate::QueuedWorkPayload::AgentFrameTask { .. } => "agent_frame_task",
         crate::QueuedWorkPayload::SessionCommand { command } => command.kind(),
     }
 }
@@ -88,20 +92,20 @@ fn queued_work_batch_ids(claim: &crate::QueuedWorkClaim) -> Vec<String> {
 /// `started_at_ms` comes from the wall-clock source and the duration from the
 /// monotonic source, so deterministic clocks produce deterministic timing.
 #[derive(Clone, Copy)]
-struct TurnStopwatch {
+pub(super) struct TurnStopwatch {
     started: std::time::Instant,
     started_at_ms: u64,
 }
 
 impl TurnStopwatch {
-    fn start(clock: &dyn crate::Clock) -> Self {
+    pub(super) fn start(clock: &dyn crate::Clock) -> Self {
         Self {
             started: clock.now(),
             started_at_ms: clock.timestamp_ms(),
         }
     }
 
-    fn stamp(&self, turn: &mut AssembledTurn, clock: &dyn crate::Clock) {
+    pub(super) fn stamp(&self, turn: &mut AssembledTurn, clock: &dyn crate::Clock) {
         turn.execution.started_at_ms = self.started_at_ms;
         turn.execution.duration_ms = clock
             .now()
@@ -199,8 +203,8 @@ struct TurnFinishInput {
     new_messages: crate::MessageSequence,
     policy: RuntimeSessionPolicy,
     turn_index: usize,
-    queued_work_completions: Vec<crate::QueuedWorkCompletion>,
-    turn_input_completions: Vec<crate::TurnInputCompletion>,
+    queued_work_claims: Vec<crate::QueuedWorkClaim>,
+    turn_input_claims: Vec<crate::TurnInputClaim>,
     trace_turn_id: String,
 }
 
@@ -376,15 +380,15 @@ impl LashRuntime {
         cancel_state: &CancellationToken,
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
         session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
-    ) -> Result<AssembledTurn, RuntimeError> {
+    ) -> Result<PhysicalTurnExecution, RuntimeError> {
         let TurnFinishInput {
             mut turn_pipeline,
             assembler,
             new_messages,
             policy,
             turn_index,
-            queued_work_completions,
-            turn_input_completions,
+            queued_work_claims,
+            turn_input_claims,
             trace_turn_id,
         } = finish;
         self.policy = self.state.effective_policy().clone();
@@ -422,7 +426,10 @@ impl LashRuntime {
         let Some(session) = self.session.as_ref() else {
             self.state.apply_snapshot(&assembled.state);
             self.emit_completed_turn_trace(&assembled.state, &assembled.outcome, &trace_turn_id);
-            return Ok(assembled);
+            return Ok(PhysicalTurnExecution {
+                turn: assembled,
+                enqueued_queue_batches: Vec::new(),
+            });
         };
         self.ensure_session_execution_lease_live(session_execution_lease)
             .await?;
@@ -465,23 +472,31 @@ impl LashRuntime {
         let mut returned_turn = finalized.turn;
         let release_session_execution_lease =
             session_execution_lease_release_policy.should_release(&returned_turn.outcome);
+        let commit_effects = LogicalTurnClaims::new(queued_work_claims, turn_input_claims)
+            .into_commit_effects(
+                &returned_turn.outcome,
+                &self.state.session_id,
+                &trace_turn_id,
+                Some(self.state.effective_protocol_turn_options().clone()),
+            );
         self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
         self.mark_phase_begin(RuntimeTurnPhase::FinalCommit);
-        let queued_work_completion_trace = queued_work_completions.clone();
+        let queued_work_completion_trace = commit_effects.completed_queue_claims.clone();
         let pending_attachment_ids = self
             .host
             .core
             .durability
             .attachment_store
             .pending_manifest_commit_ids();
-        if let Err(err) = turn_pipeline
+        let enqueued_queue_batches = match turn_pipeline
             .final_commit(
                 &mut returned_turn,
                 self.session.as_mut(),
                 &turn_usage_delta,
                 Some(&trace_turn_id),
-                queued_work_completions,
-                turn_input_completions,
+                commit_effects.completed_queue_claims,
+                commit_effects.completed_turn_input_claims,
+                commit_effects.enqueued_queue_batches,
                 cancel_state.is_cancelled().then(|| trace_turn_id.clone()),
                 pending_attachment_ids.clone(),
                 release_session_execution_lease
@@ -490,10 +505,13 @@ impl LashRuntime {
             )
             .await
         {
-            self.mark_phase_end(RuntimeTurnPhase::FinalCommit);
-            self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
-            return Err(err);
-        }
+            Ok(batches) => batches,
+            Err(err) => {
+                self.mark_phase_end(RuntimeTurnPhase::FinalCommit);
+                self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
+                return Err(err);
+            }
+        };
         if release_session_execution_lease && let Some(lease) = session_execution_lease {
             lease.mark_released();
         }
@@ -550,7 +568,10 @@ impl LashRuntime {
             &returned_turn.outcome,
             &trace_turn_id,
         );
-        Ok(returned_turn)
+        Ok(PhysicalTurnExecution {
+            turn: returned_turn,
+            enqueued_queue_batches,
+        })
     }
 
     fn emit_completed_turn_trace(
@@ -578,6 +599,80 @@ impl LashRuntime {
             },
             self.host.core.clock.as_ref(),
         );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn finish_logical_turn_error(
+        &mut self,
+        message: String,
+        trace_turn_id: String,
+        events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+        scoped_effect_controller: ScopedEffectController<'_>,
+        cancel: CancellationToken,
+        claims: LogicalTurnClaims,
+        session_execution_lease: Option<&SessionExecutionLeaseGuard>,
+    ) -> Result<PhysicalTurnExecution, RuntimeError> {
+        let mut assembler = TurnAssembler::default();
+        let error_event = SessionEvent::Error {
+            message: message.clone(),
+            envelope: Some(crate::session_model::ErrorEnvelope {
+                kind: "runtime".to_string(),
+                code: Some("agent_frame_switch_limit".to_string()),
+                terminal_reason: None,
+                user_message: message.clone(),
+                raw: None,
+                retryable: Some(false),
+                provider_failure_kind: None,
+            }),
+        };
+        assembler.push(&error_event);
+        emit_turn_activity_to_sink(
+            turn_events,
+            TurnActivity::independent(TurnEvent::Error {
+                message: message.clone(),
+            }),
+        )
+        .await;
+        emit_session_event_to_sink(events, error_event).await;
+        let outcome_event = SessionEvent::TurnOutcome {
+            outcome: TurnOutcome::Stopped(TurnStop::RuntimeError),
+        };
+        assembler.push(&outcome_event);
+        emit_session_event_to_sink(events, outcome_event).await;
+        assembler.push(&SessionEvent::Done);
+        emit_session_event_to_sink(events, SessionEvent::Done).await;
+
+        let messages = crate::MessageSequence::from_base(self.state.read_model().messages);
+        let mut turn_pipeline = TurnBoundary::from_state_with_clock(
+            self.state.clone(),
+            Arc::clone(&self.host.core.clock),
+        )
+        .with_session_execution_lease(
+            session_execution_lease.map(SessionExecutionLeaseGuard::fence),
+        );
+        turn_pipeline.apply_prepared_messages(&messages);
+        self.finish_turn(
+            TurnFinishInput {
+                turn_pipeline,
+                assembler,
+                new_messages: messages,
+                policy: RuntimeSessionPolicy::new(
+                    self.state.effective_policy().clone(),
+                    Default::default(),
+                ),
+                turn_index: self.state.turn_index + 1,
+                queued_work_claims: claims.queued,
+                turn_input_claims: claims.turn_inputs,
+                trace_turn_id,
+            },
+            events,
+            &scoped_effect_controller,
+            &cancel,
+            session_execution_lease,
+            SessionExecutionLeaseReleasePolicy::KeepOnAgentFrameSwitch,
+        )
+        .await
     }
 
     async fn emit_turn_persisted_event(
@@ -621,7 +716,7 @@ impl LashRuntime {
         Ok(())
     }
 
-    /// Run a single turn and stream events to the host sink.
+    /// Run one logical turn and stream every physical frame to the host sink.
     pub async fn stream_turn(
         &mut self,
         input: TurnInput,
@@ -633,23 +728,21 @@ impl LashRuntime {
             .claim_session_execution_lease(cancel.clone(), true)
             .await?;
         let scoped_effect_controller = opts.scoped_effect_controller();
-        let result = self
-            .stream_turn_with_scoped_effect_controller_inner(
-                input,
-                opts.events_or_noop(),
-                opts.turn_events_or_noop(),
-                scoped_effect_controller,
-                cancel,
-                None,
-                None,
-                session_execution_lease.as_ref(),
-                SessionExecutionLeaseReleasePolicy::FinalCommit,
-            )
-            .await
-            .map(|mut turn| {
-                stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
-                turn
-            });
+        let result = Box::pin(self.drive_logical_turn(
+            LogicalTurnStart::Input(input),
+            opts.events_or_noop(),
+            opts.turn_events_or_noop(),
+            scoped_effect_controller,
+            cancel,
+            LogicalTurnClaims::new(Vec::new(), Vec::new()),
+            session_execution_lease.as_ref(),
+            stopwatch,
+        ))
+        .await
+        .map(|run| {
+            run.into_final_turn()
+                .expect("logical turn always contains a terminal physical turn")
+        });
         self.settle_session_execution_lease(session_execution_lease.as_ref(), result)
             .await
     }
@@ -753,23 +846,18 @@ impl LashRuntime {
                 );
                 let claim_for_abandon = input_claim.clone();
                 let scoped_effect_controller = opts.scoped_effect_controller();
-                let result = self
-                    .stream_turn_with_scoped_effect_controller_inner(
-                        input,
-                        opts.events_or_noop(),
-                        opts.turn_events_or_noop(),
-                        scoped_effect_controller,
-                        cancel,
-                        None,
-                        Some(input_claim),
-                        Some(&session_execution_lease),
-                        SessionExecutionLeaseReleasePolicy::FinalCommit,
-                    )
-                    .await
-                    .map(|mut turn| {
-                        stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
-                        Some(turn)
-                    });
+                let result = Box::pin(self.drive_logical_turn(
+                    LogicalTurnStart::Input(input),
+                    opts.events_or_noop(),
+                    opts.turn_events_or_noop(),
+                    scoped_effect_controller,
+                    cancel,
+                    LogicalTurnClaims::new(Vec::new(), vec![input_claim]),
+                    Some(&session_execution_lease),
+                    stopwatch,
+                ))
+                .await
+                .map(AgentFrameRun::into_final_turn);
                 if let Err(err) = &result {
                     self.abandon_turn_input_claims_after_lease_loss(
                         err,
@@ -848,23 +936,18 @@ impl LashRuntime {
         );
         let claim_for_abandon = claim.clone();
         let scoped_effect_controller = opts.scoped_effect_controller();
-        let result = self
-            .stream_turn_with_scoped_effect_controller_inner(
-                work.input,
-                opts.events_or_noop(),
-                opts.turn_events_or_noop(),
-                scoped_effect_controller,
-                cancel,
-                Some(claim),
-                None,
-                Some(&session_execution_lease),
-                SessionExecutionLeaseReleasePolicy::FinalCommit,
-            )
-            .await
-            .map(|mut turn| {
-                stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
-                Some(turn)
-            });
+        let result = Box::pin(self.drive_logical_turn(
+            LogicalTurnStart::Input(work.input),
+            opts.events_or_noop(),
+            opts.turn_events_or_noop(),
+            scoped_effect_controller,
+            cancel,
+            LogicalTurnClaims::new(vec![claim], Vec::new()),
+            Some(&session_execution_lease),
+            stopwatch,
+        ))
+        .await
+        .map(AgentFrameRun::into_final_turn);
         if let Err(err) = &result {
             self.abandon_queued_work_claims_after_lease_loss(
                 err,
@@ -964,19 +1047,20 @@ impl LashRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn stream_turn_with_scoped_effect_controller_inner(
+    pub(super) async fn stream_turn_with_scoped_effect_controller_inner(
         &mut self,
         mut input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
         scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
-        queued_claim: Option<crate::QueuedWorkClaim>,
-        turn_input_claim: Option<crate::TurnInputClaim>,
+        queued_claims: Vec<crate::QueuedWorkClaim>,
+        turn_input_claims: Vec<crate::TurnInputClaim>,
+        materialize_initial_claims: bool,
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
         session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        if queued_claim.is_none() && turn_input_claim.is_none() {
+    ) -> Result<PhysicalTurnExecution, RuntimeError> {
+        if queued_claims.is_empty() && turn_input_claims.is_empty() {
             if let Some(lease) = session_execution_lease {
                 while self
                     .drain_next_session_command(&lease.fence())
@@ -1019,8 +1103,9 @@ impl LashRuntime {
             turn_events,
             scoped_effect_controller,
             cancel.clone(),
-            queued_claim,
-            turn_input_claim,
+            queued_claims,
+            turn_input_claims,
+            materialize_initial_claims,
             session_execution_lease,
             session_execution_lease_release_policy,
         )
@@ -1046,104 +1131,19 @@ impl LashRuntime {
             .claim_session_execution_lease(cancel.clone(), true)
             .await?;
         let scoped_effect_controller = opts.scoped_effect_controller();
-        let result = self
-            .stream_turn_with_agent_frames_inner(
-                input,
-                opts.events_or_noop(),
-                opts.turn_events_or_noop(),
-                scoped_effect_controller,
-                cancel,
-                session_execution_lease.as_ref(),
-                stopwatch,
-            )
-            .await;
+        let result = Box::pin(self.drive_logical_turn(
+            LogicalTurnStart::Input(input),
+            opts.events_or_noop(),
+            opts.turn_events_or_noop(),
+            scoped_effect_controller,
+            cancel,
+            LogicalTurnClaims::new(Vec::new(), Vec::new()),
+            session_execution_lease.as_ref(),
+            stopwatch,
+        ))
+        .await;
         self.settle_session_execution_lease(session_execution_lease.as_ref(), result)
             .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn stream_turn_with_agent_frames_inner(
-        &mut self,
-        mut input: TurnInput,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        scoped_effect_controller: ScopedEffectController<'_>,
-        cancel: CancellationToken,
-        session_execution_lease: Option<&SessionExecutionLeaseGuard>,
-        stopwatch: TurnStopwatch,
-    ) -> Result<AgentFrameRun, RuntimeError> {
-        if let Some(input_turn_id) = input.trace_turn_id.as_deref()
-            && scoped_effect_controller
-                .execution_scope()
-                .validates_turn_trace_id()
-            && input_turn_id != scoped_effect_controller.scope_id()
-        {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::ExecutionScopeTurnIdMismatch,
-                format!(
-                    "input trace_turn_id `{input_turn_id}` does not match execution scope id `{}`",
-                    scoped_effect_controller.scope_id()
-                ),
-            ));
-        }
-        let follow_protocol_turn_options = input.protocol_turn_options.clone();
-        let follow_turn_context = input.turn_context.clone();
-        let follow_trace_turn_id = input
-            .trace_turn_id
-            .clone()
-            .unwrap_or_else(|| scoped_effect_controller.scope_id().to_string());
-        input
-            .trace_turn_id
-            .get_or_insert(follow_trace_turn_id.clone());
-        let mut turns = Vec::new();
-        loop {
-            let turn_trace_turn_id = agent_frame_follow_turn_id(&follow_trace_turn_id, turns.len());
-            input.trace_turn_id = Some(turn_trace_turn_id.clone());
-            let turn_effect_controller = if turns.is_empty() {
-                scoped_effect_controller.clone()
-            } else {
-                ScopedEffectController::borrowed(
-                    scoped_effect_controller.controller(),
-                    ExecutionScope::turn(&self.state.session_id, &turn_trace_turn_id),
-                )?
-            };
-            // The first frame's window opened before the lease claim; each
-            // follow frame is timed from its own start so per-frame durations
-            // stay honest.
-            let frame_stopwatch = if turns.is_empty() {
-                stopwatch
-            } else {
-                TurnStopwatch::start(self.host.core.clock.as_ref())
-            };
-            let mut turn = self
-                .stream_turn_with_scoped_effect_controller_inner(
-                    input,
-                    events,
-                    turn_events,
-                    turn_effect_controller,
-                    cancel.clone(),
-                    None,
-                    None,
-                    session_execution_lease,
-                    SessionExecutionLeaseReleasePolicy::KeepOnAgentFrameSwitch,
-                )
-                .await?;
-            frame_stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
-            let switched_frame = match &turn.outcome {
-                TurnOutcome::AgentFrameSwitch { frame_id, task, .. } => {
-                    Some((frame_id.clone(), task.clone()))
-                }
-                _ => None,
-            };
-            turns.push(turn);
-
-            let Some((_frame_id, task)) = switched_frame else {
-                return Ok(AgentFrameRun { turns });
-            };
-            input = turn_input_from_text(task);
-            input.protocol_turn_options = follow_protocol_turn_options.clone();
-            input.turn_context = follow_turn_context.clone();
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1154,20 +1154,23 @@ impl LashRuntime {
         turn_events: &dyn TurnActivitySink,
         scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
-        queued_claim: Option<crate::QueuedWorkClaim>,
-        turn_input_claim: Option<crate::TurnInputClaim>,
+        queued_claims: Vec<crate::QueuedWorkClaim>,
+        turn_input_claims: Vec<crate::TurnInputClaim>,
+        materialize_initial_claims: bool,
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
         session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
-    ) -> Result<AssembledTurn, RuntimeError> {
+    ) -> Result<PhysicalTurnExecution, RuntimeError> {
         self.refresh_session_graph_from_store()
             .await
             .map_err(session_head_refresh_error)?;
         let input_trace_turn_id = input.trace_turn_id.clone();
-        let queued_turn_work = queued_claim
-            .as_ref()
+        let queued_turn_work = materialize_initial_claims
+            .then(|| queued_claims.first())
+            .flatten()
             .map(crate::QueuedWorkClaim::materialize_for_turn);
-        let pending_turn_input = turn_input_claim
-            .as_ref()
+        let pending_turn_input = materialize_initial_claims
+            .then(|| turn_input_claims.first())
+            .flatten()
             .map(crate::TurnInputClaim::materialize_for_turn);
         if let Some(work) = pending_turn_input.as_ref()
             && input.items.is_empty()
@@ -1241,12 +1244,42 @@ impl LashRuntime {
                 emit_session_event_to_sink(events, outcome_event).await;
                 assembler.push(&SessionEvent::Done);
                 emit_session_event_to_sink(events, SessionEvent::Done).await;
-                return Ok(assembler.finish(
-                    self.state.to_snapshot(),
-                    false,
-                    None,
-                    &self.host.core.control.termination,
-                ));
+                let turn_index = self.state.turn_index + 1;
+                let trace_turn_id = input
+                    .trace_turn_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let messages = crate::MessageSequence::from_base(self.state.read_model().messages);
+                let mut turn_pipeline = TurnBoundary::from_state_with_clock(
+                    self.state.clone(),
+                    Arc::clone(&self.host.core.clock),
+                )
+                .with_session_execution_lease(
+                    session_execution_lease.map(SessionExecutionLeaseGuard::fence),
+                );
+                turn_pipeline.apply_prepared_messages(&messages);
+                return self
+                    .finish_turn(
+                        TurnFinishInput {
+                            turn_pipeline,
+                            assembler,
+                            new_messages: messages,
+                            policy: RuntimeSessionPolicy::new(
+                                self.state.effective_policy().clone(),
+                                Default::default(),
+                            ),
+                            turn_index,
+                            queued_work_claims: queued_claims,
+                            turn_input_claims,
+                            trace_turn_id,
+                        },
+                        events,
+                        &scoped_effect_controller,
+                        &cancel,
+                        session_execution_lease,
+                        session_execution_lease_release_policy,
+                    )
+                    .await;
             }
         };
         let turn_index = self.state.turn_index + 1;
@@ -1440,15 +1473,15 @@ impl LashRuntime {
             turn_events,
             scoped_effect_controller,
             cancel,
-            queued_claim,
-            turn_input_claim,
+            queued_claims,
+            turn_input_claims,
             session_execution_lease,
             session_execution_lease_release_policy,
         ))
         .await
     }
 
-    /// Run a single turn and return only the assembled terminal result.
+    /// Run one logical turn and return only its assembled terminal result.
     pub async fn run_turn_assembled(
         &mut self,
         input: TurnInput,
@@ -1459,7 +1492,7 @@ impl LashRuntime {
             .await
     }
 
-    /// Run a turn using host-prepared message history.
+    /// Run one logical turn using host-prepared message history.
     #[allow(clippy::too_many_arguments)]
     pub async fn stream_prepared_turn(
         &mut self,
@@ -1482,8 +1515,8 @@ impl LashRuntime {
         let session_execution_lease = self
             .claim_session_execution_lease(cancel.clone(), true)
             .await?;
-        let result = self
-            .stream_prepared_turn_inner(
+        let result = Box::pin(self.drive_logical_turn(
+            LogicalTurnStart::Prepared(PreparedLogicalTurn {
                 messages,
                 previous_prompt_usage,
                 protocol_turn_options,
@@ -1492,26 +1525,29 @@ impl LashRuntime {
                 initial_turn_causes,
                 trace_turn_id,
                 turn_index,
-                events,
-                turn_events,
-                scoped_effect_controller,
-                cancel,
-                initial_queue_claim,
-                initial_turn_input_claim,
-                session_execution_lease.as_ref(),
-                SessionExecutionLeaseReleasePolicy::FinalCommit,
-            )
-            .await
-            .map(|mut turn| {
-                stopwatch.stamp(&mut turn, self.host.core.clock.as_ref());
-                turn
-            });
+            }),
+            events,
+            turn_events,
+            scoped_effect_controller,
+            cancel,
+            LogicalTurnClaims::new(
+                initial_queue_claim.into_iter().collect(),
+                initial_turn_input_claim.into_iter().collect(),
+            ),
+            session_execution_lease.as_ref(),
+            stopwatch,
+        ))
+        .await
+        .map(|run| {
+            run.into_final_turn()
+                .expect("logical turn always contains a terminal physical turn")
+        });
         self.settle_session_execution_lease(session_execution_lease.as_ref(), result)
             .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn stream_prepared_turn_inner(
+    pub(super) async fn stream_prepared_turn_inner(
         &mut self,
         messages: crate::MessageSequence,
         _previous_prompt_usage: Option<PromptUsage>,
@@ -1525,11 +1561,11 @@ impl LashRuntime {
         turn_events: &dyn TurnActivitySink,
         scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
-        initial_queue_claim: Option<crate::QueuedWorkClaim>,
-        initial_turn_input_claim: Option<crate::TurnInputClaim>,
+        initial_queue_claims: Vec<crate::QueuedWorkClaim>,
+        initial_turn_input_claims: Vec<crate::TurnInputClaim>,
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
         session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
-    ) -> Result<AssembledTurn, RuntimeError> {
+    ) -> Result<PhysicalTurnExecution, RuntimeError> {
         if session_execution_lease.is_none()
             && self
                 .session
@@ -1627,9 +1663,9 @@ impl LashRuntime {
             let mut turn_pipeline = TurnBoundary::from_state_with_clock(
                 self.state.clone(),
                 Arc::clone(&self.host.core.clock),
-            );
+            )
+            .with_session_execution_lease(session_execution_fence.clone());
             turn_pipeline.apply_prepared_messages(&prepared.messages);
-            let state = turn_pipeline.into_final_state();
             let issue = TurnIssue {
                 kind: "plugin".to_string(),
                 code: Some(abort.code),
@@ -1667,12 +1703,28 @@ impl LashRuntime {
             emit_session_event_to_sink(events, outcome_event).await;
             assembler.push(&SessionEvent::Done);
             emit_session_event_to_sink(events, SessionEvent::Done).await;
-            return Ok(assembler.finish(
-                state.to_snapshot(),
-                cancel.is_cancelled(),
-                Some(issue),
-                &self.host.core.control.termination,
-            ));
+            return self
+                .finish_turn(
+                    TurnFinishInput {
+                        turn_pipeline,
+                        assembler,
+                        new_messages: prepared.messages,
+                        policy: RuntimeSessionPolicy::new(
+                            self.state.effective_policy().clone(),
+                            Default::default(),
+                        ),
+                        turn_index,
+                        queued_work_claims: initial_queue_claims,
+                        turn_input_claims: initial_turn_input_claims,
+                        trace_turn_id,
+                    },
+                    events,
+                    &scoped_effect_controller,
+                    &cancel,
+                    session_execution_lease,
+                    session_execution_lease_release_policy,
+                )
+                .await;
         }
         let mut turn_pipeline = TurnBoundary::from_state_with_clock(
             self.state.clone(),
@@ -1742,8 +1794,8 @@ impl LashRuntime {
             protocol_extension,
             turn_context,
             turn_causes: initial_turn_causes,
-            pending_queue_claims: initial_queue_claim.into_iter().collect(),
-            pending_turn_input_claims: initial_turn_input_claim.into_iter().collect(),
+            pending_queue_claims: initial_queue_claims,
+            pending_turn_input_claims: initial_turn_input_claims,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             session_execution_lease: session_execution_fence,
             runtime_lease_owner: self.runtime_lease_owner.clone(),
@@ -1805,14 +1857,8 @@ impl LashRuntime {
                     new_messages,
                     policy,
                     turn_index,
-                    queued_work_completions: pending_queue_claims
-                        .iter()
-                        .map(crate::QueuedWorkClaim::completion)
-                        .collect(),
-                    turn_input_completions: pending_turn_input_claims
-                        .iter()
-                        .map(crate::TurnInputClaim::completion)
-                        .collect(),
+                    queued_work_claims: pending_queue_claims,
+                    turn_input_claims: pending_turn_input_claims,
                     trace_turn_id,
                 },
                 events,
@@ -1847,25 +1893,6 @@ impl LashRuntime {
             self.host.core.durability.attachment_store.as_ref(),
         )
         .await
-    }
-}
-
-fn turn_input_from_text(text: String) -> TurnInput {
-    TurnInput {
-        items: vec![InputItem::Text { text }],
-        image_blobs: HashMap::new(),
-        protocol_turn_options: None,
-        trace_turn_id: None,
-        protocol_extension: None,
-        turn_context: crate::TurnContext::default(),
-    }
-}
-
-fn agent_frame_follow_turn_id(root_turn_id: &str, completed_turn_count: usize) -> String {
-    if completed_turn_count == 0 {
-        root_turn_id.to_string()
-    } else {
-        format!("{root_turn_id}:agent-frame:{completed_turn_count}")
     }
 }
 

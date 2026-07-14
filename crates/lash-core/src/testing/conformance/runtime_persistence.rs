@@ -338,6 +338,7 @@ fn queued_batch_text(batch: &QueuedWorkBatch) -> Option<&str> {
     let payload = batch.items.first().map(|item| &item.payload)?;
     match payload {
         QueuedWorkPayload::ProcessWake { wake } => Some(wake.input.as_str()),
+        QueuedWorkPayload::AgentFrameTask { task, .. } => Some(task.as_str()),
         QueuedWorkPayload::SessionCommand { .. } => None,
     }
 }
@@ -1480,33 +1481,71 @@ async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimeP
         .await
         .expect("enqueue second batch");
 
-    let rejected_session_lease =
+    let selected_session_lease =
         claim_session_execution_lease_for_test(&store, "root", "owner").await;
     assert!(
         store
             .claim_ready_queued_work_by_batch_ids(
                 "root",
-                &rejected_session_lease.fence(),
+                &selected_session_lease.fence(),
                 &lease_owner("owner"),
-                QueuedWorkClaimBoundary::Idle,
+                QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
                 std::slice::from_ref(&second.batch_id),
             )
             .await
-            .expect("claim out-of-order exact batch")
+            .expect("boundary-gated exact claim")
             .is_none(),
-        "exact claims must not skip earlier durable queue work"
+        "exact selection must preserve the delivery boundary gate"
     );
-    release_session_execution_lease_for_test(&store, &rejected_session_lease).await;
+    assert!(
+        store
+            .claim_ready_queued_work_by_batch_ids(
+                "root",
+                &selected_session_lease.fence(),
+                &lease_owner("owner"),
+                QueuedWorkClaimBoundary::Idle,
+                &[first.batch_id.clone(), second.batch_id.clone()],
+            )
+            .await
+            .expect("slot-policy-gated exact claim")
+            .is_none(),
+        "exact selection must not combine exclusive batches into one claim"
+    );
+    let selected = store
+        .claim_ready_queued_work_by_batch_ids(
+            "root",
+            &selected_session_lease.fence(),
+            &lease_owner("owner"),
+            QueuedWorkClaimBoundary::Idle,
+            std::slice::from_ref(&second.batch_id),
+        )
+        .await
+        .expect("claim out-of-order exact batch")
+        .expect("selected exact batch exists");
+    assert_eq!(selected.batches[0].batch_id, second.batch_id);
     assert_eq!(
         store
             .list_pending_queued_work("root")
             .await
-            .expect("list after rejected exact claim")
+            .expect("list after out-of-order exact claim")
             .iter()
             .map(|batch| batch.batch_id.as_str())
             .collect::<Vec<_>>(),
-        vec![first.batch_id.as_str(), second.batch_id.as_str()]
+        vec![first.batch_id.as_str()]
     );
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_session_execution_lease(selected_session_lease.fence())
+                .releasing_session_execution_lease(selected_session_lease.completion())
+                .completing_queue_claim(selected.completion()),
+        )
+        .await
+        .expect("complete out-of-order exact batch");
 
     let accepted_session_lease =
         claim_session_execution_lease_for_test(&store, "root", "owner").await;
@@ -1529,18 +1568,14 @@ async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimeP
             .collect::<Vec<_>>(),
         vec![first.batch_id.as_str()]
     );
-    // The claim only hides `first` from the pending snapshot while its pinned
-    // session-lease generation is still live (ADR 0029), so keep the lease held
-    // across this assertion.
-    assert_eq!(
+    // Both selected batches are hidden now: `second` was atomically completed
+    // above, while `first` remains held by this live claim.
+    assert!(
         store
             .list_pending_queued_work("root")
             .await
             .expect("list pending after exact claim")
-            .iter()
-            .map(|batch| batch.batch_id.as_str())
-            .collect::<Vec<_>>(),
-        vec![second.batch_id.as_str()]
+            .is_empty()
     );
     release_session_execution_lease_for_test(&store, &accepted_session_lease).await;
 }
@@ -2684,7 +2719,20 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
         turn_index: 41,
         ..RuntimeSessionState::default()
     };
-    let base_commit = RuntimeCommit::persisted_state(&state, &[]);
+    let mut base_commit = RuntimeCommit::persisted_state(&state, &[]);
+    base_commit.enqueued_queue_batches = vec![
+        QueuedWorkBatchDraft::new(
+            "root",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+            vec![QueuedWorkPayload::agent_frame_task(
+                "follow-frame",
+                "follow-on task",
+                None,
+            )],
+        )
+        .with_source_key("agent-frame-handoff:turn-atomic"),
+    ];
     let commit_hash = base_commit.turn_commit_hash().expect("turn commit hash");
     let turn_commit = RuntimeTurnCommitStamp::new("root", "turn-atomic", commit_hash.clone());
     let mut stale_queue_completion = claim.completion();
@@ -2745,6 +2793,12 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
         .expect("same final turn commit stamp retries idempotently");
     assert_eq!(retry.head_revision, first.head_revision);
     assert_eq!(retry.checkpoint_ref, first.checkpoint_ref);
+    assert_eq!(first.enqueued_queue_batches.len(), 1);
+    assert_eq!(retry.enqueued_queue_batches.len(), 1);
+    assert_eq!(
+        retry.enqueued_queue_batches[0].batch_id, first.enqueued_queue_batches[0].batch_id,
+        "idempotent commit retry must return the original outbox identity"
+    );
     assert!(
         store
             .load_session(SessionReadScope::FullGraph)
@@ -2757,7 +2811,9 @@ async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn Runtim
             .list_queued_work("root")
             .await
             .expect("list after accepted atomic commit")
-            .is_empty()
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .eq([first.enqueued_queue_batches[0].batch_id.as_str()])
     );
 }
 

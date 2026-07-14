@@ -71,6 +71,7 @@ struct FinalCommitInput<'a> {
     turn_id: Option<&'a str>,
     completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
+    enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
     interrupted_turn_input_turn_id: Option<String>,
     pending_attachment_ids: Vec<crate::AttachmentId>,
     session_execution_lease_completion: Option<crate::SessionExecutionLeaseCompletion>,
@@ -353,10 +354,11 @@ impl TurnBoundary {
         turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
         completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
+        enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
         interrupted_turn_input_turn_id: Option<String>,
         pending_attachment_ids: Vec<crate::AttachmentId>,
         session_execution_lease_completion: Option<crate::SessionExecutionLeaseCompletion>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Vec<crate::QueuedWorkBatch>, RuntimeError> {
         let (store, plugins, execution_state_snapshot) = match session {
             Some(session) => {
                 let store = session.history_store();
@@ -366,25 +368,27 @@ impl TurnBoundary {
             }
             None => (None, None, None),
         };
-        self.final_commit_with_snapshots(FinalCommitInput {
-            returned_state: &returned_turn.state,
-            tool_calls: &returned_turn.tool_calls,
-            plugins: plugins.as_deref(),
-            execution_state_snapshot,
-            store: store.as_ref().map(|store| store.as_ref()),
-            usage_deltas,
-            outcome: &returned_turn.outcome,
-            turn_id,
-            completed_queue_claims,
-            completed_turn_input_claims,
-            interrupted_turn_input_turn_id,
-            pending_attachment_ids,
-            session_execution_lease_completion,
-        })
-        .await
-        .map_err(super::runtime_error_from_store_commit)?;
+        let enqueued_queue_batches = self
+            .final_commit_with_snapshots(FinalCommitInput {
+                returned_state: &returned_turn.state,
+                tool_calls: &returned_turn.tool_calls,
+                plugins: plugins.as_deref(),
+                execution_state_snapshot,
+                store: store.as_ref().map(|store| store.as_ref()),
+                usage_deltas,
+                outcome: &returned_turn.outcome,
+                turn_id,
+                completed_queue_claims,
+                completed_turn_input_claims,
+                enqueued_queue_batches,
+                interrupted_turn_input_turn_id,
+                pending_attachment_ids,
+                session_execution_lease_completion,
+            })
+            .await
+            .map_err(super::runtime_error_from_store_commit)?;
         returned_turn.state = self.final_state_mut().to_snapshot();
-        Ok(())
+        Ok(enqueued_queue_batches)
     }
 
     pub(super) fn into_final_state(self) -> RuntimeSessionState {
@@ -445,17 +449,19 @@ impl TurnBoundary {
             None,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             None,
             Vec::new(),
             None,
         )
         .await
+        .map(|_| ())
     }
 
     async fn final_commit_with_snapshots(
         &mut self,
         input: FinalCommitInput<'_>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError> {
         let FinalCommitInput {
             returned_state,
             tool_calls,
@@ -467,6 +473,7 @@ impl TurnBoundary {
             turn_id,
             completed_queue_claims,
             completed_turn_input_claims,
+            enqueued_queue_batches,
             interrupted_turn_input_turn_id,
             pending_attachment_ids,
             session_execution_lease_completion,
@@ -528,6 +535,7 @@ impl TurnBoundary {
                 turn_id,
                 completed_queue_claims,
                 completed_turn_input_claims,
+                enqueued_queue_batches,
                 interrupted_turn_input_turn_id,
                 committed_attachment_ids,
                 session_execution_lease_completion,
@@ -535,7 +543,7 @@ impl TurnBoundary {
             .await
         } else {
             state.discard_runtime_snapshots();
-            Ok(())
+            Ok(Vec::new())
         }
     }
 
@@ -548,10 +556,11 @@ impl TurnBoundary {
         turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
         completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
+        enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
         interrupted_turn_input_turn_id: Option<String>,
         committed_attachment_ids: Vec<crate::AttachmentId>,
         session_execution_lease_completion: Option<crate::SessionExecutionLeaseCompletion>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError> {
         let session_execution_lease = self.session_execution_lease.clone();
         let state = self.state_mut();
         let mark = PersistedGraphMark::from_graph_commit(&graph);
@@ -566,6 +575,7 @@ impl TurnBoundary {
         }
         commit.completed_queue_claims = completed_queue_claims;
         commit.completed_turn_input_claims = completed_turn_input_claims;
+        commit.enqueued_queue_batches = enqueued_queue_batches;
         commit.interrupted_turn_input_turn_id = interrupted_turn_input_turn_id;
         if let Some(turn_id) = turn_id {
             let turn_commit_hash = commit.turn_commit_hash()?;
@@ -576,6 +586,7 @@ impl TurnBoundary {
             ));
         }
         let result = store.commit_runtime_state(commit).await?;
+        let enqueued_queue_batches = result.enqueued_queue_batches.clone();
         state.apply_persisted_commit_result(result);
         if let TurnCommitStage::Drafting(draft) = &mut self.stage {
             match mark {
@@ -588,7 +599,7 @@ impl TurnBoundary {
                 }
             }
         }
-        Ok(())
+        Ok(enqueued_queue_batches)
     }
 
     async fn snapshot_dirty_execution_state(session: &mut Session) -> Option<Option<Vec<u8>>> {
@@ -1367,6 +1378,7 @@ mod tests {
                 turn_id: None,
                 completed_queue_claims: Vec::new(),
                 completed_turn_input_claims: Vec::new(),
+                enqueued_queue_batches: Vec::new(),
                 interrupted_turn_input_turn_id: None,
                 pending_attachment_ids: Vec::new(),
                 session_execution_lease_completion: None,
@@ -1408,6 +1420,7 @@ mod tests {
                 turn_id: None,
                 completed_queue_claims: Vec::new(),
                 completed_turn_input_claims: Vec::new(),
+                enqueued_queue_batches: Vec::new(),
                 interrupted_turn_input_turn_id: None,
                 pending_attachment_ids: Vec::new(),
                 session_execution_lease_completion: None,

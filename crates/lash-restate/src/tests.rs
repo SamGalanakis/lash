@@ -431,6 +431,25 @@ impl lash_core::QueuedWorkStore for CommitRetryStore {
             .await
     }
 
+    async fn claim_ready_queued_work_by_batch_ids(
+        &self,
+        session_id: &str,
+        session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        owner: &lash_core::LeaseOwnerIdentity,
+        boundary: lash_core::runtime::QueuedWorkClaimBoundary,
+        batch_ids: &[String],
+    ) -> Result<Option<lash_core::runtime::QueuedWorkClaim>, lash_core::StoreError> {
+        self.inner
+            .claim_ready_queued_work_by_batch_ids(
+                session_id,
+                session_execution_lease,
+                owner,
+                boundary,
+                batch_ids,
+            )
+            .await
+    }
+
     async fn abandon_queued_work_claim(
         &self,
         claim: &lash_core::runtime::QueuedWorkClaim,

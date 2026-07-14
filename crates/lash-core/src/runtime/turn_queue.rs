@@ -91,8 +91,18 @@ pub enum MergeKey {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum QueuedWorkPayload {
-    ProcessWake { wake: Box<ProcessWakeDelivery> },
-    SessionCommand { command: Box<SessionCommand> },
+    ProcessWake {
+        wake: Box<ProcessWakeDelivery>,
+    },
+    AgentFrameTask {
+        frame_id: crate::AgentFrameId,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_turn_options: Option<crate::ProtocolTurnOptions>,
+    },
+    SessionCommand {
+        command: Box<SessionCommand>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -115,10 +125,22 @@ impl QueuedWorkPayload {
         }
     }
 
+    pub fn agent_frame_task(
+        frame_id: impl Into<crate::AgentFrameId>,
+        task: impl Into<String>,
+        protocol_turn_options: Option<crate::ProtocolTurnOptions>,
+    ) -> Self {
+        Self::AgentFrameTask {
+            frame_id: frame_id.into(),
+            task: task.into(),
+            protocol_turn_options,
+        }
+    }
+
     pub fn work_class(&self) -> QueuedWorkClass {
         match self {
             Self::SessionCommand { .. } => QueuedWorkClass::SessionCommand,
-            Self::ProcessWake { .. } => QueuedWorkClass::TurnWork,
+            Self::ProcessWake { .. } | Self::AgentFrameTask { .. } => QueuedWorkClass::TurnWork,
         }
     }
 }
@@ -275,6 +297,7 @@ impl QueuedWorkClaim {
                     QueuedWorkPayload::ProcessWake { wake } => {
                         turn_causes.push(crate::process_wake_turn_cause(wake));
                     }
+                    QueuedWorkPayload::AgentFrameTask { .. } => {}
                     QueuedWorkPayload::SessionCommand { .. } => {}
                 }
             }
@@ -299,6 +322,7 @@ impl QueuedWorkClaim {
                     QueuedWorkPayload::ProcessWake { wake } => {
                         turn_causes.push(crate::process_wake_turn_cause(wake));
                     }
+                    QueuedWorkPayload::AgentFrameTask { .. } => {}
                     QueuedWorkPayload::SessionCommand { .. } => {}
                 }
             }
@@ -327,8 +351,22 @@ impl QueuedWorkClaim {
 
     pub fn materialize_for_turn(&self) -> QueuedTurnWork {
         let checkpoint = self.materialize_for_checkpoint();
+        let mut input = TurnInput::empty();
+        for batch in &self.batches {
+            for item in &batch.items {
+                if let QueuedWorkPayload::AgentFrameTask {
+                    task,
+                    protocol_turn_options,
+                    ..
+                } = &item.payload
+                {
+                    input = TurnInput::text(task.clone());
+                    input.protocol_turn_options = protocol_turn_options.clone();
+                }
+            }
+        }
         QueuedTurnWork {
-            input: TurnInput::empty(),
+            input,
             messages: checkpoint.messages,
             turn_causes: checkpoint.turn_causes,
         }
