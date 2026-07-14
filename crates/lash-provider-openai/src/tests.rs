@@ -984,6 +984,32 @@ fn chat_usage_payload_maps_canonical_token_buckets() {
 }
 
 #[test]
+fn openrouter_gemini_production_usage_payload_maps_zero_cache_buckets() {
+    let usage = lash_llm_transport::openai_usage_from_usage_value(&json!({
+        "prompt_tokens": 6370,
+        "completion_tokens": 7,
+        "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "video_tokens": 0
+        },
+        "cost": 0.003206
+    }));
+
+    assert_eq!(
+        usage,
+        lash_core::llm::types::LlmUsage {
+            input_tokens: 6370,
+            output_tokens: 7,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
+        }
+    );
+}
+
+#[test]
 fn chat_stream_parser_captures_text_tool_done_and_usage() {
     let mut state = ChatStreamState::default();
     OpenAiCompatibleProvider::process_chat_sse_event(

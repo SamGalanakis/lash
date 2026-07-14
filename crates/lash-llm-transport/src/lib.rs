@@ -1,4 +1,6 @@
 #[cfg(feature = "testing")]
+pub mod cache_regression;
+#[cfg(feature = "testing")]
 pub mod conformance;
 pub mod http;
 pub mod normalize;
