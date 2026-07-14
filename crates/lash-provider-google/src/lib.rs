@@ -6,6 +6,8 @@ mod provider;
 mod request;
 mod stream;
 mod support;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod upload;
 
 pub use config::{GoogleOAuthProvider, GoogleOAuthProviderFactory};

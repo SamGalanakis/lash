@@ -6,6 +6,8 @@ mod provider;
 mod request;
 mod stream;
 mod support;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use config::{AnthropicProvider, AnthropicProviderFactory, DEFAULT_BASE_URL};
 

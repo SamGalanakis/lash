@@ -11,6 +11,8 @@ mod responses;
 pub mod responses_shared;
 pub mod schema;
 mod support;
+#[cfg(feature = "testing")]
+pub mod testing;
 #[cfg(test)]
 mod tests;
 

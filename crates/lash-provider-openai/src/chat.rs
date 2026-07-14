@@ -4,6 +4,13 @@ use std::borrow::Cow;
 
 const PROVIDER: &str = "OpenAI-compatible";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CacheBreakpointDiagnostics {
+    pub(crate) requested: usize,
+    pub(crate) emitted: usize,
+    pub(crate) dropped: usize,
+}
+
 impl OpenAiCompatibleProvider {
     fn model_is_anthropic_claude(model: &str) -> bool {
         let model = model.to_ascii_lowercase();
@@ -227,16 +234,38 @@ impl OpenAiCompatibleProvider {
         cache_retention: CacheRetention,
         messages: &mut [Value],
         tools: &mut [Value],
-    ) {
+    ) -> CacheBreakpointDiagnostics {
+        let requested = req
+            .messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .filter(|block| {
+                matches!(
+                    block,
+                    LlmContentBlock::Text {
+                        cache_breakpoint: true,
+                        ..
+                    }
+                )
+            })
+            .count();
         if !self.openrouter_cache_control_request(req) {
             Self::strip_internal_cache_markers(messages);
-            return;
+            return CacheBreakpointDiagnostics {
+                requested,
+                emitted: 0,
+                dropped: requested,
+            };
         }
         let gemini_request = Self::model_is_google_gemini(&req.model);
         let Some(cache_control) = Self::chat_cache_control_value(cache_retention, !gemini_request)
         else {
             Self::strip_internal_cache_markers(messages);
-            return;
+            return CacheBreakpointDiagnostics {
+                requested,
+                emitted: 0,
+                dropped: requested,
+            };
         };
 
         if gemini_request {
@@ -255,7 +284,12 @@ impl OpenAiCompatibleProvider {
                 }
             }
             Self::strip_internal_cache_markers(messages);
-            return;
+            let emitted = usize::from(applied_explicit_breakpoint);
+            return CacheBreakpointDiagnostics {
+                requested,
+                emitted,
+                dropped: requested.saturating_sub(emitted),
+            };
         }
 
         for message in messages.iter_mut() {
@@ -293,6 +327,12 @@ impl OpenAiCompatibleProvider {
             }
         }
         Self::strip_internal_cache_markers(messages);
+        let emitted = usize::from(applied_explicit_breakpoint);
+        CacheBreakpointDiagnostics {
+            requested,
+            emitted,
+            dropped: requested.saturating_sub(emitted),
+        }
     }
 
     pub(crate) fn build_chat_request_body(
@@ -300,6 +340,15 @@ impl OpenAiCompatibleProvider {
         req: &LlmRequest,
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
+        self.build_chat_request_body_with_diagnostics(req, stream)
+            .map(|(body, _)| body)
+    }
+
+    pub(crate) fn build_chat_request_body_with_diagnostics(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<(Value, CacheBreakpointDiagnostics), LlmTransportError> {
         validate_image_attachments(req, OPENAI_IMAGE_MIMES, "OpenAI")?;
         let compat = self.resolved_compat(CompletionEndpoint::ChatCompletions);
         let mut messages = Self::build_chat_messages(req);
@@ -311,7 +360,12 @@ impl OpenAiCompatibleProvider {
             DEFAULT_MAX_OUTPUT_TOKENS,
             (),
         );
-        self.apply_openrouter_cache_control(req, policy.cache_retention, &mut messages, &mut tools);
+        let cache_diagnostics = self.apply_openrouter_cache_control(
+            req,
+            policy.cache_retention,
+            &mut messages,
+            &mut tools,
+        );
         let mut body = json!({
             "model": req.model,
             "messages": messages,
@@ -354,7 +408,7 @@ impl OpenAiCompatibleProvider {
                 }
             };
         }
-        Ok(body)
+        Ok((body, cache_diagnostics))
     }
 
     fn chat_message_text(message: &Value) -> String {
