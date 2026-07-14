@@ -123,6 +123,115 @@ impl crate::Clock for StepExpiryClock {
     }
 }
 
+struct FrameRotatingDynamicTool {
+    rotated: Arc<AtomicBool>,
+}
+
+fn rotating_tool_definition(name: &str) -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        format!("tool:{name}"),
+        name,
+        "Exercise live tool discovery across an AgentFrame rotation",
+        crate::ToolDefinition::default_input_schema(),
+        json!({ "type": "object", "additionalProperties": true }),
+    )
+}
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for FrameRotatingDynamicTool {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        let mut manifests = vec![rotating_tool_definition("rotate_surface").manifest()];
+        if self.rotated.load(Ordering::SeqCst) {
+            manifests.push(rotating_tool_definition("new_after_rotation").manifest());
+        }
+        manifests
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        self.tool_manifests()
+            .into_iter()
+            .any(|manifest| manifest.name == name)
+            .then(|| Arc::new(rotating_tool_definition(name).contract()))
+    }
+
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        match call.name {
+            "rotate_surface" => {
+                self.rotated.store(true, Ordering::SeqCst);
+                crate::ToolResult::ok(json!({ "rotated": true })).with_control(
+                    crate::ToolControl::SwitchAgentFrame {
+                        frame_id: "live-surface-frame".to_string(),
+                        initial_nodes: Vec::new(),
+                        task: Some("call the newly available tool".to_string()),
+                    },
+                )
+            }
+            "new_after_rotation" => crate::ToolResult::ok(json!({ "called": call.name }))
+                .with_control(crate::ToolControl::Finish {
+                    value: json!("new tool executed").into(),
+                }),
+            name => crate::ToolResult::err_fmt(format_args!("unknown rotating tool `{name}`")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn continue_as_frame_rotation_reconciles_newly_advertised_tool() {
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "rotate-call".to_string(),
+                    tool_name: "rotate_surface".to_string(),
+                    input_json: "{}".to_string(),
+                    replay: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "new-tool-call".to_string(),
+                    tool_name: "new_after_rotation".to_string(),
+                    input_json: "{}".to_string(),
+                    replay: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let tools: Arc<dyn crate::ToolProvider> = Arc::new(FrameRotatingDynamicTool {
+        rotated: Arc::new(AtomicBool::new(false)),
+    });
+    let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
+
+    let run = runtime
+        .stream_turn_with_agent_frames(
+            TurnInput::text("rotate the frame"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "live-surface-frame-rotation"),
+            ),
+        )
+        .await
+        .expect("AgentFrame run");
+
+    assert_eq!(run.frame_switch_count(), 1);
+    let final_turn = run.final_turn().expect("final frame");
+    assert!(
+        matches!(
+            &final_turn.outcome,
+            TurnOutcome::Finished(TurnFinish::ToolValue { tool_name, value })
+                if tool_name == "new_after_rotation" && *value == json!("new tool executed")
+        ),
+        "new tool must be callable in the follow frame: {:?}",
+        final_turn.outcome
+    );
+}
+
 struct ExpireLeaseAtFinalCommit {
     clock: Arc<ManualClock>,
     expired: AtomicBool,
