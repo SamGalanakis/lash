@@ -110,6 +110,20 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
     }
 }
 
+fn count_object_key(value: &Value, key: &str) -> usize {
+    match value {
+        Value::Object(object) => {
+            usize::from(object.contains_key(key))
+                + object
+                    .values()
+                    .map(|value| count_object_key(value, key))
+                    .sum::<usize>()
+        }
+        Value::Array(array) => array.iter().map(|value| count_object_key(value, key)).sum(),
+        _ => 0,
+    }
+}
+
 #[tokio::test]
 async fn openrouter_request_body_uses_bounded_session_affinity_field() {
     let transport = Arc::new(RecordingHttpTransport::default());
@@ -498,6 +512,103 @@ fn openrouter_claude_chat_body_marks_anthropic_cache_breakpoints() {
         body["messages"][1]["content"][0]["cache_control"],
         json!({ "type": "ephemeral" })
     );
+}
+
+#[test]
+fn openrouter_gemini_chat_body_emits_one_ephemeral_explicit_breakpoint() {
+    let mut req = request(vec![
+        LlmMessage::text(LlmRole::System, "stable system prompt"),
+        LlmMessage::new(
+            LlmRole::User,
+            vec![
+                LlmContentBlock::Text {
+                    text: "older stable history".into(),
+                    response_meta: None,
+                    cache_breakpoint: true,
+                },
+                LlmContentBlock::Text {
+                    text: "latest stable history".into(),
+                    response_meta: None,
+                    cache_breakpoint: true,
+                },
+                LlmContentBlock::Text {
+                    text: "dynamic current iteration".into(),
+                    response_meta: None,
+                    cache_breakpoint: false,
+                },
+            ],
+        ),
+    ]);
+    req.model = "google/Gemini-2.5-Pro".to_string();
+    req.tools = Arc::new(vec![LlmToolSpec {
+        name: "search".to_string(),
+        description: "Search".to_string(),
+        input_schema: json!({"type": "object"}).into(),
+        output_schema: json!({}).into(),
+    }]);
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_options(ProviderOptions {
+            cache_retention: CacheRetention::Long,
+            ..ProviderOptions::default()
+        })
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(count_object_key(&body, "cache_control"), 1);
+    assert_eq!(
+        body["messages"][1]["content"][1]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+    assert!(
+        body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert!(body["messages"][0]["content"].is_string());
+    assert!(body["tools"][0].get("cache_control").is_none());
+    assert_eq!(count_object_key(&body, "ttl"), 0);
+    assert_eq!(count_object_key(&body, "__lash_cache_breakpoint"), 0);
+}
+
+#[test]
+fn openrouter_gemini_chat_body_falls_back_to_last_message_text() {
+    let mut req = request(vec![
+        LlmMessage::text(LlmRole::System, "stable system prompt"),
+        LlmMessage::text(LlmRole::User, "last stable text"),
+    ]);
+    req.model = "google/gemini-2.5-flash".to_string();
+
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(count_object_key(&body, "cache_control"), 1);
+    assert_eq!(
+        body["messages"][1]["content"][0]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+    assert!(body["messages"][0]["content"].is_string());
+}
+
+#[test]
+fn non_openrouter_gemini_chat_body_strips_breakpoint_without_emitting_cache_control() {
+    let mut req = request(vec![LlmMessage::new(
+        LlmRole::User,
+        vec![LlmContentBlock::Text {
+            text: "stable history".into(),
+            response_meta: None,
+            cache_breakpoint: true,
+        }],
+    )]);
+    req.model = "google/gemini-2.5-pro".to_string();
+
+    let body = OpenAiCompatibleProvider::new("key", "https://api.together.xyz/v1")
+        .build_chat_request_body(&req, true)
+        .unwrap();
+
+    assert_eq!(count_object_key(&body, "cache_control"), 0);
+    assert_eq!(count_object_key(&body, "__lash_cache_breakpoint"), 0);
 }
 
 #[test]
