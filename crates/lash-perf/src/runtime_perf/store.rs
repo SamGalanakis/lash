@@ -603,6 +603,15 @@ impl SessionCommitStore for RuntimePerfStore {
             release_session_execution_lease,
             committed_attachment_ids: _,
         } = commit;
+        if let Some(batch) = enqueued_queue_batches
+            .iter()
+            .find(|batch| batch.session_id != session_id)
+        {
+            return Err(StoreError::SessionBindingMismatch {
+                bound_session_id: session_id.clone(),
+                attempted_session_id: batch.session_id.clone(),
+            });
+        }
         let mut meta_guard = self
             .session_head_meta
             .lock()
@@ -1422,5 +1431,69 @@ impl StoreMaintenance for RuntimePerfStore {
 
     async fn gc_unreachable(&self) -> Result<GcReport, store::StoreError> {
         Ok(GcReport::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash_core::runtime::{DeliveryPolicy, QueuedWorkPayload, RuntimeSessionState, SlotPolicy};
+
+    #[tokio::test]
+    async fn runtime_commit_rejects_cross_session_queue_batches_atomically() {
+        let store = RuntimePerfStore::default();
+        let owner = LeaseOwnerIdentity::opaque("perf-store-test", "cross-session-outbox");
+        let lease = store
+            .try_claim_session_execution_lease("root", &owner, 60_000)
+            .await
+            .expect("claim execution lease")
+            .acquired()
+            .expect("execution lease acquired");
+        let state = RuntimeSessionState {
+            session_id: "root".to_string(),
+            turn_index: 1,
+            ..RuntimeSessionState::default()
+        };
+        let mut commit =
+            RuntimeCommit::persisted_state(&state, &[]).with_session_execution_lease(lease.fence());
+        commit.enqueued_queue_batches = vec![QueuedWorkBatchDraft::new(
+            "other-session",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+            vec![QueuedWorkPayload::agent_frame_task(
+                "follow-frame",
+                "follow-on task",
+                None,
+            )],
+        )];
+
+        let error = store
+            .commit_runtime_state(commit)
+            .await
+            .expect_err("cross-session queue batch must reject the commit");
+
+        assert!(matches!(
+            error,
+            StoreError::SessionBindingMismatch {
+                bound_session_id,
+                attempted_session_id,
+            } if bound_session_id == "root" && attempted_session_id == "other-session"
+        ));
+        assert!(
+            store
+                .load_session(SessionReadScope::FullGraph)
+                .await
+                .expect("load session after rejected commit")
+                .is_none(),
+            "rejected commit must not persist session state"
+        );
+        assert!(
+            store
+                .list_queued_work("other-session")
+                .await
+                .expect("list queued work after rejected commit")
+                .is_empty(),
+            "rejected commit must not enqueue cross-session work"
+        );
     }
 }
