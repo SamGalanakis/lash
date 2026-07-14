@@ -1,5 +1,7 @@
 use crate::support::*;
 
+const OPENROUTER_SESSION_ID_MAX_CHARS: usize = 256;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CompletionEndpoint {
     Responses,
@@ -74,10 +76,20 @@ pub(crate) async fn complete(
     let provider_trace = req.provider_trace.clone();
     let timeouts = provider.options.llm_timeouts();
     let stream = stream_events.is_some();
-    let body = match endpoint {
+    let compat = provider.resolved_compat(endpoint);
+    let mut body = match endpoint {
         CompletionEndpoint::Responses => provider.build_responses_request_body(&req, stream)?,
         CompletionEndpoint::ChatCompletions => provider.build_chat_request_body(&req, stream)?,
     };
+    if compat.cache_session_affinity && base_url_is_openrouter(&provider.base_url) {
+        body["session_id"] = Value::String(
+            req.scope
+                .session_id
+                .chars()
+                .take(OPENROUTER_SESSION_ID_MAX_CHARS)
+                .collect(),
+        );
+    }
     emit_provider_request_trace(
         provider_trace.as_ref(),
         endpoint.request_trace_name(),
@@ -92,7 +104,6 @@ pub(crate) async fn complete(
         provider.base_url.trim_end_matches('/'),
         endpoint.path()
     );
-    let compat = provider.resolved_compat(endpoint);
     let mut headers = vec![
         (
             "Authorization".to_string(),
@@ -102,7 +113,6 @@ pub(crate) async fn complete(
         ("Accept".to_string(), "text/event-stream".to_string()),
     ];
     if compat.cache_session_affinity {
-        headers.push(("session_id".to_string(), req.scope.session_id.clone()));
         headers.push((
             "x-client-request-id".to_string(),
             req.scope.request_id.clone(),

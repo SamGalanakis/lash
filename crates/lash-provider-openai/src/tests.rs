@@ -39,6 +39,29 @@ impl LlmHttpTransport for ScriptedHttpTransport {
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingHttpTransport {
+    requests: std::sync::Mutex<Vec<LlmHttpRequest>>,
+}
+
+#[async_trait]
+impl LlmHttpTransport for RecordingHttpTransport {
+    async fn send(
+        &self,
+        request: LlmHttpRequest,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<lash_llm_transport::LlmHttpResponse, LlmTransportError> {
+        self.requests.lock().expect("request lock").push(request);
+        Ok(lash_llm_transport::LlmHttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: LlmHttpBody::buffered(
+                r#"{"id":"gen-123","model":"test-model","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#,
+            ),
+        })
+    }
+}
+
 fn reasoning_capability() -> ModelCapability {
     ModelCapability {
         reasoning: Some(ReasoningCapability {
@@ -85,6 +108,53 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         generation: lash_core::GenerationOptions::default(),
         provider_trace: None,
     }
+}
+
+#[tokio::test]
+async fn openrouter_request_body_uses_bounded_session_affinity_field() {
+    let transport = Arc::new(RecordingHttpTransport::default());
+    let mut provider =
+        OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL).with_transport(transport.clone());
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    let session_id = format!("{}étrailing", "s".repeat(255));
+    req.scope.session_id = session_id.clone();
+
+    provider.complete(req).await.expect("request succeeds");
+
+    let requests = transport.requests.lock().expect("request lock");
+    let wire_request = requests.first().expect("captured request");
+    let body: Value = serde_json::from_slice(&wire_request.body).expect("request body");
+    let expected = session_id.chars().take(256).collect::<String>();
+    assert_eq!(body["session_id"], expected);
+    assert_eq!(
+        body["session_id"]
+            .as_str()
+            .expect("session id")
+            .chars()
+            .count(),
+        256
+    );
+    assert!(
+        wire_request
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("session_id"))
+    );
+}
+
+#[tokio::test]
+async fn non_openrouter_request_body_omits_session_affinity_field() {
+    let transport = Arc::new(RecordingHttpTransport::default());
+    let mut provider = OpenAiCompatibleProvider::new("key", "https://api.together.xyz/v1")
+        .with_transport(transport.clone());
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    provider.complete(req).await.expect("request succeeds");
+
+    let requests = transport.requests.lock().expect("request lock");
+    let wire_request = requests.first().expect("captured request");
+    let body: Value = serde_json::from_slice(&wire_request.body).expect("request body");
+    assert!(body.get("session_id").is_none());
 }
 
 #[test]
