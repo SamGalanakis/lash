@@ -15,7 +15,7 @@ use lash_rlm_types::{RlmCreateExtras, RlmFinalAnswerFormat, RlmTermination};
 
 #[cfg(test)]
 use crate::projection::rlm_protocol_event;
-use crate::rlm_support::decode_rlm_options;
+use crate::rlm_support::{SharedBoundVariablesPrompt, decode_rlm_options};
 
 #[cfg(test)]
 use history::render_history_messages;
@@ -53,6 +53,19 @@ pub fn build_rlm_preamble(
     input: ProtocolBuildInput,
     config: RlmProjectorConfig,
 ) -> TurnDriverPreamble {
+    let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
+    let bound_variables_prompt = Arc::new(RwLock::new(crate::rlm_support::render_bound_variables(
+        &mut cache,
+        &[],
+    )));
+    build_rlm_preamble_with_bound_variables(input, config, bound_variables_prompt)
+}
+
+pub(crate) fn build_rlm_preamble_with_bound_variables(
+    input: ProtocolBuildInput,
+    config: RlmProjectorConfig,
+    bound_variables_prompt: SharedBoundVariablesPrompt,
+) -> TurnDriverPreamble {
     let tool_catalog = input.tool_catalog.as_ref();
     let tool_names = tool_catalog.tool_names();
     let tool_names_fingerprint = tool_catalog.tool_names_fingerprint();
@@ -75,6 +88,7 @@ pub fn build_rlm_preamble(
                 max_output_chars: config.max_output_chars,
                 max_budget_tokens: config.max_budget_tokens,
                 last_prompt_usage: config.last_prompt_usage,
+                bound_variables_prompt,
             }),
             sync_execution_environment: true,
             turn_limit_final_message: Arc::new(crate::protocol::turn_limit_final_message),
@@ -240,6 +254,7 @@ struct RlmContextProjector {
     max_output_chars: usize,
     max_budget_tokens: Option<usize>,
     last_prompt_usage: SharedPromptUsage,
+    bound_variables_prompt: SharedBoundVariablesPrompt,
 }
 
 impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
@@ -256,6 +271,11 @@ impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
                 self.max_budget_tokens,
             )
         });
+        let bound_variables_prompt = self
+            .bound_variables_prompt
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
 
         let mut messages = Vec::new();
         if !ctx.config.system_prompt.trim().is_empty() {
@@ -276,6 +296,7 @@ impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
                 required_output: required_output.as_deref(),
                 final_answer_format: final_answer_format.as_deref(),
                 budget_suffix: budget_suffix.as_deref(),
+                bound_variables: &bound_variables_prompt,
             },
             &mut attachments,
         ));
@@ -453,6 +474,7 @@ impl RlmContextProjector {
                 required_output: None,
                 final_answer_format: None,
                 budget_suffix: None,
+                bound_variables: "",
             },
             &mut attachments,
         );
@@ -471,10 +493,38 @@ impl RlmContextProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash_core::Provider;
     use lash_core::session_model::{
         ConversationRecord, MessageRole, Part, PartKind, PruneState, SessionEventRecord,
     };
+    use lash_http_transport::HttpTransportError;
+    use lash_llm_transport::{LlmHttpBody, LlmHttpRequest, LlmHttpResponse, LlmHttpTransport};
+    use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
     use lash_rlm_types::{RlmProtocolEvent, RlmTrajectoryEntry};
+
+    #[derive(Debug, Default)]
+    struct CapturingTransport {
+        bodies: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmHttpTransport for CapturingTransport {
+        async fn send(
+            &self,
+            request: LlmHttpRequest,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<LlmHttpResponse, HttpTransportError> {
+            self.bodies
+                .lock()
+                .expect("capture lock")
+                .push(request.body.to_vec());
+            Ok(LlmHttpResponse {
+                status: 400,
+                headers: Vec::new(),
+                body: LlmHttpBody::buffered("{}"),
+            })
+        }
+    }
 
     fn user_event(id: &str, text: &str) -> SessionEventRecord {
         SessionEventRecord::Conversation(ConversationRecord {
@@ -537,11 +587,116 @@ mod tests {
     }
 
     fn projector(max_output_chars: usize) -> RlmContextProjector {
+        let mut bound_variables_cache = crate::rlm_support::BoundVariableRenderCache::default();
         RlmContextProjector {
             max_output_chars,
             max_budget_tokens: None,
             last_prompt_usage: Arc::new(RwLock::new(None)),
+            bound_variables_prompt: Arc::new(RwLock::new(
+                crate::rlm_support::render_bound_variables(&mut bound_variables_cache, &[]),
+            )),
         }
+    }
+
+    fn rendered_bound_variables(
+        cache: &mut crate::rlm_support::BoundVariableRenderCache,
+        globals: serde_json::Value,
+    ) -> Arc<str> {
+        let globals = globals
+            .as_object()
+            .expect("globals object")
+            .iter()
+            .map(|(name, value)| (name.clone(), lashlang::from_json(value.clone())))
+            .collect::<Vec<_>>();
+        crate::rlm_support::render_bound_variables(cache, &globals)
+    }
+
+    fn project_iteration_request(
+        projector: &RlmContextProjector,
+        events: &[SessionEventRecord],
+        protocol_iteration: usize,
+        model: &str,
+    ) -> Arc<LlmRequest> {
+        let config = lash_core::TurnMachineConfig {
+            protocol_driver: Arc::new(crate::protocol::RlmDriver),
+            projector: Arc::new(lash_core::sansio::ChatContextProjector),
+            sync_execution_environment: true,
+            model: model.to_string(),
+            max_context_tokens: None,
+            max_turns: None,
+            model_variant: Default::default(),
+            model_capability: Default::default(),
+            generation: Default::default(),
+            autonomous: false,
+            tool_specs: Arc::new(Vec::new()),
+            system_prompt: Arc::from("stable RLM system prompt"),
+            session_id: "prefix-stability".to_string(),
+            emit_llm_trace: false,
+            termination: lash_core::ProtocolTurnOptions::typed(RlmCreateExtras::default())
+                .expect("RLM options"),
+            turn_limit_final_message: Arc::new(crate::protocol::turn_limit_final_message),
+        };
+        projector.project(ProjectorContext {
+            config: &config,
+            messages: &lash_core::MessageSequence::default(),
+            events,
+            turn_causes: &[],
+            protocol_iteration,
+            use_tools: false,
+        })
+    }
+
+    fn serialize_openrouter_request(request: LlmRequest) -> serde_json::Value {
+        let capture = Arc::new(CapturingTransport::default());
+        let mut provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+            .with_transport(capture.clone());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async move {
+                let _ = provider.complete(request).await;
+            });
+        let body = capture
+            .bodies
+            .lock()
+            .expect("capture lock")
+            .pop()
+            .expect("captured request body");
+        serde_json::from_slice(&body).expect("request JSON")
+    }
+
+    fn stable_prompt_prefix_bytes(body: &serde_json::Value, message_count: usize) -> Vec<u8> {
+        // `cache_control` is the provider's deliberately moving breakpoint
+        // directive, not prompt content. Remove only that annotation before
+        // comparing the serialized prompt prefix; roles, part shape, and text
+        // remain byte-for-byte significant.
+        let mut prefix =
+            body["messages"].as_array().expect("messages array")[..message_count].to_vec();
+        for message in &mut prefix {
+            if let Some(parts) = message
+                .get_mut("content")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for part in parts {
+                    part.as_object_mut()
+                        .map(|object| object.remove("cache_control"));
+                }
+            }
+        }
+        serde_json::to_vec(&prefix).expect("serialize stable prompt prefix")
+    }
+
+    fn message_text(message: &LlmMessage) -> String {
+        message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -594,6 +749,7 @@ mod tests {
                 required_output: None,
                 final_answer_format: None,
                 budget_suffix: None,
+                bound_variables: "",
             },
             &mut attachments,
         );
@@ -775,6 +931,7 @@ mod tests {
                 required_output: None,
                 final_answer_format: None,
                 budget_suffix: None,
+                bound_variables: "",
             },
             &mut attachments,
         );
@@ -816,6 +973,7 @@ mod tests {
                 required_output: None,
                 final_answer_format: None,
                 budget_suffix: None,
+                bound_variables: "",
             },
             &mut attachments,
         );
@@ -878,6 +1036,7 @@ mod tests {
                 required_output: None,
                 final_answer_format: None,
                 budget_suffix: None,
+                bound_variables: "",
             },
             &mut attachments,
         );
@@ -918,6 +1077,7 @@ mod tests {
                 required_output: None,
                 final_answer_format: None,
                 budget_suffix: None,
+                bound_variables: "",
             },
             &mut attachments,
         );
@@ -964,6 +1124,119 @@ mod tests {
     }
 
     #[test]
+    fn rlm_system_message_is_stable_while_history_and_globals_change() {
+        let previous_events = vec![user_event("u1", "inspect"), step_event(0, "value = 1", "1")];
+        let mut next_events = previous_events.clone();
+        next_events.push(step_event(1, "scratch_note = \"saved\"", "saved"));
+        let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
+        let previous_bound = rendered_bound_variables(&mut cache, serde_json::json!({}));
+        let next_bound =
+            rendered_bound_variables(&mut cache, serde_json::json!({ "scratch_note": "saved" }));
+        let projector = projector(1000);
+
+        *projector
+            .bound_variables_prompt
+            .write()
+            .expect("bound variables write") = previous_bound;
+        let previous = project_iteration_request(&projector, &previous_events, 0, "test-model");
+        *projector
+            .bound_variables_prompt
+            .write()
+            .expect("bound variables write") = next_bound;
+        let next = project_iteration_request(&projector, &next_events, 1, "test-model");
+
+        assert_eq!(
+            serde_json::to_vec(&previous.messages[0]).unwrap(),
+            serde_json::to_vec(&next.messages[0]).unwrap()
+        );
+        assert!(!message_text(&previous.messages[0]).contains("Bound Variables"));
+        assert!(!message_text(&next.messages[0]).contains("scratch_note"));
+    }
+
+    #[test]
+    fn bound_variables_render_in_the_volatile_tail_in_name_order() {
+        let events = vec![
+            user_event("u1", "inspect"),
+            step_event(0, "value = 1", "1"),
+            step_event(1, "scratch_note = \"saved\"", "saved"),
+        ];
+        let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
+        let bound_variables = rendered_bound_variables(
+            &mut cache,
+            serde_json::json!({
+                "zeta": 3,
+                "scratch_note": "saved",
+                "alpha": 1
+            }),
+        );
+        let projector = projector(1000);
+        *projector
+            .bound_variables_prompt
+            .write()
+            .expect("bound variables write") = bound_variables;
+        let request = project_iteration_request(&projector, &events, 1, "test-model");
+        let tail = message_text(request.messages.last().expect("volatile tail"));
+
+        assert!(tail.contains("=== BOUND VARIABLES ==="), "{tail}");
+        assert!(tail.contains("- `scratch_note` = saved"), "{tail}");
+        assert!(
+            tail.contains("- `history` currently has 3 entries"),
+            "{tail}"
+        );
+        let alpha = tail.find("- `alpha` = 1").expect("alpha row");
+        let scratch = tail.find("- `scratch_note` = saved").expect("scratch row");
+        let zeta = tail.find("- `zeta` = 3").expect("zeta row");
+        assert!(alpha < scratch && scratch < zeta, "{tail}");
+    }
+
+    #[test]
+    fn openrouter_rlm_prompt_prefix_is_byte_stable_across_iterations() {
+        let previous_events = vec![user_event("u1", "inspect"), step_event(0, "value = 1", "1")];
+        let mut next_events = previous_events.clone();
+        next_events.push(step_event(1, "scratch_note = \"saved\"", "saved"));
+        let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
+        let previous_bound = rendered_bound_variables(&mut cache, serde_json::json!({}));
+        let next_bound =
+            rendered_bound_variables(&mut cache, serde_json::json!({ "scratch_note": "saved" }));
+        let projector = projector(1000);
+
+        for model in [
+            "anthropic/claude-sonnet-4.6",
+            "google/gemini-3.1-pro-preview",
+        ] {
+            *projector
+                .bound_variables_prompt
+                .write()
+                .expect("bound variables write") = Arc::clone(&previous_bound);
+            let previous_request =
+                project_iteration_request(&projector, &previous_events, 0, model);
+            let stable_message_count = previous_request.messages.len() - 1;
+            *projector
+                .bound_variables_prompt
+                .write()
+                .expect("bound variables write") = Arc::clone(&next_bound);
+            let next_request = project_iteration_request(&projector, &next_events, 1, model);
+            let previous_body = serialize_openrouter_request(previous_request.as_ref().clone());
+            let next_body = serialize_openrouter_request(next_request.as_ref().clone());
+
+            assert_eq!(
+                stable_prompt_prefix_bytes(&previous_body, stable_message_count),
+                stable_prompt_prefix_bytes(&next_body, stable_message_count),
+                "RLM prompt prefix changed for {model}"
+            );
+            assert!(
+                next_body["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .iter()
+                    .take(stable_message_count)
+                    .all(|message| message["content"].is_array()),
+                "stable prefix text shape changed for {model}"
+            );
+        }
+    }
+
+    #[test]
     fn rlm_prompt_renders_required_output_block_when_schema_present() {
         let events = [user_event("u1", "first")];
         let mut attachments = Vec::new();
@@ -988,6 +1261,7 @@ mod tests {
                 required_output: Some(&schema_contract),
                 final_answer_format: None,
                 budget_suffix: None,
+                bound_variables: "",
             },
             &mut attachments,
         );

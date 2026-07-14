@@ -18,17 +18,17 @@
 //!   `cache_breakpoint` (`mark_last_history_text_cache_breakpoint`) so the
 //!   provider can reuse the stable history prefix across iterations. Only the
 //!   volatile `=== CURRENT ITERATION ===` tail — iteration number, turn events,
-//!   finalization, required-output schema, context budget — is appended uncached
-//!   by `append_current_iteration_message`.
+//!   bound variables, finalization, required-output schema, context budget — is
+//!   appended uncached by `append_current_iteration_message`.
 //! - **Re-fetch handle.** A lossy-projected step output is tagged
 //!   `full: history[N].output[M]` on its user message; the `history` projected
 //!   binding (`projection/context.rs`) carries the full untruncated value, keyed
 //!   by the step's `entry.index`, so the model can recover it by re-printing the
 //!   reference. Proven by
 //!   `projection::context::tests::history_step_output_resolves_full_untruncated_value`.
-//! - **Variables.** The live variable namespace is surfaced separately as the
-//!   "Bound Variables" prompt contribution (`crate::rlm_support::render_bound_variables`),
-//!   not here — history carries the trajectory, not current globals.
+//! - **Variables.** The live variable namespace is rendered into the volatile
+//!   current-iteration tail. It is deliberately outside the stable system and
+//!   history prefix while remaining adjacent to the work it describes.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -40,7 +40,7 @@ use lash_rlm_types::{RlmAttachmentRef, RlmImageRef};
 use lashlang::{Value as FlowValue, ValueProjectionContext};
 
 use crate::cell_scan::render_lashlang_cell_text;
-use crate::projection::{decode_rlm_protocol_event, json_to_flow_value};
+use crate::projection::{decode_rlm_protocol_event, json_to_flow_value, rlm_history_projection};
 
 pub(super) struct RlmHistoryRenderInput<'a> {
     pub(super) events: &'a [lash_core::SessionEventRecord],
@@ -52,17 +52,20 @@ pub(super) struct RlmHistoryRenderInput<'a> {
     pub(super) required_output: Option<&'a str>,
     pub(super) final_answer_format: Option<&'a str>,
     pub(super) budget_suffix: Option<&'a str>,
+    pub(super) bound_variables: &'a str,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct CurrentIterationMessageInput<'a> {
     pub(super) saw_history: bool,
+    pub(super) history_len: usize,
     pub(super) protocol_iteration: usize,
     pub(super) turn_causes: &'a [lash_core::TurnCause],
     pub(super) finalization: &'a str,
     pub(super) required_output: Option<&'a str>,
     pub(super) final_answer_format: Option<&'a str>,
     pub(super) budget_suffix: Option<&'a str>,
+    pub(super) bound_variables: &'a str,
 }
 
 /// Assistant prose awaiting a fold into the next lashlang step. Buffered because
@@ -78,16 +81,23 @@ pub(super) fn build_rlm_history_messages_from_turn(
 ) -> Vec<LlmMessage> {
     let mut messages = render_history_messages(&input, attachments);
     let saw_history = !messages.is_empty();
+    let history_len = rlm_history_projection(&lash_core::ChronologicalProjection::from_turn_view(
+        input.events,
+        input.turn_messages,
+    ))
+    .len();
     append_current_iteration_message(
         &mut messages,
         CurrentIterationMessageInput {
             saw_history,
+            history_len,
             protocol_iteration: input.protocol_iteration,
             turn_causes: input.turn_causes,
             finalization: input.finalization,
             required_output: input.required_output,
             final_answer_format: input.final_answer_format,
             budget_suffix: input.budget_suffix,
+            bound_variables: input.bound_variables,
         },
     );
     messages
@@ -225,6 +235,19 @@ fn append_current_iteration_message(
         current_prompt.push_str("\n\n");
         current_prompt.push_str(&turn_events);
     }
+    current_prompt.push_str("\n\n\n=== BOUND VARIABLES ===\n\n");
+    current_prompt.push_str(input.bound_variables);
+    current_prompt.push_str("\n\nRuntime notes:\n");
+    let _ = write!(
+        current_prompt,
+        "- `history` currently has {} {}",
+        input.history_len,
+        if input.history_len == 1 {
+            "entry"
+        } else {
+            "entries"
+        }
+    );
     current_prompt.push_str("\n\n\n=== FINALIZATION ===\n\n");
     current_prompt.push_str(input.finalization);
     if let Some(block) = input.required_output {
