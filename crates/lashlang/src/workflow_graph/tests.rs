@@ -32,6 +32,64 @@ fn canonical_get_put_and_put_get() {
 }
 
 #[test]
+fn expression_if_and_direct_else_if_obey_all_lens_laws() {
+    let source = r#"choice = (true ? 1 : (false ? 2 : 3))
+if choice == 1 {
+  print "one"
+} else if choice == 2 {
+  print "two"
+} else {
+  print "other"
+}
+finish choice
+"#;
+    let canonical = canonical_program_source(&parse(source).unwrap()).unwrap();
+    let graph = workflow_graph_from_source(&canonical).unwrap();
+
+    let WorkflowNodeKind::Container(WorkflowContainer::If {
+        then_is_block,
+        else_is_block,
+        ..
+    }) = &graph.main.nodes[0].kind
+    else {
+        panic!("expected expression-if container")
+    };
+    assert!(!then_is_block);
+    assert!(!else_is_block);
+
+    let WorkflowNodeKind::Container(WorkflowContainer::If {
+        then_is_block,
+        else_is_block,
+        else_graph,
+        ..
+    }) = &graph.main.nodes[1].kind
+    else {
+        panic!("expected statement-if container")
+    };
+    assert!(*then_is_block);
+    assert!(!else_is_block);
+    assert!(matches!(
+        else_graph.as_deref().unwrap().nodes.as_slice(),
+        [WorkflowNode {
+            kind: WorkflowNodeKind::Container(WorkflowContainer::If {
+                then_is_block: true,
+                ..
+            }),
+            ..
+        }]
+    ));
+
+    let rendered = workflow_graph_to_source(&graph).unwrap();
+    assert_eq!(rendered, canonical, "GetPut and canonical fixpoint");
+    assert_eq!(parse(&rendered).unwrap(), parse(&canonical).unwrap());
+    assert_eq!(
+        workflow_graph_from_source(&rendered).unwrap(),
+        graph,
+        "PutGet"
+    );
+}
+
+#[test]
 fn canonicalization_discards_comments_but_preserves_labels() {
     let graph = workflow_graph_from_source(
         "# comment\n@label(title: \"Named\", description: \"Kept\")\nvalue = 1\n",

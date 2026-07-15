@@ -18,11 +18,15 @@ use crate::ast::{
 use crate::runtime::is_pure_expr;
 use crate::source::{CanonicalSourceError, canonical_program_source};
 use crate::tracking::WorkflowExecutionSite;
-use crate::tracking::{LashlangAstPath, LashlangExecutionContext};
-use crate::{LashlangExecutionSite, ModuleArtifact, ParseError, Span, parse};
+use crate::{LashlangExecutionSite, ParseError, Span, parse};
+
+mod execution_sites;
+
+use execution_sites::execution_sites;
+pub use execution_sites::runtime_execution_site_for_workflow_site;
 
 /// Version of the serialized workflow graph contract.
-pub const WORKFLOW_GRAPH_SCHEMA_VERSION: u32 = 1;
+pub const WORKFLOW_GRAPH_SCHEMA_VERSION: u32 = 2;
 
 /// A deterministic node identifier minted from canonical source and AST position.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -191,6 +195,10 @@ pub enum WorkflowContainer {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binding: Option<AssignTarget>,
         condition: Expr,
+        /// Whether the source's then branch is a statement block rather than a value expression.
+        then_is_block: bool,
+        /// Whether the source's else branch is a block rather than a direct value or `else if`.
+        else_is_block: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         then_graph: Option<Box<WorkflowSubgraph>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,37 +312,6 @@ pub fn node_id_for_execution_site(
                 .any(|candidate| candidate.same_location(&site.workflow_site))
         })
         .map(|node| node.id.clone())
-}
-
-/// Recreate the runtime identity for a graph execution-site descriptor.
-///
-/// This is primarily a compatibility seam for trace consumers that key live
-/// observations by the runtime site id while reading the workflow graph as the
-/// static skeleton.
-pub fn runtime_execution_site_for_workflow_site(
-    artifact: &ModuleArtifact,
-    site: &WorkflowExecutionSite,
-) -> Option<LashlangExecutionSite> {
-    let context = if site.owner == "main" {
-        LashlangExecutionContext::main(artifact.module_ref.clone())
-    } else {
-        let process_name = site.owner.strip_prefix("process:")?;
-        LashlangExecutionContext::process(
-            artifact.module_ref.clone(),
-            artifact.process_ref(process_name)?.clone(),
-            process_name,
-        )
-    };
-    let path = LashlangAstPath::from_indices(&site.path);
-    let mut runtime_site = if site.kind == "branch" {
-        context.builder().branch_site(&path)
-    } else {
-        context
-            .builder()
-            .node_site(&path, site.kind.clone(), site.label.clone())
-    };
-    runtime_site.workflow_site = site.clone();
-    Some(runtime_site)
 }
 
 struct GraphProjector<'a> {
@@ -521,6 +498,8 @@ impl<'a> GraphProjector<'a> {
                     WorkflowNodeKind::Container(WorkflowContainer::If {
                         binding,
                         condition: (**condition).clone(),
+                        then_is_block: matches!(then_block.as_ref(), Expr::Block(_)),
+                        else_is_block: matches!(else_block.as_ref(), Expr::Block(_)),
                         then_graph: Some(Box::new(then_graph)),
                         else_graph: Some(Box::new(else_graph)),
                     }),
@@ -834,6 +813,8 @@ fn validate_node(
             return invalid_payload(node, "fail terminal must carry a fail expression");
         }
         WorkflowNodeKind::Container(WorkflowContainer::If {
+            then_is_block,
+            else_is_block,
             then_graph,
             else_graph,
             ..
@@ -854,6 +835,36 @@ fn validate_node(
                     })?;
             validate_subgraph(then_graph, all_ids)?;
             validate_subgraph(else_graph, all_ids)?;
+            if !then_is_block && *else_is_block {
+                return invalid_payload(
+                    node,
+                    "expression if cannot have a statement-block else branch",
+                );
+            }
+            if !then_is_block && (then_graph.nodes.len() != 1 || else_graph.nodes.len() != 1) {
+                return invalid_payload(
+                    node,
+                    "expression-if branches must contain exactly one value node",
+                );
+            }
+            if *then_is_block && !else_is_block {
+                let is_direct_else_if = matches!(
+                    else_graph.nodes.as_slice(),
+                    [WorkflowNode {
+                        kind: WorkflowNodeKind::Container(WorkflowContainer::If {
+                            then_is_block: true,
+                            ..
+                        }),
+                        ..
+                    }]
+                );
+                if !is_direct_else_if {
+                    return invalid_payload(
+                        node,
+                        "non-block statement-if else branch must be a direct else if",
+                    );
+                }
+            }
         }
         WorkflowNodeKind::Container(WorkflowContainer::For { body, .. }) => {
             let body = body
@@ -962,6 +973,8 @@ fn node_to_expr(node: &WorkflowNode, context: RenderContext) -> Result<Expr, Gra
             WorkflowNodeKind::Container(WorkflowContainer::If {
                 binding,
                 condition,
+                then_is_block,
+                else_is_block,
                 then_graph,
                 else_graph,
             }) => {
@@ -981,8 +994,20 @@ fn node_to_expr(node: &WorkflowNode, context: RenderContext) -> Result<Expr, Gra
                     binding,
                     Expr::If {
                         condition: Box::new(condition.clone()),
-                        then_block: Box::new(subgraph_to_block(then_graph, context)?),
-                        else_block: Box::new(subgraph_to_block(else_graph, context)?),
+                        then_block: Box::new(subgraph_to_branch(
+                            node,
+                            then_graph,
+                            context,
+                            *then_is_block,
+                            "then_graph",
+                        )?),
+                        else_block: Box::new(subgraph_to_branch(
+                            node,
+                            else_graph,
+                            context,
+                            *else_is_block,
+                            "else_graph",
+                        )?),
                     },
                 )
             }
@@ -1044,6 +1069,25 @@ fn node_to_expr(node: &WorkflowNode, context: RenderContext) -> Result<Expr, Gra
     } else {
         expression
     })
+}
+
+fn subgraph_to_branch(
+    node: &WorkflowNode,
+    graph: &WorkflowSubgraph,
+    context: RenderContext,
+    is_block: bool,
+    child: &'static str,
+) -> Result<Expr, GraphRenderError> {
+    if is_block {
+        return subgraph_to_block(graph, context);
+    }
+    let [branch] = graph.nodes.as_slice() else {
+        return Err(GraphRenderError::InvalidNodePayload {
+            node_id: node.id.to_string(),
+            message: format!("non-block {child} must contain exactly one node"),
+        });
+    };
+    node_to_expr(branch, context)
 }
 
 fn parse_opaque_statement(
@@ -1362,187 +1406,6 @@ fn child_path(path: &[u32], child: impl TryInto<u32>) -> Vec<u32> {
     let mut result = path.to_vec();
     result.push(child.try_into().ok().expect("AST child index fits u32"));
     result
-}
-
-fn execution_sites(
-    expression: &Expr,
-    owner: &str,
-    path: &[u32],
-    label: Option<&LabelMetadata>,
-) -> Vec<WorkflowExecutionSite> {
-    let mut sites = Vec::new();
-    collect_execution_sites(expression, owner, path, label, &mut sites);
-    sites.sort();
-    sites.dedup();
-    sites
-}
-
-fn collect_execution_sites(
-    expression: &Expr,
-    owner: &str,
-    path: &[u32],
-    label: Option<&LabelMetadata>,
-    sites: &mut Vec<WorkflowExecutionSite>,
-) {
-    if let Some(label) = label
-        && !label_attaches_to_concrete_node(expression)
-    {
-        sites.push(WorkflowExecutionSite::new(
-            owner,
-            path,
-            "step",
-            label.title.as_str(),
-        ));
-        return;
-    }
-    match expression {
-        Expr::Assign { target, expr } if label.is_some() => {
-            let value_index = target
-                .steps
-                .iter()
-                .filter(|step| matches!(step, crate::AssignPathStep::Index(_)))
-                .count() as u32;
-            collect_execution_sites(expr, owner, &child_path(path, value_index), label, sites);
-        }
-        Expr::Await(expr) | Expr::ResultUnwrap(expr) if label.is_some() => {
-            collect_execution_sites(expr, owner, &child_path(path, 0), label, sites);
-        }
-        Expr::ReceiverCall { operation, .. } => {
-            sites.push(WorkflowExecutionSite::new(
-                owner,
-                path,
-                "resource_operation",
-                operation.as_str(),
-            ));
-            collect_child_execution_sites(expression, owner, path, sites);
-        }
-        Expr::StartProcess(start) => {
-            sites.push(WorkflowExecutionSite::new(
-                owner,
-                path,
-                "child_process",
-                format!("start {}", start.process),
-            ));
-            collect_child_execution_sites(expression, owner, path, sites);
-        }
-        Expr::SleepFor(_) => {
-            sites.push(WorkflowExecutionSite::new(
-                owner,
-                path,
-                "sleep",
-                "sleep for",
-            ));
-            collect_child_execution_sites(expression, owner, path, sites);
-        }
-        Expr::SleepUntil(_) => {
-            sites.push(WorkflowExecutionSite::new(
-                owner,
-                path,
-                "sleep",
-                "sleep until",
-            ));
-            collect_child_execution_sites(expression, owner, path, sites);
-        }
-        Expr::WaitSignal { name } => sites.push(WorkflowExecutionSite::new(
-            owner,
-            path,
-            "wait",
-            format!("wait_signal {name}"),
-        )),
-        Expr::SignalRun { .. } => {
-            sites.push(WorkflowExecutionSite::new(
-                owner,
-                path,
-                "signal",
-                "signal_run",
-            ));
-            collect_child_execution_sites(expression, owner, path, sites);
-        }
-        Expr::Finish(_) => {
-            sites.push(WorkflowExecutionSite::new(
-                owner, path, "terminal", "result",
-            ));
-            collect_child_execution_sites(expression, owner, path, sites);
-        }
-        Expr::Fail(_) => {
-            sites.push(WorkflowExecutionSite::new(
-                owner, path, "terminal", "failure",
-            ));
-            collect_child_execution_sites(expression, owner, path, sites);
-        }
-        Expr::Yield(_) => {
-            sites.push(WorkflowExecutionSite::new(
-                owner,
-                path,
-                "process_event",
-                "yield",
-            ));
-            collect_child_execution_sites(expression, owner, path, sites);
-        }
-        Expr::Wake(_) => {
-            sites.push(WorkflowExecutionSite::new(
-                owner,
-                path,
-                "process_event",
-                "wake",
-            ));
-            collect_child_execution_sites(expression, owner, path, sites);
-        }
-        Expr::If { condition, .. } => {
-            sites.push(WorkflowExecutionSite::new(owner, path, "branch", "if"));
-            collect_execution_sites(condition, owner, &child_path(path, 0), None, sites);
-        }
-        Expr::For { iterable, .. } => {
-            collect_execution_sites(iterable, owner, &child_path(path, 0), None, sites);
-        }
-        Expr::ListComprehension { clauses, .. } => {
-            for (index, clause) in clauses.iter().enumerate() {
-                let expression = match clause {
-                    ListComprehensionClause::For { iterable, .. } => iterable,
-                    ListComprehensionClause::If { condition } => condition,
-                };
-                collect_execution_sites(
-                    expression,
-                    owner,
-                    &child_path(path, index as u32),
-                    None,
-                    sites,
-                );
-            }
-        }
-        _ => collect_child_execution_sites(expression, owner, path, sites),
-    }
-}
-
-fn collect_child_execution_sites(
-    expression: &Expr,
-    owner: &str,
-    path: &[u32],
-    sites: &mut Vec<WorkflowExecutionSite>,
-) {
-    for (index, child) in expression.children().enumerate() {
-        collect_execution_sites(child, owner, &child_path(path, index as u32), None, sites);
-    }
-}
-
-fn label_attaches_to_concrete_node(expression: &Expr) -> bool {
-    match expression {
-        Expr::Assign { expr, .. } | Expr::Await(expr) | Expr::ResultUnwrap(expr) => {
-            label_attaches_to_concrete_node(expr)
-        }
-        Expr::ReceiverCall { .. }
-        | Expr::StartProcess(_)
-        | Expr::SleepFor(_)
-        | Expr::SleepUntil(_)
-        | Expr::WaitSignal { .. }
-        | Expr::SignalRun { .. }
-        | Expr::Yield(_)
-        | Expr::Wake(_)
-        | Expr::Finish(_)
-        | Expr::Fail(_)
-        | Expr::If { .. } => true,
-        _ => false,
-    }
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
