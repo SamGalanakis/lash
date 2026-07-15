@@ -442,7 +442,7 @@ mod tests {
         else {
             panic!("expected seed globals event");
         };
-        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(&protocol_event)
+        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(protocol_event)
         else {
             panic!("expected RlmSeed");
         };
@@ -498,7 +498,7 @@ mod tests {
         else {
             panic!("expected seed globals event");
         };
-        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(&protocol_event)
+        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(protocol_event)
         else {
             panic!("expected RlmSeed");
         };
@@ -548,7 +548,7 @@ mod tests {
         else {
             panic!("expected seed globals event");
         };
-        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(&protocol_event)
+        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(protocol_event)
         else {
             panic!("expected RlmSeed");
         };
