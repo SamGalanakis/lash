@@ -244,6 +244,10 @@ fn child_groups(node: &WorkflowNode) -> Vec<ChildGroup> {
             .as_deref()
             .map(|graph| vec![group("body", graph)])
             .unwrap_or_default(),
+        WorkflowNodeKind::Container(WorkflowContainer::While { body, .. }) => body
+            .as_deref()
+            .map(|graph| vec![group("body", graph)])
+            .unwrap_or_default(),
         WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { element, .. }) => {
             element
                 .as_deref()
@@ -263,6 +267,9 @@ fn child_subgraph<'a>(node: &'a WorkflowNode, slot: &str) -> Option<&'a Workflow
             else_graph.as_deref()
         }
         (WorkflowNodeKind::Container(WorkflowContainer::For { body, .. }), "body") => {
+            body.as_deref()
+        }
+        (WorkflowNodeKind::Container(WorkflowContainer::While { body, .. }), "body") => {
             body.as_deref()
         }
         (
@@ -390,6 +397,9 @@ fn rebuild_children(
         WorkflowNodeKind::Container(WorkflowContainer::For { body, .. }) => {
             *body = build("body")?;
         }
+        WorkflowNodeKind::Container(WorkflowContainer::While { body, .. }) => {
+            *body = build("body")?;
+        }
         WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { element, .. }) => {
             *element = build("element")?;
         }
@@ -411,6 +421,8 @@ fn apply_editable_data(node: &mut WorkflowNode, data: &NodeData) {
         WorkflowNodeKind::Data { expression, .. }
         | WorkflowNodeKind::Call { expression, .. }
         | WorkflowNodeKind::Effect { expression, .. }
+        | WorkflowNodeKind::Computation { expression, .. }
+        | WorkflowNodeKind::StateUpdate { expression, .. }
         | WorkflowNodeKind::Terminal { expression, .. } => Some(expression),
         _ => None,
     };
@@ -424,6 +436,8 @@ fn editable_fields(node: &WorkflowNode) -> BTreeMap<String, EditableValue> {
         WorkflowNodeKind::Data { expression, .. }
         | WorkflowNodeKind::Call { expression, .. }
         | WorkflowNodeKind::Effect { expression, .. }
+        | WorkflowNodeKind::Computation { expression, .. }
+        | WorkflowNodeKind::StateUpdate { expression, .. }
         | WorkflowNodeKind::Terminal { expression, .. } => expression,
         _ => return BTreeMap::new(),
     };
@@ -547,6 +561,8 @@ fn node_kind(node: &WorkflowNode) -> &'static str {
         WorkflowNodeKind::Data { .. } => "data",
         WorkflowNodeKind::Call { .. } => "call",
         WorkflowNodeKind::Effect { .. } => "effect",
+        WorkflowNodeKind::Computation { .. } => "computation",
+        WorkflowNodeKind::StateUpdate { .. } => "state_update",
         WorkflowNodeKind::Terminal { .. } => "terminal",
         WorkflowNodeKind::Container(_) => "container",
         WorkflowNodeKind::Opaque { .. } => "opaque",

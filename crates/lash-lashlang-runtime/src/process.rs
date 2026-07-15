@@ -1259,6 +1259,12 @@ fn append_trace_workflow_subgraph(
             }) => {
                 append_trace_workflow_subgraph(artifact, graph, nodes, edges, primary_runtime_ids);
             }
+            lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::While {
+                body: Some(graph),
+                ..
+            }) => {
+                append_trace_workflow_subgraph(artifact, graph, nodes, edges, primary_runtime_ids);
+            }
             lashlang::WorkflowNodeKind::Container(
                 lashlang::WorkflowContainer::ListComprehension {
                     element: Some(graph),

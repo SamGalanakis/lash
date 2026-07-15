@@ -166,6 +166,9 @@ fn collect_execution_sites(
         Expr::For { iterable, .. } => {
             collect_execution_sites(iterable, owner, &child_path(path, 0), None, sites);
         }
+        Expr::While { condition, .. } => {
+            collect_execution_sites(condition, owner, &child_path(path, 0), None, sites);
+        }
         Expr::ListComprehension { clauses, .. } => {
             for (index, clause) in clauses.iter().enumerate() {
                 let expression = match clause {
