@@ -18,15 +18,75 @@ in `examples/workflow-graph-roundtrip/frontend/dist/` (or directly in
 
 | Method | Path | Response |
 | --- | --- | --- |
+| `GET` | `/workflows` | Built-in catalog as a list of `WorkflowCatalogEntry` objects |
 | `GET` | `/workflow` | Current saved workflow as a `WorkflowDocument` |
+| `POST` | `/workflow/select` | Reset the current workflow to a built-in example and return its `WorkflowDocument` |
 | `POST` | `/workflow` | Save a mutated `WorkflowDocument`; returns the new canonical version |
 | `POST` | `/run` | Create a fresh invocation and return its `text/event-stream` |
 | `GET` | `/healthz` | `{ "service": "workflow-graph-roundtrip", "status": "ok" }` |
 | `GET` | `/` and `/{path}` | Optional files from `frontend/` |
 
+## Built-in workflow catalog
+
+`GET /workflows` returns the four built-in examples in display order:
+
+```json
+[
+  {
+    "id": "onboarding",
+    "name": "Onboarding",
+    "description": "A labeled onboarding flow with a signal wait, branch, and mixed display updates."
+  },
+  {
+    "id": "traffic-lights",
+    "name": "Traffic Lights",
+    "description": "A visual red, amber, and green light sequence repeated twice."
+  },
+  {
+    "id": "branching-approval",
+    "name": "Branching Approval",
+    "description": "An if-heavy approval flow with a visible signal wait and distinct outcomes."
+  },
+  {
+    "id": "counter-loop",
+    "name": "Counter Loop",
+    "description": "An opaque while loop followed by an editable for container and progress updates."
+  }
+]
+```
+
+Select an example with its catalog ID:
+
+```http
+POST /workflow/select
+Content-Type: application/json
+
+{ "id": "traffic-lights" }
+```
+
+A successful selection resets the current workflow to that example's canonical
+source, appends a new in-memory version, and returns the resulting
+`WorkflowDocument` in the same shape as `GET /workflow`. Subsequent
+`GET /workflow`, `POST /workflow`, and `POST /run` requests use that selected
+version. Selecting an example again discards any edits to the current draft and
+loads the built-in source again.
+
+An unknown ID returns HTTP `404`:
+
+```json
+{
+  "error": {
+    "code": "unknown_workflow",
+    "message": "workflow example `missing` does not exist",
+    "details": { "id": "missing" }
+  }
+}
+```
+
 ## WorkflowDocument
 
-`GET /workflow` and a successful `POST /workflow` return this exact shape:
+`GET /workflow`, a successful `POST /workflow`, and a successful
+`POST /workflow/select` return this exact shape:
 
 ```json
 {
