@@ -385,8 +385,8 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
     lash_core::turn_outcome_from_tool_control(&record.tool, record.output.control.as_ref()?)
 }
 
-fn tool_call_event(record: ToolCallRecord) -> SessionEvent {
-    SessionEvent::ToolCall {
+fn tool_call_event(record: ToolCallRecord) -> SessionStreamEvent {
+    SessionStreamEvent::ToolCall {
         call_id: record.call_id,
         name: record.tool,
         args: record.args,

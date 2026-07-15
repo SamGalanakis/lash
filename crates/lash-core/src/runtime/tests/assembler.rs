@@ -410,7 +410,7 @@ fn assembler_derives_tool_failure_from_assembled_records() {
 #[test]
 fn assembler_treats_any_non_success_record_as_tool_failure() {
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::ToolCall {
+    assembler.push(&SessionStreamEvent::ToolCall {
         call_id: Some("tc-cancelled".to_string()),
         name: "x".to_string(),
         args: serde_json::json!({}),
@@ -419,11 +419,11 @@ fn assembler_treats_any_non_success_record_as_tool_failure() {
         )),
         duration_ms: 1,
     });
-    assembler.push(&SessionEvent::Error {
+    assembler.push(&SessionStreamEvent::Error {
         message: "runtime also reported a blocking issue".to_string(),
         envelope: None,
     });
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
 
     let out = assembler.finish(
         default_state().to_snapshot(),

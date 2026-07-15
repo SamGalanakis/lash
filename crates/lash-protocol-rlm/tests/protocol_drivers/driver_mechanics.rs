@@ -168,7 +168,7 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
     let replayed_tool_call = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::Emit(SessionEvent::ToolCall {
+            Effect::Emit(SessionStreamEvent::ToolCall {
                 call_id,
                 name,
                 output,
@@ -267,7 +267,7 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
     let emitted = exec_effects
         .iter()
         .filter_map(|effect| match effect {
-            Effect::Emit(SessionEvent::ToolCall {
+            Effect::Emit(SessionStreamEvent::ToolCall {
                 call_id,
                 name,
                 args,
