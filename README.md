@@ -33,13 +33,15 @@ tokio                = { version = "1", features = ["full"] }
 use std::sync::Arc;
 
 use lash::{LashCore, ModelSpec, TurnInput, provider::ProviderHandle};
-use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompat, OpenAiCompatibleProvider};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let api_key = std::env::var("OPENROUTER_API_KEY")?;
     let provider = ProviderHandle::new(
-        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL).into_components(),
+        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+            .with_compat(OpenAiCompat::openrouter())
+            .into_components(),
     );
 
     let model = ModelSpec::from_token_limits(
@@ -48,7 +50,11 @@ async fn main() -> anyhow::Result<()> {
         200_000,
         None,
     )
-    .map_err(anyhow::Error::msg)?;
+    .map_err(anyhow::Error::msg)?
+    .with_capability(lash::provider::ModelCapability {
+        cache_control: Some(lash::provider::CacheControlDialect::Anthropic),
+        ..Default::default()
+    });
 
     // one LashCore per app, cloned freely.
     let core = lash::LashCore::standard_builder()

@@ -65,6 +65,7 @@
           </div>
           <pre data-lang="rust" data-snippet="example_agent_service#service-core"><code>let provider = ProviderHandle::new(
     OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+        .with_compat(OpenAiCompat::openrouter())
         .with_options(ProviderOptions {
             expose_thinking: true,
             ..ProviderOptions::default()

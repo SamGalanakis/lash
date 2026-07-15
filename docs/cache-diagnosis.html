@@ -28,7 +28,7 @@
     <div class="section" id="detect">
       <div class="section-header">
         <h2>Detect A Regression</h2>
-        <p>Graph cache reuse per logical lane, not as a fleet-wide average. A lane is the stable combination of provider path, base URL, model class, protocol, session, and agent frame.</p>
+        <p>Graph cache reuse per logical lane, not as a fleet-wide average. A lane is the stable combination of provider path, endpoint compatibility, model cache capability, protocol, session, and agent frame.</p>
       </div>
       <div class="table">
         <table>
@@ -60,8 +60,8 @@
         </li>
         <li>
           <div>
-            <h3>Is a marker emitted for this base URL and model?</h3>
-            <p>Serialize the exact path and inspect its body. Anthropic dialects use <code>cache_control</code>; OpenAI Responses and Codex use <code>prompt_cache_key</code>; unsupported paths emit nothing. <code>cache_coverage_matrix_matches_provider_model_and_retention_dialects</code> is the canonical provider × model × <code>CacheRetention</code> table. <code>requested_breakpoints_that_the_chat_gate_strips_are_reported</code> proves a requested marker cannot disappear without an observable drop count.</p>
+            <h3>Is a marker enabled by the model capability?</h3>
+            <p>Serialize the exact path and inspect its body. <code>ModelCapability.cache_control</code> selects the Anthropic or Gemini Chat dialect; OpenAI Responses and Codex use <code>prompt_cache_key</code>; absent capability emits nothing. <code>cache_coverage_matrix_matches_capability_and_retention_dialects</code> is the canonical capability × <code>CacheRetention</code> table. <code>requested_breakpoints_report_capability_driven_emission_and_drop</code> proves a requested marker cannot disappear without an observable drop count.</p>
           </div>
         </li>
         <li>
@@ -73,7 +73,7 @@
         <li>
           <div>
             <h3>Is session affinity stable?</h3>
-            <p>For the current OpenRouter path, inspect the request header named exactly <code>session_id</code> and verify that repeated calls in one session use the same value. Also check <code>x-client-request-id</code> remains call-specific. The <code>openrouter-cache-affinity</code> cutover moves affinity to a bounded body field; use the coverage expectation owned by that branch when it lands.</p>
+            <p>When <code>OpenAiCompat.cache_session_affinity</code> is enabled, inspect the request body field named exactly <code>session_id</code> and verify that repeated calls in one session use the same bounded value. Also check <code>x-client-request-id</code> remains call-specific. The flag is endpoint capability data: a custom proxy may enable it, while the canonical OpenRouter URL alone does not.</p>
           </div>
         </li>
         <li>
@@ -113,8 +113,8 @@
       </div>
       <div class="listing">
         <div class="listing__row">
-          <div class="listing__label">silent model gate</div>
-          <div class="listing__body"><p>A base-URL/model classifier strips requested breakpoints for a model it does not recognize. Check <code>cache_coverage_matrix_matches_provider_model_and_retention_dialects</code> and <code>requested_breakpoints_that_the_chat_gate_strips_are_reported</code>.</p></div>
+          <div class="listing__label">missing capability</div>
+          <div class="listing__body"><p>The host omits or misstates <code>ModelCapability.cache_control</code>, so requested breakpoints are intentionally dropped. Check <code>cache_coverage_matrix_matches_capability_and_retention_dialects</code> and <code>requested_breakpoints_report_capability_driven_emission_and_drop</code>. URL and model-name changes cannot repair missing data.</p></div>
         </div>
         <div class="listing__row">
           <div class="listing__label">volatile cached prefix</div>
@@ -122,7 +122,7 @@
         </div>
         <div class="listing__row">
           <div class="listing__label">rolling wire shape</div>
-          <div class="listing__body"><p>Adding or moving a breakpoint changes an otherwise identical content block from a JSON string to an array, or back again. Check <code>openrouter_standard_prefix_shape_is_stable_as_breakpoints_roll</code>; it intentionally removes directives but keeps content shape significant.</p></div>
+          <div class="listing__body"><p>Adding or moving a breakpoint changes an otherwise identical content block from a JSON string to an array, or back again. Check <code>chat_cache_dialect_prefix_shape_is_stable_as_breakpoints_roll</code>; it intentionally removes directives but keeps content shape significant.</p></div>
         </div>
         <div class="listing__row">
           <div class="listing__label">inert retention</div>
@@ -130,7 +130,7 @@
         </div>
         <div class="listing__row">
           <div class="listing__label">hidden affinity</div>
-          <div class="listing__body"><p>A provider-specific affinity field exists but its exact name, scope, or stability contract is undocumented. Verify the current <code>session_id</code> header and update this runbook and the matrix when the body-field cutover lands.</p></div>
+          <div class="listing__body"><p>A provider-specific affinity field exists but its exact name, scope, or stability contract is undocumented. Verify the bounded body <code>session_id</code>, the call-specific <code>x-client-request-id</code>, and the host's explicit <code>cache_session_affinity</code> setting.</p></div>
         </div>
       </div>
     </div>
