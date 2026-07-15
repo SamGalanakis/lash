@@ -1,6 +1,6 @@
 use super::*;
 use lash_llm_transport::{LlmHttpRequest, LlmHttpResponse};
-use lash_provider_openai::OPENROUTER_BASE_URL;
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompat};
 
 #[derive(Debug)]
 struct CapturingLlmHttpTransport {
@@ -53,10 +53,16 @@ fn wire_message_text(message: &Value) -> String {
 }
 
 #[tokio::test]
-async fn openrouter_rlm_prompt_prefix_is_byte_stable_across_iterations() {
-    for model in [
-        "anthropic/claude-sonnet-4.6",
-        "google/gemini-3.1-pro-preview",
+async fn cache_dialect_rlm_prompt_prefix_is_byte_stable_across_iterations() {
+    for (model, cache_control) in [
+        (
+            "anthropic/claude-sonnet-4.6",
+            lash_core::CacheControlDialect::Anthropic,
+        ),
+        (
+            "google/gemini-3.1-pro-preview",
+            lash_core::CacheControlDialect::Gemini,
+        ),
     ] {
         let responses = vec![
             "<lashlang>\nscratch_note = \"saved\"\nprint scratch_note\n</lashlang>".to_string(),
@@ -78,6 +84,7 @@ async fn openrouter_rlm_prompt_prefix_is_byte_stable_across_iterations() {
             bodies: Mutex::new(Vec::new()),
         });
         let provider = OpenAiCompatibleProvider::new("test-key", OPENROUTER_BASE_URL)
+            .with_compat(OpenAiCompat::openrouter())
             .with_transport(capture.clone());
         let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
             lash_protocol_rlm::RlmProtocolPluginConfig::default(),
@@ -97,7 +104,11 @@ async fn openrouter_rlm_prompt_prefix_is_byte_stable_across_iterations() {
             .provider(ProviderHandle::new(provider.into_components()))
             .model(
                 lash_core::ModelSpec::from_token_limits(model, Default::default(), 200_000, None)
-                    .expect("model limits"),
+                    .expect("model limits")
+                    .with_capability(lash_core::ModelCapability {
+                        cache_control: Some(cache_control),
+                        ..lash_core::ModelCapability::default()
+                    }),
             )
             .build()
             .expect("RLM prefix-stability core");

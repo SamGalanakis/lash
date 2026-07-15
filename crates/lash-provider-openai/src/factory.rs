@@ -35,7 +35,11 @@ impl ProviderFactory for OpenAiProviderFactory {
                 api_key: cfg.api_key,
                 base_url: OPENAI_BASE_URL.to_string(),
                 options: cfg.options,
-                compat: OpenAiCompat::default(),
+                compat: OpenAiCompat {
+                    prompt_cache_key: Some(true),
+                    prompt_cache_retention: Some(true),
+                    ..OpenAiCompat::default()
+                },
                 transport: DEFAULT_HTTP_TRANSPORT.clone(),
             },
         }

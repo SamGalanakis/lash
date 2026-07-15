@@ -3715,6 +3715,7 @@ async fn turn_driver_normalizes_alias_effort_into_outgoing_request() {
             aliases: std::collections::BTreeMap::from([("xhigh".to_string(), "max".to_string())]),
             ..Default::default()
         }),
+        cache_control: None,
     };
     let model = crate::ModelSpec::from_token_limits(
         "mock-model",
@@ -3788,6 +3789,7 @@ async fn turn_driver_rejects_unsupported_effort_before_provider_call() {
                 .collect(),
             ..Default::default()
         }),
+        cache_control: None,
     };
     let model = crate::ModelSpec::from_token_limits(
         "mock-model",

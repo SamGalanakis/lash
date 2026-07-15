@@ -1983,6 +1983,7 @@ mod tests {
                 )),
                 ..ReasoningCapability::default()
             }),
+            cache_control: None,
         }
     }
 

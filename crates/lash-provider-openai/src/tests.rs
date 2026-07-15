@@ -3,8 +3,8 @@ use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
 use lash_core::llm::transport::ProviderFailureKind;
 use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolChoice, LlmToolSpec};
 use lash_core::provider::{
-    CacheRetention, ModelCapability, ProviderHandle, ProviderReliability, ReasoningCapability,
-    ReasoningEncoding,
+    CacheControlDialect, CacheRetention, ModelCapability, ProviderHandle, ProviderReliability,
+    ReasoningCapability, ReasoningEncoding,
 };
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -44,6 +44,15 @@ struct RecordingHttpTransport {
     requests: std::sync::Mutex<Vec<LlmHttpRequest>>,
 }
 
+fn openrouter_provider() -> OpenAiCompatibleProvider {
+    OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_compat(OpenAiCompat::openrouter())
+}
+
+fn enable_cache_control(req: &mut LlmRequest, dialect: CacheControlDialect) {
+    req.model_capability.cache_control = Some(dialect);
+}
+
 #[async_trait]
 impl LlmHttpTransport for RecordingHttpTransport {
     async fn send(
@@ -56,7 +65,7 @@ impl LlmHttpTransport for RecordingHttpTransport {
             status: 200,
             headers: Vec::new(),
             body: LlmHttpBody::buffered(
-                r#"{"id":"gen-123","model":"test-model","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#,
+                r#"{"id":"gen-123","model":"test-model","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}"#,
             ),
         })
     }
@@ -72,6 +81,7 @@ fn reasoning_capability() -> ModelCapability {
             )),
             ..ReasoningCapability::default()
         }),
+        cache_control: None,
     }
 }
 
@@ -86,6 +96,7 @@ fn budget_reasoning_capability() -> ModelCapability {
             ])),
             ..ReasoningCapability::default()
         }),
+        cache_control: None,
     }
 }
 
@@ -125,10 +136,14 @@ fn count_object_key(value: &Value, key: &str) -> usize {
 }
 
 #[tokio::test]
-async fn openrouter_request_body_uses_bounded_session_affinity_field() {
+async fn host_enabled_session_affinity_works_through_a_custom_proxy_url() {
     let transport = Arc::new(RecordingHttpTransport::default());
-    let mut provider =
-        OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL).with_transport(transport.clone());
+    let mut provider = OpenAiCompatibleProvider::new("key", "https://router-proxy.example/v1")
+        .with_compat(OpenAiCompat {
+            cache_session_affinity: Some(true),
+            ..OpenAiCompat::default()
+        })
+        .with_transport(transport.clone());
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     let session_id = format!("{}étrailing", "s".repeat(255));
     req.scope.session_id = session_id.clone();
@@ -154,13 +169,16 @@ async fn openrouter_request_body_uses_bounded_session_affinity_field() {
             .iter()
             .all(|(name, _)| !name.eq_ignore_ascii_case("session_id"))
     );
+    assert!(wire_request.headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("x-client-request-id") && value == "session-1:request:test"
+    }));
 }
 
 #[tokio::test]
-async fn non_openrouter_request_body_omits_session_affinity_field() {
+async fn session_affinity_is_disabled_without_endpoint_capability() {
     let transport = Arc::new(RecordingHttpTransport::default());
-    let mut provider = OpenAiCompatibleProvider::new("key", "https://api.together.xyz/v1")
-        .with_transport(transport.clone());
+    let mut provider =
+        OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL).with_transport(transport.clone());
     let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
 
     provider.complete(req).await.expect("request succeeds");
@@ -171,9 +189,30 @@ async fn non_openrouter_request_body_omits_session_affinity_field() {
     assert!(body.get("session_id").is_none());
 }
 
+#[tokio::test]
+async fn direct_openai_prompt_cache_key_does_not_enable_body_session_affinity() {
+    let transport = Arc::new(RecordingHttpTransport::default());
+    let mut provider = OpenAiProvider::new("key").with_transport(transport.clone());
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    provider.complete(req).await.expect("request succeeds");
+
+    let requests = transport.requests.lock().expect("request lock");
+    let wire_request = requests.first().expect("captured request");
+    let body: Value = serde_json::from_slice(&wire_request.body).expect("request body");
+    assert_eq!(body["prompt_cache_key"], "session-1::session-1:frame:test");
+    assert!(body.get("session_id").is_none());
+    assert!(
+        wire_request
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("x-client-request-id"))
+    );
+}
+
 #[test]
 fn chat_image_attachment_serializes_as_data_url() {
-    let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+    let provider = openrouter_provider();
     let png_bytes = vec![0x89, 0x50, 0x4E, 0x47];
     let mut req = request(vec![LlmMessage::new(
         LlmRole::User,
@@ -206,7 +245,7 @@ fn chat_image_attachment_serializes_as_data_url() {
 
 #[test]
 fn chat_unsupported_image_mime_is_rejected_at_request_boundary() {
-    let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+    let provider = openrouter_provider();
     let mut req = request(vec![LlmMessage::new(
         LlmRole::User,
         vec![LlmContentBlock::Image { attachment_idx: 0 }],
@@ -363,7 +402,7 @@ fn providers_serialize_distinct_config_shapes() {
     assert!(direct_config.get("base_url").is_none());
     assert!(direct_config.get("wire_api").is_none());
 
-    let compatible = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+    let compatible = openrouter_provider();
     let compatible_config = compatible.serialize_config();
     assert_eq!(compatible.kind(), "openai-compatible");
     assert_eq!(compatible_config["api_key"], "key");
@@ -416,7 +455,7 @@ fn chat_body_uses_messages_and_not_responses_input() {
     req.model = "anthropic/claude-sonnet-4.6".to_string();
     req.output_spec = Some(LlmOutputSpec::JsonObject);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -435,7 +474,7 @@ fn chat_body_emits_reasoning_from_capability_variant() {
     req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
     req.model_capability = reasoning_capability();
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -449,7 +488,7 @@ fn chat_body_emits_numeric_reasoning_from_budget_encoding() {
     req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
     req.model_capability = budget_reasoning_capability();
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -462,7 +501,7 @@ fn chat_body_emits_none_effort_for_disabled_selection() {
     req.model_variant = lash_core::provider::ReasoningSelection::Disabled;
     req.model_capability = reasoning_capability();
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -475,7 +514,7 @@ fn chat_body_omits_reasoning_without_capability() {
     req.model = "openrouter/custom-model".to_string();
     req.model_variant = lash_core::provider::ReasoningSelection::Effort("high".to_string());
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -483,12 +522,13 @@ fn chat_body_omits_reasoning_without_capability() {
 }
 
 #[test]
-fn openrouter_claude_chat_body_marks_anthropic_cache_breakpoints() {
+fn anthropic_cache_dialect_marks_canonical_breakpoints_for_an_arbitrary_model() {
     let mut req = request(vec![
         LlmMessage::text(LlmRole::System, "stable system prompt"),
         LlmMessage::text(LlmRole::User, "dynamic tail"),
     ]);
-    req.model = "anthropic/claude-sonnet-4.6".to_string();
+    req.model = "custom/model-v1".to_string();
+    enable_cache_control(&mut req, CacheControlDialect::Anthropic);
     req.tools = Arc::new(vec![LlmToolSpec {
         name: "search".to_string(),
         description: "Search".to_string(),
@@ -496,7 +536,7 @@ fn openrouter_claude_chat_body_marks_anthropic_cache_breakpoints() {
         output_schema: json!({}).into(),
     }]);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = OpenAiCompatibleProvider::new("key", "https://router-proxy.example/v1")
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -515,7 +555,7 @@ fn openrouter_claude_chat_body_marks_anthropic_cache_breakpoints() {
 }
 
 #[test]
-fn openrouter_gemini_chat_body_emits_one_ephemeral_explicit_breakpoint() {
+fn gemini_cache_dialect_emits_one_ephemeral_explicit_breakpoint() {
     let mut req = request(vec![
         LlmMessage::text(LlmRole::System, "stable system prompt"),
         LlmMessage::new(
@@ -539,7 +579,8 @@ fn openrouter_gemini_chat_body_emits_one_ephemeral_explicit_breakpoint() {
             ],
         ),
     ]);
-    req.model = "google/Gemini-2.5-Pro".to_string();
+    req.model = "custom/model-v1".to_string();
+    enable_cache_control(&mut req, CacheControlDialect::Gemini);
     req.tools = Arc::new(vec![LlmToolSpec {
         name: "search".to_string(),
         description: "Search".to_string(),
@@ -547,7 +588,7 @@ fn openrouter_gemini_chat_body_emits_one_ephemeral_explicit_breakpoint() {
         output_schema: json!({}).into(),
     }]);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .with_options(ProviderOptions {
             cache_retention: CacheRetention::Long,
             ..ProviderOptions::default()
@@ -572,14 +613,15 @@ fn openrouter_gemini_chat_body_emits_one_ephemeral_explicit_breakpoint() {
 }
 
 #[test]
-fn openrouter_gemini_chat_body_falls_back_to_last_message_text() {
+fn gemini_cache_dialect_falls_back_to_last_message_text() {
     let mut req = request(vec![
         LlmMessage::text(LlmRole::System, "stable system prompt"),
         LlmMessage::text(LlmRole::User, "last stable text"),
     ]);
-    req.model = "google/gemini-2.5-flash".to_string();
+    req.model = "custom/model-v1".to_string();
+    enable_cache_control(&mut req, CacheControlDialect::Gemini);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -592,7 +634,7 @@ fn openrouter_gemini_chat_body_falls_back_to_last_message_text() {
 }
 
 #[test]
-fn non_openrouter_gemini_chat_body_strips_breakpoint_without_emitting_cache_control() {
+fn absent_cache_dialect_strips_breakpoint_even_on_the_openrouter_url() {
     let mut req = request(vec![LlmMessage::new(
         LlmRole::User,
         vec![LlmContentBlock::Text {
@@ -603,7 +645,7 @@ fn non_openrouter_gemini_chat_body_strips_breakpoint_without_emitting_cache_cont
     )]);
     req.model = "google/gemini-2.5-pro".to_string();
 
-    let body = OpenAiCompatibleProvider::new("key", "https://api.together.xyz/v1")
+    let body = openrouter_provider()
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -661,7 +703,7 @@ fn chat_tools_use_projected_openai_schema_and_preserve_override() {
         },
     ]);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -742,7 +784,7 @@ fn openrouter_can_be_configured_for_bedrock_safe_schema_dialect() {
         strict: true,
     }));
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .with_schema_capabilities(lash_core::ProviderSchemaCapabilities::bedrock_claude())
         .build_chat_request_body(&req, true)
         .unwrap();
@@ -758,7 +800,7 @@ fn openrouter_can_be_configured_for_bedrock_safe_schema_dialect() {
 }
 
 #[test]
-fn openrouter_claude_chat_body_prefers_explicit_text_cache_breakpoint() {
+fn anthropic_cache_dialect_prefers_explicit_text_breakpoint() {
     let mut req = request(vec![
         LlmMessage::text(LlmRole::System, "stable system prompt"),
         LlmMessage::new(
@@ -777,9 +819,10 @@ fn openrouter_claude_chat_body_prefers_explicit_text_cache_breakpoint() {
             ],
         ),
     ]);
-    req.model = "anthropic/claude-sonnet-4.6".to_string();
+    req.model = "custom/model-v1".to_string();
+    enable_cache_control(&mut req, CacheControlDialect::Anthropic);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -810,10 +853,10 @@ fn without_cache_control(mut value: Value) -> Value {
 }
 
 #[test]
-fn openrouter_chat_history_shape_is_stable_when_cache_breakpoint_moves() {
-    for model in [
-        "anthropic/claude-sonnet-4.6",
-        "google/gemini-3.1-pro-preview",
+fn cache_dialect_chat_history_shape_is_stable_when_breakpoint_moves() {
+    for (model, dialect) in [
+        ("custom/model-a", CacheControlDialect::Anthropic),
+        ("custom/model-b", CacheControlDialect::Gemini),
     ] {
         let history = |text: &'static str, cache_breakpoint| {
             LlmMessage::new(
@@ -831,6 +874,7 @@ fn openrouter_chat_history_shape_is_stable_when_cache_breakpoint_moves() {
             LlmMessage::text(LlmRole::User, "dynamic iteration one"),
         ]);
         previous.model = model.to_string();
+        enable_cache_control(&mut previous, dialect);
         let mut next = request(vec![
             LlmMessage::text(LlmRole::System, "stable system prompt"),
             history("stable history one", false),
@@ -838,8 +882,9 @@ fn openrouter_chat_history_shape_is_stable_when_cache_breakpoint_moves() {
             LlmMessage::text(LlmRole::User, "dynamic iteration two"),
         ]);
         next.model = model.to_string();
+        enable_cache_control(&mut next, dialect);
 
-        let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+        let provider = openrouter_provider();
         let previous_body = provider.build_chat_request_body(&previous, true).unwrap();
         let next_body = provider.build_chat_request_body(&next, true).unwrap();
         let previous_history = without_cache_control(previous_body["messages"][1].clone());
@@ -859,9 +904,9 @@ fn cache_retention_none_removes_chat_cache_markers() {
         LlmMessage::text(LlmRole::System, "stable system prompt"),
         LlmMessage::text(LlmRole::User, "dynamic tail"),
     ]);
-    req.model = "anthropic/claude-sonnet-4.6".to_string();
+    enable_cache_control(&mut req, CacheControlDialect::Anthropic);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .with_options(ProviderOptions {
             cache_retention: CacheRetention::None,
             ..ProviderOptions::default()
@@ -888,9 +933,9 @@ fn cache_retention_long_uses_anthropic_ttl_on_chat_cache_markers() {
         LlmMessage::text(LlmRole::System, "stable system prompt"),
         LlmMessage::text(LlmRole::User, "dynamic tail"),
     ]);
-    req.model = "anthropic/claude-sonnet-4.6".to_string();
+    enable_cache_control(&mut req, CacheControlDialect::Anthropic);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .with_options(ProviderOptions {
             cache_retention: CacheRetention::Long,
             ..ProviderOptions::default()
@@ -935,12 +980,11 @@ fn responses_none_cache_retention_omits_prompt_cache_fields() {
 
 #[test]
 fn openai_compat_config_serializes_when_non_default() {
-    let provider =
-        OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL).with_compat(OpenAiCompat {
-            max_tokens_field: Some(OpenAiCompatMaxTokensField::MaxCompletionTokens),
-            streaming_usage: Some(false),
-            ..OpenAiCompat::default()
-        });
+    let provider = openrouter_provider().with_compat(OpenAiCompat {
+        max_tokens_field: Some(OpenAiCompatMaxTokensField::MaxCompletionTokens),
+        streaming_usage: Some(false),
+        ..OpenAiCompat::default()
+    });
 
     let config = provider.serialize_config();
 
@@ -953,7 +997,7 @@ fn openai_compat_config_serializes_when_non_default() {
 
 #[test]
 fn openai_compat_resolver_covers_openrouter_local_and_session_affinity() {
-    let openrouter = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+    let openrouter = openrouter_provider();
     let openrouter_caps = openrouter.resolved_compat(CompletionEndpoint::ChatCompletions);
     assert_eq!(
         openrouter_caps.reasoning_format,
@@ -987,7 +1031,7 @@ fn chat_body_honors_compat_max_token_field_streaming_usage_and_strict_tools() {
         output_schema: json!({}).into(),
     }]);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .with_compat(OpenAiCompat {
             max_tokens_field: Some(OpenAiCompatMaxTokensField::MaxCompletionTokens),
             streaming_usage: Some(false),
@@ -1057,14 +1101,14 @@ fn output_token_cap_maps_to_wire_fields() {
 
     let mut chat_req = req;
     chat_req.model = "anthropic/claude-sonnet-4.6".to_string();
-    let chat_body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let chat_body = openrouter_provider()
         .with_options(options.clone())
         .build_chat_request_body(&chat_req, true)
         .unwrap();
     assert_eq!(chat_body["max_tokens"], 2048);
     let mut provider_limited_chat_req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     provider_limited_chat_req.model = "anthropic/claude-sonnet-4.6".to_string();
-    let provider_limited_chat_body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let provider_limited_chat_body = openrouter_provider()
         .with_options(options)
         .build_chat_request_body(&provider_limited_chat_req, true)
         .unwrap();
@@ -1125,7 +1169,7 @@ fn chat_body_replays_openrouter_reasoning_details_on_tool_calls() {
         }],
     )]);
 
-    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let body = openrouter_provider()
         .build_chat_request_body(&req, false)
         .unwrap();
 
@@ -1507,7 +1551,7 @@ async fn openrouter_handle_records_failed_request_id_then_served_model_evidence(
             ),
         ])),
     });
-    let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+    let provider = openrouter_provider()
         .with_options(ProviderOptions {
             reliability: ProviderReliability::default()
                 .max_attempts(2)

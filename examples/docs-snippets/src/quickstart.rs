@@ -4,14 +4,16 @@
 use std::sync::Arc;
 
 use lash::{LashCore, TurnInput, provider::ProviderHandle};
-use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompat, OpenAiCompatibleProvider};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // build a provider handle. substitute your own creds + base URL.
     let api_key = std::env::var("OPENROUTER_API_KEY")?;
     let provider = ProviderHandle::new(
-        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL).into_components(),
+        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+            .with_compat(OpenAiCompat::openrouter())
+            .into_components(),
     );
 
     // one LashCore per app, cloned freely.
@@ -24,7 +26,11 @@ async fn main() -> anyhow::Result<()> {
                 200_000,
                 None,
             )
-            .expect("valid model metadata"),
+            .expect("valid model metadata")
+            .with_capability(lash::provider::ModelCapability {
+                cache_control: Some(lash::provider::CacheControlDialect::Anthropic),
+                ..Default::default()
+            }),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))

@@ -38,8 +38,13 @@ impl OpenAiCompatibleProvider {
 
 impl OpenAiProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
+        let compat = OpenAiCompat {
+            prompt_cache_key: Some(true),
+            prompt_cache_retention: Some(true),
+            ..OpenAiCompat::default()
+        };
         Self {
-            inner: OpenAiCompatibleProvider::new(api_key, OPENAI_BASE_URL),
+            inner: OpenAiCompatibleProvider::new(api_key, OPENAI_BASE_URL).with_compat(compat),
         }
     }
 

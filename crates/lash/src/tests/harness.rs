@@ -37,6 +37,7 @@ fn capability_for_variant(variant: Option<&str>) -> lash_core::ModelCapability {
             disable: None,
             mandatory: false,
         }),
+        cache_control: None,
     }
 }
 

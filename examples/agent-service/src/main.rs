@@ -13,7 +13,7 @@ use lash::{
     provider::{ProviderHandle, ProviderOptions},
     tracing::{JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceLevel, TraceSink},
 };
-use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompat, OpenAiCompatibleProvider};
 
 mod board;
 mod db;
@@ -23,6 +23,25 @@ mod restate;
 mod routes;
 mod state;
 mod ui;
+
+fn default_openrouter_model_capability() -> lash::provider::ModelCapability {
+    lash::provider::ModelCapability {
+        reasoning: Some(lash::provider::ReasoningCapability {
+            efforts: ["low", "medium", "high"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            default_effort: Some("medium".to_string()),
+            encoding: lash::provider::ReasoningEncoding::Effort,
+            ..lash::provider::ReasoningCapability::default()
+        }),
+        cache_control: Some(lash::provider::CacheControlDialect::Anthropic),
+    }
+}
+
+fn default_openrouter_model_capability_for(model: lash::ModelSpec) -> lash::ModelSpec {
+    model.with_capability(default_openrouter_model_capability())
+}
 
 use crate::db::AppDb;
 #[cfg(feature = "restate")]
@@ -97,6 +116,7 @@ async fn async_main() -> anyhow_like::Result<()> {
 
     let provider = ProviderHandle::new(
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+            .with_compat(OpenAiCompat::openrouter())
             .with_options(ProviderOptions {
                 expose_thinking: true,
                 ..ProviderOptions::default()
@@ -159,7 +179,8 @@ async fn async_main() -> anyhow_like::Result<()> {
         200_000,
         None,
     )
-    .map_err(|err| format!("invalid OPENROUTER_MODEL metadata: {err}"))?;
+    .map_err(|err| format!("invalid OPENROUTER_MODEL metadata: {err}"))?
+    .with_capability(default_openrouter_model_capability());
     let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
         lash_protocol_rlm::RlmProtocolPluginConfig::default(),
         artifact_store,

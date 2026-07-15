@@ -27,8 +27,9 @@ pub use handle::{
     UnconfiguredProvider,
 };
 pub use lash_sansio::llm::capability::{
-    ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError,
-    ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection,
+    CacheControlDialect, ModelCapability, ModelEffortValidationCategory,
+    ModelEffortValidationError, ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding,
+    ReasoningSelection,
 };
 pub use options::{
     CacheRetention, DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS,

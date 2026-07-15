@@ -196,12 +196,22 @@ pub struct RemoteModelIntent {
 pub struct RemoteModelCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<RemoteReasoningCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<RemoteCacheControlDialect>,
 }
 
 impl RemoteModelCapability {
     pub fn is_empty(&self) -> bool {
-        self.reasoning.is_none()
+        self.reasoning.is_none() && self.cache_control.is_none()
     }
+}
+
+/// Mirror of the core `CacheControlDialect`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCacheControlDialect {
+    Anthropic,
+    Gemini,
 }
 
 /// Mirror of the core `ReasoningCapability`.

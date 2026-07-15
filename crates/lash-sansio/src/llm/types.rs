@@ -4,8 +4,9 @@ use std::sync::Arc;
 use crate::{AttachmentRef, SchemaContract};
 
 pub use crate::llm::capability::{
-    ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError,
-    ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection,
+    CacheControlDialect, ModelCapability, ModelEffortValidationCategory,
+    ModelEffortValidationError, ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding,
+    ReasoningSelection,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

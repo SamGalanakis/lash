@@ -688,6 +688,7 @@ pub(crate) fn model_spec_for_chat_selection(
         DEFAULT_CONTEXT_WINDOW_TOKENS,
         None,
     )
+    .map(crate::default_openrouter_model_capability_for)
     .map_err(AppError::bad_request)
 }
 

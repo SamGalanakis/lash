@@ -67,6 +67,7 @@ async fn async_main() -> AnyhowResult<()> {
 
     let provider = ProviderHandle::new(
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+            .with_compat(OpenAiCompat::openrouter())
             .with_options(ProviderOptions {
                 expose_thinking: true,
                 ..ProviderOptions::default()

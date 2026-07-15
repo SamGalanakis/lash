@@ -7,7 +7,7 @@ use lash::persistence::SessionStoreFactory;
 use lash::provider::{ProviderHandle, ProviderOptions};
 use lash::tracing::{TraceLevel, TraceSink};
 use lash::{LashCore, LashSession, TurnInput, TurnResult};
-use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompat, OpenAiCompatibleProvider};
 
 async fn service_core(
     api_key: String,
@@ -20,6 +20,7 @@ async fn service_core(
     // docs:start:service-core
     let provider = ProviderHandle::new(
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+            .with_compat(OpenAiCompat::openrouter())
             .with_options(ProviderOptions {
                 expose_thinking: true,
                 ..ProviderOptions::default()
@@ -151,5 +152,6 @@ fn adaptive_reasoning_capability() -> lash::provider::ModelCapability {
             disable: None,
             mandatory: false,
         }),
+        cache_control: Some(lash::provider::CacheControlDialect::Anthropic),
     }
 }

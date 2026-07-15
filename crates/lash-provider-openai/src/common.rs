@@ -64,10 +64,6 @@ pub(crate) fn reasoning_config_json(config: OpenAiReasoningConfig) -> Value {
 pub(crate) static DEFAULT_HTTP_TRANSPORT: LazyLock<Arc<dyn LlmHttpTransport>> =
     LazyLock::new(|| Arc::new(ReqwestLlmHttpTransport::new()));
 
-pub(crate) fn base_url_is_openrouter(base_url: &str) -> bool {
-    base_url.trim_end_matches('/') == OPENROUTER_BASE_URL
-}
-
 pub(crate) fn emit_provider_request_trace(
     provider_trace: Option<&lash_core::llm::types::LlmProviderTraceSender>,
     endpoint: &str,

@@ -29,6 +29,8 @@ pub struct OpenAiCompat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_session_affinity: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_retention: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_tools: Option<bool>,
@@ -42,12 +44,24 @@ pub struct OpenAiCompat {
     pub schema_capabilities: Option<ProviderSchemaCapabilities>,
 }
 
+impl OpenAiCompat {
+    /// Explicit endpoint capabilities for OpenRouter and compatible proxies.
+    pub fn openrouter() -> Self {
+        Self {
+            reasoning_format: Some(OpenAiCompatReasoningFormat::OpenRouter),
+            cache_session_affinity: Some(true),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OpenAiResolvedCompat {
     pub(crate) request_fields: bool,
     pub(crate) max_tokens_field: OpenAiCompatMaxTokensField,
     pub(crate) reasoning_format: OpenAiCompatReasoningFormat,
     pub(crate) cache_session_affinity: bool,
+    pub(crate) prompt_cache_key: bool,
     pub(crate) prompt_cache_retention: bool,
     pub(crate) strict_tools: bool,
     pub(crate) store: bool,
@@ -81,7 +95,6 @@ impl OpenAiCompatibleProvider {
 
     pub(crate) fn resolved_compat(&self, endpoint: CompletionEndpoint) -> OpenAiResolvedCompat {
         let local = Self::local_style_base_url(&self.base_url);
-        let openrouter = base_url_is_openrouter(&self.base_url);
         let direct_openai = self.base_url.trim_end_matches('/') == OPENAI_BASE_URL;
 
         let request_fields = !local;
@@ -91,18 +104,15 @@ impl OpenAiCompatibleProvider {
         };
         let reasoning_format = match endpoint {
             CompletionEndpoint::Responses if direct_openai => OpenAiCompatReasoningFormat::OpenAi,
-            CompletionEndpoint::Responses if openrouter => OpenAiCompatReasoningFormat::OpenRouter,
-            CompletionEndpoint::ChatCompletions if openrouter => {
-                OpenAiCompatReasoningFormat::OpenRouter
-            }
             _ => OpenAiCompatReasoningFormat::None,
         };
         let defaults = OpenAiResolvedCompat {
             request_fields,
             max_tokens_field,
             reasoning_format,
-            cache_session_affinity: !local,
-            prompt_cache_retention: !local,
+            cache_session_affinity: false,
+            prompt_cache_key: false,
+            prompt_cache_retention: false,
             strict_tools: false,
             store: !local,
             streaming_usage: !local,
@@ -127,6 +137,10 @@ impl OpenAiCompatibleProvider {
                 .compat
                 .cache_session_affinity
                 .unwrap_or(defaults.cache_session_affinity),
+            prompt_cache_key: self
+                .compat
+                .prompt_cache_key
+                .unwrap_or(defaults.prompt_cache_key),
             prompt_cache_retention: self
                 .compat
                 .prompt_cache_retention

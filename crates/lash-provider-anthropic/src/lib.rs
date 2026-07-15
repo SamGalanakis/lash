@@ -42,6 +42,7 @@ mod tests {
                 disable: Some(lash_core::provider::ReasoningDisableEncoding::Native),
                 mandatory: false,
             }),
+            cache_control: None,
         }
     }
 
@@ -63,6 +64,7 @@ mod tests {
                 disable: Some(lash_core::provider::ReasoningDisableEncoding::Omit),
                 mandatory: false,
             }),
+            cache_control: None,
         }
     }
 

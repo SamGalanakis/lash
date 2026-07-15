@@ -69,6 +69,7 @@ mod tests {
                 disable: None,
                 mandatory: false,
             }),
+            cache_control: None,
         }
     }
 
@@ -90,6 +91,7 @@ mod tests {
                 disable: Some(lash_core::provider::ReasoningDisableEncoding::Budget(0)),
                 mandatory: false,
             }),
+            cache_control: None,
         }
     }
 

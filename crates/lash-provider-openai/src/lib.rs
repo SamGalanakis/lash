@@ -18,5 +18,8 @@ mod tests;
 
 pub use codex::{CodexProvider, CodexProviderFactory};
 pub use common::{OPENAI_BASE_URL, OPENROUTER_BASE_URL};
-pub use config::{OpenAiCompatibleProvider, OpenAiProvider};
+pub use config::{
+    OpenAiCompat, OpenAiCompatMaxTokensField, OpenAiCompatReasoningFormat,
+    OpenAiCompatibleProvider, OpenAiProvider,
+};
 pub use factory::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};

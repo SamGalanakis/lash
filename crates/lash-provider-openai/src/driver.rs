@@ -1,6 +1,6 @@
 use crate::support::*;
 
-const OPENROUTER_SESSION_ID_MAX_CHARS: usize = 256;
+const CACHE_SESSION_ID_MAX_CHARS: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CompletionEndpoint {
@@ -81,12 +81,12 @@ pub(crate) async fn complete(
         CompletionEndpoint::Responses => provider.build_responses_request_body(&req, stream)?,
         CompletionEndpoint::ChatCompletions => provider.build_chat_request_body(&req, stream)?,
     };
-    if compat.cache_session_affinity && base_url_is_openrouter(&provider.base_url) {
+    if compat.cache_session_affinity {
         body["session_id"] = Value::String(
             req.scope
                 .session_id
                 .chars()
-                .take(OPENROUTER_SESSION_ID_MAX_CHARS)
+                .take(CACHE_SESSION_ID_MAX_CHARS)
                 .collect(),
         );
     }

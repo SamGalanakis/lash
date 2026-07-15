@@ -76,7 +76,7 @@ impl OpenAiCompatibleProvider {
             }
             body["text"]["format"] = format;
         }
-        if policy.cache_retention != CacheRetention::None && compat.cache_session_affinity {
+        if policy.cache_retention != CacheRetention::None && compat.prompt_cache_key {
             body["prompt_cache_key"] = json!(req.continuation_key());
         }
         if policy.cache_retention == CacheRetention::Long && compat.prompt_cache_retention {

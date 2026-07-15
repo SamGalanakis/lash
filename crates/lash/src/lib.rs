@@ -430,15 +430,15 @@ pub mod provider {
     pub use lash_core::provider::{
         ProviderRateLimitPolicy, ProviderReliability, ProviderRetryPolicy,
     };
+    pub use lash_core::{
+        CacheControlDialect, LlmTimeouts, ModelCapability, Provider, ProviderComponents,
+        ProviderFactory, ProviderHandle, ProviderOptions, ProviderSpec, ReasoningCapability,
+        ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection, RequestTimeout,
+    };
     /// Request/response/error vocabulary of [`Provider::complete`],
     /// re-exported so hosts can implement provider decorators (admission
     /// gates, metrics taps) against the facade alone.
     pub use lash_core::{
         ExecutionEvidence, LlmRequest, LlmRequestScope, LlmResponse, LlmTransportError,
-    };
-    pub use lash_core::{
-        LlmTimeouts, ModelCapability, Provider, ProviderComponents, ProviderFactory,
-        ProviderHandle, ProviderOptions, ProviderSpec, ReasoningCapability,
-        ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection, RequestTimeout,
     };
 }

@@ -121,6 +121,7 @@ fn llm_request_and_response_round_trip_owned_dtos() {
                 disable: Some(core_llm::ReasoningDisableEncoding::ToggleFalse),
                 mandatory: false,
             }),
+            cache_control: Some(core_llm::CacheControlDialect::Anthropic),
         },
         generation: core_llm::GenerationOptions {
             output_token_cap: NonZeroUsize::new(42),
@@ -145,6 +146,10 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         remote_json["model_intent"]["capability"]["reasoning"]["disable"],
         serde_json::json!("toggle_false")
     );
+    assert_eq!(
+        remote_json["model_intent"]["capability"]["cache_control"],
+        serde_json::json!("anthropic")
+    );
     let remote: RemoteLlmRequest =
         serde_json::from_value(remote_json).expect("deserialize remote request");
     remote.validate().expect("valid remote request");
@@ -164,6 +169,10 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         .expect("capability must round-trip");
     assert_eq!(reasoning.efforts, vec!["fast", "slow"]);
     assert_eq!(reasoning.default_effort.as_deref(), Some("fast"));
+    assert_eq!(
+        core.model_capability.cache_control,
+        Some(core_llm::CacheControlDialect::Anthropic)
+    );
     assert_eq!(
         reasoning.aliases.get("quick").map(String::as_str),
         Some("fast")
