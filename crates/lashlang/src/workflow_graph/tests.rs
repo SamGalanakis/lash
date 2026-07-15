@@ -388,6 +388,80 @@ fn all_container_expression_slots_accept_host_edits() {
 }
 
 #[test]
+fn execution_site_correlation_survives_edit_and_reprojection() {
+    let source = r#"if await tools.ready({ attempt: 1 })? {
+  print "ready"
+} else {
+  print "not ready"
+}
+for value in await tools.values({ batch: 1 })? {
+  print "loop"
+}
+selected = [1 for value in await tools.values({ batch: 2 })? if await tools.keep({})?]
+finish selected
+"#;
+    let mut graph = workflow_graph_from_source(source).unwrap();
+    let original_sites = graph.main.nodes[..3]
+        .iter()
+        .map(|node| node.execution_sites.clone())
+        .collect::<Vec<_>>();
+    assert!(original_sites.iter().all(|sites| !sites.is_empty()));
+
+    let WorkflowNodeKind::Container(WorkflowContainer::If { condition, .. }) =
+        &mut graph.main.nodes[0].kind
+    else {
+        panic!("expected if container")
+    };
+    *condition = "await tools.ready({ attempt: 2 })?".to_string();
+
+    let WorkflowNodeKind::Container(WorkflowContainer::For {
+        binding, iterable, ..
+    }) = &mut graph.main.nodes[1].kind
+    else {
+        panic!("expected for container")
+    };
+    *binding = "entry".to_string();
+    *iterable = "await tools.values({ batch: 3 })?".to_string();
+
+    let WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { clauses, .. }) =
+        &mut graph.main.nodes[2].kind
+    else {
+        panic!("expected list-comprehension container")
+    };
+    clauses[0] = WorkflowListComprehensionClause::For {
+        binding: "candidate".to_string(),
+        iterable: "await tools.values({ batch: 4 })?".to_string(),
+    };
+    clauses[1] = WorkflowListComprehensionClause::If {
+        condition: "await tools.keep({ strict: true })?".to_string(),
+    };
+
+    let rendered = workflow_graph_to_source(&graph).unwrap();
+    let reprojected = workflow_graph_from_source(&rendered).unwrap();
+
+    for (node, sites) in reprojected.main.nodes[..3].iter().zip(original_sites) {
+        assert_eq!(node.execution_sites, sites);
+        for workflow_site in sites {
+            let runtime_site = LashlangExecutionSite {
+                node_id: "runtime-site".to_string(),
+                node_kind: workflow_site.kind.clone(),
+                label: workflow_site.label.clone(),
+                branch: None,
+                workflow_site,
+            };
+            let correlated = node_id_for_execution_site(&reprojected, &runtime_site)
+                .expect("edited execution site should resolve after reprojection");
+            assert_eq!(correlated, node.id);
+            assert!(
+                reprojected
+                    .nodes()
+                    .any(|candidate| candidate.id == correlated)
+            );
+        }
+    }
+}
+
+#[test]
 fn iteration_carried_reassignment_is_structured_state_update() {
     let graph = workflow_graph_from_source(
         "total = 0\nfor value in [1, 2] { total = total + value }\nfinish total\n",
