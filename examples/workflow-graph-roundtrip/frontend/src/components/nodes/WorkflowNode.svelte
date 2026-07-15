@@ -10,14 +10,36 @@
   const meta = $derived(kindMeta(node.data.kind));
   const status = $derived(run.overlay[id] ?? null);
 
+  const isAssign = $derived(node.data.kind === 'state_update');
+  const isComputation = $derived(node.data.kind === 'computation');
+  const hasExpr = $derived(isAssign || isComputation);
+
   const subtitle = $derived(
     node.data.operation
       ? OP_LABELS[node.data.operation] ?? node.data.operation
-      : node.data.effect ?? node.data.kind,
+      : node.data.effect ??
+          (isAssign ? 'assignment' : isComputation ? 'sequenced compute' : node.data.kind),
   );
   const isWaitEffect = $derived(node.data.effect && WAITING_EFFECTS.has(node.data.effect));
 
   const fieldKeys = $derived(Object.keys(node.data.fields ?? {}));
+
+  // state_update titles are derived as "update <target>"; recover a default
+  // assignment target for display when the draft has no explicit override.
+  function defaultTarget() {
+    const m = (node.data.title ?? '').trim().match(/^update\s+(.+)$/i);
+    return m ? m[1] : '';
+  }
+  function onTarget(e) {
+    node.data.target = e.currentTarget.value;
+  }
+  function onBinding(e) {
+    const v = e.currentTarget.value;
+    node.data.binding = v === '' ? undefined : v;
+  }
+  function onExpr(e) {
+    node.data.expression = e.currentTarget.value;
+  }
 
   function fieldType(v) {
     if (typeof v === 'number') return 'number';
@@ -119,6 +141,43 @@
           {/if}
         </label>
       {/each}
+    </div>
+  {/if}
+
+  {#if hasExpr}
+    <div class="wf-expr">
+      <div class="wf-expr-row">
+        {#if isAssign}
+          <input
+            class="wf-expr-lhs"
+            value={node.data.target ?? defaultTarget()}
+            oninput={onTarget}
+            spellcheck="false"
+            placeholder="target"
+          />
+          <span class="wf-expr-op" title="assignment">≔</span>
+        {:else}
+          <input
+            class="wf-expr-lhs wf-expr-lhs--opt"
+            value={node.data.binding ?? ''}
+            oninput={onBinding}
+            spellcheck="false"
+            placeholder="binding (optional)"
+          />
+          <span class="wf-expr-op" title="bind">=</span>
+        {/if}
+      </div>
+      <textarea
+        class="wf-expr-input nodrag"
+        rows="1"
+        value={node.data.expression ?? ''}
+        oninput={onExpr}
+        spellcheck="false"
+        placeholder="expression…"
+      ></textarea>
+      <div class="wf-expr-note">
+        typed {isAssign ? 'assignment' : 'computation'} · canonical form rebuilt on save
+      </div>
     </div>
   {/if}
 
@@ -309,6 +368,70 @@
     color: var(--amber);
     opacity: 0.8;
     letter-spacing: 0.04em;
+  }
+
+  .wf-expr {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .wf-expr-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .wf-expr-lhs {
+    flex: 1;
+    min-width: 0;
+    background: var(--ink-2);
+    border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+    border-radius: 7px;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 8px;
+  }
+  .wf-expr-lhs--opt {
+    color: var(--text-dim);
+    font-weight: 500;
+    border-color: var(--line);
+  }
+  .wf-expr-lhs:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .wf-expr-op {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+  .wf-expr-input {
+    width: 100%;
+    background: #0a0d13;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: #eaf2ff;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    padding: 7px 9px;
+    resize: vertical;
+    tab-size: 2;
+  }
+  .wf-expr-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .wf-expr-note {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-faint);
+    letter-spacing: 0.03em;
   }
 
   /* run overlay states */

@@ -1,7 +1,7 @@
 <script>
   import { Handle, Position } from '@xyflow/svelte';
   import { getContext } from 'svelte';
-  import { kindMeta } from '../../lib/nodeKinds.js';
+  import { kindMeta, containerSubkind, CONTAINER_SUBKINDS } from '../../lib/nodeKinds.js';
 
   let { id, data } = $props();
 
@@ -12,9 +12,19 @@
   const status = $derived(run.overlay[id] ?? null);
   const groups = $derived(data.groups ?? []);
 
+  // Recover the container sub-kind (if / for / while / comprehension) — it is not
+  // an explicit DTO field. While loops render like for / if but expose an
+  // editable condition in place of their (redundant) "while" title.
+  const subkind = $derived(isProcess ? null : containerSubkind(node));
+  const subMeta = $derived(subkind ? CONTAINER_SUBKINDS[subkind] ?? CONTAINER_SUBKINDS.loop : null);
+  const isWhile = $derived(subkind === 'while');
+
   function onTitleInput(e) {
     node.data.title = e.currentTarget.value;
     node.data.nameSource = 'label';
+  }
+  function onCondition(e) {
+    node.data.condition = e.currentTarget.value;
   }
 </script>
 
@@ -28,10 +38,25 @@
   <Handle type="target" position={Position.Top} />
 
   <header class="ct-head">
-    <span class="ct-badge"><span class="ct-glyph">{meta.glyph}</span>{isProcess ? 'process' : 'branch'}</span
+    <span class="ct-badge"
+      ><span class="ct-glyph">{isProcess ? meta.glyph : subMeta.glyph}</span>{isProcess
+        ? 'process'
+        : subMeta.label}</span
     >
     {#if isProcess}
       <input class="ct-title" value={node.data.title} oninput={onTitleInput} spellcheck="false" />
+    {:else if isWhile}
+      <span class="ct-cond">
+        <span class="ct-paren">(</span>
+        <input
+          class="ct-cond-input nodrag"
+          value={node.data.condition ?? ''}
+          oninput={onCondition}
+          spellcheck="false"
+          placeholder="condition"
+        />
+        <span class="ct-paren">)</span>
+      </span>
     {:else}
       <span class="ct-title-static">{node.data.title}</span>
     {/if}
@@ -118,6 +143,34 @@
     font-family: var(--font-mono);
     font-size: 12px;
     flex: 1;
+  }
+  .ct-cond {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+  }
+  .ct-paren {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: color-mix(in srgb, var(--accent) 75%, var(--text-dim));
+  }
+  .ct-cond-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--ink-2);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 3px 7px;
+  }
+  .ct-cond-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .ct-status {
     font-family: var(--font-mono);
