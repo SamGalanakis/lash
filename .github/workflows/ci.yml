@@ -195,6 +195,9 @@ jobs:
       - name: Check core/UI boundary
         run: bash scripts/check-core-ui-boundary.sh
 
+      - name: Check workflow graph model
+        run: bash scripts/check-workflow-graph-model.sh
+
       - name: Check production file-size budget
         run: bash scripts/check-production-file-size.sh
 
@@ -446,8 +449,8 @@ jobs:
       - name: Build release workspace
         run: cargo build --locked --release --workspace --target x86_64-unknown-linux-gnu
 
-  restate-e2e:
-    name: Restate E2E (${{ matrix.name }})
+  functional-e2e:
+    name: Functional E2E (${{ matrix.name }})
     runs-on: ubuntu-latest
 
     strategy:
@@ -456,8 +459,13 @@ jobs:
         include:
           - name: agent-service
             recipe: agent-service-restate-e2e
+            node: false
           - name: agent-workbench
             recipe: agent-workbench-restate-e2e
+            node: false
+          - name: workflow-graph-roundtrip
+            recipe: workflow-graph-integration-verify
+            node: true
 
     steps:
       - name: Check out repository
@@ -479,12 +487,20 @@ jobs:
         with:
           tool: protoc
 
+      - name: Install Node
+        if: matrix.node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: examples/workflow-graph-roundtrip/frontend/package-lock.json
+
       - name: Install just
         uses: extractions/setup-just@v2
 
-      # Each recipe owns its container lifecycle and uses distinct ports/names,
-      # so the matrix legs run independently without cross-job coordination.
-      - name: Run live Restate e2e
+      # Each recipe owns its dependencies and any container lifecycle, so the
+      # matrix legs run independently without cross-job coordination.
+      - name: Run example integration verification
         run: just ${{ matrix.recipe }}
 
   restate-postgres-workers:

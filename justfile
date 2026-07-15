@@ -29,6 +29,12 @@ agent-workbench-down port='3030':
 agent-workbench-foreground port='3030':
   ./scripts/agent-workbench-dev.sh foreground --port "{{port}}"
 
+workflow-graph-integration-verify:
+  npm --prefix "{{repo}}/examples/workflow-graph-roundtrip/frontend" ci
+  npm --prefix "{{repo}}/examples/workflow-graph-roundtrip/frontend" run build
+  cargo test -p workflow-graph-roundtrip --all-targets --locked
+  bash "{{repo}}/scripts/check-workflow-graph-model.sh"
+
 agent-service-restate-e2e:
   #!/usr/bin/env bash
   set -euo pipefail

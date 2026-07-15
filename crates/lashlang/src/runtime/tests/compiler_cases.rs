@@ -121,10 +121,7 @@ async fn aggregate_await_tuple_of_resource_calls_batches_and_reconstructs_tuple(
     };
     assert_eq!(
         &items[..],
-        [
-            Value::String("left".into()),
-            Value::String("right".into())
-        ]
+        [Value::String("left".into()), Value::String("right".into())]
     );
 }
 
@@ -198,10 +195,7 @@ async fn aggregate_await_mixed_pure_values_batch_resource_leaves_and_reconstruct
         panic!("program should finish");
     };
 
-    assert_eq!(
-        host.batch_len.load(std::sync::atomic::Ordering::SeqCst),
-        2
-    );
+    assert_eq!(host.batch_len.load(std::sync::atomic::Ordering::SeqCst), 2);
     let record = value.as_record().expect("result record");
     assert_eq!(record["first"], Value::String("a".into()));
     assert_eq!(record["source"], Value::String("cache-miss".into()));
@@ -385,10 +379,7 @@ async fn aggregate_await_leaf_unwrap_waits_for_all_siblings_then_reports_first_e
     let err = execute_program(&program, &mut state, &host)
         .await
         .expect_err("program should fail after batch completes");
-    assert_eq!(
-        host.batch_len.load(std::sync::atomic::Ordering::SeqCst),
-        2
-    );
+    assert_eq!(host.batch_len.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert!(
         err.to_string()
             .contains("`?` unwrapped failed module operation: boom"),
@@ -397,18 +388,16 @@ async fn aggregate_await_leaf_unwrap_waits_for_all_siblings_then_reports_first_e
 }
 
 #[test]
-fn labeled_process_resource_operation_site_matches_static_graph_node() {
-    let program = crate::parse(
-        r#"
+fn labeled_process_resource_operation_site_correlates_to_workflow_node() {
+    let source = r#"
         process search_test() {
           @label(title: "Spawn subagent with web search")
           result = await tools.echo({ value: { ok: true } })?
           wake result
           finish result
         }
-        "#,
-    )
-    .expect("program should parse");
+        "#;
+    let program = crate::parse(source).expect("program should parse");
     let surface = runtime_test_environment().with_language_features(
         crate::LashlangLanguageFeatures::default().with_label_annotations(),
     );
@@ -428,30 +417,16 @@ fn labeled_process_resource_operation_site_matches_static_graph_node() {
         .and_then(Option::as_ref)
         .expect("resource call execution site");
 
-    let process_ref = linked
-        .artifact
-        .process_ref("search_test")
-        .expect("search_test process ref")
-        .clone();
-    let map = crate::map_lashlang_process(
-        &linked.artifact,
-        &process_ref,
-        crate::LashlangMapOptions::default(),
-    )
-    .expect("process graph");
-    let static_node =
-        map.nodes
-            .iter()
-            .find(|node| {
-                node.kind == "resource_operation"
-                    && node.label_metadata.as_ref().is_some_and(|label| {
-                        label.title.as_str() == "Spawn subagent with web search"
-                    })
-            })
-            .unwrap_or_else(|| panic!("missing labeled resource operation node: {:?}", map.nodes));
+    let graph = crate::workflow_graph_from_source(source).expect("workflow graph");
+    let graph_node_id = crate::node_id_for_execution_site(&graph, site)
+        .expect("runtime site should correlate to a workflow node");
+    let graph_node = graph
+        .nodes()
+        .find(|node| node.id == graph_node_id)
+        .expect("correlated graph node");
 
     assert_eq!(site.node_kind, "resource_operation");
-    assert_eq!(site.node_id, static_node.id);
+    assert_eq!(graph_node.name, "Spawn subagent with web search");
     assert!(
         !compiled
             .chunk
@@ -462,6 +437,118 @@ fn labeled_process_resource_operation_site_matches_static_graph_node() {
                 site.node_kind == "step" && site.label == "Spawn subagent with web search"
             }),
         "labeled resource operation should not emit a parallel step site"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_runs_correlate_every_execution_site_to_the_selected_workflow_path() {
+    #[derive(Default)]
+    struct CorrelationHost {
+        observations: Mutex<Vec<crate::LashlangExecutionObservation>>,
+    }
+
+    impl ExecutionHost for CorrelationHost {
+        async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            Host.perform(op).await
+        }
+
+        fn observe_lashlang_execution(&self, observation: crate::LashlangExecutionObservation) {
+            self.observations
+                .lock()
+                .expect("observations lock")
+                .push(observation);
+        }
+    }
+
+    let source = r#"
+        @label(title: "First call")
+        first = await tools.echo({ value: "first" })?
+        if true {
+          @label(title: "Selected call")
+          selected = await tools.echo({ value: first })?
+        } else {
+          @label(title: "Skipped call")
+          selected = await tools.echo({ value: "skipped" })?
+        }
+        @label(title: "Finish selected")
+        finish selected
+        "#;
+    let graph = crate::workflow_graph_from_source(source).expect("workflow graph");
+    let compiled = compile_labeled_source(source);
+
+    let mut invocation_paths = Vec::new();
+    for _ in 0..2 {
+        let host = CorrelationHost::default();
+        let outcome = execute_compiled(&compiled, &mut State::new(), &host)
+            .await
+            .expect("workflow invocation should run");
+        assert_eq!(
+            outcome,
+            ExecutionOutcome::Finished(Value::String("first".into()))
+        );
+
+        let observations = host.observations.into_inner().expect("observations lock");
+        let correlated = observations
+            .iter()
+            .map(|observation| {
+                let (site, occurrence) = match observation {
+                    crate::LashlangExecutionObservation::NodeStarted { site, occurrence }
+                    | crate::LashlangExecutionObservation::NodeCompleted { site, occurrence }
+                    | crate::LashlangExecutionObservation::NodeFailed {
+                        site, occurrence, ..
+                    }
+                    | crate::LashlangExecutionObservation::BranchSelected {
+                        site,
+                        occurrence,
+                        ..
+                    }
+                    | crate::LashlangExecutionObservation::ChildStarted {
+                        site, occurrence, ..
+                    } => (site, *occurrence),
+                };
+                let node_id = crate::node_id_for_execution_site(&graph, site)
+                    .expect("every observed runtime site should resolve to the workflow graph");
+                assert!(
+                    graph.nodes().any(|node| node.id == node_id),
+                    "correlated node id must belong to the projected graph"
+                );
+                (observation, node_id, occurrence)
+            })
+            .collect::<Vec<_>>();
+
+        let selected_path = correlated
+            .iter()
+            .filter(|(observation, _, _)| {
+                matches!(
+                    observation,
+                    crate::LashlangExecutionObservation::NodeStarted { .. }
+                        | crate::LashlangExecutionObservation::BranchSelected { .. }
+                )
+            })
+            .map(|(_, node_id, occurrence)| {
+                let node = graph
+                    .nodes()
+                    .find(|node| node.id == *node_id)
+                    .expect("correlated graph node");
+                (node.name.clone(), *occurrence)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected_path,
+            vec![
+                ("First call".to_string(), 1),
+                ("if".to_string(), 1),
+                ("Selected call".to_string(), 1),
+                ("Finish selected".to_string(), 1),
+            ],
+            "correlated nodes should follow only the executed branch"
+        );
+        invocation_paths.push(selected_path);
+    }
+
+    assert_eq!(
+        invocation_paths[0], invocation_paths[1],
+        "each invocation must start with an independent correlation sequence"
     );
 }
 

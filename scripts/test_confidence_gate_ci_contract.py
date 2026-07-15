@@ -12,6 +12,7 @@ CONFIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "confidence.yml"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 GATE = ROOT / "scripts" / "confidence-gate.sh"
 CARGO_TOML = ROOT / "Cargo.toml"
+JUSTFILE = ROOT / "justfile"
 FOCUSED_SQLITE_REPRO = ROOT / "scripts" / "lash-sim-focused-sqlite-repro.sh"
 # The two micro lanes (sim unit/oracle + perf-guard identity) share one shard.
 FAST_SHARDS = [
@@ -87,7 +88,24 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         self.assertIn("cargo clippy --workspace --all-targets --locked", lint)
         self.assertIn("-- -D warnings", lint)
         self.assertIn("bash scripts/check-core-ui-boundary.sh", lint)
+        self.assertIn("bash scripts/check-workflow-graph-model.sh", lint)
         self.assertIn("bash scripts/check-production-file-size.sh", lint)
+
+    def test_workflow_graph_example_is_in_functional_matrix(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        justfile = JUSTFILE.read_text(encoding="utf-8")
+        functional = workflow_job_block(workflow, "functional-e2e")
+
+        self.assertIn("workflow-graph-roundtrip", functional)
+        self.assertIn("recipe: workflow-graph-integration-verify", functional)
+        self.assertIn("uses: actions/setup-node@v6", functional)
+        self.assertIn("run: just ${{ matrix.recipe }}", functional)
+        self.assertIn("workflow-graph-integration-verify:", justfile)
+        self.assertIn(
+            "cargo test -p workflow-graph-roundtrip --all-targets --locked",
+            justfile,
+        )
+        self.assertIn("run build", justfile)
 
     def test_sim_search_lane_is_sharded_and_budgeted_at_plan_targets(self) -> None:
         gate = GATE.read_text(encoding="utf-8")

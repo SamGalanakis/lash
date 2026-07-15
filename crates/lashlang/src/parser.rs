@@ -90,6 +90,43 @@ pub fn parse(source: &str) -> Result<Program, ParseError> {
     .parse_program()
 }
 
+/// Parse exactly one expression in workflow-editing context.
+///
+/// Process-only and loop-only expressions are accepted because a workflow
+/// graph field may belong to a node nested inside either construct. Callers
+/// remain responsible for validating that the parsed expression is compatible
+/// with the graph node kind that owns it.
+pub fn parse_expression(source: &str) -> Result<Expr, ParseError> {
+    let tokens = lex(source)?;
+    match parse_expression_with_context(tokens.clone(), true) {
+        Ok(expression) => Ok(expression),
+        Err(_) => parse_expression_with_context(tokens, false),
+    }
+}
+
+fn parse_expression_with_context(
+    tokens: Vec<Token>,
+    inside_process: bool,
+) -> Result<Expr, ParseError> {
+    let mut parser = Parser {
+        tokens,
+        index: 0,
+        loop_depth: 1,
+        process_depth: usize::from(inside_process),
+        nesting_depth: 0,
+    };
+    let expression = parser.parse_statement_expr()?.into_expr();
+    if !parser.at_eof() {
+        let token = parser.peek();
+        return Err(ParseError::Expected {
+            expected: "end of expression",
+            found: render_kind(&token.kind),
+            span: token.span,
+        });
+    }
+    Ok(expression)
+}
+
 /// Maximum syntactic nesting depth (nested expressions *and* nested blocks).
 /// Bounds recursive-descent stack growth so adversarial model-emitted source
 /// (deeply nested brackets or `if`/`for` bodies) returns a `ParseError` instead

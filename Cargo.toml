@@ -36,6 +36,7 @@ members = [
     "examples/agent-service",
     "examples/agent-workbench",
     "examples/docs-snippets",
+    "examples/workflow-graph-roundtrip",
     "e2e/restate-postgres-workers",
 ]
 # `cargo build` from the repo root compiles only the publishable SDK surface.

@@ -114,6 +114,9 @@ cargo clippy --workspace --all-targets --locked ${ci_features} -- -D warnings
 step "Core/UI boundary guard"
 bash scripts/check-core-ui-boundary.sh
 
+step "Workflow graph model guard"
+bash scripts/check-workflow-graph-model.sh
+
 step "Production file-size budget guard"
 bash scripts/check-production-file-size.sh
 
@@ -134,6 +137,9 @@ step "Workspace doctests"
 cargo test --doc --workspace --locked ${ci_features}
 
 run_postgres_conformance
+
+step "Workflow graph example integration"
+just workflow-graph-integration-verify
 
 step "Restate e2e: agent-service"
 RESTATE_ADMIN_PORT="$((port_base + 20))" \

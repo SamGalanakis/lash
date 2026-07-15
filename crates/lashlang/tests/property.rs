@@ -233,6 +233,406 @@ fn globals_strategy() -> impl Strategy<Value = HashMap<String, GenValue>> {
     prop::collection::hash_map(ident_strategy(), gen_value_strategy(), 0..6)
 }
 
+fn generated_workflow_corpus(ident: &str, value: &str) -> Vec<(&'static str, String)> {
+    let ident = format!("generated_{ident}");
+    vec![
+        ("data", format!("{ident} = {value}\nfinish {ident}\n")),
+        (
+            "call",
+            format!(
+                "@label(title: \"Generated call\", description: \"Metadata survives\")\n{ident} = await tools.echo({{ value: {value} }})?\nfinish {ident}\n"
+            ),
+        ),
+        (
+            "effect",
+            format!(
+                "@label(title: \"Generated effect\", description: \"Metadata survives\")\nprint {value}\nfinish {value}\n"
+            ),
+        ),
+        (
+            "terminal",
+            format!("process {ident}_terminal() {{\n  fail {value}\n}}\n"),
+        ),
+        (
+            "if_forms",
+            format!(
+                "{ident} = (true ? {value} : null)\nif true {{\n  print {ident}\n}} else if false {{\n  print null\n}} else {{\n  print {value}\n}}\nfinish {ident}\n"
+            ),
+        ),
+        (
+            "for",
+            format!("for item in [1, 2] {{\n  print item\n}}\nfinish {value}\n"),
+        ),
+        (
+            "comprehension",
+            format!("{ident} = [item for item in [1, 2, 3] if item > 1]\nfinish {ident}\n"),
+        ),
+        (
+            "process",
+            format!(
+                "@label(title: \"Generated process\", description: \"Metadata survives\")\nprocess {ident}() {{\n  wake {value}\n  finish {value}\n}}\n"
+            ),
+        ),
+        (
+            "while",
+            "count = 0\nwhile count < 2 { count = count + 1 }\nfinish count\n".to_string(),
+        ),
+        (
+            "stateful_for",
+            "total = 0\nfor item in [1, 2] { total = total + item\nintroduced = item }\nfinish [total, introduced]\n".to_string(),
+        ),
+        (
+            "state_update_path",
+            "state = { count: 0 }\nstate.count = 1\nfinish state\n".to_string(),
+        ),
+        (
+            "state_update_simple",
+            format!("{ident} = null\n{ident} = {value}\nfinish {ident}\n"),
+        ),
+        (
+            "type_ref_data",
+            "type Generated = { value: str }\nschema = Type { nested: Generated }\nfinish schema\n"
+                .to_string(),
+        ),
+        (
+            "computation",
+            "process generated_worker() { finish 1 }\nruns = [start generated_worker(), start generated_worker()]\ntupled = (await runs[0], await runs[1])\nlisted = [await runs[0], await runs[1]]\nrecorded = { value: await runs[0] }\nbuilt = len(await runs)\nbinary = (await runs[0] + 1)\nunary = not await runs[0]\nfield = (await runs[0]).value\nindexed = (await runs)[0]\nunusual = (await runs[0])??\nfinish unusual\n".to_string(),
+        ),
+        (
+            "scoped_for",
+            "item = 99\nitems = [1, 2]\nfor item in items { print item }\nselected = [item for item in items if item > 0]\nfinish item\n"
+                .to_string(),
+        ),
+    ]
+}
+
+fn graph_has_required_variant(graph: &lashlang::WorkflowGraph, variant: &str) -> bool {
+    match variant {
+        "data" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Data { .. })),
+        "call" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Call { .. })),
+        "effect" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Effect { .. })),
+        "terminal" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Terminal { .. })),
+        "if_forms" => {
+            let mut has_expression_if = false;
+            let mut has_direct_else_if = false;
+            for node in graph.nodes() {
+                if let lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::If {
+                    then_is_block,
+                    else_is_block,
+                    ..
+                }) = node.kind
+                {
+                    has_expression_if |= !then_is_block && !else_is_block;
+                    has_direct_else_if |= then_is_block && !else_is_block;
+                }
+            }
+            has_expression_if && has_direct_else_if
+        }
+        "for" | "stateful_for" | "scoped_for" => graph.nodes().any(|node| {
+            matches!(
+                node.kind,
+                lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::For { .. })
+            )
+        }),
+        "while" => graph.nodes().any(|node| {
+            matches!(
+                node.kind,
+                lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::While { .. })
+            )
+        }),
+        "comprehension" => graph.nodes().any(|node| {
+            matches!(
+                node.kind,
+                lashlang::WorkflowNodeKind::Container(
+                    lashlang::WorkflowContainer::ListComprehension { .. }
+                )
+            )
+        }),
+        "process" => graph
+            .declarations
+            .iter()
+            .any(|declaration| matches!(declaration, lashlang::WorkflowDeclaration::Process(_))),
+        "state_update_path" | "state_update_simple" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::StateUpdate { .. })),
+        "type_ref_data" => graph.nodes().any(|node| {
+            matches!(
+                &node.kind,
+                lashlang::WorkflowNodeKind::Data {
+                    expression,
+                    ..
+                } if expression.starts_with("Type {")
+            )
+        }),
+        "computation" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Computation { .. })),
+        _ => false,
+    }
+}
+
+fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &str) -> bool {
+    let mut invalid = graph.clone();
+    let expected;
+    match variant {
+        "data" => {
+            let Some(node) = invalid
+                .main
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Data { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Data { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "{".to_string();
+            expected = "invalid_expression";
+        }
+        "call" => {
+            let Some(node) = invalid
+                .main
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Call { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Call { binding, .. } = &mut node.kind else {
+                return false;
+            };
+            *binding = Some("1 + 2".to_string());
+            expected = "invalid_assignment_target";
+        }
+        "effect" => {
+            let Some(node) = invalid
+                .main
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Effect { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Effect { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "{".to_string();
+            expected = "invalid_expression";
+        }
+        "terminal" => {
+            let Some(process) =
+                invalid
+                    .declarations
+                    .iter_mut()
+                    .find_map(|declaration| match declaration {
+                        lashlang::WorkflowDeclaration::Process(process) => Some(process),
+                        lashlang::WorkflowDeclaration::Type(_) => None,
+                    })
+            else {
+                return false;
+            };
+            let Some(node) = process
+                .body
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Terminal { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Terminal { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "{".to_string();
+            expected = "invalid_expression";
+        }
+        "if_forms" => {
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
+                matches!(
+                    node.kind,
+                    lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::If {
+                        then_is_block: false,
+                        ..
+                    })
+                )
+            }) else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::If {
+                else_is_block,
+                ..
+            }) = &mut node.kind
+            else {
+                return false;
+            };
+            *else_is_block = true;
+            expected = "invalid_payload";
+        }
+        "for" | "stateful_for" | "scoped_for" => {
+            let Some(node) = invalid.nodes().find(|node| {
+                matches!(
+                    node.kind,
+                    lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::For { .. })
+                )
+            }) else {
+                return false;
+            };
+            let id = node.id.clone();
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| node.id == id) else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::For {
+                body,
+                ..
+            }) = &mut node.kind
+            else {
+                return false;
+            };
+            *body = None;
+            expected = "missing_child";
+        }
+        "while" => {
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
+                matches!(
+                    node.kind,
+                    lashlang::WorkflowNodeKind::Container(
+                        lashlang::WorkflowContainer::While { .. }
+                    )
+                )
+            }) else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::While {
+                body,
+                ..
+            }) = &mut node.kind
+            else {
+                return false;
+            };
+            *body = None;
+            expected = "missing_child";
+        }
+        "comprehension" => {
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
+                matches!(
+                    node.kind,
+                    lashlang::WorkflowNodeKind::Container(
+                        lashlang::WorkflowContainer::ListComprehension { .. }
+                    )
+                )
+            }) else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Container(
+                lashlang::WorkflowContainer::ListComprehension { element, .. },
+            ) = &mut node.kind
+            else {
+                return false;
+            };
+            *element = None;
+            expected = "missing_child";
+        }
+        "state_update_path" | "state_update_simple" => {
+            let Some(node) =
+                invalid.main.nodes.iter_mut().find(|node| {
+                    matches!(node.kind, lashlang::WorkflowNodeKind::StateUpdate { .. })
+                })
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::StateUpdate { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "{".to_string();
+            expected = "invalid_expression";
+        }
+        "type_ref_data" => {
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
+                matches!(
+                    &node.kind,
+                    lashlang::WorkflowNodeKind::Data {
+                        expression,
+                        ..
+                    } if expression.starts_with("Type {")
+                )
+            }) else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Data { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "print null".to_string();
+            expected = "invalid_payload";
+        }
+        "computation" => {
+            let Some(node) =
+                invalid.main.nodes.iter_mut().find(|node| {
+                    matches!(node.kind, lashlang::WorkflowNodeKind::Computation { .. })
+                })
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Computation { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "null".to_string();
+            expected = "invalid_payload";
+        }
+        "process" => {
+            let Some(process) =
+                invalid
+                    .declarations
+                    .iter_mut()
+                    .find_map(|declaration| match declaration {
+                        lashlang::WorkflowDeclaration::Process(process) => Some(process),
+                        lashlang::WorkflowDeclaration::Type(_) => None,
+                    })
+            else {
+                return false;
+            };
+            let Some(node) = process
+                .body
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Effect { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Effect { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "{".to_string();
+            expected = "invalid_expression";
+        }
+        _ => return false,
+    }
+
+    matches!(
+        (expected, lashlang::workflow_graph_to_source(&invalid)),
+        (
+            "invalid_payload",
+            Err(lashlang::GraphRenderError::InvalidNodePayload { .. })
+        ) | (
+            "missing_child",
+            Err(lashlang::GraphRenderError::MissingRequiredChild { .. })
+        ) | (
+            "invalid_expression",
+            Err(lashlang::GraphRenderError::InvalidExpression { .. })
+        ) | (
+            "invalid_assignment_target",
+            Err(lashlang::GraphRenderError::InvalidAssignmentTarget { .. })
+        )
+    )
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256,
@@ -285,6 +685,79 @@ proptest! {
         let reparsed = parse(&rendered).expect("canonical source should parse");
 
         prop_assert_eq!(canonical_program_ir(reparsed), canonical_program_ir(program));
+    }
+
+    #[test]
+    fn generated_workflows_obey_code_graph_code_laws(
+        ident in ident_strategy(),
+        value in gen_value_strategy(),
+    ) {
+        let value = value.to_source();
+        for (variant, source) in generated_workflow_corpus(&ident, &value) {
+            let input = parse(&source).expect("generated workflow should parse");
+            let canonical = canonical_program_source(&input).expect("canonical workflow source");
+            let graph = lashlang::workflow_graph_from_source(&canonical)
+                .expect("canonical source should project");
+            prop_assert!(
+                graph_has_required_variant(&graph, variant),
+                "{variant} did not project to its required workflow graph kind"
+            );
+
+            let rendered = lashlang::workflow_graph_to_source(&graph)
+                .expect("projected graph should render");
+
+            // GetPut on canonical source.
+            prop_assert_eq!(&rendered, &canonical, "GetPut failed for {}", variant);
+            // Canonical structural fixpoint (spans are ignored by Program::PartialEq).
+            prop_assert_eq!(
+                parse(&rendered).unwrap(),
+                parse(&canonical).unwrap(),
+                "canonical AST fixpoint failed for {}",
+                variant
+            );
+            // PutGet for graphs produced by source projection.
+            prop_assert_eq!(
+                lashlang::workflow_graph_from_source(&rendered).unwrap(),
+                graph.clone(),
+                "PutGet failed for {}",
+                variant
+            );
+
+            // Every invalid document is rejected through the typed render surface.
+            let mut unsupported = graph.clone();
+            unsupported.schema_version = lashlang::WORKFLOW_GRAPH_SCHEMA_VERSION + 1;
+            let unsupported_is_typed = matches!(
+                lashlang::workflow_graph_to_source(&unsupported),
+                Err(lashlang::GraphRenderError::UnsupportedSchemaVersion { .. })
+            );
+            prop_assert!(unsupported_is_typed);
+
+            prop_assert!(
+                !graph
+                    .nodes()
+                    .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Opaque { .. })),
+                "promoted construct unexpectedly projected as opaque for {variant}"
+            );
+            prop_assert!(
+                promoted_invalid_graph_is_typed(&graph, variant),
+                "invalid promoted graph did not return its typed error for {variant}"
+            );
+
+            if source.contains("@label") {
+                let has_label = graph.nodes().any(|node| {
+                    node.name_source == lashlang::WorkflowNodeNameSource::Label
+                        && node.description.as_deref() == Some("Metadata survives")
+                }) || graph.declarations.iter().any(|declaration| {
+                    matches!(
+                        declaration,
+                        lashlang::WorkflowDeclaration::Process(process)
+                            if process.name_source == lashlang::WorkflowNodeNameSource::Label
+                                && process.description.as_deref() == Some("Metadata survives")
+                    )
+                });
+                prop_assert!(has_label, "@label metadata was lost for {variant}");
+            }
+        }
     }
 
     #[test]

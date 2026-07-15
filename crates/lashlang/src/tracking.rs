@@ -52,24 +52,21 @@ impl LashlangExecutionEntry {
             Self::Process { process_ref, .. } => process_ref_key(process_ref),
         }
     }
+
+    fn workflow_owner(&self) -> String {
+        match self {
+            Self::Main => "main".to_string(),
+            Self::Process { process_name, .. } => format!("process:{process_name}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LashlangAstPath(Vec<u32>);
 
 impl LashlangAstPath {
-    pub(crate) fn root() -> Self {
-        Self(Vec::new())
-    }
-
     pub(crate) fn from_indices(indices: &[u32]) -> Self {
         Self(indices.to_vec())
-    }
-
-    pub(crate) fn child(&self, index: usize) -> Self {
-        let mut path = self.0.clone();
-        path.push(index as u32);
-        Self(path)
     }
 
     fn stable_text(&self) -> String {
@@ -82,6 +79,10 @@ impl LashlangAstPath {
             .collect::<Vec<_>>()
             .join(".")
     }
+
+    fn indices(&self) -> &[u32] {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -90,14 +91,6 @@ pub(crate) struct LashlangExecutionSiteBuilder<'context> {
 }
 
 impl LashlangExecutionSiteBuilder<'_> {
-    pub(crate) fn process_node_id(&self) -> String {
-        self.node_id(&LashlangAstPath::root(), "process")
-    }
-
-    pub(crate) fn main_node_id(&self) -> String {
-        self.node_id(&LashlangAstPath::root(), "main")
-    }
-
     pub(crate) fn node_site(
         &self,
         path: &LashlangAstPath,
@@ -105,11 +98,18 @@ impl LashlangExecutionSiteBuilder<'_> {
         label: impl Into<String>,
     ) -> LashlangExecutionSite {
         let kind = kind.into();
+        let label = label.into();
         LashlangExecutionSite {
             node_id: self.node_id(path, &kind),
-            node_kind: kind,
-            label: label.into(),
+            node_kind: kind.clone(),
+            label: label.clone(),
             branch: None,
+            workflow_site: WorkflowExecutionSite::new(
+                self.context.entry.workflow_owner(),
+                path.indices(),
+                kind,
+                label,
+            ),
         }
     }
 
@@ -122,39 +122,13 @@ impl LashlangExecutionSiteBuilder<'_> {
                 then_edge_id: self.branch_edge_id(path, ProcessBranchSelection::Then),
                 else_edge_id: self.branch_edge_id(path, ProcessBranchSelection::Else),
             }),
+            workflow_site: WorkflowExecutionSite::new(
+                self.context.entry.workflow_owner(),
+                path.indices(),
+                "branch",
+                "if",
+            ),
         }
-    }
-
-    pub(crate) fn branch_arm_node_id(
-        &self,
-        path: &LashlangAstPath,
-        selection: ProcessBranchSelection,
-    ) -> String {
-        let kind = match selection {
-            ProcessBranchSelection::Then => "branch_arm_then",
-            ProcessBranchSelection::Else => "branch_arm_else",
-        };
-        self.node_id(path, kind)
-    }
-
-    pub(crate) fn edge_id(
-        &self,
-        path: &LashlangAstPath,
-        from: &str,
-        to: &str,
-        label: &str,
-    ) -> String {
-        stable_id(
-            "edge",
-            &[
-                self.context.module_ref.to_string(),
-                self.context.entry.stable_key(),
-                path.stable_text(),
-                from.to_string(),
-                to.to_string(),
-                label.to_string(),
-            ],
-        )
     }
 
     pub(crate) fn branch_edge_id(
@@ -191,6 +165,36 @@ impl LashlangExecutionSiteBuilder<'_> {
     }
 }
 
+/// Stable source-level location carried by runtime sites for workflow-graph joins.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WorkflowExecutionSite {
+    pub owner: String,
+    #[serde(default)]
+    pub path: Vec<u32>,
+    pub kind: String,
+    pub label: String,
+}
+
+impl WorkflowExecutionSite {
+    pub fn new(
+        owner: impl Into<String>,
+        path: impl AsRef<[u32]>,
+        kind: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            path: path.as_ref().to_vec(),
+            kind: kind.into(),
+            label: label.into(),
+        }
+    }
+
+    pub(crate) fn same_location(&self, other: &Self) -> bool {
+        self.owner == other.owner && self.path == other.path
+    }
+}
+
 fn stable_id(prefix: &str, parts: &[String]) -> String {
     let mut hasher = Sha256::new();
     for part in parts {
@@ -212,6 +216,7 @@ pub struct LashlangExecutionSite {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<LashlangBranchSite>,
+    pub workflow_site: WorkflowExecutionSite,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

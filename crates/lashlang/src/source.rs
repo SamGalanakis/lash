@@ -42,6 +42,22 @@ pub fn canonical_program_source(program: &Program) -> Result<String, CanonicalSo
     SourceFormatter::new(None).program_source(program)
 }
 
+/// Pretty-print one expression as canonical Lashlang source.
+///
+/// This is the textual form used by editable workflow-graph expression fields.
+pub fn canonical_expression_source(expression: &Expr) -> Result<String, CanonicalSourceError> {
+    SourceFormatter::new(None).statement_expr_source(expression)
+}
+
+/// Pretty-print one assignment target as canonical Lashlang source.
+///
+/// This is the textual form used by editable workflow-graph binding and target fields.
+pub fn canonical_assign_target_source(
+    target: &AssignTarget,
+) -> Result<String, CanonicalSourceError> {
+    SourceFormatter::new(None).assign_target_source(target)
+}
+
 /// Pretty-print a canonical Lashlang program using the host requirements saved
 /// with the artifact.
 pub fn canonical_program_source_with_requirements(
