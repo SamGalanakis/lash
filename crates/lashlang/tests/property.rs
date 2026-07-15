@@ -233,6 +233,106 @@ fn globals_strategy() -> impl Strategy<Value = HashMap<String, GenValue>> {
     prop::collection::hash_map(ident_strategy(), gen_value_strategy(), 0..6)
 }
 
+fn generated_workflow_corpus(ident: &str, value: &str) -> Vec<(&'static str, String)> {
+    let ident = format!("generated_{ident}");
+    vec![
+        ("data", format!("{ident} = {value}\nfinish {ident}\n")),
+        (
+            "call",
+            format!(
+                "@label(title: \"Generated call\", description: \"Metadata survives\")\n{ident} = await tools.echo({{ value: {value} }})?\nfinish {ident}\n"
+            ),
+        ),
+        (
+            "effect",
+            format!(
+                "@label(title: \"Generated effect\", description: \"Metadata survives\")\nprint {value}\nfinish {value}\n"
+            ),
+        ),
+        (
+            "terminal",
+            format!("process {ident}_terminal() {{\n  fail {value}\n}}\n"),
+        ),
+        (
+            "if",
+            format!(
+                "if true {{\n  {ident} = {value}\n}} else {{\n  {ident} = null\n}}\nfinish {ident}\n"
+            ),
+        ),
+        (
+            "for",
+            format!("for item in [1, 2] {{\n  print item\n}}\nfinish {value}\n"),
+        ),
+        (
+            "comprehension",
+            format!("{ident} = [item for item in [1, 2, 3] if item > 1]\nfinish {ident}\n"),
+        ),
+        (
+            "process",
+            format!(
+                "@label(title: \"Generated process\", description: \"Metadata survives\")\nprocess {ident}() {{\n  wake {value}\n  finish {value}\n}}\n"
+            ),
+        ),
+        (
+            "opaque_while",
+            "count = 0\nwhile count < 2 { count = count + 1 }\nfinish count\n".to_string(),
+        ),
+        (
+            "opaque_iteration_carried",
+            "total = 0\nfor item in [1, 2] { total = total + item }\nfinish total\n".to_string(),
+        ),
+        (
+            "opaque_nested_path",
+            "state = { count: 0 }\nstate.count = 1\nfinish state\n".to_string(),
+        ),
+    ]
+}
+
+fn graph_has_required_variant(graph: &lashlang::WorkflowGraph, variant: &str) -> bool {
+    match variant {
+        "data" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Data { .. })),
+        "call" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Call { .. })),
+        "effect" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Effect { .. })),
+        "terminal" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Terminal { .. })),
+        "if" => graph.nodes().any(|node| {
+            matches!(
+                node.kind,
+                lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::If { .. })
+            )
+        }),
+        "for" => graph.nodes().any(|node| {
+            matches!(
+                node.kind,
+                lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::For { .. })
+            )
+        }),
+        "comprehension" => graph.nodes().any(|node| {
+            matches!(
+                node.kind,
+                lashlang::WorkflowNodeKind::Container(
+                    lashlang::WorkflowContainer::ListComprehension { .. }
+                )
+            )
+        }),
+        "process" => graph
+            .declarations
+            .iter()
+            .any(|declaration| matches!(declaration, lashlang::WorkflowDeclaration::Process(_))),
+        variant if variant.starts_with("opaque_") => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Opaque { .. })),
+        _ => false,
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256,
@@ -291,34 +391,89 @@ proptest! {
     fn generated_workflows_obey_code_graph_code_laws(
         ident in ident_strategy(),
         value in gen_value_strategy(),
-        shape in 0u8..3,
     ) {
         let value = value.to_source();
-        let source = match shape {
-            0 => format!("{ident} = {value}\nfinish {ident}\n"),
-            1 => format!(
-                "if true {{\n  {ident} = {value}\n}} else {{\n  {ident} = null\n}}\nfinish {ident}\n"
-            ),
-            _ => format!(
-                "@label(title: \"Generated process\", description: \"Metadata survives\")\nprocess {ident}() {{\n  value = {value}\n  finish value\n}}\n"
-            ),
-        };
-        let input = parse(&source).expect("generated workflow should parse");
-        let canonical = canonical_program_source(&input).expect("canonical workflow source");
-        let graph = lashlang::workflow_graph_from_source(&canonical)
-            .expect("canonical source should project");
-        let rendered = lashlang::workflow_graph_to_source(&graph)
-            .expect("projected graph should render");
+        for (variant, source) in generated_workflow_corpus(&ident, &value) {
+            let input = parse(&source).expect("generated workflow should parse");
+            let canonical = canonical_program_source(&input).expect("canonical workflow source");
+            let graph = lashlang::workflow_graph_from_source(&canonical)
+                .expect("canonical source should project");
+            prop_assert!(
+                graph_has_required_variant(&graph, variant),
+                "{variant} did not project to its required workflow graph kind"
+            );
 
-        // GetPut on canonical source.
-        prop_assert_eq!(&rendered, &canonical);
-        // Canonical structural fixpoint (spans are ignored by Program::PartialEq).
-        prop_assert_eq!(parse(&rendered).unwrap(), parse(&canonical).unwrap());
-        // PutGet for graphs produced by source projection.
-        prop_assert_eq!(
-            lashlang::workflow_graph_from_source(&rendered).unwrap(),
-            graph
-        );
+            let rendered = lashlang::workflow_graph_to_source(&graph)
+                .expect("projected graph should render");
+
+            // GetPut on canonical source.
+            prop_assert_eq!(&rendered, &canonical, "GetPut failed for {}", variant);
+            // Canonical structural fixpoint (spans are ignored by Program::PartialEq).
+            prop_assert_eq!(
+                parse(&rendered).unwrap(),
+                parse(&canonical).unwrap(),
+                "canonical AST fixpoint failed for {}",
+                variant
+            );
+            // PutGet for graphs produced by source projection.
+            prop_assert_eq!(
+                lashlang::workflow_graph_from_source(&rendered).unwrap(),
+                graph.clone(),
+                "PutGet failed for {}",
+                variant
+            );
+
+            // Every invalid document is rejected through the typed render surface.
+            let mut unsupported = graph.clone();
+            unsupported.schema_version = lashlang::WORKFLOW_GRAPH_SCHEMA_VERSION + 1;
+            let unsupported_is_typed = matches!(
+                lashlang::workflow_graph_to_source(&unsupported),
+                Err(lashlang::GraphRenderError::UnsupportedSchemaVersion { .. })
+            );
+            prop_assert!(unsupported_is_typed);
+
+            // Opaque tails retain their exact canonical statement when spliced back.
+            if let Some(opaque) = graph.main.nodes.iter().find_map(|node| match &node.kind {
+                lashlang::WorkflowNodeKind::Opaque { source } => Some(source.clone()),
+                _ => None,
+            }) {
+                prop_assert!(
+                    rendered.contains(&opaque),
+                    "opaque source was not spliced verbatim for {variant}: {opaque:?}"
+                );
+                let mut invalid_opaque = graph.clone();
+                let node = invalid_opaque
+                    .main
+                    .nodes
+                    .iter_mut()
+                    .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Opaque { .. }))
+                    .expect("opaque node should remain present");
+                let lashlang::WorkflowNodeKind::Opaque { source } = &mut node.kind else {
+                    unreachable!("selected an opaque node")
+                };
+                *source = "value = 1\nother = 2".to_string();
+                let invalid_opaque_is_typed = matches!(
+                    lashlang::workflow_graph_to_source(&invalid_opaque),
+                    Err(lashlang::GraphRenderError::InvalidOpaqueSource { .. })
+                );
+                prop_assert!(invalid_opaque_is_typed);
+            }
+
+            if source.contains("@label") {
+                let has_label = graph.nodes().any(|node| {
+                    node.name_source == lashlang::WorkflowNodeNameSource::Label
+                        && node.description.as_deref() == Some("Metadata survives")
+                }) || graph.declarations.iter().any(|declaration| {
+                    matches!(
+                        declaration,
+                        lashlang::WorkflowDeclaration::Process(process)
+                            if process.name_source == lashlang::WorkflowNodeNameSource::Label
+                                && process.description.as_deref() == Some("Metadata survives")
+                    )
+                });
+                prop_assert!(has_label, "@label metadata was lost for {variant}");
+            }
+        }
     }
 
     #[test]
