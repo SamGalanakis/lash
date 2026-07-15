@@ -1,0 +1,351 @@
+<script>
+  import { Handle, Position } from '@xyflow/svelte';
+  import { getContext } from 'svelte';
+  import { kindMeta, OP_LABELS, WAITING_EFFECTS } from '../../lib/nodeKinds.js';
+
+  let { id, data } = $props();
+
+  const run = getContext('run');
+  const node = $derived(data.node);
+  const meta = $derived(kindMeta(node.data.kind));
+  const status = $derived(run.overlay[id] ?? null);
+
+  const subtitle = $derived(
+    node.data.operation
+      ? OP_LABELS[node.data.operation] ?? node.data.operation
+      : node.data.effect ?? node.data.kind,
+  );
+  const isWaitEffect = $derived(node.data.effect && WAITING_EFFECTS.has(node.data.effect));
+
+  const fieldKeys = $derived(Object.keys(node.data.fields ?? {}));
+
+  function fieldType(v) {
+    if (typeof v === 'number') return 'number';
+    if (typeof v === 'boolean') return 'boolean';
+    if (typeof v === 'string') return 'string';
+    return 'other';
+  }
+
+  function onTitleInput(e) {
+    node.data.title = e.currentTarget.value;
+    node.data.nameSource = 'label';
+  }
+  function onDescInput(e) {
+    node.data.description = e.currentTarget.value || undefined;
+    node.data.nameSource = 'label';
+  }
+  function onNumber(key, e) {
+    const n = Number(e.currentTarget.value);
+    if (!Number.isNaN(n)) node.data.fields[key] = n;
+  }
+</script>
+
+<div
+  class="wf-node"
+  class:is-running={status === 'running'}
+  class:is-waiting={status === 'waiting'}
+  class:is-done={status === 'succeeded'}
+  class:is-failed={status === 'failed'}
+  style="--accent:{meta.accent}; width:{data.width}px; min-height:{data.height}px;"
+>
+  <Handle type="target" position={Position.Top} />
+
+  <header class="wf-head">
+    <span class="wf-badge" title={node.data.kind}>
+      <span class="wf-glyph">{meta.glyph}</span>{meta.label}
+    </span>
+    <span class="wf-sub">{subtitle}</span>
+    {#if status}
+      <span class="wf-status wf-status--{status}">{status}</span>
+    {/if}
+    <button
+      class="wf-del"
+      title="Delete node"
+      aria-label="Delete node"
+      onclick={(e) => {
+        e.stopPropagation();
+        data.onDelete(id);
+      }}>×</button
+    >
+  </header>
+
+  <input
+    class="wf-title"
+    value={node.data.title}
+    oninput={onTitleInput}
+    spellcheck="false"
+    placeholder="title"
+  />
+  {#if node.data.nameSource === 'label' || node.data.description}
+    <input
+      class="wf-desc"
+      value={node.data.description ?? ''}
+      oninput={onDescInput}
+      spellcheck="false"
+      placeholder="description…"
+    />
+  {/if}
+
+  {#if fieldKeys.length}
+    <div class="wf-fields">
+      {#each fieldKeys as key (key)}
+        {@const v = node.data.fields[key]}
+        <label class="wf-field">
+          <span class="wf-key">{key}</span>
+          {#if fieldType(v) === 'number'}
+            <input
+              class="wf-input wf-input--num"
+              type="number"
+              value={v}
+              oninput={(e) => onNumber(key, e)}
+            />
+          {:else if fieldType(v) === 'boolean'}
+            <input
+              class="wf-check"
+              type="checkbox"
+              checked={v}
+              onchange={(e) => (node.data.fields[key] = e.currentTarget.checked)}
+            />
+          {:else if fieldType(v) === 'string'}
+            <input
+              class="wf-input"
+              type="text"
+              value={v}
+              spellcheck="false"
+              oninput={(e) => (node.data.fields[key] = e.currentTarget.value)}
+            />
+          {:else}
+            <code class="wf-ro">{JSON.stringify(v)}</code>
+          {/if}
+        </label>
+      {/each}
+    </div>
+  {/if}
+
+  {#if isWaitEffect}
+    <div class="wf-wait-note">
+      {node.data.effect === 'sleep' ? 'pauses the run' : 'waits for a signal'}
+    </div>
+  {/if}
+
+  <Handle type="source" position={Position.Bottom} />
+</div>
+
+<style>
+  .wf-node {
+    position: relative;
+    background: linear-gradient(180deg, var(--node-hi), var(--node));
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 12px;
+    padding: 9px 11px 11px;
+    box-shadow: var(--shadow);
+    transition:
+      box-shadow 0.25s ease,
+      border-color 0.25s ease,
+      transform 0.2s ease;
+  }
+
+  .wf-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 7px;
+  }
+  .wf-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+    padding: 2px 6px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .wf-glyph {
+    font-size: 11px;
+    line-height: 1;
+  }
+  .wf-sub {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .wf-status {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2px 5px;
+    border-radius: 5px;
+  }
+  .wf-status--running {
+    color: var(--cyan);
+    background: color-mix(in srgb, var(--cyan) 18%, transparent);
+  }
+  .wf-status--waiting {
+    color: var(--amber);
+    background: color-mix(in srgb, var(--amber) 18%, transparent);
+  }
+  .wf-status--succeeded {
+    color: #5fd08a;
+    background: rgba(95, 208, 138, 0.16);
+  }
+  .wf-status--failed {
+    color: var(--rose);
+    background: color-mix(in srgb, var(--rose) 20%, transparent);
+  }
+  .wf-del {
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 17px;
+    line-height: 1;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    padding: 0;
+    transition:
+      color 0.15s ease,
+      background 0.15s ease;
+  }
+  .wf-del:hover {
+    color: var(--rose);
+    background: color-mix(in srgb, var(--rose) 16%, transparent);
+  }
+
+  .wf-title {
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-bottom: 1px dashed transparent;
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-weight: 600;
+    font-size: 14px;
+    padding: 1px 0 3px;
+    margin-bottom: 2px;
+  }
+  .wf-title:focus,
+  .wf-desc:focus {
+    outline: none;
+    border-bottom-color: var(--accent);
+  }
+  .wf-desc {
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-bottom: 1px dashed transparent;
+    color: var(--text-dim);
+    font-family: var(--font-ui);
+    font-size: 11.5px;
+    padding: 1px 0 4px;
+    margin-bottom: 4px;
+  }
+
+  .wf-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .wf-field {
+    display: grid;
+    grid-template-columns: 62px 1fr;
+    align-items: center;
+    gap: 8px;
+  }
+  .wf-key {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-faint);
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .wf-input {
+    width: 100%;
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 5px 8px;
+    transition: border-color 0.15s ease;
+  }
+  .wf-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .wf-input--num {
+    font-variant-numeric: tabular-nums;
+  }
+  .wf-check {
+    justify-self: start;
+    accent-color: var(--accent);
+    width: 15px;
+    height: 15px;
+  }
+  .wf-ro {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-dim);
+  }
+  .wf-wait-note {
+    margin-top: 8px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--amber);
+    opacity: 0.8;
+    letter-spacing: 0.04em;
+  }
+
+  /* run overlay states */
+  .wf-node.is-running {
+    border-color: var(--cyan);
+    box-shadow:
+      0 0 0 1px var(--cyan),
+      0 0 26px -4px color-mix(in srgb, var(--cyan) 65%, transparent),
+      var(--shadow);
+  }
+  .wf-node.is-waiting {
+    border-color: var(--amber);
+    animation: wf-pulse 1.1s ease-in-out infinite;
+  }
+  .wf-node.is-done {
+    border-left-color: #5fd08a;
+  }
+  .wf-node.is-failed {
+    border-color: var(--rose);
+    box-shadow:
+      0 0 0 1px var(--rose),
+      0 0 26px -6px color-mix(in srgb, var(--rose) 60%, transparent),
+      var(--shadow);
+  }
+  @keyframes wf-pulse {
+    0%,
+    100% {
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--amber) 55%, transparent),
+        0 0 8px -2px color-mix(in srgb, var(--amber) 30%, transparent),
+        var(--shadow);
+    }
+    50% {
+      box-shadow:
+        0 0 0 1px var(--amber),
+        0 0 28px -2px color-mix(in srgb, var(--amber) 75%, transparent),
+        var(--shadow);
+    }
+  }
+</style>
