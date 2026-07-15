@@ -64,11 +64,37 @@ async fn lists_selects_projects_and_runs_built_in_workflows() {
         let rendered =
             lashlang::workflow_graph_to_source(&projected).expect("catalog graph should render");
         assert_eq!(rendered, document.source);
+        assert_eq!(
+            lashlang::parse(&rendered).expect("rendered catalog source"),
+            lashlang::parse(&document.source).expect("canonical catalog source")
+        );
+        assert_eq!(
+            lashlang::workflow_graph_from_source(&rendered).expect("reproject catalog source"),
+            projected
+        );
 
         if entry.id == "counter-loop" {
-            assert!(document.nodes.iter().any(|node| node.node_type == "opaque"));
+            assert!(!document.nodes.iter().any(|node| node.node_type == "opaque"));
+            assert!(
+                document
+                    .nodes
+                    .iter()
+                    .any(|node| node.node_type == "state_update")
+            );
+            assert!(document.nodes.iter().any(|node| {
+                node.node_type == "container"
+                    && node.data.title == "while"
+                    && node.data.children.iter().any(|child| child.slot == "body")
+            }));
             assert!(document.nodes.iter().any(|node| {
                 node.node_type == "container" && node.data.title.starts_with("for ")
+            }));
+            assert!(projected.nodes().any(|node| {
+                matches!(
+                    &node.kind,
+                    lashlang::WorkflowNodeKind::StateUpdate { target, .. }
+                        if !target.is_simple()
+                )
             }));
         }
 
@@ -101,7 +127,16 @@ async fn lists_selects_projects_and_runs_built_in_workflows() {
             .id
             .as_str();
         let final_event = events.last().expect("final run event");
-        assert_eq!(final_event.node_id, terminal_id);
+        let final_title = document
+            .nodes
+            .iter()
+            .find(|node| node.id == final_event.node_id)
+            .map(|node| node.data.title.as_str());
+        assert_eq!(
+            final_event.node_id, terminal_id,
+            "{} final event was {final_title:?}",
+            entry.id
+        );
         assert_eq!(final_event.status, RunStatus::Succeeded);
 
         if entry.id == "branching-approval" {
@@ -343,8 +378,35 @@ async fn invalid_graph_post_returns_typed_unprocessable_entity() {
     assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
     let body: Value = response.json().await.expect("typed error response");
     assert_eq!(body["error"]["code"], "unsupported_schema_version");
-    assert_eq!(body["error"]["details"]["found"], 2);
-    assert_eq!(body["error"]["details"]["expected"], 1);
+    assert_eq!(
+        body["error"]["details"]["found"],
+        lashlang::WORKFLOW_GRAPH_SCHEMA_VERSION + 1
+    );
+    assert_eq!(
+        body["error"]["details"]["expected"],
+        lashlang::WORKFLOW_GRAPH_SCHEMA_VERSION
+    );
+
+    document.schema_version = lashlang::WORKFLOW_GRAPH_SCHEMA_VERSION;
+    let while_node = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.node_type == "container" && node.data.title == "while")
+        .expect("default workflow while container");
+    while_node
+        .data
+        .children
+        .retain(|child| child.slot != "body");
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("POST while without body");
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = response.json().await.expect("typed missing-child response");
+    assert_eq!(body["error"]["code"], "missing_required_child");
+    assert_eq!(body["error"]["details"]["child"], "body");
 
     server.abort();
 }

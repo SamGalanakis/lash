@@ -601,3 +601,62 @@ fn parse_name_source(source: &str) -> WorkflowNodeNameSource {
         WorkflowNodeNameSource::Derived
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn promoted_constructs_flatten_and_rebuild_as_typed_nodes() {
+        let input = r#"type State = { count: int }
+
+process worker() {
+  finish 1
+}
+
+schema = Type { state: State }
+runs = [start worker(), start worker()]
+state = { count: 0 }
+state.count = 1
+while state.count < 2 {
+  state.count = state.count + 1
+}
+for item in [1, 2] {
+  state.count = item
+  introduced = item
+}
+finish [state, introduced]
+"#;
+        let graph = lashlang::workflow_graph_from_source(input).expect("project promoted graph");
+        let source = lashlang::workflow_graph_to_source(&graph).expect("render promoted graph");
+        let document = document_from_graph(1, source.clone(), graph.clone());
+
+        for kind in [
+            "data",
+            "computation",
+            "state_update",
+            "container",
+            "terminal",
+        ] {
+            assert!(
+                document.nodes.iter().any(|node| node.node_type == kind),
+                "missing flattened {kind} node"
+            );
+        }
+        assert!(!document.nodes.iter().any(|node| node.node_type == "opaque"));
+        assert!(document.nodes.iter().any(|node| {
+            node.data.title == "while"
+                && node.data.children.iter().any(|child| child.slot == "body")
+        }));
+
+        let rebuilt = graph_from_document(document, &graph).expect("rebuild promoted graph");
+        assert_eq!(
+            lashlang::workflow_graph_to_source(&rebuilt).expect("render rebuilt graph"),
+            source
+        );
+        assert_eq!(
+            lashlang::workflow_graph_from_source(&source).expect("reproject rebuilt source"),
+            graph
+        );
+    }
+}

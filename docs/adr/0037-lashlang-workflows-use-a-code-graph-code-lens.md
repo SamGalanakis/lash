@@ -41,15 +41,25 @@ that it cannot prove parses rather than presenting a plausible but false view.
 
 The derived projection is n8n-shaped:
 
-- calls, effects, terminals, and pure value-shaping data are typed nodes;
-- `if`, `for`, list comprehension, and named process are containers with child
-  subgraphs;
+- calls, effects, terminals, pure value-shaping data, reference-bearing type
+  literals, state updates, and sequenced computations are typed nodes;
+- `if`, `for`, `while`, list comprehension, and named process are containers
+  with child subgraphs;
 - data-dependency edges carry SSA-like variable versions, while explicit
   sequencing edges preserve the source order of effects;
-- `is_pure_expr` is the shared discriminator for the projectable data subset;
-- imperative tails such as `while`, nested path assignment,
-  iteration-carried reassignment, and signal state machines are opaque
-  edit-as-text nodes rather than misleading partial structure.
+- `is_pure_expr` is the shared discriminator for the ordinary data subset,
+  while source-valid `TypeLiteral` values remain typed data even when their
+  references require runtime resolution;
+- a computation retains one complete effectful expression AST, preserving its
+  evaluation order, short-circuit behavior, unwrap timing, and canonical text
+  instead of splitting operands into independently scheduled nodes;
+- `for` and `while` summarize body writes as one post-loop version per visible
+  root, including nested-path writes and variables first introduced in a loop;
+  loop and comprehension bindings shadow outer dependency state and do not
+  leak from their scope;
+- opaque fallback is local to one statement and is reserved for a genuinely
+  unisolable construct. A projectable `if`, `for`, `while`, reassignment, type
+  literal, or effectful expression never makes its enclosing region opaque.
 
 An explicit `@label` supplies the node name and description. Otherwise the
 projection derives a name from the operation or construct. Node ids are hashes
@@ -71,8 +81,9 @@ mutation commands, versioning, layout, rendering, and interaction policy.
 
 Hosts can choose code authoring, graph authoring, or both without maintaining a
 second language printer or a private inverse. Canonical reformatting is visible
-after graph rendering, and comments are not preserved. Clean workflow regions
-remain structurally editable while complex imperative regions stay honest and
-round-trippable as text. The execution-trace graph remains a separate
-trace-derived runtime view and may consume the workflow graph as its static
-skeleton without becoming the authoring model.
+after graph rendering, and comments are not preserved. Effectful composites
+retain their source semantics without sacrificing typed structure. Any future
+opaque fallback remains a single editable statement, so surrounding control
+flow and dependencies stay visible. The execution-trace graph remains a
+separate trace-derived runtime view and may consume the workflow graph as its
+static skeleton without becoming the authoring model.

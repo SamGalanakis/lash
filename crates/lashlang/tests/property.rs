@@ -254,9 +254,9 @@ fn generated_workflow_corpus(ident: &str, value: &str) -> Vec<(&'static str, Str
             format!("process {ident}_terminal() {{\n  fail {value}\n}}\n"),
         ),
         (
-            "if",
+            "if_forms",
             format!(
-                "if true {{\n  {ident} = {value}\n}} else {{\n  {ident} = null\n}}\nfinish {ident}\n"
+                "{ident} = (true ? {value} : null)\nif true {{\n  print {ident}\n}} else if false {{\n  print null\n}} else {{\n  print {value}\n}}\nfinish {ident}\n"
             ),
         ),
         (
@@ -274,16 +274,34 @@ fn generated_workflow_corpus(ident: &str, value: &str) -> Vec<(&'static str, Str
             ),
         ),
         (
-            "opaque_while",
+            "while",
             "count = 0\nwhile count < 2 { count = count + 1 }\nfinish count\n".to_string(),
         ),
         (
-            "opaque_iteration_carried",
-            "total = 0\nfor item in [1, 2] { total = total + item }\nfinish total\n".to_string(),
+            "stateful_for",
+            "total = 0\nfor item in [1, 2] { total = total + item\nintroduced = item }\nfinish [total, introduced]\n".to_string(),
         ),
         (
-            "opaque_nested_path",
+            "state_update_path",
             "state = { count: 0 }\nstate.count = 1\nfinish state\n".to_string(),
+        ),
+        (
+            "state_update_simple",
+            format!("{ident} = null\n{ident} = {value}\nfinish {ident}\n"),
+        ),
+        (
+            "type_ref_data",
+            "type Generated = { value: str }\nschema = Type { nested: Generated }\nfinish schema\n"
+                .to_string(),
+        ),
+        (
+            "computation",
+            "process generated_worker() { finish 1 }\nruns = [start generated_worker(), start generated_worker()]\ntupled = (await runs[0], await runs[1])\nlisted = [await runs[0], await runs[1]]\nrecorded = { value: await runs[0] }\nbuilt = len(await runs)\nbinary = (await runs[0] + 1)\nunary = not await runs[0]\nfield = (await runs[0]).value\nindexed = (await runs)[0]\nunusual = (await runs[0])??\nfinish unusual\n".to_string(),
+        ),
+        (
+            "scoped_for",
+            "item = 99\nitems = [1, 2]\nfor item in items { print item }\nselected = [item for item in items if item > 0]\nfinish item\n"
+                .to_string(),
         ),
     ]
 }
@@ -302,16 +320,32 @@ fn graph_has_required_variant(graph: &lashlang::WorkflowGraph, variant: &str) ->
         "terminal" => graph
             .nodes()
             .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Terminal { .. })),
-        "if" => graph.nodes().any(|node| {
-            matches!(
-                node.kind,
-                lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::If { .. })
-            )
-        }),
-        "for" => graph.nodes().any(|node| {
+        "if_forms" => {
+            let mut has_expression_if = false;
+            let mut has_direct_else_if = false;
+            for node in graph.nodes() {
+                if let lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::If {
+                    then_is_block,
+                    else_is_block,
+                    ..
+                }) = node.kind
+                {
+                    has_expression_if |= !then_is_block && !else_is_block;
+                    has_direct_else_if |= then_is_block && !else_is_block;
+                }
+            }
+            has_expression_if && has_direct_else_if
+        }
+        "for" | "stateful_for" | "scoped_for" => graph.nodes().any(|node| {
             matches!(
                 node.kind,
                 lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::For { .. })
+            )
+        }),
+        "while" => graph.nodes().any(|node| {
+            matches!(
+                node.kind,
+                lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::While { .. })
             )
         }),
         "comprehension" => graph.nodes().any(|node| {
@@ -326,9 +360,167 @@ fn graph_has_required_variant(graph: &lashlang::WorkflowGraph, variant: &str) ->
             .declarations
             .iter()
             .any(|declaration| matches!(declaration, lashlang::WorkflowDeclaration::Process(_))),
-        variant if variant.starts_with("opaque_") => graph
+        "state_update_path" | "state_update_simple" => graph
             .nodes()
-            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Opaque { .. })),
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::StateUpdate { .. })),
+        "type_ref_data" => graph.nodes().any(|node| {
+            matches!(
+                node.kind,
+                lashlang::WorkflowNodeKind::Data {
+                    expression: lashlang::Expr::TypeLiteral(_),
+                    ..
+                }
+            )
+        }),
+        "computation" => graph
+            .nodes()
+            .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Computation { .. })),
+        _ => false,
+    }
+}
+
+fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &str) -> bool {
+    let mut invalid = graph.clone();
+    let expected = match variant {
+        "if_forms" => {
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
+                matches!(
+                    node.kind,
+                    lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::If {
+                        then_is_block: false,
+                        ..
+                    })
+                )
+            }) else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::If {
+                else_is_block,
+                ..
+            }) = &mut node.kind
+            else {
+                return false;
+            };
+            *else_is_block = true;
+            "invalid_payload"
+        }
+        "for" | "stateful_for" | "scoped_for" => {
+            let Some(node) = invalid.nodes().find(|node| {
+                matches!(
+                    node.kind,
+                    lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::For { .. })
+                )
+            }) else {
+                return false;
+            };
+            let id = node.id.clone();
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| node.id == id) else {
+                return true;
+            };
+            let lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::For {
+                body,
+                ..
+            }) = &mut node.kind
+            else {
+                return false;
+            };
+            *body = None;
+            "missing_child"
+        }
+        "while" => {
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
+                matches!(
+                    node.kind,
+                    lashlang::WorkflowNodeKind::Container(
+                        lashlang::WorkflowContainer::While { .. }
+                    )
+                )
+            }) else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::While {
+                body,
+                ..
+            }) = &mut node.kind
+            else {
+                return false;
+            };
+            *body = None;
+            "missing_child"
+        }
+        "comprehension" => {
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
+                matches!(
+                    node.kind,
+                    lashlang::WorkflowNodeKind::Container(
+                        lashlang::WorkflowContainer::ListComprehension { .. }
+                    )
+                )
+            }) else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Container(
+                lashlang::WorkflowContainer::ListComprehension { element, .. },
+            ) = &mut node.kind
+            else {
+                return false;
+            };
+            *element = None;
+            "missing_child"
+        }
+        "state_update_path" | "state_update_simple" => {
+            let Some(node) =
+                invalid.main.nodes.iter_mut().find(|node| {
+                    matches!(node.kind, lashlang::WorkflowNodeKind::StateUpdate { .. })
+                })
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::StateUpdate { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = lashlang::Expr::Block(Vec::new());
+            "canonical_source"
+        }
+        "type_ref_data" => {
+            let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
+                matches!(
+                    node.kind,
+                    lashlang::WorkflowNodeKind::Data {
+                        expression: lashlang::Expr::TypeLiteral(_),
+                        ..
+                    }
+                )
+            }) else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Data { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = lashlang::Expr::Print(Box::new(lashlang::Expr::Null));
+            "invalid_payload"
+        }
+        "computation" => {
+            let Some(node) =
+                invalid.main.nodes.iter_mut().find(|node| {
+                    matches!(node.kind, lashlang::WorkflowNodeKind::Computation { .. })
+                })
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Computation { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = lashlang::Expr::Null;
+            "invalid_payload"
+        }
+        _ => return true,
+    };
+
+    match (expected, lashlang::workflow_graph_to_source(&invalid)) {
+        ("invalid_payload", Err(lashlang::GraphRenderError::InvalidNodePayload { .. }))
+        | ("missing_child", Err(lashlang::GraphRenderError::MissingRequiredChild { .. }))
+        | ("canonical_source", Err(lashlang::GraphRenderError::CanonicalSource(_))) => true,
         _ => false,
     }
 }
@@ -432,32 +624,16 @@ proptest! {
             );
             prop_assert!(unsupported_is_typed);
 
-            // Opaque tails retain their exact canonical statement when spliced back.
-            if let Some(opaque) = graph.main.nodes.iter().find_map(|node| match &node.kind {
-                lashlang::WorkflowNodeKind::Opaque { source } => Some(source.clone()),
-                _ => None,
-            }) {
-                prop_assert!(
-                    rendered.contains(&opaque),
-                    "opaque source was not spliced verbatim for {variant}: {opaque:?}"
-                );
-                let mut invalid_opaque = graph.clone();
-                let node = invalid_opaque
-                    .main
-                    .nodes
-                    .iter_mut()
-                    .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Opaque { .. }))
-                    .expect("opaque node should remain present");
-                let lashlang::WorkflowNodeKind::Opaque { source } = &mut node.kind else {
-                    unreachable!("selected an opaque node")
-                };
-                *source = "value = 1\nother = 2".to_string();
-                let invalid_opaque_is_typed = matches!(
-                    lashlang::workflow_graph_to_source(&invalid_opaque),
-                    Err(lashlang::GraphRenderError::InvalidOpaqueSource { .. })
-                );
-                prop_assert!(invalid_opaque_is_typed);
-            }
+            prop_assert!(
+                !graph
+                    .nodes()
+                    .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Opaque { .. })),
+                "promoted construct unexpectedly projected as opaque for {variant}"
+            );
+            prop_assert!(
+                promoted_invalid_graph_is_typed(&graph, variant),
+                "invalid promoted graph did not return its typed error for {variant}"
+            );
 
             if source.contains("@label") {
                 let has_label = graph.nodes().any(|node| {

@@ -72,15 +72,15 @@ process branching_approval() signals { continue: any } {
 "#;
 
 const COUNTER_LOOP_WORKFLOW: &str = r#"
-@label(title: "Counter loop", description: "Combine an opaque while tail with an editable for container")
+@label(title: "Counter loop", description: "Combine structured while and for containers")
 process counter_loop() {
   await display.set_status({ key: "counter", value: "running" })?
-  await display.set_progress({ pct: 0 })?
-  count = 0
-  while count < 3 {
-    await display.add_item({ list: "counts", item: count })?
-    await display.set_progress({ pct: count * 20 + 20 })?
-    count = count + 1
+  await display.set_progress({ pct: 5 })?
+  state = { count: 0 }
+  while state.count < 3 {
+    await display.add_item({ list: "counts", item: state.count })?
+    await display.set_progress({ pct: state.count * 20 + 20 })?
+    state.count = state.count + 1
     sleep for "250ms"
   }
   for pct in [70, 85, 100] {
@@ -90,7 +90,7 @@ process counter_loop() {
   await display.highlight({ target: "progress" })?
   await display.set_status({ key: "counter", value: "complete" })?
   await display.show_message({ text: "Counter complete" })?
-  finish count
+  finish state.count
 }
 "#;
 
@@ -116,7 +116,7 @@ pub(crate) const BUILT_IN_WORKFLOWS: &[BuiltInWorkflow] = &[
     BuiltInWorkflow {
         id: "counter-loop",
         name: "Counter Loop",
-        description: "An opaque while loop followed by an editable for container and progress updates.",
+        description: "A structured while loop followed by an editable for container and progress updates.",
         source: COUNTER_LOOP_WORKFLOW,
     },
 ];

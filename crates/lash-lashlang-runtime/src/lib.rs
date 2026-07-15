@@ -937,6 +937,12 @@ mod tests {
               @label(title: "Skipped print")
               print 0
             }
+            count = 0
+            while count < 1 {
+              @label(title: "Loop print")
+              print count
+              count = count + 1
+            }
             @label(title: "Finish value")
             finish value
         "#;
@@ -979,6 +985,12 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|node| node.label == "Selected print")
+        );
+        assert!(
+            trace_map
+                .nodes
+                .iter()
+                .any(|node| node.label == "Loop print")
         );
     }
 

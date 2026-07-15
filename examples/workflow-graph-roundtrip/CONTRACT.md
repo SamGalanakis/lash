@@ -50,7 +50,7 @@ in `examples/workflow-graph-roundtrip/frontend/dist/` (or directly in
   {
     "id": "counter-loop",
     "name": "Counter Loop",
-    "description": "An opaque while loop followed by an editable for container and progress updates."
+    "description": "A structured while loop followed by an editable for container and progress updates."
   }
 ]
 ```
@@ -90,7 +90,7 @@ An unknown ID returns HTTP `404`:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "version": 1,
   "source": "canonical Lashlang source",
   "nodes": [
@@ -106,7 +106,7 @@ An unknown ID returns HTTP `404`:
         "operation": "show_message",
         "effect": "sleep",
         "fields": { "text": "Welcome", "pct": 35 },
-        "source": "while count < 2 { count = count + 1 }",
+        "source": "one canonical opaque statement, when fallback is required",
         "children": [
           {
             "slot": "then",
@@ -142,7 +142,8 @@ Optional properties are omitted, so a real call node has `operation` but no
 possible property in one place.
 
 Node `type` and `data.kind` use `process`, `data`, `call`, `effect`,
-`terminal`, `container`, or `opaque`. `data.effect` uses `start_process`,
+`computation`, `state_update`, `terminal`, `container`, or `opaque`.
+`data.effect` uses `start_process`,
 `await_join`, `signal_run`, `wait_signal`, `sleep`, `cancel`, `print`, `yield`,
 `wake`, `break`, or `continue`. `data.nameSource` is `label` for an authored
 `@label` and `derived` for an automatic name.
@@ -155,8 +156,8 @@ node is edited through `data.source` as one complete Lashlang statement.
 
 Containers carry ordered child groups in `data.children`. `roots.processes`
 lists the top-level process containers. A process container uses slot `body`;
-`if` uses `then` and `else`; other structured
-containers use `body` or `element`. `parentId` is supplied for SvelteFlow
+`if` uses `then` and `else`; `for` and `while` use `body`; list comprehension
+uses `element`. `parentId` is supplied for SvelteFlow
 nesting. `roots` and each `children[].nodeIds` are the source order and are
 therefore also the reorder controls.
 
@@ -263,8 +264,8 @@ The data JSON shape is:
 are omitted; `displayDelta` itself is always present. `display` is the full
 state after that event, which lets a client either apply deltas or replace its
 view. Sleep and `wait_signal` emit `waiting`. The host auto-fires the declared
-`continue` signal after 650 ms. Opaque loops can emit multiple occurrences for
-the same graph node. Stream EOF means the run is complete; the correlated
+`continue` signal after 650 ms. Loop body nodes can emit multiple occurrences.
+Stream EOF means the run is complete; the correlated
 terminal node's `succeeded` event is the final normal event.
 
 Every emitted event has a `nodeId` obtained through
