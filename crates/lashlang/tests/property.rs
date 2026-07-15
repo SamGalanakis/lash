@@ -517,12 +517,19 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
         _ => return true,
     };
 
-    match (expected, lashlang::workflow_graph_to_source(&invalid)) {
-        ("invalid_payload", Err(lashlang::GraphRenderError::InvalidNodePayload { .. }))
-        | ("missing_child", Err(lashlang::GraphRenderError::MissingRequiredChild { .. }))
-        | ("canonical_source", Err(lashlang::GraphRenderError::CanonicalSource(_))) => true,
-        _ => false,
-    }
+    matches!(
+        (expected, lashlang::workflow_graph_to_source(&invalid)),
+        (
+            "invalid_payload",
+            Err(lashlang::GraphRenderError::InvalidNodePayload { .. })
+        ) | (
+            "missing_child",
+            Err(lashlang::GraphRenderError::MissingRequiredChild { .. })
+        ) | (
+            "canonical_source",
+            Err(lashlang::GraphRenderError::CanonicalSource(_))
+        )
+    )
 }
 
 proptest! {

@@ -64,6 +64,7 @@ fn collect_execution_sites(
             "step",
             label.title.as_str(),
         ));
+        collect_execution_sites(expression, owner, path, None, sites);
         return;
     }
     match expression {

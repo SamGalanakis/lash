@@ -333,7 +333,8 @@ finish unusual
 
 #[test]
 fn while_collects_condition_sites_without_duplicating_body_sites() {
-    let source = r#"while await tools.ready({})? {
+    let source = r#"@label(title: "Loop guard")
+while await tools.ready({})? {
   await tools.tick({})?
 }
 "#;
@@ -347,7 +348,7 @@ fn while_collects_condition_sites_without_duplicating_body_sites() {
             .iter()
             .map(|site| site.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["ready"]
+        vec!["Loop guard", "ready"]
     );
     assert_eq!(
         body.as_deref().unwrap().nodes[0].execution_sites[0].label,
