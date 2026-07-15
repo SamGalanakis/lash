@@ -108,7 +108,7 @@
 
     <div class="section" id="archetypes">
       <div class="section-header">
-        <h2>Five Regression Archetypes</h2>
+        <h2>Six Regression Archetypes</h2>
         <p>Use this checklist during review and incident response. Each item points to the test that turns the failure class into an executable contract.</p>
       </div>
       <div class="listing">
@@ -131,6 +131,10 @@
         <div class="listing__row">
           <div class="listing__label">hidden affinity</div>
           <div class="listing__body"><p>A provider-specific affinity field exists but its exact name, scope, or stability contract is undocumented. Verify the bounded body <code>session_id</code>, the call-specific <code>x-client-request-id</code>, and the host's explicit <code>cache_session_affinity</code> setting.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">zero-usage EOF</div>
+          <div class="listing__body"><p>A stream ends before its dialect terminal event and the apparent response has zero usage. This is now a retryable truncation error, not a successful zero-cost completion. Inspect the failed ADR 0032 attempt: any usage and raw <code>provider_usage</code> observed before EOF are retained; <code>usage: None</code> means the provider reported none. Check the per-dialect missing-terminal regressions and <code>failed_stream_attempt_retains_observed_usage_and_evidence_in_ledger</code>. Only explicitly <code>EofTolerated</code> routes preserve clean-EOF success.</p></div>
         </div>
       </div>
     </div>

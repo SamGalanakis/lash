@@ -121,6 +121,10 @@
               <div class="listing__body"><p><code>ProviderRetryPolicy</code> defaults to four attempts with exponential delay capped at 10 seconds and <code>Retry-After</code> capped at 60 seconds. <code>ProviderReliability::disabled()</code> turns retries off for hosts that already retry at a higher layer.</p></div>
             </div>
             <div class="listing__row">
+              <div class="listing__label">stream termination</div>
+              <div class="listing__body"><p><code>StreamTermination::RequireTerminalEvidence</code> rejects clean EOF unless the wire dialect proved completion: Chat Completions needs a nonempty <code>finish_reason</code>, Responses/Codex needs a terminal response event, and Anthropic needs <code>message_stop</code> after <code>message_start</code>. Google defaults to <code>EofTolerated</code>; other hosts may select that compatibility policy explicitly through <code>ModelCapability.stream_termination</code>, <code>OpenAiCompat.stream_termination</code>, or the direct-provider builder. URLs and model names never select it.</p><p>A missing terminal is a retryable stream error. The failed attempt retains partial content, normalized usage, raw <code>provider_usage</code>, and execution evidence in the ADR 0032 ledger. A whole-call retry resets attempt-local parts first, so a truncated tool call is never executed or merged into the next attempt. User cancellation remains distinct and non-retryable.</p></div>
+            </div>
+            <div class="listing__row">
               <div class="listing__label">throttles</div>
               <div class="listing__body"><p>A retryable quota failure carrying <code>Retry-After</code> (an HTTP 429) is a throttle, not a failure: the ladder waits as instructed without consuming a retry attempt. The deference is bounded by the cumulative <code>throttle_wait_budget_ms</code> (default 90 seconds per call; <code>0</code> disables it, and each deferred wait charges at least one second), after which throttles count as ordinary retryable failures. A 429 without <code>Retry-After</code> follows the normal backoff-and-count ladder.</p></div>
             </div>
@@ -128,6 +132,17 @@
               <div class="listing__label">rate limits</div>
               <div class="listing__body"><p><code>ProviderRateLimitPolicy</code> can cap max concurrency, requests per window, and tokens per window before a provider request is admitted.</p></div>
             </div>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Dialect</th><th>Default</th><th>Required evidence</th></tr></thead>
+              <tbody>
+                <tr><td>OpenAI Chat Completions</td><td><code>RequireTerminalEvidence</code></td><td>Nonempty <code>finish_reason</code></td></tr>
+                <tr><td>OpenAI / Codex Responses</td><td><code>RequireTerminalEvidence</code></td><td><code>response.completed</code>, <code>response.incomplete</code>, <code>response.failed</code>, or <code>response.done</code></td></tr>
+                <tr><td>Anthropic Messages</td><td><code>RequireTerminalEvidence</code></td><td><code>message_stop</code> after <code>message_start</code></td></tr>
+                <tr><td>Google Gemini / Code Assist</td><td><code>EofTolerated</code></td><td>Clean EOF; a present <code>finishReason</code> still determines the normalized terminal reason</td></tr>
+              </tbody>
+            </table>
           </div>
           <pre><code>use lash::provider::{ProviderReliability, RequestTimeout};
 
