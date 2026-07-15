@@ -23,6 +23,14 @@ WORKFLOW_GRAPH_ADDR=127.0.0.1:3057 \
   cargo run -p workflow-graph-roundtrip
 ```
 
+The backend serves `frontend/dist` from disk on each request, so a frontend
+rebuild is visible on a browser refresh alone. The Rust backend is **not**
+hot-reloaded, however: after any change to backend source (`src/*.rs`, or the
+lash crates it depends on) you must rebuild and restart the server process, or
+it keeps serving the old projection. A half-refreshed server — new frontend,
+stale binary — is the most likely cause of a field that renders empty or a
+graph that ignores an edit; rebuild and relaunch before debugging further.
+
 Open the address used above. Exercise the newly editable fields with this
 operator loop:
 
