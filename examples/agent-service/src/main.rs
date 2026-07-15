@@ -36,6 +36,7 @@ fn default_openrouter_model_capability() -> lash::provider::ModelCapability {
             ..lash::provider::ReasoningCapability::default()
         }),
         cache_control: Some(lash::provider::CacheControlDialect::Anthropic),
+        stream_termination: None,
     }
 }
 

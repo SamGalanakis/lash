@@ -773,6 +773,9 @@ pub struct ResponsesStreamState {
     pub usage: LlmUsage,
     pub provider_usage: Option<Value>,
     pub final_response: Option<Value>,
+    /// Set only by a terminal Responses event, never merely by an event that
+    /// happens to carry a `response` snapshot.
+    pub terminal_event_seen: bool,
     pub current_text_part: Option<usize>,
     pub current_text_output_index: Option<usize>,
     pub current_message_item_id: Option<String>,
@@ -1470,12 +1473,14 @@ pub fn process_sse_event(
                 }
             }
         }
-        "response.completed" => {
+        "response.completed" | "response.incomplete" | "response.done" => {
+            state.terminal_event_seen = true;
             if let Some(resp_value) = event.get("response") {
                 state.merge_final_response(resp_value);
             }
         }
         "response.failed" => {
+            state.terminal_event_seen = true;
             let error_value = event
                 .get("response")
                 .and_then(|r| r.get("error"))

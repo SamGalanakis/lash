@@ -38,6 +38,7 @@ fn capability_for_variant(variant: Option<&str>) -> lash_core::ModelCapability {
             mandatory: false,
         }),
         cache_control: None,
+        stream_termination: None,
     }
 }
 

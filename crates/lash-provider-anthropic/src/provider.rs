@@ -34,6 +34,12 @@ impl Provider for AnthropicProvider {
                 serde_json::Value::String(base_url.clone()),
             );
         }
+        if self.stream_termination != StreamTermination::RequireTerminalEvidence {
+            map.insert(
+                "stream_termination".to_string(),
+                serde_json::to_value(self.stream_termination).unwrap_or(Value::Null),
+            );
+        }
         serialize_options_tail(&mut map, &self.options);
         serde_json::Value::Object(map)
     }
@@ -114,7 +120,7 @@ impl Provider for AnthropicProvider {
 
         let mut state = StreamState::default();
         let expose_thinking = self.options.expose_thinking;
-        drive_sse_response(
+        let stream_result = drive_sse_response(
             resp.body,
             timeouts.chunk_timeout,
             "Anthropic stream chunk timed out",
@@ -123,7 +129,30 @@ impl Provider for AnthropicProvider {
                 Self::process_sse_event(raw, &mut state, stream_events.as_ref(), expose_thinking)
             },
         )
-        .await?;
+        .await;
+
+        let stream_termination = req
+            .model_capability
+            .stream_termination
+            .unwrap_or(self.stream_termination);
+        if let Err(error) = stream_result {
+            return Err(error.with_partial_response(Self::partial_response(
+                state.clone(),
+                request_body.clone(),
+                &url,
+            )));
+        }
+        if stream_termination == StreamTermination::RequireTerminalEvidence
+            && !state.message_stopped
+        {
+            return Err(
+                LlmTransportError::new("Anthropic stream ended before message_stop")
+                    .with_kind(ProviderFailureKind::Stream)
+                    .with_code("stream_ended_before_message_stop")
+                    .retryable(true)
+                    .with_partial_response(Self::partial_response(state, request_body, &url)),
+            );
+        }
 
         let provider_usage = state.provider_usage.take();
         let (parts, full_text, usage, terminal_reason) = Self::finalize(state);
@@ -142,5 +171,27 @@ impl Provider for AnthropicProvider {
 
     fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
+    }
+}
+
+impl AnthropicProvider {
+    fn partial_response(
+        mut state: StreamState,
+        request_body: Option<String>,
+        url: &str,
+    ) -> LlmResponse {
+        let provider_usage = state.provider_usage.take();
+        let (parts, full_text, usage, _) = Self::finalize(state);
+        LlmResponse {
+            full_text,
+            parts,
+            usage,
+            terminal_reason: LlmTerminalReason::Unknown,
+            terminal_diagnostic: None,
+            provider_usage,
+            request_body,
+            http_summary: Some(format!("HTTP POST {url} (stream)")),
+            execution_evidence: None,
+        }
     }
 }

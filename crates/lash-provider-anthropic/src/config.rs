@@ -16,6 +16,7 @@ pub struct AnthropicProvider {
     pub api_key: String,
     pub base_url: Option<String>,
     pub options: ProviderOptions,
+    pub stream_termination: StreamTermination,
     pub(crate) transport: Arc<dyn LlmHttpTransport>,
 }
 
@@ -25,6 +26,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: None,
             options: ProviderOptions::default(),
+            stream_termination: StreamTermination::RequireTerminalEvidence,
             transport: Arc::clone(&DEFAULT_HTTP_TRANSPORT),
         }
     }
@@ -36,6 +38,11 @@ impl AnthropicProvider {
 
     pub fn with_options(mut self, options: ProviderOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    pub fn with_stream_termination(mut self, policy: StreamTermination) -> Self {
+        self.stream_termination = policy;
         self
     }
 
@@ -67,6 +74,12 @@ struct AnthropicProviderConfig {
     base_url: Option<String>,
     #[serde(default)]
     options: ProviderOptions,
+    #[serde(default = "default_stream_termination")]
+    stream_termination: StreamTermination,
+}
+
+fn default_stream_termination() -> StreamTermination {
+    StreamTermination::RequireTerminalEvidence
 }
 
 /// Factory that materializes [`AnthropicProvider`] from a host-owned
@@ -84,6 +97,7 @@ impl ProviderFactory for AnthropicProviderFactory {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             options: cfg.options,
+            stream_termination: cfg.stream_termination,
             transport: Arc::clone(&DEFAULT_HTTP_TRANSPORT),
         }
         .into_components())

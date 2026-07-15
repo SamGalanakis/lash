@@ -434,6 +434,7 @@ pub mod provider {
         CacheControlDialect, LlmTimeouts, ModelCapability, Provider, ProviderComponents,
         ProviderFactory, ProviderHandle, ProviderOptions, ProviderSpec, ReasoningCapability,
         ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection, RequestTimeout,
+        StreamTermination,
     };
     /// Request/response/error vocabulary of [`Provider::complete`],
     /// re-exported so hosts can implement provider decorators (admission

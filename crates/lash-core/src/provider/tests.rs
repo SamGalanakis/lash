@@ -25,6 +25,57 @@ struct TerminalProvider {
     text: &'static str,
 }
 
+#[derive(Clone, Debug)]
+struct PartialStreamFailureProvider;
+
+#[async_trait::async_trait]
+impl Provider for PartialStreamFailureProvider {
+    fn kind(&self) -> &'static str {
+        "partial-stream-failure"
+    }
+
+    fn options(&self) -> ProviderOptions {
+        ProviderOptions {
+            reliability: ProviderReliability::default().max_attempts(1),
+            ..ProviderOptions::default()
+        }
+    }
+
+    fn set_options(&mut self, _options: ProviderOptions) {}
+
+    fn serialize_config(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        Err(LlmTransportError::new("stream truncated")
+            .with_kind(ProviderFailureKind::Stream)
+            .with_code("stream_ended_before_terminal")
+            .retryable(true)
+            .with_partial_response(LlmResponse {
+                full_text: "partial".to_string(),
+                usage: LlmUsage {
+                    input_tokens: 7,
+                    output_tokens: 3,
+                    ..LlmUsage::default()
+                },
+                provider_usage: Some(serde_json::json!({
+                    "prompt_tokens": 7,
+                    "completion_tokens": 3
+                })),
+                execution_evidence: Some(ExecutionEvidence {
+                    provider_response_id: Some("resp-partial".to_string()),
+                    ..ExecutionEvidence::default()
+                }),
+                ..LlmResponse::default()
+            }))
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for TerminalProvider {
     fn kind(&self) -> &'static str {
@@ -477,6 +528,48 @@ async fn provider_handle_records_aborted_and_interrupted_outcomes() {
             expected_position
         );
     }
+}
+
+#[tokio::test]
+async fn failed_stream_attempt_retains_observed_usage_and_evidence_in_ledger() {
+    let mut handle = ProviderHandle::new(ProviderComponents::new(Box::new(
+        PartialStreamFailureProvider,
+    )));
+
+    let failure = handle
+        .complete(empty_request())
+        .await
+        .expect_err("truncated stream must fail");
+    let attempt = &failure.call_record.attempts[0];
+
+    assert_eq!(attempt.outcome, AttemptOutcome::Interrupted);
+    assert_eq!(attempt.protocol_position, ProtocolPosition::OutputStarted);
+    assert_eq!(
+        attempt.usage.as_ref().expect("observed usage").input_tokens,
+        7
+    );
+    assert_eq!(
+        attempt
+            .usage
+            .as_ref()
+            .expect("observed usage")
+            .output_tokens,
+        3
+    );
+    assert_eq!(
+        attempt
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.provider_response_id.as_deref()),
+        Some("resp-partial")
+    );
+    assert_eq!(
+        failure
+            .partial_response
+            .as_deref()
+            .map(|response| response.full_text.as_str()),
+        Some("partial")
+    );
 }
 
 #[test]

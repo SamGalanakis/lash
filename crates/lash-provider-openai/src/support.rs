@@ -4,7 +4,9 @@ pub(crate) use serde::Deserialize;
 pub(crate) use serde_json::{Value, json};
 pub(crate) use std::collections::HashMap;
 
-pub(crate) use lash_core::llm::transport::{LlmTransportError, validate_image_attachments};
+pub(crate) use lash_core::llm::transport::{
+    LlmTransportError, ProviderFailureKind, validate_image_attachments,
+};
 pub(crate) use lash_core::llm::types::{
     ExecutionEvidence, LlmAttachment, LlmContentBlock, LlmEventSender, LlmOutputPart,
     LlmOutputSpec, LlmProviderTraceSender, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent,
@@ -20,7 +22,7 @@ pub(crate) use crate::schema::responses_error_is_retryable;
 pub(crate) use lash_core::llm::types::{LlmRequestScope, ResponseTextMeta};
 pub(crate) use lash_core::provider::{
     CacheControlDialect, CacheRetention, Provider, ProviderComponents, ProviderFactory,
-    ProviderOptions, resolve_generation_policy,
+    ProviderOptions, StreamTermination, resolve_generation_policy,
 };
 pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 pub(crate) use lash_llm_transport::timeouts::response_start_timeout;

@@ -207,5 +207,6 @@ fn adaptive_reasoning_capability() -> lash::provider::ModelCapability {
             mandatory: false,
         }),
         cache_control: None,
+        stream_termination: None,
     }
 }

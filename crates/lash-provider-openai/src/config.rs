@@ -20,6 +20,10 @@ pub enum OpenAiCompatReasoningFormat {
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OpenAiCompat {
+    /// Clean-EOF policy for this endpoint. Model capability data, when set on
+    /// a request, takes precedence over this endpoint default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_termination: Option<StreamTermination>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_fields: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,6 +54,7 @@ impl OpenAiCompat {
         Self {
             reasoning_format: Some(OpenAiCompatReasoningFormat::OpenRouter),
             cache_session_affinity: Some(true),
+            stream_termination: Some(StreamTermination::RequireTerminalEvidence),
             ..Self::default()
         }
     }
@@ -57,6 +62,7 @@ impl OpenAiCompat {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OpenAiResolvedCompat {
+    pub(crate) stream_termination: StreamTermination,
     pub(crate) request_fields: bool,
     pub(crate) max_tokens_field: OpenAiCompatMaxTokensField,
     pub(crate) reasoning_format: OpenAiCompatReasoningFormat,
@@ -107,6 +113,7 @@ impl OpenAiCompatibleProvider {
             _ => OpenAiCompatReasoningFormat::None,
         };
         let defaults = OpenAiResolvedCompat {
+            stream_termination: StreamTermination::RequireTerminalEvidence,
             request_fields,
             max_tokens_field,
             reasoning_format,
@@ -121,6 +128,10 @@ impl OpenAiCompatibleProvider {
         };
         let strict_tools = self.compat.strict_tools.unwrap_or(defaults.strict_tools);
         OpenAiResolvedCompat {
+            stream_termination: self
+                .compat
+                .stream_termination
+                .unwrap_or(defaults.stream_termination),
             request_fields: self
                 .compat
                 .request_fields

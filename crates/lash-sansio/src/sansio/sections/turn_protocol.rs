@@ -284,6 +284,10 @@ pub struct LlmCallError {
     pub code: Option<String>,
     pub terminal_reason: LlmTerminalReason,
     pub request_body: Option<String>,
+    /// Output and usage observed before the failed stream ended. Partial tool
+    /// calls in this response are retained for diagnosis but never executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_response: Option<Box<LlmResponse>>,
 }
 
 /// A response to a previously emitted effect.

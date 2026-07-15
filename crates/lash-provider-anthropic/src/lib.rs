@@ -16,17 +16,36 @@ mod tests {
     use crate::stream::StreamState;
     use crate::{AnthropicProvider, DEFAULT_BASE_URL};
     use lash_core::llm::types::{
-        LlmAttachment, LlmContentBlock, LlmJsonSchema, LlmMessage, LlmOutputPart, LlmOutputSpec,
-        LlmRequest, LlmRole, LlmTerminalReason, LlmToolChoice, LlmToolSpec, LlmUsage,
+        LlmAttachment, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputPart,
+        LlmOutputSpec, LlmRequest, LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice,
+        LlmToolSpec, LlmUsage,
     };
     use lash_core::provider::{
         CacheRetention, ModelCapability, Provider, ProviderOptions, ReasoningCapability,
-        ReasoningEncoding,
+        ReasoningEncoding, StreamTermination,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct StaticSseTransport(&'static str);
+
+    #[async_trait::async_trait]
+    impl lash_llm_transport::LlmHttpTransport for StaticSseTransport {
+        async fn send(
+            &self,
+            _request: lash_llm_transport::LlmHttpRequest,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<lash_llm_transport::LlmHttpResponse, lash_core::LlmTransportError> {
+            Ok(lash_llm_transport::LlmHttpResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+                body: lash_llm_transport::LlmHttpBody::buffered(self.0),
+            })
+        }
+    }
 
     // Capability data mirrors what the host catalog supplies. Effort encoding
     // sends the resolved variant verbatim (adaptive thinking); budget encoding
@@ -43,6 +62,7 @@ mod tests {
                 mandatory: false,
             }),
             cache_control: None,
+            stream_termination: None,
         }
     }
 
@@ -65,6 +85,7 @@ mod tests {
                 mandatory: false,
             }),
             cache_control: None,
+            stream_termination: None,
         }
     }
 
@@ -91,6 +112,100 @@ mod tests {
             generation: lash_core::GenerationOptions::default(),
             provider_trace: None,
         }
+    }
+
+    #[tokio::test]
+    async fn anthropic_requires_message_stop_and_retains_partial_usage() {
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":8,\"cache_read_input_tokens\":2}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"lookup\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n"
+        );
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let event_sink = Arc::clone(&events);
+        req.stream_events = Some(LlmEventSender::new(move |event| {
+            event_sink.lock().expect("event lock").push(event);
+        }));
+        let mut provider =
+            AnthropicProvider::new("key").with_transport(Arc::new(StaticSseTransport(body)));
+
+        let error = provider
+            .complete(req)
+            .await
+            .expect_err("message_stop is required");
+
+        assert_eq!(error.kind, lash_core::ProviderFailureKind::Stream);
+        assert_eq!(
+            error.code.as_deref(),
+            Some("stream_ended_before_message_stop")
+        );
+        let partial = error.partial_response.as_deref().expect("partial response");
+        assert_eq!(partial.full_text, "partial");
+        assert_eq!(partial.usage.input_tokens, 8);
+        assert_eq!(partial.usage.output_tokens, 3);
+        assert!(partial.provider_usage.is_some());
+        assert!(
+            partial
+                .parts
+                .iter()
+                .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+        );
+        assert!(
+            events
+                .lock()
+                .expect("event lock")
+                .iter()
+                .all(|event| !matches!(
+                    event,
+                    LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. })
+                ))
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_accepts_message_stop_and_explicit_eof_tolerance() {
+        let terminal_body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut terminal_req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        terminal_req.stream_events = Some(LlmEventSender::new(|_| {}));
+        let mut terminal = AnthropicProvider::new("key")
+            .with_transport(Arc::new(StaticSseTransport(terminal_body)));
+        assert_eq!(
+            terminal
+                .complete(terminal_req)
+                .await
+                .expect("terminal stream")
+                .full_text,
+            "done"
+        );
+
+        let eof_body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"legacy\"}}\n\n"
+        );
+        let mut tolerant_req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        tolerant_req.stream_events = Some(LlmEventSender::new(|_| {}));
+        tolerant_req.model_capability.stream_termination = Some(StreamTermination::EofTolerated);
+        let mut tolerant =
+            AnthropicProvider::new("key").with_transport(Arc::new(StaticSseTransport(eof_body)));
+        assert_eq!(
+            tolerant
+                .complete(tolerant_req)
+                .await
+                .expect("tolerated EOF")
+                .full_text,
+            "legacy"
+        );
     }
 
     #[test]

@@ -7,7 +7,9 @@ pub(crate) use base64::Engine;
 pub(crate) use serde::Deserialize;
 pub(crate) use serde_json::{Value, json};
 
-pub(crate) use lash_core::llm::transport::{LlmTransportError, validate_image_attachments};
+pub(crate) use lash_core::llm::transport::{
+    LlmTransportError, ProviderFailureKind, validate_image_attachments,
+};
 pub(crate) use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
     LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
@@ -15,7 +17,7 @@ pub(crate) use lash_core::llm::types::{
 };
 pub(crate) use lash_core::provider::{
     Provider, ProviderComponents, ProviderFactory, ProviderOptions, ReasoningDisableEncoding,
-    ReasoningEncoding, ReasoningSelection, resolve_generation_policy,
+    ReasoningEncoding, ReasoningSelection, StreamTermination, resolve_generation_policy,
 };
 pub(crate) use lash_llm_transport::normalize::{
     http_error_envelope, serialize_options_tail, terminal_reason_from_parts,

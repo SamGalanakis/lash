@@ -602,5 +602,6 @@ fn standard_llm_error(message: &str) -> lash_core::LlmCallError {
         code: Some("test_provider_error".to_string()),
         terminal_reason: LlmTerminalReason::ProviderError,
         request_body: None,
+        partial_response: None,
     }
 }

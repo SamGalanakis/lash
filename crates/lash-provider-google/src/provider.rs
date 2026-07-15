@@ -13,12 +13,13 @@ impl GoogleOAuthProvider {
             })
     }
 
-    async fn execute_request(
+    pub(crate) async fn execute_request(
         &self,
         access_token: &str,
         request: Value,
         stream_events: Option<lash_core::llm::types::LlmEventSender>,
         provider_trace: Option<lash_core::llm::types::LlmProviderTraceSender>,
+        stream_termination: StreamTermination,
     ) -> Result<LlmResponse, LlmTransportError> {
         let request_body_bytes = serde_json::to_vec(&request).map_err(|err| {
             LlmTransportError::new(format!("Failed to serialize Cloud Code body: {err}"))
@@ -120,7 +121,7 @@ impl GoogleOAuthProvider {
             .get("model")
             .and_then(Value::as_str)
             .map(str::to_string);
-        drive_sse_response(
+        let stream_result = drive_sse_response(
             resp.body,
             self.options.llm_timeouts().chunk_timeout,
             "Cloud Code stream chunk timed out",
@@ -145,7 +146,52 @@ impl GoogleOAuthProvider {
                 Ok(())
             },
         )
-        .await?;
+        .await;
+
+        let partial_response = || {
+            let mut parts = text_parts.clone();
+            if parts
+                .iter()
+                .filter_map(|part| match part {
+                    LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+                .is_empty()
+                && !full.is_empty()
+            {
+                parts.push(LlmOutputPart::Text {
+                    text: full.clone(),
+                    response_meta: None,
+                });
+            }
+            parts.extend(tool_call_parts.clone());
+            LlmResponse {
+                full_text: full.clone(),
+                parts,
+                usage: usage.clone(),
+                terminal_reason: LlmTerminalReason::Unknown,
+                terminal_diagnostic: None,
+                provider_usage: provider_usage.clone(),
+                request_body: request_body.clone(),
+                http_summary: Some(format!("HTTP POST {url} (stream)")),
+                execution_evidence: None,
+            }
+        };
+        if let Err(error) = stream_result {
+            return Err(error.with_partial_response(partial_response()));
+        }
+        if stream_termination == StreamTermination::RequireTerminalEvidence
+            && finish_event.is_none()
+        {
+            return Err(
+                LlmTransportError::new("Google stream ended without finishReason")
+                    .with_kind(ProviderFailureKind::Stream)
+                    .with_code("stream_ended_before_finish_reason")
+                    .retryable(true)
+                    .with_partial_response(partial_response()),
+            );
+        }
 
         let mut parts = text_parts;
         if parts
@@ -293,6 +339,12 @@ impl Provider for GoogleOAuthProvider {
                 serde_json::Value::String(project_id.clone()),
             );
         }
+        if self.stream_termination != StreamTermination::EofTolerated {
+            map.insert(
+                "stream_termination".to_string(),
+                serde_json::to_value(self.stream_termination).unwrap_or(Value::Null),
+            );
+        }
         serialize_options_tail(&mut map, &self.options);
         serde_json::Value::Object(map)
     }
@@ -338,6 +390,10 @@ impl Provider for GoogleOAuthProvider {
         )?;
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
+        let stream_termination = req
+            .model_capability
+            .stream_termination
+            .unwrap_or(self.stream_termination);
         let credential = self
             .attempt_credential
             .take()
@@ -378,6 +434,7 @@ impl Provider for GoogleOAuthProvider {
                 request,
                 stream_events.clone(),
                 provider_trace.clone(),
+                stream_termination,
             )
             .await
         {
@@ -385,8 +442,14 @@ impl Provider for GoogleOAuthProvider {
             Err(err) if used_uploaded_files && Self::should_retry_inline(&err) => {
                 let inline_request =
                     Self::build_request(self, &req, inline_contents, project_id.as_deref());
-                self.execute_request(&access_token, inline_request, stream_events, provider_trace)
-                    .await
+                self.execute_request(
+                    &access_token,
+                    inline_request,
+                    stream_events,
+                    provider_trace,
+                    stream_termination,
+                )
+                .await
             }
             Err(err) => Err(err),
         }

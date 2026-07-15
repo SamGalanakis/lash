@@ -198,11 +198,15 @@ pub struct RemoteModelCapability {
     pub reasoning: Option<RemoteReasoningCapability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<RemoteCacheControlDialect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_termination: Option<RemoteStreamTermination>,
 }
 
 impl RemoteModelCapability {
     pub fn is_empty(&self) -> bool {
-        self.reasoning.is_none() && self.cache_control.is_none()
+        self.reasoning.is_none()
+            && self.cache_control.is_none()
+            && self.stream_termination.is_none()
     }
 }
 
@@ -212,6 +216,14 @@ impl RemoteModelCapability {
 pub enum RemoteCacheControlDialect {
     Anthropic,
     Gemini,
+}
+
+/// Mirror of the core `StreamTermination`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteStreamTermination {
+    RequireTerminalEvidence,
+    EofTolerated,
 }
 
 /// Mirror of the core `ReasoningCapability`.

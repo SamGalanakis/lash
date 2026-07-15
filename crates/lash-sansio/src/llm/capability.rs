@@ -18,6 +18,19 @@ pub struct ModelCapability {
     /// Cache-control wire dialect accepted by this model on its selected route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControlDialect>,
+    /// How a streaming provider proves that this model's response completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_termination: Option<StreamTermination>,
+}
+
+/// Host-supplied policy for interpreting a clean EOF on a provider stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamTermination {
+    /// EOF is successful only after the dialect's semantic terminal event.
+    RequireTerminalEvidence,
+    /// Clean EOF is a valid completion boundary for this route.
+    EofTolerated,
 }
 
 /// How an OpenAI-compatible Chat Completions route places `cache_control`.
@@ -132,7 +145,9 @@ impl std::error::Error for ModelEffortValidationError {}
 
 impl ModelCapability {
     pub fn is_empty(&self) -> bool {
-        self.reasoning.is_none() && self.cache_control.is_none()
+        self.reasoning.is_none()
+            && self.cache_control.is_none()
+            && self.stream_termination.is_none()
     }
 
     /// Resolve a requested effort to its canonical form: alias-map first
@@ -265,6 +280,7 @@ mod tests {
         ModelCapability {
             reasoning,
             cache_control: None,
+            stream_termination: None,
         }
     }
 
@@ -275,6 +291,13 @@ mod tests {
         assert!(
             !ModelCapability {
                 cache_control: Some(CacheControlDialect::Anthropic),
+                ..ModelCapability::default()
+            }
+            .is_empty()
+        );
+        assert!(
+            !ModelCapability {
+                stream_termination: Some(StreamTermination::RequireTerminalEvidence),
                 ..ModelCapability::default()
             }
             .is_empty()

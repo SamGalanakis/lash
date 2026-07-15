@@ -90,6 +90,13 @@ pub enum ScriptedWsAction {
         text: &'static str,
         message: &'static str,
     },
+    /// Stream partial output and usage, then close cleanly without a terminal
+    /// response event.
+    CloseAfterStart {
+        response_id: &'static str,
+        message_id: &'static str,
+        text: &'static str,
+    },
     /// Accept the request and go silent before any output, forcing the
     /// client's idle timeout.
     IdleBeforeStart,
@@ -286,6 +293,29 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
                                 json!({"type":"error","error":{"message": message}}),
                             )
                             .await;
+                        }
+                        ScriptedWsAction::CloseAfterStart {
+                            response_id,
+                            message_id,
+                            text,
+                        } => {
+                            send_ws_json(
+                                &mut ws,
+                                json!({"type":"response.created","response":{"id":response_id,"status":"in_progress","usage":{"input_tokens":4,"output_tokens":1,"total_tokens":5}}}),
+                            )
+                            .await;
+                            send_ws_json(
+                                &mut ws,
+                                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":message_id,"status":"in_progress","phase":"final_answer","content":[]}}),
+                            )
+                            .await;
+                            send_ws_json(
+                                &mut ws,
+                                json!({"type":"response.output_text.delta","output_index":0,"item_id":message_id,"delta":text}),
+                            )
+                            .await;
+                            let _ = ws.close(None).await;
+                            break;
                         }
                         ScriptedWsAction::IdleBeforeStart => {
                             tokio::time::sleep(Duration::from_secs(60)).await;

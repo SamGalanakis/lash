@@ -370,7 +370,7 @@ pub use provider::{
     ProviderBinding, ProviderCompletion, ProviderCompletionError, ProviderComponents,
     ProviderFactory, ProviderHandle, ProviderOptions, ProviderResolutionError, ProviderSpec,
     ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection,
-    RequestTimeout, RuntimeProviderResolver, SingleProviderResolver,
+    RequestTimeout, RuntimeProviderResolver, SingleProviderResolver, StreamTermination,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;

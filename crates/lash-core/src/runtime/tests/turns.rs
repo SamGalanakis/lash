@@ -2681,6 +2681,105 @@ async fn cancelled_provider_stream_does_not_commit_partial_output() {
     );
 }
 
+#[tokio::test]
+async fn truncated_retry_resets_partial_tool_calls_and_retains_failed_attempt_usage() {
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let transport = TestProvider::builder()
+        .kind("openai-compatible")
+        .requires_streaming(true)
+        .options(crate::ProviderOptions {
+            reliability: crate::provider::ProviderReliability::default()
+                .max_attempts(2)
+                .base_delay_ms(0)
+                .max_delay_ms(0),
+            ..crate::ProviderOptions::default()
+        })
+        .complete({
+            let attempts = Arc::clone(&attempts);
+            move |request| {
+                let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    let stream = request.stream_events.expect("stream events");
+                    if attempt == 0 {
+                        let usage = LlmUsage {
+                            input_tokens: 11,
+                            output_tokens: 2,
+                            ..LlmUsage::default()
+                        };
+                        stream.send(LlmStreamEvent::Part(LlmOutputPart::ToolCall {
+                            call_id: "partial-call".to_string(),
+                            tool_name: "must_not_run".to_string(),
+                            input_json: "{\"unfinished\":".to_string(),
+                            replay: None,
+                        }));
+                        stream.send(LlmStreamEvent::Usage(usage.clone()));
+                        return Err(LlmTransportError::new("Stream ended without finish_reason")
+                            .with_kind(crate::ProviderFailureKind::Stream)
+                            .with_code("stream_ended_before_finish_reason")
+                            .retryable(true)
+                            .with_partial_response(LlmResponse {
+                                parts: vec![LlmOutputPart::ToolCall {
+                                    call_id: "partial-call".to_string(),
+                                    tool_name: "must_not_run".to_string(),
+                                    input_json: "{\"unfinished\":".to_string(),
+                                    replay: None,
+                                }],
+                                usage,
+                                provider_usage: Some(serde_json::json!({
+                                    "prompt_tokens": 11,
+                                    "completion_tokens": 2
+                                })),
+                                ..LlmResponse::default()
+                            }));
+                    }
+
+                    stream.send(LlmStreamEvent::Delta("success".to_string()));
+                    Ok(LlmResponse {
+                        full_text: "success".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "success".to_string(),
+                            response_meta: None,
+                        }],
+                        terminal_reason: crate::LlmTerminalReason::Stop,
+                        ..LlmResponse::default()
+                    })
+                }
+            }
+        })
+        .build();
+    let mut runtime = standard_runtime_with_transport(transport).await;
+
+    let assembled = runtime
+        .stream_turn(
+            TurnInput::text("retry a truncated stream"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "truncated-stream-retry"),
+            ),
+        )
+        .await
+        .expect("retry succeeds");
+
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(assembled.assistant_output.safe_text, "success");
+    assert!(assembled.tool_calls.is_empty());
+    assert!(
+        active_conversation_messages(&assembled.state)
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .all(|part| !part.content.contains("must_not_run"))
+    );
+    let failed_attempt = &assembled.llm_calls[0].attempts[0];
+    assert_eq!(failed_attempt.outcome, crate::AttemptOutcome::Interrupted);
+    assert_eq!(
+        failed_attempt
+            .usage
+            .as_ref()
+            .map(|usage| usage.input_tokens),
+        Some(11)
+    );
+}
+
 // Boundary: busy and lease-loss tests stay in `turns.rs` because they exercise
 // live `LashRuntime` lease acquisition, public busy/no-op scheduling, turn
 // phase probes, provider suspension, and runtime error-code mapping. Runtime
@@ -3716,6 +3815,7 @@ async fn turn_driver_normalizes_alias_effort_into_outgoing_request() {
             ..Default::default()
         }),
         cache_control: None,
+        stream_termination: None,
     };
     let model = crate::ModelSpec::from_token_limits(
         "mock-model",
@@ -3790,6 +3890,7 @@ async fn turn_driver_rejects_unsupported_effort_before_provider_call() {
             ..Default::default()
         }),
         cache_control: None,
+        stream_termination: None,
     };
     let model = crate::ModelSpec::from_token_limits(
         "mock-model",

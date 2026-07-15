@@ -49,6 +49,20 @@ fn openrouter_provider() -> OpenAiCompatibleProvider {
         .with_compat(OpenAiCompat::openrouter())
 }
 
+#[test]
+fn openrouter_preset_requires_terminal_evidence() {
+    assert_eq!(
+        OpenAiCompat::openrouter().stream_termination,
+        Some(StreamTermination::RequireTerminalEvidence)
+    );
+    assert_eq!(
+        OpenAiCompatibleProvider::new("key", "https://proxy.example/v1")
+            .resolved_compat(CompletionEndpoint::ChatCompletions)
+            .stream_termination,
+        StreamTermination::RequireTerminalEvidence
+    );
+}
+
 fn enable_cache_control(req: &mut LlmRequest, dialect: CacheControlDialect) {
     req.model_capability.cache_control = Some(dialect);
 }
@@ -82,6 +96,7 @@ fn reasoning_capability() -> ModelCapability {
             ..ReasoningCapability::default()
         }),
         cache_control: None,
+        stream_termination: None,
     }
 }
 
@@ -97,6 +112,7 @@ fn budget_reasoning_capability() -> ModelCapability {
             ..ReasoningCapability::default()
         }),
         cache_control: None,
+        stream_termination: None,
     }
 }
 
@@ -1652,6 +1668,148 @@ fn openrouter_stream_wire_captures_first_stable_identity_and_terminal_facts() {
     assert_eq!(evidence.served_model.as_deref(), Some("provider/model-a"));
     assert_eq!(evidence.reasoning_output_tokens, Some(7));
     assert_eq!(evidence.provider_finish_reason.as_deref(), Some("length"));
+}
+
+fn streamed_request(events: Arc<std::sync::Mutex<Vec<LlmStreamEvent>>>) -> LlmRequest {
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.stream_events = Some(LlmEventSender::new(move |event| {
+        events.lock().expect("event lock").push(event);
+    }));
+    req
+}
+
+fn single_stream_transport(body: &'static str) -> Arc<ScriptedHttpTransport> {
+    Arc::new(ScriptedHttpTransport {
+        responses: std::sync::Mutex::new(VecDeque::from([(
+            200,
+            vec![("content-type".to_string(), "text/event-stream".to_string())],
+            body,
+        )])),
+    })
+}
+
+#[tokio::test]
+async fn chat_stream_ending_without_finish_reason_is_retryable_truncation_with_partials() {
+    let body = concat!(
+        "data: {\"id\":\"gen-partial\",\"model\":\"provider/model\",\"choices\":[{\"delta\":{\"content\":\"partial\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut provider = openrouter_provider()
+        .with_options(ProviderOptions {
+            reliability: ProviderReliability::default().max_attempts(1),
+            ..ProviderOptions::default()
+        })
+        .with_transport(single_stream_transport(body));
+
+    let error = provider
+        .complete(streamed_request(Arc::clone(&events)))
+        .await
+        .expect_err("missing finish_reason must fail");
+
+    assert_eq!(error.kind, ProviderFailureKind::Stream);
+    assert_eq!(
+        error.code.as_deref(),
+        Some("stream_ended_before_finish_reason")
+    );
+    assert!(error.retryable);
+    let partial = error.partial_response.as_deref().expect("partial response");
+    assert_eq!(partial.full_text, "partial");
+    assert_eq!(partial.usage.input_tokens, 9);
+    assert_eq!(partial.usage.output_tokens, 4);
+    assert!(partial.provider_usage.is_some());
+    assert!(
+        partial
+            .parts
+            .iter()
+            .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+    );
+    assert!(
+        events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .all(|event| !matches!(event, LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. })))
+    );
+}
+
+#[tokio::test]
+async fn chat_stream_with_finish_reason_succeeds_and_eof_tolerated_preserves_compatibility() {
+    let terminal_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+    );
+    let mut strict = openrouter_provider().with_transport(single_stream_transport(terminal_body));
+    let response = strict
+        .complete(streamed_request(Arc::new(
+            std::sync::Mutex::new(Vec::new()),
+        )))
+        .await
+        .expect("finish_reason is terminal evidence");
+    assert_eq!(response.full_text, "done");
+    assert_eq!(response.terminal_reason, LlmTerminalReason::Stop);
+
+    let eof_body = "data: {\"choices\":[{\"delta\":{\"content\":\"legacy\"}}]}\n\n";
+    let compat = OpenAiCompat {
+        stream_termination: Some(StreamTermination::EofTolerated),
+        ..OpenAiCompat::openrouter()
+    };
+    let mut tolerant = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_compat(compat)
+        .with_transport(single_stream_transport(eof_body));
+    let response = tolerant
+        .complete(streamed_request(Arc::new(
+            std::sync::Mutex::new(Vec::new()),
+        )))
+        .await
+        .expect("explicit EOF tolerance preserves compatibility");
+    assert_eq!(response.full_text, "legacy");
+}
+
+#[tokio::test]
+async fn responses_stream_requires_terminal_event_and_accepts_incomplete_terminal() {
+    let partial_body = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\",\"response\":{\"id\":\"resp-1\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let mut strict =
+        OpenAiProvider::new("key").with_transport(single_stream_transport(partial_body));
+    let error = strict
+        .complete(streamed_request(Arc::new(
+            std::sync::Mutex::new(Vec::new()),
+        )))
+        .await
+        .expect_err("Responses requires a terminal event");
+    assert_eq!(
+        error.code.as_deref(),
+        Some("stream_ended_before_terminal_response")
+    );
+    assert_eq!(
+        error
+            .partial_response
+            .as_deref()
+            .map(|partial| partial.full_text.as_str()),
+        Some("partial")
+    );
+    let partial = error.partial_response.as_deref().expect("partial response");
+    assert_eq!(partial.usage.input_tokens, 5);
+    assert_eq!(partial.usage.output_tokens, 2);
+    assert!(partial.provider_usage.is_some());
+
+    let terminal_body = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"bounded\"}\n\n",
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp-2\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n"
+    );
+    let mut terminal =
+        OpenAiProvider::new("key").with_transport(single_stream_transport(terminal_body));
+    let response = terminal
+        .complete(streamed_request(Arc::new(
+            std::sync::Mutex::new(Vec::new()),
+        )))
+        .await
+        .expect("response.incomplete is terminal evidence");
+    assert_eq!(response.full_text, "bounded");
 }
 
 /// Cross-provider response-normalization conformance. The shared suite lives in
