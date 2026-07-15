@@ -322,12 +322,9 @@ fn rlm_exec_result_no_tool_call_replay_execution() -> Result<Value, FixedScriptR
 
 fn rlm_exec_tool_control_frame_switch_terminal_execution() -> Result<Value, FixedScriptRunnerError>
 {
-    let initial_nodes = vec![
-        serde_json::to_value(lash_core::SessionAppendNode::message(
-            lash_core::PluginMessage::text(lash_core::MessageRole::User, "seed"),
-        ))
-        .map_err(FixedScriptRunnerError::Json)?,
-    ];
+    let initial_nodes = vec![lash_core::SessionAppendNode::message(
+        lash_core::PluginMessage::text(lash_core::MessageRole::User, "seed"),
+    )];
     let result = run_rlm_protocol_contract(
         "rlm exec tool-control frame switch terminal",
         "run a custom frame-switch tool",

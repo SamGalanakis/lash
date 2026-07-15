@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{MessageOrigin, MessageRole, Part};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PluginMessage {
     pub role: MessageRole,
     pub content: String,

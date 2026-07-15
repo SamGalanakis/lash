@@ -104,18 +104,6 @@ fn continue_as_switch_frame(args: &Value) -> Result<ContinueAsResult, String> {
     let seed_count = seed_keys.len();
     let frame_id = uuid::Uuid::new_v4().to_string();
     let initial_nodes = crate::rlm_seed_initial_nodes(seed);
-    let initial_nodes = initial_nodes
-        .into_iter()
-        .map(|node| {
-            serde_json::to_value(node)
-                .map_err(|err| format!("failed to encode continue_as frame seed node: {err}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for (index, node) in initial_nodes.iter().enumerate() {
-        serde_json::from_value::<lash_core::SessionAppendNode>(node.clone()).map_err(|err| {
-            format!("failed to validate continue_as frame seed node {index}: {err}")
-        })?;
-    }
 
     Ok(ContinueAsResult {
         value: json!({
@@ -447,12 +435,10 @@ mod tests {
         );
         assert_eq!(task.as_deref(), Some("finish from here"));
         assert_eq!(initial_nodes.len(), 1);
-        let node = serde_json::from_value::<SessionAppendNode>(initial_nodes[0].clone())
-            .expect("decode initial node");
         let SessionAppendNode::ProtocolEvent {
             event: protocol_event,
             ..
-        } = node
+        } = &initial_nodes[0]
         else {
             panic!("expected seed globals event");
         };
@@ -505,12 +491,10 @@ mod tests {
             panic!("expected frame switch control");
         };
         assert_eq!(initial_nodes.len(), 1);
-        let node = serde_json::from_value::<SessionAppendNode>(initial_nodes[0].clone())
-            .expect("decode initial node");
         let SessionAppendNode::ProtocolEvent {
             event: protocol_event,
             ..
-        } = node
+        } = &initial_nodes[0]
         else {
             panic!("expected seed globals event");
         };
@@ -557,12 +541,10 @@ mod tests {
         else {
             panic!("expected frame switch control");
         };
-        let node = serde_json::from_value::<SessionAppendNode>(initial_nodes[0].clone())
-            .expect("decode initial node");
         let SessionAppendNode::ProtocolEvent {
             event: protocol_event,
             ..
-        } = node
+        } = &initial_nodes[0]
         else {
             panic!("expected seed globals event");
         };

@@ -50,9 +50,10 @@ pub use session_model::{
     AcceptedInjectedTurnInput, BaseRenderCache, ConversationRecord, ErrorEnvelope,
     MAIN_AGENT_INTRO, Message, MessageRole, MessageSequence, Part, PartAttachment, PartKind,
     PromptBuiltin, PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer, SessionEvent,
-    SessionEventRecord, TokenUsage, TurnFinish, TurnOutcome, TurnStop, default_prompt_template,
-    messages_are_prompt_resume_safe, resolve_prompt_layers, shared_parts,
+    PromptTemplateSection, ProtocolEvent, PruneState, RenderedPrompt, ResolvedPromptLayer,
+    SessionAppendNode, SessionEvent, SessionEventRecord, TokenUsage, TurnFinish, TurnOutcome,
+    TurnStop, default_prompt_template, messages_are_prompt_resume_safe, resolve_prompt_layers,
+    shared_parts,
 };
 pub use tool_catalog::{
     ToolCatalog, ToolCatalogBuildInput, ToolCatalogContribution, ToolCatalogEntry,

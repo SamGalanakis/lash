@@ -78,7 +78,7 @@ impl RuntimeTurnPhaseProbe for PauseAfterFirstFinalCommit {
 }
 
 struct SeedSwitchTool {
-    initial_nodes: Vec<Value>,
+    initial_nodes: Vec<SessionAppendNode>,
 }
 
 struct NoTools;
@@ -205,10 +205,7 @@ async fn claimed_switch_is_seeded_atomic_ordered_and_exactly_once() {
     let initial_nodes = vec![
         SessionAppendNode::plugin("sim.seed.alpha", json!({"value": 1})),
         SessionAppendNode::plugin("sim.seed.beta", json!({"value": 2})),
-    ]
-    .into_iter()
-    .map(|node| serde_json::to_value(node).expect("serialize seed node"))
-    .collect::<Vec<_>>();
+    ];
     let trace = Arc::new(RecordingTraceSink::default());
     let completions = Arc::new(Mutex::new(Vec::<String>::new()));
     let provider_call = Arc::new(AtomicUsize::new(0));
@@ -451,13 +448,10 @@ impl ToolProvider for BoundedSwitchTools {
             .expect("bounded switch tool name");
         ToolResult::ok(json!({"switch": index})).with_control(ToolControl::SwitchAgentFrame {
             frame_id: format!("bounded-frame-{index}"),
-            initial_nodes: vec![
-                serde_json::to_value(SessionAppendNode::plugin(
-                    "sim.bounded.seed",
-                    json!({"index": index}),
-                ))
-                .expect("serialize bounded seed"),
-            ],
+            initial_nodes: vec![SessionAppendNode::plugin(
+                "sim.bounded.seed",
+                json!({"index": index}),
+            )],
             task: Some(format!("continue bounded chain {index}")),
         })
     }

@@ -19,6 +19,98 @@ use crate::ToolDefinition;
 use crate::llm::types::LlmToolSpec;
 use crate::plugin::{CheckpointKind, PluginMessage, PluginRuntimeEvent};
 
+/// Durable protocol payload stored in session history.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProtocolEvent {
+    pub plugin_id: String,
+    pub payload: serde_json::Value,
+}
+
+impl ProtocolEvent {
+    pub fn typed<T>(plugin_id: impl Into<String>, event: T) -> Result<Self, serde_json::Error>
+    where
+        T: serde::Serialize,
+    {
+        Ok(Self {
+            plugin_id: plugin_id.into(),
+            payload: serde_json::to_value(event)?,
+        })
+    }
+
+    pub fn decode<T>(&self, expected_plugin_id: &str) -> Result<Option<T>, serde_json::Error>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        if self.plugin_id != expected_plugin_id {
+            return Ok(None);
+        }
+        serde_json::from_value(self.payload.clone()).map(Some)
+    }
+}
+
+/// Typed node accepted at session-graph append boundaries.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum SessionAppendNode {
+    Message {
+        message: PluginMessage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
+    },
+    ProtocolEvent {
+        event: ProtocolEvent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
+    },
+    Plugin {
+        plugin_type: String,
+        #[serde(default)]
+        body: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
+    },
+}
+
+impl SessionAppendNode {
+    pub fn message(message: PluginMessage) -> Self {
+        Self::Message {
+            message,
+            caused_by: None,
+        }
+    }
+
+    pub fn plugin(plugin_type: impl Into<String>, body: serde_json::Value) -> Self {
+        Self::Plugin {
+            plugin_type: plugin_type.into(),
+            body,
+            caused_by: None,
+        }
+    }
+
+    pub fn protocol_event(event: ProtocolEvent) -> Self {
+        Self::ProtocolEvent {
+            event,
+            caused_by: None,
+        }
+    }
+
+    pub fn with_caused_by(mut self, caused_by: crate::CausalRef) -> Self {
+        match &mut self {
+            Self::Message {
+                caused_by: cause, ..
+            }
+            | Self::ProtocolEvent {
+                caused_by: cause, ..
+            }
+            | Self::Plugin {
+                caused_by: cause, ..
+            } => *cause = Some(caused_by),
+        }
+        self
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum SessionEventRecord<PE = ()> {
@@ -226,7 +318,7 @@ pub enum TurnOutcome {
         frame_id: String,
         task: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        initial_nodes: Vec<serde_json::Value>,
+        initial_nodes: Vec<SessionAppendNode>,
     },
     Stopped(TurnStop),
 }

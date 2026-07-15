@@ -85,9 +85,9 @@ pub use services::{PersistentRuntimeServices, PluginOperationInvokeError, Runtim
 pub use session_obj::PluginSession;
 pub use session_types::{
     AgentFrameAssignment, AgentFrameId, AgentFrameReason, AgentFrameRecord, AgentFrameStatus,
-    OpenAgentFrameRequest, OpenAgentFrameResult, PluginOwned, SessionAppendNode,
-    SessionContextOverlay, SessionCreateRequest, SessionHandle, SessionPluginSource,
-    SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess, SubagentSessionContext,
+    OpenAgentFrameRequest, OpenAgentFrameResult, PluginOwned, SessionContextOverlay,
+    SessionCreateRequest, SessionHandle, SessionPluginSource, SessionRelation, SessionSnapshot,
+    SessionStartPoint, SessionToolAccess, SubagentSessionContext,
 };
 pub(crate) use snapshot::{InMemorySnapshotReader, InMemorySnapshotWriter};
 pub use snapshot::{

@@ -721,17 +721,10 @@ fn materialize_agent_frame_switch(
     if frame_id.trim().is_empty() || state.current_agent_frame_id == *frame_id {
         return;
     }
-    let nodes = initial_nodes
-        .iter()
-        .map(|value| {
-            serde_json::from_value::<crate::SessionAppendNode>(value.clone())
-                .expect("agent frame seed nodes are validated by the protocol producer")
-        })
-        .collect::<Vec<_>>();
     super::open_agent_frame_in_state_with_clock(
         state,
         crate::OpenAgentFrameRequest::new(frame_id.clone(), crate::AgentFrameReason::continue_as())
-            .with_initial_nodes(nodes),
+            .with_initial_nodes(initial_nodes.clone()),
         clock,
     );
 }
@@ -933,7 +926,7 @@ mod tests {
             &TurnOutcome::AgentFrameSwitch {
                 frame_id: frame_id.clone(),
                 task: "next task".to_string(),
-                initial_nodes: vec![serde_json::to_value(seed_node).expect("seed node json")],
+                initial_nodes: vec![seed_node],
             },
             &crate::SystemClock,
         );

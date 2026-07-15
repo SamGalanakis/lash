@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::SessionAppendNode;
 
 #[async_trait::async_trait]
 pub trait SessionStateService: Send + Sync {

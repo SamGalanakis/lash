@@ -13,10 +13,10 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::SessionAppendNode;
 use crate::runtime::RuntimeSessionState;
 use crate::{
-    ExecRequest, ExecResponse, LlmRequest, PromptUsage, RuntimeExecutionContext, SessionReadView,
+    ExecRequest, ExecResponse, LlmRequest, PromptUsage, RuntimeExecutionContext, SessionAppendNode,
+    SessionReadView,
 };
 
 /// Session-scoped plugin that initializes, restores, and extends protocol
