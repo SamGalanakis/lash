@@ -1004,6 +1004,23 @@ impl ToolProvider for AppTools {
     }
 }
 
+struct FailingAppTools;
+
+#[async_trait]
+impl ToolProvider for FailingAppTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![app_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "app_lookup").then(|| Arc::new(app_tool_definition().contract()))
+    }
+
+    async fn execute(&self, _call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        lash_core::ToolResult::err_fmt("lookup failed but Lashlang recovered")
+    }
+}
+
 struct PendingAppTools {
     key_tx: StdMutex<Option<oneshot::Sender<lash_core::AwaitEventKey>>>,
 }

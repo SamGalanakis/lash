@@ -542,7 +542,6 @@ pub(super) struct TurnAssembler {
     pub(super) child_cumulatives: BTreeMap<(String, String, String), TokenUsage>,
     pub(super) issues: Vec<TurnIssue>,
     pub(super) saw_done: bool,
-    pub(super) saw_tool_failure: bool,
     pub(super) outcome: Option<TurnOutcome>,
 }
 
@@ -562,7 +561,6 @@ impl TurnAssembler {
             child_cumulatives: BTreeMap::new(),
             issues: Vec::new(),
             saw_done: false,
-            saw_tool_failure: false,
             outcome: None,
         }
     }
@@ -583,9 +581,6 @@ impl TurnAssembler {
                     output: output.clone(),
                     duration_ms: *duration_ms,
                 });
-                if !output.is_success() {
-                    self.saw_tool_failure = true;
-                }
             }
             SessionEvent::TokenUsage {
                 usage, cumulative, ..
@@ -708,7 +703,11 @@ impl TurnAssembler {
             });
             TurnOutcome::Stopped(TurnStop::RuntimeError)
         } else if has_blocking_turn_issue(&issues) {
-            if self.saw_tool_failure {
+            if self
+                .tool_calls
+                .iter()
+                .any(|record| !record.output.is_success())
+            {
                 TurnOutcome::Stopped(TurnStop::ToolFailure)
             } else {
                 TurnOutcome::Stopped(TurnStop::RuntimeError)

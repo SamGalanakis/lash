@@ -722,7 +722,13 @@ fn remote_turn_result_maps_core_semantics() {
             },
         }],
         llm_calls: Vec::new(),
-        tool_calls: Vec::new(),
+        tool_calls: vec![lash_core::ToolCallRecord {
+            call_id: Some("exec-call".to_string()),
+            tool: "lookup".to_string(),
+            args: serde_json::json!({ "key": "value" }),
+            output: lash_core::ToolCallOutput::success(serde_json::json!({ "ok": true })),
+            duration_ms: 7,
+        }],
         errors: Vec::new(),
     };
 
@@ -733,6 +739,13 @@ fn remote_turn_result_maps_core_semantics() {
     assert_eq!(remote.usage.total.output_tokens, 6);
     assert_eq!(remote.execution.started_at_ms, 1_700_000_000_000);
     assert_eq!(remote.execution.duration_ms, 42);
+    assert_eq!(remote.tool_calls.len(), 1);
+    assert_eq!(remote.tool_calls[0].call_id.as_deref(), Some("exec-call"));
+    assert_eq!(remote.tool_calls[0].tool_name, "lookup");
+    assert!(matches!(
+        &remote.tool_calls[0].outcome,
+        RemoteToolCallOutcome::Success(value) if value == &serde_json::json!({ "ok": true })
+    ));
 }
 
 #[test]

@@ -5,9 +5,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_core::{
-    AttachmentRef, ExecImage, RuntimeExecutionContext, TextProjectionMetadata,
-    ToolChildExecutionTraceHook, ToolExecutionGrant, ToolInvocation, ToolInvocationReply,
-    TraceBranchSelection, TraceContext, TraceEvent, TraceRecord, TraceRuntimeSubject, TraceSink,
+    AttachmentRef, RuntimeExecutionContext, TextProjectionMetadata, ToolChildExecutionTraceHook,
+    ToolExecutionGrant, ToolInvocation, ToolInvocationReply, TraceBranchSelection, TraceContext,
+    TraceEvent, TraceRecord, TraceRuntimeSubject, TraceSink,
 };
 use lash_lashlang_runtime::{
     LASHLANG_ENGINE_KIND, LashlangProcessInput, TraceLashlangChildExecution,
@@ -33,7 +33,6 @@ pub(super) struct HostBridge<'run> {
     observation_truncation: Mutex<Vec<TextProjectionMetadata>>,
     printed_images: Mutex<Vec<AttachmentRef>>,
     tool_calls: Mutex<Vec<lash_core::ToolCallRecord>>,
-    tool_images: Mutex<Vec<ExecImage>>,
     next_tool_index: Mutex<usize>,
     sleep_sequence: AtomicU64,
     lashlang_execution_trace: Option<LashlangExecutionTrace>,
@@ -63,7 +62,6 @@ impl<'run> HostBridge<'run> {
             observation_truncation: Mutex::new(Vec::new()),
             printed_images: Mutex::new(Vec::new()),
             tool_calls: Mutex::new(Vec::new()),
-            tool_images: Mutex::new(Vec::new()),
             next_tool_index: Mutex::new(0),
             sleep_sequence: AtomicU64::new(0),
             lashlang_execution_trace,
@@ -119,7 +117,6 @@ impl<'run> HostBridge<'run> {
             observation_truncation: self.observation_truncation.into_inner().unwrap_or_default(),
             printed_images: self.printed_images.into_inner().unwrap_or_default(),
             tool_calls: self.tool_calls.into_inner().unwrap_or_default(),
-            tool_images: self.tool_images.into_inner().unwrap_or_default(),
         }
     }
 
@@ -925,7 +922,6 @@ pub(super) struct CollectedExecutionOutput {
     pub(super) observation_truncation: Vec<TextProjectionMetadata>,
     pub(super) printed_images: Vec<AttachmentRef>,
     pub(super) tool_calls: Vec<lash_core::ToolCallRecord>,
-    pub(super) tool_images: Vec<ExecImage>,
 }
 
 async fn collect_printed_images(

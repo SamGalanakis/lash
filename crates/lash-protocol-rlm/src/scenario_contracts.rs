@@ -102,7 +102,7 @@ pub const RLM_PROTOCOL_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
     },
     ScenarioContractSpec {
         suite: "rlm",
-        test_name: "rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool_events",
+        test_name: "rlm_protocol_scenario_exec_result_emits_accounting_without_storing_tool_call_ids",
         display_name: "exec result keeps tool calls protocol internal",
         owned_invariant: "Exec result feedback avoids tool-call id storage and synthetic tool replay.",
         semantic_oracle: "rlm.exec_result_no_tool_call_replay",

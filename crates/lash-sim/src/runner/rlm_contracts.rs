@@ -315,7 +315,7 @@ fn rlm_exec_result_no_tool_call_replay_execution() -> Result<Value, FixedScriptR
     contract_execution_payload(
         "rlm.exec_result_no_tool_call_replay",
         "crates/lash-protocol-rlm/tests/protocol_drivers/scenarios.rs",
-        "rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool_events",
+        "rlm_protocol_scenario_exec_result_emits_accounting_without_storing_tool_call_ids",
         result,
     )
 }

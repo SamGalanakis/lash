@@ -4470,13 +4470,13 @@ fn rlm_protocol_execution_fact(
                 contract,
             )?;
             require_rlm_checkpoint(result, "after_work", contract)?;
-            require_rlm_no_tool_call_event(result, contract)?;
+            require_rlm_tool_call_event(result, contract)?;
             require_rlm_trajectory_omits(result, "rlm-call-1", contract)?;
             require_rlm_trajectory_error(result, None, contract)?;
             json!({
                 "exec_code": "x = await tools.read_file({ path: \"foo\" })?",
                 "checkpoint": "after_work",
-                "tool_call_event": false,
+                "tool_call_event": true,
                 "trajectory_omits_tool_call_id": "rlm-call-1",
             })
         }
@@ -4484,7 +4484,7 @@ fn rlm_protocol_execution_fact(
             require_rlm_bool(result, "/done", true, contract)?;
             require_rlm_exec_code(result, "x = await tools.custom_frame_switch({})?", contract)?;
             require_rlm_checkpoint(result, "before_completion", contract)?;
-            require_rlm_no_tool_call_event(result, contract)?;
+            require_rlm_tool_call_event(result, contract)?;
             require_rlm_agent_frame_switch(result, "next-frame", "continue", 1, contract)?;
             require_rlm_trajectory_error(result, None, contract)?;
             json!({
@@ -4496,14 +4496,14 @@ fn rlm_protocol_execution_fact(
                     "task": "continue",
                     "initial_node_count": 1,
                 },
-                "tool_call_event": false,
+                "tool_call_event": true,
             })
         }
         "rlm.exec_tool_control_fail_terminal" => {
             require_rlm_bool(result, "/done", true, contract)?;
             require_rlm_exec_code(result, "x = await tools.custom_fail({})?", contract)?;
             require_rlm_checkpoint(result, "before_completion", contract)?;
-            require_rlm_no_tool_call_event(result, contract)?;
+            require_rlm_tool_call_event(result, contract)?;
             require_rlm_tool_error(result, "custom_fail", "no valid result", contract)?;
             require_rlm_trajectory_error(result, None, contract)?;
             json!({
@@ -4511,7 +4511,7 @@ fn rlm_protocol_execution_fact(
                 "exec_code": "x = await tools.custom_fail({})?",
                 "checkpoint": "before_completion",
                 "tool_error": { "tool_name": "custom_fail", "message": "no valid result" },
-                "tool_call_event": false,
+                "tool_call_event": true,
             })
         }
         "rlm.natural_allows_finish_value" => {
@@ -4645,9 +4645,9 @@ fn rlm_protocol_contract_metadata(
             "empty RLM turn options default to natural mode and accept explicit finish value",
         )),
         "rlm.exec_result_no_tool_call_replay" => Ok((
-            "rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool_events",
+            "rlm_protocol_scenario_exec_result_emits_accounting_without_storing_tool_call_ids",
             "rlm_exec_result_no_tool_call_replay",
-            "exec results with internal tool-call records do not replay tool-call ids as RLM session events",
+            "exec results emit standard tool-call accounting events without storing tool-call ids in RLM trajectory",
         )),
         "rlm.exec_tool_control_frame_switch_terminal" => Ok((
             "rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal",
@@ -4968,6 +4968,16 @@ fn require_rlm_no_tool_call_event(result: &Value, contract: &str) -> Result<(), 
         Ok(())
     } else {
         Err(format!("{contract} unexpectedly emitted a tool-call event"))
+    }
+}
+
+fn require_rlm_tool_call_event(result: &Value, contract: &str) -> Result<(), String> {
+    if result.get("tool_call_event").and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{contract} did not emit a tool-call accounting event"
+        ))
     }
 }
 
@@ -7047,25 +7057,25 @@ mod tests {
             "unexpected RLM retired-marker replay failure: {err}"
         );
 
-        let mut exec_replayed_tool_event = events.clone();
+        let mut exec_missing_tool_event = events.clone();
         mutate_contract_execution(
-            &mut exec_replayed_tool_event,
+            &mut exec_missing_tool_event,
             "rlm.exec_result_no_tool_call_replay",
             |execution| {
                 execution
                     .pointer_mut("/result/tool_call_event")
                     .expect("tool call event flag")
-                    .clone_from(&json!(true));
+                    .clone_from(&json!(false));
             },
         );
         let err = scenario_contract_generated_facts_for_semantic(
             "rlm.exec_result_no_tool_call_replay",
-            &exec_replayed_tool_event,
+            &exec_missing_tool_event,
         )
-        .expect_err("RLM exec result fact must reject replayed tool-call events");
+        .expect_err("RLM exec result fact must require tool-call accounting events");
         assert!(
             err.contains("fixed-source replay validation"),
-            "unexpected RLM no-tool-call-replay failure: {err}"
+            "unexpected RLM tool-call-emission failure: {err}"
         );
 
         let mut frame_switch_wrong_frame = events.clone();
