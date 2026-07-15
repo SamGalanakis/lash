@@ -37,6 +37,14 @@ fn unique_db_path(name: &str) -> std::path::PathBuf {
     dir.join("session.db")
 }
 
+fn persisted_tool_state_at_generation(generation: u64) -> ToolState {
+    serde_json::from_value(serde_json::json!({
+        "generation": generation,
+        "tools": {}
+    }))
+    .expect("deserialize persisted tool state")
+}
+
 fn block_on<T>(future: impl Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -148,7 +156,7 @@ async fn gc_keeps_live_committed_checkpoint_blobs() {
 
     let state = RuntimeSessionState {
         session_id: "root".to_string(),
-        tool_state_snapshot: Some(ToolState::default().with_generation(3)),
+        tool_state_snapshot: Some(persisted_tool_state_at_generation(3)),
         plugin_snapshot: Some(PluginSessionSnapshot {
             plugins: Default::default(),
         }),
