@@ -52,9 +52,9 @@ use crate::plugin::{
 };
 use crate::sansio::{LlmCallError, Response};
 use crate::session_model::{
-    Message, MessageRole, Part, PartKind, PruneState, RuntimeSessionPolicy, SessionEvent,
-    SessionPolicy, TokenUsage, fresh_message_id, make_error_event, reassign_part_ids, shared_parts,
-    transport_stream_events,
+    Message, MessageRole, Part, PartKind, PruneState, RuntimeSessionPolicy, SessionPolicy,
+    SessionStreamEvent, TokenUsage, fresh_message_id, make_error_event, reassign_part_ids,
+    shared_parts, transport_stream_events,
 };
 use crate::{
     CheckpointKind, PersistentRuntimeServices, PluginOperationInvokeError, PromptHookContext,
@@ -702,14 +702,14 @@ impl Default for TerminationPolicy {
 }
 
 /// Host application sink for low-level streaming runtime events.
-/// `SessionEvent` is protocol-specific preview/progress data.
+/// `SessionStreamEvent` is protocol-specific preview/progress data.
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
     fn is_noop(&self) -> bool {
         false
     }
 
-    async fn emit(&self, event: SessionEvent);
+    async fn emit(&self, event: SessionStreamEvent);
 }
 
 /// No-op sink useful for callers that only care about final state.
@@ -724,7 +724,7 @@ impl EventSink for NoopEventSink {
         true
     }
 
-    async fn emit(&self, _event: SessionEvent) {}
+    async fn emit(&self, _event: SessionStreamEvent) {}
 }
 
 /// Stable identifier for a semantic turn activity.
@@ -772,7 +772,7 @@ impl TurnActivity {
 
 /// App-facing semantic event payload for a turn activity.
 ///
-/// Unlike [`SessionEvent`], these events are stable application signals rather
+/// Unlike [`SessionStreamEvent`], these events are stable application signals rather
 /// than low-level runtime/debug events. Public streams carry these payloads
 /// inside [`TurnActivity`] so every emitted item has identity.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -961,7 +961,7 @@ impl<'a> TurnOptions<'a> {
 }
 
 enum RuntimeStreamEvent {
-    Session(SessionEvent),
+    Session(SessionStreamEvent),
     Turn(TurnActivity),
 }
 

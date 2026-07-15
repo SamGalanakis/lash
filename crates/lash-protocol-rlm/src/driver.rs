@@ -461,7 +461,7 @@ impl RlmContextProjector {
     /// Test helper: the history-only messages (no current-iteration tail)
     /// flattened to their text for substring assertions on the rendered format.
     #[cfg(test)]
-    fn format_history(&self, events: &[lash_core::SessionEventRecord]) -> String {
+    fn format_history(&self, events: &[lash_core::SessionHistoryRecord]) -> String {
         let mut attachments = Vec::new();
         let messages = render_history_messages(
             &RlmHistoryRenderInput {
@@ -494,12 +494,12 @@ impl RlmContextProjector {
 mod tests {
     use super::*;
     use lash_core::session_model::{
-        ConversationRecord, MessageRole, Part, PartKind, PruneState, SessionEventRecord,
+        ConversationRecord, MessageRole, Part, PartKind, PruneState, SessionHistoryRecord,
     };
     use lash_rlm_types::{RlmProtocolEvent, RlmTrajectoryEntry};
 
-    fn user_event(id: &str, text: &str) -> SessionEventRecord {
-        SessionEventRecord::Conversation(ConversationRecord {
+    fn user_event(id: &str, text: &str) -> SessionHistoryRecord {
+        SessionHistoryRecord::Conversation(ConversationRecord {
             id: id.to_string(),
             role: MessageRole::User,
             parts: vec![Part {
@@ -519,8 +519,8 @@ mod tests {
         })
     }
 
-    fn step_event(protocol_iteration: usize, code: &str, output: &str) -> SessionEventRecord {
-        SessionEventRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmTrajectoryEntry(
+    fn step_event(protocol_iteration: usize, code: &str, output: &str) -> SessionHistoryRecord {
+        SessionHistoryRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmTrajectoryEntry(
             RlmTrajectoryEntry {
                 id: format!("lashlang_step_{protocol_iteration}"),
                 protocol_iteration,
@@ -537,8 +537,8 @@ mod tests {
         )))
     }
 
-    fn assistant_prose_event(id: &str, text: &str) -> SessionEventRecord {
-        SessionEventRecord::Conversation(ConversationRecord {
+    fn assistant_prose_event(id: &str, text: &str) -> SessionHistoryRecord {
+        SessionHistoryRecord::Conversation(ConversationRecord {
             id: id.to_string(),
             role: MessageRole::Assistant,
             parts: vec![Part {
@@ -585,7 +585,7 @@ mod tests {
 
     fn project_iteration_request(
         projector: &RlmContextProjector,
-        events: &[SessionEventRecord],
+        events: &[SessionHistoryRecord],
         protocol_iteration: usize,
         model: &str,
     ) -> Arc<LlmRequest> {
@@ -792,7 +792,7 @@ mod tests {
     #[test]
     fn plugin_origin_is_not_rendered_in_history() {
         let projector = projector(100);
-        let event = SessionEventRecord::Conversation(ConversationRecord {
+        let event = SessionHistoryRecord::Conversation(ConversationRecord {
             id: "plugin".to_string(),
             role: MessageRole::User,
             parts: vec![Part {
@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn process_wake_history_renders_as_chronological_event_context() {
         let projector = projector(1000);
-        let event = SessionEventRecord::Conversation(ConversationRecord {
+        let event = SessionHistoryRecord::Conversation(ConversationRecord {
             id: "wake:abc".to_string(),
             role: MessageRole::Event,
             parts: vec![Part {
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn printed_images_render_as_llm_image_blocks() {
-        let event = SessionEventRecord::Protocol(rlm_protocol_event(
+        let event = SessionHistoryRecord::Protocol(rlm_protocol_event(
             RlmProtocolEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
                 id: "lashlang_step_1".to_string(),
                 protocol_iteration: 1,

@@ -309,7 +309,7 @@ impl RuntimeSessionServices {
 
 pub(super) async fn emit_session_events_to_sink(
     events: &dyn EventSink,
-    plugin_events: Vec<SessionEvent>,
+    plugin_events: Vec<SessionStreamEvent>,
 ) {
     if events.is_noop() {
         return;
@@ -319,7 +319,7 @@ pub(super) async fn emit_session_events_to_sink(
     }
 }
 
-pub(super) async fn emit_session_event_to_sink(events: &dyn EventSink, event: SessionEvent) {
+pub(super) async fn emit_session_event_to_sink(events: &dyn EventSink, event: SessionStreamEvent) {
     if !events.is_noop() {
         events.emit(event).await;
     }
@@ -327,7 +327,7 @@ pub(super) async fn emit_session_event_to_sink(events: &dyn EventSink, event: Se
 
 pub(super) async fn emit_session_events(
     event_tx: &mpsc::Sender<RuntimeStreamEvent>,
-    plugin_events: Vec<SessionEvent>,
+    plugin_events: Vec<SessionStreamEvent>,
 ) {
     for event in plugin_events {
         if !event_tx.is_closed() {

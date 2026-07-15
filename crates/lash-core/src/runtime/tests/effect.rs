@@ -2185,7 +2185,7 @@ impl lash_sansio::ProtocolDriverHandle<crate::HostTurnProtocol> for EffectContro
                 },
             ))],
             Err(error) => vec![
-                crate::DriverAction::Emit(crate::SessionEvent::Error {
+                crate::DriverAction::Emit(crate::SessionStreamEvent::Error {
                     message: error,
                     envelope: None,
                 }),

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
-use crate::session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord};
+use crate::session_model::{ConversationRecord, ProtocolEvent, SessionHistoryRecord};
 use crate::{BaseRenderCache, Clock, Message, MessageRole, PromptUsage, TokenUsage};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -122,10 +122,10 @@ impl SessionNodeDraft {
         }
     }
 
-    pub(crate) fn event(event: SessionEventRecord) -> Self {
+    pub(crate) fn event(event: SessionHistoryRecord) -> Self {
         match event {
-            SessionEventRecord::Conversation(record) => Self::message(record.to_message()),
-            SessionEventRecord::Protocol(event) => Self::protocol_event(event),
+            SessionHistoryRecord::Conversation(record) => Self::message(record.to_message()),
+            SessionHistoryRecord::Protocol(event) => Self::protocol_event(event),
         }
     }
 
@@ -178,7 +178,7 @@ impl<'de> serde::Deserialize<'de> for SharedJsonValue {
 #[allow(clippy::large_enum_variant)]
 pub enum SessionNodePayload {
     Event {
-        event: SessionEventRecord,
+        event: SessionHistoryRecord,
     },
     Plugin {
         plugin_type: String,
@@ -217,13 +217,13 @@ pub struct SessionMessageTreeNode {
 pub(crate) struct ActiveReadReplacement {
     pub(crate) leaf_node_id: Option<String>,
     pub(crate) new_tail_nodes: Vec<SessionNodeRecord>,
-    pub(crate) active_events: Vec<SessionEventRecord>,
+    pub(crate) active_events: Vec<SessionHistoryRecord>,
     pub(crate) active_messages: Vec<Message>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionReadModel {
-    pub(crate) active_events: Arc<Vec<SessionEventRecord>>,
+    pub(crate) active_events: Arc<Vec<SessionHistoryRecord>>,
     pub(crate) messages: Arc<Vec<Message>>,
     pub(crate) prompt_render_cache: Arc<BaseRenderCache>,
 }
@@ -288,7 +288,7 @@ impl SessionGraphAppendBuilder {
         timestamp: String,
     ) -> Vec<SessionNodeRecord>
     where
-        I: IntoIterator<Item = SessionEventRecord>,
+        I: IntoIterator<Item = SessionHistoryRecord>,
     {
         self.append_drafts_at(events.into_iter().map(SessionNodeDraft::event), timestamp)
     }
@@ -317,7 +317,7 @@ impl SessionGraphAppendBuilder {
                         node_id,
                         caused_by,
                         SessionNodePayload::Event {
-                            event: SessionEventRecord::Conversation(
+                            event: SessionHistoryRecord::Conversation(
                                 ConversationRecord::from_message(message),
                             ),
                         },
@@ -340,7 +340,7 @@ impl SessionGraphAppendBuilder {
                         node_id,
                         draft.caused_by,
                         SessionNodePayload::Event {
-                            event: SessionEventRecord::Protocol(event),
+                            event: SessionHistoryRecord::Protocol(event),
                         },
                     )
                 }
@@ -364,7 +364,7 @@ impl SessionGraphAppendBuilder {
 struct SessionGraphCache {
     by_id: HashMap<String, usize>,
     active_path_indices: Vec<usize>,
-    active_events: Arc<Vec<SessionEventRecord>>,
+    active_events: Arc<Vec<SessionHistoryRecord>>,
     active_messages: Arc<Vec<Message>>,
     /// Index from `Message::id` to its position in `active_messages`,
     /// kept in sync with the vec so dedup on append is O(1) instead of an
@@ -505,7 +505,7 @@ impl SessionGraphCache {
 }
 
 impl SessionNodeRecord {
-    pub fn event(&self) -> Option<&SessionEventRecord> {
+    pub fn event(&self) -> Option<&SessionHistoryRecord> {
         match &self.payload {
             SessionNodePayload::Event { event } => Some(event),
             SessionNodePayload::Plugin { .. } => None,
@@ -514,7 +514,7 @@ impl SessionNodeRecord {
 
     pub fn message(&self) -> Option<Message> {
         match self.event()? {
-            SessionEventRecord::Conversation(record) => Some(record.to_message()),
+            SessionHistoryRecord::Conversation(record) => Some(record.to_message()),
             _ => None,
         }
     }
@@ -1131,7 +1131,7 @@ pub(crate) fn build_active_read_replacement<'a>(
             agent_frame_id: agent_frame_id.map(ToOwned::to_owned),
             timestamp: timestamp.clone(),
             payload: SessionNodePayload::Event {
-                event: SessionEventRecord::Conversation(ConversationRecord::from_message(
+                event: SessionHistoryRecord::Conversation(ConversationRecord::from_message(
                     message.clone(),
                 )),
             },
@@ -1157,7 +1157,7 @@ pub(crate) fn build_active_read_replacement<'a>(
 
 fn push_active_read_node(
     node: &SessionNodeRecord,
-    active_events: &mut Vec<SessionEventRecord>,
+    active_events: &mut Vec<SessionHistoryRecord>,
     active_messages: &mut Vec<Message>,
     active_message_ids: &mut HashSet<String>,
 ) {
@@ -1175,7 +1175,7 @@ fn push_active_read_node(
 fn recognized_active_read_key(node: &SessionNodeRecord) -> Option<String> {
     match &node.payload {
         SessionNodePayload::Event { event } => match event {
-            SessionEventRecord::Conversation(record) => Some(format!("message:{}", record.id)),
+            SessionHistoryRecord::Conversation(record) => Some(format!("message:{}", record.id)),
             _ => None,
         },
         SessionNodePayload::Plugin { .. } => None,
@@ -1316,7 +1316,7 @@ mod tests {
         assert_eq!(graph.nodes.len(), 1);
         assert!(matches!(
             graph.nodes[0].event(),
-            Some(SessionEventRecord::Conversation(_))
+            Some(SessionHistoryRecord::Conversation(_))
         ));
     }
 
@@ -1329,10 +1329,10 @@ mod tests {
 
         for node in &graph.nodes {
             match node.event() {
-                Some(SessionEventRecord::Conversation(_)) => {
+                Some(SessionHistoryRecord::Conversation(_)) => {
                     assert!(!node.node_id.starts_with("plugin:"), "{:?}", node);
                 }
-                Some(SessionEventRecord::Protocol(_)) => {
+                Some(SessionHistoryRecord::Protocol(_)) => {
                     assert!(node.node_id.starts_with("protocol:"), "{:?}", node);
                 }
                 None => {

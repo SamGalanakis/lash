@@ -3,10 +3,10 @@ use super::*;
 #[test]
 fn assembler_ignores_streamed_text_without_durable_output() {
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::TextDelta {
+    assembler.push(&SessionStreamEvent::TextDelta {
         content: "streamed but not committed".to_string(),
     });
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
 
     let out = assembler.finish(
         default_state().to_snapshot(),
@@ -29,7 +29,7 @@ fn assembler_ignores_streamed_text_without_durable_output() {
 #[test]
 fn cancelled_assembler_with_only_streamed_text_has_empty_assistant_output() {
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::TextDelta {
+    assembler.push(&SessionStreamEvent::TextDelta {
         content: "partial answer".to_string(),
     });
 
@@ -49,12 +49,12 @@ fn cancelled_assembler_with_only_streamed_text_has_empty_assistant_output() {
 #[test]
 fn assembler_preserves_explicit_assistant_message_outcome() {
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::TurnOutcome {
+    assembler.push(&SessionStreamEvent::TurnOutcome {
         outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
             text: "first\n\nsecond".to_string(),
         }),
     });
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
 
     let out = assembler.finish(
         default_state().to_snapshot(),
@@ -75,12 +75,12 @@ fn assembler_preserves_explicit_assistant_message_outcome() {
 #[test]
 fn assembler_uses_assistant_message_outcome_without_recovery_issue_when_no_streamed_prose() {
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::TurnOutcome {
+    assembler.push(&SessionStreamEvent::TurnOutcome {
         outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
             text: "settled answer".to_string(),
         }),
     });
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
 
     let out = assembler.finish(
         default_state().to_snapshot(),
@@ -106,12 +106,12 @@ fn assembler_uses_assistant_message_outcome_without_recovery_issue_when_no_strea
 #[test]
 fn assembler_uses_final_value_for_assistant_output() {
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::TurnOutcome {
+    assembler.push(&SessionStreamEvent::TurnOutcome {
         outcome: TurnOutcome::Finished(TurnFinish::FinalValue {
             value: serde_json::json!({ "ok": true }),
         }),
     });
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
 
     let out = assembler.finish(
         default_state().to_snapshot(),
@@ -132,13 +132,13 @@ fn assembler_uses_final_value_for_assistant_output() {
 #[test]
 fn assembler_uses_tool_value_for_assistant_output() {
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::TurnOutcome {
+    assembler.push(&SessionStreamEvent::TurnOutcome {
         outcome: TurnOutcome::Finished(TurnFinish::ToolValue {
             tool_name: "finish".to_string(),
             value: serde_json::json!("done"),
         }),
     });
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
 
     let out = assembler.finish(
         default_state().to_snapshot(),
@@ -182,7 +182,7 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
         },
     );
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
     let out = assembler.finish(
         state.to_snapshot(),
         false,
@@ -288,10 +288,10 @@ fn assembler_prefers_state_output_when_streamed_text_is_a_truncated_prefix() {
         },
     );
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::TextDelta {
+    assembler.push(&SessionStreamEvent::TextDelta {
         content: "You graduated with a degree in Business".to_string(),
     });
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
     let out = assembler.finish(
         state.to_snapshot(),
         false,
@@ -377,7 +377,7 @@ fn assembler_state_output_excludes_tool_call_payload() {
 #[test]
 fn assembler_derives_tool_failure_from_assembled_records() {
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::ToolCall {
+    assembler.push(&SessionStreamEvent::ToolCall {
         call_id: Some("tc1".to_string()),
         name: "x".to_string(),
         args: serde_json::json!({}),
@@ -388,11 +388,11 @@ fn assembler_derives_tool_failure_from_assembled_records() {
         )),
         duration_ms: 1,
     });
-    assembler.push(&SessionEvent::Error {
+    assembler.push(&SessionStreamEvent::Error {
         message: "tool failed".to_string(),
         envelope: None,
     });
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
     let out = assembler.finish(
         default_state().to_snapshot(),
         false,
@@ -438,7 +438,7 @@ fn assembler_treats_any_non_success_record_as_tool_failure() {
 #[test]
 fn assembler_marks_missing_done_as_failure() {
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::TextDelta {
+    assembler.push(&SessionStreamEvent::TextDelta {
         content: "partial".to_string(),
     });
     let out = assembler.finish(
@@ -479,7 +479,7 @@ fn assembler_detects_max_turn_message() {
         },
     );
     let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::Done);
+    assembler.push(&SessionStreamEvent::Done);
     let out = assembler.finish(
         state.to_snapshot(),
         false,

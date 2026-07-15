@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord};
+use crate::session_model::{ConversationRecord, ProtocolEvent, SessionHistoryRecord};
 use crate::{Message, MessageOrigin, MessageRole, MessageSequence, Part};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -89,11 +89,11 @@ impl ChronologicalProjection {
         )
     }
 
-    pub fn from_turn_view(events: &[SessionEventRecord], messages: &MessageSequence) -> Self {
+    pub fn from_turn_view(events: &[SessionHistoryRecord], messages: &MessageSequence) -> Self {
         Self::from_active_read(events, messages.as_slice())
     }
 
-    fn from_active_read(active_events: &[SessionEventRecord], messages: &[Message]) -> Self {
+    fn from_active_read(active_events: &[SessionHistoryRecord], messages: &[Message]) -> Self {
         let mut projection = Self::default();
         projection
             .entries
@@ -126,7 +126,7 @@ impl ChronologicalProjection {
 }
 
 pub fn visit_turn_view<'a>(
-    events: &'a [SessionEventRecord],
+    events: &'a [SessionHistoryRecord],
     messages: &'a MessageSequence,
     visit: impl FnMut(BorrowedChronologicalEntry<'a>),
 ) {
@@ -134,7 +134,7 @@ pub fn visit_turn_view<'a>(
 }
 
 fn visit_active_read<'a>(
-    active_events: &'a [SessionEventRecord],
+    active_events: &'a [SessionHistoryRecord],
     messages: &'a [Message],
     mut visit: impl FnMut(BorrowedChronologicalEntry<'a>),
 ) {
@@ -148,7 +148,7 @@ fn visit_active_read<'a>(
 
     for event in active_events {
         match event {
-            SessionEventRecord::Conversation(record) => {
+            SessionHistoryRecord::Conversation(record) => {
                 let message = BorrowedChronologicalMessage::from_record(record);
                 if !message.is_transient() && seen_messages.insert(message.id.to_string()) {
                     visit(BorrowedChronologicalEntry {
@@ -158,7 +158,7 @@ fn visit_active_read<'a>(
                     index += 1;
                 }
             }
-            SessionEventRecord::Protocol(event) => {
+            SessionHistoryRecord::Protocol(event) => {
                 visit(BorrowedChronologicalEntry {
                     index,
                     payload: BorrowedChronologicalPayload::ProtocolEvent(event),
@@ -262,7 +262,10 @@ mod tests {
             .collect()
     }
 
-    fn borrowed_summary(events: &[SessionEventRecord], messages: &MessageSequence) -> Vec<String> {
+    fn borrowed_summary(
+        events: &[SessionHistoryRecord],
+        messages: &MessageSequence,
+    ) -> Vec<String> {
         let mut summary = Vec::new();
         visit_turn_view(events, messages, |entry| {
             summary.push(match entry.payload {
@@ -282,9 +285,9 @@ mod tests {
         let m1 = text_message("m1", MessageRole::User, "first");
         let m2 = text_message("m2", MessageRole::Assistant, "second");
         let events = vec![
-            SessionEventRecord::Conversation(ConversationRecord::from_message(m1.clone())),
-            SessionEventRecord::Protocol(protocol_event("step")),
-            SessionEventRecord::Conversation(ConversationRecord::from_message(m1.clone())),
+            SessionHistoryRecord::Conversation(ConversationRecord::from_message(m1.clone())),
+            SessionHistoryRecord::Protocol(protocol_event("step")),
+            SessionHistoryRecord::Conversation(ConversationRecord::from_message(m1.clone())),
         ];
         let messages = MessageSequence::from_owned(vec![m1, m2]);
         let projection = ChronologicalProjection::from_turn_view(&events, &messages);

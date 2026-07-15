@@ -733,7 +733,7 @@ finish { baton: baton }
         .iter()
         .filter_map(|node| match &node.payload {
             SessionNodePayload::Event {
-                event: lash_core::SessionEventRecord::Protocol(event),
+                event: lash_core::SessionHistoryRecord::Protocol(event),
             } => lash_protocol_rlm::decode_rlm_protocol_event(event),
             _ => None,
         })

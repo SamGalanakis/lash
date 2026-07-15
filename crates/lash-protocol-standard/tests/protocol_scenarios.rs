@@ -4,7 +4,7 @@ use std::sync::Arc;
 use lash_core::sansio::{self, ChatContextProjector, ProtocolDriverHandle, Response};
 use lash_core::{
     CheckpointKind, Effect, LlmCallError, LlmOutputPart, LlmRequest, LlmResponse,
-    LlmTerminalReason, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
+    LlmTerminalReason, Message, MessageRole, Part, PartKind, PruneState, SessionStreamEvent,
     ToolCallOutput, ToolFailure, ToolFailureClass, TurnMachine, TurnMachineConfig, TurnOutcome,
     TurnStop,
 };
@@ -422,13 +422,13 @@ impl StandardProtocolRun {
                         }));
                 }
                 Effect::Checkpoint { checkpoint, .. } => self.checkpoints.push(*checkpoint),
-                Effect::Emit(SessionEvent::TextDelta { content }) => {
+                Effect::Emit(SessionStreamEvent::TextDelta { content }) => {
                     self.text_deltas.push(content.clone());
                 }
-                Effect::Emit(SessionEvent::Error { message, .. }) => {
+                Effect::Emit(SessionStreamEvent::Error { message, .. }) => {
                     self.errors.push(message.clone());
                 }
-                Effect::Emit(SessionEvent::TurnOutcome { outcome }) => {
+                Effect::Emit(SessionStreamEvent::TurnOutcome { outcome }) => {
                     self.turn_outcomes.push(outcome.clone());
                 }
                 _ => {}

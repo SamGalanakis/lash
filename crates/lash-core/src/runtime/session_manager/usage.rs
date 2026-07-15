@@ -1,7 +1,7 @@
 use super::*;
 
 pub(in crate::runtime::session_manager) struct ChannelEventSink {
-    pub(in crate::runtime::session_manager) tx: mpsc::Sender<SessionEvent>,
+    pub(in crate::runtime::session_manager) tx: mpsc::Sender<SessionStreamEvent>,
     pub(in crate::runtime::session_manager) live_usage: Option<LiveChildUsageForwarder>,
 }
 
@@ -34,18 +34,18 @@ impl ChildUsageEventRelay {
         self.tx.lock().expect("child usage relay lock").take();
     }
 
-    async fn emit(&self, event: SessionEvent) {
+    async fn emit(&self, event: SessionStreamEvent) {
         let tx = self.tx.lock().expect("child usage relay lock").clone();
         let Some(tx) = tx else { return };
         if tx.is_closed() {
             return;
         }
         // Project ChildTokenUsage onto the embed-facing TurnActivity stream
-        // before forwarding the SessionEvent itself. Other variants reach the
+        // before forwarding the SessionStreamEvent itself. Other variants reach the
         // turn-activity stream through `send_session_event` in `turn_driver`,
         // but child usage skips that path because it originates in the
         // session manager rather than the parent's turn driver.
-        if let SessionEvent::ChildTokenUsage {
+        if let SessionStreamEvent::ChildTokenUsage {
             session_id,
             source,
             model,
@@ -212,7 +212,7 @@ impl LiveChildUsageForwarder {
         record_token_usage_shared(&self.token_ledger, &self.source, &self.model, &delta);
         if let Some(relay) = &self.relay {
             relay
-                .emit(SessionEvent::ChildTokenUsage {
+                .emit(SessionStreamEvent::ChildTokenUsage {
                     session_id: self.session_id.clone(),
                     source: self.source.clone(),
                     model: self.model.clone(),
@@ -227,8 +227,8 @@ impl LiveChildUsageForwarder {
 
 #[async_trait::async_trait]
 impl EventSink for ChannelEventSink {
-    async fn emit(&self, event: SessionEvent) {
-        if let SessionEvent::TokenUsage {
+    async fn emit(&self, event: SessionStreamEvent) {
+        if let SessionStreamEvent::TokenUsage {
             protocol_iteration,
             usage,
             cumulative,

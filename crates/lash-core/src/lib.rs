@@ -76,7 +76,7 @@ pub use lash_sansio::{
     PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderSchemaCapabilities,
     PruneState, RenderedPrompt, ResolvedPromptLayer, ResolvedSchema, Response, SchemaContract,
     SchemaDialect, SchemaProjectionOverride, SchemaProjectionPolicy, SchemaPurpose,
-    SchemaResolutionError, SchemaResolutionRequest, SessionAppendNode, SessionEvent,
+    SchemaResolutionError, SchemaResolutionRequest, SessionAppendNode, SessionStreamEvent,
     TextProjectionMetadata, TokenUsage, ToolActivation, ToolArgumentProjectionPolicy,
     ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation, ToolCatalog,
     ToolCatalogBuildInput, ToolCatalogEntry, ToolContract, ToolControl, ToolDefinition,
@@ -453,7 +453,7 @@ pub use session_graph::{
     SessionNodePayload, SessionNodeRecord,
 };
 pub use session_model::context::PreparedContext;
-pub use session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord};
+pub use session_model::{ConversationRecord, ProtocolEvent, SessionHistoryRecord};
 pub use session_model::{RuntimeSessionPolicy, SessionPolicy, SessionSpec};
 pub use store::{
     AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,

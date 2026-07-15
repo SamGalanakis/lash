@@ -335,13 +335,15 @@ impl StandardContractObserved {
                 lash_core::Effect::Checkpoint { checkpoint, .. } => {
                     self.checkpoints.push(checkpoint_kind_name(*checkpoint));
                 }
-                lash_core::Effect::Emit(lash_core::SessionEvent::TextDelta { content }) => {
+                lash_core::Effect::Emit(lash_core::SessionStreamEvent::TextDelta { content }) => {
                     self.text_deltas.push(content.clone());
                 }
-                lash_core::Effect::Emit(lash_core::SessionEvent::Error { message, .. }) => {
+                lash_core::Effect::Emit(lash_core::SessionStreamEvent::Error {
+                    message, ..
+                }) => {
                     self.errors.push(message.clone());
                 }
-                lash_core::Effect::Emit(lash_core::SessionEvent::TurnOutcome { outcome }) => {
+                lash_core::Effect::Emit(lash_core::SessionStreamEvent::TurnOutcome { outcome }) => {
                     self.turn_outcomes.push(outcome.clone());
                 }
                 _ => {}

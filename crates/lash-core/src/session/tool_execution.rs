@@ -10,8 +10,8 @@ use crate::tool_dispatch::{
     schedule_tool_batch,
 };
 use crate::{
-    ModelToolReturn, SessionEvent, ToolCallOutput, ToolCallRecord, ToolCancellation, ToolFailure,
-    ToolFailureClass, ToolResult, TurnActivityId, TurnEvent,
+    ModelToolReturn, SessionStreamEvent, ToolCallOutput, ToolCallRecord, ToolCancellation,
+    ToolFailure, ToolFailureClass, ToolResult, TurnActivityId, TurnEvent,
 };
 use std::collections::HashMap;
 
@@ -610,7 +610,7 @@ impl RuntimeExecutionContext<'_> {
         let _ = self
             .dispatch
             .event_tx
-            .send(SessionEvent::ToolCallStart {
+            .send(SessionStreamEvent::ToolCallStart {
                 call_id: Some(call_id.to_string()),
                 name: name.to_string(),
                 args: args.clone(),
@@ -705,7 +705,7 @@ impl RuntimeExecutionContext<'_> {
         let _ = self
             .dispatch
             .event_tx
-            .send(SessionEvent::ToolCallStart {
+            .send(SessionStreamEvent::ToolCallStart {
                 call_id: Some(call_id.clone()),
                 name: name.clone(),
                 args: args.clone(),
@@ -856,7 +856,7 @@ impl RuntimeExecutionContext<'_> {
         let _ = self
             .dispatch
             .event_tx
-            .send(SessionEvent::ToolCallStart {
+            .send(SessionStreamEvent::ToolCallStart {
                 call_id: Some(call_id.clone()),
                 name: name.clone(),
                 args: args.clone(),

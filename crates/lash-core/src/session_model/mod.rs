@@ -14,7 +14,7 @@ pub use lash_sansio::format_tool_output_content;
 pub use lash_sansio::session_model::{
     ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, Part, PartKind,
     PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
-    ProtocolEvent, PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState,
+    ProtocolEvent, PruneState, SessionStreamEvent, TokenUsage, TurnTerminationPolicyState,
     default_prompt_template, make_error_envelope, make_error_event, reassign_part_ids,
     render_prompt, render_transcript_prompt, shared_parts,
 };
@@ -23,7 +23,7 @@ pub fn fresh_message_id() -> String {
     format!("m{}", uuid::Uuid::new_v4().simple())
 }
 
-pub type SessionEventRecord = lash_sansio::session_model::SessionEventRecord<ProtocolEvent>;
+pub type SessionHistoryRecord = lash_sansio::session_model::SessionHistoryRecord<ProtocolEvent>;
 
 pub const PLUGIN_RUNTIME_PROTOCOL_PLUGIN_ID: &str = "lash.plugin_runtime";
 
@@ -53,7 +53,7 @@ pub fn plugin_runtime_event_from_protocol(
 }
 
 /// Send an event to the channel if it's still open.
-pub(crate) async fn send_event(tx: &mpsc::Sender<SessionEvent>, event: SessionEvent) {
+pub(crate) async fn send_event(tx: &mpsc::Sender<SessionStreamEvent>, event: SessionStreamEvent) {
     if !tx.is_closed() {
         let _ = tx.send(event).await;
     }

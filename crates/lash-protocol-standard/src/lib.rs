@@ -26,8 +26,8 @@ use lash_core::sansio::{
 };
 use lash_core::session_model::message::PartAttachment;
 use lash_core::session_model::{
-    ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
-    SessionEventRecord, fresh_message_id, make_error_event, reassign_part_ids, shared_parts,
+    ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionHistoryRecord,
+    SessionStreamEvent, fresh_message_id, make_error_event, reassign_part_ids, shared_parts,
 };
 
 mod batch;
@@ -411,7 +411,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for StandardDriver {
                         assistant_text_parts
                             .push((assistant_text[previous_len..].to_string(), response_meta));
                         if !text_streamed {
-                            actions.push(DriverAction::Emit(SessionEvent::TextDelta {
+                            actions.push(DriverAction::Emit(SessionStreamEvent::TextDelta {
                                 content: assistant_text[previous_len..].to_string(),
                             }));
                         }
@@ -442,7 +442,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for StandardDriver {
             }
         }
 
-        actions.push(DriverAction::Emit(SessionEvent::LlmResponse {
+        actions.push(DriverAction::Emit(SessionStreamEvent::LlmResponse {
             protocol_iteration: ctx.protocol_iteration(),
             content: assistant_text.clone(),
             duration_ms: 0,
@@ -703,8 +703,8 @@ fn append_model_return_parts(parts: &mut Vec<Part>, model_return: lash_core::Mod
     }
 }
 
-fn conversation_event(message: Message) -> SessionEventRecord {
-    SessionEventRecord::Conversation(ConversationRecord::from_message(message))
+fn conversation_event(message: Message) -> SessionHistoryRecord {
+    SessionHistoryRecord::Conversation(ConversationRecord::from_message(message))
 }
 
 #[cfg(test)]

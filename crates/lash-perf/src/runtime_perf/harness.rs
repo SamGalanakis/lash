@@ -10,7 +10,7 @@ use lash::{
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
     runtime::SessionSnapshot,
 };
-use lash_core::SessionEventRecord;
+use lash_core::SessionHistoryRecord;
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ACTIVE_STATE_PLUGIN_TYPE as OM_ACTIVE_STATE_PLUGIN_TYPE;
 use lash_protocol_rlm::RlmTurnInputExt;
@@ -359,7 +359,7 @@ fn rlm_trajectory_entries(turn: &lash::TurnResult) -> Vec<RlmTrajectoryEntry> {
         .active_events()
         .iter()
         .filter_map(|event| {
-            let SessionEventRecord::Protocol(event) = event else {
+            let SessionHistoryRecord::Protocol(event) = event else {
                 return None;
             };
             match event.decode::<RlmProtocolEvent>(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID) {

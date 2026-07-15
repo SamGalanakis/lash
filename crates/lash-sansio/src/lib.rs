@@ -51,9 +51,9 @@ pub use session_model::{
     MAIN_AGENT_INTRO, Message, MessageRole, MessageSequence, Part, PartAttachment, PartKind,
     PromptBuiltin, PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry,
     PromptTemplateSection, ProtocolEvent, PruneState, RenderedPrompt, ResolvedPromptLayer,
-    SessionAppendNode, SessionEvent, SessionEventRecord, TokenUsage, TurnFinish, TurnOutcome,
-    TurnStop, default_prompt_template, messages_are_prompt_resume_safe, resolve_prompt_layers,
-    shared_parts,
+    SessionAppendNode, SessionHistoryRecord, SessionStreamEvent, TokenUsage, TurnFinish,
+    TurnOutcome, TurnStop, default_prompt_template, messages_are_prompt_resume_safe,
+    resolve_prompt_layers, shared_parts,
 };
 pub use tool_catalog::{
     ToolCatalog, ToolCatalogBuildInput, ToolCatalogContribution, ToolCatalogEntry,

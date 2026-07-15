@@ -108,7 +108,7 @@ impl SessionReadView {
         meta: SessionReadMeta,
         base_graph: Arc<crate::SessionGraph>,
         messages: crate::MessageSequence,
-        active_events: Arc<Vec<crate::SessionEventRecord>>,
+        active_events: Arc<Vec<crate::SessionHistoryRecord>>,
     ) -> Self {
         Self(Arc::new(SessionReadState {
             meta,
@@ -218,7 +218,7 @@ impl SessionReadView {
         self.0.read_model.messages.as_slice()
     }
 
-    pub fn active_events(&self) -> &[crate::SessionEventRecord] {
+    pub fn active_events(&self) -> &[crate::SessionHistoryRecord] {
         self.0.read_model.active_events.as_slice()
     }
 

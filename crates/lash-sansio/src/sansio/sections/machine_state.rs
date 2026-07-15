@@ -37,7 +37,7 @@ pub struct TurnCheckpoint<M: TurnProtocol = UnitTurnProtocol> {
     #[serde(default)]
     next_synthetic_message_id: u64,
     messages: Vec<Message>,
-    events: Vec<SessionEventRecord<M::Event>>,
+    events: Vec<SessionHistoryRecord<M::Event>>,
     #[serde(default)]
     turn_causes: Vec<TurnCause>,
     #[serde(default)]
@@ -162,7 +162,7 @@ pub struct TurnMachine<M: TurnProtocol = UnitTurnProtocol> {
     next_effect_id: u64,
     next_synthetic_message_id: u64,
     messages: MessageSequence,
-    events: Arc<Vec<SessionEventRecord<M::Event>>>,
+    events: Arc<Vec<SessionHistoryRecord<M::Event>>>,
     turn_causes: Vec<TurnCause>,
     progress_event_cursor: usize,
     protocol_iteration: usize,

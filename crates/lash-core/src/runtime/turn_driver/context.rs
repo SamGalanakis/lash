@@ -8,7 +8,7 @@ impl<'run> RuntimeTurnDriver<'run> {
 
     pub(super) fn execution_context(
         &self,
-        event_tx: mpsc::Sender<SessionEvent>,
+        event_tx: mpsc::Sender<SessionStreamEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
     ) -> Result<crate::RuntimeExecutionContext<'run>, PluginError> {
         let manager = self.session_services.clone();

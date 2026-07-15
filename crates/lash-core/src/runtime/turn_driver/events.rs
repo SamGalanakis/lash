@@ -2,11 +2,11 @@ use super::*;
 
 pub(in crate::runtime) async fn send_session_event(
     event_tx: &mpsc::Sender<RuntimeStreamEvent>,
-    event: SessionEvent,
+    event: SessionStreamEvent,
 ) {
     if !event_tx.is_closed() {
         match &event {
-            SessionEvent::TokenUsage {
+            SessionStreamEvent::TokenUsage {
                 protocol_iteration,
                 usage,
                 cumulative,
@@ -26,7 +26,7 @@ pub(in crate::runtime) async fn send_session_event(
             // not here. Child usage events bypass `send_session_event` because
             // they're produced by the session manager rather than the parent's
             // turn driver.
-            SessionEvent::LlmRequest {
+            SessionStreamEvent::LlmRequest {
                 protocol_iteration, ..
             } => {
                 send_independent_turn_event(
@@ -37,7 +37,7 @@ pub(in crate::runtime) async fn send_session_event(
                 )
                 .await;
             }
-            SessionEvent::RetryStatus {
+            SessionStreamEvent::RetryStatus {
                 wait_seconds,
                 attempt,
                 max_attempts,
@@ -55,7 +55,7 @@ pub(in crate::runtime) async fn send_session_event(
                 )
                 .await;
             }
-            SessionEvent::PluginEvent { plugin_id, event } => {
+            SessionStreamEvent::PluginEvent { plugin_id, event } => {
                 send_independent_turn_event(
                     event_tx,
                     TurnEvent::PluginRuntime {
@@ -65,7 +65,7 @@ pub(in crate::runtime) async fn send_session_event(
                 )
                 .await;
             }
-            SessionEvent::InjectedTurnInputAccepted { inputs, checkpoint } => {
+            SessionStreamEvent::InjectedTurnInputAccepted { inputs, checkpoint } => {
                 send_independent_turn_event(
                     event_tx,
                     TurnEvent::QueuedInputAccepted {
@@ -75,7 +75,7 @@ pub(in crate::runtime) async fn send_session_event(
                 )
                 .await;
             }
-            SessionEvent::InjectedMessagesCommitted {
+            SessionStreamEvent::InjectedMessagesCommitted {
                 messages,
                 checkpoint,
             } => {
@@ -88,7 +88,7 @@ pub(in crate::runtime) async fn send_session_event(
                 )
                 .await;
             }
-            SessionEvent::Error { message, .. } => {
+            SessionStreamEvent::Error { message, .. } => {
                 send_independent_turn_event(
                     event_tx,
                     TurnEvent::Error {
@@ -97,7 +97,7 @@ pub(in crate::runtime) async fn send_session_event(
                 )
                 .await;
             }
-            SessionEvent::TurnOutcome {
+            SessionStreamEvent::TurnOutcome {
                 outcome: TurnOutcome::Finished(TurnFinish::FinalValue { value }),
             } => {
                 send_independent_turn_event(
@@ -108,7 +108,7 @@ pub(in crate::runtime) async fn send_session_event(
                 )
                 .await;
             }
-            SessionEvent::TurnOutcome {
+            SessionStreamEvent::TurnOutcome {
                 outcome: TurnOutcome::Finished(TurnFinish::ToolValue { tool_name, value }),
             } => {
                 send_independent_turn_event(

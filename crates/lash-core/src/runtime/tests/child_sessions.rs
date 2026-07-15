@@ -621,7 +621,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
         .clone()
         .into_iter()
         .find_map(|event| match event {
-            SessionEvent::ChildTokenUsage {
+            SessionStreamEvent::ChildTokenUsage {
                 session_id,
                 source,
                 model,
@@ -796,7 +796,7 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
         .clone()
         .into_iter()
         .find_map(|event| match event {
-            SessionEvent::ChildTokenUsage {
+            SessionStreamEvent::ChildTokenUsage {
                 usage, cumulative, ..
             } => Some((usage, cumulative)),
             _ => None,

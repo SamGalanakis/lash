@@ -182,21 +182,21 @@ pub enum Effect<M: TurnProtocol = UnitTurnProtocol> {
     /// Host-implemented fire-and-forget logging.
     Log { event: LogEvent },
     /// Fire-and-forget event (no response needed).
-    Emit(SessionEvent),
+    Emit(SessionStreamEvent),
     /// Prompt-history progress that may be durably persisted by the host.
     ///
-    /// This is separate from [`SessionEvent`]: UI stream events can be partial,
+    /// This is separate from [`SessionStreamEvent`]: UI stream events can be partial,
     /// duplicated, or display-only, while `Progress` is emitted only after the
     /// state machine has applied semantic message or protocol-step changes.
     Progress {
         messages: MessageSequence,
-        event_delta: Vec<SessionEventRecord<M::Event>>,
+        event_delta: Vec<SessionHistoryRecord<M::Event>>,
         protocol_iteration: usize,
     },
     /// Turn is done.
     Done {
         messages: MessageSequence,
-        event_delta: Vec<SessionEventRecord<M::Event>>,
+        event_delta: Vec<SessionHistoryRecord<M::Event>>,
         protocol_iteration: usize,
     },
 }
@@ -357,8 +357,8 @@ pub enum CheckpointResumeAction {
 
 #[allow(clippy::large_enum_variant)]
 pub enum DriverAction<M: TurnProtocol = UnitTurnProtocol> {
-    Emit(SessionEvent),
-    AppendEvents(Vec<SessionEventRecord<M::Event>>),
+    Emit(SessionStreamEvent),
+    AppendEvents(Vec<SessionHistoryRecord<M::Event>>),
     StartLlm {
         request: Arc<LlmRequest>,
         driver_state: Option<M::DriverState>,
@@ -385,7 +385,7 @@ pub enum DriverAction<M: TurnProtocol = UnitTurnProtocol> {
 pub struct DriverContextView<'a, M: TurnProtocol = UnitTurnProtocol> {
     config: &'a TurnMachineConfig<M>,
     messages: &'a MessageSequence,
-    events: &'a [SessionEventRecord<M::Event>],
+    events: &'a [SessionHistoryRecord<M::Event>],
     turn_causes: &'a [TurnCause],
     protocol_iteration: usize,
     protocol_run_offset: usize,
@@ -440,7 +440,7 @@ impl<'a, M: TurnProtocol> DriverContextView<'a, M> {
         self.messages
     }
 
-    pub fn events(&self) -> &[SessionEventRecord<M::Event>] {
+    pub fn events(&self) -> &[SessionHistoryRecord<M::Event>] {
         self.events
     }
 
@@ -452,7 +452,7 @@ impl<'a, M: TurnProtocol> DriverContextView<'a, M> {
 pub struct ProjectorContext<'a, M: TurnProtocol = UnitTurnProtocol> {
     pub config: &'a TurnMachineConfig<M>,
     pub messages: &'a MessageSequence,
-    pub events: &'a [SessionEventRecord<M::Event>],
+    pub events: &'a [SessionHistoryRecord<M::Event>],
     pub turn_causes: &'a [TurnCause],
     pub protocol_iteration: usize,
     pub use_tools: bool,

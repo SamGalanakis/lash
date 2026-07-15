@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::session_model::SessionEventRecord;
+use crate::session_model::SessionHistoryRecord;
 use crate::{MessageSequence, SessionReadView};
 
 use super::RuntimeSessionState;
@@ -42,7 +42,7 @@ impl TurnCommitDraft {
         &self.state
     }
 
-    pub(super) fn active_events(&self) -> Arc<Vec<SessionEventRecord>> {
+    pub(super) fn active_events(&self) -> Arc<Vec<SessionHistoryRecord>> {
         self.graph.read_model().active_events
     }
 
@@ -52,7 +52,7 @@ impl TurnCommitDraft {
 
     pub(super) fn append_events<I>(&mut self, events: I)
     where
-        I: IntoIterator<Item = SessionEventRecord>,
+        I: IntoIterator<Item = SessionHistoryRecord>,
     {
         self.graph.append_events(events);
     }

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::session_model::{SessionEventRecord, fresh_message_id};
+use crate::session_model::{SessionHistoryRecord, fresh_message_id};
 use crate::store::{GraphCommitDelta, RuntimeCommit, RuntimePersistence, StoreError};
 use crate::{
     AssembledTurn, Message, MessageRole, MessageSequence, Part, PartKind, PluginSession,
@@ -20,7 +20,7 @@ struct ProgressBoundarySnapshot<'a> {
     policy: SessionPolicy,
     turn_index: usize,
     messages: MessageSequence,
-    event_delta: Vec<SessionEventRecord>,
+    event_delta: Vec<SessionHistoryRecord>,
     execution_state_snapshot: Option<Option<Vec<u8>>>,
     plugins: Option<&'a PluginSession>,
     store: Option<&'a (dyn RuntimePersistence + 'a)>,
@@ -161,7 +161,7 @@ impl TurnBoundary {
             .read_view(policy, turn_index, protocol_turn_options, messages)
     }
 
-    pub(super) fn active_events(&self) -> Arc<Vec<SessionEventRecord>> {
+    pub(super) fn active_events(&self) -> Arc<Vec<SessionHistoryRecord>> {
         self.draft_ref().active_events()
     }
 
@@ -216,7 +216,7 @@ impl TurnBoundary {
         policy: SessionPolicy,
         turn_index: usize,
         messages: MessageSequence,
-        event_delta: Vec<SessionEventRecord>,
+        event_delta: Vec<SessionHistoryRecord>,
     ) -> Result<ProgressBoundaryCommit, RuntimeError> {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return Ok(ProgressBoundaryCommit {
@@ -246,7 +246,7 @@ impl TurnBoundary {
         policy: SessionPolicy,
         turn_index: usize,
         messages: MessageSequence,
-        event_delta: Vec<SessionEventRecord>,
+        event_delta: Vec<SessionHistoryRecord>,
     ) -> Result<ProgressBoundaryCommit, RuntimeError> {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return Ok(ProgressBoundaryCommit {
@@ -334,13 +334,13 @@ impl TurnBoundary {
 
     pub(super) fn apply_event_delta(
         &mut self,
-        event_delta: Vec<SessionEventRecord>,
+        event_delta: Vec<SessionHistoryRecord>,
     ) -> Vec<crate::ProtocolEvent> {
         let protocol_events = event_delta
             .iter()
             .filter_map(|event| match event {
-                SessionEventRecord::Protocol(event) => Some(event.clone()),
-                SessionEventRecord::Conversation(_) => None,
+                SessionHistoryRecord::Protocol(event) => Some(event.clone()),
+                SessionHistoryRecord::Conversation(_) => None,
             })
             .collect::<Vec<_>>();
         self.draft_mut().append_events(event_delta);
@@ -844,10 +844,12 @@ mod tests {
             .nodes
             .iter()
             .filter_map(|node| match node.event()? {
-                crate::SessionEventRecord::Conversation(record) => {
+                crate::SessionHistoryRecord::Conversation(record) => {
                     Some(format!("message:{}", record.id))
                 }
-                crate::SessionEventRecord::Protocol(event) => Some(summarize_protocol_event(event)),
+                crate::SessionHistoryRecord::Protocol(event) => {
+                    Some(summarize_protocol_event(event))
+                }
             })
             .collect()
     }
@@ -1134,8 +1136,10 @@ mod tests {
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user));
         let base_graph = graph.clone();
         let event_delta = vec![
-            crate::SessionEventRecord::Conversation(ConversationRecord::from_message(user.clone())),
-            crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
+            crate::SessionHistoryRecord::Conversation(ConversationRecord::from_message(
+                user.clone(),
+            )),
+            crate::SessionHistoryRecord::Conversation(ConversationRecord::from_message(
                 assistant.clone(),
             )),
         ];
@@ -1170,7 +1174,7 @@ mod tests {
             .filter(|node| {
                 matches!(
                     node.event(),
-                    Some(crate::SessionEventRecord::Conversation(_))
+                    Some(crate::SessionHistoryRecord::Conversation(_))
                 )
             })
             .collect::<Vec<_>>();
@@ -1183,7 +1187,7 @@ mod tests {
                 .iter()
                 .filter(|node| matches!(
                     node.event(),
-                    Some(crate::SessionEventRecord::Conversation(_))
+                    Some(crate::SessionHistoryRecord::Conversation(_))
                 ))
                 .all(|node| !node.node_id.starts_with("plugin:"))
         );
@@ -1220,7 +1224,7 @@ mod tests {
                 policy: SessionPolicy::default(),
                 turn_index: 1,
                 messages: MessageSequence::from_base(vec![user].into()),
-                event_delta: vec![crate::SessionEventRecord::Protocol(diagnostic)],
+                event_delta: vec![crate::SessionHistoryRecord::Protocol(diagnostic)],
                 execution_state_snapshot: None,
                 plugins: None,
                 store: Some(&store),
@@ -1255,10 +1259,10 @@ mod tests {
                 turn_index: 1,
                 messages: MessageSequence::from_base(vec![user, assistant.clone()].into()),
                 event_delta: vec![
-                    crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
+                    crate::SessionHistoryRecord::Conversation(ConversationRecord::from_message(
                         assistant,
                     )),
-                    crate::SessionEventRecord::Protocol(trajectory),
+                    crate::SessionHistoryRecord::Protocol(trajectory),
                 ],
                 execution_state_snapshot: None,
                 plugins: None,
@@ -1283,7 +1287,7 @@ mod tests {
         let protocol_event =
             crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
                 .expect("protocol event serializes");
-        let event_delta = vec![crate::SessionEventRecord::Protocol(protocol_event)];
+        let event_delta = vec![crate::SessionHistoryRecord::Protocol(protocol_event)];
 
         let boundary = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
@@ -1311,7 +1315,7 @@ mod tests {
         let protocol_event =
             crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
                 .expect("protocol event serializes");
-        let event_delta = vec![crate::SessionEventRecord::Protocol(protocol_event)];
+        let event_delta = vec![crate::SessionHistoryRecord::Protocol(protocol_event)];
         let store = RecordingStore::default();
         store
             .save_session_head_meta(crate::SessionHeadMeta {

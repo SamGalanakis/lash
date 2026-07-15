@@ -10,7 +10,7 @@ impl RuntimeTurnDriver<'_> {
         cancel: &CancellationToken,
     ) -> Result<(), RuntimeError> {
         if cancel.is_cancelled() {
-            send_session_event(event_tx, SessionEvent::Done).await;
+            send_session_event(event_tx, SessionStreamEvent::Done).await;
             machine.finish_with_outcome(crate::TurnOutcome::Stopped(TurnStop::Cancelled));
             return Ok(());
         }

@@ -14,7 +14,8 @@ impl RuntimeTurnDriver<'_> {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<Vec<crate::sansio::CompletedToolCall>, RuntimeEffectControllerError> {
-        let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
+        let (tool_event_tx, mut tool_event_rx) =
+            tokio::sync::mpsc::channel::<SessionStreamEvent>(64);
         let runtime_event_tx = event_tx.clone();
         let tool_event_forwarder = tokio::spawn(async move {
             while let Some(event) = tool_event_rx.recv().await {
@@ -168,7 +169,8 @@ impl RuntimeTurnDriver<'_> {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<ToolBatchRunOutcome, crate::RuntimeEffectControllerError> {
-        let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
+        let (tool_event_tx, mut tool_event_rx) =
+            tokio::sync::mpsc::channel::<SessionStreamEvent>(64);
         let (turn_event_tx, mut turn_event_rx) = tokio::sync::mpsc::channel::<TurnActivity>(64);
         let runtime_event_tx = event_tx.clone();
         let tool_event_forwarder = tokio::spawn(async move {

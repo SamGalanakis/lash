@@ -111,9 +111,12 @@ impl SessionAppendNode {
     }
 }
 
+/// Durable semantic history stored in the session graph and replayed into
+/// future prompts. Unlike [`SessionStreamEvent`], these records are committed
+/// state rather than transient UI/progress signals.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
-pub enum SessionEventRecord<PE = ()> {
+pub enum SessionHistoryRecord<PE = ()> {
     Conversation(ConversationRecord),
     Protocol(PE),
 }
@@ -185,14 +188,19 @@ impl TokenUsage {
     }
 }
 
-/// Structured error payload carried on [`SessionEvent::Error`] (and
-/// [`SessionEvent::RetryStatus`]).
+/// Structured error payload carried on [`SessionStreamEvent::Error`] (and
+/// [`SessionStreamEvent::RetryStatus`]).
 ///
 /// Durability: this type appears inside persisted session snapshots and turn
 /// checkpoints, so every field added after the initial shape must stay
 /// additive — `#[serde(default)]` on decode and
 /// `#[serde(skip_serializing_if = "Option::is_none")]` on encode — to keep
 /// old snapshots decodable and new snapshots readable by older readers.
+/// Transient runtime-stream signal for live consumers.
+///
+/// These events may be partial, duplicated, or display-only and are not proof
+/// of durable session history. Persisted semantic history uses
+/// [`SessionHistoryRecord`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ErrorEnvelope {
     pub kind: String,
@@ -218,7 +226,7 @@ pub struct ErrorEnvelope {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 #[allow(clippy::large_enum_variant)]
-pub enum SessionEvent {
+pub enum SessionStreamEvent {
     #[serde(rename = "text_delta")]
     TextDelta { content: String },
     /// Streaming update for the model's reasoning summary ("thinking").
@@ -425,9 +433,9 @@ pub fn make_error_event(
     code: Option<&str>,
     user_message: impl Into<String>,
     raw: Option<String>,
-) -> SessionEvent {
+) -> SessionStreamEvent {
     let user_message = user_message.into();
-    SessionEvent::Error {
+    SessionStreamEvent::Error {
         message: user_message.clone(),
         envelope: Some(make_error_envelope(kind, code, None, user_message, raw)),
     }
@@ -482,7 +490,7 @@ pub fn model_tool_specs(tools: &[ToolDefinition]) -> Vec<LlmToolSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorEnvelope, SessionEvent, TurnOutcome};
+    use super::{ErrorEnvelope, SessionStreamEvent, TurnOutcome};
     use crate::llm::types::{LlmTerminalReason, ProviderFailureKind};
 
     // ─── ErrorEnvelope durable-snapshot compatibility ──────────────────
@@ -507,16 +515,16 @@ mod tests {
         assert_eq!(envelope.retryable, None);
         assert_eq!(envelope.provider_failure_kind, None);
 
-        // The legacy shape embedded in a persisted `SessionEvent::Error`
+        // The legacy shape embedded in a persisted `SessionStreamEvent::Error`
         // record decodes the same way.
         let legacy_event = r#"{
             "type":"error",
             "message":"LLM error: rate limited",
             "envelope":{"kind":"llm_provider","user_message":"LLM error: rate limited"}
         }"#;
-        let event: SessionEvent = serde_json::from_str(legacy_event).expect("legacy event");
+        let event: SessionStreamEvent = serde_json::from_str(legacy_event).expect("legacy event");
         match event {
-            SessionEvent::Error { envelope, .. } => {
+            SessionStreamEvent::Error { envelope, .. } => {
                 let envelope = envelope.expect("envelope");
                 assert_eq!(envelope.retryable, None);
                 assert_eq!(envelope.provider_failure_kind, None);
@@ -600,9 +608,10 @@ mod tests {
                 }
             }
         }"#;
-        let event: SessionEvent = serde_json::from_str(legacy).expect("legacy frame switch event");
+        let event: SessionStreamEvent =
+            serde_json::from_str(legacy).expect("legacy frame switch event");
         match event {
-            SessionEvent::TurnOutcome {
+            SessionStreamEvent::TurnOutcome {
                 outcome:
                     TurnOutcome::AgentFrameSwitch {
                         frame_id,

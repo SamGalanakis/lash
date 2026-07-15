@@ -262,7 +262,7 @@ async fn standard_runtime_assembles_stream_only_text_response() {
         .snapshot()
         .into_iter()
         .filter_map(|event| match event {
-            SessionEvent::TextDelta { content } => Some(content),
+            SessionStreamEvent::TextDelta { content } => Some(content),
             _ => None,
         })
         .collect();
@@ -325,7 +325,7 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
         .snapshot()
         .into_iter()
         .filter_map(|event| match event {
-            SessionEvent::TextDelta { content } => Some(content),
+            SessionStreamEvent::TextDelta { content } => Some(content),
             _ => None,
         })
         .collect();
@@ -373,7 +373,7 @@ async fn standard_runtime_text_part_reconciles_without_streaming_duplicate() {
         .snapshot()
         .into_iter()
         .filter_map(|event| match event {
-            SessionEvent::TextDelta { content } => Some(content),
+            SessionStreamEvent::TextDelta { content } => Some(content),
             _ => None,
         })
         .collect();
@@ -767,7 +767,7 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
         .snapshot()
         .into_iter()
         .filter_map(|event| match event {
-            SessionEvent::TextDelta { content } => Some(content),
+            SessionStreamEvent::TextDelta { content } => Some(content),
             _ => None,
         })
         .collect();

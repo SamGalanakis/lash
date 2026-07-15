@@ -646,7 +646,7 @@ impl LashRuntime {
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
     ) -> Result<PhysicalTurnExecution, RuntimeError> {
         let mut assembler = TurnAssembler::default();
-        let error_event = SessionEvent::Error {
+        let error_event = SessionStreamEvent::Error {
             message: message.clone(),
             envelope: Some(crate::session_model::ErrorEnvelope {
                 kind: "runtime".to_string(),
@@ -667,13 +667,13 @@ impl LashRuntime {
         )
         .await;
         emit_session_event_to_sink(events, error_event).await;
-        let outcome_event = SessionEvent::TurnOutcome {
+        let outcome_event = SessionStreamEvent::TurnOutcome {
             outcome: TurnOutcome::Stopped(TurnStop::RuntimeError),
         };
         assembler.push(&outcome_event);
         emit_session_event_to_sink(events, outcome_event).await;
-        assembler.push(&SessionEvent::Done);
-        emit_session_event_to_sink(events, SessionEvent::Done).await;
+        assembler.push(&SessionStreamEvent::Done);
+        emit_session_event_to_sink(events, SessionStreamEvent::Done).await;
 
         let messages = crate::MessageSequence::from_base(self.state.read_model().messages);
         let mut turn_pipeline = TurnBoundary::from_state_with_clock(
@@ -1250,7 +1250,7 @@ impl LashRuntime {
             Err(e) => {
                 self.state.last_prompt_usage = None;
                 let mut assembler = TurnAssembler::default();
-                let error_event = SessionEvent::Error {
+                let error_event = SessionStreamEvent::Error {
                     message: e.clone(),
                     envelope: Some(crate::session_model::ErrorEnvelope {
                         kind: "input_validation".to_string(),
@@ -1269,13 +1269,13 @@ impl LashRuntime {
                 )
                 .await;
                 emit_session_event_to_sink(events, error_event).await;
-                let outcome_event = SessionEvent::TurnOutcome {
+                let outcome_event = SessionStreamEvent::TurnOutcome {
                     outcome: TurnOutcome::Stopped(TurnStop::InvalidInput),
                 };
                 assembler.push(&outcome_event);
                 emit_session_event_to_sink(events, outcome_event).await;
-                assembler.push(&SessionEvent::Done);
-                emit_session_event_to_sink(events, SessionEvent::Done).await;
+                assembler.push(&SessionStreamEvent::Done);
+                emit_session_event_to_sink(events, SessionStreamEvent::Done).await;
                 let turn_index = self.state.turn_index + 1;
                 let trace_turn_id = input
                     .trace_turn_id
@@ -1707,7 +1707,7 @@ impl LashRuntime {
                 retryable: None,
                 provider_failure_kind: None,
             };
-            let error_event = SessionEvent::Error {
+            let error_event = SessionStreamEvent::Error {
                 message: abort.message,
                 envelope: Some(crate::session_model::ErrorEnvelope {
                     kind: "plugin".to_string(),
@@ -1728,13 +1728,13 @@ impl LashRuntime {
             )
             .await;
             emit_session_event_to_sink(events, error_event).await;
-            let outcome_event = SessionEvent::TurnOutcome {
+            let outcome_event = SessionStreamEvent::TurnOutcome {
                 outcome: TurnOutcome::Stopped(TurnStop::PluginAbort),
             };
             assembler.push(&outcome_event);
             emit_session_event_to_sink(events, outcome_event).await;
-            assembler.push(&SessionEvent::Done);
-            emit_session_event_to_sink(events, SessionEvent::Done).await;
+            assembler.push(&SessionStreamEvent::Done);
+            emit_session_event_to_sink(events, SessionStreamEvent::Done).await;
             return self
                 .finish_turn(
                     TurnFinishInput {

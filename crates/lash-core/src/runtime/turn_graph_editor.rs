@@ -3,14 +3,14 @@ use std::sync::Arc;
 
 use crate::session_graph::SessionReadModel;
 use crate::session_graph::build_active_read_replacement;
-use crate::session_model::SessionEventRecord;
+use crate::session_model::SessionHistoryRecord;
 use crate::store::GraphCommitDelta;
 use crate::{BaseRenderCache, Message, MessageSequence, SessionGraph, SessionNodeRecord};
 
 #[derive(Debug)]
 pub(super) struct TurnGraphEditor {
     base_graph: Arc<SessionGraph>,
-    active_events: Arc<Vec<SessionEventRecord>>,
+    active_events: Arc<Vec<SessionHistoryRecord>>,
     active_messages: MessageSequence,
     append_builder: crate::session_graph::SessionGraphAppendBuilder,
     appended_nodes: Vec<SessionNodeRecord>,
@@ -64,7 +64,7 @@ impl TurnGraphEditor {
 
     pub(super) fn append_events<I>(&mut self, events: I)
     where
-        I: IntoIterator<Item = SessionEventRecord>,
+        I: IntoIterator<Item = SessionHistoryRecord>,
     {
         let mut active_message_ids = self
             .active_messages
@@ -74,11 +74,11 @@ impl TurnGraphEditor {
         let events = events
             .into_iter()
             .filter(|event| match event {
-                SessionEventRecord::Conversation(record) => {
+                SessionHistoryRecord::Conversation(record) => {
                     let message = record.to_message();
                     !message.is_transient() && active_message_ids.insert(record.id.clone())
                 }
-                SessionEventRecord::Protocol(_) => true,
+                SessionHistoryRecord::Protocol(_) => true,
             })
             .collect::<Vec<_>>();
         if events.is_empty() {

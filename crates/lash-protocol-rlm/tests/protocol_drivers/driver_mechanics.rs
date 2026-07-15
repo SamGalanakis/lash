@@ -294,7 +294,7 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
     assert!(
         !effects
             .iter()
-            .any(|effect| matches!(effect, Effect::Emit(SessionEvent::ToolCall { .. })))
+            .any(|effect| matches!(effect, Effect::Emit(SessionStreamEvent::ToolCall { .. })))
     );
     let trajectory = machine_trajectory(&restored);
     let entry = trajectory.last().expect("rlm trajectory entry");

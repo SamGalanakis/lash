@@ -3,7 +3,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
     pub fn new(
         config: TurnMachineConfig<M>,
         messages: Vec<Message>,
-        events: Arc<Vec<SessionEventRecord<M::Event>>>,
+        events: Arc<Vec<SessionHistoryRecord<M::Event>>>,
         protocol_run_offset: usize,
     ) -> Self {
         Self::new_shared(
@@ -17,7 +17,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
     pub fn new_shared(
         config: TurnMachineConfig<M>,
         messages: MessageSequence,
-        events: Arc<Vec<SessionEventRecord<M::Event>>>,
+        events: Arc<Vec<SessionHistoryRecord<M::Event>>>,
         protocol_run_offset: usize,
     ) -> Self {
         Self::new_shared_with_turn_causes(config, messages, events, protocol_run_offset, Vec::new())
@@ -26,7 +26,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
     pub fn new_shared_with_turn_causes(
         config: TurnMachineConfig<M>,
         messages: MessageSequence,
-        events: Arc<Vec<SessionEventRecord<M::Event>>>,
+        events: Arc<Vec<SessionHistoryRecord<M::Event>>>,
         protocol_run_offset: usize,
         turn_causes: Vec<TurnCause>,
     ) -> Self {
@@ -59,7 +59,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
         self.messages.shared()
     }
 
-    pub fn events(&self) -> Arc<Vec<SessionEventRecord<M::Event>>> {
+    pub fn events(&self) -> Arc<Vec<SessionHistoryRecord<M::Event>>> {
         Arc::clone(&self.events)
     }
 
@@ -155,7 +155,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
         id
     }
 
-    fn emit(&mut self, event: SessionEvent) {
+    fn emit(&mut self, event: SessionStreamEvent) {
         self.pending_effects.push_back(Effect::Emit(event));
     }
 
@@ -168,7 +168,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
         });
     }
 
-    pub fn fail_turn(&mut self, event: SessionEvent) {
+    pub fn fail_turn(&mut self, event: SessionStreamEvent) {
         self.emit(event);
         self.finish(TurnOutcome::Stopped(TurnStop::RuntimeError));
     }
@@ -178,8 +178,8 @@ impl<M: TurnProtocol> TurnMachine<M> {
     }
 
     fn finish(&mut self, outcome: TurnOutcome) {
-        self.emit(SessionEvent::TurnOutcome { outcome });
-        self.emit(SessionEvent::Done);
+        self.emit(SessionStreamEvent::TurnOutcome { outcome });
+        self.emit(SessionStreamEvent::Done);
         let msgs = std::mem::take(&mut self.messages);
         let event_delta = self.next_event_delta();
         let protocol_iteration = self.protocol_iteration;
@@ -191,7 +191,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
         });
     }
 
-    fn next_event_delta(&mut self) -> Vec<SessionEventRecord<M::Event>> {
+    fn next_event_delta(&mut self) -> Vec<SessionHistoryRecord<M::Event>> {
         if self.progress_event_cursor >= self.events.len() {
             self.progress_event_cursor = self.events.len();
             return Vec::new();
@@ -283,7 +283,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        self.emit(SessionEvent::LlmRequest {
+        self.emit(SessionStreamEvent::LlmRequest {
             protocol_iteration: self.protocol_iteration,
             message_count: self.messages.len(),
             tool_list,
@@ -354,15 +354,15 @@ impl<M: TurnProtocol> TurnMachine<M> {
         true
     }
 
-    fn append_event(&mut self, event: SessionEventRecord<M::Event>) {
+    fn append_event(&mut self, event: SessionHistoryRecord<M::Event>) {
         match event {
-            SessionEventRecord::Conversation(record) => {
+            SessionHistoryRecord::Conversation(record) => {
                 Arc::make_mut(&mut self.events)
-                    .push(SessionEventRecord::Conversation(record.clone()));
+                    .push(SessionHistoryRecord::Conversation(record.clone()));
                 self.messages.push(record.to_message());
             }
-            SessionEventRecord::Protocol(protocol_event) => {
-                Arc::make_mut(&mut self.events).push(SessionEventRecord::Protocol(protocol_event));
+            SessionHistoryRecord::Protocol(protocol_event) => {
+                Arc::make_mut(&mut self.events).push(SessionHistoryRecord::Protocol(protocol_event));
             }
         }
     }
@@ -671,11 +671,11 @@ impl<M: TurnProtocol> TurnMachine<M> {
         };
 
         if !text_streamed && !llm_response.full_text.is_empty() {
-            self.emit(SessionEvent::TextDelta {
+            self.emit(SessionStreamEvent::TextDelta {
                 content: llm_response.full_text.clone(),
             });
         }
-        self.emit(SessionEvent::LlmResponse {
+        self.emit(SessionStreamEvent::LlmResponse {
             protocol_iteration: self.protocol_iteration,
             content: llm_response.full_text.clone(),
             duration_ms: 0,
@@ -696,7 +696,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
         // (overflow, filter, cancellation): replaying the identical request
         // reproduces it, so the source knows it is not retryable.
         envelope.retryable = Some(false);
-        self.emit(SessionEvent::Error {
+        self.emit(SessionStreamEvent::Error {
             message: diagnostic,
             envelope: Some(envelope),
         });
@@ -750,7 +750,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
     fn record_llm_usage(&mut self, llm_response: &LlmResponse, response_text: &str) {
         let usage = token_usage_from_llm_usage(&llm_response.usage);
         self.cumulative_usage.add(&usage);
-        self.emit(SessionEvent::TokenUsage {
+        self.emit(SessionStreamEvent::TokenUsage {
             protocol_iteration: self.protocol_iteration,
             usage: usage.clone(),
             cumulative: self.cumulative_usage.clone(),
@@ -803,7 +803,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
         envelope.retryable = Some(error.retryable);
         envelope.provider_failure_kind =
             (error.kind != crate::llm::types::ProviderFailureKind::Unknown).then_some(error.kind);
-        self.emit(SessionEvent::Error {
+        self.emit(SessionStreamEvent::Error {
             message: format!("LLM error: {}", error.message),
             envelope: Some(envelope),
         });
@@ -829,7 +829,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
         }
 
         for outcome in &completed {
-            self.emit(SessionEvent::ToolCall {
+            self.emit(SessionStreamEvent::ToolCall {
                 call_id: Some(outcome.call_id.clone()),
                 name: outcome.tool_name.clone(),
                 args: outcome.args.clone(),
