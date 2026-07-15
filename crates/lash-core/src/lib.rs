@@ -365,12 +365,12 @@ pub use plugin::{
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
-    CacheRetention, EmptyProviderResolver, LlmTimeouts, MapProviderResolver, ModelCapability,
-    ModelEffortValidationCategory, ModelEffortValidationError, Provider, ProviderBinding,
-    ProviderCompletion, ProviderCompletionError, ProviderComponents, ProviderFactory,
-    ProviderHandle, ProviderOptions, ProviderResolutionError, ProviderSpec, ReasoningCapability,
-    ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection, RequestTimeout,
-    RuntimeProviderResolver, SingleProviderResolver,
+    CacheControlDialect, CacheRetention, EmptyProviderResolver, LlmTimeouts, MapProviderResolver,
+    ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError, Provider,
+    ProviderBinding, ProviderCompletion, ProviderCompletionError, ProviderComponents,
+    ProviderFactory, ProviderHandle, ProviderOptions, ProviderResolutionError, ProviderSpec,
+    ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection,
+    RequestTimeout, RuntimeProviderResolver, SingleProviderResolver, StreamTermination,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;

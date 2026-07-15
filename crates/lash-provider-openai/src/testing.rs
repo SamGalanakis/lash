@@ -14,14 +14,15 @@ pub struct CacheBreakpointReport {
 }
 
 pub fn serialize_chat_request(
-    base_url: &str,
     request: &LlmRequest,
     retention: CacheRetention,
 ) -> Result<(Value, CacheBreakpointReport), lash_core::LlmTransportError> {
-    let provider = OpenAiCompatibleProvider::new("test", base_url).with_options(ProviderOptions {
-        cache_retention: retention,
-        ..ProviderOptions::default()
-    });
+    let provider = OpenAiCompatibleProvider::new("test", "https://provider.test").with_options(
+        ProviderOptions {
+            cache_retention: retention,
+            ..ProviderOptions::default()
+        },
+    );
     let (body, diagnostics) = provider.build_chat_request_body_with_diagnostics(request, false)?;
     Ok((
         body,
@@ -38,6 +39,11 @@ pub fn serialize_responses_request(
     retention: CacheRetention,
 ) -> Result<Value, lash_core::LlmTransportError> {
     OpenAiCompatibleProvider::new("test", OPENAI_BASE_URL)
+        .with_compat(crate::OpenAiCompat {
+            prompt_cache_key: Some(true),
+            prompt_cache_retention: Some(true),
+            ..crate::OpenAiCompat::default()
+        })
         .with_options(ProviderOptions {
             cache_retention: retention,
             ..ProviderOptions::default()

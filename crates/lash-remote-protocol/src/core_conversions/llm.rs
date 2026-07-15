@@ -83,18 +83,70 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
 
 impl From<core_llm::ModelCapability> for RemoteModelCapability {
     fn from(value: core_llm::ModelCapability) -> Self {
-        let core_llm::ModelCapability { reasoning } = value;
+        let core_llm::ModelCapability {
+            reasoning,
+            cache_control,
+            stream_termination,
+        } = value;
         Self {
             reasoning: reasoning.map(Into::into),
+            cache_control: cache_control.map(Into::into),
+            stream_termination: stream_termination.map(Into::into),
         }
     }
 }
 
 impl From<RemoteModelCapability> for core_llm::ModelCapability {
     fn from(value: RemoteModelCapability) -> Self {
-        let RemoteModelCapability { reasoning } = value;
+        let RemoteModelCapability {
+            reasoning,
+            cache_control,
+            stream_termination,
+        } = value;
         Self {
             reasoning: reasoning.map(Into::into),
+            cache_control: cache_control.map(Into::into),
+            stream_termination: stream_termination.map(Into::into),
+        }
+    }
+}
+
+impl From<core_llm::CacheControlDialect> for RemoteCacheControlDialect {
+    fn from(value: core_llm::CacheControlDialect) -> Self {
+        match value {
+            core_llm::CacheControlDialect::Anthropic => Self::Anthropic,
+            core_llm::CacheControlDialect::Gemini => Self::Gemini,
+        }
+    }
+}
+
+impl From<RemoteCacheControlDialect> for core_llm::CacheControlDialect {
+    fn from(value: RemoteCacheControlDialect) -> Self {
+        match value {
+            RemoteCacheControlDialect::Anthropic => Self::Anthropic,
+            RemoteCacheControlDialect::Gemini => Self::Gemini,
+        }
+    }
+}
+
+impl From<core_llm::StreamTermination> for RemoteStreamTermination {
+    fn from(value: core_llm::StreamTermination) -> Self {
+        match value {
+            core_llm::StreamTermination::RequireTerminalEvidence => {
+                Self::RequireTerminalEvidence
+            }
+            core_llm::StreamTermination::EofTolerated => Self::EofTolerated,
+        }
+    }
+}
+
+impl From<RemoteStreamTermination> for core_llm::StreamTermination {
+    fn from(value: RemoteStreamTermination) -> Self {
+        match value {
+            RemoteStreamTermination::RequireTerminalEvidence => {
+                Self::RequireTerminalEvidence
+            }
+            RemoteStreamTermination::EofTolerated => Self::EofTolerated,
         }
     }
 }

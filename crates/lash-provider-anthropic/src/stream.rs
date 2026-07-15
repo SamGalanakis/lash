@@ -5,7 +5,7 @@
 
 use crate::support::*;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct StreamBlock {
     pub(crate) kind: BlockKind,
     /// Accumulated visible text (for text/thinking blocks).
@@ -24,7 +24,7 @@ pub(crate) struct StreamBlock {
     pub(crate) redacted: bool,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum BlockKind {
     #[default]
     Unknown,
@@ -33,7 +33,7 @@ pub(crate) enum BlockKind {
     ToolUse,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct StreamState {
     pub(crate) blocks: Vec<StreamBlock>,
     pub(crate) usage: LlmUsage,
@@ -43,6 +43,8 @@ pub(crate) struct StreamState {
     /// shallow-merged rather than last-wins.
     pub(crate) provider_usage: Option<Value>,
     pub(crate) stop_reason: Option<String>,
+    pub(crate) message_started: bool,
+    pub(crate) message_stopped: bool,
 }
 
 /// Overlay the keys of `next` (a raw wire `usage` object) onto the captured
@@ -130,6 +132,7 @@ impl AnthropicProvider {
 
         match kind.as_str() {
             "message_start" => {
+                state.message_started = true;
                 if let Some(usage) = event.get("message").and_then(|m| m.get("usage")) {
                     state.usage = Self::parse_usage(usage);
                     merge_raw_usage(&mut state.provider_usage, usage);
@@ -259,7 +262,9 @@ impl AnthropicProvider {
                 }
             }
             "message_stop" => {
-                // End-of-stream marker. Nothing to collect here.
+                if state.message_started {
+                    state.message_stopped = true;
+                }
             }
             "ping" => {}
             "error" => {

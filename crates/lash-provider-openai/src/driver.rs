@@ -1,11 +1,18 @@
 use crate::support::*;
 
-const OPENROUTER_SESSION_ID_MAX_CHARS: usize = 256;
+const CACHE_SESSION_ID_MAX_CHARS: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CompletionEndpoint {
     Responses,
     ChatCompletions,
+}
+
+struct ResponseContext {
+    stream_events: Option<LlmEventSender>,
+    provider_trace: Option<LlmProviderTraceSender>,
+    url: String,
+    stream_termination: StreamTermination,
 }
 
 impl CompletionEndpoint {
@@ -77,16 +84,20 @@ pub(crate) async fn complete(
     let timeouts = provider.options.llm_timeouts();
     let stream = stream_events.is_some();
     let compat = provider.resolved_compat(endpoint);
+    let stream_termination = req
+        .model_capability
+        .stream_termination
+        .unwrap_or(compat.stream_termination);
     let mut body = match endpoint {
         CompletionEndpoint::Responses => provider.build_responses_request_body(&req, stream)?,
         CompletionEndpoint::ChatCompletions => provider.build_chat_request_body(&req, stream)?,
     };
-    if compat.cache_session_affinity && base_url_is_openrouter(&provider.base_url) {
+    if compat.cache_session_affinity {
         body["session_id"] = Value::String(
             req.scope
                 .session_id
                 .chars()
-                .take(OPENROUTER_SESSION_ID_MAX_CHARS)
+                .take(CACHE_SESSION_ID_MAX_CHARS)
                 .collect(),
         );
     }
@@ -169,15 +180,19 @@ pub(crate) async fn complete(
     let provider_request_id = first_header_value(&resp.headers, "x-request-id").map(str::to_string);
     let is_sse = header_contains(&resp.headers, "content-type", "text/event-stream");
 
+    let response_context = ResponseContext {
+        stream_events,
+        provider_trace,
+        url,
+        stream_termination,
+    };
     let response = if is_sse {
         drive_streaming_response(
             provider,
             endpoint,
             resp.body,
-            stream_events,
-            provider_trace,
-            url,
             timeouts.chunk_timeout,
+            response_context,
         )
         .await
     } else {
@@ -185,16 +200,31 @@ pub(crate) async fn complete(
             provider,
             endpoint,
             resp.body,
-            stream_events,
-            provider_trace,
-            url,
             timeouts.request_timeout,
+            response_context,
         )
         .await
     };
     let mut response = match response {
         Ok(response) => response,
         Err(mut failure) => {
+            if failure.request_body.is_none() {
+                failure.request_body = Some(request_body_for_error.clone());
+            }
+            if let Some(partial) = failure.partial_response.as_deref_mut()
+                && partial.request_body.is_none()
+            {
+                partial.request_body = Some(request_body_for_error.clone());
+            }
+            if let (Some(partial), Some(provider_request_id)) = (
+                failure.partial_response.as_deref_mut(),
+                provider_request_id.as_ref(),
+            ) {
+                partial
+                    .execution_evidence
+                    .get_or_insert_with(ExecutionEvidence::default)
+                    .provider_request_id = Some(provider_request_id.clone());
+            }
             if let Some(provider_request_id) = provider_request_id
                 && !failure
                     .headers
@@ -221,19 +251,24 @@ async fn complete_buffered_response(
     provider: &OpenAiCompatibleProvider,
     endpoint: CompletionEndpoint,
     body: LlmHttpBody,
-    stream_events: Option<LlmEventSender>,
-    provider_trace: Option<LlmProviderTraceSender>,
-    url: String,
     timeout: Option<std::time::Duration>,
+    context: ResponseContext,
 ) -> Result<LlmResponse, LlmTransportError> {
+    let ResponseContext {
+        stream_events,
+        provider_trace,
+        url,
+        stream_termination,
+    } = context;
+    let stream_termination = stream_events.is_some().then_some(stream_termination);
     let text = read_http_body_text(body, timeout, endpoint.response_body_timeout_error()).await?;
     emit_provider_trace(provider_trace.as_ref(), "openai_compatible", &text);
     match endpoint {
         CompletionEndpoint::Responses => {
-            complete_buffered_responses(provider, text, stream_events, url)
+            complete_buffered_responses(provider, text, stream_events, url, stream_termination)
         }
         CompletionEndpoint::ChatCompletions => {
-            complete_buffered_chat(provider, text, stream_events, url)
+            complete_buffered_chat(provider, text, stream_events, url, stream_termination)
         }
     }
 }
@@ -243,6 +278,7 @@ fn complete_buffered_responses(
     text: String,
     stream_events: Option<LlmEventSender>,
     url: String,
+    stream_termination: Option<StreamTermination>,
 ) -> Result<LlmResponse, LlmTransportError> {
     let mut state = ResponsesStreamState::default();
     if text.trim_start().starts_with("data:") || text.contains("\ndata:") {
@@ -256,6 +292,28 @@ fn complete_buffered_responses(
         state.parts = OpenAiCompatibleProvider::response_parts_from_value(&value);
         state.recompute_full_text();
         state.final_response = Some(value);
+    }
+    let terminal_event_seen = state.terminal_event_seen
+        || state
+            .final_response
+            .as_ref()
+            .and_then(|response| response.get("status").and_then(Value::as_str))
+            .is_some_and(|status| matches!(status, "completed" | "incomplete" | "failed"));
+    if stream_termination == Some(StreamTermination::RequireTerminalEvidence)
+        && !terminal_event_seen
+    {
+        let mut partial = shared_response_from_state(
+            state,
+            CompletionEndpoint::Responses.http_summary(&url, false),
+        );
+        partial.terminal_reason = LlmTerminalReason::Unknown;
+        return Err(LlmTransportError::new(
+            "OpenAI Responses stream ended before a terminal response event",
+        )
+        .with_kind(ProviderFailureKind::Stream)
+        .with_code("stream_ended_before_terminal_response")
+        .retryable(true)
+        .with_partial_response(partial));
     }
     let parts = state.response_parts();
     if !has_response_content(&parts) {
@@ -301,6 +359,7 @@ fn complete_buffered_chat(
     text: String,
     stream_events: Option<LlmEventSender>,
     url: String,
+    stream_termination: Option<StreamTermination>,
 ) -> Result<LlmResponse, LlmTransportError> {
     let mut state = ChatStreamState::default();
     let mut parsed_parts = None;
@@ -328,6 +387,15 @@ fn complete_buffered_chat(
         state.terminal_reason = terminal_reason;
     }
     let parts = parsed_parts.unwrap_or_else(|| state.parts());
+    if stream_termination == Some(StreamTermination::RequireTerminalEvidence)
+        && state.provider_finish_reason.is_none()
+    {
+        return Err(LlmTransportError::new("Stream ended without finish_reason")
+            .with_kind(ProviderFailureKind::Stream)
+            .with_code("stream_ended_before_finish_reason")
+            .retryable(true)
+            .with_partial_response(chat_response_from_state(state, &url)));
+    }
     if !has_response_content(&parts) {
         return Err(empty_response_error(text));
     }
@@ -376,11 +444,15 @@ async fn drive_streaming_response(
     provider: &OpenAiCompatibleProvider,
     endpoint: CompletionEndpoint,
     body: LlmHttpBody,
-    stream_events: Option<LlmEventSender>,
-    provider_trace: Option<LlmProviderTraceSender>,
-    url: String,
     chunk_timeout: std::time::Duration,
+    context: ResponseContext,
 ) -> Result<LlmResponse, LlmTransportError> {
+    let ResponseContext {
+        stream_events,
+        provider_trace,
+        url,
+        stream_termination,
+    } = context;
     match endpoint {
         CompletionEndpoint::Responses => {
             drive_streaming_responses(
@@ -390,6 +462,7 @@ async fn drive_streaming_response(
                 provider_trace,
                 url,
                 chunk_timeout,
+                stream_termination,
             )
             .await
         }
@@ -401,6 +474,7 @@ async fn drive_streaming_response(
                 provider_trace,
                 url,
                 chunk_timeout,
+                stream_termination,
             )
             .await
         }
@@ -414,11 +488,12 @@ async fn drive_streaming_responses(
     provider_trace: Option<LlmProviderTraceSender>,
     url: String,
     chunk_timeout: std::time::Duration,
+    stream_termination: StreamTermination,
 ) -> Result<LlmResponse, LlmTransportError> {
     let mut state = ResponsesStreamState::default();
     let mut emitted_parts = Vec::new();
     let expose_thinking = provider.options.expose_thinking;
-    drive_sse_response(
+    let stream_result = drive_sse_response(
         body,
         chunk_timeout,
         CompletionEndpoint::Responses.stream_chunk_timeout_error(),
@@ -451,7 +526,33 @@ async fn drive_streaming_responses(
             Ok(())
         },
     )
-    .await?;
+    .await;
+
+    if let Err(error) = stream_result {
+        let mut partial = shared_response_from_state(
+            state.clone(),
+            CompletionEndpoint::Responses.http_summary(&url, true),
+        );
+        partial.terminal_reason = LlmTerminalReason::Unknown;
+        return Err(error.with_partial_response(partial));
+    }
+
+    if stream_termination == StreamTermination::RequireTerminalEvidence
+        && !state.terminal_event_seen
+    {
+        let mut partial = shared_response_from_state(
+            state.clone(),
+            CompletionEndpoint::Responses.http_summary(&url, true),
+        );
+        partial.terminal_reason = LlmTerminalReason::Unknown;
+        return Err(LlmTransportError::new(
+            "OpenAI Responses stream ended before a terminal response event",
+        )
+        .with_kind(ProviderFailureKind::Stream)
+        .with_code("stream_ended_before_terminal_response")
+        .retryable(true)
+        .with_partial_response(partial));
+    }
 
     let parts = state.response_parts();
     if !has_response_content(&parts) {
@@ -488,10 +589,11 @@ async fn drive_streaming_chat(
     provider_trace: Option<LlmProviderTraceSender>,
     url: String,
     chunk_timeout: std::time::Duration,
+    stream_termination: StreamTermination,
 ) -> Result<LlmResponse, LlmTransportError> {
     let mut state = ChatStreamState::default();
     let expose_thinking = provider.options.expose_thinking;
-    drive_sse_response(
+    let stream_result = drive_sse_response(
         body,
         chunk_timeout,
         CompletionEndpoint::ChatCompletions.stream_chunk_timeout_error(),
@@ -517,13 +619,26 @@ async fn drive_streaming_chat(
             Ok(())
         },
     )
-    .await?;
+    .await;
+
+    if let Err(error) = stream_result {
+        return Err(error.with_partial_response(chat_response_from_state(state.clone(), &url)));
+    }
 
     let parts = state.parts();
     if !has_response_content(&parts) {
         return Err(empty_response_error(
             state.final_response_raw.clone().unwrap_or_default(),
         ));
+    }
+    if stream_termination == StreamTermination::RequireTerminalEvidence
+        && state.provider_finish_reason.is_none()
+    {
+        return Err(LlmTransportError::new("Stream ended without finish_reason")
+            .with_kind(ProviderFailureKind::Stream)
+            .with_code("stream_ended_before_finish_reason")
+            .retryable(true)
+            .with_partial_response(chat_response_from_state(state, &url)));
     }
     if let Some(tx) = &stream_events {
         for part in parts
@@ -550,4 +665,24 @@ async fn drive_streaming_chat(
         http_summary: Some(CompletionEndpoint::ChatCompletions.http_summary(&url, true)),
         execution_evidence,
     })
+}
+
+fn shared_response_from_state(state: ResponsesStreamState, http_summary: String) -> LlmResponse {
+    crate::responses_shared::response_from_stream_state(state, None, http_summary)
+}
+
+fn chat_response_from_state(state: ChatStreamState, url: &str) -> LlmResponse {
+    let parts = state.parts();
+    let execution_evidence = state.execution_evidence();
+    LlmResponse {
+        full_text: state.full_text,
+        parts,
+        usage: state.usage,
+        terminal_reason: LlmTerminalReason::Unknown,
+        terminal_diagnostic: None,
+        provider_usage: state.provider_usage,
+        request_body: None,
+        http_summary: Some(CompletionEndpoint::ChatCompletions.http_summary(url, true)),
+        execution_evidence,
+    }
 }

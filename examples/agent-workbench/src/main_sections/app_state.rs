@@ -262,6 +262,8 @@ fn workbench_model_capability() -> lash::provider::ModelCapability {
             disable: None,
             mandatory: false,
         }),
+        cache_control: Some(lash::provider::CacheControlDialect::Anthropic),
+        stream_termination: None,
     }
 }
 

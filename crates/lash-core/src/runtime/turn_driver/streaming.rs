@@ -51,6 +51,7 @@ fn validate_generation_options(
         code: Some("output_token_cap_exceeds_model_capacity".to_string()),
         terminal_reason: crate::LlmTerminalReason::ProviderError,
         request_body: None,
+        partial_response: None,
     })
 }
 
@@ -112,6 +113,7 @@ impl RuntimeTurnDriver<'_> {
                 code: Some("plugin_assistant_stream".to_string()),
                 terminal_reason: crate::LlmTerminalReason::ProviderError,
                 request_body: None,
+                partial_response: None,
             })?;
         let mut current = String::new();
         let mut first = true;
@@ -156,6 +158,7 @@ impl RuntimeTurnDriver<'_> {
                 code: Some("plugin_assistant_response".to_string()),
                 terminal_reason: crate::LlmTerminalReason::ProviderError,
                 request_body: None,
+                partial_response: None,
             })?;
         let mut current: Option<LlmResponse> = None;
         for emitted in transforms {
@@ -195,6 +198,7 @@ impl RuntimeTurnDriver<'_> {
                         code: Some("attachment_resolution_failed".to_string()),
                         terminal_reason: crate::LlmTerminalReason::ProviderError,
                         request_body: None,
+                        partial_response: None,
                     }),
                     false,
                     None,
@@ -269,6 +273,7 @@ impl RuntimeTurnDriver<'_> {
                         code: Some("cancelled".to_string()),
                         terminal_reason: crate::LlmTerminalReason::Cancelled,
                         request_body: None,
+                        partial_response: None,
                     });
                 }
                 Some(stream_event) = llm_stream_rx.recv() => {
@@ -335,6 +340,7 @@ impl RuntimeTurnDriver<'_> {
                             code: Some("task_join_failed".to_string()),
                             terminal_reason: crate::LlmTerminalReason::ProviderError,
                             request_body: None,
+                            partial_response: None,
                         }),
                     };
                     self.policy.binding = match crate::ProviderBinding::new(
@@ -350,6 +356,7 @@ impl RuntimeTurnDriver<'_> {
                             code: Some("provider_binding_mismatch".to_string()),
                             terminal_reason: crate::LlmTerminalReason::ProviderError,
                             request_body: None,
+                            partial_response: None,
                         }),
                     };
                     if let Err(err) = self
@@ -389,6 +396,7 @@ impl RuntimeTurnDriver<'_> {
                                 code: e.code,
                                 terminal_reason: e.terminal_reason,
                                 request_body: e.request_body,
+                                partial_response: e.partial_response,
                             });
                         }
                     }
@@ -743,6 +751,12 @@ impl RuntimeTurnDriver<'_> {
         state: &mut LlmStreamState<'_>,
     ) -> Result<(), LlmCallError> {
         match stream_event {
+            LlmStreamEvent::AttemptReset => {
+                *state.stream_accumulator = LlmStreamAccumulator::default();
+                *state.streamed_usage = LlmUsage::default();
+                *state.assistant_prose_correlation = None;
+                *state.reasoning_correlation = None;
+            }
             LlmStreamEvent::Delta(delta) => {
                 self.emit_visible_assistant_text(event_tx, delta, None, "delta", state)
                     .await?;

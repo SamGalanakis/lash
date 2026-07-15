@@ -1169,6 +1169,7 @@ impl LocalDirectEffectRunner {
                         code: Some("attachment_resolution_failed".to_string()),
                         terminal_reason: crate::LlmTerminalReason::ProviderError,
                         request_body: None,
+                        partial_response: None,
                     }),
                     None,
                 );

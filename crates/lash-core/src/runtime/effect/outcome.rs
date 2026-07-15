@@ -135,6 +135,7 @@ pub(crate) fn llm_call_error_from_transport(err: LlmTransportError) -> LlmCallEr
         code: err.code,
         terminal_reason: err.terminal_reason,
         request_body: err.request_body,
+        partial_response: err.partial_response,
     }
 }
 

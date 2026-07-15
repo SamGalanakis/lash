@@ -571,6 +571,7 @@ fn llm_error(message: &str) -> LlmCallError {
         code: Some("test_provider_error".to_string()),
         terminal_reason: LlmTerminalReason::ProviderError,
         request_body: None,
+        partial_response: None,
     }
 }
 

@@ -591,6 +591,8 @@ mod tests {
                 )]),
                 ..Default::default()
             }),
+            cache_control: None,
+            stream_termination: None,
         }
     }
 

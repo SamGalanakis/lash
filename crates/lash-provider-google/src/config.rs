@@ -118,6 +118,7 @@ pub struct GoogleOAuthProvider {
     pub(crate) attempt_credential: Option<Lease<GoogleCredential>>,
     pub project_id: Option<String>,
     pub options: ProviderOptions,
+    pub stream_termination: StreamTermination,
     pub(crate) transport: Arc<dyn LlmHttpTransport>,
 }
 
@@ -148,6 +149,7 @@ impl GoogleOAuthProvider {
             attempt_credential: None,
             project_id: None,
             options: ProviderOptions::default(),
+            stream_termination: StreamTermination::EofTolerated,
             transport: Arc::clone(&DEFAULT_HTTP_TRANSPORT),
         }
     }
@@ -159,6 +161,11 @@ impl GoogleOAuthProvider {
 
     pub fn with_options(mut self, options: ProviderOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    pub fn with_stream_termination(mut self, policy: StreamTermination) -> Self {
+        self.stream_termination = policy;
         self
     }
 
@@ -198,6 +205,12 @@ struct GoogleProviderConfig {
     project_id: Option<String>,
     #[serde(default)]
     options: ProviderOptions,
+    #[serde(default = "default_stream_termination")]
+    stream_termination: StreamTermination,
+}
+
+fn default_stream_termination() -> StreamTermination {
+    StreamTermination::EofTolerated
 }
 
 pub struct GoogleOAuthProviderFactory;
@@ -212,6 +225,7 @@ impl ProviderFactory for GoogleOAuthProviderFactory {
         Ok(GoogleOAuthProvider {
             project_id: cfg.project_id,
             options: cfg.options,
+            stream_termination: cfg.stream_termination,
             ..GoogleOAuthProvider::new(cfg.access_token, cfg.refresh_token, cfg.expires_at)
         }
         .into_components())

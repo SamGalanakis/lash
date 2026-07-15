@@ -15,6 +15,32 @@ use serde::{Deserialize, Serialize};
 pub struct ModelCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningCapability>,
+    /// Cache-control wire dialect accepted by this model on its selected route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControlDialect>,
+    /// How a streaming provider proves that this model's response completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_termination: Option<StreamTermination>,
+}
+
+/// Host-supplied policy for interpreting a clean EOF on a provider stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamTermination {
+    /// EOF is successful only after the dialect's semantic terminal event.
+    RequireTerminalEvidence,
+    /// Clean EOF is a valid completion boundary for this route.
+    EofTolerated,
+}
+
+/// How an OpenAI-compatible Chat Completions route places `cache_control`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheControlDialect {
+    /// Anthropic-style canonical placement, including extended TTL support.
+    Anthropic,
+    /// A single ephemeral breakpoint with no extended TTL.
+    Gemini,
 }
 
 /// What reasoning/effort the model exposes and how effort maps onto the wire.
@@ -120,6 +146,8 @@ impl std::error::Error for ModelEffortValidationError {}
 impl ModelCapability {
     pub fn is_empty(&self) -> bool {
         self.reasoning.is_none()
+            && self.cache_control.is_none()
+            && self.stream_termination.is_none()
     }
 
     /// Resolve a requested effort to its canonical form: alias-map first
@@ -249,13 +277,31 @@ mod tests {
     }
 
     fn capability(reasoning: Option<ReasoningCapability>) -> ModelCapability {
-        ModelCapability { reasoning }
+        ModelCapability {
+            reasoning,
+            cache_control: None,
+            stream_termination: None,
+        }
     }
 
     #[test]
     fn is_empty_tracks_reasoning_presence() {
         assert!(capability(None).is_empty());
         assert!(!capability(Some(reasoning())).is_empty());
+        assert!(
+            !ModelCapability {
+                cache_control: Some(CacheControlDialect::Anthropic),
+                ..ModelCapability::default()
+            }
+            .is_empty()
+        );
+        assert!(
+            !ModelCapability {
+                stream_termination: Some(StreamTermination::RequireTerminalEvidence),
+                ..ModelCapability::default()
+            }
+            .is_empty()
+        );
     }
 
     #[test]
@@ -453,6 +499,15 @@ mod tests {
         let cap = capability(None);
         let json = serde_json::to_value(&cap).expect("serialize");
         assert_eq!(json, serde_json::json!({}));
+        let back: ModelCapability = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, cap);
+
+        let cap = ModelCapability {
+            cache_control: Some(CacheControlDialect::Gemini),
+            ..ModelCapability::default()
+        };
+        let json = serde_json::to_value(&cap).expect("serialize");
+        assert_eq!(json, serde_json::json!({ "cache_control": "gemini" }));
         let back: ModelCapability = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, cap);
 

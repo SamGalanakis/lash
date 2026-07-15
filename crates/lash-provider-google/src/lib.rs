@@ -22,12 +22,30 @@ mod tests {
     use lash_core::llm::transport::validate_image_attachments;
     use lash_core::llm::types::{
         LlmContentBlock, LlmEventSender, LlmMessage, LlmOutputPart, LlmRequest, LlmRole,
-        LlmTerminalReason, LlmToolChoice, LlmToolSpec, LlmUsage, ResponseTextMeta,
+        LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmToolSpec, LlmUsage, ResponseTextMeta,
     };
     use lash_core::provider::{
-        ModelCapability, ProviderOptions, ReasoningCapability, ReasoningEncoding,
+        ModelCapability, ProviderOptions, ReasoningCapability, ReasoningEncoding, StreamTermination,
     };
     use serde_json::{Value, json};
+
+    #[derive(Debug)]
+    struct StaticSseTransport(&'static str);
+
+    #[async_trait::async_trait]
+    impl lash_llm_transport::LlmHttpTransport for StaticSseTransport {
+        async fn send(
+            &self,
+            _request: lash_llm_transport::LlmHttpRequest,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<lash_llm_transport::LlmHttpResponse, lash_core::LlmTransportError> {
+            Ok(lash_llm_transport::LlmHttpResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+                body: lash_llm_transport::LlmHttpBody::buffered(self.0),
+            })
+        }
+    }
 
     fn request_with_capability(
         model_variant: Option<&str>,
@@ -59,6 +77,86 @@ mod tests {
         request_with_capability(model_variant, ModelCapability::default())
     }
 
+    #[tokio::test]
+    async fn google_default_tolerates_eof_but_strict_policy_retains_partial_usage() {
+        let body = "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"legacy\"},{\"functionCall\":{\"id\":\"call-1\",\"name\":\"lookup\",\"args\":{\"q\":\"x\"}}}]}}],\"usageMetadata\":{\"promptTokenCount\":6,\"candidatesTokenCount\":2}}}\n\n";
+        let wire_request = json!({ "model": "gemini-test" });
+        let tolerant = GoogleOAuthProvider::new("access", "refresh", 0)
+            .with_transport(Arc::new(StaticSseTransport(body)));
+        let response = tolerant
+            .execute_request(
+                "access",
+                wire_request.clone(),
+                Some(LlmEventSender::new(|_| {})),
+                None,
+                StreamTermination::EofTolerated,
+            )
+            .await
+            .expect("Google default permits clean EOF");
+        assert_eq!(response.full_text, "legacy");
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let event_sink = Arc::clone(&events);
+        let strict = GoogleOAuthProvider::new("access", "refresh", 0)
+            .with_transport(Arc::new(StaticSseTransport(body)));
+        let error = strict
+            .execute_request(
+                "access",
+                wire_request,
+                Some(LlmEventSender::new(move |event| {
+                    event_sink.lock().expect("event lock").push(event);
+                })),
+                None,
+                StreamTermination::RequireTerminalEvidence,
+            )
+            .await
+            .expect_err("strict Google route requires finishReason");
+        assert_eq!(
+            error.code.as_deref(),
+            Some("stream_ended_before_finish_reason")
+        );
+        let partial = error.partial_response.as_deref().expect("partial response");
+        assert_eq!(partial.full_text, "legacy");
+        assert_eq!(partial.usage.input_tokens, 6);
+        assert_eq!(partial.usage.output_tokens, 2);
+        assert!(partial.provider_usage.is_some());
+        assert!(
+            partial
+                .parts
+                .iter()
+                .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+        );
+        assert!(
+            events
+                .lock()
+                .expect("event lock")
+                .iter()
+                .all(|event| !matches!(
+                    event,
+                    LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. })
+                ))
+        );
+    }
+
+    #[tokio::test]
+    async fn google_strict_policy_accepts_finish_reason() {
+        let body = "data: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"done\"}]}}]}}\n\n";
+        let provider = GoogleOAuthProvider::new("access", "refresh", 0)
+            .with_transport(Arc::new(StaticSseTransport(body)));
+        let response = provider
+            .execute_request(
+                "access",
+                json!({ "model": "gemini-test" }),
+                Some(LlmEventSender::new(|_| {})),
+                None,
+                StreamTermination::RequireTerminalEvidence,
+            )
+            .await
+            .expect("finishReason is terminal evidence");
+        assert_eq!(response.full_text, "done");
+        assert_eq!(response.terminal_reason, LlmTerminalReason::Stop);
+    }
+
     fn effort_capability(efforts: &[&str]) -> ModelCapability {
         ModelCapability {
             reasoning: Some(ReasoningCapability {
@@ -69,6 +167,8 @@ mod tests {
                 disable: None,
                 mandatory: false,
             }),
+            cache_control: None,
+            stream_termination: None,
         }
     }
 
@@ -90,6 +190,8 @@ mod tests {
                 disable: Some(lash_core::provider::ReasoningDisableEncoding::Budget(0)),
                 mandatory: false,
             }),
+            cache_control: None,
+            stream_termination: None,
         }
     }
 

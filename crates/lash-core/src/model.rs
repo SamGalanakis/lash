@@ -9,9 +9,9 @@ pub struct ModelSpec {
     #[serde(default)]
     pub variant: ReasoningSelection,
     pub limits: ModelLimits,
-    /// Host-supplied capability metadata: what effort levels the model exposes
-    /// and how they encode on the wire. Lash validates the requested variant
-    /// against this and threads it onto every request the provider receives.
+    /// Host-supplied capability metadata: reasoning controls and cache-control
+    /// dialect accepted by this model route. Lash validates the requested
+    /// variant and threads all capability data onto every provider request.
     #[serde(default, skip_serializing_if = "ModelCapability::is_empty")]
     pub capability: ModelCapability,
 }

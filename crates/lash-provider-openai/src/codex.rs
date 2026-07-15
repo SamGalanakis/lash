@@ -17,11 +17,13 @@ use crate::common::{
 };
 use crate::responses_shared as shared;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
-use lash_core::llm::types::{LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
+use lash_core::llm::types::{
+    LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEvent, LlmTerminalReason, LlmUsage,
+};
 use lash_core::provider::{
     CacheRetention, DefaultProviderFailureClassifier, Provider, ProviderComponents,
     ProviderFactory, ProviderFailureClassifier, ProviderOptions, ProviderReliability,
-    resolve_generation_policy,
+    StreamTermination, resolve_generation_policy,
 };
 use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
@@ -1185,6 +1187,10 @@ impl CodexProvider {
     ) -> Result<LlmResponse, CodexWebSocketAttemptError> {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
+        let stream_termination = req
+            .model_capability
+            .stream_termination
+            .unwrap_or(StreamTermination::RequireTerminalEvidence);
         let websocket_body = Self::websocket_create_request(&plan.body);
         let request_body = match serde_json::to_string(&websocket_body) {
             Ok(request_body) => request_body,
@@ -1369,23 +1375,22 @@ impl CodexProvider {
             } else {
                 state.take_reasoning_deltas();
             }
-            if state
-                .final_response
-                .as_ref()
-                .and_then(|response| response.get("status").and_then(Value::as_str))
-                .is_some_and(|status| matches!(status, "completed" | "incomplete"))
-            {
+            if state.terminal_event_seen {
                 break;
             }
         }
 
-        let terminal_response_seen = state
-            .final_response
-            .as_ref()
-            .and_then(|response| response.get("status").and_then(Value::as_str))
-            .is_some_and(|status| matches!(status, "completed" | "incomplete"));
-        if !terminal_response_seen {
+        let terminal_response_seen = state.terminal_event_seen;
+        if !terminal_response_seen
+            && stream_termination == StreamTermination::RequireTerminalEvidence
+        {
             let output_started = Self::response_state_started_output(&state);
+            let mut partial = shared::response_from_stream_state(
+                state.clone(),
+                Some(request_body.clone()),
+                self.websocket_http_summary(&diagnostics),
+            );
+            partial.terminal_reason = LlmTerminalReason::Unknown;
             self.release_websocket_lease(
                 lease.take().expect("websocket lease is present"),
                 false,
@@ -1394,8 +1399,10 @@ impl CodexProvider {
             return Err(CodexWebSocketAttemptError {
                 error: LlmTransportError::new("Codex WebSocket ended before response.completed")
                     .with_request_body(request_body)
+                    .with_kind(ProviderFailureKind::Stream)
                     .retryable(true)
-                    .with_code("websocket_closed_before_completed"),
+                    .with_code("websocket_closed_before_completed")
+                    .with_partial_response(partial),
                 events_seen,
                 output_started,
                 stale_previous_response: false,
@@ -1600,6 +1607,10 @@ impl Provider for CodexProvider {
             .take()
             .expect("credential attempt is configured");
         let credential = &credential_lease.value;
+        let stream_termination = req
+            .model_capability
+            .stream_termination
+            .unwrap_or(StreamTermination::RequireTerminalEvidence);
         if !matches!(self.transport, CodexTransport::Sse) {
             let fallback_reason = matches!(self.transport, CodexTransport::Auto)
                 .then(|| self.websocket_fallback_reason(&req))
@@ -1829,7 +1840,7 @@ impl Provider for CodexProvider {
 
         let mut state = shared::ResponsesStreamState::default();
         let expose_thinking = self.options.expose_thinking;
-        drive_sse_response(
+        let stream_result = drive_sse_response(
             body,
             timeouts.chunk_timeout,
             "Codex stream chunk timed out",
@@ -1862,7 +1873,35 @@ impl Provider for CodexProvider {
                 Ok(())
             },
         )
-        .await?;
+        .await;
+
+        if let Err(error) = stream_result {
+            let mut partial = shared::response_from_stream_state(
+                state.clone(),
+                request_body.clone(),
+                format!("HTTP POST {} (stream)", self.responses_url),
+            );
+            partial.terminal_reason = LlmTerminalReason::Unknown;
+            return Err(error.with_partial_response(partial));
+        }
+
+        if stream_termination == StreamTermination::RequireTerminalEvidence
+            && !state.terminal_event_seen
+        {
+            let mut partial = shared::response_from_stream_state(
+                state.clone(),
+                request_body.clone(),
+                format!("HTTP POST {} (stream)", self.responses_url),
+            );
+            partial.terminal_reason = LlmTerminalReason::Unknown;
+            return Err(LlmTransportError::new(
+                "Codex stream ended before a terminal response event",
+            )
+            .with_kind(ProviderFailureKind::Stream)
+            .with_code("stream_ended_before_terminal_response")
+            .retryable(true)
+            .with_partial_response(partial));
+        }
 
         if state.final_response.is_none()
             && state.parts.is_empty()
@@ -1983,6 +2022,8 @@ mod tests {
                 )),
                 ..ReasoningCapability::default()
             }),
+            cache_control: None,
+            stream_termination: None,
         }
     }
 
@@ -3298,6 +3339,54 @@ mod tests {
         assert_eq!(err.code.as_deref(), Some("websocket_idle_timeout"));
         assert_eq!(http.captured_len(), 0);
         assert_eq!(ws.captured().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn codex_websocket_clean_eof_requires_terminal_event_unless_explicitly_tolerated() {
+        let action = ScriptedWsAction::CloseAfterStart {
+            response_id: "resp_partial",
+            message_id: "msg_partial",
+            text: "partial",
+        };
+        let strict_ws = spawn_scripted_websocket(vec![action.clone()]).await;
+        let http = spawn_http_sse("resp_http", "msg_http", "unused").await;
+        let mut strict = websocket_test_provider(
+            CodexTransport::Websocket,
+            http.url.clone(),
+            strict_ws.url.clone(),
+        );
+
+        let error = strict
+            .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .await
+            .expect_err("clean EOF without a terminal event must fail");
+
+        assert_eq!(
+            error.code.as_deref(),
+            Some("websocket_closed_before_completed")
+        );
+        let partial = error.partial_response.as_deref().expect("partial response");
+        assert_eq!(partial.full_text, "partial");
+        assert_eq!(partial.usage.input_tokens, 4);
+        assert_eq!(partial.usage.output_tokens, 1);
+        assert!(partial.provider_usage.is_some());
+        assert_eq!(http.captured_len(), 0);
+
+        let tolerant_ws = spawn_scripted_websocket(vec![action]).await;
+        let mut tolerant = websocket_test_provider(
+            CodexTransport::Websocket,
+            http.url.clone(),
+            tolerant_ws.url.clone(),
+        );
+        let mut tolerant_request = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        tolerant_request.model_capability.stream_termination =
+            Some(StreamTermination::EofTolerated);
+        let response = tolerant
+            .complete(tolerant_request)
+            .await
+            .expect("explicit EOF tolerance accepts clean close");
+        assert_eq!(response.full_text, "partial");
+        assert_eq!(http.captured_len(), 0);
     }
 
     #[test]

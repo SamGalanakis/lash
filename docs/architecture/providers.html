@@ -73,20 +73,20 @@
             </article>
             <article class="panel">
               <h3><code>openai-compatible</code></h3>
-              <p>Generic Chat Completions. Requires <code>base_url</code>. Converts <code>LlmRequest</code> to a <code>messages</code> array, emits Chat Completions <code>tools</code>, maps structured output to <code>response_format</code>, and preserves OpenRouter reasoning effort through the <code>reasoning.effort</code> request field. Used for OpenRouter, vLLM, Together, Groq, etc.</p>
+              <p>Generic Chat Completions. Requires <code>base_url</code>. Converts <code>LlmRequest</code> to a <code>messages</code> array, emits Chat Completions <code>tools</code>, and maps structured output to <code>response_format</code>. Endpoint behavior is host-supplied through <code>OpenAiCompat</code>; <code>OpenAiCompat::openrouter()</code> explicitly enables OpenRouter reasoning format and session affinity for OpenRouter itself or a compatible proxy. The provider never infers those capabilities from <code>base_url</code>.</p>
             </article>
           </div>
         </div>
 
         <div class="section">
           <div class="section-header">
-            <h2>OpenRouter Cache-Control Markers</h2>
-            <p>For direct Anthropic requests and OpenRouter-served Claude or Gemini on Chat Completions, shared <code>ProviderOptions.cache_retention</code> controls the <code>cache_control</code> dialect used in the request:</p>
+            <h2>Host-Supplied Cache-Control Dialects</h2>
+            <p>For OpenAI-compatible Chat Completions, the host attaches <code>ModelCapability.cache_control</code> to the selected model route. <code>None</code> emits no marker; <code>CacheControlDialect::Anthropic</code> and <code>::Gemini</code> select the exact wire placement. Model ids and endpoint URLs are never inspected. Shared <code>ProviderOptions.cache_retention</code> then controls whether and how long the selected dialect caches:</p>
           </div>
           <div class="def-list-grid">
             <article class="panel"><h3><code>none</code></h3><p>No markers emitted. Each request is treated as fresh.</p></article>
             <article class="panel"><h3><code>short</code></h3><p>Emits <code>{"type":"ephemeral"}</code> at the provider-specific breakpoints for the default short cache window.</p></article>
-            <article class="panel"><h3><code>long</code></h3><p>Adds <code>"ttl":"1h"</code> where the Claude dialect supports it. OpenRouter Gemini remains plain ephemeral because it does not support the one-hour TTL.</p></article>
+            <article class="panel"><h3><code>long</code></h3><p>Adds <code>"ttl":"1h"</code> for the Anthropic dialect. The Gemini dialect remains plain ephemeral because that dialect does not support the one-hour TTL.</p></article>
           </div>
           <p>Breakpoints are placed at:</p>
           <ol class="bullets">
@@ -94,13 +94,14 @@
             <li>The last tool definition in the request.</li>
             <li>Any explicit <code>LlmContentBlock::Text.cache_breakpoint</code> the runtime asks for.</li>
           </ol>
-          <p>Claude requests use all three canonical placements. OpenRouter Gemini emits exactly one marker: the explicit text breakpoint when present, otherwise the last user/assistant text content. Internal breakpoint markers are always removed from the wire request.</p>
+          <p>The Anthropic dialect uses all three canonical placements. The Gemini dialect emits exactly one marker: the explicit text breakpoint when present, otherwise the last user/assistant text content. Internal breakpoint markers are always removed from the wire request.</p>
+          <p>Session affinity is separate endpoint capability data. Set <code>OpenAiCompat.cache_session_affinity</code> (or explicitly select <code>OpenAiCompat::openrouter()</code>) to emit the bounded body <code>session_id</code> and call-specific <code>x-client-request-id</code>. It is disabled by default, including when <code>base_url</code> happens to equal the canonical OpenRouter URL.</p>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>RLM Prompt Caching</h2>
-            <p>RLM projects chronological history as append-only chat-shaped messages: user inputs remain user messages, prior RLM steps become assistant messages, tool observations become user messages, and the mutable current-iteration/finalization prompt stays as the final user message. The rolling <code>cache_breakpoint</code> is placed on the last <em>stable</em> history text block, so OpenRouter Claude and Gemini cache a real prefix instead of a rewritten history blob each turn.</p>
+            <p>RLM projects chronological history as append-only chat-shaped messages: user inputs remain user messages, prior RLM steps become assistant messages, tool observations become user messages, and the mutable current-iteration/finalization prompt stays as the final user message. The rolling <code>cache_breakpoint</code> is placed on the last <em>stable</em> history text block, so either host-selected Chat cache dialect can cache a real prefix instead of a rewritten history blob each turn.</p>
           </div>
           <p>The result: long RLM sessions get the same cache-hit rate as native multi-turn chats, even though Lashlang-driven reasoning regenerates a fresh prompt on every iteration.</p>
         </div>
@@ -120,6 +121,10 @@
               <div class="listing__body"><p><code>ProviderRetryPolicy</code> defaults to four attempts with exponential delay capped at 10 seconds and <code>Retry-After</code> capped at 60 seconds. <code>ProviderReliability::disabled()</code> turns retries off for hosts that already retry at a higher layer.</p></div>
             </div>
             <div class="listing__row">
+              <div class="listing__label">stream termination</div>
+              <div class="listing__body"><p><code>StreamTermination::RequireTerminalEvidence</code> rejects clean EOF unless the wire dialect proved completion: Chat Completions needs a nonempty <code>finish_reason</code>, Responses/Codex needs a terminal response event, and Anthropic needs <code>message_stop</code> after <code>message_start</code>. Google defaults to <code>EofTolerated</code>; other hosts may select that compatibility policy explicitly through <code>ModelCapability.stream_termination</code>, <code>OpenAiCompat.stream_termination</code>, or the direct-provider builder. URLs and model names never select it.</p><p>A missing terminal is a retryable stream error. The failed attempt retains partial content, normalized usage, raw <code>provider_usage</code>, and execution evidence in the ADR 0032 ledger. A whole-call retry resets attempt-local parts first, so a truncated tool call is never executed or merged into the next attempt. User cancellation remains distinct and non-retryable.</p></div>
+            </div>
+            <div class="listing__row">
               <div class="listing__label">throttles</div>
               <div class="listing__body"><p>A retryable quota failure carrying <code>Retry-After</code> (an HTTP 429) is a throttle, not a failure: the ladder waits as instructed without consuming a retry attempt. The deference is bounded by the cumulative <code>throttle_wait_budget_ms</code> (default 90 seconds per call; <code>0</code> disables it, and each deferred wait charges at least one second), after which throttles count as ordinary retryable failures. A 429 without <code>Retry-After</code> follows the normal backoff-and-count ladder.</p></div>
             </div>
@@ -127,6 +132,17 @@
               <div class="listing__label">rate limits</div>
               <div class="listing__body"><p><code>ProviderRateLimitPolicy</code> can cap max concurrency, requests per window, and tokens per window before a provider request is admitted.</p></div>
             </div>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Dialect</th><th>Default</th><th>Required evidence</th></tr></thead>
+              <tbody>
+                <tr><td>OpenAI Chat Completions</td><td><code>RequireTerminalEvidence</code></td><td>Nonempty <code>finish_reason</code></td></tr>
+                <tr><td>OpenAI / Codex Responses</td><td><code>RequireTerminalEvidence</code></td><td><code>response.completed</code>, <code>response.incomplete</code>, <code>response.failed</code>, or <code>response.done</code></td></tr>
+                <tr><td>Anthropic Messages</td><td><code>RequireTerminalEvidence</code></td><td><code>message_stop</code> after <code>message_start</code></td></tr>
+                <tr><td>Google Gemini / Code Assist</td><td><code>EofTolerated</code></td><td>Clean EOF; a present <code>finishReason</code> still determines the normalized terminal reason</td></tr>
+              </tbody>
+            </table>
           </div>
           <pre><code>use lash::provider::{ProviderReliability, RequestTimeout};
 

@@ -12,22 +12,6 @@ pub(crate) struct CacheBreakpointDiagnostics {
 }
 
 impl OpenAiCompatibleProvider {
-    fn model_is_anthropic_claude(model: &str) -> bool {
-        let model = model.to_ascii_lowercase();
-        // Protocol dialect: OpenRouter-served Anthropic models use Anthropic payload shape.
-        model.contains("claude") || model.contains("anthropic/")
-    }
-
-    fn model_is_google_gemini(model: &str) -> bool {
-        model.to_ascii_lowercase().contains("gemini")
-    }
-
-    fn openrouter_cache_control_request(&self, req: &LlmRequest) -> bool {
-        base_url_is_openrouter(&self.base_url)
-            && (Self::model_is_anthropic_claude(&req.model)
-                || Self::model_is_google_gemini(&req.model))
-    }
-
     fn chat_cache_control_value(
         cache_retention: CacheRetention,
         extended_ttl: bool,
@@ -228,8 +212,7 @@ impl OpenAiCompatibleProvider {
         }
     }
 
-    fn apply_openrouter_cache_control(
-        &self,
+    fn apply_chat_cache_control(
         req: &LlmRequest,
         cache_retention: CacheRetention,
         messages: &mut [Value],
@@ -249,16 +232,16 @@ impl OpenAiCompatibleProvider {
                 )
             })
             .count();
-        if !self.openrouter_cache_control_request(req) {
+        let Some(dialect) = req.model_capability.cache_control else {
             Self::strip_internal_cache_markers(messages);
             return CacheBreakpointDiagnostics {
                 requested,
                 emitted: 0,
                 dropped: requested,
             };
-        }
-        let gemini_request = Self::model_is_google_gemini(&req.model);
-        let Some(cache_control) = Self::chat_cache_control_value(cache_retention, !gemini_request)
+        };
+        let extended_ttl = matches!(dialect, CacheControlDialect::Anthropic);
+        let Some(cache_control) = Self::chat_cache_control_value(cache_retention, extended_ttl)
         else {
             Self::strip_internal_cache_markers(messages);
             return CacheBreakpointDiagnostics {
@@ -268,7 +251,7 @@ impl OpenAiCompatibleProvider {
             };
         };
 
-        if gemini_request {
+        if matches!(dialect, CacheControlDialect::Gemini) {
             let applied_explicit_breakpoint = messages.iter_mut().rev().any(|message| {
                 Self::add_cache_control_to_marked_text_content(message, &cache_control)
             });
@@ -360,12 +343,8 @@ impl OpenAiCompatibleProvider {
             DEFAULT_MAX_OUTPUT_TOKENS,
             (),
         );
-        let cache_diagnostics = self.apply_openrouter_cache_control(
-            req,
-            policy.cache_retention,
-            &mut messages,
-            &mut tools,
-        );
+        let cache_diagnostics =
+            Self::apply_chat_cache_control(req, policy.cache_retention, &mut messages, &mut tools);
         let mut body = json!({
             "model": req.model,
             "messages": messages,

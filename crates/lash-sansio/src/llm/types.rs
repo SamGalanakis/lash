@@ -4,8 +4,9 @@ use std::sync::Arc;
 use crate::{AttachmentRef, SchemaContract};
 
 pub use crate::llm::capability::{
-    ModelCapability, ModelEffortValidationCategory, ModelEffortValidationError,
-    ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection,
+    CacheControlDialect, ModelCapability, ModelEffortValidationCategory,
+    ModelEffortValidationError, ReasoningCapability, ReasoningDisableEncoding, ReasoningEncoding,
+    ReasoningSelection, StreamTermination,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -433,6 +434,9 @@ impl LlmUsage {
 
 #[derive(Clone, Debug)]
 pub enum LlmStreamEvent {
+    /// A retry is starting from the original request. Consumers must discard
+    /// attempt-local accumulated parts and usage before accepting new events.
+    AttemptReset,
     /// Append-only visible assistant text. Providers must send only the new
     /// suffix here; completed/cumulative message text belongs in `Part(Text)`.
     Delta(String),

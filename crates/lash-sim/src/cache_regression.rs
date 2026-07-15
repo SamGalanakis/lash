@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use lash::rlm::RlmTurnBuilderExt;
 use lash_core::llm::types::{LlmContentBlock, LlmMessage, LlmRequest, LlmRole};
-use lash_core::provider::CacheRetention;
+use lash_core::provider::{CacheControlDialect, CacheRetention};
 use lash_llm_transport::cache_regression::{
     SerializedPromptRequest, assert_prefix_stability, strip_cache_directives,
 };
-use lash_provider_openai::{OPENAI_BASE_URL, OPENROUTER_BASE_URL};
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,8 +16,8 @@ enum ProtocolKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProviderSerializer {
-    OpenRouterClaude,
-    OpenRouterNonClaude,
+    ChatAnthropicDialect,
+    ChatGeminiDialect,
     AnthropicDirect,
     GoogleDirect,
 }
@@ -34,8 +33,9 @@ enum CacheWireForm {
 
 #[derive(Clone, Copy, Debug)]
 enum CoveragePath {
-    OpenRouterClaude,
-    OpenRouterNonClaude,
+    ChatAnthropicDialect,
+    ChatGeminiDialect,
+    ChatNoDialect,
     AnthropicDirect,
     GoogleDirect,
     OpenAiResponses,
@@ -76,6 +76,11 @@ fn request(model: &str, messages: Vec<LlmMessage>) -> LlmRequest {
         generation: Default::default(),
         provider_trace: None,
     }
+}
+
+fn with_cache_control(mut request: LlmRequest, dialect: CacheControlDialect) -> LlmRequest {
+    request.model_capability.cache_control = Some(dialect);
+    request
 }
 
 fn standard_iterations(model: &str) -> Vec<LlmRequest> {
@@ -257,13 +262,18 @@ fn serialize_prefix(
     stable_messages: usize,
 ) -> SerializedPromptRequest {
     match serializer {
-        ProviderSerializer::OpenRouterClaude | ProviderSerializer::OpenRouterNonClaude => {
+        ProviderSerializer::ChatAnthropicDialect | ProviderSerializer::ChatGeminiDialect => {
+            let dialect = match serializer {
+                ProviderSerializer::ChatAnthropicDialect => CacheControlDialect::Anthropic,
+                ProviderSerializer::ChatGeminiDialect => CacheControlDialect::Gemini,
+                _ => unreachable!(),
+            };
+            let request = with_cache_control(request.clone(), dialect);
             let (body, _) = lash_provider_openai::testing::serialize_chat_request(
-                OPENROUTER_BASE_URL,
-                request,
+                &request,
                 CacheRetention::Short,
             )
-            .expect("OpenRouter request");
+            .expect("OpenAI-compatible Chat request");
             prefix_for_openai_chat(body, stable_messages)
         }
         ProviderSerializer::AnthropicDirect => {
@@ -302,10 +312,10 @@ fn prefix_stability_matrix_runs_consecutive_protocol_iterations() {
 
     for (protocol, serializer) in cases {
         let model = match serializer {
-            ProviderSerializer::OpenRouterClaude | ProviderSerializer::AnthropicDirect => {
+            ProviderSerializer::ChatAnthropicDialect | ProviderSerializer::AnthropicDirect => {
                 "anthropic/claude-sonnet-4.6"
             }
-            ProviderSerializer::OpenRouterNonClaude | ProviderSerializer::GoogleDirect => {
+            ProviderSerializer::ChatGeminiDialect | ProviderSerializer::GoogleDirect => {
                 "google/gemini-3.1-pro-preview"
             }
         };
@@ -318,14 +328,14 @@ fn prefix_stability_matrix_runs_consecutive_protocol_iterations() {
 }
 
 #[test]
-fn openrouter_standard_prefix_shape_is_stable_as_breakpoints_roll() {
+fn chat_cache_dialect_prefix_shape_is_stable_as_breakpoints_roll() {
     for serializer in [
-        ProviderSerializer::OpenRouterClaude,
-        ProviderSerializer::OpenRouterNonClaude,
+        ProviderSerializer::ChatAnthropicDialect,
+        ProviderSerializer::ChatGeminiDialect,
     ] {
         let model = match serializer {
-            ProviderSerializer::OpenRouterClaude => "anthropic/claude-sonnet-4.6",
-            ProviderSerializer::OpenRouterNonClaude => "google/gemini-3.1-pro-preview",
+            ProviderSerializer::ChatAnthropicDialect => "custom/model-a",
+            ProviderSerializer::ChatGeminiDialect => "custom/model-b",
             _ => unreachable!(),
         };
         let iterations = standard_iterations(model);
@@ -342,16 +352,16 @@ async fn rlm_live_bound_state_is_prefix_stable_for_every_serializer() {
     let captured = captured_rlm_iterations().await;
     assert_eq!(captured.len(), 3, "RLM protocol call count");
     for serializer in [
-        ProviderSerializer::OpenRouterClaude,
-        ProviderSerializer::OpenRouterNonClaude,
+        ProviderSerializer::ChatAnthropicDialect,
+        ProviderSerializer::ChatGeminiDialect,
         ProviderSerializer::AnthropicDirect,
         ProviderSerializer::GoogleDirect,
     ] {
         let model = match serializer {
-            ProviderSerializer::OpenRouterClaude | ProviderSerializer::AnthropicDirect => {
+            ProviderSerializer::ChatAnthropicDialect | ProviderSerializer::AnthropicDirect => {
                 "anthropic/claude-sonnet-4.6"
             }
-            ProviderSerializer::OpenRouterNonClaude | ProviderSerializer::GoogleDirect => {
+            ProviderSerializer::ChatGeminiDialect | ProviderSerializer::GoogleDirect => {
                 "google/gemini-3.1-pro-preview"
             }
         };
@@ -416,22 +426,28 @@ fn observed_wire_form(body: &Value) -> CacheWireForm {
 
 fn serialize_coverage_case(case: CoverageCase) -> Value {
     match case.path {
-        CoveragePath::OpenRouterClaude => {
-            lash_provider_openai::testing::serialize_chat_request(
-                OPENROUTER_BASE_URL,
-                &cache_request("anthropic/claude-sonnet-4.6"),
-                case.retention,
-            )
-            .expect("OpenRouter Claude body")
-            .0
+        CoveragePath::ChatAnthropicDialect => {
+            let request = with_cache_control(
+                cache_request("custom/model-a"),
+                CacheControlDialect::Anthropic,
+            );
+            lash_provider_openai::testing::serialize_chat_request(&request, case.retention)
+                .expect("Anthropic cache-control dialect body")
+                .0
         }
-        CoveragePath::OpenRouterNonClaude => {
+        CoveragePath::ChatGeminiDialect => {
+            let request =
+                with_cache_control(cache_request("custom/model-b"), CacheControlDialect::Gemini);
+            lash_provider_openai::testing::serialize_chat_request(&request, case.retention)
+                .expect("Gemini cache-control dialect body")
+                .0
+        }
+        CoveragePath::ChatNoDialect => {
             lash_provider_openai::testing::serialize_chat_request(
-                OPENROUTER_BASE_URL,
-                &cache_request("meta-llama/llama-4-maverick"),
+                &cache_request("anthropic/claude-gemini-lookalike"),
                 case.retention,
             )
-            .expect("OpenRouter non-Claude body")
+            .expect("capability-free Chat body")
             .0
         }
         CoveragePath::AnthropicDirect => lash_provider_anthropic::testing::serialize_request(
@@ -459,44 +475,59 @@ fn serialize_coverage_case(case: CoverageCase) -> Value {
 }
 
 #[test]
-fn cache_coverage_matrix_matches_provider_model_and_retention_dialects() {
+fn cache_coverage_matrix_matches_capability_and_retention_dialects() {
     use CacheRetention::{Long, None, Short};
     use CacheWireForm::{
         CacheControl, CacheControlOneHour, Nothing, PromptCacheKey, PromptCacheKeyOneDay,
     };
     use CoveragePath::{
-        AnthropicDirect, CodexResponses, GoogleDirect, OpenAiResponses, OpenRouterClaude,
-        OpenRouterNonClaude,
+        AnthropicDirect, ChatAnthropicDialect, ChatGeminiDialect, ChatNoDialect, CodexResponses,
+        GoogleDirect, OpenAiResponses,
     };
 
     let cases = [
         CoverageCase {
-            path: OpenRouterClaude,
+            path: ChatAnthropicDialect,
             retention: None,
             expected: Nothing,
         },
         CoverageCase {
-            path: OpenRouterClaude,
+            path: ChatAnthropicDialect,
             retention: Short,
             expected: CacheControl,
         },
         CoverageCase {
-            path: OpenRouterClaude,
+            path: ChatAnthropicDialect,
             retention: Long,
             expected: CacheControlOneHour,
         },
         CoverageCase {
-            path: OpenRouterNonClaude,
+            path: ChatGeminiDialect,
             retention: None,
             expected: Nothing,
         },
         CoverageCase {
-            path: OpenRouterNonClaude,
+            path: ChatGeminiDialect,
+            retention: Short,
+            expected: CacheControl,
+        },
+        CoverageCase {
+            path: ChatGeminiDialect,
+            retention: Long,
+            expected: CacheControl,
+        },
+        CoverageCase {
+            path: ChatNoDialect,
+            retention: None,
+            expected: Nothing,
+        },
+        CoverageCase {
+            path: ChatNoDialect,
             retention: Short,
             expected: Nothing,
         },
         CoverageCase {
-            path: OpenRouterNonClaude,
+            path: ChatNoDialect,
             retention: Long,
             expected: Nothing,
         },
@@ -578,42 +609,40 @@ fn cache_coverage_matrix_matches_provider_model_and_retention_dialects() {
 }
 
 #[test]
-fn openrouter_gemini_cache_coverage_matrix_emits_ephemeral_markers() {
+fn gemini_dialect_is_independent_of_model_name() {
     for (retention, expected) in [
         (CacheRetention::None, CacheWireForm::Nothing),
         (CacheRetention::Short, CacheWireForm::CacheControl),
         (CacheRetention::Long, CacheWireForm::CacheControl),
     ] {
-        let body = lash_provider_openai::testing::serialize_chat_request(
-            OPENROUTER_BASE_URL,
-            &cache_request("google/gemini-3.1-pro-preview"),
-            retention,
-        )
-        .expect("OpenRouter Gemini body")
-        .0;
+        let request = with_cache_control(
+            cache_request("unrecognized/model"),
+            CacheControlDialect::Gemini,
+        );
+        let body = lash_provider_openai::testing::serialize_chat_request(&request, retention)
+            .expect("Gemini cache-control dialect body")
+            .0;
         assert_eq!(observed_wire_form(&body), expected, "{retention:?}");
     }
 }
 
 #[test]
-fn requested_breakpoints_that_the_chat_gate_strips_are_reported() {
-    let request = cache_request("google/gemini-3.1-pro-preview");
-    let (_, report) = lash_provider_openai::testing::serialize_chat_request(
-        OPENROUTER_BASE_URL,
-        &request,
-        CacheRetention::Short,
-    )
-    .expect("OpenRouter Gemini body");
+fn requested_breakpoints_report_capability_driven_emission_and_drop() {
+    let request = with_cache_control(
+        cache_request("unrecognized/model"),
+        CacheControlDialect::Gemini,
+    );
+    let (_, report) =
+        lash_provider_openai::testing::serialize_chat_request(&request, CacheRetention::Short)
+            .expect("Gemini cache-control dialect body");
 
     assert_eq!(report.requested, 1);
     assert_eq!(report.emitted, 1);
     assert_eq!(report.dropped, 0);
 
-    let (_, non_openrouter) = lash_provider_openai::testing::serialize_chat_request(
-        OPENAI_BASE_URL,
-        &request,
-        CacheRetention::Short,
-    )
-    .expect("non-OpenRouter chat body");
-    assert_eq!(non_openrouter.dropped, 1);
+    let request = cache_request("anthropic/claude-gemini-lookalike");
+    let (_, unsupported) =
+        lash_provider_openai::testing::serialize_chat_request(&request, CacheRetention::Short)
+            .expect("capability-free Chat body");
+    assert_eq!(unsupported.dropped, 1);
 }

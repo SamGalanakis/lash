@@ -1,4 +1,4 @@
-use lash_sansio::llm::types::{LlmTerminalReason, ProviderFailureKind};
+use lash_sansio::llm::types::{LlmResponse, LlmTerminalReason, ProviderFailureKind};
 
 /// Failure crossing the host-configurable HTTP transport boundary.
 ///
@@ -17,6 +17,9 @@ pub struct HttpTransportError {
     pub headers: Vec<(String, String)>,
     pub retry_after: Option<std::time::Duration>,
     pub request_body: Option<String>,
+    /// Provider output observed before this failure. It is diagnostic and
+    /// accounting evidence, never a successful response.
+    pub partial_response: Option<Box<LlmResponse>>,
 }
 
 impl HttpTransportError {
@@ -32,6 +35,7 @@ impl HttpTransportError {
             headers: Vec::new(),
             retry_after: None,
             request_body: None,
+            partial_response: None,
         }
     }
 
@@ -89,6 +93,11 @@ impl HttpTransportError {
 
     pub fn with_request_body(mut self, request_body: impl Into<String>) -> Self {
         self.request_body = Some(request_body.into());
+        self
+    }
+
+    pub fn with_partial_response(mut self, response: LlmResponse) -> Self {
+        self.partial_response = Some(Box::new(response));
         self
     }
 }

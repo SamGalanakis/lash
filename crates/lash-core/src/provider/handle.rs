@@ -243,6 +243,7 @@ impl ProviderHandle {
                                 "provider throttled with retry-after; waiting without consuming a retry attempt"
                             );
                             if let Some(events) = request.stream_events.as_ref() {
+                                events.send(crate::llm::types::LlmStreamEvent::AttemptReset);
                                 events.send(crate::llm::types::LlmStreamEvent::RetryStatus {
                                     wait_seconds: wait.as_secs(),
                                     attempt: (attempt + 1) as usize,
@@ -308,6 +309,7 @@ impl ProviderHandle {
                         "provider call failed with retryable failure; sleeping before retry"
                     );
                     if let Some(events) = request.stream_events.as_ref() {
+                        events.send(crate::llm::types::LlmStreamEvent::AttemptReset);
                         events.send(crate::llm::types::LlmStreamEvent::RetryStatus {
                             wait_seconds: delay.as_secs(),
                             attempt: (attempt + 1) as usize,
@@ -380,15 +382,16 @@ fn failure_attempt_record(
     retry_budget_consumed: bool,
     retry_decision: Option<RetryDecision>,
 ) -> AttemptRecord {
+    let partial = failure.partial_response.as_deref();
     let provider_request_id = observe_execution
         .then(|| header_value(&failure.headers, "x-request-id"))
         .flatten();
-    let evidence = provider_request_id
-        .clone()
-        .map(|provider_request_id| ExecutionEvidence {
-            provider_request_id: Some(provider_request_id),
-            ..ExecutionEvidence::default()
-        });
+    let mut evidence = partial.and_then(|response| response.execution_evidence.clone());
+    if let Some(provider_request_id) = provider_request_id.clone() {
+        evidence
+            .get_or_insert_with(ExecutionEvidence::default)
+            .provider_request_id = Some(provider_request_id);
+    }
     AttemptRecord {
         ordinal,
         started_at,
@@ -400,11 +403,21 @@ fn failure_attempt_record(
             }
             _ => AttemptOutcome::Failed,
         },
-        protocol_position: match failure.kind {
-            ProviderFailureKind::Stream => ProtocolPosition::OutputStarted,
-            _ if failure.status.is_some() => ProtocolPosition::ResponseObserved,
-            _ => ProtocolPosition::NoResponse,
-        },
+        protocol_position: partial
+            .map(|response| {
+                if !response.full_text.is_empty() || !response.parts.is_empty() {
+                    ProtocolPosition::OutputStarted
+                } else {
+                    ProtocolPosition::ResponseObserved
+                }
+            })
+            .unwrap_or_else(|| {
+                if failure.status.is_some() {
+                    ProtocolPosition::ResponseObserved
+                } else {
+                    ProtocolPosition::NoResponse
+                }
+            }),
         retry_budget_consumed,
         retry_decision,
         error: Some(NormalizedError {
@@ -416,7 +429,11 @@ fn failure_attempt_record(
             diagnostic: bounded_redacted_diagnostic(&failure.message),
         }),
         evidence,
-        usage: None,
+        usage: partial.and_then(|response| {
+            (response.provider_usage.is_some()
+                || response.usage != crate::llm::types::LlmUsage::default())
+            .then(|| response.usage.clone())
+        }),
     }
 }
 
