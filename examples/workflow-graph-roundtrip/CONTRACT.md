@@ -90,7 +90,7 @@ An unknown ID returns HTTP `404`:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "version": 1,
   "source": "canonical Lashlang source",
   "nodes": [
@@ -106,6 +106,15 @@ An unknown ID returns HTTP `404`:
         "operation": "show_message",
         "effect": "sleep",
         "fields": { "text": "Welcome", "pct": 35 },
+        "binding": "optional assignment binding",
+        "target": "state.count",
+        "expression": "state.count + 1",
+        "condition": "state.count < 3",
+        "iterable": "[70, 85, 100]",
+        "clauses": [
+          { "kind": "for", "binding": "item", "iterable": "items" },
+          { "kind": "if", "condition": "item.enabled" }
+        ],
         "source": "one canonical opaque statement, when fallback is required",
         "children": [
           {
@@ -138,8 +147,12 @@ An unknown ID returns HTTP `404`:
 ```
 
 Optional properties are omitted, so a real call node has `operation` but no
-`effect`, `source`, or `children`. The combined example above shows every
-possible property in one place.
+`effect`, expression slot, `source`, or `children`. The combined example above
+shows every possible property in one place.
+
+`schemaVersion: 3` is the clean-cutover contract in which every expression
+owned by a structured Lashlang graph node is canonical editable text. Version
+2 serialized retained AST payloads and is not accepted by the v3 renderer.
 
 Node `type` and `data.kind` use `process`, `data`, `call`, `effect`,
 `computation`, `state_update`, `terminal`, `container`, or `opaque`.
@@ -153,6 +166,21 @@ that includes strings such as `text`, `key`, `value`, `name`, `state`, `list`,
 `item`, and `target`; numeric `pct`; sleep `duration`; and wait `signal`.
 Values may be null, booleans, numbers, strings, lists, or objects. An opaque
 node is edited through `data.source` as one complete Lashlang statement.
+
+Structured expression slots are canonical Lashlang text rather than AST JSON:
+
+- `data.condition` is present on `if` and `while` containers.
+- `data.iterable` is present on `for` containers.
+- `data.clauses` exposes every list-comprehension `for` iterable and `if`
+  condition, plus each clause binding.
+- `data.target` and `data.expression` are present on `state_update` nodes.
+- `data.binding` and `data.expression` are present on `computation` nodes.
+
+Bindings are also returned on other assignment-producing structured nodes.
+On save, these strings replace the graph payload. Lashlang parses each string
+back into its typed AST field, validates that it matches the owning node kind,
+and only then runs the canonical printer. No original AST expression is used
+as a fallback.
 
 Containers carry ordered child groups in `data.children`. `roots.processes`
 lists the top-level process containers. A process container uses slot `body`;
@@ -183,6 +211,8 @@ The editable surface is:
 - `data.title`, `data.description`, and `data.nameSource`; set `nameSource` to
   `label` to author a label. A `derived` title is recomputed after save.
 - `data.fields` literal values.
+- `data.binding`, `data.target`, `data.expression`, `data.condition`,
+  `data.iterable`, and `data.clauses` canonical Lashlang text where present.
 - Opaque `data.source`.
 - `nodes`, `edges`, `roots`, and `children[].nodeIds` for delete/reorder edits.
 
@@ -202,17 +232,18 @@ Invalid graph edits return HTTP `422`:
 ```json
 {
   "error": {
-    "code": "invalid_opaque_source",
-    "message": "opaque node `...` is not exactly one valid statement: ...",
-    "details": { "nodeId": "opaque:...", "reason": "..." }
+    "code": "invalid_expression",
+    "message": "node `...` has invalid `condition` expression text: ...",
+    "details": { "nodeId": "container:...", "field": "condition", "reason": "..." }
   }
 }
 ```
 
 Typed render codes are `unsupported_schema_version`, `duplicate_node_id`,
 `unknown_node_reference`, `missing_required_child`, `invalid_node_payload`,
-`invalid_opaque_source`, `duplicate_process_name`, `canonical_source`, and
-`rendered_source_invalid`. Malformed host DTO structure uses
+`invalid_expression`, `invalid_assignment_target`, `invalid_opaque_source`,
+`duplicate_process_name`, `canonical_source`, and `rendered_source_invalid`.
+Malformed host DTO structure uses
 `invalid_graph_document`. A stale save returns HTTP `409` with
 `version_conflict`.
 

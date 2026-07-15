@@ -26,6 +26,14 @@ overlays. Projection parses source and operates on the AST; rendering
 reconstructs an AST and delegates all text generation to the existing canonical
 printer. It does not compile or link the workflow.
 
+Every expression-valued field owned by a structured node is stored in the
+graph as canonical Lashlang text. This includes assignment expressions and
+targets, computation expressions and bindings, `if`/`while` conditions, `for`
+iterables, and list-comprehension iterable/filter clauses. Rendering parses
+those fields back independently and returns field-typed errors for invalid
+host edits. The retained AST from the original projection is never an input to
+graph → source, so an edited field cannot silently reset.
+
 The lens laws are:
 
 1. On canonical source, source → graph → source is an exact textual fixpoint.
@@ -50,7 +58,7 @@ The derived projection is n8n-shaped:
 - `is_pure_expr` is the shared discriminator for the ordinary data subset,
   while source-valid `TypeLiteral` values remain typed data even when their
   references require runtime resolution;
-- a computation retains one complete effectful expression AST, preserving its
+- a computation retains one complete canonical effectful expression, preserving its
   evaluation order, short-circuit behavior, unwrap timing, and canonical text
   instead of splitting operands into independently scheduled nodes;
 - `for` and `while` summarize body writes as one post-loop version per visible
