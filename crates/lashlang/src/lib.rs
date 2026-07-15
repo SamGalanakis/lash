@@ -2,7 +2,6 @@ mod artifact;
 mod ast;
 mod builtins;
 mod compile;
-mod graph;
 mod identity;
 mod introspection;
 mod lexer;
@@ -12,6 +11,7 @@ mod runtime;
 mod source;
 mod tracking;
 mod trigger;
+mod workflow_graph;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -32,10 +32,6 @@ pub use ast::{
 pub use compile::{
     ModuleCompileDiagnostic, ModuleCompileError, ModuleCompileOutput, ModuleCompileRequest,
     ModuleCompileStage, compile_module,
-};
-pub use graph::{
-    LashlangMap, LashlangMapEdge, LashlangMapNode, LashlangMapOptions, map_lashlang_main,
-    map_lashlang_process, static_graph_json,
 };
 pub use identity::{ProcessDefinitionIdentity, ProcessDefinitionIdentityError};
 pub use introspection::{
@@ -81,7 +77,8 @@ pub use source::{
 };
 pub use tracking::{
     LashlangBranchSite, LashlangExecutionCallSite, LashlangExecutionChild,
-    LashlangExecutionObservation, LashlangExecutionSite, ProcessBranchSelection, process_ref_key,
+    LashlangExecutionObservation, LashlangExecutionSite, ProcessBranchSelection,
+    WorkflowExecutionSite, process_ref_key,
 };
 pub use trigger::{
     HostDescriptor, HostDescriptorError, LASH_TRIGGER_EVENT_KEY, TriggerCancelRequest,
@@ -90,6 +87,14 @@ pub use trigger::{
     TriggerRegistrationRequest, add_trigger_resource_operations, cancel_call_args,
     check_trigger_compatibility, event_type_for_source, is_trigger_resource_type, list_call_args,
     register_call_args, trigger_event_placeholder_expr,
+};
+pub use workflow_graph::{
+    GraphRenderError, VariableVersion, WORKFLOW_GRAPH_SCHEMA_VERSION, WorkflowContainer,
+    WorkflowDeclaration, WorkflowEdge, WorkflowEdgeKind, WorkflowEffectKind, WorkflowGraph,
+    WorkflowGraphBuildError, WorkflowNode, WorkflowNodeId, WorkflowNodeKind,
+    WorkflowNodeNameSource, WorkflowProcess, WorkflowSubgraph, WorkflowTerminalKind,
+    node_id_for_execution_site, runtime_execution_site_for_workflow_site,
+    workflow_graph_from_source, workflow_graph_to_source,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {

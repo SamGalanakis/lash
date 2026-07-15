@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use lash_core::{
     ExecRequest, ExecResponse, RuntimeEffectKind, RuntimeExecutionContext, SessionError,
-    TraceContext, TraceLabelMetadata, TraceRuntimeScope, TraceRuntimeSubject, TraceSink,
+    TraceContext, TraceRuntimeScope, TraceRuntimeSubject, TraceSink,
 };
 use lash_lashlang_runtime::{
     LashlangSurface, TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, TraceLashlangMap,
-    TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangStatus,
+    TraceLashlangStatus,
 };
 use lashlang::{ExecutionOutcome, State as FlowState};
 
@@ -439,41 +439,7 @@ fn emit_foreground_execution_finished(
 }
 
 fn trace_main_map(artifact: &lashlang::ModuleArtifact) -> TraceLashlangMap {
-    let map = lashlang::map_lashlang_main(
-        artifact,
-        lashlang::LashlangMapOptions {
-            include_reachable_processes: true,
-        },
-    );
-    TraceLashlangMap {
-        module_ref: map.module_ref.to_string(),
-        entry_kind: map.entry_kind,
-        entry_ref: map.entry_ref.as_ref().map(lashlang::process_ref_key),
-        entry_name: map.entry_name,
-        nodes: map
-            .nodes
-            .into_iter()
-            .map(|node| TraceLashlangMapNode {
-                id: node.id,
-                kind: node.kind,
-                label: node.label,
-                label_metadata: node.label_metadata.map(|label| TraceLabelMetadata {
-                    title: label.title.to_string(),
-                    description: label.description.map(|description| description.to_string()),
-                }),
-            })
-            .collect(),
-        edges: map
-            .edges
-            .into_iter()
-            .map(|edge| TraceLashlangMapEdge {
-                id: edge.id,
-                from: edge.from,
-                to: edge.to,
-                label: edge.label,
-            })
-            .collect(),
-    }
+    lash_lashlang_runtime::trace_lashlang_main_map(artifact)
 }
 
 fn apply_global_defaults(

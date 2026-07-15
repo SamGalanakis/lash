@@ -1,0 +1,1553 @@
+//! Source-level Lashlang workflow graph projection and rendering.
+//!
+//! The graph is deliberately a semantic, canonical view rather than a CST:
+//! comments and authored formatting are discarded. Hosts own graph mutation,
+//! drafts, layout, and versioning; this module owns only the typed document,
+//! deterministic identity, projection, validation, and canonical rendering.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use crate::ast::{
+    AssignTarget, Declaration, Expr, LabelMetadata, ListComprehensionClause, ProcessDecl,
+    ProcessParam, ProcessSignalDecl, Program, TypeDecl, TypeExpr,
+};
+use crate::runtime::is_pure_expr;
+use crate::source::{CanonicalSourceError, canonical_program_source};
+use crate::tracking::WorkflowExecutionSite;
+use crate::tracking::{LashlangAstPath, LashlangExecutionContext};
+use crate::{LashlangExecutionSite, ModuleArtifact, ParseError, Span, parse};
+
+/// Version of the serialized workflow graph contract.
+pub const WORKFLOW_GRAPH_SCHEMA_VERSION: u32 = 1;
+
+/// A deterministic node identifier minted from canonical source and AST position.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkflowNodeId(String);
+
+impl WorkflowNodeId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for WorkflowNodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The single serializable graph document used for editing and run overlays.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowGraph {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub declarations: Vec<WorkflowDeclaration>,
+    pub main: WorkflowSubgraph,
+}
+
+impl WorkflowGraph {
+    pub fn process(&self, name: &str) -> Option<&WorkflowProcess> {
+        self.declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                WorkflowDeclaration::Process(process) if process.name.as_str() == name => {
+                    Some(process)
+                }
+                _ => None,
+            })
+    }
+
+    /// Iterates over every node, including nodes in nested containers and processes.
+    pub fn nodes(&self) -> impl Iterator<Item = &WorkflowNode> {
+        let mut nodes = Vec::new();
+        collect_subgraph_nodes(&self.main, &mut nodes);
+        for declaration in &self.declarations {
+            if let WorkflowDeclaration::Process(process) = declaration {
+                collect_subgraph_nodes(&process.body, &mut nodes);
+            }
+        }
+        nodes.into_iter()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowDeclaration {
+    Type(TypeDecl),
+    Process(WorkflowProcess),
+}
+
+/// A named process is a container with its own child subgraph.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowProcess {
+    pub id: WorkflowNodeId,
+    pub name: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub name_source: WorkflowNodeNameSource,
+    #[serde(default)]
+    pub params: Vec<ProcessParam>,
+    #[serde(default)]
+    pub signals: Vec<ProcessSignalDecl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_ty: Option<TypeExpr>,
+    pub body: WorkflowSubgraph,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowNodeNameSource {
+    Label,
+    Derived,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowSubgraph {
+    #[serde(default)]
+    pub nodes: Vec<WorkflowNode>,
+    #[serde(default)]
+    pub edges: Vec<WorkflowEdge>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowNode {
+    pub id: WorkflowNodeId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub name_source: WorkflowNodeNameSource,
+    pub kind: WorkflowNodeKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<VariableVersion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_sites: Vec<WorkflowExecutionSite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<Span>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowNodeKind {
+    Data {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<AssignTarget>,
+        expression: Expr,
+    },
+    Call {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<AssignTarget>,
+        operation: String,
+        expression: Expr,
+    },
+    Effect {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<AssignTarget>,
+        effect: WorkflowEffectKind,
+        expression: Expr,
+    },
+    Terminal {
+        terminal: WorkflowTerminalKind,
+        expression: Expr,
+    },
+    Container(WorkflowContainer),
+    Opaque {
+        source: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowEffectKind {
+    StartProcess,
+    AwaitJoin,
+    SignalRun,
+    WaitSignal,
+    Sleep,
+    Cancel,
+    Print,
+    Yield,
+    Wake,
+    Break,
+    Continue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowTerminalKind {
+    Finish,
+    Fail,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowContainer {
+    If {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<AssignTarget>,
+        condition: Expr,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        then_graph: Option<Box<WorkflowSubgraph>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        else_graph: Option<Box<WorkflowSubgraph>>,
+    },
+    For {
+        binding: String,
+        iterable: Expr,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<Box<WorkflowSubgraph>>,
+    },
+    ListComprehension {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<AssignTarget>,
+        clauses: Vec<ListComprehensionClause>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        element: Option<Box<WorkflowSubgraph>>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VariableVersion {
+    pub variable: String,
+    pub version: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowEdge {
+    pub id: String,
+    pub from: WorkflowNodeId,
+    pub to: WorkflowNodeId,
+    pub kind: WorkflowEdgeKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowEdgeKind {
+    DataDependency { variable: String, version: u32 },
+    Sequence,
+}
+
+#[derive(Debug, Error)]
+pub enum WorkflowGraphBuildError {
+    #[error(transparent)]
+    Parse(#[from] ParseError),
+    #[error(transparent)]
+    CanonicalSource(#[from] CanonicalSourceError),
+}
+
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum GraphRenderError {
+    #[error("unsupported workflow graph schema version {found}; expected {expected}")]
+    UnsupportedSchemaVersion { found: u32, expected: u32 },
+    #[error("duplicate workflow node id `{id}`")]
+    DuplicateNodeId { id: String },
+    #[error("edge `{edge_id}` references unknown {endpoint} node `{node_id}`")]
+    UnknownNodeReference {
+        edge_id: String,
+        endpoint: &'static str,
+        node_id: String,
+    },
+    #[error("node `{node_id}` is missing required child `{child}`")]
+    MissingRequiredChild {
+        node_id: String,
+        child: &'static str,
+    },
+    #[error("node `{node_id}` has a payload incompatible with its kind: {message}")]
+    InvalidNodePayload { node_id: String, message: String },
+    #[error("opaque node `{node_id}` is not exactly one valid statement: {message}")]
+    InvalidOpaqueSource { node_id: String, message: String },
+    #[error("duplicate process name `{name}`")]
+    DuplicateProcessName { name: String },
+    #[error(transparent)]
+    CanonicalSource(#[from] CanonicalSourceError),
+    #[error("rendered workflow source did not parse: {message}")]
+    RenderedSourceInvalid { message: String },
+}
+
+/// Parse source, canonicalize it, and project it into a deterministic graph.
+pub fn workflow_graph_from_source(src: &str) -> Result<WorkflowGraph, WorkflowGraphBuildError> {
+    let parsed = parse(src)?;
+    let canonical = canonical_program_source(&parsed)?;
+    let canonical_program = parse(&canonical)?;
+    Ok(GraphProjector::new(&canonical, &canonical_program).project())
+}
+
+/// Validate and render a graph through the canonical Lashlang source printer.
+pub fn workflow_graph_to_source(graph: &WorkflowGraph) -> Result<String, GraphRenderError> {
+    validate_graph(graph)?;
+    let program = graph_to_program(graph)?;
+    let source = canonical_program_source(&program)?;
+    parse(&source).map_err(|error| GraphRenderError::RenderedSourceInvalid {
+        message: error.to_string(),
+    })?;
+    Ok(source)
+}
+
+/// Resolve a runtime execution site to the workflow node that owns it.
+///
+/// This keeps runtime events unchanged: the host joins an observed site to the
+/// graph using the source-level entry/path descriptor carried by the site.
+pub fn node_id_for_execution_site(
+    graph: &WorkflowGraph,
+    site: &LashlangExecutionSite,
+) -> Option<WorkflowNodeId> {
+    graph
+        .nodes()
+        .find(|node| {
+            node.execution_sites
+                .iter()
+                .any(|candidate| candidate.same_location(&site.workflow_site))
+        })
+        .map(|node| node.id.clone())
+}
+
+/// Recreate the runtime identity for a graph execution-site descriptor.
+///
+/// This is primarily a compatibility seam for trace consumers that key live
+/// observations by the runtime site id while reading the workflow graph as the
+/// static skeleton.
+pub fn runtime_execution_site_for_workflow_site(
+    artifact: &ModuleArtifact,
+    site: &WorkflowExecutionSite,
+) -> Option<LashlangExecutionSite> {
+    let context = if site.owner == "main" {
+        LashlangExecutionContext::main(artifact.module_ref.clone())
+    } else {
+        let process_name = site.owner.strip_prefix("process:")?;
+        LashlangExecutionContext::process(
+            artifact.module_ref.clone(),
+            artifact.process_ref(process_name)?.clone(),
+            process_name,
+        )
+    };
+    let path = LashlangAstPath::from_indices(&site.path);
+    let mut runtime_site = if site.kind == "branch" {
+        context.builder().branch_site(&path)
+    } else {
+        context
+            .builder()
+            .node_site(&path, site.kind.clone(), site.label.clone())
+    };
+    runtime_site.workflow_site = site.clone();
+    Some(runtime_site)
+}
+
+struct GraphProjector<'a> {
+    program: &'a Program,
+    source_hash: String,
+    spans: BTreeMap<Vec<u32>, Span>,
+}
+
+impl<'a> GraphProjector<'a> {
+    fn new(canonical: &'a str, program: &'a Program) -> Self {
+        Self {
+            program,
+            source_hash: hex_digest(canonical.as_bytes()),
+            spans: program
+                .expression_source_spans
+                .iter()
+                .map(|source_span| (source_span.path.clone(), source_span.span))
+                .collect(),
+        }
+    }
+
+    fn project(&self) -> WorkflowGraph {
+        let mut declarations = Vec::with_capacity(self.program.declarations.len());
+        for declaration in &self.program.declarations {
+            match declaration {
+                Declaration::Type(ty) => declarations.push(WorkflowDeclaration::Type(ty.clone())),
+                Declaration::Process(process) => {
+                    declarations.push(WorkflowDeclaration::Process(self.project_process(process)))
+                }
+            }
+        }
+        let mut versions = VersionState::default();
+        let main = self.project_block(&self.program.main, "main", &[], &mut versions);
+        WorkflowGraph {
+            schema_version: WORKFLOW_GRAPH_SCHEMA_VERSION,
+            declarations,
+            main,
+        }
+    }
+
+    fn project_process(&self, process: &ProcessDecl) -> WorkflowProcess {
+        let owner = format!("process:{}", process.name);
+        let (display_name, description, name_source) = match &process.label {
+            Some(label) => (
+                label.title.to_string(),
+                label.description.as_ref().map(ToString::to_string),
+                WorkflowNodeNameSource::Label,
+            ),
+            None => (
+                process.name.to_string(),
+                None,
+                WorkflowNodeNameSource::Derived,
+            ),
+        };
+        let mut versions = VersionState::default();
+        for param in &process.params {
+            versions.seed(param.name.as_str());
+        }
+        WorkflowProcess {
+            id: self.node_id(&owner, &[], "process"),
+            name: process.name.to_string(),
+            display_name,
+            description,
+            name_source,
+            params: process.params.clone(),
+            signals: process.signals.clone(),
+            return_ty: process.return_ty.clone(),
+            body: self.project_block(&process.body, &owner, &[], &mut versions),
+        }
+    }
+
+    fn project_block(
+        &self,
+        expr: &Expr,
+        owner: &str,
+        base_path: &[u32],
+        versions: &mut VersionState,
+    ) -> WorkflowSubgraph {
+        let expressions = match expr {
+            Expr::Block(expressions) => expressions.as_slice(),
+            expression => std::slice::from_ref(expression),
+        };
+        let mut subgraph = WorkflowSubgraph::default();
+        let mut previous_effect: Option<WorkflowNodeId> = None;
+        for (index, expression) in expressions.iter().enumerate() {
+            let mut path = base_path.to_vec();
+            if matches!(expr, Expr::Block(_)) {
+                path.push(index as u32);
+            }
+            let node = self.project_node(expression, owner, &path, versions);
+            add_dependency_edges(&mut subgraph.edges, &node, expression, versions);
+            if node_is_sequenced(&node) {
+                if let Some(previous) = &previous_effect {
+                    subgraph.edges.push(edge(
+                        previous.clone(),
+                        node.id.clone(),
+                        WorkflowEdgeKind::Sequence,
+                    ));
+                }
+                previous_effect = Some(node.id.clone());
+            }
+            versions.record_outputs(&node.outputs, &node.id);
+            subgraph.nodes.push(node);
+        }
+        subgraph
+    }
+
+    fn project_node(
+        &self,
+        expression: &Expr,
+        owner: &str,
+        path: &[u32],
+        versions: &mut VersionState,
+    ) -> WorkflowNode {
+        let (label, expression) = peel_label(expression);
+        let source_span = if owner == "main" {
+            self.spans.get(path).copied()
+        } else {
+            None
+        };
+        let (kind, derived_name, outputs) = self.project_kind(expression, owner, path, versions);
+        let (name, description, name_source) = match label {
+            Some(label) => (
+                label.title.to_string(),
+                label.description.as_ref().map(ToString::to_string),
+                WorkflowNodeNameSource::Label,
+            ),
+            None => (derived_name, None, WorkflowNodeNameSource::Derived),
+        };
+        let execution_sites = execution_sites(expression, owner, path, label);
+        WorkflowNode {
+            id: self.node_id(owner, path, kind_tag(&kind)),
+            name,
+            description,
+            name_source,
+            kind,
+            outputs,
+            execution_sites,
+            source_span,
+        }
+    }
+
+    fn project_kind(
+        &self,
+        expression: &Expr,
+        owner: &str,
+        path: &[u32],
+        versions: &mut VersionState,
+    ) -> (WorkflowNodeKind, String, Vec<VariableVersion>) {
+        let (binding, value, value_path) = assignment_parts(expression, path);
+        if should_be_opaque(expression, versions) {
+            let outputs = opaque_outputs(expression, binding.as_ref(), versions);
+            return (
+                WorkflowNodeKind::Opaque {
+                    source: canonical_statement(expression),
+                },
+                opaque_name(expression),
+                outputs,
+            );
+        }
+        match value {
+            Expr::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                let mut then_versions = versions.clone();
+                let mut else_versions = versions.clone();
+                let then_graph = self.project_block(
+                    then_block,
+                    owner,
+                    &child_path(&value_path, 1),
+                    &mut then_versions,
+                );
+                let else_graph = self.project_block(
+                    else_block,
+                    owner,
+                    &child_path(&value_path, 2),
+                    &mut else_versions,
+                );
+                let mut outputs = assignment_output(binding.as_ref(), versions);
+                outputs.extend(versions.merge_outputs(&then_versions, &else_versions));
+                (
+                    WorkflowNodeKind::Container(WorkflowContainer::If {
+                        binding,
+                        condition: (**condition).clone(),
+                        then_graph: Some(Box::new(then_graph)),
+                        else_graph: Some(Box::new(else_graph)),
+                    }),
+                    "if".to_string(),
+                    outputs,
+                )
+            }
+            Expr::For {
+                binding: loop_binding,
+                iterable,
+                body,
+            } => {
+                let mut body_versions = versions.clone();
+                body_versions.seed(loop_binding.as_str());
+                let body = self.project_block(
+                    body,
+                    owner,
+                    &child_path(&value_path, 1),
+                    &mut body_versions,
+                );
+                (
+                    WorkflowNodeKind::Container(WorkflowContainer::For {
+                        binding: loop_binding.to_string(),
+                        iterable: (**iterable).clone(),
+                        body: Some(Box::new(body)),
+                    }),
+                    format!("for {loop_binding}"),
+                    Vec::new(),
+                )
+            }
+            Expr::ListComprehension { element, clauses } => {
+                let mut element_versions = versions.clone();
+                for clause in clauses {
+                    if let ListComprehensionClause::For { binding, .. } = clause {
+                        element_versions.seed(binding.as_str());
+                    }
+                }
+                let element_graph = self.project_block(
+                    element,
+                    owner,
+                    &child_path(&value_path, clauses.len() as u32),
+                    &mut element_versions,
+                );
+                let outputs = assignment_output(binding.as_ref(), versions);
+                (
+                    WorkflowNodeKind::Container(WorkflowContainer::ListComprehension {
+                        binding,
+                        clauses: clauses.clone(),
+                        element: Some(Box::new(element_graph)),
+                    }),
+                    "list comprehension".to_string(),
+                    outputs,
+                )
+            }
+            Expr::Finish(_) => (
+                WorkflowNodeKind::Terminal {
+                    terminal: WorkflowTerminalKind::Finish,
+                    expression: value.clone(),
+                },
+                "finish".to_string(),
+                Vec::new(),
+            ),
+            Expr::Fail(_) => (
+                WorkflowNodeKind::Terminal {
+                    terminal: WorkflowTerminalKind::Fail,
+                    expression: value.clone(),
+                },
+                "fail".to_string(),
+                Vec::new(),
+            ),
+            _ if is_pure_expr(value) => {
+                let outputs = assignment_output(binding.as_ref(), versions);
+                (
+                    WorkflowNodeKind::Data {
+                        binding,
+                        expression: value.clone(),
+                    },
+                    data_name(value),
+                    outputs,
+                )
+            }
+            _ => {
+                let outputs = assignment_output(binding.as_ref(), versions);
+                if let Some(operation) = first_receiver_operation(value) {
+                    (
+                        WorkflowNodeKind::Call {
+                            binding,
+                            operation: operation.to_string(),
+                            expression: value.clone(),
+                        },
+                        operation.to_string(),
+                        outputs,
+                    )
+                } else if let Some(effect) = effect_kind(value) {
+                    let name = effect_name(value, &effect);
+                    (
+                        WorkflowNodeKind::Effect {
+                            binding,
+                            effect,
+                            expression: value.clone(),
+                        },
+                        name,
+                        outputs,
+                    )
+                } else {
+                    (
+                        WorkflowNodeKind::Opaque {
+                            source: canonical_statement(expression),
+                        },
+                        opaque_name(expression),
+                        outputs,
+                    )
+                }
+            }
+        }
+    }
+
+    fn node_id(&self, owner: &str, path: &[u32], kind: &str) -> WorkflowNodeId {
+        let path = if path.is_empty() {
+            "root".to_string()
+        } else {
+            path.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        let material = format!("{}\0{owner}\0{path}\0{kind}", self.source_hash);
+        WorkflowNodeId(format!("{kind}:{}", &hex_digest(material.as_bytes())[..24]))
+    }
+}
+
+#[derive(Clone, Default)]
+struct VersionState {
+    next: BTreeMap<String, u32>,
+    current: BTreeMap<String, (u32, WorkflowNodeId)>,
+    known: BTreeSet<String>,
+}
+
+impl VersionState {
+    fn seed(&mut self, variable: &str) {
+        self.known.insert(variable.to_string());
+        self.next.entry(variable.to_string()).or_insert(1);
+    }
+
+    fn allocate(&mut self, variable: &str) -> VariableVersion {
+        self.known.insert(variable.to_string());
+        let version = *self.next.entry(variable.to_string()).or_insert(1);
+        self.next.insert(variable.to_string(), version + 1);
+        VariableVersion {
+            variable: variable.to_string(),
+            version,
+        }
+    }
+
+    fn record_outputs(&mut self, outputs: &[VariableVersion], node: &WorkflowNodeId) {
+        for output in outputs {
+            self.current
+                .insert(output.variable.clone(), (output.version, node.clone()));
+            self.next
+                .entry(output.variable.clone())
+                .and_modify(|next| *next = (*next).max(output.version + 1))
+                .or_insert(output.version + 1);
+        }
+    }
+
+    fn merge_outputs(&mut self, left: &Self, right: &Self) -> Vec<VariableVersion> {
+        let variables = left
+            .current
+            .keys()
+            .chain(right.current.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let changed = variables
+            .into_iter()
+            .filter(|variable| {
+                left.current.get(variable) != self.current.get(variable)
+                    || right.current.get(variable) != self.current.get(variable)
+            })
+            .collect::<Vec<_>>();
+        changed
+            .into_iter()
+            .map(|variable| self.allocate(&variable))
+            .collect()
+    }
+}
+
+fn validate_graph(graph: &WorkflowGraph) -> Result<(), GraphRenderError> {
+    if graph.schema_version != WORKFLOW_GRAPH_SCHEMA_VERSION {
+        return Err(GraphRenderError::UnsupportedSchemaVersion {
+            found: graph.schema_version,
+            expected: WORKFLOW_GRAPH_SCHEMA_VERSION,
+        });
+    }
+    let mut all_ids = BTreeSet::new();
+    validate_subgraph(&graph.main, &mut all_ids)?;
+    let mut process_names = BTreeSet::new();
+    for declaration in &graph.declarations {
+        if let WorkflowDeclaration::Process(process) = declaration {
+            if !process_names.insert(process.name.clone()) {
+                return Err(GraphRenderError::DuplicateProcessName {
+                    name: process.name.clone(),
+                });
+            }
+            if !all_ids.insert(process.id.clone()) {
+                return Err(GraphRenderError::DuplicateNodeId {
+                    id: process.id.to_string(),
+                });
+            }
+            validate_subgraph(&process.body, &mut all_ids)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_subgraph(
+    graph: &WorkflowSubgraph,
+    all_ids: &mut BTreeSet<WorkflowNodeId>,
+) -> Result<(), GraphRenderError> {
+    let local_ids = graph
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    if local_ids.len() != graph.nodes.len() {
+        let mut seen = BTreeSet::new();
+        let id = graph
+            .nodes
+            .iter()
+            .find(|node| !seen.insert(node.id.clone()))
+            .expect("a duplicate exists")
+            .id
+            .to_string();
+        return Err(GraphRenderError::DuplicateNodeId { id });
+    }
+    for node in &graph.nodes {
+        if !all_ids.insert(node.id.clone()) {
+            return Err(GraphRenderError::DuplicateNodeId {
+                id: node.id.to_string(),
+            });
+        }
+        validate_node(node, all_ids)?;
+    }
+    for edge in &graph.edges {
+        if !local_ids.contains(&edge.from) && !all_ids.contains(&edge.from) {
+            return Err(GraphRenderError::UnknownNodeReference {
+                edge_id: edge.id.clone(),
+                endpoint: "source",
+                node_id: edge.from.to_string(),
+            });
+        }
+        if !local_ids.contains(&edge.to) && !all_ids.contains(&edge.to) {
+            return Err(GraphRenderError::UnknownNodeReference {
+                edge_id: edge.id.clone(),
+                endpoint: "target",
+                node_id: edge.to.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_node(
+    node: &WorkflowNode,
+    all_ids: &mut BTreeSet<WorkflowNodeId>,
+) -> Result<(), GraphRenderError> {
+    let binding = match &node.kind {
+        WorkflowNodeKind::Data { binding, .. }
+        | WorkflowNodeKind::Call { binding, .. }
+        | WorkflowNodeKind::Effect { binding, .. }
+        | WorkflowNodeKind::Container(WorkflowContainer::If { binding, .. })
+        | WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { binding, .. }) => {
+            binding.as_ref()
+        }
+        _ => None,
+    };
+    if binding.is_some_and(|binding| !binding.is_simple()) {
+        return invalid_payload(node, "nested path assignment must be an opaque node");
+    }
+    match &node.kind {
+        WorkflowNodeKind::Data { expression, .. } if !is_pure_expr(expression) => {
+            return Err(GraphRenderError::InvalidNodePayload {
+                node_id: node.id.to_string(),
+                message: "data expression is effectful".to_string(),
+            });
+        }
+        WorkflowNodeKind::Call {
+            operation,
+            expression,
+            ..
+        } if first_receiver_operation(expression) != Some(operation.as_str()) => {
+            return invalid_payload(
+                node,
+                "call operation does not match its receiver-call expression",
+            );
+        }
+        WorkflowNodeKind::Effect {
+            effect, expression, ..
+        } if effect_kind(expression).as_ref() != Some(effect) => {
+            return invalid_payload(node, "effect kind does not match its expression");
+        }
+        WorkflowNodeKind::Terminal {
+            terminal: WorkflowTerminalKind::Finish,
+            expression,
+        } if !matches!(expression, Expr::Finish(_)) => {
+            return invalid_payload(node, "finish terminal must carry a finish expression");
+        }
+        WorkflowNodeKind::Terminal {
+            terminal: WorkflowTerminalKind::Fail,
+            expression,
+        } if !matches!(expression, Expr::Fail(_)) => {
+            return invalid_payload(node, "fail terminal must carry a fail expression");
+        }
+        WorkflowNodeKind::Container(WorkflowContainer::If {
+            then_graph,
+            else_graph,
+            ..
+        }) => {
+            let then_graph =
+                then_graph
+                    .as_deref()
+                    .ok_or_else(|| GraphRenderError::MissingRequiredChild {
+                        node_id: node.id.to_string(),
+                        child: "then_graph",
+                    })?;
+            let else_graph =
+                else_graph
+                    .as_deref()
+                    .ok_or_else(|| GraphRenderError::MissingRequiredChild {
+                        node_id: node.id.to_string(),
+                        child: "else_graph",
+                    })?;
+            validate_subgraph(then_graph, all_ids)?;
+            validate_subgraph(else_graph, all_ids)?;
+        }
+        WorkflowNodeKind::Container(WorkflowContainer::For { body, .. }) => {
+            let body = body
+                .as_deref()
+                .ok_or_else(|| GraphRenderError::MissingRequiredChild {
+                    node_id: node.id.to_string(),
+                    child: "body",
+                })?;
+            validate_subgraph(body, all_ids)?;
+        }
+        WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { element, .. }) => {
+            let element =
+                element
+                    .as_deref()
+                    .ok_or_else(|| GraphRenderError::MissingRequiredChild {
+                        node_id: node.id.to_string(),
+                        child: "element",
+                    })?;
+            validate_subgraph(element, all_ids)?;
+            if element.nodes.len() != 1 {
+                return invalid_payload(
+                    node,
+                    "list-comprehension element must contain exactly one node",
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn invalid_payload<T>(node: &WorkflowNode, message: &str) -> Result<T, GraphRenderError> {
+    Err(GraphRenderError::InvalidNodePayload {
+        node_id: node.id.to_string(),
+        message: message.to_string(),
+    })
+}
+
+fn graph_to_program(graph: &WorkflowGraph) -> Result<Program, GraphRenderError> {
+    let mut declarations = Vec::with_capacity(graph.declarations.len());
+    for declaration in &graph.declarations {
+        declarations.push(match declaration {
+            WorkflowDeclaration::Type(ty) => Declaration::Type(ty.clone()),
+            WorkflowDeclaration::Process(process) => {
+                let label =
+                    (process.name_source == WorkflowNodeNameSource::Label).then(|| LabelMetadata {
+                        title: process.display_name.clone().into(),
+                        description: process.description.clone().map(Into::into),
+                    });
+                Declaration::Process(ProcessDecl {
+                    name: process.name.clone().into(),
+                    params: process.params.clone(),
+                    signals: process.signals.clone(),
+                    return_ty: process.return_ty.clone(),
+                    label,
+                    body: subgraph_to_block(&process.body, RenderContext::Process)?,
+                })
+            }
+        });
+    }
+    Ok(Program {
+        declarations,
+        main: subgraph_to_block(&graph.main, RenderContext::Main)?,
+        declaration_spans: Vec::new(),
+        expression_spans: Vec::new(),
+        expression_source_spans: Vec::new(),
+    })
+}
+
+#[derive(Clone, Copy)]
+enum RenderContext {
+    Main,
+    Process,
+}
+
+fn subgraph_to_block(
+    graph: &WorkflowSubgraph,
+    context: RenderContext,
+) -> Result<Expr, GraphRenderError> {
+    graph
+        .nodes
+        .iter()
+        .map(|node| node_to_expr(node, context))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Expr::Block)
+}
+
+fn node_to_expr(node: &WorkflowNode, context: RenderContext) -> Result<Expr, GraphRenderError> {
+    let expression =
+        match &node.kind {
+            WorkflowNodeKind::Data {
+                binding,
+                expression,
+            }
+            | WorkflowNodeKind::Call {
+                binding,
+                expression,
+                ..
+            }
+            | WorkflowNodeKind::Effect {
+                binding,
+                expression,
+                ..
+            } => with_assignment(binding, expression.clone()),
+            WorkflowNodeKind::Terminal { expression, .. } => expression.clone(),
+            WorkflowNodeKind::Container(WorkflowContainer::If {
+                binding,
+                condition,
+                then_graph,
+                else_graph,
+            }) => {
+                let then_graph = then_graph.as_deref().ok_or_else(|| {
+                    GraphRenderError::MissingRequiredChild {
+                        node_id: node.id.to_string(),
+                        child: "then_graph",
+                    }
+                })?;
+                let else_graph = else_graph.as_deref().ok_or_else(|| {
+                    GraphRenderError::MissingRequiredChild {
+                        node_id: node.id.to_string(),
+                        child: "else_graph",
+                    }
+                })?;
+                with_assignment(
+                    binding,
+                    Expr::If {
+                        condition: Box::new(condition.clone()),
+                        then_block: Box::new(subgraph_to_block(then_graph, context)?),
+                        else_block: Box::new(subgraph_to_block(else_graph, context)?),
+                    },
+                )
+            }
+            WorkflowNodeKind::Container(WorkflowContainer::For {
+                binding,
+                iterable,
+                body,
+            }) => Expr::For {
+                binding: binding.clone().into(),
+                iterable: Box::new(iterable.clone()),
+                body: Box::new(subgraph_to_block(
+                    body.as_deref()
+                        .ok_or_else(|| GraphRenderError::MissingRequiredChild {
+                            node_id: node.id.to_string(),
+                            child: "body",
+                        })?,
+                    context,
+                )?),
+            },
+            WorkflowNodeKind::Container(WorkflowContainer::ListComprehension {
+                binding,
+                clauses,
+                element,
+            }) => {
+                let element =
+                    element
+                        .as_deref()
+                        .ok_or_else(|| GraphRenderError::MissingRequiredChild {
+                            node_id: node.id.to_string(),
+                            child: "element",
+                        })?;
+                let Expr::Block(mut expressions) = subgraph_to_block(element, context)? else {
+                    unreachable!("subgraph rendering always returns a block")
+                };
+                if expressions.len() != 1 {
+                    return invalid_payload(
+                        node,
+                        "list-comprehension element must contain exactly one node",
+                    );
+                }
+                with_assignment(
+                    binding,
+                    Expr::ListComprehension {
+                        element: Box::new(expressions.remove(0)),
+                        clauses: clauses.clone(),
+                    },
+                )
+            }
+            WorkflowNodeKind::Opaque { source } => parse_opaque_statement(node, source, context)?,
+        };
+    Ok(if node.name_source == WorkflowNodeNameSource::Label {
+        Expr::LabelAnnotated {
+            label: LabelMetadata {
+                title: node.name.clone().into(),
+                description: node.description.clone().map(Into::into),
+            },
+            expr: Box::new(expression),
+        }
+    } else {
+        expression
+    })
+}
+
+fn parse_opaque_statement(
+    node: &WorkflowNode,
+    source: &str,
+    context: RenderContext,
+) -> Result<Expr, GraphRenderError> {
+    let program = match context {
+        RenderContext::Main => parse(source),
+        RenderContext::Process => parse(&format!("process __workflow_graph__() {{\n{source}\n}}")),
+    }
+    .map_err(|error| GraphRenderError::InvalidOpaqueSource {
+        node_id: node.id.to_string(),
+        message: error.to_string(),
+    })?;
+    let expressions = match context {
+        RenderContext::Main => match program.main {
+            Expr::Block(expressions) => expressions,
+            expression => vec![expression],
+        },
+        RenderContext::Process => {
+            let Some(Declaration::Process(process)) = program.declarations.into_iter().next()
+            else {
+                return invalid_payload(node, "opaque process wrapper did not produce a process");
+            };
+            match process.body {
+                Expr::Block(expressions) => expressions,
+                expression => vec![expression],
+            }
+        }
+    };
+    if expressions.len() != 1 {
+        return Err(GraphRenderError::InvalidOpaqueSource {
+            node_id: node.id.to_string(),
+            message: format!("expected one statement, found {}", expressions.len()),
+        });
+    }
+    Ok(expressions.into_iter().next().expect("one expression"))
+}
+
+fn with_assignment(binding: &Option<AssignTarget>, expression: Expr) -> Expr {
+    match binding {
+        Some(target) => Expr::Assign {
+            target: target.clone(),
+            expr: Box::new(expression),
+        },
+        None => expression,
+    }
+}
+
+fn collect_subgraph_nodes<'a>(graph: &'a WorkflowSubgraph, nodes: &mut Vec<&'a WorkflowNode>) {
+    for node in &graph.nodes {
+        nodes.push(node);
+        match &node.kind {
+            WorkflowNodeKind::Container(WorkflowContainer::If {
+                then_graph,
+                else_graph,
+                ..
+            }) => {
+                if let Some(graph) = then_graph {
+                    collect_subgraph_nodes(graph, nodes);
+                }
+                if let Some(graph) = else_graph {
+                    collect_subgraph_nodes(graph, nodes);
+                }
+            }
+            WorkflowNodeKind::Container(WorkflowContainer::For {
+                body: Some(graph), ..
+            }) => collect_subgraph_nodes(graph, nodes),
+            WorkflowNodeKind::Container(WorkflowContainer::ListComprehension {
+                element: Some(graph),
+                ..
+            }) => collect_subgraph_nodes(graph, nodes),
+            _ => {}
+        }
+    }
+}
+
+fn add_dependency_edges(
+    edges: &mut Vec<WorkflowEdge>,
+    node: &WorkflowNode,
+    expression: &Expr,
+    versions: &VersionState,
+) {
+    let mut variables = BTreeSet::new();
+    collect_variables(expression, &mut variables);
+    for variable in variables {
+        if let Some((version, producer)) = versions.current.get(&variable) {
+            edges.push(edge(
+                producer.clone(),
+                node.id.clone(),
+                WorkflowEdgeKind::DataDependency {
+                    variable,
+                    version: *version,
+                },
+            ));
+        }
+    }
+}
+
+fn collect_variables(expression: &Expr, variables: &mut BTreeSet<String>) {
+    if let Expr::Variable(variable) = expression {
+        variables.insert(variable.to_string());
+    }
+    if let Expr::Assign { target, .. } = expression
+        && !target.is_simple()
+    {
+        variables.insert(target.root.to_string());
+    }
+    for child in expression.children() {
+        collect_variables(child, variables);
+    }
+}
+
+fn edge(from: WorkflowNodeId, to: WorkflowNodeId, kind: WorkflowEdgeKind) -> WorkflowEdge {
+    let kind_key = match &kind {
+        WorkflowEdgeKind::Sequence => "sequence".to_string(),
+        WorkflowEdgeKind::DataDependency { variable, version } => {
+            format!("data:{variable}:{version}")
+        }
+    };
+    let material = format!("{}\0{}\0{kind_key}", from.as_str(), to.as_str());
+    WorkflowEdge {
+        id: format!("edge:{}", &hex_digest(material.as_bytes())[..24]),
+        from,
+        to,
+        kind,
+    }
+}
+
+fn node_is_sequenced(node: &WorkflowNode) -> bool {
+    !matches!(node.kind, WorkflowNodeKind::Data { .. })
+}
+
+fn assignment_parts<'a>(
+    expression: &'a Expr,
+    path: &[u32],
+) -> (Option<AssignTarget>, &'a Expr, Vec<u32>) {
+    match expression {
+        Expr::Assign { target, expr } => {
+            let dynamic_indices = target
+                .steps
+                .iter()
+                .filter(|step| matches!(step, crate::AssignPathStep::Index(_)))
+                .count() as u32;
+            (
+                Some(target.clone()),
+                expr,
+                child_path(path, dynamic_indices),
+            )
+        }
+        _ => (None, expression, path.to_vec()),
+    }
+}
+
+fn assignment_output(
+    binding: Option<&AssignTarget>,
+    versions: &mut VersionState,
+) -> Vec<VariableVersion> {
+    binding
+        .filter(|target| target.is_simple())
+        .map(|target| vec![versions.allocate(target.root.as_str())])
+        .unwrap_or_default()
+}
+
+fn opaque_outputs(
+    expression: &Expr,
+    binding: Option<&AssignTarget>,
+    versions: &mut VersionState,
+) -> Vec<VariableVersion> {
+    if let Some(binding) = binding {
+        return vec![versions.allocate(binding.root.as_str())];
+    }
+    let mut assigned = BTreeSet::new();
+    collect_assignment_roots(expression, &mut assigned);
+    if let Expr::For { binding, .. } = expression {
+        assigned.remove(binding.as_str());
+    }
+    assigned
+        .into_iter()
+        .map(|variable| versions.allocate(&variable))
+        .collect()
+}
+
+fn should_be_opaque(expression: &Expr, versions: &VersionState) -> bool {
+    match expression {
+        Expr::LabelAnnotated { expr, .. } => should_be_opaque(expr, versions),
+        Expr::While { .. } => true,
+        Expr::Assign { target, .. } if !target.is_simple() => true,
+        Expr::For { binding, body, .. } => {
+            let mut assigned = BTreeSet::new();
+            collect_simple_assignments(body, &mut assigned);
+            assigned.remove(binding.as_str());
+            assigned.iter().any(|name| versions.known.contains(name))
+        }
+        _ => false,
+    }
+}
+
+fn collect_simple_assignments(expression: &Expr, assigned: &mut BTreeSet<String>) {
+    if let Expr::Assign { target, .. } = expression
+        && target.is_simple()
+    {
+        assigned.insert(target.root.to_string());
+    }
+    for child in expression.children() {
+        collect_simple_assignments(child, assigned);
+    }
+}
+
+fn collect_assignment_roots(expression: &Expr, assigned: &mut BTreeSet<String>) {
+    if let Expr::Assign { target, .. } = expression {
+        assigned.insert(target.root.to_string());
+    }
+    for child in expression.children() {
+        collect_assignment_roots(child, assigned);
+    }
+}
+
+fn peel_label(expression: &Expr) -> (Option<&LabelMetadata>, &Expr) {
+    match expression {
+        Expr::LabelAnnotated { label, expr } => (Some(label), expr),
+        _ => (None, expression),
+    }
+}
+
+fn first_receiver_operation(expression: &Expr) -> Option<&str> {
+    match expression {
+        Expr::ReceiverCall { operation, .. } => Some(operation.as_str()),
+        Expr::Await(expr) | Expr::ResultUnwrap(expr) => first_receiver_operation(expr),
+        _ => None,
+    }
+}
+
+fn effect_kind(expression: &Expr) -> Option<WorkflowEffectKind> {
+    match expression {
+        Expr::StartProcess(_) => Some(WorkflowEffectKind::StartProcess),
+        Expr::Await(_) => Some(WorkflowEffectKind::AwaitJoin),
+        Expr::SignalRun { .. } => Some(WorkflowEffectKind::SignalRun),
+        Expr::WaitSignal { .. } => Some(WorkflowEffectKind::WaitSignal),
+        Expr::SleepFor(_) | Expr::SleepUntil(_) => Some(WorkflowEffectKind::Sleep),
+        Expr::Cancel(_) => Some(WorkflowEffectKind::Cancel),
+        Expr::Print(_) => Some(WorkflowEffectKind::Print),
+        Expr::Yield(_) => Some(WorkflowEffectKind::Yield),
+        Expr::Wake(_) => Some(WorkflowEffectKind::Wake),
+        Expr::Break => Some(WorkflowEffectKind::Break),
+        Expr::Continue => Some(WorkflowEffectKind::Continue),
+        Expr::ResultUnwrap(expr) => effect_kind(expr),
+        _ => None,
+    }
+}
+
+fn effect_name(expression: &Expr, effect: &WorkflowEffectKind) -> String {
+    match expression {
+        Expr::StartProcess(start) => format!("start {}", start.process),
+        Expr::WaitSignal { name } => format!("wait_signal {name}"),
+        Expr::SleepFor(_) => "sleep for".to_string(),
+        Expr::SleepUntil(_) => "sleep until".to_string(),
+        _ => match effect {
+            WorkflowEffectKind::StartProcess => "start process",
+            WorkflowEffectKind::AwaitJoin => "await",
+            WorkflowEffectKind::SignalRun => "signal_run",
+            WorkflowEffectKind::WaitSignal => "wait_signal",
+            WorkflowEffectKind::Sleep => "sleep",
+            WorkflowEffectKind::Cancel => "cancel",
+            WorkflowEffectKind::Print => "print",
+            WorkflowEffectKind::Yield => "yield",
+            WorkflowEffectKind::Wake => "wake",
+            WorkflowEffectKind::Break => "break",
+            WorkflowEffectKind::Continue => "continue",
+        }
+        .to_string(),
+    }
+}
+
+fn data_name(expression: &Expr) -> String {
+    match expression {
+        Expr::BuiltinCall { name, .. } => name.to_string(),
+        Expr::List(_) => "list".to_string(),
+        Expr::Record(_) => "record".to_string(),
+        Expr::Tuple(_) => "tuple".to_string(),
+        Expr::Variable(name) => name.to_string(),
+        _ => "data".to_string(),
+    }
+}
+
+fn opaque_name(expression: &Expr) -> String {
+    match expression {
+        Expr::While { .. } => "while (edit as text)",
+        Expr::Assign { target, .. } if !target.is_simple() => "state update (edit as text)",
+        Expr::For { .. } => "stateful loop (edit as text)",
+        _ => "imperative step (edit as text)",
+    }
+    .to_string()
+}
+
+fn canonical_statement(expression: &Expr) -> String {
+    canonical_program_source(&Program::block(vec![expression.clone()]))
+        .expect("parser-reachable expression must have canonical source")
+        .trim_end()
+        .to_string()
+}
+
+fn kind_tag(kind: &WorkflowNodeKind) -> &'static str {
+    match kind {
+        WorkflowNodeKind::Data { .. } => "data",
+        WorkflowNodeKind::Call { .. } => "call",
+        WorkflowNodeKind::Effect { .. } => "effect",
+        WorkflowNodeKind::Terminal { .. } => "terminal",
+        WorkflowNodeKind::Container(_) => "container",
+        WorkflowNodeKind::Opaque { .. } => "opaque",
+    }
+}
+
+fn child_path(path: &[u32], child: impl TryInto<u32>) -> Vec<u32> {
+    let mut result = path.to_vec();
+    result.push(child.try_into().ok().expect("AST child index fits u32"));
+    result
+}
+
+fn execution_sites(
+    expression: &Expr,
+    owner: &str,
+    path: &[u32],
+    label: Option<&LabelMetadata>,
+) -> Vec<WorkflowExecutionSite> {
+    let mut sites = Vec::new();
+    collect_execution_sites(expression, owner, path, label, &mut sites);
+    sites.sort();
+    sites.dedup();
+    sites
+}
+
+fn collect_execution_sites(
+    expression: &Expr,
+    owner: &str,
+    path: &[u32],
+    label: Option<&LabelMetadata>,
+    sites: &mut Vec<WorkflowExecutionSite>,
+) {
+    if let Some(label) = label
+        && !label_attaches_to_concrete_node(expression)
+    {
+        sites.push(WorkflowExecutionSite::new(
+            owner,
+            path,
+            "step",
+            label.title.as_str(),
+        ));
+        return;
+    }
+    match expression {
+        Expr::Assign { target, expr } if label.is_some() => {
+            let value_index = target
+                .steps
+                .iter()
+                .filter(|step| matches!(step, crate::AssignPathStep::Index(_)))
+                .count() as u32;
+            collect_execution_sites(expr, owner, &child_path(path, value_index), label, sites);
+        }
+        Expr::Await(expr) | Expr::ResultUnwrap(expr) if label.is_some() => {
+            collect_execution_sites(expr, owner, &child_path(path, 0), label, sites);
+        }
+        Expr::ReceiverCall { operation, .. } => {
+            sites.push(WorkflowExecutionSite::new(
+                owner,
+                path,
+                "resource_operation",
+                operation.as_str(),
+            ));
+            collect_child_execution_sites(expression, owner, path, sites);
+        }
+        Expr::StartProcess(start) => {
+            sites.push(WorkflowExecutionSite::new(
+                owner,
+                path,
+                "child_process",
+                format!("start {}", start.process),
+            ));
+            collect_child_execution_sites(expression, owner, path, sites);
+        }
+        Expr::SleepFor(_) => {
+            sites.push(WorkflowExecutionSite::new(
+                owner,
+                path,
+                "sleep",
+                "sleep for",
+            ));
+            collect_child_execution_sites(expression, owner, path, sites);
+        }
+        Expr::SleepUntil(_) => {
+            sites.push(WorkflowExecutionSite::new(
+                owner,
+                path,
+                "sleep",
+                "sleep until",
+            ));
+            collect_child_execution_sites(expression, owner, path, sites);
+        }
+        Expr::WaitSignal { name } => sites.push(WorkflowExecutionSite::new(
+            owner,
+            path,
+            "wait",
+            format!("wait_signal {name}"),
+        )),
+        Expr::SignalRun { .. } => {
+            sites.push(WorkflowExecutionSite::new(
+                owner,
+                path,
+                "signal",
+                "signal_run",
+            ));
+            collect_child_execution_sites(expression, owner, path, sites);
+        }
+        Expr::Finish(_) => {
+            sites.push(WorkflowExecutionSite::new(
+                owner, path, "terminal", "result",
+            ));
+            collect_child_execution_sites(expression, owner, path, sites);
+        }
+        Expr::Fail(_) => {
+            sites.push(WorkflowExecutionSite::new(
+                owner, path, "terminal", "failure",
+            ));
+            collect_child_execution_sites(expression, owner, path, sites);
+        }
+        Expr::Yield(_) => {
+            sites.push(WorkflowExecutionSite::new(
+                owner,
+                path,
+                "process_event",
+                "yield",
+            ));
+            collect_child_execution_sites(expression, owner, path, sites);
+        }
+        Expr::Wake(_) => {
+            sites.push(WorkflowExecutionSite::new(
+                owner,
+                path,
+                "process_event",
+                "wake",
+            ));
+            collect_child_execution_sites(expression, owner, path, sites);
+        }
+        Expr::If { condition, .. } => {
+            sites.push(WorkflowExecutionSite::new(owner, path, "branch", "if"));
+            collect_execution_sites(condition, owner, &child_path(path, 0), None, sites);
+        }
+        Expr::For { iterable, .. } => {
+            collect_execution_sites(iterable, owner, &child_path(path, 0), None, sites);
+        }
+        Expr::ListComprehension { clauses, .. } => {
+            for (index, clause) in clauses.iter().enumerate() {
+                let expression = match clause {
+                    ListComprehensionClause::For { iterable, .. } => iterable,
+                    ListComprehensionClause::If { condition } => condition,
+                };
+                collect_execution_sites(
+                    expression,
+                    owner,
+                    &child_path(path, index as u32),
+                    None,
+                    sites,
+                );
+            }
+        }
+        _ => collect_child_execution_sites(expression, owner, path, sites),
+    }
+}
+
+fn collect_child_execution_sites(
+    expression: &Expr,
+    owner: &str,
+    path: &[u32],
+    sites: &mut Vec<WorkflowExecutionSite>,
+) {
+    for (index, child) in expression.children().enumerate() {
+        collect_execution_sites(child, owner, &child_path(path, index as u32), None, sites);
+    }
+}
+
+fn label_attaches_to_concrete_node(expression: &Expr) -> bool {
+    match expression {
+        Expr::Assign { expr, .. } | Expr::Await(expr) | Expr::ResultUnwrap(expr) => {
+            label_attaches_to_concrete_node(expr)
+        }
+        Expr::ReceiverCall { .. }
+        | Expr::StartProcess(_)
+        | Expr::SleepFor(_)
+        | Expr::SleepUntil(_)
+        | Expr::WaitSignal { .. }
+        | Expr::SignalRun { .. }
+        | Expr::Yield(_)
+        | Expr::Wake(_)
+        | Expr::Finish(_)
+        | Expr::Fail(_)
+        | Expr::If { .. } => true,
+        _ => false,
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests;

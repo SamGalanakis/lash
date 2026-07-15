@@ -437,9 +437,8 @@ mod tests {
     }
 
     #[test]
-    fn static_graph_includes_process_activation_resources_and_branches() {
-        let program = parse(
-            r#"
+    fn workflow_graph_includes_process_calls_containers_and_terminals() {
+        let source = r#"
             type EmailInput = { source: "gmail" | "manual", message_id: string? }
             process triage(gmail: Gmail, input: EmailInput) -> null {
               if input.source == "gmail" {
@@ -457,32 +456,25 @@ mod tests {
               name: "daily_digest"
             })?
             finish handle
-            "#,
-        )
-        .expect("module should parse");
-
-        let graph = crate::static_graph_json(&program, "v1");
-        let nodes = graph["nodes"].as_array().expect("graph nodes");
-        let edges = graph["edges"].as_array().expect("graph edges");
-        assert!(nodes.iter().any(|node| node["kind"] == "process"));
-        assert!(
-            nodes
-                .iter()
-                .any(|node| node["kind"] == "resource_operation")
-        );
-        assert!(nodes.iter().any(|node| node["kind"] == "branch"));
-        assert!(nodes.iter().any(|node| node["kind"] == "terminal"));
-        assert!(edges.iter().any(|edge| edge["label"] == "calls"));
-        assert!(
-            nodes
-                .iter()
-                .all(|node| node["span"]["end"].as_u64() > node["span"]["start"].as_u64())
-        );
-        assert!(
-            edges
-                .iter()
-                .all(|edge| edge["span"]["end"].as_u64() > edge["span"]["start"].as_u64())
-        );
+            "#;
+        let graph = crate::workflow_graph_from_source(source).expect("module should project");
+        assert!(graph.process("triage").is_some());
+        assert!(graph.nodes().any(|node| matches!(
+            node.kind,
+            crate::WorkflowNodeKind::Call { .. }
+        )));
+        assert!(graph.nodes().any(|node| matches!(
+            node.kind,
+            crate::WorkflowNodeKind::Container(crate::WorkflowContainer::If { .. })
+        )));
+        assert!(graph.nodes().any(|node| matches!(
+            node.kind,
+            crate::WorkflowNodeKind::Terminal { .. }
+        )));
+        assert!(graph.main.edges.iter().any(|edge| matches!(
+            edge.kind,
+            crate::WorkflowEdgeKind::Sequence
+        )));
     }
 
     #[test]

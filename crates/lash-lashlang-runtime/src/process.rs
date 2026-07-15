@@ -1119,13 +1119,14 @@ fn trace_lashlang_process_map(
     process_ref: &lashlang::ProcessRef,
     process_name: &str,
 ) -> TraceLashlangMap {
-    let Some(map) = lashlang::map_lashlang_process(
-        artifact,
-        process_ref,
-        lashlang::LashlangMapOptions {
-            include_reachable_processes: true,
-        },
-    ) else {
+    let source = lashlang::canonical_program_source_with_requirements(
+        &artifact.canonical_ir,
+        &artifact.host_requirements,
+    );
+    let graph = source
+        .ok()
+        .and_then(|source| lashlang::workflow_graph_from_source(&source).ok());
+    let Some(process) = graph.as_ref().and_then(|graph| graph.process(process_name)) else {
         return TraceLashlangMap {
             module_ref: artifact.module_ref.to_string(),
             entry_kind: "process".to_string(),
@@ -1135,34 +1136,159 @@ fn trace_lashlang_process_map(
             edges: Vec::new(),
         };
     };
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut primary_runtime_ids = BTreeMap::new();
+    append_trace_workflow_subgraph(
+        artifact,
+        &process.body,
+        &mut nodes,
+        &mut edges,
+        &mut primary_runtime_ids,
+    );
     TraceLashlangMap {
-        module_ref: map.module_ref.to_string(),
-        entry_kind: map.entry_kind,
-        entry_ref: map.entry_ref.as_ref().map(lashlang::process_ref_key),
+        module_ref: artifact.module_ref.to_string(),
+        entry_kind: "process".to_string(),
+        entry_ref: Some(lashlang::process_ref_key(process_ref)),
         entry_name: process_name.to_string(),
-        nodes: map
-            .nodes
-            .into_iter()
-            .map(|node| TraceLashlangMapNode {
-                id: node.id,
-                kind: node.kind,
-                label: node.label,
-                label_metadata: node.label_metadata.map(|label| TraceLabelMetadata {
-                    title: label.title.to_string(),
-                    description: label.description.map(|description| description.to_string()),
-                }),
-            })
-            .collect(),
-        edges: map
-            .edges
-            .into_iter()
-            .map(|edge| TraceLashlangMapEdge {
-                id: edge.id,
-                from: edge.from,
-                to: edge.to,
-                label: edge.label,
-            })
-            .collect(),
+        nodes,
+        edges,
+    }
+}
+
+/// Builds the trace runtime's read-only foreground skeleton from the workflow graph.
+pub fn trace_lashlang_main_map(artifact: &lashlang::ModuleArtifact) -> TraceLashlangMap {
+    let graph = lashlang::canonical_program_source_with_requirements(
+        &artifact.canonical_ir,
+        &artifact.host_requirements,
+    )
+    .ok()
+    .and_then(|source| lashlang::workflow_graph_from_source(&source).ok());
+    let Some(graph) = graph else {
+        return TraceLashlangMap {
+            module_ref: artifact.module_ref.to_string(),
+            entry_kind: "main".to_string(),
+            entry_ref: None,
+            entry_name: "main".to_string(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+    };
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut primary_runtime_ids = BTreeMap::new();
+    append_trace_workflow_subgraph(
+        artifact,
+        &graph.main,
+        &mut nodes,
+        &mut edges,
+        &mut primary_runtime_ids,
+    );
+    TraceLashlangMap {
+        module_ref: artifact.module_ref.to_string(),
+        entry_kind: "main".to_string(),
+        entry_ref: None,
+        entry_name: "main".to_string(),
+        nodes,
+        edges,
+    }
+}
+
+fn append_trace_workflow_subgraph(
+    artifact: &lashlang::ModuleArtifact,
+    graph: &lashlang::WorkflowSubgraph,
+    nodes: &mut Vec<TraceLashlangMapNode>,
+    edges: &mut Vec<TraceLashlangMapEdge>,
+    primary_runtime_ids: &mut BTreeMap<String, String>,
+) {
+    for node in &graph.nodes {
+        let label_metadata =
+            (node.name_source == lashlang::WorkflowNodeNameSource::Label).then(|| {
+                TraceLabelMetadata {
+                    title: node.name.clone(),
+                    description: node.description.clone(),
+                }
+            });
+        for site in &node.execution_sites {
+            let Some(runtime_site) =
+                lashlang::runtime_execution_site_for_workflow_site(artifact, site)
+            else {
+                continue;
+            };
+            primary_runtime_ids
+                .entry(node.id.to_string())
+                .or_insert_with(|| runtime_site.node_id.clone());
+            if nodes.iter().any(|node| node.id == runtime_site.node_id) {
+                continue;
+            }
+            nodes.push(TraceLashlangMapNode {
+                id: runtime_site.node_id,
+                kind: runtime_site.node_kind,
+                label: runtime_site.label,
+                label_metadata: label_metadata.clone(),
+            });
+        }
+        match &node.kind {
+            lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::If {
+                then_graph,
+                else_graph,
+                ..
+            }) => {
+                if let Some(graph) = then_graph {
+                    append_trace_workflow_subgraph(
+                        artifact,
+                        graph,
+                        nodes,
+                        edges,
+                        primary_runtime_ids,
+                    );
+                }
+                if let Some(graph) = else_graph {
+                    append_trace_workflow_subgraph(
+                        artifact,
+                        graph,
+                        nodes,
+                        edges,
+                        primary_runtime_ids,
+                    );
+                }
+            }
+            lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::For {
+                body: Some(graph),
+                ..
+            }) => {
+                append_trace_workflow_subgraph(artifact, graph, nodes, edges, primary_runtime_ids);
+            }
+            lashlang::WorkflowNodeKind::Container(
+                lashlang::WorkflowContainer::ListComprehension {
+                    element: Some(graph),
+                    ..
+                },
+            ) => {
+                append_trace_workflow_subgraph(artifact, graph, nodes, edges, primary_runtime_ids);
+            }
+            _ => {}
+        }
+    }
+    for edge in &graph.edges {
+        let (Some(from), Some(to)) = (
+            primary_runtime_ids.get(edge.from.as_str()),
+            primary_runtime_ids.get(edge.to.as_str()),
+        ) else {
+            continue;
+        };
+        let label = match &edge.kind {
+            lashlang::WorkflowEdgeKind::Sequence => "sequence".to_string(),
+            lashlang::WorkflowEdgeKind::DataDependency { variable, version } => {
+                format!("{variable}@{version}")
+            }
+        };
+        edges.push(TraceLashlangMapEdge {
+            id: edge.id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            label,
+        });
     }
 }
 

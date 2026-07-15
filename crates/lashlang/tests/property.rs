@@ -288,6 +288,40 @@ proptest! {
     }
 
     #[test]
+    fn generated_workflows_obey_code_graph_code_laws(
+        ident in ident_strategy(),
+        value in gen_value_strategy(),
+        shape in 0u8..3,
+    ) {
+        let value = value.to_source();
+        let source = match shape {
+            0 => format!("{ident} = {value}\nfinish {ident}\n"),
+            1 => format!(
+                "if true {{\n  {ident} = {value}\n}} else {{\n  {ident} = null\n}}\nfinish {ident}\n"
+            ),
+            _ => format!(
+                "@label(title: \"Generated process\", description: \"Metadata survives\")\nprocess {ident}() {{\n  value = {value}\n  finish value\n}}\n"
+            ),
+        };
+        let input = parse(&source).expect("generated workflow should parse");
+        let canonical = canonical_program_source(&input).expect("canonical workflow source");
+        let graph = lashlang::workflow_graph_from_source(&canonical)
+            .expect("canonical source should project");
+        let rendered = lashlang::workflow_graph_to_source(&graph)
+            .expect("projected graph should render");
+
+        // GetPut on canonical source.
+        prop_assert_eq!(&rendered, &canonical);
+        // Canonical structural fixpoint (spans are ignored by Program::PartialEq).
+        prop_assert_eq!(parse(&rendered).unwrap(), parse(&canonical).unwrap());
+        // PutGet for graphs produced by source projection.
+        prop_assert_eq!(
+            lashlang::workflow_graph_from_source(&rendered).unwrap(),
+            graph
+        );
+    }
+
+    #[test]
     fn snapshot_round_trip_preserves_state(
         globals in globals_strategy()
     ) {

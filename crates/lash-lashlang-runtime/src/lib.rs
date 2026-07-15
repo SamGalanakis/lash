@@ -868,6 +868,7 @@ pub use deferred::{
 };
 pub use process::{
     lashlang_process_event_types, lashlang_process_signal_event_types, lashlang_type_expr_schema,
+    trace_lashlang_main_map,
 };
 pub use typed_output::parse_output_schema;
 
@@ -1277,6 +1278,12 @@ mod tests {
                 node_kind: "child_process".to_string(),
                 label: "start scan".to_string(),
                 branch: None,
+                workflow_site: lashlang::WorkflowExecutionSite::new(
+                    "process:scan",
+                    [],
+                    "child_process",
+                    "start scan",
+                ),
             },
             occurrence,
         }

@@ -15,6 +15,7 @@ use thiserror::Error;
 mod access;
 mod cache;
 mod compiler;
+pub(crate) use compiler::is_pure_expr;
 mod entry_points;
 mod format;
 mod host;
@@ -143,17 +144,6 @@ impl std::fmt::Debug for CompiledProgram {
 impl CompiledProgram {
     pub fn compile_stats(&self) -> &CompileStats {
         &self.compile_stats
-    }
-
-    pub fn static_graph_json(&self, module_ref: impl Into<String>) -> serde_json::Value {
-        if let Some(context) = &self.chunk.module_context {
-            crate::graph::static_graph_json_for_module_ref(
-                context.module_ref.clone(),
-                &context.process_refs,
-            )
-        } else {
-            crate::graph::static_graph_json_without_ir(module_ref)
-        }
     }
 }
 

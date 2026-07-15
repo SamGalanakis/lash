@@ -397,18 +397,16 @@ async fn aggregate_await_leaf_unwrap_waits_for_all_siblings_then_reports_first_e
 }
 
 #[test]
-fn labeled_process_resource_operation_site_matches_static_graph_node() {
-    let program = crate::parse(
-        r#"
+fn labeled_process_resource_operation_site_correlates_to_workflow_node() {
+    let source = r#"
         process search_test() {
           @label(title: "Spawn subagent with web search")
           result = await tools.echo({ value: { ok: true } })?
           wake result
           finish result
         }
-        "#,
-    )
-    .expect("program should parse");
+        "#;
+    let program = crate::parse(source).expect("program should parse");
     let surface = runtime_test_environment().with_language_features(
         crate::LashlangLanguageFeatures::default().with_label_annotations(),
     );
@@ -428,30 +426,16 @@ fn labeled_process_resource_operation_site_matches_static_graph_node() {
         .and_then(Option::as_ref)
         .expect("resource call execution site");
 
-    let process_ref = linked
-        .artifact
-        .process_ref("search_test")
-        .expect("search_test process ref")
-        .clone();
-    let map = crate::map_lashlang_process(
-        &linked.artifact,
-        &process_ref,
-        crate::LashlangMapOptions::default(),
-    )
-    .expect("process graph");
-    let static_node =
-        map.nodes
-            .iter()
-            .find(|node| {
-                node.kind == "resource_operation"
-                    && node.label_metadata.as_ref().is_some_and(|label| {
-                        label.title.as_str() == "Spawn subagent with web search"
-                    })
-            })
-            .unwrap_or_else(|| panic!("missing labeled resource operation node: {:?}", map.nodes));
+    let graph = crate::workflow_graph_from_source(source).expect("workflow graph");
+    let graph_node_id = crate::node_id_for_execution_site(&graph, site)
+        .expect("runtime site should correlate to a workflow node");
+    let graph_node = graph
+        .nodes()
+        .find(|node| node.id == graph_node_id)
+        .expect("correlated graph node");
 
     assert_eq!(site.node_kind, "resource_operation");
-    assert_eq!(site.node_id, static_node.id);
+    assert_eq!(graph_node.name, "Spawn subagent with web search");
     assert!(
         !compiled
             .chunk
