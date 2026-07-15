@@ -1,10 +1,11 @@
 # Workflow graph backend contract
 
-The backend listens on `http://127.0.0.1:3031` by default. Set
-`WORKFLOW_GRAPH_ADDR` to another `IP:PORT`.
+The backend listens on `http://127.0.0.1:3031` by default. The conventional
+demo address is selected explicitly with
+`WORKFLOW_GRAPH_ADDR=127.0.0.1:3057`; any other `IP:PORT` is also accepted.
 
 ```sh
-CARGO_TARGET_DIR=/tmp/lash-wfgraph-target \
+CARGO_TARGET_DIR=/tmp/lash-workflow-graph \
   cargo run -p workflow-graph-roundtrip
 ```
 
@@ -215,6 +216,23 @@ The editable surface is:
   `data.iterable`, and `data.clauses` canonical Lashlang text where present.
 - Opaque `data.source`.
 - `nodes`, `edges`, `roots`, and `children[].nodeIds` for delete/reorder edits.
+
+The structured text fields and their render-time validation are:
+
+| Field | Accepted node kinds | Typed error for an invalid edit |
+| --- | --- | --- |
+| `data.condition` | `if`, `while` | `invalid_expression` |
+| `data.iterable` | `for` | `invalid_expression` |
+| `data.binding` | `data`, `call`, `effect`, `computation`, `if`, `for`, `list_comprehension` | `invalid_assignment_target`; a syntactically valid non-simple binding is `invalid_node_payload` |
+| `data.target` | `state_update` | `invalid_assignment_target` |
+| `data.expression` | `computation`, `state_update` | `invalid_expression` |
+| `data.clauses[].iterable` / `.condition` | `list_comprehension` `for` / `if` clauses | `invalid_expression` (`clause iterable` or `clause condition`) |
+| `data.clauses[].binding` | `list_comprehension` `for` clauses | `invalid_assignment_target` (`clause binding`); a syntactically valid non-simple binding is `invalid_node_payload` |
+
+Changing `schemaVersion` yields `unsupported_schema_version`. Removing a
+required child group yields `missing_required_child`: `if` requires `then` and
+`else`, `for` and `while` require `body`, and `list_comprehension` requires
+`element`.
 
 To delete a node, remove it from `nodes`, remove its ID from its root or child
 group, and remove incident edges. To reorder nodes, reorder the relevant root

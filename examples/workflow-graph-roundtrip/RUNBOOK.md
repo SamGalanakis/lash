@@ -8,21 +8,41 @@ npm --prefix examples/workflow-graph-roundtrip/frontend ci
 npm --prefix examples/workflow-graph-roundtrip/frontend run build
 ```
 
-Start the server. It listens on `127.0.0.1:3031` unless
-`WORKFLOW_GRAPH_ADDR` is set:
+Start the server. The code default is `127.0.0.1:3031`:
 
 ```sh
 CARGO_TARGET_DIR=/tmp/lash-workflow-graph \
   cargo run -p workflow-graph-roundtrip
 ```
 
-Open <http://127.0.0.1:3031>. The operator loop is:
+The conventional demo port is `3057`; select it explicitly when needed:
 
-1. Select any built-in workflow.
-2. Edit a field or delete/reorder a node and save the graph.
-3. Confirm the backend returns the canonical, reprojected document.
-4. Play the saved version and watch correlated node states plus display updates
-   arrive over SSE until the terminal node succeeds.
+```sh
+WORKFLOW_GRAPH_ADDR=127.0.0.1:3057 \
+  CARGO_TARGET_DIR=/tmp/lash-workflow-graph \
+  cargo run -p workflow-graph-roundtrip
+```
+
+Open the address used above. Exercise the newly editable fields with this
+operator loop:
+
+1. Select **Branching Approval**, change the inner literal `if` condition from
+   `true` to `false`, and save. Confirm the returned canonical source contains
+   `if false`, then Play and observe the `Approval needs review` branch.
+2. Select **Counter Loop**. On `for pct`, enter ` pct ` for the binding and
+   `[15]` for the iterable, then save. Confirm the reprojected source
+   canonicalizes the binding to `pct` and contains `for pct in [15]`; Play and
+   observe a successful run ending at 15% progress.
+3. No built-in catalog workflow contains a list comprehension, so there is no
+   honest catalog run for editing `clauses`. Comprehension edit/reprojection is
+   covered by the Lashlang property and focused unit tests instead.
+4. Select **Onboarding**. On the `Wait for approval` effect, enter
+   ` approval ` for `binding`, save, and confirm the canonical source restores
+   `approval = wait_signal(...)`; Play and observe a successful correlated run.
+
+Delete/reorder checks may still be performed on any workflow. After every
+save, replace the displayed document with the returned canonical projection
+before running it.
 
 This proves the source → graph → edited graph → canonical source lens and the
 saved-version → runtime execution-site → graph-node correlation used by a
@@ -34,4 +54,4 @@ just workflow-graph-integration-verify
 ```
 
 Browser UI automation is intentionally out of scope; the integration pass
-verifies the edit → save → run contract at the backend seam.
+verifies the edit → save → reproject → run contract at the backend seam.

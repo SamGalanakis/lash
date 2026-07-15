@@ -12,13 +12,14 @@ documents.
 Run it from the repository root:
 
 ```sh
-CARGO_TARGET_DIR=/tmp/lash-wfgraph-target \
+CARGO_TARGET_DIR=/tmp/lash-workflow-graph \
   cargo run -p workflow-graph-roundtrip
 ```
 
-The default address is `http://127.0.0.1:3031`; override it with
-`WORKFLOW_GRAPH_ADDR`. See [CONTRACT.md](CONTRACT.md) for the complete API used
-by the frontend.
+The code default is `http://127.0.0.1:3031`. The conventional demo uses
+`WORKFLOW_GRAPH_ADDR=127.0.0.1:3057`; set that variable to any available
+`IP:PORT`. See [CONTRACT.md](CONTRACT.md) for the complete API used by the
+frontend.
 
 The server serves files from `frontend/dist/` (or directly from `frontend/`)
 when present. A frontend dev server
