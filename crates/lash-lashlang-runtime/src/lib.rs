@@ -925,6 +925,63 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn foreground_trace_skeleton_is_derived_from_the_workflow_graph() {
+        let source = r#"
+            @label(title: "Seed value")
+            value = 1
+            if true {
+              @label(title: "Selected print")
+              print value
+            } else {
+              @label(title: "Skipped print")
+              print 0
+            }
+            @label(title: "Finish value")
+            finish value
+        "#;
+        let environment = LashlangHostEnvironment::new(
+            lashlang::LashlangHostCatalog::new(),
+            LashlangAbilities::all(),
+        )
+        .with_language_features(
+            lashlang::LashlangLanguageFeatures::default().with_label_annotations(),
+        );
+        let output = lashlang::compile_module(lashlang::ModuleCompileRequest {
+            source,
+            environment: &environment,
+            artifact_store: None,
+        })
+        .await
+        .expect("labeled workflow compiles");
+        let graph = lashlang::workflow_graph_from_source(source).expect("workflow graph projects");
+        let trace_map = trace_lashlang_main_map(&output.artifact);
+
+        let expected_nodes = graph
+            .nodes()
+            .flat_map(|node| &node.execution_sites)
+            .map(|site| {
+                lashlang::runtime_execution_site_for_workflow_site(&output.artifact, site)
+                    .expect("workflow execution site should exist in the compiled artifact")
+                    .node_id
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let actual_nodes = trace_map
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(!expected_nodes.is_empty());
+        assert_eq!(actual_nodes, expected_nodes);
+        assert!(
+            trace_map
+                .nodes
+                .iter()
+                .any(|node| node.label == "Selected print")
+        );
+    }
+
     #[test]
     fn process_input_serializes_as_generic_engine_payload() {
         let hash = lashlang::ContentHash::new("abc123");
