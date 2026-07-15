@@ -381,7 +381,79 @@ fn graph_has_required_variant(graph: &lashlang::WorkflowGraph, variant: &str) ->
 
 fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &str) -> bool {
     let mut invalid = graph.clone();
-    let expected = match variant {
+    let expected;
+    match variant {
+        "data" => {
+            let Some(node) = invalid
+                .main
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Data { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Data { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "{".to_string();
+            expected = "invalid_expression";
+        }
+        "call" => {
+            let Some(node) = invalid
+                .main
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Call { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Call { binding, .. } = &mut node.kind else {
+                return false;
+            };
+            *binding = Some("1 + 2".to_string());
+            expected = "invalid_assignment_target";
+        }
+        "effect" => {
+            let Some(node) = invalid
+                .main
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Effect { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Effect { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "{".to_string();
+            expected = "invalid_expression";
+        }
+        "terminal" => {
+            let Some(process) =
+                invalid
+                    .declarations
+                    .iter_mut()
+                    .find_map(|declaration| match declaration {
+                        lashlang::WorkflowDeclaration::Process(process) => Some(process),
+                        lashlang::WorkflowDeclaration::Type(_) => None,
+                    })
+            else {
+                return false;
+            };
+            let Some(node) = process
+                .body
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Terminal { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Terminal { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "{".to_string();
+            expected = "invalid_expression";
+        }
         "if_forms" => {
             let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
                 matches!(
@@ -402,7 +474,7 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
                 return false;
             };
             *else_is_block = true;
-            "invalid_payload"
+            expected = "invalid_payload";
         }
         "for" | "stateful_for" | "scoped_for" => {
             let Some(node) = invalid.nodes().find(|node| {
@@ -415,7 +487,7 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
             };
             let id = node.id.clone();
             let Some(node) = invalid.main.nodes.iter_mut().find(|node| node.id == id) else {
-                return true;
+                return false;
             };
             let lashlang::WorkflowNodeKind::Container(lashlang::WorkflowContainer::For {
                 body,
@@ -425,7 +497,7 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
                 return false;
             };
             *body = None;
-            "missing_child"
+            expected = "missing_child";
         }
         "while" => {
             let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
@@ -446,7 +518,7 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
                 return false;
             };
             *body = None;
-            "missing_child"
+            expected = "missing_child";
         }
         "comprehension" => {
             let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
@@ -466,7 +538,7 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
                 return false;
             };
             *element = None;
-            "missing_child"
+            expected = "missing_child";
         }
         "state_update_path" | "state_update_simple" => {
             let Some(node) =
@@ -480,7 +552,7 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
                 return false;
             };
             *expression = "{".to_string();
-            "invalid_expression"
+            expected = "invalid_expression";
         }
         "type_ref_data" => {
             let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
@@ -498,7 +570,7 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
                 return false;
             };
             *expression = "print null".to_string();
-            "invalid_payload"
+            expected = "invalid_payload";
         }
         "computation" => {
             let Some(node) =
@@ -512,10 +584,36 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
                 return false;
             };
             *expression = "null".to_string();
-            "invalid_payload"
+            expected = "invalid_payload";
         }
-        _ => return true,
-    };
+        "process" => {
+            let Some(process) =
+                invalid
+                    .declarations
+                    .iter_mut()
+                    .find_map(|declaration| match declaration {
+                        lashlang::WorkflowDeclaration::Process(process) => Some(process),
+                        lashlang::WorkflowDeclaration::Type(_) => None,
+                    })
+            else {
+                return false;
+            };
+            let Some(node) = process
+                .body
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node.kind, lashlang::WorkflowNodeKind::Effect { .. }))
+            else {
+                return false;
+            };
+            let lashlang::WorkflowNodeKind::Effect { expression, .. } = &mut node.kind else {
+                return false;
+            };
+            *expression = "{".to_string();
+            expected = "invalid_expression";
+        }
+        _ => return false,
+    }
 
     matches!(
         (expected, lashlang::workflow_graph_to_source(&invalid)),
@@ -528,6 +626,9 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
         ) | (
             "invalid_expression",
             Err(lashlang::GraphRenderError::InvalidExpression { .. })
+        ) | (
+            "invalid_assignment_target",
+            Err(lashlang::GraphRenderError::InvalidAssignmentTarget { .. })
         )
     )
 }
