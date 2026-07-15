@@ -509,6 +509,8 @@ impl LashRuntime {
                 self.session.as_mut(),
                 &turn_usage_delta,
                 Some(&trace_turn_id),
+                commit_effects.originating_queue_claims,
+                commit_effects.originating_turn_input_claims,
                 commit_effects.completed_queue_claims,
                 commit_effects.completed_turn_input_claims,
                 commit_effects.enqueued_queue_batches,

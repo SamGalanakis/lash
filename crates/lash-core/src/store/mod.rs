@@ -138,6 +138,20 @@ pub enum StoreError {
         claim_id: String,
     },
     #[error(
+        "runtime commit for session `{session_id}` includes queued-work-derived content without settling claim `{claim_id}`"
+    )]
+    UnsettledQueuedWorkClaim {
+        session_id: String,
+        claim_id: String,
+    },
+    #[error(
+        "runtime commit for session `{session_id}` includes turn-input-derived content without settling claim `{claim_id}`"
+    )]
+    UnsettledTurnInputClaim {
+        session_id: String,
+        claim_id: String,
+    },
+    #[error(
         "pending turn input source_key `{source_key}` for session `{session_id}` is already bound to input `{existing_input_id}` with different submitted content"
     )]
     PendingTurnInputSourceKeyConflict {
@@ -735,6 +749,36 @@ fn build_checkpoint_from_persisted_state(
 }
 
 impl RuntimeCommit {
+    pub(crate) fn validate_claim_settlement(
+        &self,
+        originating_queue_claims: &[crate::QueuedWorkCompletion],
+        originating_turn_input_claims: &[crate::TurnInputCompletion],
+    ) -> Result<(), StoreError> {
+        for originating in originating_queue_claims {
+            if !self.completed_queue_claims.iter().any(|completed| {
+                completed.session_id == originating.session_id
+                    && completed.claim_id == originating.claim_id
+            }) {
+                return Err(StoreError::UnsettledQueuedWorkClaim {
+                    session_id: originating.session_id.clone(),
+                    claim_id: originating.claim_id.clone(),
+                });
+            }
+        }
+        for originating in originating_turn_input_claims {
+            if !self.completed_turn_input_claims.iter().any(|completed| {
+                completed.session_id == originating.session_id
+                    && completed.claim_id == originating.claim_id
+            }) {
+                return Err(StoreError::UnsettledTurnInputClaim {
+                    session_id: originating.session_id.clone(),
+                    claim_id: originating.claim_id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn turn_commit_hash(&self) -> Result<String, StoreError> {
         let mut semantic_commit = self.clone();
         semantic_commit.expected_head_revision = None;

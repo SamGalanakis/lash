@@ -69,6 +69,8 @@ struct FinalCommitInput<'a> {
     usage_deltas: &'a [crate::TokenLedgerEntry],
     outcome: &'a TurnOutcome,
     turn_id: Option<&'a str>,
+    originating_queue_claims: Vec<crate::QueuedWorkCompletion>,
+    originating_turn_input_claims: Vec<crate::TurnInputCompletion>,
     completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
     enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
@@ -352,6 +354,8 @@ impl TurnBoundary {
         session: Option<&mut Session>,
         usage_deltas: &[crate::TokenLedgerEntry],
         turn_id: Option<&str>,
+        originating_queue_claims: Vec<crate::QueuedWorkCompletion>,
+        originating_turn_input_claims: Vec<crate::TurnInputCompletion>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
         completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
         enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
@@ -378,6 +382,8 @@ impl TurnBoundary {
                 usage_deltas,
                 outcome: &returned_turn.outcome,
                 turn_id,
+                originating_queue_claims,
+                originating_turn_input_claims,
                 completed_queue_claims,
                 completed_turn_input_claims,
                 enqueued_queue_batches,
@@ -450,6 +456,8 @@ impl TurnBoundary {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
             None,
             Vec::new(),
             None,
@@ -471,6 +479,8 @@ impl TurnBoundary {
             usage_deltas,
             outcome,
             turn_id,
+            originating_queue_claims,
+            originating_turn_input_claims,
             completed_queue_claims,
             completed_turn_input_claims,
             enqueued_queue_batches,
@@ -533,6 +543,8 @@ impl TurnBoundary {
                 graph,
                 usage_deltas,
                 turn_id,
+                originating_queue_claims,
+                originating_turn_input_claims,
                 completed_queue_claims,
                 completed_turn_input_claims,
                 enqueued_queue_batches,
@@ -554,6 +566,8 @@ impl TurnBoundary {
         graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
         turn_id: Option<&str>,
+        originating_queue_claims: Vec<crate::QueuedWorkCompletion>,
+        originating_turn_input_claims: Vec<crate::TurnInputCompletion>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
         completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
         enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
@@ -575,6 +589,8 @@ impl TurnBoundary {
         }
         commit.completed_queue_claims = completed_queue_claims;
         commit.completed_turn_input_claims = completed_turn_input_claims;
+        commit
+            .validate_claim_settlement(&originating_queue_claims, &originating_turn_input_claims)?;
         commit.enqueued_queue_batches = enqueued_queue_batches;
         commit.interrupted_turn_input_turn_id = interrupted_turn_input_turn_id;
         if let Some(turn_id) = turn_id {
@@ -1432,6 +1448,8 @@ mod tests {
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
                 turn_id: None,
+                originating_queue_claims: Vec::new(),
+                originating_turn_input_claims: Vec::new(),
                 completed_queue_claims: Vec::new(),
                 completed_turn_input_claims: Vec::new(),
                 enqueued_queue_batches: Vec::new(),
@@ -1449,6 +1467,95 @@ mod tests {
         assert_eq!(pipeline.state_mut().token_ledger.len(), 2);
         assert!(pipeline.state_mut().execution_state_snapshot().is_none());
         assert!(pipeline.state_mut().head_revision.is_some());
+    }
+
+    #[tokio::test]
+    async fn final_commit_rejects_claim_derived_content_without_settlement() {
+        let graph = SessionGraph::from_active_read_state(&[text_message(
+            "claimed-input",
+            MessageRole::User,
+            "claimed content",
+        )]);
+        let queue_origin = crate::QueuedWorkCompletion {
+            session_id: "session-1".to_string(),
+            claim_id: "queue-claim".to_string(),
+            lease_token: "queue-token".to_string(),
+            batch_ids: vec!["queue-batch".to_string()],
+        };
+        let turn_input_origin = crate::TurnInputCompletion {
+            session_id: "session-1".to_string(),
+            claim_id: "turn-input-claim".to_string(),
+            lease_token: "turn-input-token".to_string(),
+            input_ids: vec!["turn-input".to_string()],
+        };
+
+        let store = RecordingStore::default();
+        let (mut queue_pipeline, _lease) =
+            leased_boundary(&store, state_with_graph(graph.clone())).await;
+        let queue_state = queue_pipeline.export_state_for_assembly();
+        let queue_err = queue_pipeline
+            .final_commit_with_snapshots(FinalCommitInput {
+                returned_state: &queue_state,
+                plugins: None,
+                execution_state_snapshot: None,
+                store: Some(&store),
+                usage_deltas: &[],
+                outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                tool_calls: &[],
+                turn_id: None,
+                originating_queue_claims: vec![queue_origin],
+                originating_turn_input_claims: Vec::new(),
+                completed_queue_claims: Vec::new(),
+                completed_turn_input_claims: Vec::new(),
+                enqueued_queue_batches: Vec::new(),
+                interrupted_turn_input_turn_id: None,
+                pending_attachment_ids: Vec::new(),
+                session_execution_lease_completion: None,
+            })
+            .await
+            .expect_err("queue-derived content requires claim settlement");
+        assert!(matches!(
+            queue_err,
+            StoreError::UnsettledQueuedWorkClaim { ref claim_id, .. }
+                if claim_id == "queue-claim"
+        ));
+
+        let (mut input_pipeline, _lease) = leased_boundary(&store, state_with_graph(graph)).await;
+        let input_state = input_pipeline.export_state_for_assembly();
+        let input_err = input_pipeline
+            .final_commit_with_snapshots(FinalCommitInput {
+                returned_state: &input_state,
+                plugins: None,
+                execution_state_snapshot: None,
+                store: Some(&store),
+                usage_deltas: &[],
+                outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                tool_calls: &[],
+                turn_id: None,
+                originating_queue_claims: Vec::new(),
+                originating_turn_input_claims: vec![turn_input_origin],
+                completed_queue_claims: Vec::new(),
+                completed_turn_input_claims: Vec::new(),
+                enqueued_queue_batches: Vec::new(),
+                interrupted_turn_input_turn_id: None,
+                pending_attachment_ids: Vec::new(),
+                session_execution_lease_completion: None,
+            })
+            .await
+            .expect_err("turn-input-derived content requires claim settlement");
+        assert!(matches!(
+            input_err,
+            StoreError::UnsettledTurnInputClaim { ref claim_id, .. }
+                if claim_id == "turn-input-claim"
+        ));
+        assert_eq!(
+            *store
+                .runtime_commit_count
+                .lock()
+                .expect("lock runtime commit count"),
+            0,
+            "invalid commits must be rejected before reaching persistence"
+        );
     }
 
     #[tokio::test]
@@ -1474,6 +1581,8 @@ mod tests {
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
                 turn_id: None,
+                originating_queue_claims: Vec::new(),
+                originating_turn_input_claims: Vec::new(),
                 completed_queue_claims: Vec::new(),
                 completed_turn_input_claims: Vec::new(),
                 enqueued_queue_batches: Vec::new(),
