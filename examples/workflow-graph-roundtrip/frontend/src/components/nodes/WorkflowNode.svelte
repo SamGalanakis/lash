@@ -13,6 +13,10 @@
   const isAssign = $derived(node.data.kind === 'state_update');
   const isComputation = $derived(node.data.kind === 'computation');
   const hasExpr = $derived(isAssign || isComputation);
+  // data / call / effect nodes carry an optional `let <binding> =` name. Their
+  // raw expression is not directly editable (the backend rebuilds it from the
+  // `fields` map), so binding is the only extra editable slice here.
+  const hasBinding = $derived(['data', 'call', 'effect'].includes(node.data.kind));
 
   const subtitle = $derived(
     node.data.operation
@@ -106,6 +110,20 @@
       spellcheck="false"
       placeholder="description…"
     />
+  {/if}
+
+  {#if hasBinding}
+    <div class="wf-bind">
+      <span class="wf-bind-kw">let</span>
+      <input
+        class="wf-bind-input nodrag"
+        value={node.data.binding ?? ''}
+        oninput={onBinding}
+        spellcheck="false"
+        placeholder="binding (optional)"
+      />
+      <span class="wf-bind-eq">=</span>
+    </div>
   {/if}
 
   {#if fieldKeys.length}
@@ -309,6 +327,45 @@
     font-size: 11.5px;
     padding: 1px 0 4px;
     margin-bottom: 4px;
+  }
+
+  .wf-bind {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 2px;
+    margin-bottom: 4px;
+  }
+  .wf-bind-kw {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+  .wf-bind-eq {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+  .wf-bind-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 5px 8px;
+    transition: border-color 0.15s ease;
+  }
+  .wf-bind-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
   }
 
   .wf-fields {

@@ -13,11 +13,19 @@
   const groups = $derived(data.groups ?? []);
 
   // Recover the container sub-kind (if / for / while / comprehension) — it is not
-  // an explicit DTO field. While loops render like for / if but expose an
-  // editable condition in place of their (redundant) "while" title.
+  // an explicit DTO field. Each sub-kind surfaces the editable slice of the
+  // backend lens in place of its (redundant) derived title: `if`/`while` edit a
+  // condition, `for` edits its loop binding + iterable, and a comprehension
+  // edits its binding + for/if clauses.
   const subkind = $derived(isProcess ? null : containerSubkind(node));
   const subMeta = $derived(subkind ? CONTAINER_SUBKINDS[subkind] ?? CONTAINER_SUBKINDS.loop : null);
   const isWhile = $derived(subkind === 'while');
+  const isIf = $derived(subkind === 'if');
+  const isFor = $derived(subkind === 'for');
+  const isComprehension = $derived(subkind === 'comprehension');
+  // if / while both surface a single editable condition input.
+  const isConditional = $derived(isWhile || isIf);
+  const clauses = $derived(node.data.clauses ?? []);
 
   function onTitleInput(e) {
     node.data.title = e.currentTarget.value;
@@ -25,6 +33,28 @@
   }
   function onCondition(e) {
     node.data.condition = e.currentTarget.value;
+  }
+  // `for` binding + iterable are required by the backend lens — keep the raw
+  // value (never coerce empty to undefined the way an optional binding would).
+  function onForBinding(e) {
+    node.data.binding = e.currentTarget.value;
+  }
+  function onIterable(e) {
+    node.data.iterable = e.currentTarget.value;
+  }
+  // Comprehension binding is optional — empty means "no `let` name".
+  function onBinding(e) {
+    const v = e.currentTarget.value;
+    node.data.binding = v === '' ? undefined : v;
+  }
+  function onClauseBinding(i, e) {
+    node.data.clauses[i].binding = e.currentTarget.value;
+  }
+  function onClauseIterable(i, e) {
+    node.data.clauses[i].iterable = e.currentTarget.value;
+  }
+  function onClauseCondition(i, e) {
+    node.data.clauses[i].condition = e.currentTarget.value;
   }
 </script>
 
@@ -45,7 +75,7 @@
     >
     {#if isProcess}
       <input class="ct-title" value={node.data.title} oninput={onTitleInput} spellcheck="false" />
-    {:else if isWhile}
+    {:else if isConditional}
       <span class="ct-cond">
         <span class="ct-paren">(</span>
         <input
@@ -56,6 +86,35 @@
           placeholder="condition"
         />
         <span class="ct-paren">)</span>
+      </span>
+    {:else if isFor}
+      <span class="ct-for">
+        <input
+          class="ct-cond-input ct-for-bind nodrag"
+          value={node.data.binding ?? ''}
+          oninput={onForBinding}
+          spellcheck="false"
+          placeholder="binding"
+        />
+        <span class="ct-kw">in</span>
+        <input
+          class="ct-cond-input nodrag"
+          value={node.data.iterable ?? ''}
+          oninput={onIterable}
+          spellcheck="false"
+          placeholder="iterable"
+        />
+      </span>
+    {:else if isComprehension}
+      <span class="ct-for">
+        <span class="ct-kw">let</span>
+        <input
+          class="ct-cond-input ct-for-bind nodrag"
+          value={node.data.binding ?? ''}
+          oninput={onBinding}
+          spellcheck="false"
+          placeholder="binding (optional)"
+        />
       </span>
     {:else}
       <span class="ct-title-static">{node.data.title}</span>
@@ -73,6 +132,42 @@
       >
     {/if}
   </header>
+
+  {#if isComprehension && clauses.length}
+    <div class="ct-clauses nodrag">
+      {#each clauses as clause, i (i)}
+        <div class="ct-clause">
+          {#if clause.kind === 'for'}
+            <span class="ct-kw">for</span>
+            <input
+              class="ct-cond-input ct-for-bind"
+              value={clause.binding ?? ''}
+              oninput={(e) => onClauseBinding(i, e)}
+              spellcheck="false"
+              placeholder="binding"
+            />
+            <span class="ct-kw">in</span>
+            <input
+              class="ct-cond-input"
+              value={clause.iterable ?? ''}
+              oninput={(e) => onClauseIterable(i, e)}
+              spellcheck="false"
+              placeholder="iterable"
+            />
+          {:else}
+            <span class="ct-kw">if</span>
+            <input
+              class="ct-cond-input"
+              value={clause.condition ?? ''}
+              oninput={(e) => onClauseCondition(i, e)}
+              spellcheck="false"
+              placeholder="condition"
+            />
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
 
   {#each groups as g (g.slot)}
     <span class="ct-slot" style="left:{g.x}px; top:{g.y - 4}px; width:{g.w}px;">{g.slot}</span>
@@ -171,6 +266,40 @@
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .ct-for {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 1;
+    min-width: 0;
+  }
+  .ct-for-bind {
+    flex: 0 1 40%;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .ct-kw {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: color-mix(in srgb, var(--accent) 70%, var(--text-dim));
+    flex-shrink: 0;
+  }
+  .ct-clauses {
+    position: absolute;
+    top: 38px;
+    left: 14px;
+    right: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .ct-clause {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
   }
   .ct-status {
     font-family: var(--font-mono);

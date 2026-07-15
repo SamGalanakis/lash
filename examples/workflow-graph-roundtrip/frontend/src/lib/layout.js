@@ -1,4 +1,5 @@
 import dagre from '@dagrejs/dagre';
+import { containerSubkind } from './nodeKinds.js';
 
 // Auto-layout for a positionless WorkflowDocument.
 //
@@ -43,6 +44,8 @@ export function layoutDocument(doc) {
       // that are not part of `fields`, so reserve space for them here.
       if (kind === 'state_update') h += 52; // target ≔ expression
       else if (kind === 'computation') h += 84; // optional binding + expression
+      // data / call / effect nodes render an optional `let <binding> =` row.
+      else if (kind === 'data' || kind === 'call' || kind === 'effect') h += 30;
     }
     h += 26; // footer / delete affordance
     return { w, h: Math.max(h, 82) };
@@ -50,6 +53,19 @@ export function layoutDocument(doc) {
 
   function isContainer(node) {
     return (node.data.children ?? []).length > 0;
+  }
+
+  // Height of a container's title band before its child groups begin. Most
+  // containers fit their editable header (title / condition / for-binding row)
+  // in the base band; a list comprehension additionally stacks one editable
+  // row per for/if clause below it, so grow the band to keep the clause rows
+  // from overlapping the element group.
+  function headerBand(node) {
+    if (containerSubkind(node) === 'comprehension') {
+      const clauseCount = (node.data.clauses ?? []).length;
+      return HEADER_BAND + (clauseCount ? clauseCount * 26 + 8 : 0);
+    }
+    return HEADER_BAND;
   }
 
   // Lay out one scope (an ordered list of node ids) with dagre, returning
@@ -107,19 +123,20 @@ export function layoutDocument(doc) {
   function sizeContainer(node) {
     if (sizes.has(node.id) && groupLayouts.has(node.id)) return;
     const groups = node.data.children ?? [];
+    const band = headerBand(node);
     const laid = groups.map((grp) => ({ slot: grp.slot, ...layoutScope(grp.nodeIds) }));
 
     let x = PAD;
     let maxH = 0;
     for (const lg of laid) {
       lg.offsetX = x;
-      lg.offsetY = HEADER_BAND + GROUP_LABEL;
+      lg.offsetY = band + GROUP_LABEL;
       x += lg.width + GROUP_GAP;
       maxH = Math.max(maxH, lg.height);
     }
     const innerRight = laid.length ? x - GROUP_GAP + PAD : PAD * 3;
     const totalW = Math.max(innerRight, 220);
-    const totalH = HEADER_BAND + (laid.length ? GROUP_LABEL + maxH + PAD : PAD);
+    const totalH = band + (laid.length ? GROUP_LABEL + maxH + PAD : PAD);
 
     for (const lg of laid) {
       for (const [id, p] of lg.positions) {
@@ -132,7 +149,7 @@ export function layoutDocument(doc) {
       laid.map((lg) => ({
         slot: lg.slot,
         x: lg.offsetX,
-        y: HEADER_BAND,
+        y: band,
         w: Math.max(lg.width, 80),
         h: GROUP_LABEL + lg.height,
       })),
