@@ -488,6 +488,40 @@ async fn invalid_graph_post_returns_typed_unprocessable_entity() {
     assert_eq!(body["error"]["code"], "missing_required_child");
     assert_eq!(body["error"]["details"]["child"], "body");
 
+    let mut document: WorkflowDocument = client
+        .post(format!("{base}/workflow/select"))
+        .json(&serde_json::json!({ "id": "counter-loop" }))
+        .send()
+        .await
+        .expect("select counter-loop")
+        .json()
+        .await
+        .expect("counter-loop document");
+    let invalid_target = "state.count + 1";
+    assert!(
+        lashlang::parse_expression(invalid_target).is_ok(),
+        "invalid assignment target should remain a valid expression"
+    );
+    let state_update = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.node_type == "state_update")
+        .expect("counter-loop state update");
+    state_update.data.target = Some(invalid_target.to_string());
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("POST invalid state update target");
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = response
+        .json()
+        .await
+        .expect("typed assignment-target response");
+    assert_eq!(body["error"]["code"], "invalid_assignment_target");
+    assert_eq!(body["error"]["details"]["field"], "target");
+
     server.abort();
 }
 
