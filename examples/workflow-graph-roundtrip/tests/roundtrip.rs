@@ -93,7 +93,7 @@ async fn lists_selects_projects_and_runs_built_in_workflows() {
                 matches!(
                     &node.kind,
                     lashlang::WorkflowNodeKind::StateUpdate { target, .. }
-                        if !target.is_simple()
+                        if target.contains('.')
                 )
             }));
         }
@@ -264,6 +264,67 @@ async fn project_mutate_save_and_run_streams_correlated_events() {
 }
 
 #[tokio::test]
+async fn edited_counter_loop_condition_saves_reprojects_and_runs() {
+    let state = AppState::with_run_timing(RunTiming {
+        sleep_cap: Duration::from_millis(2),
+        signal_delay: Duration::from_millis(2),
+    })
+    .expect("default workflow");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document: WorkflowDocument = client
+        .post(format!("{base}/workflow/select"))
+        .json(&serde_json::json!({ "id": "counter-loop" }))
+        .send()
+        .await
+        .expect("select counter-loop")
+        .json()
+        .await
+        .expect("counter-loop document");
+    let while_node = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.node_type == "container" && node.data.title == "while")
+        .expect("counter-loop while node");
+    assert_eq!(
+        while_node.data.condition.as_deref(),
+        Some("(state.count < 3)")
+    );
+    while_node.data.condition = Some("(state.count < 1)".to_string());
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save edited counter-loop");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: WorkflowDocument = response.json().await.expect("saved counter-loop");
+    assert!(saved.source.contains("while (state.count < 1)"));
+    assert!(saved.nodes.iter().any(|node| {
+        node.node_type == "container" && node.data.condition.as_deref() == Some("(state.count < 1)")
+    }));
+
+    let events = run_workflow(&client, &base).await;
+    assert!(!events.is_empty());
+    assert!(!events.iter().any(|event| event.status == RunStatus::Failed));
+    let final_event = events.last().expect("terminal event");
+    assert_eq!(final_event.status, RunStatus::Succeeded);
+    assert_eq!(
+        final_event.display.lists.get("counts"),
+        Some(&vec!["0".to_string()])
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn delete_node_edit_round_trips_and_runs_the_saved_graph() {
     let state = AppState::with_run_timing(RunTiming {
         sleep_cap: Duration::from_millis(2),
@@ -393,6 +454,25 @@ async fn invalid_graph_post_returns_typed_unprocessable_entity() {
         .iter_mut()
         .find(|node| node.node_type == "container" && node.data.title == "while")
         .expect("default workflow while container");
+    let original_condition = while_node.data.condition.clone();
+    while_node.data.condition = Some("count <".to_string());
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("POST invalid while condition");
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = response.json().await.expect("typed expression response");
+    assert_eq!(body["error"]["code"], "invalid_expression");
+    assert_eq!(body["error"]["details"]["field"], "condition");
+
+    let while_node = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.node_type == "container" && node.data.title == "while")
+        .expect("default workflow while container");
+    while_node.data.condition = original_condition;
     while_node
         .data
         .children

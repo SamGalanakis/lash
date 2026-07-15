@@ -50,9 +50,28 @@ pub struct NodeData {
     #[serde(default)]
     pub fields: BTreeMap<String, EditableValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterable: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clauses: Vec<EditableComprehensionClause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChildGroup>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EditableComprehensionClause {
+    For { binding: String, iterable: String },
+    If { condition: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -211,6 +230,22 @@ impl RenderErrorResponse {
             GraphRenderError::InvalidNodePayload { node_id, message } => (
                 "invalid_node_payload",
                 json!({ "nodeId": node_id, "reason": message }),
+            ),
+            GraphRenderError::InvalidExpression {
+                node_id,
+                field,
+                message,
+            } => (
+                "invalid_expression",
+                json!({ "nodeId": node_id, "field": field, "reason": message }),
+            ),
+            GraphRenderError::InvalidAssignmentTarget {
+                node_id,
+                field,
+                message,
+            } => (
+                "invalid_assignment_target",
+                json!({ "nodeId": node_id, "field": field, "reason": message }),
             ),
             GraphRenderError::InvalidOpaqueSource { node_id, message } => (
                 "invalid_opaque_source",

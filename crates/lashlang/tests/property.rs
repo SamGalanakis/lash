@@ -365,11 +365,11 @@ fn graph_has_required_variant(graph: &lashlang::WorkflowGraph, variant: &str) ->
             .any(|node| matches!(node.kind, lashlang::WorkflowNodeKind::StateUpdate { .. })),
         "type_ref_data" => graph.nodes().any(|node| {
             matches!(
-                node.kind,
+                &node.kind,
                 lashlang::WorkflowNodeKind::Data {
-                    expression: lashlang::Expr::TypeLiteral(_),
+                    expression,
                     ..
-                }
+                } if expression.starts_with("Type {")
             )
         }),
         "computation" => graph
@@ -479,17 +479,17 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
             let lashlang::WorkflowNodeKind::StateUpdate { expression, .. } = &mut node.kind else {
                 return false;
             };
-            *expression = lashlang::Expr::Block(Vec::new());
-            "canonical_source"
+            *expression = "{".to_string();
+            "invalid_expression"
         }
         "type_ref_data" => {
             let Some(node) = invalid.main.nodes.iter_mut().find(|node| {
                 matches!(
-                    node.kind,
+                    &node.kind,
                     lashlang::WorkflowNodeKind::Data {
-                        expression: lashlang::Expr::TypeLiteral(_),
+                        expression,
                         ..
-                    }
+                    } if expression.starts_with("Type {")
                 )
             }) else {
                 return false;
@@ -497,7 +497,7 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
             let lashlang::WorkflowNodeKind::Data { expression, .. } = &mut node.kind else {
                 return false;
             };
-            *expression = lashlang::Expr::Print(Box::new(lashlang::Expr::Null));
+            *expression = "print null".to_string();
             "invalid_payload"
         }
         "computation" => {
@@ -511,7 +511,7 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
             let lashlang::WorkflowNodeKind::Computation { expression, .. } = &mut node.kind else {
                 return false;
             };
-            *expression = lashlang::Expr::Null;
+            *expression = "null".to_string();
             "invalid_payload"
         }
         _ => return true,
@@ -526,8 +526,8 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
             "missing_child",
             Err(lashlang::GraphRenderError::MissingRequiredChild { .. })
         ) | (
-            "canonical_source",
-            Err(lashlang::GraphRenderError::CanonicalSource(_))
+            "invalid_expression",
+            Err(lashlang::GraphRenderError::InvalidExpression { .. })
         )
     )
 }

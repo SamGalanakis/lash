@@ -172,6 +172,222 @@ fn while_and_path_assignment_are_structured_and_typed() {
 }
 
 #[test]
+fn edited_expression_text_is_rendered_and_reprojected() {
+    let source = r#"process child() {
+  finish 1
+}
+
+process workflow() {
+  state = { count: 0, other: 0 }
+  while state.count < 3 {
+    state.count = state.count + 1
+  }
+  state.count = 7
+  runs = [start child(), start child()]
+  finish state
+}
+"#;
+    let graph = workflow_graph_from_source(source).unwrap();
+
+    let mut edited = graph.clone();
+    let process = edited
+        .declarations
+        .iter_mut()
+        .find_map(|declaration| match declaration {
+            WorkflowDeclaration::Process(process) if process.name == "workflow" => Some(process),
+            _ => None,
+        })
+        .unwrap();
+    let WorkflowNodeKind::Container(WorkflowContainer::While { condition, .. }) =
+        &mut process.body.nodes[1].kind
+    else {
+        panic!("expected while container")
+    };
+    *condition = "(state.count < 2)".to_string();
+    let WorkflowNodeKind::StateUpdate { target, expression } = &mut process.body.nodes[2].kind
+    else {
+        panic!("expected state update")
+    };
+    *target = "state.other".to_string();
+    *expression = "(state.count + 40)".to_string();
+    let WorkflowNodeKind::Computation {
+        binding,
+        expression,
+    } = &mut process.body.nodes[3].kind
+    else {
+        panic!("expected computation")
+    };
+    *binding = Some("started".to_string());
+    *expression = "[start child(), start child(), start child()]".to_string();
+
+    let rendered = workflow_graph_to_source(&edited).unwrap();
+    assert!(
+        rendered.contains("while (state.count < 2)"),
+        "rendered source:\n{rendered}"
+    );
+    assert!(rendered.contains("state.other = (state.count + 40)"));
+    assert!(rendered.contains("started = [start child(), start child(), start child()]"));
+
+    let reprojected = workflow_graph_from_source(&rendered).unwrap();
+    let process = reprojected.process("workflow").unwrap();
+    assert!(matches!(
+        &process.body.nodes[1].kind,
+        WorkflowNodeKind::Container(WorkflowContainer::While { condition, .. })
+            if condition == "(state.count < 2)"
+    ));
+    assert!(matches!(
+        &process.body.nodes[2].kind,
+        WorkflowNodeKind::StateUpdate { target, expression }
+            if target == "state.other" && expression == "(state.count + 40)"
+    ));
+    assert!(matches!(
+        &process.body.nodes[3].kind,
+        WorkflowNodeKind::Computation { binding, expression }
+            if binding.as_deref() == Some("started")
+                && expression == "[start child(), start child(), start child()]"
+    ));
+    assert_eq!(workflow_graph_to_source(&reprojected).unwrap(), rendered);
+}
+
+#[test]
+fn invalid_edited_expression_returns_field_typed_error() {
+    let mut graph =
+        workflow_graph_from_source("process workflow() { while true { sleep for 1 } finish null }")
+            .unwrap();
+    let process = graph
+        .declarations
+        .iter_mut()
+        .find_map(|declaration| match declaration {
+            WorkflowDeclaration::Process(process) => Some(process),
+            _ => None,
+        })
+        .unwrap();
+    let WorkflowNodeKind::Container(WorkflowContainer::While { condition, .. }) =
+        &mut process.body.nodes[0].kind
+    else {
+        panic!("expected while container")
+    };
+    *condition = "value <".to_string();
+
+    assert!(matches!(
+        workflow_graph_to_source(&graph),
+        Err(GraphRenderError::InvalidExpression {
+            field: "condition",
+            ..
+        })
+    ));
+
+    let mut graph = workflow_graph_from_source(
+        "process workflow() { state = { count: 0 } state.count = 1 finish state }",
+    )
+    .unwrap();
+    let process = graph.process("workflow").unwrap();
+    let state_update_id = process.body.nodes[1].id.clone();
+    let process = graph
+        .declarations
+        .iter_mut()
+        .find_map(|declaration| match declaration {
+            WorkflowDeclaration::Process(process) => Some(process),
+            _ => None,
+        })
+        .unwrap();
+    let node = process
+        .body
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == state_update_id)
+        .unwrap();
+    let WorkflowNodeKind::StateUpdate { target, .. } = &mut node.kind else {
+        panic!("expected state update")
+    };
+    *target = "state.".to_string();
+    assert!(matches!(
+        workflow_graph_to_source(&graph),
+        Err(GraphRenderError::InvalidAssignmentTarget {
+            field: "target",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn all_container_expression_slots_accept_host_edits() {
+    let source = r#"process workflow() {
+  values = [1, 2]
+  if true { sleep for 1 } else { sleep for 2 }
+  for value in values { sleep for value }
+  selected = [value for value in values if value > 0]
+  finish selected
+}
+"#;
+    let mut graph = workflow_graph_from_source(source).unwrap();
+    let process = graph
+        .declarations
+        .iter_mut()
+        .find_map(|declaration| match declaration {
+            WorkflowDeclaration::Process(process) => Some(process),
+            _ => None,
+        })
+        .unwrap();
+    let WorkflowNodeKind::Container(WorkflowContainer::If { condition, .. }) =
+        &mut process.body.nodes[1].kind
+    else {
+        panic!("expected if container")
+    };
+    *condition = "false".to_string();
+    let WorkflowNodeKind::Container(WorkflowContainer::For { iterable, .. }) =
+        &mut process.body.nodes[2].kind
+    else {
+        panic!("expected for container")
+    };
+    *iterable = "[3, 4]".to_string();
+    let WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { clauses, .. }) =
+        &mut process.body.nodes[3].kind
+    else {
+        panic!("expected list-comprehension container")
+    };
+    clauses[0] = WorkflowListComprehensionClause::For {
+        binding: "value".to_string(),
+        iterable: "[5, 6]".to_string(),
+    };
+    clauses[1] = WorkflowListComprehensionClause::If {
+        condition: "(value > 5)".to_string(),
+    };
+
+    let rendered = workflow_graph_to_source(&graph).unwrap();
+    assert!(rendered.contains("if false"));
+    assert!(rendered.contains("for value in [3, 4]"));
+    assert!(rendered.contains("for value in [5, 6] if (value > 5)"));
+
+    let reprojected = workflow_graph_from_source(&rendered).unwrap();
+    let process = reprojected.process("workflow").unwrap();
+    assert!(matches!(
+        &process.body.nodes[1].kind,
+        WorkflowNodeKind::Container(WorkflowContainer::If { condition, .. })
+            if condition == "false"
+    ));
+    assert!(matches!(
+        &process.body.nodes[2].kind,
+        WorkflowNodeKind::Container(WorkflowContainer::For { iterable, .. })
+            if iterable == "[3, 4]"
+    ));
+    assert!(matches!(
+        &process.body.nodes[3].kind,
+        WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { clauses, .. })
+            if clauses == &vec![
+                WorkflowListComprehensionClause::For {
+                    binding: "value".to_string(),
+                    iterable: "[5, 6]".to_string(),
+                },
+                WorkflowListComprehensionClause::If {
+                    condition: "(value > 5)".to_string(),
+                },
+            ]
+    ));
+    assert_eq!(workflow_graph_to_source(&reprojected).unwrap(), rendered);
+}
+
+#[test]
 fn iteration_carried_reassignment_is_structured_state_update() {
     let graph = workflow_graph_from_source(
         "total = 0\nfor value in [1, 2] { total = total + value }\nfinish total\n",
@@ -312,11 +528,8 @@ finish unusual
 "#;
     let graph = workflow_graph_from_source(source).unwrap();
     assert!(matches!(
-        graph.main.nodes[0].kind,
-        WorkflowNodeKind::Data {
-            expression: Expr::TypeLiteral(_),
-            ..
-        }
+        &graph.main.nodes[0].kind,
+        WorkflowNodeKind::Data { expression, .. } if expression == "Type { item: Item }"
     ));
     assert!(
         graph.main.nodes[1..=10]

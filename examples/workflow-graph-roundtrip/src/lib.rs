@@ -28,8 +28,9 @@ use tokio_stream::wrappers::ReceiverStream;
 
 pub use catalog::{SelectWorkflowRequest, WorkflowCatalogEntry};
 pub use contract::{
-    ChildGroup, DisplayDelta, DisplayState, EdgeData, EditableValue, FlowEdge, FlowNode,
-    GraphRoots, NodeData, RenderErrorResponse, RunEvent, RunStatus, WorkflowDocument,
+    ChildGroup, DisplayDelta, DisplayState, EdgeData, EditableComprehensionClause, EditableValue,
+    FlowEdge, FlowNode, GraphRoots, NodeData, RenderErrorResponse, RunEvent, RunStatus,
+    WorkflowDocument,
 };
 pub use runtime::RunTiming;
 

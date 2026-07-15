@@ -2,13 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lashlang::{
     Expr, WorkflowContainer, WorkflowDeclaration, WorkflowEdge, WorkflowEdgeKind, WorkflowGraph,
-    WorkflowNode, WorkflowNodeId, WorkflowNodeKind, WorkflowNodeNameSource, WorkflowSubgraph,
+    WorkflowListComprehensionClause, WorkflowNode, WorkflowNodeId, WorkflowNodeKind,
+    WorkflowNodeNameSource, WorkflowSubgraph, canonical_expression_source, parse_expression,
 };
 use serde_json::json;
 
 use crate::{
-    ChildGroup, EdgeData, EditableValue, FlowEdge, FlowNode, GraphRoots, NodeData,
-    RenderErrorResponse, WorkflowDocument,
+    ChildGroup, EdgeData, EditableComprehensionClause, EditableValue, FlowEdge, FlowNode,
+    GraphRoots, NodeData, RenderErrorResponse, WorkflowDocument,
 };
 
 pub(crate) fn document_from_graph(
@@ -43,6 +44,12 @@ pub(crate) fn document_from_graph(
                 operation: None,
                 effect: None,
                 fields: BTreeMap::new(),
+                binding: None,
+                target: None,
+                expression: None,
+                condition: None,
+                iterable: None,
+                clauses: Vec::new(),
                 source: None,
                 children: vec![ChildGroup {
                     slot: "body".to_string(),
@@ -189,6 +196,48 @@ fn node_data(node: &WorkflowNode, children: Vec<ChildGroup>) -> NodeData {
         WorkflowNodeKind::Opaque { source } => Some(source.clone()),
         _ => None,
     };
+    let binding = match &node.kind {
+        WorkflowNodeKind::Data { binding, .. }
+        | WorkflowNodeKind::Call { binding, .. }
+        | WorkflowNodeKind::Effect { binding, .. }
+        | WorkflowNodeKind::Computation { binding, .. }
+        | WorkflowNodeKind::Container(WorkflowContainer::If { binding, .. })
+        | WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { binding, .. }) => {
+            binding.clone()
+        }
+        WorkflowNodeKind::Container(WorkflowContainer::For { binding, .. }) => {
+            Some(binding.clone())
+        }
+        _ => None,
+    };
+    let target = match &node.kind {
+        WorkflowNodeKind::StateUpdate { target, .. } => Some(target.clone()),
+        _ => None,
+    };
+    let expression = match &node.kind {
+        WorkflowNodeKind::Computation { expression, .. }
+        | WorkflowNodeKind::StateUpdate { expression, .. } => Some(expression.clone()),
+        _ => None,
+    };
+    let condition = match &node.kind {
+        WorkflowNodeKind::Container(WorkflowContainer::If { condition, .. })
+        | WorkflowNodeKind::Container(WorkflowContainer::While { condition, .. }) => {
+            Some(condition.clone())
+        }
+        _ => None,
+    };
+    let iterable = match &node.kind {
+        WorkflowNodeKind::Container(WorkflowContainer::For { iterable, .. }) => {
+            Some(iterable.clone())
+        }
+        _ => None,
+    };
+    let clauses = match &node.kind {
+        WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { clauses, .. }) => {
+            clauses.iter().map(editable_clause).collect()
+        }
+        _ => Vec::new(),
+    };
     NodeData {
         kind: node_kind(node).to_string(),
         title: node.name.clone(),
@@ -197,8 +246,28 @@ fn node_data(node: &WorkflowNode, children: Vec<ChildGroup>) -> NodeData {
         operation,
         effect,
         fields: editable_fields(node),
+        binding,
+        target,
+        expression,
+        condition,
+        iterable,
+        clauses,
         source,
         children,
+    }
+}
+
+fn editable_clause(clause: &WorkflowListComprehensionClause) -> EditableComprehensionClause {
+    match clause {
+        WorkflowListComprehensionClause::For { binding, iterable } => {
+            EditableComprehensionClause::For {
+                binding: binding.clone(),
+                iterable: iterable.clone(),
+            }
+        }
+        WorkflowListComprehensionClause::If { condition } => EditableComprehensionClause::If {
+            condition: condition.clone(),
+        },
     }
 }
 
@@ -301,7 +370,7 @@ fn build_subgraph(
                 json!({ "nodeId": id }),
             )
         })?;
-        apply_editable_data(&mut node, &flow.data);
+        apply_editable_data(&mut node, &flow.data)?;
         rebuild_children(
             &mut node,
             &flow.data.children,
@@ -408,7 +477,11 @@ fn rebuild_children(
     Ok(())
 }
 
-fn apply_editable_data(node: &mut WorkflowNode, data: &NodeData) {
+fn apply_editable_data(
+    node: &mut WorkflowNode,
+    data: &NodeData,
+) -> Result<(), RenderErrorResponse> {
+    let node_id = node.id.to_string();
     node.name = data.title.clone();
     node.description = data.description.clone();
     node.name_source = parse_name_source(&data.name_source);
@@ -417,17 +490,103 @@ fn apply_editable_data(node: &mut WorkflowNode, data: &NodeData) {
     {
         *source = updated.clone();
     }
-    let expression = match &mut node.kind {
+    match &mut node.kind {
+        WorkflowNodeKind::Data { binding, .. }
+        | WorkflowNodeKind::Call { binding, .. }
+        | WorkflowNodeKind::Effect { binding, .. } => {
+            *binding = data.binding.clone();
+        }
+        WorkflowNodeKind::Computation {
+            binding,
+            expression,
+        } => {
+            *binding = data.binding.clone();
+            *expression = required_text(&node_id, data.expression.as_ref(), "expression")?;
+        }
+        WorkflowNodeKind::StateUpdate { target, expression } => {
+            *target = required_text(&node_id, data.target.as_ref(), "target")?;
+            *expression = required_text(&node_id, data.expression.as_ref(), "expression")?;
+        }
+        WorkflowNodeKind::Container(WorkflowContainer::If {
+            binding, condition, ..
+        }) => {
+            *binding = data.binding.clone();
+            *condition = required_text(&node_id, data.condition.as_ref(), "condition")?;
+        }
+        WorkflowNodeKind::Container(WorkflowContainer::For {
+            binding, iterable, ..
+        }) => {
+            *binding = required_text(&node_id, data.binding.as_ref(), "binding")?;
+            *iterable = required_text(&node_id, data.iterable.as_ref(), "iterable")?;
+        }
+        WorkflowNodeKind::Container(WorkflowContainer::While { condition, .. }) => {
+            *condition = required_text(&node_id, data.condition.as_ref(), "condition")?;
+        }
+        WorkflowNodeKind::Container(WorkflowContainer::ListComprehension {
+            binding,
+            clauses,
+            ..
+        }) => {
+            *binding = data.binding.clone();
+            *clauses = data.clauses.iter().map(workflow_clause).collect();
+        }
+        _ => {}
+    }
+    let expression_text = match &mut node.kind {
         WorkflowNodeKind::Data { expression, .. }
         | WorkflowNodeKind::Call { expression, .. }
         | WorkflowNodeKind::Effect { expression, .. }
-        | WorkflowNodeKind::Computation { expression, .. }
-        | WorkflowNodeKind::StateUpdate { expression, .. }
         | WorkflowNodeKind::Terminal { expression, .. } => Some(expression),
         _ => None,
     };
-    if let Some(expression) = expression {
-        apply_fields(expression, &data.fields);
+    if let Some(expression_text) = expression_text {
+        let mut expression = parse_expression(expression_text).map_err(|error| {
+            RenderErrorResponse::document(
+                format!(
+                    "stored expression for node `{}` did not parse: {error}",
+                    node.id
+                ),
+                json!({ "nodeId": node.id.to_string(), "reason": error.to_string() }),
+            )
+        })?;
+        apply_fields(&mut expression, &data.fields);
+        *expression_text = canonical_expression_source(&expression).map_err(|error| {
+            RenderErrorResponse::document(
+                format!(
+                    "edited fields for node `{}` are not sourceable: {error}",
+                    node.id
+                ),
+                json!({ "nodeId": node.id.to_string(), "reason": error.to_string() }),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn required_text(
+    node_id: &str,
+    value: Option<&String>,
+    field: &'static str,
+) -> Result<String, RenderErrorResponse> {
+    value.cloned().ok_or_else(|| {
+        RenderErrorResponse::document(
+            format!("flow node `{node_id}` is missing `data.{field}`"),
+            json!({ "nodeId": node_id, "field": field }),
+        )
+    })
+}
+
+fn workflow_clause(clause: &EditableComprehensionClause) -> WorkflowListComprehensionClause {
+    match clause {
+        EditableComprehensionClause::For { binding, iterable } => {
+            WorkflowListComprehensionClause::For {
+                binding: binding.clone(),
+                iterable: iterable.clone(),
+            }
+        }
+        EditableComprehensionClause::If { condition } => WorkflowListComprehensionClause::If {
+            condition: condition.clone(),
+        },
     }
 }
 
@@ -436,12 +595,13 @@ fn editable_fields(node: &WorkflowNode) -> BTreeMap<String, EditableValue> {
         WorkflowNodeKind::Data { expression, .. }
         | WorkflowNodeKind::Call { expression, .. }
         | WorkflowNodeKind::Effect { expression, .. }
-        | WorkflowNodeKind::Computation { expression, .. }
-        | WorkflowNodeKind::StateUpdate { expression, .. }
         | WorkflowNodeKind::Terminal { expression, .. } => expression,
         _ => return BTreeMap::new(),
     };
-    if let Some(fields) = receiver_fields(expression) {
+    let Ok(expression) = parse_expression(expression) else {
+        return BTreeMap::new();
+    };
+    if let Some(fields) = receiver_fields(&expression) {
         return fields
             .iter()
             .filter_map(|(name, value)| {
@@ -449,7 +609,7 @@ fn editable_fields(node: &WorkflowNode) -> BTreeMap<String, EditableValue> {
             })
             .collect();
     }
-    match expression {
+    match &expression {
         Expr::SleepFor(value) | Expr::SleepUntil(value) => EditableValue::from_expr(value)
             .map(|value| BTreeMap::from([("duration".to_string(), value)]))
             .unwrap_or_default(),
@@ -646,7 +806,18 @@ finish [state, introduced]
         assert!(!document.nodes.iter().any(|node| node.node_type == "opaque"));
         assert!(document.nodes.iter().any(|node| {
             node.data.title == "while"
+                && node.data.condition.as_deref() == Some("(state.count < 2)")
                 && node.data.children.iter().any(|child| child.slot == "body")
+        }));
+        assert!(document.nodes.iter().any(|node| {
+            node.node_type == "state_update"
+                && node.data.target.as_deref() == Some("state.count")
+                && node.data.expression.is_some()
+        }));
+        assert!(document.nodes.iter().any(|node| {
+            node.node_type == "computation"
+                && node.data.binding.as_deref() == Some("runs")
+                && node.data.expression.as_deref() == Some("[start worker(), start worker()]")
         }));
 
         let rebuilt = graph_from_document(document, &graph).expect("rebuild promoted graph");

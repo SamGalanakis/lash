@@ -47,7 +47,7 @@ pub use linker::{
     LashlangLanguageFeatures, LinkError, LinkedModule, NamedDataType, NamedDataTypeError,
     ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding, ValueConstructorBinding,
 };
-pub use parser::{ParseError, parse};
+pub use parser::{ParseError, parse, parse_expression};
 pub use runtime::{
     AbilityOp, AbilityResult, BudgetedJsonProjectionConfig, BudgetedJsonProjector, CompileStats,
     CompiledLinkedProgram, CompiledProcessCache, CompiledProcessCacheKey, CompiledProgram,
@@ -72,8 +72,9 @@ pub use runtime::{
 /// continuation-incompatible instruction stream.
 pub const BYTECODE_FORMAT_VERSION: u32 = 1;
 pub use source::{
-    CanonicalSourceError, canonical_process_source, canonical_process_source_with_requirements,
-    canonical_program_source, canonical_program_source_with_requirements,
+    CanonicalSourceError, canonical_assign_target_source, canonical_expression_source,
+    canonical_process_source, canonical_process_source_with_requirements, canonical_program_source,
+    canonical_program_source_with_requirements,
 };
 pub use tracking::{
     LashlangBranchSite, LashlangExecutionCallSite, LashlangExecutionChild,
@@ -91,9 +92,9 @@ pub use trigger::{
 pub use workflow_graph::{
     GraphRenderError, VariableVersion, WORKFLOW_GRAPH_SCHEMA_VERSION, WorkflowContainer,
     WorkflowDeclaration, WorkflowEdge, WorkflowEdgeKind, WorkflowEffectKind, WorkflowGraph,
-    WorkflowGraphBuildError, WorkflowNode, WorkflowNodeId, WorkflowNodeKind,
-    WorkflowNodeNameSource, WorkflowProcess, WorkflowSubgraph, WorkflowTerminalKind,
-    node_id_for_execution_site, runtime_execution_site_for_workflow_site,
+    WorkflowGraphBuildError, WorkflowListComprehensionClause, WorkflowNode, WorkflowNodeId,
+    WorkflowNodeKind, WorkflowNodeNameSource, WorkflowProcess, WorkflowSubgraph,
+    WorkflowTerminalKind, node_id_for_execution_site, runtime_execution_site_for_workflow_site,
     workflow_graph_from_source, workflow_graph_to_source,
 };
 
