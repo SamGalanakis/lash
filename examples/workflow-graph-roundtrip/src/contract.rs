@@ -263,6 +263,15 @@ impl RenderErrorResponse {
         )
     }
 
+    pub(crate) fn unknown_workflow(id: &str) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "unknown_workflow",
+            format!("workflow example `{id}` does not exist"),
+            json!({ "id": id }),
+        )
+    }
+
     fn new(
         status: StatusCode,
         code: impl Into<String>,

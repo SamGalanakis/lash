@@ -1,5 +1,6 @@
 //! HTTP backend for the workflow-graph round-trip example.
 
+mod catalog;
 mod contract;
 mod display;
 mod graph;
@@ -25,6 +26,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
+pub use catalog::{SelectWorkflowRequest, WorkflowCatalogEntry};
 pub use contract::{
     ChildGroup, DisplayDelta, DisplayState, EdgeData, EditableValue, FlowEdge, FlowNode,
     GraphRoots, NodeData, RenderErrorResponse, RunEvent, RunStatus, WorkflowDocument,
@@ -128,13 +130,35 @@ impl Default for AppState {
 
 pub fn app(state: AppState) -> Router {
     Router::new()
+        .route("/workflows", get(list_workflows))
         .route("/workflow", get(get_workflow).post(save_workflow))
+        .route("/workflow/select", post(select_workflow))
         .route("/run", post(run_workflow))
         .route("/healthz", get(healthz))
         .route("/", get(static_index))
         .route("/{*path}", get(static_asset))
         .layer(middleware::from_fn(cors))
         .with_state(state)
+}
+
+async fn list_workflows() -> Json<Vec<WorkflowCatalogEntry>> {
+    Json(catalog::entries())
+}
+
+async fn select_workflow(
+    State(state): State<AppState>,
+    Json(request): Json<SelectWorkflowRequest>,
+) -> Result<Json<WorkflowDocument>, RenderErrorResponse> {
+    let source = catalog::source(&request.id)
+        .ok_or_else(|| RenderErrorResponse::unknown_workflow(&request.id))?;
+    let graph = workflow_graph_from_source(source).map_err(RenderErrorResponse::projection)?;
+    let source = workflow_graph_to_source(&graph).map_err(RenderErrorResponse::from)?;
+    let saved = state.save(source, graph);
+    Ok(Json(graph::document_from_graph(
+        saved.version,
+        saved.source,
+        saved.graph,
+    )))
 }
 
 pub async fn serve(listener: tokio::net::TcpListener, state: AppState) -> std::io::Result<()> {
