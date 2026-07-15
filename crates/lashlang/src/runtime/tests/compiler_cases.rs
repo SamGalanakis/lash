@@ -518,19 +518,19 @@ async fn real_runs_correlate_every_execution_site_to_the_selected_workflow_path(
 
         let selected_path = correlated
             .iter()
-            .filter_map(|(observation, node_id, occurrence)| {
+            .filter(|(observation, _, _)| {
                 matches!(
                     observation,
                     crate::LashlangExecutionObservation::NodeStarted { .. }
                         | crate::LashlangExecutionObservation::BranchSelected { .. }
                 )
-                .then(|| {
-                    let node = graph
-                        .nodes()
-                        .find(|node| node.id == *node_id)
-                        .expect("correlated graph node");
-                    (node.name.clone(), *occurrence)
-                })
+            })
+            .map(|(_, node_id, occurrence)| {
+                let node = graph
+                    .nodes()
+                    .find(|node| node.id == *node_id)
+                    .expect("correlated graph node");
+                (node.name.clone(), *occurrence)
             })
             .collect::<Vec<_>>();
         assert_eq!(
