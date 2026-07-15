@@ -24,3 +24,6 @@ The server serves files from `frontend/dist/` (or directly from `frontend/`)
 when present. A frontend dev server
 can also run separately because the API permits cross-origin GET, POST, and
 OPTIONS requests.
+
+See [RUNBOOK.md](RUNBOOK.md) for the production frontend build, server startup,
+operator checks, and integration verification command.
