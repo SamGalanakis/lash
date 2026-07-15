@@ -325,6 +325,150 @@ async fn edited_counter_loop_condition_saves_reprojects_and_runs() {
 }
 
 #[tokio::test]
+async fn edited_if_condition_and_for_iterable_save_reproject_and_run() {
+    let state = AppState::with_run_timing(RunTiming {
+        sleep_cap: Duration::from_millis(2),
+        signal_delay: Duration::from_millis(2),
+    })
+    .expect("default workflow");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut if_document: WorkflowDocument = client
+        .post(format!("{base}/workflow/select"))
+        .json(&serde_json::json!({ "id": "branching-approval" }))
+        .send()
+        .await
+        .expect("select branching-approval")
+        .json()
+        .await
+        .expect("branching-approval document");
+    let if_node = if_document
+        .nodes
+        .iter_mut()
+        .find(|node| {
+            node.node_type == "container" && node.data.condition.as_deref() == Some("true")
+        })
+        .expect("branching-approval literal if node");
+    if_node.data.condition = Some("false".to_string());
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&if_document)
+        .send()
+        .await
+        .expect("save edited branching-approval");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved_if: WorkflowDocument = response.json().await.expect("saved branching-approval");
+    assert!(saved_if.source.contains("if false"));
+    assert!(saved_if.nodes.iter().any(|node| {
+        node.node_type == "container" && node.data.condition.as_deref() == Some("false")
+    }));
+    let projected_if = lashlang::workflow_graph_from_source(&saved_if.source)
+        .expect("edited branching-approval source should reproject");
+    assert_eq!(
+        lashlang::workflow_graph_to_source(&projected_if)
+            .expect("edited branching-approval graph should render"),
+        saved_if.source
+    );
+
+    let if_events = run_workflow(&client, &base).await;
+    assert!(!if_events.is_empty());
+    assert!(
+        if_events
+            .iter()
+            .all(|event| event.workflow_version == saved_if.version)
+    );
+    assert!(
+        if_events
+            .iter()
+            .all(|event| { saved_if.nodes.iter().any(|node| node.id == event.node_id) })
+    );
+    assert!(
+        !if_events
+            .iter()
+            .any(|event| event.status == RunStatus::Failed)
+    );
+    let final_if_event = if_events.last().expect("branching terminal event");
+    assert_eq!(final_if_event.status, RunStatus::Succeeded);
+    assert!(
+        final_if_event
+            .display
+            .messages
+            .iter()
+            .any(|message| message == "Approval needs review")
+    );
+
+    let mut for_document: WorkflowDocument = client
+        .post(format!("{base}/workflow/select"))
+        .json(&serde_json::json!({ "id": "counter-loop" }))
+        .send()
+        .await
+        .expect("select counter-loop")
+        .json()
+        .await
+        .expect("counter-loop document");
+    let for_node = for_document
+        .nodes
+        .iter_mut()
+        .find(|node| node.node_type == "container" && node.data.iterable.is_some())
+        .expect("counter-loop for node");
+    assert_eq!(for_node.data.iterable.as_deref(), Some("[70, 85, 100]"));
+    for_node.data.iterable = Some("[15]".to_string());
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&for_document)
+        .send()
+        .await
+        .expect("save edited counter-loop for iterable");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved_for: WorkflowDocument = response
+        .json()
+        .await
+        .expect("saved counter-loop for iterable");
+    assert!(saved_for.source.contains("for pct in [15]"));
+    assert!(saved_for.nodes.iter().any(|node| {
+        node.node_type == "container" && node.data.iterable.as_deref() == Some("[15]")
+    }));
+    let projected_for = lashlang::workflow_graph_from_source(&saved_for.source)
+        .expect("edited counter-loop source should reproject");
+    assert_eq!(
+        lashlang::workflow_graph_to_source(&projected_for)
+            .expect("edited counter-loop graph should render"),
+        saved_for.source
+    );
+
+    let for_events = run_workflow(&client, &base).await;
+    assert!(!for_events.is_empty());
+    assert!(
+        for_events
+            .iter()
+            .all(|event| event.workflow_version == saved_for.version)
+    );
+    assert!(
+        for_events
+            .iter()
+            .all(|event| { saved_for.nodes.iter().any(|node| node.id == event.node_id) })
+    );
+    assert!(
+        !for_events
+            .iter()
+            .any(|event| event.status == RunStatus::Failed)
+    );
+    let final_for_event = for_events.last().expect("counter-loop terminal event");
+    assert_eq!(final_for_event.status, RunStatus::Succeeded);
+    assert_eq!(final_for_event.display.progress, 15.0);
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn delete_node_edit_round_trips_and_runs_the_saved_graph() {
     let state = AppState::with_run_timing(RunTiming {
         sleep_cap: Duration::from_millis(2),
