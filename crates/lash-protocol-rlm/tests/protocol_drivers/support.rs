@@ -509,6 +509,7 @@ pub(crate) struct RlmProtocolExpectations {
     pub(crate) no_exec_code: bool,
     pub(crate) no_final_message_event: bool,
     pub(crate) no_tool_call_events: bool,
+    pub(crate) tool_call_events: bool,
     pub(crate) no_assistant_conversation_progress: bool,
     pub(crate) trajectory_omits_tool_call_ids: bool,
     pub(crate) system_message_contains: Vec<&'static str>,
@@ -577,6 +578,12 @@ impl RlmProtocolExpectations {
             assert!(
                 !run.tool_call_event,
                 "{scenario_name} emitted host tool-call events for protocol-internal exec results"
+            );
+        }
+        if self.tool_call_events {
+            assert!(
+                run.tool_call_event,
+                "{scenario_name} did not emit tool-call accounting events for exec results"
             );
         }
         if self.no_assistant_conversation_progress {

@@ -2164,6 +2164,14 @@ finish "done""#,
         result.outcome,
         TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
     ));
+    assert!(result.execution.had_tool_calls);
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].tool, "app_lookup");
+    assert_eq!(result.tool_calls[0].args, serde_json::json!({}));
+    assert_eq!(
+        result.tool_calls[0].output.value_for_projection(),
+        serde_json::json!({ "ok": true })
+    );
     let events = events.snapshot().await;
     let code_started = events
         .iter()
@@ -2275,6 +2283,40 @@ finish "done""#,
     };
     assert_eq!(value, &serde_json::json!("done"));
     Ok(())
+}
+
+#[test]
+fn rlm_recovered_tool_failure_remains_in_turn_accounting() -> Result<()> {
+    run_async_test_on_stack_budget("rlm-recovered-tool-failure-test", || async {
+        let core = explicit_ephemeral_facets(LashCore::rlm_builder(rlm_factory()))
+            .provider(queued_text_provider(vec![lashlang_block(
+                r#"failure = await tools.app_lookup({})
+finish "recovered""#,
+            )]))
+            .model(mock_model_spec())
+            .tools(Arc::new(FailingAppTools))
+            .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+            .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+            .build()?;
+        let session = core.session("rlm-recovered-tool-failure").open().await?;
+
+        let result = session
+            .turn(TurnInput::text("recover the tool failure"))
+            .run()
+            .await?
+            .result;
+
+        assert!(matches!(
+            result.outcome,
+            TurnOutcome::Finished(lash_core::TurnFinish::FinalValue { .. })
+        ));
+        assert_eq!(result.final_value(), Some(&serde_json::json!("recovered")));
+        assert!(result.execution.had_tool_calls);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool, "app_lookup");
+        assert!(!result.tool_calls[0].output.is_success());
+        Ok(())
+    })
 }
 
 #[test]

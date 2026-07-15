@@ -78,9 +78,9 @@ const EMPTY_TURN_OPTIONS_DEFAULT: RlmProtocolScenarioCoverage = rlm_protocol_cov
     "Empty RLM turn options use the natural default."
 );
 const EXEC_RESULT_TOOL_CALL_IDS_INTERNAL: RlmProtocolScenarioCoverage = rlm_protocol_coverage!(
-    rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool_events,
-    "exec result keeps tool calls protocol internal",
-    "Exec result feedback avoids tool-call id storage and synthetic tool replay."
+    rlm_protocol_scenario_exec_result_emits_accounting_without_storing_tool_call_ids,
+    "exec result emits tool-call accounting outside model history",
+    "Exec result feedback emits accounting events without storing tool-call ids in trajectory."
 );
 const EXEC_TOOL_CONTROL_FRAME_SWITCH: RlmProtocolScenarioCoverage = rlm_protocol_coverage!(
     rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal,
@@ -510,7 +510,7 @@ fn rlm_protocol_scenario_empty_turn_options_use_natural_default() {
 }
 
 #[test]
-fn rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool_events() {
+fn rlm_protocol_scenario_exec_result_emits_accounting_without_storing_tool_call_ids() {
     RlmProtocolScenario::new(EXEC_RESULT_TOOL_CALL_IDS_INTERNAL.display_name)
         .user_message("run a tool")
         .llm_response(vec![text_part(&lashlang_block(
@@ -535,7 +535,7 @@ fn rlm_protocol_scenario_exec_result_does_not_store_tool_call_ids_or_replay_tool
         .expect(RlmProtocolExpectations {
             exec_codes: vec!["x = await tools.read_file({ path: \"foo\" })?"],
             checkpoints: vec![CheckpointKind::AfterWork],
-            no_tool_call_events: true,
+            tool_call_events: true,
             trajectory_omits_tool_call_ids: true,
             trajectory_last: Some(RlmTrajectoryExpectation {
                 code: "x = await tools.read_file({ path: \"foo\" })?",
@@ -587,7 +587,7 @@ fn rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal() {
             exec_codes: vec!["x = await tools.custom_frame_switch({})?"],
             checkpoints: vec![CheckpointKind::BeforeCompletion],
             done: Some(true),
-            no_tool_call_events: true,
+            tool_call_events: true,
             agent_frame_switch: Some(("next-frame", "continue")),
             turn_outcome: Some(lash_sansio::TurnOutcome::AgentFrameSwitch {
                 frame_id: "next-frame".to_string(),
@@ -640,7 +640,7 @@ fn rlm_protocol_scenario_exec_any_tool_control_fail_is_terminal_error() {
             exec_codes: vec!["x = await tools.custom_fail({})?"],
             checkpoints: vec![CheckpointKind::BeforeCompletion],
             done: Some(true),
-            no_tool_call_events: true,
+            tool_call_events: true,
             tool_error_message: Some(("custom_fail", "no valid result")),
             trajectory_last: Some(RlmTrajectoryExpectation {
                 code: "x = await tools.custom_fail({})?",

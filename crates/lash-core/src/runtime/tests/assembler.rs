@@ -375,7 +375,7 @@ fn assembler_state_output_excludes_tool_call_payload() {
 }
 
 #[test]
-fn assembler_marks_tool_failure() {
+fn assembler_derives_tool_failure_from_assembled_records() {
     let mut assembler = TurnAssembler::default();
     assembler.push(&SessionEvent::ToolCall {
         call_id: Some("tc1".to_string()),
@@ -405,6 +405,34 @@ fn assembler_marks_tool_failure() {
         TurnOutcome::Stopped(TurnStop::ToolFailure)
     ));
     assert_eq!(out.tool_calls.len(), 1);
+}
+
+#[test]
+fn assembler_treats_any_non_success_record_as_tool_failure() {
+    let mut assembler = TurnAssembler::default();
+    assembler.push(&SessionEvent::ToolCall {
+        call_id: Some("tc-cancelled".to_string()),
+        name: "x".to_string(),
+        args: serde_json::json!({}),
+        output: crate::ToolCallOutput::cancelled(crate::ToolCancellation::runtime(
+            "tool cancelled",
+        )),
+        duration_ms: 1,
+    });
+    assembler.push(&SessionEvent::Error {
+        message: "runtime also reported a blocking issue".to_string(),
+        envelope: None,
+    });
+    assembler.push(&SessionEvent::Done);
+
+    let out = assembler.finish(
+        default_state().to_snapshot(),
+        false,
+        None,
+        &TerminationPolicy::default(),
+    );
+
+    assert_eq!(out.outcome, TurnOutcome::Stopped(TurnStop::ToolFailure));
 }
 
 #[test]

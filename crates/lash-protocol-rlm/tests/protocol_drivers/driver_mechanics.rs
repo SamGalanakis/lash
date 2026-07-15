@@ -139,7 +139,23 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
         result: Ok(lash_sansio::ExecResponse {
             observations: vec!["hi\n".to_string()],
             observation_truncation: Vec::new(),
-            tool_calls: Vec::new(),
+            tool_calls: vec![lash_core::ToolCallRecord {
+                call_id: Some("replayed-call".to_string()),
+                tool: "attachment_tool".to_string(),
+                args: serde_json::json!({}),
+                output: lash_core::ToolCallOutput::success(lash_core::ToolValue::Attachment(
+                    lash_core::AttachmentMeta::new(
+                        lash_core::AttachmentId::new("replayed-attachment"),
+                        lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
+                        3,
+                        Some(1),
+                        Some(1),
+                        Some("replayed".to_string()),
+                    )
+                    .as_ref(),
+                )),
+                duration_ms: 1,
+            }],
             images: Vec::new(),
             printed_images: Vec::new(),
             error: None,
@@ -149,6 +165,24 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
     });
 
     let effects = drain_effects(&mut restored);
+    let replayed_tool_call = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Emit(SessionEvent::ToolCall {
+                call_id,
+                name,
+                output,
+                ..
+            }) => Some((call_id, name, output)),
+            _ => None,
+        })
+        .expect("replayed exec response emits its tool-call accounting event");
+    assert_eq!(replayed_tool_call.0.as_deref(), Some("replayed-call"));
+    assert_eq!(replayed_tool_call.1, "attachment_tool");
+    assert_eq!(
+        replayed_tool_call.2.attachments()[0].id,
+        lash_core::AttachmentId::new("replayed-attachment")
+    );
     let trajectory = machine_trajectory(&restored);
     let entry = trajectory.last().expect("rlm trajectory entry");
     assert_eq!(entry.code, "print \"hi\"");
@@ -228,6 +262,31 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
             terminal_finish: None,
         }),
     });
+
+    let exec_effects = drain_effects(&mut machine);
+    let emitted = exec_effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Emit(SessionEvent::ToolCall {
+                call_id,
+                name,
+                args,
+                output,
+                duration_ms,
+            }) => Some((call_id, name, args, output, duration_ms)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(emitted.len(), 3);
+    assert_eq!(emitted[0].0.as_deref(), Some("fanout-ok"));
+    assert_eq!(emitted[0].1, "ok");
+    assert_eq!(emitted[0].2, &serde_json::json!({}));
+    assert!(emitted[0].3.is_success());
+    assert_eq!(*emitted[0].4, 1);
+    assert_eq!(emitted[1].0.as_deref(), Some("fanout-fail"));
+    assert!(!emitted[1].3.is_success());
+    assert_eq!(emitted[2].0.as_deref(), Some("fanout-cancel"));
+    assert!(!emitted[2].3.is_success());
 
     let checkpoint = roundtrip_turn_checkpoint(machine.checkpoint());
     let mut restored = TurnMachine::restore_from_checkpoint(test_config(), checkpoint);

@@ -743,6 +743,18 @@ mod tests {
     use crate::store::SessionExecutionLeaseStore;
     use crate::{Message, SessionGraph, TokenUsage, shared_parts};
 
+    struct FixedAttachmentRoots(std::collections::BTreeSet<crate::AttachmentId>);
+
+    #[async_trait::async_trait]
+    impl crate::AttachmentRootSet for FixedAttachmentRoots {
+        async fn live_attachment_refs(
+            &self,
+            _intent_grace_cutoff_epoch_ms: u64,
+        ) -> Result<std::collections::BTreeSet<crate::AttachmentId>, crate::StoreError> {
+            Ok(self.0.clone())
+        }
+    }
+
     fn lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {
         crate::LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
     }
@@ -1351,6 +1363,50 @@ mod tests {
                 crate::AttachmentId::new("store-write"),
                 crate::AttachmentId::new("tool-output"),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn replayed_exec_tool_output_is_a_gc_root_without_pending_or_message_refs() {
+        let backend = crate::InMemoryAttachmentStore::new();
+        let attachment = crate::AttachmentStore::put(
+            &backend,
+            vec![1, 2, 3],
+            crate::AttachmentCreateMeta::new(
+                crate::MediaType::Image(crate::ImageMediaType::Png),
+                Some(1),
+                Some(1),
+                Some("replayed-only".to_string()),
+            ),
+        )
+        .await
+        .expect("put attachment bytes");
+        let tool_calls = vec![crate::ToolCallRecord {
+            call_id: Some("replayed-exec-call".to_string()),
+            tool: "executor_state_only".to_string(),
+            args: serde_json::json!({}),
+            output: crate::ToolCallOutput::success(crate::ToolValue::Attachment(
+                attachment.clone(),
+            )),
+            duration_ms: 1,
+        }];
+
+        let committed =
+            committed_attachment_ids(&RuntimeSessionState::default(), &tool_calls, Vec::new());
+        assert_eq!(committed, vec![attachment.id.clone()]);
+
+        let roots = FixedAttachmentRoots(committed.into_iter().collect());
+        let report = crate::reclaim_unreferenced_attachments(&roots, &backend, 0)
+            .await
+            .expect("grace-period GC");
+
+        assert_eq!(report.reclaimed_count, 0);
+        assert_eq!(
+            crate::AttachmentStore::get(&backend, &attachment.id)
+                .await
+                .expect("replayed exec attachment survives GC")
+                .bytes,
+            vec![1, 2, 3]
         );
     }
 
