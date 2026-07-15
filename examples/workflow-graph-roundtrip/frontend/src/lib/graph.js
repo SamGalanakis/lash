@@ -55,9 +55,27 @@ export function buildFlow(doc, storedPositions, onDelete) {
     };
   });
 
-  const flowEdges = doc.edges.map((edge) => {
+  // Classify data edges by scope. A data edge is "same-scope" when its source
+  // and target share the same parent container/process group (identical
+  // parentId — two top-level nodes both read as `null` and count as same
+  // scope). Same-scope data edges route cleanly under dagre and keep their
+  // variable-name pill.
+  //
+  // Cross-scope data edges — a variable defined in one scope but consumed
+  // inside a nested container (e.g. `state`, defined in the process body, read
+  // inside the `while` body) — cannot be routed by the per-scope layout, so
+  // SvelteFlow draws them as floating dashed lines whose label chips land on
+  // top of node headers and borders. We do not render them at all: the
+  // consuming node already displays the variable name in its own body, so no
+  // information is lost and the graph reads cleanly.
+  const parentOf = new Map(doc.nodes.map((n) => [n.id, n.parentId ?? null]));
+  const flowEdges = [];
+  for (const edge of doc.edges) {
     const isData = edge.data?.kind === 'data';
-    return {
+    if (isData && parentOf.get(edge.source) !== parentOf.get(edge.target)) {
+      continue; // cross-scope data edge — drop it (see note above)
+    }
+    flowEdges.push({
       id: edge.id,
       source: edge.source,
       target: edge.target,
@@ -68,8 +86,8 @@ export function buildFlow(doc, storedPositions, onDelete) {
       class: isData ? 'edge-data' : 'edge-sequence',
       zIndex: 2,
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
-    };
-  });
+    });
+  }
 
   return { flowNodes, flowEdges };
 }

@@ -13,12 +13,13 @@ import { containerSubkind } from './nodeKinds.js';
 const NODE_W = 264;
 const OPAQUE_W = 340;
 const SMALL_W = 208;
-const HEADER_BAND = 46; // container title band
+const HEADER_BAND = 60; // container title band (leaves clear space between the
+// editable condition/iterable/binding row and the group label + first body node)
 const GROUP_LABEL = 24; // slot label (then/else/body) height
-const PAD = 20;
-const GROUP_GAP = 30;
-const NODESEP = 34;
-const RANKSEP = 52;
+const PAD = 24;
+const GROUP_GAP = 40;
+const NODESEP = 40;
+const RANKSEP = 64;
 
 export function layoutDocument(doc) {
   const nodeMap = new Map(doc.nodes.map((n) => [n.id, n]));
