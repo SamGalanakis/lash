@@ -37,7 +37,7 @@ impl RuntimeTurnDriver<'_> {
             };
             match effect {
                 Effect::Emit(event) => {
-                    if let SessionEvent::TokenUsage {
+                    if let SessionStreamEvent::TokenUsage {
                         usage, cumulative, ..
                     } = &event
                     {
@@ -110,7 +110,7 @@ impl RuntimeTurnDriver<'_> {
     async fn persist_progress_boundary(
         &mut self,
         messages: crate::MessageSequence,
-        event_delta: Vec<crate::SessionEventRecord>,
+        event_delta: Vec<crate::SessionHistoryRecord>,
         protocol_iteration: usize,
     ) -> Result<(), RuntimeError> {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {

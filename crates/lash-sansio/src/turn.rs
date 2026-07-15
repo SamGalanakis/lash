@@ -13,7 +13,7 @@ pub struct SansIoTurnInput<M: TurnProtocol = UnitTurnProtocol> {
     /// so it can reclassify a zero-output `OutputLimit` as `ContextOverflow`.
     pub max_context_tokens: Option<usize>,
     pub messages: MessageSequence,
-    pub events: Arc<Vec<crate::SessionEventRecord<M::Event>>>,
+    pub events: Arc<Vec<crate::SessionHistoryRecord<M::Event>>>,
     pub turn_causes: Vec<crate::TurnCause>,
     pub protocol_run_offset: usize,
     pub turn_driver_preamble: Arc<TurnDriverPreamble<M>>,

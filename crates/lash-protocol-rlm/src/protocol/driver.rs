@@ -5,8 +5,8 @@ use lash_core::sansio::{
     WaitingLlmState,
 };
 use lash_core::session_model::{
-    ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
-    SessionEventRecord, fresh_message_id, make_error_event, shared_parts,
+    ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionHistoryRecord,
+    SessionStreamEvent, fresh_message_id, make_error_event, shared_parts,
 };
 use lash_core::{
     CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart, LlmResponse,
@@ -53,7 +53,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
         llm_response: LlmResponse,
         _text_streamed: bool,
     ) -> Vec<DriverAction> {
-        let mut actions = vec![DriverAction::Emit(SessionEvent::LlmResponse {
+        let mut actions = vec![DriverAction::Emit(SessionStreamEvent::LlmResponse {
             protocol_iteration: ctx.protocol_iteration(),
             content: llm_response.full_text.clone(),
             duration_ms: 0,
@@ -194,7 +194,7 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
         // Emit the raw lashlang source as a `Message` with kind
         // `lashlang_code` so the CLI can reveal it in the full-expand
         // view (Alt+O) above the tool activities it produced.
-        actions.push(DriverAction::Emit(SessionEvent::Message {
+        actions.push(DriverAction::Emit(SessionStreamEvent::Message {
             text: cell.code.clone(),
             kind: "lashlang_code".to_string(),
         }));
@@ -332,8 +332,8 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
 fn continue_or_stop_after_nonterminal(
     ctx: &DriverContextView<'_>,
     actions: &mut Vec<DriverAction>,
-    durable_events: Vec<SessionEventRecord>,
-    retry_events: Vec<SessionEventRecord>,
+    durable_events: Vec<SessionHistoryRecord>,
+    retry_events: Vec<SessionHistoryRecord>,
 ) -> Result<(), String> {
     if !durable_events.is_empty() {
         actions.push(DriverAction::AppendEvents(durable_events));
@@ -385,8 +385,8 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
     lash_core::turn_outcome_from_tool_control(&record.tool, record.output.control.as_ref()?)
 }
 
-fn tool_call_event(record: ToolCallRecord) -> SessionEvent {
-    SessionEvent::ToolCall {
+fn tool_call_event(record: ToolCallRecord) -> SessionStreamEvent {
+    SessionStreamEvent::ToolCall {
         call_id: record.call_id,
         name: record.tool,
         args: record.args,
@@ -564,7 +564,7 @@ fn trajectory_events(
     state: &RlmDriverState,
     validation_error: Option<String>,
     final_output: Option<Value>,
-) -> Vec<SessionEventRecord> {
+) -> Vec<SessionHistoryRecord> {
     let mut events = Vec::new();
     if let Some(message) = assistant_content_message(&state.reasoning, &state.prose) {
         events.push(conversation_event(message));
@@ -622,18 +622,18 @@ fn assistant_content_message(reasoning: &str, prose: &str) -> Option<Message> {
     })
 }
 
-fn conversation_event(message: Message) -> SessionEventRecord {
-    SessionEventRecord::Conversation(ConversationRecord::from_message(message))
+fn conversation_event(message: Message) -> SessionHistoryRecord {
+    SessionHistoryRecord::Conversation(ConversationRecord::from_message(message))
 }
 
-fn trajectory_event(entry: RlmTrajectoryEntry) -> SessionEventRecord {
-    SessionEventRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmTrajectoryEntry(
+fn trajectory_event(entry: RlmTrajectoryEntry) -> SessionHistoryRecord {
+    SessionHistoryRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmTrajectoryEntry(
         entry,
     )))
 }
 
-fn diagnostic_event(phase: &str, payload: Value) -> SessionEventRecord {
-    SessionEventRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmDiagnostic(
+fn diagnostic_event(phase: &str, payload: Value) -> SessionHistoryRecord {
+    SessionHistoryRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmDiagnostic(
         RlmDiagnosticEvent {
             phase: phase.to_string(),
             payload,

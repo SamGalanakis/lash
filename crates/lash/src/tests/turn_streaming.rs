@@ -2274,7 +2274,7 @@ finish "done""#,
             .active_path_nodes()
             .into_iter()
             .filter_map(|node| node.event())
-            .filter(|event| matches!(event, lash_core::SessionEventRecord::Conversation(_)))
+            .filter(|event| matches!(event, lash_core::SessionHistoryRecord::Conversation(_)))
             .count(),
         read_view.messages().len()
     );

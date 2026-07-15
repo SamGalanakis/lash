@@ -25,7 +25,7 @@ impl ManagedSessionCapability {
             runtime.session_policy()
         };
         let cancel = CancellationToken::new();
-        let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
+        let (event_tx, mut event_rx) = mpsc::channel::<SessionStreamEvent>(100);
         let usage_source = self.child_usage_source(usage, &session_id);
         let sink = ChannelEventSink {
             tx: event_tx,

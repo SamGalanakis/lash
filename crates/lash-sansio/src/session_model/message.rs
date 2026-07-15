@@ -59,7 +59,7 @@ pub enum MessageOrigin {
     },
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Part {
     /// e.g. "m3.p0"
     pub id: String,
@@ -115,7 +115,7 @@ pub struct PartAttachment {
     pub reference: AttachmentRef,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PruneState {
     Intact,
     Cleared,

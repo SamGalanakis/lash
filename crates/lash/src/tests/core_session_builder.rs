@@ -2,6 +2,15 @@ use super::*;
 use crate::rlm::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 use lash_lashlang_runtime::LashlangArtifactStore as _;
 
+fn persisted_tool_state_at_generation(
+    state: lash_core::ToolState,
+    generation: u64,
+) -> lash_core::ToolState {
+    let mut value = serde_json::to_value(state).expect("serialize persisted tool state");
+    value["generation"] = serde_json::json!(generation);
+    serde_json::from_value(value).expect("deserialize persisted tool state")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReconciliationTransformObservation {
     max_context_tokens: Option<usize>,
@@ -1290,14 +1299,10 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         .generation()
         .saturating_add(5);
     persisted.tool_state_generation = Some(expected_generation);
-    persisted.tool_state_snapshot = Some(
-        opened
-            .admin()
-            .tools()
-            .state()
-            .await?
-            .with_generation(expected_generation),
-    );
+    persisted.tool_state_snapshot = Some(persisted_tool_state_at_generation(
+        opened.admin().tools().state().await?,
+        expected_generation,
+    ));
     drop(opened);
 
     let reopened = core

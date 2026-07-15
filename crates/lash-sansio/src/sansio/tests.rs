@@ -7,7 +7,7 @@ use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReaso
 use crate::session_model::message::PartAttachment;
 use crate::session_model::{
     ConversationRecord, Message, MessageRole, MessageSequence, Part, PartKind, PruneState,
-    SessionEventRecord,
+    SessionHistoryRecord,
 };
 use crate::{ModelToolReturnPart, ToolCancellation, ToolFailure, ToolFailureClass};
 
@@ -97,8 +97,8 @@ fn user_message(content: &str) -> Message {
     }
 }
 
-fn conversation_event(message: Message) -> SessionEventRecord {
-    SessionEventRecord::Conversation(ConversationRecord::from_message(message))
+fn conversation_event(message: Message) -> SessionHistoryRecord {
+    SessionHistoryRecord::Conversation(ConversationRecord::from_message(message))
 }
 
 fn text_message(role: MessageRole, content: impl Into<String>) -> Message {
@@ -174,14 +174,14 @@ fn find_done(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
     })
 }
 
-fn progress_event_delta(effects: &[Effect]) -> Option<&[SessionEventRecord]> {
+fn progress_event_delta(effects: &[Effect]) -> Option<&[SessionHistoryRecord]> {
     effects.iter().find_map(|effect| match effect {
         Effect::Progress { event_delta, .. } => Some(event_delta.as_slice()),
         _ => None,
     })
 }
 
-fn done_event_delta(effects: &[Effect]) -> Option<&[SessionEventRecord]> {
+fn done_event_delta(effects: &[Effect]) -> Option<&[SessionHistoryRecord]> {
     effects.iter().find_map(|effect| match effect {
         Effect::Done { event_delta, .. } => Some(event_delta.as_slice()),
         _ => None,
@@ -553,7 +553,7 @@ fn progress_emits_only_new_event_delta() {
     assert_eq!(delta.len(), 1);
     assert!(matches!(
         &delta[0],
-        SessionEventRecord::Conversation(record)
+        SessionHistoryRecord::Conversation(record)
             if record.role == MessageRole::Assistant
     ));
 }
@@ -599,7 +599,7 @@ fn done_carries_unreported_final_delta() {
     assert_eq!(delta.len(), 1);
     assert!(matches!(
         &delta[0],
-        SessionEventRecord::Conversation(record)
+        SessionHistoryRecord::Conversation(record)
             if record.role == MessageRole::Assistant
     ));
 }
@@ -786,17 +786,17 @@ fn output_limit_stops_as_incomplete_without_assistant_message() {
     );
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Emit(SessionEvent::TextDelta { content }) if content == "partial"
+        Effect::Emit(SessionStreamEvent::TextDelta { content }) if content == "partial"
     )));
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Emit(SessionEvent::TurnOutcome {
+        Effect::Emit(SessionStreamEvent::TurnOutcome {
             outcome: TurnOutcome::Stopped(TurnStop::Incomplete)
         })
     )));
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Emit(SessionEvent::Error {
+        Effect::Emit(SessionStreamEvent::Error {
             envelope: Some(envelope),
             ..
         }) if envelope.terminal_reason == Some(LlmTerminalReason::OutputLimit)
@@ -825,13 +825,13 @@ fn context_overflow_response_stops_as_provider_error() {
     assert!(find_done(&effects).is_some());
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Emit(SessionEvent::TurnOutcome {
+        Effect::Emit(SessionStreamEvent::TurnOutcome {
             outcome: TurnOutcome::Stopped(TurnStop::ProviderError)
         })
     )));
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Emit(SessionEvent::Error {
+        Effect::Emit(SessionStreamEvent::Error {
             envelope: Some(envelope),
             ..
         }) if envelope.terminal_reason == Some(LlmTerminalReason::ContextOverflow)

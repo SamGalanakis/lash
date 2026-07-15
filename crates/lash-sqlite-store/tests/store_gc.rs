@@ -22,6 +22,14 @@ fn lease_owner(owner_id: &str) -> LeaseOwnerIdentity {
     LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
 }
 
+fn persisted_tool_state_at_generation(generation: u64) -> ToolState {
+    serde_json::from_value(serde_json::json!({
+        "generation": generation,
+        "tools": {}
+    }))
+    .expect("deserialize persisted tool state")
+}
+
 #[tokio::test]
 async fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
     let store = Store::memory().await.expect("store");
@@ -34,7 +42,7 @@ async fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
                 protocol_turn_options: Default::default(),
             },
             tool_state_ref: None,
-            tool_state: Some(ToolState::default().with_generation(7)),
+            tool_state: Some(persisted_tool_state_at_generation(7)),
             plugin_snapshot_ref: None,
             plugin_snapshot_revision: Some(11),
             plugin_snapshot: Some(PluginSessionSnapshot {

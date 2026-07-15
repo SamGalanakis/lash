@@ -76,25 +76,25 @@ pub use lash_sansio::{
     PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderSchemaCapabilities,
     PruneState, RenderedPrompt, ResolvedPromptLayer, ResolvedSchema, Response, SchemaContract,
     SchemaDialect, SchemaProjectionOverride, SchemaProjectionPolicy, SchemaPurpose,
-    SchemaResolutionError, SchemaResolutionRequest, SessionEvent, TextProjectionMetadata,
-    TokenUsage, ToolActivation, ToolArgumentProjectionPolicy, ToolCallOutcome, ToolCallOutput,
-    ToolCallRecord, ToolCallStatus, ToolCancellation, ToolCatalog, ToolCatalogBuildInput,
-    ToolCatalogEntry, ToolContract, ToolControl, ToolDefinition, ToolFailure, ToolFailureClass,
-    ToolFailureSource, ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition,
-    ToolRetryPolicy, ToolScheduling, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage,
-    TurnOutcome, TurnStop, append_assistant_text_part, build_prompt, build_tool_catalog,
-    build_turn, default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, project_anthropic_bedrock_schema, project_for_dialect,
-    prompt_template_fingerprint, prompt_text_fingerprint, prompt_tool_names_fingerprint,
-    reasoning_part, render_turn_causes_prompt, resolve_prompt_layers, resolve_schema, shared_parts,
-    validate_tool_input, visible_response_parts, visible_response_text_from_parts,
+    SchemaResolutionError, SchemaResolutionRequest, SessionAppendNode, SessionStreamEvent,
+    TextProjectionMetadata, TokenUsage, ToolActivation, ToolArgumentProjectionPolicy,
+    ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation, ToolCatalog,
+    ToolCatalogBuildInput, ToolCatalogEntry, ToolContract, ToolControl, ToolDefinition,
+    ToolFailure, ToolFailureClass, ToolFailureSource, ToolId, ToolManifest, ToolOutputContract,
+    ToolRetryDisposition, ToolRetryPolicy, ToolScheduling, ToolValue, TurnCause, TurnFinish,
+    TurnLimitFinalMessage, TurnOutcome, TurnStop, append_assistant_text_part, build_prompt,
+    build_tool_catalog, build_turn, default_prompt_template, head_tail_truncate,
+    messages_are_prompt_resume_safe, normalized_response_parts, project_anthropic_bedrock_schema,
+    project_for_dialect, prompt_template_fingerprint, prompt_text_fingerprint,
+    prompt_tool_names_fingerprint, reasoning_part, render_turn_causes_prompt,
+    resolve_prompt_layers, resolve_schema, shared_parts, validate_tool_input,
+    visible_response_parts, visible_response_text_from_parts,
 };
 
 /// Project a successful tool control into its terminal turn outcome.
 ///
-/// Agent-frame seeds are decoded here, at the protocol producer seam, so a
-/// terminal outcome can never advertise nodes that the commit materializer
-/// would have to drop.
+/// Agent-frame seeds are typed at their serde boundary, so a terminal outcome
+/// can never advertise nodes that the commit materializer would have to drop.
 pub fn turn_outcome_from_tool_control(
     tool_name: &str,
     control: &ToolControl,
@@ -105,16 +105,6 @@ pub fn turn_outcome_from_tool_control(
             initial_nodes,
             task: Some(task),
         } if !frame_id.trim().is_empty() && !task.trim().is_empty() => {
-            for (index, node) in initial_nodes.iter().enumerate() {
-                if let Err(err) = serde_json::from_value::<SessionAppendNode>(node.clone()) {
-                    return Some(TurnOutcome::Stopped(TurnStop::ToolError {
-                        tool_name: tool_name.to_string(),
-                        value: serde_json::json!({
-                            "error": format!("agent frame seed node {index} is invalid: {err}")
-                        }),
-                    }));
-                }
-            }
             Some(TurnOutcome::AgentFrameSwitch {
                 frame_id: frame_id.clone(),
                 task: task.clone(),
@@ -353,7 +343,7 @@ pub use plugin::{
     PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
     PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PluginTask, PluginTaskContext,
     PluginTaskOutcome, PluginTaskReceipt, ProcessEngineContributionContext, PromptHookContext,
-    ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RuntimeServices, SessionAppendNode,
+    ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RuntimeServices,
     SessionConfigChangedContext, SessionContextOverlay, SessionCreateRequest, SessionGraphService,
     SessionHandle, SessionLifecycleService, SessionParam, SessionPlugin, SessionPluginSource,
     SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
@@ -463,7 +453,7 @@ pub use session_graph::{
     SessionNodePayload, SessionNodeRecord,
 };
 pub use session_model::context::PreparedContext;
-pub use session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord};
+pub use session_model::{ConversationRecord, ProtocolEvent, SessionHistoryRecord};
 pub use session_model::{RuntimeSessionPolicy, SessionPolicy, SessionSpec};
 pub use store::{
     AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
@@ -495,26 +485,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invalid_agent_frame_seed_becomes_a_loud_tool_error() {
-        let outcome = turn_outcome_from_tool_control(
-            "continue_as",
-            &ToolControl::SwitchAgentFrame {
-                frame_id: "delegate".to_string(),
-                initial_nodes: vec![serde_json::json!({ "not": "a session append node" })],
-                task: Some("continue the work".to_string()),
-            },
-        )
-        .expect("complete switch control produces a terminal outcome");
+    fn invalid_agent_frame_seed_is_rejected_at_the_serde_boundary() {
+        let err = serde_json::from_value::<ToolControl>(serde_json::json!({
+            "type": "switch_agent_frame",
+            "frame_id": "delegate",
+            "initial_nodes": [{ "not": "a session append node" }],
+            "task": "continue the work"
+        }))
+        .expect_err("invalid seed cannot construct a tool control");
 
-        let TurnOutcome::Stopped(TurnStop::ToolError { tool_name, value }) = outcome else {
-            panic!("invalid seed must stop as a tool error");
-        };
-        assert_eq!(tool_name, "continue_as");
-        assert!(
-            value["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("agent frame seed node 0 is invalid"))
-        );
+        assert!(err.to_string().contains("kind"), "unexpected error: {err}");
     }
 
     #[test]

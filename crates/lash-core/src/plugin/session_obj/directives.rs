@@ -29,7 +29,7 @@ impl PluginDirectivePolicy {
 enum DirectiveAction {
     Abort(PluginAbort),
     EnqueueMessages(Vec<PluginMessage>),
-    EmitRuntimeEvents(Vec<crate::SessionEvent>),
+    EmitRuntimeEvents(Vec<crate::SessionStreamEvent>),
     None,
 }
 

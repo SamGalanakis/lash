@@ -176,18 +176,18 @@ pub(crate) fn append_message(state: &mut impl ReadModelStateMut, message: Messag
 
 #[derive(Clone, Default)]
 pub(crate) struct RecordingSink {
-    pub(crate) events: Arc<Mutex<Vec<SessionEvent>>>,
+    pub(crate) events: Arc<Mutex<Vec<SessionStreamEvent>>>,
 }
 
 #[async_trait::async_trait]
 impl EventSink for RecordingSink {
-    async fn emit(&self, event: SessionEvent) {
+    async fn emit(&self, event: SessionStreamEvent) {
         self.events.lock().expect("lock sink").push(event);
     }
 }
 
 impl RecordingSink {
-    pub(crate) fn snapshot(&self) -> Vec<SessionEvent> {
+    pub(crate) fn snapshot(&self) -> Vec<SessionStreamEvent> {
         self.events.lock().expect("lock sink").clone()
     }
 }

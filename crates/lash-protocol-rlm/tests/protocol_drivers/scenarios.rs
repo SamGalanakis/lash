@@ -550,12 +550,9 @@ fn rlm_protocol_scenario_exec_result_emits_accounting_without_storing_tool_call_
 
 #[test]
 fn rlm_protocol_scenario_exec_any_tool_control_frame_switch_is_terminal() {
-    let initial_nodes = vec![
-        serde_json::to_value(lash_core::SessionAppendNode::message(
-            lash_core::PluginMessage::text(lash_core::MessageRole::User, "seed"),
-        ))
-        .expect("serialize valid frame seed"),
-    ];
+    let initial_nodes = vec![lash_core::SessionAppendNode::message(
+        lash_core::PluginMessage::text(lash_core::MessageRole::User, "seed"),
+    )];
     RlmProtocolScenario::new(EXEC_TOOL_CONTROL_FRAME_SWITCH.display_name)
         .user_message("run a custom frame-switch tool")
         .llm_response(vec![text_part(&lashlang_block(

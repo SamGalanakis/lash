@@ -322,12 +322,9 @@ fn rlm_exec_result_no_tool_call_replay_execution() -> Result<Value, FixedScriptR
 
 fn rlm_exec_tool_control_frame_switch_terminal_execution() -> Result<Value, FixedScriptRunnerError>
 {
-    let initial_nodes = vec![
-        serde_json::to_value(lash_core::SessionAppendNode::message(
-            lash_core::PluginMessage::text(lash_core::MessageRole::User, "seed"),
-        ))
-        .map_err(FixedScriptRunnerError::Json)?,
-    ];
+    let initial_nodes = vec![lash_core::SessionAppendNode::message(
+        lash_core::PluginMessage::text(lash_core::MessageRole::User, "seed"),
+    )];
     let result = run_rlm_protocol_contract(
         "rlm exec tool-control frame switch terminal",
         "run a custom frame-switch tool",
@@ -536,22 +533,22 @@ impl RlmContractObserved {
                 lash_core::Effect::Checkpoint { checkpoint, .. } => {
                     self.checkpoints.push(checkpoint_kind_name(*checkpoint));
                 }
-                lash_core::Effect::Emit(lash_core::SessionEvent::TurnOutcome { outcome }) => {
+                lash_core::Effect::Emit(lash_core::SessionStreamEvent::TurnOutcome { outcome }) => {
                     self.turn_outcomes.push(outcome.clone());
                 }
-                lash_core::Effect::Emit(lash_core::SessionEvent::Message { kind, .. })
-                    if kind == "final" =>
-                {
+                lash_core::Effect::Emit(lash_core::SessionStreamEvent::Message {
+                    kind, ..
+                }) if kind == "final" => {
                     self.final_message_event = true;
                 }
-                lash_core::Effect::Emit(lash_core::SessionEvent::ToolCall { .. }) => {
+                lash_core::Effect::Emit(lash_core::SessionStreamEvent::ToolCall { .. }) => {
                     self.tool_call_event = true;
                 }
                 lash_core::Effect::Progress { event_delta, .. } => {
                     self.assistant_conversation_progress |= event_delta.iter().any(|event| {
                         matches!(
                             event,
-                            lash_core::SessionEventRecord::Conversation(record)
+                            lash_core::SessionHistoryRecord::Conversation(record)
                                 if record.to_message().role == lash_core::MessageRole::Assistant
                         )
                     });
@@ -858,7 +855,7 @@ fn rlm_contract_llm_extraction_diagnostics(machine: &lash_core::TurnMachine) -> 
         .events()
         .iter()
         .filter_map(|event| match event {
-            lash_core::SessionEventRecord::Protocol(event) => {
+            lash_core::SessionHistoryRecord::Protocol(event) => {
                 match lash_protocol_rlm::decode_rlm_protocol_event(event) {
                     Some(RlmProtocolEvent::RlmDiagnostic(diagnostic))
                         if diagnostic.phase == "llm_extraction" =>
@@ -878,7 +875,7 @@ fn rlm_contract_trajectory(machine: &lash_core::TurnMachine) -> Vec<Value> {
         .events()
         .iter()
         .filter_map(|event| match event {
-            lash_core::SessionEventRecord::Protocol(event) => {
+            lash_core::SessionHistoryRecord::Protocol(event) => {
                 match lash_protocol_rlm::decode_rlm_protocol_event(event) {
                     Some(RlmProtocolEvent::RlmTrajectoryEntry(entry)) => {
                         serde_json::to_value(entry).ok()

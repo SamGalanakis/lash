@@ -1,5 +1,14 @@
 use super::*;
 
+fn persisted_tool_state_at_generation(
+    state: lash_core::ToolState,
+    generation: u64,
+) -> lash_core::ToolState {
+    let mut value = serde_json::to_value(state).expect("serialize persisted tool state");
+    value["generation"] = serde_json::json!(generation);
+    serde_json::from_value(value).expect("deserialize persisted tool state")
+}
+
 #[tokio::test]
 async fn plugin_surface_streams_as_semantic_turn_event() -> Result<()> {
     let core = explicit_ephemeral_facets(LashCore::standard_builder())
@@ -123,7 +132,8 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
         .tools()
         .set_membership("tool:app_lookup", false)
         .await?;
-    let persisted_tool_state = session.admin().tools().state().await?.with_generation(9);
+    let persisted_tool_state =
+        persisted_tool_state_at_generation(session.admin().tools().state().await?, 9);
     let state = RuntimeSessionState {
         session_id: "persisted-tools".to_string(),
         policy: lash_core::SessionPolicy {

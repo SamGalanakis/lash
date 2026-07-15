@@ -4,7 +4,9 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::PluginMessage;
 use crate::tool_dispatch::ToolDispatchContext;
-use crate::{PromptContribution, RuntimeServices, SandboxMessage, SessionEvent, ToolProvider};
+use crate::{
+    PromptContribution, RuntimeServices, SandboxMessage, SessionStreamEvent, ToolProvider,
+};
 
 mod execution_context;
 pub(crate) mod process_handles;
@@ -313,7 +315,7 @@ impl Session {
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         direct_completions: crate::DirectCompletionClient<'run>,
         trigger_router: Option<crate::TriggerRouter>,
-        event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
+        event_tx: tokio::sync::mpsc::Sender<SessionStreamEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,

@@ -15,7 +15,7 @@ use crate::llm::types::{
     LlmOutputPart, LlmResponse, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
     ResponseTextMeta,
 };
-use crate::session_model::{MessageRole, PartKind, SessionEvent, TokenUsage};
+use crate::session_model::{MessageRole, PartKind, SessionStreamEvent, TokenUsage};
 use crate::{TurnFinish, TurnOutcome, TurnStop};
 
 use super::usage::TokenLedgerEntry;
@@ -565,9 +565,9 @@ impl TurnAssembler {
         }
     }
 
-    pub(super) fn push(&mut self, event: &SessionEvent) {
+    pub(super) fn push(&mut self, event: &SessionStreamEvent) {
         match event {
-            SessionEvent::ToolCall {
+            SessionStreamEvent::ToolCall {
                 call_id,
                 name,
                 args,
@@ -582,13 +582,13 @@ impl TurnAssembler {
                     duration_ms: *duration_ms,
                 });
             }
-            SessionEvent::TokenUsage {
+            SessionStreamEvent::TokenUsage {
                 usage, cumulative, ..
             } => {
                 self.token_usage = cumulative.clone();
                 self.last_llm_usage = Some(usage.clone());
             }
-            SessionEvent::ChildTokenUsage {
+            SessionStreamEvent::ChildTokenUsage {
                 session_id,
                 source,
                 model,
@@ -600,7 +600,7 @@ impl TurnAssembler {
                     cumulative.clone(),
                 );
             }
-            SessionEvent::Error { message, envelope } => {
+            SessionStreamEvent::Error { message, envelope } => {
                 let issue = if let Some(envelope) = envelope {
                     TurnIssue {
                         kind: envelope.kind.clone(),
@@ -624,10 +624,10 @@ impl TurnAssembler {
                 };
                 self.issues.push(issue);
             }
-            SessionEvent::Done => {
+            SessionStreamEvent::Done => {
                 self.saw_done = true;
             }
-            SessionEvent::TurnOutcome { outcome } => {
+            SessionStreamEvent::TurnOutcome { outcome } => {
                 self.outcome = Some(outcome.clone());
             }
             _ => {}

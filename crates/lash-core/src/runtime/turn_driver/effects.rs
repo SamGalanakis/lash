@@ -127,7 +127,7 @@ impl RuntimeTurnDriver<'_> {
             if !accepted_turn_inputs.is_empty() {
                 send_session_event(
                     event_tx,
-                    SessionEvent::InjectedTurnInputAccepted {
+                    SessionStreamEvent::InjectedTurnInputAccepted {
                         inputs: accepted_turn_inputs,
                         checkpoint,
                     },
@@ -219,7 +219,7 @@ impl RuntimeTurnDriver<'_> {
         if !committed.is_empty() {
             send_session_event(
                 event_tx,
-                SessionEvent::InjectedMessagesCommitted {
+                SessionStreamEvent::InjectedMessagesCommitted {
                     messages: committed.clone(),
                     checkpoint,
                 },
@@ -243,7 +243,7 @@ impl RuntimeTurnDriver<'_> {
         invocation: crate::RuntimeInvocation,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::ExecResponse, String> {
-        let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionEvent>(100);
+        let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionStreamEvent>(100);
         let (turn_event_tx, mut turn_event_rx) = mpsc::channel::<TurnActivity>(100);
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
@@ -262,7 +262,7 @@ impl RuntimeTurnDriver<'_> {
                         };
                         if sandbox_msg.kind != "code" && !relay_tx.is_closed() {
                             let _ = relay_tx
-                                .send(RuntimeStreamEvent::Session(SessionEvent::Message {
+                                .send(RuntimeStreamEvent::Session(SessionStreamEvent::Message {
                                     text: sandbox_msg.text,
                                     kind: sandbox_msg.kind,
                                 }))

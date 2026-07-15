@@ -14,86 +14,16 @@ pub use lash_sansio::format_tool_output_content;
 pub use lash_sansio::session_model::{
     ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, Part, PartKind,
     PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
-    PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, default_prompt_template,
-    make_error_envelope, make_error_event, reassign_part_ids, render_prompt,
-    render_transcript_prompt, shared_parts,
+    ProtocolEvent, PruneState, SessionStreamEvent, TokenUsage, TurnTerminationPolicyState,
+    default_prompt_template, make_error_envelope, make_error_event, reassign_part_ids,
+    render_prompt, render_transcript_prompt, shared_parts,
 };
 
 pub fn fresh_message_id() -> String {
     format!("m{}", uuid::Uuid::new_v4().simple())
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProtocolEvent {
-    pub plugin_id: String,
-    pub payload: serde_json::Value,
-}
-
-impl ProtocolEvent {
-    pub fn typed<T>(plugin_id: impl Into<String>, event: T) -> Result<Self, serde_json::Error>
-    where
-        T: serde::Serialize,
-    {
-        Ok(Self {
-            plugin_id: plugin_id.into(),
-            payload: serde_json::to_value(event)?,
-        })
-    }
-
-    pub fn decode<T>(&self, expected_plugin_id: &str) -> Result<Option<T>, serde_json::Error>
-    where
-        T: for<'de> serde::Deserialize<'de>,
-    {
-        if self.plugin_id != expected_plugin_id {
-            return Ok(None);
-        }
-        serde_json::from_value(self.payload.clone()).map(Some)
-    }
-}
-
-impl serde::Serialize for ProtocolEvent {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(serde::Serialize)]
-        struct Tagged<'a> {
-            plugin_id: &'a str,
-            payload: &'a serde_json::Value,
-        }
-        Tagged {
-            plugin_id: &self.plugin_id,
-            payload: &self.payload,
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ProtocolEvent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if let Some(object) = value.as_object()
-            && let (Some(plugin_id), Some(payload)) =
-                (object.get("plugin_id"), object.get("payload"))
-        {
-            return Ok(Self {
-                plugin_id: plugin_id
-                    .as_str()
-                    .ok_or_else(|| serde::de::Error::custom("plugin_id must be a string"))?
-                    .to_string(),
-                payload: payload.clone(),
-            });
-        }
-        Err(serde::de::Error::custom(
-            "protocol events must be tagged with plugin_id and payload",
-        ))
-    }
-}
-
-pub type SessionEventRecord = lash_sansio::session_model::SessionEventRecord<ProtocolEvent>;
+pub type SessionHistoryRecord = lash_sansio::session_model::SessionHistoryRecord<ProtocolEvent>;
 
 pub const PLUGIN_RUNTIME_PROTOCOL_PLUGIN_ID: &str = "lash.plugin_runtime";
 
@@ -123,7 +53,7 @@ pub fn plugin_runtime_event_from_protocol(
 }
 
 /// Send an event to the channel if it's still open.
-pub(crate) async fn send_event(tx: &mpsc::Sender<SessionEvent>, event: SessionEvent) {
+pub(crate) async fn send_event(tx: &mpsc::Sender<SessionStreamEvent>, event: SessionStreamEvent) {
     if !tx.is_closed() {
         let _ = tx.send(event).await;
     }

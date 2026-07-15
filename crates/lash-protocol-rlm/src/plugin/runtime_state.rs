@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lash_core::plugin::{CodeExecutorPlugin, ProtocolSessionContext};
-use lash_core::{SessionError, SessionEventRecord};
+use lash_core::{SessionError, SessionHistoryRecord};
 use lash_lashlang_runtime::{LashlangArtifactStore, LashlangSurface, SharedDeferredToolResolver};
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmProtocolEvent};
 
@@ -164,7 +164,7 @@ impl RlmRuntimeState {
             execution.prune_protected_globals(&protected_names);
         }
         for event in state.read_view().active_events() {
-            if let SessionEventRecord::Protocol(event) = event
+            if let SessionHistoryRecord::Protocol(event) = event
                 && let Some(event) = decode_rlm_protocol_event(event)
             {
                 self.apply_seed_or_globals_event(execution, event, &protected_names)

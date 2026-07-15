@@ -305,9 +305,9 @@ mod tests {
             error: None,
             final_output: None,
         };
-        let events = [lash_core::SessionEventRecord::Protocol(rlm_protocol_event(
-            RlmProtocolEvent::RlmTrajectoryEntry(entry),
-        ))];
+        let events = [lash_core::SessionHistoryRecord::Protocol(
+            rlm_protocol_event(RlmProtocolEvent::RlmTrajectoryEntry(entry)),
+        )];
         lash_core::ChronologicalProjection::from_turn_view(
             &events,
             &lash_core::MessageSequence::default(),

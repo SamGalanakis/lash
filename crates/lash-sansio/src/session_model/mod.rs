@@ -19,9 +19,104 @@ use crate::ToolDefinition;
 use crate::llm::types::LlmToolSpec;
 use crate::plugin::{CheckpointKind, PluginMessage, PluginRuntimeEvent};
 
+/// Durable protocol payload stored in session history.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProtocolEvent {
+    pub plugin_id: String,
+    pub payload: serde_json::Value,
+}
+
+impl ProtocolEvent {
+    pub fn typed<T>(plugin_id: impl Into<String>, event: T) -> Result<Self, serde_json::Error>
+    where
+        T: serde::Serialize,
+    {
+        Ok(Self {
+            plugin_id: plugin_id.into(),
+            payload: serde_json::to_value(event)?,
+        })
+    }
+
+    pub fn decode<T>(&self, expected_plugin_id: &str) -> Result<Option<T>, serde_json::Error>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        if self.plugin_id != expected_plugin_id {
+            return Ok(None);
+        }
+        serde_json::from_value(self.payload.clone()).map(Some)
+    }
+}
+
+/// Typed node accepted at session-graph append boundaries.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum SessionAppendNode {
+    Message {
+        message: PluginMessage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
+    },
+    ProtocolEvent {
+        event: ProtocolEvent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
+    },
+    Plugin {
+        plugin_type: String,
+        #[serde(default)]
+        body: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
+    },
+}
+
+impl SessionAppendNode {
+    pub fn message(message: PluginMessage) -> Self {
+        Self::Message {
+            message,
+            caused_by: None,
+        }
+    }
+
+    pub fn plugin(plugin_type: impl Into<String>, body: serde_json::Value) -> Self {
+        Self::Plugin {
+            plugin_type: plugin_type.into(),
+            body,
+            caused_by: None,
+        }
+    }
+
+    pub fn protocol_event(event: ProtocolEvent) -> Self {
+        Self::ProtocolEvent {
+            event,
+            caused_by: None,
+        }
+    }
+
+    pub fn with_caused_by(mut self, caused_by: crate::CausalRef) -> Self {
+        match &mut self {
+            Self::Message {
+                caused_by: cause, ..
+            }
+            | Self::ProtocolEvent {
+                caused_by: cause, ..
+            }
+            | Self::Plugin {
+                caused_by: cause, ..
+            } => *cause = Some(caused_by),
+        }
+        self
+    }
+}
+
+/// Durable semantic history stored in the session graph and replayed into
+/// future prompts. Unlike [`SessionStreamEvent`], these records are committed
+/// state rather than transient UI/progress signals.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
-pub enum SessionEventRecord<PE = ()> {
+pub enum SessionHistoryRecord<PE = ()> {
     Conversation(ConversationRecord),
     Protocol(PE),
 }
@@ -93,14 +188,19 @@ impl TokenUsage {
     }
 }
 
-/// Structured error payload carried on [`SessionEvent::Error`] (and
-/// [`SessionEvent::RetryStatus`]).
+/// Structured error payload carried on [`SessionStreamEvent::Error`] (and
+/// [`SessionStreamEvent::RetryStatus`]).
 ///
 /// Durability: this type appears inside persisted session snapshots and turn
 /// checkpoints, so every field added after the initial shape must stay
 /// additive — `#[serde(default)]` on decode and
 /// `#[serde(skip_serializing_if = "Option::is_none")]` on encode — to keep
 /// old snapshots decodable and new snapshots readable by older readers.
+/// Transient runtime-stream signal for live consumers.
+///
+/// These events may be partial, duplicated, or display-only and are not proof
+/// of durable session history. Persisted semantic history uses
+/// [`SessionHistoryRecord`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ErrorEnvelope {
     pub kind: String,
@@ -126,7 +226,7 @@ pub struct ErrorEnvelope {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 #[allow(clippy::large_enum_variant)]
-pub enum SessionEvent {
+pub enum SessionStreamEvent {
     #[serde(rename = "text_delta")]
     TextDelta { content: String },
     /// Streaming update for the model's reasoning summary ("thinking").
@@ -226,7 +326,7 @@ pub enum TurnOutcome {
         frame_id: String,
         task: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        initial_nodes: Vec<serde_json::Value>,
+        initial_nodes: Vec<SessionAppendNode>,
     },
     Stopped(TurnStop),
 }
@@ -333,9 +433,9 @@ pub fn make_error_event(
     code: Option<&str>,
     user_message: impl Into<String>,
     raw: Option<String>,
-) -> SessionEvent {
+) -> SessionStreamEvent {
     let user_message = user_message.into();
-    SessionEvent::Error {
+    SessionStreamEvent::Error {
         message: user_message.clone(),
         envelope: Some(make_error_envelope(kind, code, None, user_message, raw)),
     }
@@ -390,7 +490,7 @@ pub fn model_tool_specs(tools: &[ToolDefinition]) -> Vec<LlmToolSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorEnvelope, SessionEvent, TurnOutcome};
+    use super::{ErrorEnvelope, SessionStreamEvent, TurnOutcome};
     use crate::llm::types::{LlmTerminalReason, ProviderFailureKind};
 
     // ─── ErrorEnvelope durable-snapshot compatibility ──────────────────
@@ -415,16 +515,16 @@ mod tests {
         assert_eq!(envelope.retryable, None);
         assert_eq!(envelope.provider_failure_kind, None);
 
-        // The legacy shape embedded in a persisted `SessionEvent::Error`
+        // The legacy shape embedded in a persisted `SessionStreamEvent::Error`
         // record decodes the same way.
         let legacy_event = r#"{
             "type":"error",
             "message":"LLM error: rate limited",
             "envelope":{"kind":"llm_provider","user_message":"LLM error: rate limited"}
         }"#;
-        let event: SessionEvent = serde_json::from_str(legacy_event).expect("legacy event");
+        let event: SessionStreamEvent = serde_json::from_str(legacy_event).expect("legacy event");
         match event {
-            SessionEvent::Error { envelope, .. } => {
+            SessionStreamEvent::Error { envelope, .. } => {
                 let envelope = envelope.expect("envelope");
                 assert_eq!(envelope.retryable, None);
                 assert_eq!(envelope.provider_failure_kind, None);
@@ -508,9 +608,10 @@ mod tests {
                 }
             }
         }"#;
-        let event: SessionEvent = serde_json::from_str(legacy).expect("legacy frame switch event");
+        let event: SessionStreamEvent =
+            serde_json::from_str(legacy).expect("legacy frame switch event");
         match event {
-            SessionEvent::TurnOutcome {
+            SessionStreamEvent::TurnOutcome {
                 outcome:
                     TurnOutcome::AgentFrameSwitch {
                         frame_id,

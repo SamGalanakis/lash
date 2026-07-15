@@ -227,6 +227,7 @@ where
     // attachment write-ahead manifest, and turn-commit idempotency.
     runtime_persistence_reports_declared_durability(make(), options.durability_tier).await;
     commit_increments_head_and_round_trips_agent_frames(make()).await;
+    concurrent_head_revision_cas_applies_exactly_once(make()).await;
     commit_rejects_a_different_session_id(make()).await;
     load_hydrates_checkpoint_and_usage(make()).await;
     active_path_read_scope_selects_only_requested_ancestry(make()).await;
@@ -249,6 +250,7 @@ where
     // leases, plus the commit-side completion atomicity it shares with
     // [`SessionCommitStore`].
     queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
+    concurrent_queue_and_turn_input_claims_have_one_owner(make()).await;
     queued_work_cancel_removes_only_unclaimed_batches(make()).await;
     queued_work_exact_claim_uses_selected_batch_ids(make()).await;
     queued_work_classes_gate_command_and_turn_claims(make()).await;
@@ -457,7 +459,7 @@ fn sample_session_node(id: &str, parent: Option<&str>) -> SessionNodeRecord {
         agent_frame_id: None,
         timestamp: "1970-01-01T00:00:00Z".to_string(),
         payload: SessionNodePayload::Event {
-            event: crate::SessionEventRecord::Protocol(
+            event: crate::SessionHistoryRecord::Protocol(
                 ProtocolEvent::typed("conformance", serde_json::json!({ "node": id }))
                     .expect("protocol event"),
             ),
@@ -534,6 +536,79 @@ async fn commit_increments_head_and_round_trips_agent_frames(store: Arc<dyn Runt
             .and_then(|checkpoint| checkpoint.execution_state.as_deref()),
         Some(&b"frame-vm"[..])
     );
+}
+
+async fn concurrent_head_revision_cas_applies_exactly_once(store: Arc<dyn RuntimePersistence>) {
+    let session_id = "concurrent-head-cas";
+    let lease = claim_session_execution_lease_for_test(&store, session_id, "cas-owner").await;
+    let make_commit = |node_id: &str| {
+        let state = RuntimeSessionState {
+            session_id: session_id.to_string(),
+            ..RuntimeSessionState::default()
+        };
+        let node = sample_session_node(node_id, None);
+        RuntimeCommit {
+            expected_head_revision: Some(0),
+            graph: crate::GraphCommitDelta::ReplaceFull(crate::SessionGraph::from_nodes(
+                vec![node],
+                Some(node_id.to_string()),
+            )),
+            ..RuntimeCommit::persisted_state(&state, &[])
+        }
+        .with_session_execution_lease(lease.fence())
+    };
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let left_store = Arc::clone(&store);
+    let right_store = Arc::clone(&store);
+    let left_barrier = Arc::clone(&barrier);
+    let right_barrier = Arc::clone(&barrier);
+    let left_commit = make_commit("cas-left");
+    let right_commit = make_commit("cas-right");
+    let left = tokio::spawn(async move {
+        left_barrier.wait().await;
+        left_store.commit_runtime_state(left_commit).await
+    });
+    let right = tokio::spawn(async move {
+        right_barrier.wait().await;
+        right_store.commit_runtime_state(right_commit).await
+    });
+
+    barrier.wait().await;
+    let left = left.await.expect("join left head-CAS writer");
+    let right = right.await.expect("join right head-CAS writer");
+    let winners = [&left, &right]
+        .into_iter()
+        .filter(|result| result.is_ok())
+        .count();
+    let conflicts = [&left, &right]
+        .into_iter()
+        .filter(|result| matches!(result, Err(StoreError::HeadRevisionConflict { .. })))
+        .count();
+    assert_eq!(
+        winners, 1,
+        "exactly one concurrent writer must win head CAS, got left={left:?} right={right:?}"
+    );
+    assert_eq!(
+        conflicts, 1,
+        "the losing writer must receive HeadRevisionConflict, got left={left:?} right={right:?}"
+    );
+
+    let persisted = store
+        .load_session(SessionReadScope::FullGraph)
+        .await
+        .expect("load state after concurrent head CAS")
+        .expect("concurrent head-CAS winner persisted a session");
+    assert_eq!(persisted.head_revision, 1, "exactly one commit applied");
+    assert_eq!(persisted.graph.nodes.len(), 1, "exactly one graph applied");
+    assert!(
+        matches!(
+            persisted.graph.nodes[0].node_id.as_str(),
+            "cas-left" | "cas-right"
+        ),
+        "the persisted graph must come from one of the two writers"
+    );
+    release_session_execution_lease_for_test(&store, &lease).await;
 }
 
 async fn commit_rejects_a_different_session_id(store: Arc<dyn RuntimePersistence>) {
@@ -1359,6 +1434,132 @@ async fn queued_work_source_keys_are_idempotent_and_list_ordered(
         vec![first.batch_id.as_str(), second.batch_id.as_str()]
     );
     assert!(listed[0].enqueue_seq < listed[1].enqueue_seq);
+}
+
+async fn concurrent_queue_and_turn_input_claims_have_one_owner(store: Arc<dyn RuntimePersistence>) {
+    let session_id = "concurrent-claim-races";
+    let batch = store
+        .enqueue_queued_work(queued_draft(
+            session_id,
+            "single-owner queue batch",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue queue batch for claim race");
+    let input = store
+        .enqueue_pending_turn_input(pending_next_turn_input_draft(
+            session_id,
+            "single-owner turn input",
+        ))
+        .await
+        .expect("enqueue turn input for claim race");
+    let lease =
+        claim_session_execution_lease_for_test(&store, session_id, "claim-race-lease").await;
+
+    let queue_barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let left_store = Arc::clone(&store);
+    let right_store = Arc::clone(&store);
+    let left_barrier = Arc::clone(&queue_barrier);
+    let right_barrier = Arc::clone(&queue_barrier);
+    let left_fence = lease.fence();
+    let right_fence = lease.fence();
+    let left_queue = tokio::spawn(async move {
+        left_barrier.wait().await;
+        left_store
+            .claim_ready_queued_work(
+                session_id,
+                &left_fence,
+                &lease_owner("queue-left"),
+                QueuedWorkClaimBoundary::Idle,
+                1,
+            )
+            .await
+    });
+    let right_queue = tokio::spawn(async move {
+        right_barrier.wait().await;
+        right_store
+            .claim_ready_queued_work(
+                session_id,
+                &right_fence,
+                &lease_owner("queue-right"),
+                QueuedWorkClaimBoundary::Idle,
+                1,
+            )
+            .await
+    });
+    queue_barrier.wait().await;
+    let left_queue = left_queue
+        .await
+        .expect("join left queue claimant")
+        .expect("left queue claim race resolves cleanly");
+    let right_queue = right_queue
+        .await
+        .expect("join right queue claimant")
+        .expect("right queue claim race resolves cleanly");
+    let queue_winners = [left_queue.as_ref(), right_queue.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        queue_winners.len(),
+        1,
+        "exactly one owner may claim the same queue batch"
+    );
+    assert_eq!(queue_winners[0].batches[0].batch_id, batch.batch_id);
+    assert!(
+        store
+            .list_pending_queued_work(session_id)
+            .await
+            .expect("list queue after claim race")
+            .is_empty(),
+        "the winning queue claim must exclusively hide its batch"
+    );
+
+    let input_barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let left_store = Arc::clone(&store);
+    let right_store = Arc::clone(&store);
+    let left_barrier = Arc::clone(&input_barrier);
+    let right_barrier = Arc::clone(&input_barrier);
+    let left_fence = lease.fence();
+    let right_fence = lease.fence();
+    let left_input = tokio::spawn(async move {
+        left_barrier.wait().await;
+        left_store
+            .claim_next_turn_inputs(session_id, &left_fence, &lease_owner("input-left"), 1)
+            .await
+    });
+    let right_input = tokio::spawn(async move {
+        right_barrier.wait().await;
+        right_store
+            .claim_next_turn_inputs(session_id, &right_fence, &lease_owner("input-right"), 1)
+            .await
+    });
+    input_barrier.wait().await;
+    let left_input = left_input
+        .await
+        .expect("join left turn-input claimant")
+        .expect("left turn-input claim race resolves cleanly");
+    let right_input = right_input
+        .await
+        .expect("join right turn-input claimant")
+        .expect("right turn-input claim race resolves cleanly");
+    let input_winners = [left_input.as_ref(), right_input.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        input_winners.len(),
+        1,
+        "exactly one owner may claim the same turn input"
+    );
+    assert_eq!(input_winners[0].inputs[0].input_id, input.input_id);
+    assert_ne!(
+        queue_winners[0].owner.owner_id, input_winners[0].owner.owner_id,
+        "the queue and turn-input races use independent logical owners"
+    );
+
+    release_session_execution_lease_for_test(&store, &lease).await;
 }
 
 async fn queued_work_cancel_removes_only_unclaimed_batches(store: Arc<dyn RuntimePersistence>) {

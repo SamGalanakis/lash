@@ -4,6 +4,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::SessionAppendNode;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionHandle {
@@ -603,67 +604,4 @@ pub struct SubagentSessionContext {
     pub capability: String,
     pub depth: u8,
     pub max_depth: u8,
-}
-
-/// Plugin-owned payloads carried on a `SessionCreateRequest`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[allow(clippy::large_enum_variant)]
-pub enum SessionAppendNode {
-    Message {
-        message: PluginMessage,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        caused_by: Option<crate::CausalRef>,
-    },
-    ProtocolEvent {
-        event: crate::ProtocolEvent,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        caused_by: Option<crate::CausalRef>,
-    },
-    Plugin {
-        plugin_type: String,
-        #[serde(default)]
-        body: serde_json::Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        caused_by: Option<crate::CausalRef>,
-    },
-}
-
-impl SessionAppendNode {
-    pub fn message(message: PluginMessage) -> Self {
-        Self::Message {
-            message,
-            caused_by: None,
-        }
-    }
-
-    pub fn plugin(plugin_type: impl Into<String>, body: serde_json::Value) -> Self {
-        Self::Plugin {
-            plugin_type: plugin_type.into(),
-            body,
-            caused_by: None,
-        }
-    }
-
-    pub fn protocol_event(event: crate::ProtocolEvent) -> Self {
-        Self::ProtocolEvent {
-            event,
-            caused_by: None,
-        }
-    }
-
-    pub fn with_caused_by(mut self, caused_by: crate::CausalRef) -> Self {
-        match &mut self {
-            Self::Message {
-                caused_by: cause, ..
-            }
-            | Self::ProtocolEvent {
-                caused_by: cause, ..
-            }
-            | Self::Plugin {
-                caused_by: cause, ..
-            } => *cause = Some(caused_by),
-        }
-        self
-    }
 }

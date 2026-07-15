@@ -6,8 +6,8 @@ use crate::plugin::{
     PluginSession, SessionGraphService, SessionLifecycleService, SessionStateService,
 };
 use crate::{
-    PreparedToolCall, SessionEvent, ToolCallRecord, ToolCatalog, ToolFailure, ToolFailureClass,
-    ToolProvider, ToolResult,
+    PreparedToolCall, SessionStreamEvent, ToolCallRecord, ToolCatalog, ToolFailure,
+    ToolFailureClass, ToolProvider, ToolResult,
 };
 
 #[derive(Clone, Default)]
@@ -88,7 +88,7 @@ pub struct ToolDispatchContext<'run> {
     pub(crate) execution_env_spec: crate::ProcessExecutionEnvSpec,
     pub session_id: String,
     pub agent_frame_id: crate::AgentFrameId,
-    pub event_tx: mpsc::Sender<SessionEvent>,
+    pub event_tx: mpsc::Sender<SessionStreamEvent>,
     pub(crate) checkpoint_messages: CheckpointMessageBuffer,
     pub(crate) trigger_outcomes: ToolTriggerOutcomeBuffer,
     pub attachment_store: Arc<crate::SessionAttachmentStore>,

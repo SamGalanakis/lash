@@ -23,7 +23,7 @@ pub struct PluginAbort {
 #[derive(Clone, Debug, Default)]
 pub struct TurnPreparation {
     pub messages: crate::MessageSequence,
-    pub events: Vec<crate::SessionEvent>,
+    pub events: Vec<crate::SessionStreamEvent>,
     pub abort: Option<PluginAbort>,
 }
 
@@ -41,18 +41,18 @@ pub struct PrepareTurnRequest {
 #[derive(Clone, Debug, Default)]
 pub struct CheckpointApplication {
     pub messages: Vec<PluginMessage>,
-    pub events: Vec<crate::SessionEvent>,
+    pub events: Vec<crate::SessionStreamEvent>,
     pub abort: Option<PluginAbort>,
 }
 
 #[derive(Clone, Debug)]
 pub struct TurnFinalization {
     pub turn: AssembledTurn,
-    pub events: Vec<crate::SessionEvent>,
+    pub events: Vec<crate::SessionStreamEvent>,
 }
 
 pub(crate) async fn emit_plugin_runtime_events(
-    event_tx: &mpsc::Sender<crate::SessionEvent>,
+    event_tx: &mpsc::Sender<crate::SessionStreamEvent>,
     plugin_id: &str,
     events: Vec<PluginRuntimeEvent>,
 ) {
@@ -64,10 +64,10 @@ pub(crate) async fn emit_plugin_runtime_events(
 pub(crate) fn plugin_runtime_session_events(
     plugin_id: &str,
     events: Vec<PluginRuntimeEvent>,
-) -> Vec<crate::SessionEvent> {
+) -> Vec<crate::SessionStreamEvent> {
     events
         .into_iter()
-        .map(|event| crate::SessionEvent::PluginEvent {
+        .map(|event| crate::SessionStreamEvent::PluginEvent {
             plugin_id: plugin_id.to_string(),
             event,
         })

@@ -694,7 +694,7 @@ impl RuntimeTurnDriver<'_> {
             );
             send_session_event(
                 event_tx,
-                SessionEvent::ReasoningDelta {
+                SessionStreamEvent::ReasoningDelta {
                     content: reasoning_delta.clone(),
                 },
             )
@@ -728,7 +728,7 @@ impl RuntimeTurnDriver<'_> {
             state.stream_accumulator.push_text(&text);
             send_session_event(
                 event_tx,
-                SessionEvent::TextDelta {
+                SessionStreamEvent::TextDelta {
                     content: text.clone(),
                 },
             )
@@ -785,7 +785,7 @@ impl RuntimeTurnDriver<'_> {
                         .push_reasoning(delta.clone(), None, Vec::new(), None);
                     send_session_event(
                         event_tx,
-                        SessionEvent::ReasoningDelta {
+                        SessionStreamEvent::ReasoningDelta {
                             content: delta.clone(),
                         },
                     )
@@ -868,7 +868,7 @@ impl RuntimeTurnDriver<'_> {
                     );
                     send_session_event(
                         event_tx,
-                        SessionEvent::ReasoningDelta {
+                        SessionStreamEvent::ReasoningDelta {
                             content: text.clone(),
                         },
                     )
@@ -911,7 +911,7 @@ impl RuntimeTurnDriver<'_> {
             } => {
                 send_session_event(
                     event_tx,
-                    SessionEvent::RetryStatus {
+                    SessionStreamEvent::RetryStatus {
                         wait_seconds,
                         attempt,
                         max_attempts,

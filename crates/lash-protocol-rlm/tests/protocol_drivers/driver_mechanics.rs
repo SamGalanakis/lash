@@ -168,7 +168,7 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
     let replayed_tool_call = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::Emit(SessionEvent::ToolCall {
+            Effect::Emit(SessionStreamEvent::ToolCall {
                 call_id,
                 name,
                 output,
@@ -267,7 +267,7 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
     let emitted = exec_effects
         .iter()
         .filter_map(|effect| match effect {
-            Effect::Emit(SessionEvent::ToolCall {
+            Effect::Emit(SessionStreamEvent::ToolCall {
                 call_id,
                 name,
                 args,
@@ -294,7 +294,7 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
     assert!(
         !effects
             .iter()
-            .any(|effect| matches!(effect, Effect::Emit(SessionEvent::ToolCall { .. })))
+            .any(|effect| matches!(effect, Effect::Emit(SessionStreamEvent::ToolCall { .. })))
     );
     let trajectory = machine_trajectory(&restored);
     let entry = trajectory.last().expect("rlm trajectory entry");

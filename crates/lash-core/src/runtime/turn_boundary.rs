@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::session_model::{SessionEventRecord, fresh_message_id};
+use crate::session_model::{SessionHistoryRecord, fresh_message_id};
 use crate::store::{GraphCommitDelta, RuntimeCommit, RuntimePersistence, StoreError};
 use crate::{
     AssembledTurn, Message, MessageRole, MessageSequence, Part, PartKind, PluginSession,
@@ -20,7 +20,7 @@ struct ProgressBoundarySnapshot<'a> {
     policy: SessionPolicy,
     turn_index: usize,
     messages: MessageSequence,
-    event_delta: Vec<SessionEventRecord>,
+    event_delta: Vec<SessionHistoryRecord>,
     execution_state_snapshot: Option<Option<Vec<u8>>>,
     plugins: Option<&'a PluginSession>,
     store: Option<&'a (dyn RuntimePersistence + 'a)>,
@@ -69,6 +69,8 @@ struct FinalCommitInput<'a> {
     usage_deltas: &'a [crate::TokenLedgerEntry],
     outcome: &'a TurnOutcome,
     turn_id: Option<&'a str>,
+    originating_queue_claims: Vec<crate::QueuedWorkCompletion>,
+    originating_turn_input_claims: Vec<crate::TurnInputCompletion>,
     completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
     enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
@@ -159,7 +161,7 @@ impl TurnBoundary {
             .read_view(policy, turn_index, protocol_turn_options, messages)
     }
 
-    pub(super) fn active_events(&self) -> Arc<Vec<SessionEventRecord>> {
+    pub(super) fn active_events(&self) -> Arc<Vec<SessionHistoryRecord>> {
         self.draft_ref().active_events()
     }
 
@@ -214,7 +216,7 @@ impl TurnBoundary {
         policy: SessionPolicy,
         turn_index: usize,
         messages: MessageSequence,
-        event_delta: Vec<SessionEventRecord>,
+        event_delta: Vec<SessionHistoryRecord>,
     ) -> Result<ProgressBoundaryCommit, RuntimeError> {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return Ok(ProgressBoundaryCommit {
@@ -244,7 +246,7 @@ impl TurnBoundary {
         policy: SessionPolicy,
         turn_index: usize,
         messages: MessageSequence,
-        event_delta: Vec<SessionEventRecord>,
+        event_delta: Vec<SessionHistoryRecord>,
     ) -> Result<ProgressBoundaryCommit, RuntimeError> {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return Ok(ProgressBoundaryCommit {
@@ -332,13 +334,13 @@ impl TurnBoundary {
 
     pub(super) fn apply_event_delta(
         &mut self,
-        event_delta: Vec<SessionEventRecord>,
+        event_delta: Vec<SessionHistoryRecord>,
     ) -> Vec<crate::ProtocolEvent> {
         let protocol_events = event_delta
             .iter()
             .filter_map(|event| match event {
-                SessionEventRecord::Protocol(event) => Some(event.clone()),
-                SessionEventRecord::Conversation(_) => None,
+                SessionHistoryRecord::Protocol(event) => Some(event.clone()),
+                SessionHistoryRecord::Conversation(_) => None,
             })
             .collect::<Vec<_>>();
         self.draft_mut().append_events(event_delta);
@@ -352,6 +354,8 @@ impl TurnBoundary {
         session: Option<&mut Session>,
         usage_deltas: &[crate::TokenLedgerEntry],
         turn_id: Option<&str>,
+        originating_queue_claims: Vec<crate::QueuedWorkCompletion>,
+        originating_turn_input_claims: Vec<crate::TurnInputCompletion>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
         completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
         enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
@@ -378,6 +382,8 @@ impl TurnBoundary {
                 usage_deltas,
                 outcome: &returned_turn.outcome,
                 turn_id,
+                originating_queue_claims,
+                originating_turn_input_claims,
                 completed_queue_claims,
                 completed_turn_input_claims,
                 enqueued_queue_batches,
@@ -450,6 +456,8 @@ impl TurnBoundary {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
             None,
             Vec::new(),
             None,
@@ -471,6 +479,8 @@ impl TurnBoundary {
             usage_deltas,
             outcome,
             turn_id,
+            originating_queue_claims,
+            originating_turn_input_claims,
             completed_queue_claims,
             completed_turn_input_claims,
             enqueued_queue_batches,
@@ -533,6 +543,8 @@ impl TurnBoundary {
                 graph,
                 usage_deltas,
                 turn_id,
+                originating_queue_claims,
+                originating_turn_input_claims,
                 completed_queue_claims,
                 completed_turn_input_claims,
                 enqueued_queue_batches,
@@ -554,6 +566,8 @@ impl TurnBoundary {
         graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
         turn_id: Option<&str>,
+        originating_queue_claims: Vec<crate::QueuedWorkCompletion>,
+        originating_turn_input_claims: Vec<crate::TurnInputCompletion>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
         completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
         enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
@@ -575,6 +589,8 @@ impl TurnBoundary {
         }
         commit.completed_queue_claims = completed_queue_claims;
         commit.completed_turn_input_claims = completed_turn_input_claims;
+        commit
+            .validate_claim_settlement(&originating_queue_claims, &originating_turn_input_claims)?;
         commit.enqueued_queue_batches = enqueued_queue_batches;
         commit.interrupted_turn_input_turn_id = interrupted_turn_input_turn_id;
         if let Some(turn_id) = turn_id {
@@ -705,17 +721,10 @@ fn materialize_agent_frame_switch(
     if frame_id.trim().is_empty() || state.current_agent_frame_id == *frame_id {
         return;
     }
-    let nodes = initial_nodes
-        .iter()
-        .map(|value| {
-            serde_json::from_value::<crate::SessionAppendNode>(value.clone())
-                .expect("agent frame seed nodes are validated by the protocol producer")
-        })
-        .collect::<Vec<_>>();
     super::open_agent_frame_in_state_with_clock(
         state,
         crate::OpenAgentFrameRequest::new(frame_id.clone(), crate::AgentFrameReason::continue_as())
-            .with_initial_nodes(nodes),
+            .with_initial_nodes(initial_nodes.clone()),
         clock,
     );
 }
@@ -835,10 +844,12 @@ mod tests {
             .nodes
             .iter()
             .filter_map(|node| match node.event()? {
-                crate::SessionEventRecord::Conversation(record) => {
+                crate::SessionHistoryRecord::Conversation(record) => {
                     Some(format!("message:{}", record.id))
                 }
-                crate::SessionEventRecord::Protocol(event) => Some(summarize_protocol_event(event)),
+                crate::SessionHistoryRecord::Protocol(event) => {
+                    Some(summarize_protocol_event(event))
+                }
             })
             .collect()
     }
@@ -917,7 +928,7 @@ mod tests {
             &TurnOutcome::AgentFrameSwitch {
                 frame_id: frame_id.clone(),
                 task: "next task".to_string(),
-                initial_nodes: vec![serde_json::to_value(seed_node).expect("seed node json")],
+                initial_nodes: vec![seed_node],
             },
             &crate::SystemClock,
         );
@@ -1125,8 +1136,10 @@ mod tests {
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user));
         let base_graph = graph.clone();
         let event_delta = vec![
-            crate::SessionEventRecord::Conversation(ConversationRecord::from_message(user.clone())),
-            crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
+            crate::SessionHistoryRecord::Conversation(ConversationRecord::from_message(
+                user.clone(),
+            )),
+            crate::SessionHistoryRecord::Conversation(ConversationRecord::from_message(
                 assistant.clone(),
             )),
         ];
@@ -1161,7 +1174,7 @@ mod tests {
             .filter(|node| {
                 matches!(
                     node.event(),
-                    Some(crate::SessionEventRecord::Conversation(_))
+                    Some(crate::SessionHistoryRecord::Conversation(_))
                 )
             })
             .collect::<Vec<_>>();
@@ -1174,7 +1187,7 @@ mod tests {
                 .iter()
                 .filter(|node| matches!(
                     node.event(),
-                    Some(crate::SessionEventRecord::Conversation(_))
+                    Some(crate::SessionHistoryRecord::Conversation(_))
                 ))
                 .all(|node| !node.node_id.starts_with("plugin:"))
         );
@@ -1211,7 +1224,7 @@ mod tests {
                 policy: SessionPolicy::default(),
                 turn_index: 1,
                 messages: MessageSequence::from_base(vec![user].into()),
-                event_delta: vec![crate::SessionEventRecord::Protocol(diagnostic)],
+                event_delta: vec![crate::SessionHistoryRecord::Protocol(diagnostic)],
                 execution_state_snapshot: None,
                 plugins: None,
                 store: Some(&store),
@@ -1246,10 +1259,10 @@ mod tests {
                 turn_index: 1,
                 messages: MessageSequence::from_base(vec![user, assistant.clone()].into()),
                 event_delta: vec![
-                    crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
+                    crate::SessionHistoryRecord::Conversation(ConversationRecord::from_message(
                         assistant,
                     )),
-                    crate::SessionEventRecord::Protocol(trajectory),
+                    crate::SessionHistoryRecord::Protocol(trajectory),
                 ],
                 execution_state_snapshot: None,
                 plugins: None,
@@ -1274,7 +1287,7 @@ mod tests {
         let protocol_event =
             crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
                 .expect("protocol event serializes");
-        let event_delta = vec![crate::SessionEventRecord::Protocol(protocol_event)];
+        let event_delta = vec![crate::SessionHistoryRecord::Protocol(protocol_event)];
 
         let boundary = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
@@ -1302,7 +1315,7 @@ mod tests {
         let protocol_event =
             crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
                 .expect("protocol event serializes");
-        let event_delta = vec![crate::SessionEventRecord::Protocol(protocol_event)];
+        let event_delta = vec![crate::SessionHistoryRecord::Protocol(protocol_event)];
         let store = RecordingStore::default();
         store
             .save_session_head_meta(crate::SessionHeadMeta {
@@ -1432,6 +1445,8 @@ mod tests {
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
                 turn_id: None,
+                originating_queue_claims: Vec::new(),
+                originating_turn_input_claims: Vec::new(),
                 completed_queue_claims: Vec::new(),
                 completed_turn_input_claims: Vec::new(),
                 enqueued_queue_batches: Vec::new(),
@@ -1449,6 +1464,95 @@ mod tests {
         assert_eq!(pipeline.state_mut().token_ledger.len(), 2);
         assert!(pipeline.state_mut().execution_state_snapshot().is_none());
         assert!(pipeline.state_mut().head_revision.is_some());
+    }
+
+    #[tokio::test]
+    async fn final_commit_rejects_claim_derived_content_without_settlement() {
+        let graph = SessionGraph::from_active_read_state(&[text_message(
+            "claimed-input",
+            MessageRole::User,
+            "claimed content",
+        )]);
+        let queue_origin = crate::QueuedWorkCompletion {
+            session_id: "session-1".to_string(),
+            claim_id: "queue-claim".to_string(),
+            lease_token: "queue-token".to_string(),
+            batch_ids: vec!["queue-batch".to_string()],
+        };
+        let turn_input_origin = crate::TurnInputCompletion {
+            session_id: "session-1".to_string(),
+            claim_id: "turn-input-claim".to_string(),
+            lease_token: "turn-input-token".to_string(),
+            input_ids: vec!["turn-input".to_string()],
+        };
+
+        let store = RecordingStore::default();
+        let (mut queue_pipeline, _lease) =
+            leased_boundary(&store, state_with_graph(graph.clone())).await;
+        let queue_state = queue_pipeline.export_state_for_assembly();
+        let queue_err = queue_pipeline
+            .final_commit_with_snapshots(FinalCommitInput {
+                returned_state: &queue_state,
+                plugins: None,
+                execution_state_snapshot: None,
+                store: Some(&store),
+                usage_deltas: &[],
+                outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                tool_calls: &[],
+                turn_id: None,
+                originating_queue_claims: vec![queue_origin],
+                originating_turn_input_claims: Vec::new(),
+                completed_queue_claims: Vec::new(),
+                completed_turn_input_claims: Vec::new(),
+                enqueued_queue_batches: Vec::new(),
+                interrupted_turn_input_turn_id: None,
+                pending_attachment_ids: Vec::new(),
+                session_execution_lease_completion: None,
+            })
+            .await
+            .expect_err("queue-derived content requires claim settlement");
+        assert!(matches!(
+            queue_err,
+            StoreError::UnsettledQueuedWorkClaim { ref claim_id, .. }
+                if claim_id == "queue-claim"
+        ));
+
+        let (mut input_pipeline, _lease) = leased_boundary(&store, state_with_graph(graph)).await;
+        let input_state = input_pipeline.export_state_for_assembly();
+        let input_err = input_pipeline
+            .final_commit_with_snapshots(FinalCommitInput {
+                returned_state: &input_state,
+                plugins: None,
+                execution_state_snapshot: None,
+                store: Some(&store),
+                usage_deltas: &[],
+                outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                tool_calls: &[],
+                turn_id: None,
+                originating_queue_claims: Vec::new(),
+                originating_turn_input_claims: vec![turn_input_origin],
+                completed_queue_claims: Vec::new(),
+                completed_turn_input_claims: Vec::new(),
+                enqueued_queue_batches: Vec::new(),
+                interrupted_turn_input_turn_id: None,
+                pending_attachment_ids: Vec::new(),
+                session_execution_lease_completion: None,
+            })
+            .await
+            .expect_err("turn-input-derived content requires claim settlement");
+        assert!(matches!(
+            input_err,
+            StoreError::UnsettledTurnInputClaim { ref claim_id, .. }
+                if claim_id == "turn-input-claim"
+        ));
+        assert_eq!(
+            *store
+                .runtime_commit_count
+                .lock()
+                .expect("lock runtime commit count"),
+            0,
+            "invalid commits must be rejected before reaching persistence"
+        );
     }
 
     #[tokio::test]
@@ -1474,6 +1578,8 @@ mod tests {
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
                 turn_id: None,
+                originating_queue_claims: Vec::new(),
+                originating_turn_input_claims: Vec::new(),
                 completed_queue_claims: Vec::new(),
                 completed_turn_input_claims: Vec::new(),
                 enqueued_queue_batches: Vec::new(),

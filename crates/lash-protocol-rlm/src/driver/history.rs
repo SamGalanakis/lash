@@ -43,7 +43,7 @@ use crate::cell_scan::render_lashlang_cell_text;
 use crate::projection::{decode_rlm_protocol_event, json_to_flow_value, rlm_history_projection};
 
 pub(super) struct RlmHistoryRenderInput<'a> {
-    pub(super) events: &'a [lash_core::SessionEventRecord],
+    pub(super) events: &'a [lash_core::SessionHistoryRecord],
     pub(super) turn_messages: &'a lash_core::MessageSequence,
     pub(super) turn_causes: &'a [lash_core::TurnCause],
     pub(super) max_output_chars: usize,

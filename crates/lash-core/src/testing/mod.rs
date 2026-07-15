@@ -18,7 +18,7 @@ use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::plugin::{PluginError, SessionCreateRequest, SessionHandle, SessionSnapshot};
 use crate::provider::{Provider, ProviderComponents, ProviderHandle};
-use crate::session_model::{ConversationRecord, SessionEventRecord};
+use crate::session_model::{ConversationRecord, SessionHistoryRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionSummary, ModelSpec, OutputState, ProcessRegistry,
     ProviderOptions, RuntimeSessionState, SessionPolicy, TokenUsage, TurnFinish, TurnOutcome,
@@ -1161,7 +1161,8 @@ mod test_protocol_fakes {
             use crate::sansio::{CheckpointResumeAction, PendingToolCall};
             use crate::session_model::fresh_message_id;
             use crate::{
-                CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
+                CheckpointKind, Message, MessageRole, Part, PartKind, PruneState,
+                SessionStreamEvent,
             };
             use lash_sansio::llm::types::LlmOutputPart;
             use lash_sansio::session_model::make_error_event;
@@ -1183,7 +1184,7 @@ mod test_protocol_fakes {
                             let previous_len = assistant_text.len();
                             crate::append_assistant_text_part(&mut assistant_text, &text);
                             if !text_streamed {
-                                actions.push(DriverAction::Emit(SessionEvent::TextDelta {
+                                actions.push(DriverAction::Emit(SessionStreamEvent::TextDelta {
                                     content: assistant_text[previous_len..].to_string(),
                                 }));
                             }
@@ -1201,7 +1202,7 @@ mod test_protocol_fakes {
                 }
             }
 
-            actions.push(DriverAction::Emit(SessionEvent::LlmResponse {
+            actions.push(DriverAction::Emit(SessionStreamEvent::LlmResponse {
                 protocol_iteration: ctx.protocol_iteration(),
                 content: assistant_text.clone(),
                 duration_ms: 0,
@@ -1235,7 +1236,7 @@ mod test_protocol_fakes {
                     response_meta: None,
                 }];
                 actions.push(DriverAction::AppendEvents(vec![
-                    SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
+                    SessionHistoryRecord::Conversation(ConversationRecord::from_message(Message {
                         id: asst_id,
                         role: MessageRole::Assistant,
                         parts: lash_sansio::shared_parts(parts_out),
@@ -1292,7 +1293,7 @@ mod test_protocol_fakes {
             }
             if !assistant_parts.is_empty() {
                 actions.push(DriverAction::AppendEvents(vec![
-                    SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
+                    SessionHistoryRecord::Conversation(ConversationRecord::from_message(Message {
                         id: asst_id,
                         role: MessageRole::Assistant,
                         parts: lash_sansio::shared_parts(assistant_parts),
@@ -1312,7 +1313,8 @@ mod test_protocol_fakes {
             use crate::sansio::CheckpointResumeAction;
             use crate::session_model::fresh_message_id;
             use crate::{
-                CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
+                CheckpointKind, Message, MessageRole, Part, PartKind, PruneState,
+                SessionStreamEvent,
             };
             use lash_sansio::session_model::reassign_part_ids;
             let mut actions = Vec::new();
@@ -1389,7 +1391,7 @@ mod test_protocol_fakes {
                 let user_id = fresh_message_id();
                 reassign_part_ids(&user_id, &mut result_parts);
                 actions.push(DriverAction::AppendEvents(vec![
-                    SessionEventRecord::Conversation(ConversationRecord::from_message(Message {
+                    SessionHistoryRecord::Conversation(ConversationRecord::from_message(Message {
                         id: user_id,
                         role: MessageRole::User,
                         parts: lash_sansio::shared_parts(result_parts),
@@ -1408,14 +1410,14 @@ mod test_protocol_fakes {
             {
                 let message_id = fresh_message_id();
                 actions.push(DriverAction::AppendEvents(vec![
-                    SessionEventRecord::Conversation(ConversationRecord::from_message(
+                    SessionHistoryRecord::Conversation(ConversationRecord::from_message(
                         test_turn_limit_final_message(message_id, max_turns),
                     )),
                 ]));
                 actions.push(DriverAction::Finish(TurnOutcome::Stopped(
                     TurnStop::MaxTurns,
                 )));
-                let _ = SessionEvent::Done;
+                let _ = SessionStreamEvent::Done;
                 return actions;
             }
             actions.push(DriverAction::StartCheckpoint {

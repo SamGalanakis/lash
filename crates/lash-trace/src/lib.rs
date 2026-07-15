@@ -13,7 +13,7 @@
 //! optional `otel` feature adds an `OtelTraceSink` that converts each record to
 //! an OpenTelemetry span. This is the *durable diagnostics* reporting channel —
 //! distinct from the app-facing `TurnActivity` stream and the low-level
-//! `SessionEvent` stream that the runtime crates expose.
+//! `SessionStreamEvent` stream that the runtime crates expose.
 //!
 //! For the full map of reporting channels, guidance on when to consume which,
 //! and the schema-evolution policy that governs [`TRACE_SCHEMA_VERSION`], see

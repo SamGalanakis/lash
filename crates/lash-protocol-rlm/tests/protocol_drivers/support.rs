@@ -8,7 +8,7 @@ pub(crate) use lash_rlm_types::{
 };
 pub(crate) use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 pub(crate) use lash_sansio::{
-    CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
+    CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionStreamEvent,
 };
 
 pub(crate) fn test_config() -> TurnMachineConfig {
@@ -157,7 +157,7 @@ pub(crate) fn machine_trajectory(machine: &TurnMachine) -> Vec<RlmTrajectoryEntr
         .events()
         .iter()
         .filter_map(|event| match event {
-            lash_core::SessionEventRecord::Protocol(event) => {
+            lash_core::SessionHistoryRecord::Protocol(event) => {
                 match lash_protocol_rlm::decode_rlm_protocol_event(event) {
                     Some(RlmProtocolEvent::RlmTrajectoryEntry(entry)) => Some(entry),
                     _ => None,
@@ -173,7 +173,7 @@ pub(crate) fn single_llm_extraction_payload(machine: &TurnMachine) -> serde_json
         .events()
         .iter()
         .filter_map(|event| match event {
-            lash_core::SessionEventRecord::Protocol(event) => {
+            lash_core::SessionHistoryRecord::Protocol(event) => {
                 match lash_protocol_rlm::decode_rlm_protocol_event(event) {
                     Some(RlmProtocolEvent::RlmDiagnostic(diagnostic)) => {
                         (diagnostic.phase == "llm_extraction").then_some(diagnostic.payload)
@@ -214,7 +214,7 @@ pub(crate) fn assistant_messages(machine: &TurnMachine) -> Vec<Message> {
         .events()
         .iter()
         .filter_map(|event| match event {
-            lash_core::SessionEventRecord::Conversation(record) => {
+            lash_core::SessionHistoryRecord::Conversation(record) => {
                 let message = record.to_message();
                 (message.role == MessageRole::Assistant).then_some(message)
             }
@@ -310,14 +310,14 @@ pub(crate) fn effects_include_runtime_error(effects: &[Effect], message_fragment
     let has_error = effects.iter().any(|effect| {
         matches!(
             effect,
-            Effect::Emit(SessionEvent::Error { message, .. })
+            Effect::Emit(SessionStreamEvent::Error { message, .. })
                 if message.contains(message_fragment)
         )
     });
     let has_runtime_outcome = effects.iter().any(|effect| {
         matches!(
             effect,
-            Effect::Emit(SessionEvent::TurnOutcome {
+            Effect::Emit(SessionStreamEvent::TurnOutcome {
                 outcome: lash_sansio::TurnOutcome::Stopped(lash_sansio::TurnStop::RuntimeError)
             })
         )
@@ -749,20 +749,20 @@ impl RlmProtocolRun {
                     self.exec_codes.push(code.clone());
                 }
                 Effect::Checkpoint { checkpoint, .. } => self.checkpoints.push(*checkpoint),
-                Effect::Emit(SessionEvent::TurnOutcome { outcome }) => {
+                Effect::Emit(SessionStreamEvent::TurnOutcome { outcome }) => {
                     self.turn_outcomes.push(outcome.clone());
                 }
-                Effect::Emit(SessionEvent::Message { kind, .. }) if kind == "final" => {
+                Effect::Emit(SessionStreamEvent::Message { kind, .. }) if kind == "final" => {
                     self.final_message_event = true;
                 }
-                Effect::Emit(SessionEvent::ToolCall { .. }) => {
+                Effect::Emit(SessionStreamEvent::ToolCall { .. }) => {
                     self.tool_call_event = true;
                 }
                 Effect::Progress { event_delta, .. } => {
                     self.assistant_conversation_progress |= event_delta.iter().any(|event| {
                         matches!(
                             event,
-                            lash_sansio::SessionEventRecord::Conversation(record)
+                            lash_sansio::SessionHistoryRecord::Conversation(record)
                                 if record.to_message().role == MessageRole::Assistant
                         )
                     });

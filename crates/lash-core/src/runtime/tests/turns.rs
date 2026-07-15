@@ -1189,7 +1189,7 @@ async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicat
 
     let mut saw_injected_accept = false;
     for event in sink.snapshot() {
-        if let crate::SessionEvent::InjectedTurnInputAccepted { inputs, .. } = event {
+        if let crate::SessionStreamEvent::InjectedTurnInputAccepted { inputs, .. } = event {
             saw_injected_accept = inputs.iter().any(|input| {
                 input.id.as_deref() == Some("follow-up-id")
                     && input.message.role == crate::MessageRole::User
@@ -3279,7 +3279,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
         sink.snapshot().into_iter().all(|event| {
             !matches!(
                 event,
-                crate::SessionEvent::InjectedMessagesCommitted { messages, .. }
+                crate::SessionStreamEvent::InjectedMessagesCommitted { messages, .. }
                     if messages.iter().any(|message| message.content == expected_text)
             )
         }),

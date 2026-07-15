@@ -36,16 +36,18 @@ impl LogicalTurnClaims {
         protocol_turn_options: Option<crate::ProtocolTurnOptions>,
     ) -> LogicalTurnCommitEffects {
         let claimed = !self.is_empty();
-        let completed_queue_claims = self
+        let completed_queue_claims: Vec<_> = self
             .queued
             .into_iter()
             .map(|claim| claim.completion())
             .collect();
-        let completed_turn_input_claims = self
+        let completed_turn_input_claims: Vec<_> = self
             .turn_inputs
             .into_iter()
             .map(|claim| claim.completion())
             .collect();
+        let originating_queue_claims = completed_queue_claims.clone();
+        let originating_turn_input_claims = completed_turn_input_claims.clone();
         let enqueued_queue_batches = match outcome {
             TurnOutcome::AgentFrameSwitch { frame_id, task, .. } if claimed => {
                 vec![
@@ -65,6 +67,8 @@ impl LogicalTurnClaims {
             _ => Vec::new(),
         };
         LogicalTurnCommitEffects {
+            originating_queue_claims,
+            originating_turn_input_claims,
             completed_queue_claims,
             completed_turn_input_claims,
             enqueued_queue_batches,
@@ -73,6 +77,8 @@ impl LogicalTurnClaims {
 }
 
 pub(super) struct LogicalTurnCommitEffects {
+    pub(super) originating_queue_claims: Vec<crate::QueuedWorkCompletion>,
+    pub(super) originating_turn_input_claims: Vec<crate::TurnInputCompletion>,
     pub(super) completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     pub(super) completed_turn_input_claims: Vec<crate::TurnInputCompletion>,
     pub(super) enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
