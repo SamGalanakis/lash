@@ -6,7 +6,7 @@
   import OpaqueNode from './components/nodes/OpaqueNode.svelte';
   import DisplayPanel from './components/DisplayPanel.svelte';
   import SourceView from './components/SourceView.svelte';
-  import { fetchWorkflow, saveWorkflow } from './lib/api.js';
+  import { fetchWorkflow, fetchWorkflows, selectWorkflow, saveWorkflow } from './lib/api.js';
   import { buildFlow, deleteNodeFromDoc } from './lib/graph.js';
   import { loadPositions, savePosition, clearPositions } from './lib/positions.js';
   import { RunController } from './lib/runStore.svelte.js';
@@ -32,6 +32,10 @@
   let saveError = $state(null);
   let saveOk = $state(null);
 
+  let catalog = $state([]);
+  let selectedId = $state('onboarding');
+  let switching = $state(false);
+
   const legend = Object.entries(NODE_KINDS);
 
   function onDelete(id) {
@@ -52,12 +56,34 @@
     loading = true;
     loadError = null;
     try {
-      const doc = await fetchWorkflow();
+      const [doc, list] = await Promise.all([fetchWorkflow(), fetchWorkflows().catch(() => [])]);
+      catalog = list;
       adoptDocument(doc);
     } catch (err) {
       loadError = err?.message ?? String(err);
     } finally {
       loading = false;
+    }
+  }
+
+  // Switching examples resets the backend's current workflow to that built-in
+  // and loads it just like the initial GET: fresh draft, re-layout, clear
+  // overlay. The current draft is intentionally discarded (backend contract).
+  async function onSelect(id) {
+    if (switching || id === selectedId) return;
+    switching = true;
+    saveError = null;
+    saveOk = null;
+    run.stop();
+    run.reset();
+    try {
+      const doc = await selectWorkflow(id);
+      selectedId = id;
+      adoptDocument(doc);
+    } catch (err) {
+      loadError = err?.message ?? String(err);
+    } finally {
+      switching = false;
     }
   }
 
@@ -178,6 +204,30 @@
     </section>
 
     <aside class="side">
+      {#if catalog.length}
+        <div class="wf-select">
+          <label class="wf-select-label" for="wf-picker">workflow</label>
+          <div class="wf-select-wrap">
+            <select
+              id="wf-picker"
+              class="wf-select-input"
+              value={selectedId}
+              disabled={switching || loading}
+              onchange={(e) => onSelect(e.currentTarget.value)}
+              title={catalog.find((w) => w.id === selectedId)?.description ?? ''}
+            >
+              {#each catalog as w (w.id)}
+                <option value={w.id} title={w.description}>{w.name}</option>
+              {/each}
+            </select>
+            <span class="wf-select-caret">{switching ? '…' : '▾'}</span>
+          </div>
+          <div class="wf-select-desc">
+            {catalog.find((w) => w.id === selectedId)?.description ?? ''}
+          </div>
+        </div>
+      {/if}
+
       <div class="controls">
         <button
           class="btn btn-play"
@@ -369,6 +419,70 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+  }
+
+  .wf-select {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .wf-select-label {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .wf-select-wrap {
+    position: relative;
+  }
+  .wf-select-input {
+    appearance: none;
+    width: 100%;
+    background: linear-gradient(180deg, var(--node-hi), var(--node));
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-weight: 600;
+    font-size: 14px;
+    padding: 11px 34px 11px 13px;
+    cursor: pointer;
+    transition:
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+  .wf-select-input:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--cyan) 45%, var(--line-strong));
+  }
+  .wf-select-input:focus {
+    outline: none;
+    border-color: var(--cyan);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) 14%, transparent);
+  }
+  .wf-select-input:disabled {
+    opacity: 0.55;
+    cursor: wait;
+  }
+  .wf-select-input option {
+    background: var(--ink-2);
+    color: var(--text);
+  }
+  .wf-select-caret {
+    position: absolute;
+    right: 13px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--cyan);
+    font-size: 11px;
+    pointer-events: none;
+  }
+  .wf-select-desc {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.45;
+    color: var(--text-faint);
+    min-height: 14px;
   }
 
   .controls {

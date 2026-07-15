@@ -8,6 +8,25 @@ export async function fetchWorkflow() {
   return res.json();
 }
 
+// Built-in workflow catalog: [{ id, name, description }] in display order.
+export async function fetchWorkflows() {
+  const res = await fetch('/workflows', { headers: { accept: 'application/json' } });
+  if (!res.ok) throw new Error(`GET /workflows failed: ${res.status}`);
+  return res.json();
+}
+
+// Reset the current workflow to a built-in example. Returns its WorkflowDocument
+// (same shape as GET /workflow), advancing the version. Discards any draft.
+export async function selectWorkflow(id) {
+  const res = await fetch('/workflow/select', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) throw new Error(`POST /workflow/select failed: ${res.status}`);
+  return res.json();
+}
+
 // Returns { ok: true, document } on success, or { ok: false, status, error }
 // carrying the typed render error so the UI can show it without losing the draft.
 export async function saveWorkflow(document) {
