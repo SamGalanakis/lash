@@ -60,6 +60,7 @@
         (isSimpleReference(value) && vars.includes((value ?? '').trim()))
       );
     }
+    if (builder === 'target') return !(empty || isSimpleReference(value));
     return true;
   });
   const showRaw = $derived(mode.power || (userRaw ?? autoRaw));
@@ -162,6 +163,31 @@
     listMode = next;
     if (next === 'var') emit(vars[0] ?? '');
     else emitItems();
+  }
+
+  // --- assignment-target builder ---------------------------------------------
+  // A scoped picker: an in-scope base variable + an optional member tail, so a
+  // non-expert can express `state.count` without typing. Anything that is not a
+  // simple dotted reference (index expressions, calls) stays on the raw editor.
+  let tBase = $state('');
+  let tTail = $state('');
+  let tEditing = $state(false);
+  $effect(() => {
+    if (tEditing || builder !== 'target') return;
+    const trimmed = (value ?? '').trim();
+    const dot = trimmed.indexOf('.');
+    if (dot === -1) {
+      tBase = trimmed;
+      tTail = '';
+    } else {
+      tBase = trimmed.slice(0, dot);
+      tTail = trimmed.slice(dot); // keeps the leading '.'
+    }
+  });
+  function emitTarget() {
+    let tail = tTail.trim();
+    if (tail && !tail.startsWith('.') && !tail.startsWith('[')) tail = `.${tail}`;
+    emit(`${tBase}${tail}`);
   }
 </script>
 
@@ -355,6 +381,7 @@
         >
           {#each vars as v (v)}<option value={v}>{v}</option>{/each}
         </select>
+        <div class="xf-hint">pick a list variable · non-list values won't iterate</div>
       {:else}
         <div class="xf-list-items">
           {#each items as item, i (i)}
@@ -391,6 +418,71 @@
           >
         </div>
       {/if}
+    </div>
+  {:else if builder === 'target'}
+    <div class="xf-row xf-target">
+      {#if vars.length}
+        <select
+          class="xf-target-base"
+          value={tBase}
+          onpointerdown={(e) => e.stopPropagation()}
+          onfocus={() => (tEditing = true)}
+          onchange={(e) => {
+            tBase = e.currentTarget.value;
+            emitTarget();
+          }}
+          onblur={() => {
+            tEditing = false;
+            onCommit?.();
+          }}
+        >
+          {#if !vars.includes(tBase)}<option value={tBase}>{tBase || '— variable —'}</option>{/if}
+          {#each vars as v (v)}<option value={v}>{v}</option>{/each}
+        </select>
+      {:else}
+        <input
+          class="xf-target-base xf-target-plain"
+          value={tBase}
+          placeholder="variable"
+          spellcheck="false"
+          onpointerdown={(e) => e.stopPropagation()}
+          onfocus={() => (tEditing = true)}
+          oninput={(e) => {
+            tBase = e.currentTarget.value;
+            emitTarget();
+          }}
+          onblur={() => {
+            tEditing = false;
+            onCommit?.();
+          }}
+        />
+      {/if}
+      <input
+        class="xf-target-tail"
+        value={tTail}
+        placeholder=".field (optional)"
+        spellcheck="false"
+        onpointerdown={(e) => e.stopPropagation()}
+        onfocus={() => (tEditing = true)}
+        oninput={(e) => {
+          tTail = e.currentTarget.value;
+          emitTarget();
+        }}
+        onblur={() => {
+          tEditing = false;
+          onCommit?.();
+        }}
+      />
+      <button
+        class="xf-toggle"
+        title="Edit as raw expression"
+        aria-label="Edit as raw expression"
+        onpointerdown={(e) => e.stopPropagation()}
+        onclick={(e) => {
+          e.stopPropagation();
+          userRaw = true;
+        }}>{'</>'}</button
+      >
     </div>
   {:else}
     <div class="xf-row xf-val">
@@ -595,6 +687,45 @@
   .xf-list-var:focus {
     outline: none;
     border-color: var(--cyan);
+  }
+  .xf-hint {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    line-height: 1.3;
+    color: var(--text-faint);
+    letter-spacing: 0.02em;
+  }
+
+  /* assignment-target builder */
+  .xf-target {
+    align-items: center;
+  }
+  .xf-target-base,
+  .xf-target-tail {
+    background: #0a0d13;
+    border: 1px solid color-mix(in srgb, var(--accent, var(--cyan)) 26%, var(--line));
+    border-radius: 6px;
+    color: #eaf2ff;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 4px 6px;
+    min-width: 0;
+  }
+  .xf-target-base {
+    flex: 1 1 45%;
+    color: var(--accent, var(--cyan));
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .xf-target-tail {
+    flex: 1 1 45%;
+    color: var(--text-dim);
+  }
+  .xf-target-base:focus,
+  .xf-target-tail:focus {
+    outline: none;
+    border-color: var(--accent, var(--cyan));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--cyan)) 14%, transparent);
   }
 
   .xf-toggle {

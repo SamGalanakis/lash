@@ -62,11 +62,11 @@ export async function saveWorkflow(document) {
   return { ok: false, status: res.status, error: body?.error ?? null };
 }
 
-// Operation catalog — the data home for the "+ Add node" palette. Returns an
-// array of catalog entries `[{ id, label, nodeKind, subkind?, operation?,
+// Operation catalog — the sole data home for the "+ Add node" palette. Returns
+// an array of catalog entries `[{ id, label, nodeKind, subkind?, operation?,
 // effect?, terminalKind?, fields:[{name,type,default}] }]`, or `null` when the
-// backend does not serve `/operations` (older build) so the caller can fall
-// back to its built-in catalog and never crash.
+// backend does not serve `/operations` (older build). The caller surfaces a
+// "catalog unavailable" state in that case — there is no built-in fallback.
 export async function fetchOperations() {
   try {
     const res = await fetch('/operations', { headers: { accept: 'application/json' } });

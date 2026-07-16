@@ -416,6 +416,7 @@
             <ExpressionField
               value={node.data.target ?? defaultTarget()}
               kind="assignment_target"
+              builder="target"
               {availableVars}
               placeholder="target"
               onInput={(text) => (node.data.target = text)}

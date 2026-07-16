@@ -5,6 +5,7 @@ import {
   parseList,
   encodeList,
   parseComparison,
+  stripOuterParens,
   isBoolLiteral,
   isSimpleReference,
   isComplexExpression,
@@ -12,6 +13,25 @@ import {
   clauseRemoved,
   makeClause,
 } from './fields.js';
+
+// Mirror of ExpressionField's builder-selection predicate. Kept in the test so
+// the selection logic that decides raw-vs-builder is itself under coverage —
+// this is the logic whose gap let the paren bug ship green.
+function autoRaw(builder, value, vars = []) {
+  if (isComplexExpression(value)) return true;
+  const empty = (value ?? '').trim() === '';
+  if (builder === 'comparison') return !(parseComparison(value) || empty || isBoolLiteral(value));
+  if (builder === 'value') return parseLiteral(value).type === 'expression';
+  if (builder === 'list') {
+    return !(
+      parseList(value) ||
+      empty ||
+      (isSimpleReference(value) && vars.includes((value ?? '').trim()))
+    );
+  }
+  if (builder === 'target') return !(empty || isSimpleReference(value));
+  return true;
+}
 
 describe('literal parse/encode', () => {
   it('classifies scalar literals', () => {
@@ -110,6 +130,81 @@ describe('comparison parse', () => {
   it('rejects chained / compound comparisons (stay raw)', () => {
     expect(parseComparison('a < b < c')).toBeNull();
     expect(parseComparison('plain text')).toBeNull();
+  });
+});
+
+describe('parenthesized conditions (the lens emits these)', () => {
+  it('strips a balanced outer paren pair', () => {
+    expect(stripOuterParens('(x < 2)')).toBe('x < 2');
+    expect(stripOuterParens('((a))')).toBe('a');
+    expect(stripOuterParens('  (state.count < 3)  ')).toBe('state.count < 3');
+  });
+
+  it('leaves non-wrapping parens intact', () => {
+    expect(stripOuterParens('(a) < (b)')).toBe('(a) < (b)');
+    expect(stripOuterParens('x < 2')).toBe('x < 2');
+    expect(stripOuterParens('(a) && (b)')).toBe('(a) && (b)');
+  });
+
+  it('decodes a lens-emitted `(x < 2)` to clean operands', () => {
+    expect(parseComparison('(x < 2)')).toEqual({ lhs: 'x', op: '<', rhs: '2' });
+  });
+
+  it('decodes `(state.count < 3)` with a dotted lhs', () => {
+    expect(parseComparison('(state.count < 3)')).toEqual({
+      lhs: 'state.count',
+      op: '<',
+      rhs: '3',
+    });
+  });
+
+  it('re-encodes bare (lens re-wraps) so a round-trip stays balanced', () => {
+    const parsed = parseComparison('(x < 2)');
+    const emitted = `${parsed.lhs} ${parsed.op} ${parsed.rhs}`;
+    expect(emitted).toBe('x < 2'); // bare — no stray parens, balanced
+    // and re-parsing the wrapped form the lens would produce is stable
+    expect(parseComparison(`(${emitted})`)).toEqual(parsed);
+  });
+
+  it('does NOT mis-parse a compound expression as a comparison', () => {
+    // Naive splitting would yield lhs="(x" — must reject and fall back to raw.
+    expect(parseComparison('(x < 2) && ok')).toBeNull();
+  });
+});
+
+describe('builder-selection (autoRaw) — locks the raw-vs-builder decision', () => {
+  it('keeps a parenthesized comparison on the builder, not raw', () => {
+    expect(autoRaw('comparison', '(x < 2)')).toBe(false);
+    expect(autoRaw('comparison', '(state.count < 3)')).toBe(false);
+  });
+
+  it('starts a fresh comparison for empty / bare-boolean conditions', () => {
+    expect(autoRaw('comparison', '')).toBe(false);
+    expect(autoRaw('comparison', 'true')).toBe(false);
+  });
+
+  it('falls back to raw for compound / non-comparison conditions', () => {
+    expect(autoRaw('comparison', '(x < 2) && ok')).toBe(true);
+    expect(autoRaw('comparison', 'compute(x)')).toBe(true);
+  });
+
+  it('list: literal list and in-scope var use the builder, else raw', () => {
+    expect(autoRaw('list', '[1, 2, 3]')).toBe(false);
+    expect(autoRaw('list', 'items', ['items'])).toBe(false);
+    expect(autoRaw('list', 'items', [])).toBe(true); // not in scope
+    expect(autoRaw('list', 'range(0, n)')).toBe(true);
+  });
+
+  it('value: literals use the builder, expressions stay raw', () => {
+    expect(autoRaw('value', '42')).toBe(false);
+    expect(autoRaw('value', '"hi"')).toBe(false);
+    expect(autoRaw('value', 'a + b')).toBe(true);
+  });
+
+  it('target: dotted references use the builder, index/calls stay raw', () => {
+    expect(autoRaw('target', 'state.count')).toBe(false);
+    expect(autoRaw('target', 'total')).toBe(false);
+    expect(autoRaw('target', 'arr[0]')).toBe(true);
   });
 });
 
