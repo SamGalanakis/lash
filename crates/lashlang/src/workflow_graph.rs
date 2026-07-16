@@ -636,7 +636,9 @@ impl<'a> GraphProjector<'a> {
                 "fail".to_string(),
                 Vec::new(),
             ),
-            _ if is_pure_expr(value) || matches!(value, Expr::TypeLiteral(_)) => {
+            _ if (is_pure_expr(value) || matches!(value, Expr::TypeLiteral(_)))
+                && binding.is_some() =>
+            {
                 let outputs = assignment_output(binding.as_ref(), versions);
                 (
                     WorkflowNodeKind::Data {
@@ -1044,9 +1046,6 @@ fn node_to_expr(node: &WorkflowNode, context: RenderContext) -> Result<Expr, Gra
             expression,
         } => {
             let expression = parse_expression_field(node, "expression", expression)?;
-            if is_pure_expr(&expression) {
-                return invalid_payload(node, "computation expression must be effectful");
-            }
             with_assignment(node, binding, expression, true)?
         }
         WorkflowNodeKind::StateUpdate { target, expression } => {

@@ -4,6 +4,7 @@ mod catalog;
 mod contract;
 mod display;
 mod graph;
+mod operations;
 mod runtime;
 
 use std::convert::Infallible;
@@ -29,8 +30,10 @@ use tokio_stream::wrappers::ReceiverStream;
 pub use catalog::{SelectWorkflowRequest, WorkflowCatalogEntry};
 pub use contract::{
     ChildGroup, DisplayDelta, DisplayState, EdgeData, EditableComprehensionClause, EditableValue,
-    FlowEdge, FlowNode, GraphRoots, NodeData, RenderErrorResponse, RunEvent, RunStatus,
-    SaveWorkflowResponse, WorkflowDocument,
+    FlowEdge, FlowNode, GraphRoots, NodeData, OperationCatalogEntry, OperationField,
+    ProjectWorkflowRequest, ProjectWorkflowResponse, RenderErrorResponse, RunEvent, RunStatus,
+    SaveWorkflowResponse, SourceProjectionErrorResponse, ValidateRequest, ValidateResponse,
+    ValidationKind, WorkflowDocument,
 };
 pub use runtime::RunTiming;
 
@@ -132,6 +135,9 @@ impl Default for AppState {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/workflows", get(list_workflows))
+        .route("/operations", get(list_operations))
+        .route("/validate", post(validate_fragment))
+        .route("/project", post(project_source))
         .route("/workflow", get(get_workflow).post(save_workflow))
         .route("/workflow/select", post(select_workflow))
         .route("/run", post(run_workflow))
@@ -144,6 +150,28 @@ pub fn app(state: AppState) -> Router {
 
 async fn list_workflows() -> Json<Vec<WorkflowCatalogEntry>> {
     Json(catalog::entries())
+}
+
+async fn list_operations() -> Json<Vec<OperationCatalogEntry>> {
+    Json(operations::entries())
+}
+
+async fn validate_fragment(Json(request): Json<ValidateRequest>) -> Json<ValidateResponse> {
+    Json(graph::validate_fragment(request))
+}
+
+async fn project_source(
+    State(state): State<AppState>,
+    Json(request): Json<ProjectWorkflowRequest>,
+) -> Result<Json<ProjectWorkflowResponse>, SourceProjectionErrorResponse> {
+    let version = state.current().version;
+    let graph = workflow_graph_from_source(&request.source)
+        .map_err(|error| SourceProjectionErrorResponse::invalid_source(error.to_string()))?;
+    let source = workflow_graph_to_source(&graph)
+        .map_err(|error| SourceProjectionErrorResponse::invalid_source(error.to_string()))?;
+    Ok(Json(ProjectWorkflowResponse {
+        document: graph::document_from_graph(version, source, graph),
+    }))
 }
 
 async fn select_workflow(
@@ -309,6 +337,12 @@ fn content_type(path: &Path) -> HeaderValue {
 impl IntoResponse for RenderErrorResponse {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
+    }
+}
+
+impl IntoResponse for SourceProjectionErrorResponse {
+    fn into_response(self) -> Response {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(self.body)).into_response()
     }
 }
 

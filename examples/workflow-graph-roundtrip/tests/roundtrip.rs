@@ -8,6 +8,453 @@ use workflow_graph_roundtrip::{
 };
 
 #[tokio::test]
+async fn operation_catalog_and_fragment_validation_match_the_editor_contract() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(
+        listener,
+        AppState::default(),
+    ));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let response = client
+        .get(format!("{base}/operations"))
+        .send()
+        .await
+        .expect("GET /operations");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let entries: Value = response.json().await.expect("operation catalog JSON");
+    let entries = entries.as_array().expect("operation catalog array");
+    assert_eq!(entries.len(), 15);
+    assert_eq!(
+        entries[0],
+        serde_json::json!({
+            "id": "display.show_message",
+            "label": "Show message",
+            "nodeKind": "call",
+            "operation": "show_message",
+            "fields": [{ "name": "text", "type": "string", "default": "" }]
+        })
+    );
+    assert!(entries.iter().any(|entry| {
+        entry
+            == &serde_json::json!({
+                "id": "display.set_progress",
+                "label": "Set progress",
+                "nodeKind": "call",
+                "operation": "set_progress",
+                "fields": [{ "name": "pct", "type": "number", "default": 0 }]
+            })
+    }));
+    for expected in [
+        serde_json::json!({
+            "id": "control.for",
+            "label": "For each",
+            "nodeKind": "container",
+            "subkind": "for",
+            "fields": [
+                { "name": "binding", "type": "identifier", "default": "item" },
+                { "name": "iterable", "type": "expression", "default": "[1, 2, 3]" }
+            ]
+        }),
+        serde_json::json!({
+            "id": "stmt.finish",
+            "label": "Finish",
+            "nodeKind": "terminal",
+            "terminalKind": "finish",
+            "fields": [{ "name": "expression", "type": "expression", "default": "0" }]
+        }),
+        serde_json::json!({
+            "id": "effect.sleep",
+            "label": "Sleep",
+            "nodeKind": "effect",
+            "effect": "sleep",
+            "fields": [{ "name": "duration", "type": "expression", "default": "\"1s\"" }]
+        }),
+    ] {
+        assert!(
+            entries.contains(&expected),
+            "missing catalog entry {expected}"
+        );
+    }
+
+    for (request, expected) in [
+        (
+            serde_json::json!({ "kind": "expression", "text": "state.count + 1" }),
+            serde_json::json!({ "ok": true }),
+        ),
+        (
+            serde_json::json!({ "kind": "assignment_target", "text": "state.items[0]" }),
+            serde_json::json!({ "ok": true }),
+        ),
+        (
+            serde_json::json!({ "kind": "identifier", "text": "item" }),
+            serde_json::json!({ "ok": true }),
+        ),
+    ] {
+        let response = client
+            .post(format!("{base}/validate"))
+            .json(&request)
+            .send()
+            .await
+            .expect("POST /validate valid fragment");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<Value>().await.expect("validation JSON"),
+            expected
+        );
+    }
+
+    for (kind, text, code) in [
+        ("expression", "1 +", "invalid_expression"),
+        (
+            "assignment_target",
+            "state + count",
+            "invalid_assignment_target",
+        ),
+        ("identifier", "state.count", "invalid_identifier"),
+    ] {
+        let response = client
+            .post(format!("{base}/validate"))
+            .json(&serde_json::json!({ "kind": kind, "text": text }))
+            .send()
+            .await
+            .expect("POST /validate invalid fragment");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.expect("validation JSON");
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"]["code"], code);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty())
+        );
+        assert!(body["error"].get("details").is_none());
+    }
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn source_projection_is_a_stateless_canonical_fixpoint_with_typed_errors() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(
+        listener,
+        AppState::default(),
+    ));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    let before: WorkflowDocument = client
+        .get(format!("{base}/workflow"))
+        .send()
+        .await
+        .expect("GET /workflow before projection")
+        .json()
+        .await
+        .expect("workflow before projection");
+
+    let response = client
+        .post(format!("{base}/project"))
+        .json(&serde_json::json!({
+            "source": "process drafted(input: any) { value = input finish value }"
+        }))
+        .send()
+        .await
+        .expect("POST /project valid source");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("project response JSON");
+    let document: WorkflowDocument =
+        serde_json::from_value(body["document"].clone()).expect("projected workflow document");
+    assert_eq!(document.version, before.version);
+    let graph = lashlang::workflow_graph_from_source(&document.source)
+        .expect("project response source projects");
+    assert_eq!(
+        lashlang::workflow_graph_to_source(&graph).expect("project response graph renders"),
+        document.source
+    );
+    assert_eq!(
+        lashlang::workflow_graph_from_source(&document.source)
+            .expect("project response source reprojects"),
+        graph
+    );
+    assert!(document.nodes.iter().any(|node| {
+        node.data.kind == "terminal"
+            && node.data.terminal_kind.as_deref() == Some("finish")
+            && node.data.expression.as_deref() == Some("value")
+    }));
+    let process = document
+        .nodes
+        .iter()
+        .find(|node| node.data.kind == "process")
+        .expect("projected process");
+    assert_eq!(process.data.available_vars, ["input"]);
+
+    let after: WorkflowDocument = client
+        .get(format!("{base}/workflow"))
+        .send()
+        .await
+        .expect("GET /workflow after projection")
+        .json()
+        .await
+        .expect("workflow after projection");
+    assert_eq!(after.version, before.version);
+    assert_eq!(after.source, before.source);
+
+    let response = client
+        .post(format!("{base}/project"))
+        .json(&serde_json::json!({ "source": "process broken( {" }))
+        .send()
+        .await
+        .expect("POST /project invalid source");
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = response.json().await.expect("project error JSON");
+    assert_eq!(body["error"]["code"], "invalid_source");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty())
+    );
+    assert!(body["error"].get("details").is_none());
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn projected_available_vars_follow_ssa_and_nested_lexical_scope() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(
+        listener,
+        AppState::default(),
+    ));
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{addr}/project"))
+        .json(&serde_json::json!({
+            "source": r#"
+                process scoped(record: any) {
+                  state = { count: 0 }
+                  first = 1
+                  for item in [1] { nested = first + item }
+                  finish state
+                }
+            "#
+        }))
+        .send()
+        .await
+        .expect("POST scoped source");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("scoped project JSON");
+    let document: WorkflowDocument =
+        serde_json::from_value(body["document"].clone()).expect("scoped document");
+    let state = document
+        .nodes
+        .iter()
+        .find(|node| node.data.binding.as_deref() == Some("state"))
+        .expect("state binding");
+    assert_eq!(state.data.available_vars, ["record"]);
+    let first = document
+        .nodes
+        .iter()
+        .find(|node| node.data.binding.as_deref() == Some("first"))
+        .expect("first binding");
+    assert_eq!(first.data.available_vars, ["record", "state"]);
+    let for_node = document
+        .nodes
+        .iter()
+        .find(|node| node.data.subkind.as_deref() == Some("for"))
+        .expect("for node");
+    assert_eq!(for_node.data.available_vars, ["first", "record", "state"]);
+    let nested = document
+        .nodes
+        .iter()
+        .find(|node| node.data.binding.as_deref() == Some("nested"))
+        .expect("nested binding");
+    assert_eq!(
+        nested.data.available_vars,
+        ["first", "item", "record", "state"]
+    );
+    let terminal = document
+        .nodes
+        .iter()
+        .find(|node| node.data.kind == "terminal")
+        .expect("terminal");
+    assert_eq!(
+        terminal.data.available_vars,
+        ["first", "nested", "record", "state"]
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn data_terminal_call_and_effect_edits_round_trip_without_raw_constructor_source() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(
+        listener,
+        AppState::default(),
+    ));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    let mut document = select_workflow(&client, &base, "blank").await;
+
+    let mut data = new_flow_node("new:data", "data", None, "value");
+    data.data.binding = Some("value".to_string());
+    data.data.expression = Some("1 + 1".to_string());
+    append_process_node(&mut document, data);
+    let mut computation = new_flow_node("new:computation", "computation", None, "Compute");
+    computation.data.expression = Some("1 + 1".to_string());
+    append_process_node(&mut document, computation);
+    let mut call = new_flow_node("new:call-from-catalog", "call", None, "Set status");
+    call.data.operation = Some("set_status".to_string());
+    call.data.fields.insert(
+        "key".to_string(),
+        EditableValue::String("phase".to_string()),
+    );
+    call.data.fields.insert(
+        "value".to_string(),
+        EditableValue::String("ready".to_string()),
+    );
+    append_process_node(&mut document, call);
+    let mut effect = new_flow_node("new:effect-from-catalog", "effect", None, "Sleep");
+    effect.data.effect = Some("sleep".to_string());
+    effect.data.fields.insert(
+        "duration".to_string(),
+        EditableValue::String("1ms".to_string()),
+    );
+    append_process_node(&mut document, effect);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save catalog-constructed nodes");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let mut saved: WorkflowDocument = response.json().await.expect("first edited document");
+    assert!(saved.source.contains("value = (1 + 1)"));
+    assert!(saved.nodes.iter().any(|node| {
+        node.data.kind == "computation" && node.data.expression.as_deref() == Some("(1 + 1)")
+    }));
+    assert!(
+        saved
+            .source
+            .contains("await display.set_status({ key: \"phase\", value: \"ready\" })?")
+    );
+    assert!(saved.source.contains("sleep for \"1ms\""));
+
+    let data = saved
+        .nodes
+        .iter_mut()
+        .find(|node| node.data.binding.as_deref() == Some("value"))
+        .expect("saved data node");
+    assert_eq!(data.data.expression.as_deref(), Some("(1 + 1)"));
+    data.data.expression = Some("40 + 2".to_string());
+    let terminal = saved
+        .nodes
+        .iter_mut()
+        .find(|node| node.data.kind == "terminal")
+        .expect("saved terminal");
+    assert_eq!(terminal.data.terminal_kind.as_deref(), Some("finish"));
+    assert_eq!(terminal.data.expression.as_deref(), Some("0"));
+    terminal.data.terminal_kind = Some("fail".to_string());
+    terminal.data.expression = Some("\"stopped\"".to_string());
+    let call = saved
+        .nodes
+        .iter_mut()
+        .find(|node| node.data.operation.as_deref() == Some("set_status"))
+        .expect("saved call");
+    call.data.operation = Some("show_message".to_string());
+    call.data.fields.clear();
+    call.data.fields.insert(
+        "text".to_string(),
+        EditableValue::String("switched".to_string()),
+    );
+    call.data.fields.insert(
+        "tone".to_string(),
+        EditableValue::String("warm".to_string()),
+    );
+    let effect = saved
+        .nodes
+        .iter_mut()
+        .find(|node| node.data.effect.as_deref() == Some("sleep"))
+        .expect("saved effect");
+    effect.data.effect = Some("wait_signal".to_string());
+    effect.data.fields.clear();
+    effect.data.fields.insert(
+        "signal".to_string(),
+        EditableValue::String("continue".to_string()),
+    );
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&saved)
+        .send()
+        .await
+        .expect("save switched nodes");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let mut switched: WorkflowDocument = response.json().await.expect("switched document");
+    assert!(switched.source.contains("value = (40 + 2)"));
+    assert!(switched.source.contains("fail \"stopped\""));
+    assert!(
+        switched
+            .source
+            .contains("await display.show_message({ text: \"switched\", tone: \"warm\" })?")
+    );
+    assert!(!switched.source.contains("key: \"phase\""));
+    assert!(!switched.source.contains("value: \"ready\""));
+    assert!(switched.source.contains("wait_signal(\"continue\")"));
+
+    let call = switched
+        .nodes
+        .iter_mut()
+        .find(|node| node.data.operation.as_deref() == Some("show_message"))
+        .expect("switched call");
+    call.data.fields.remove("tone");
+    let terminal = switched
+        .nodes
+        .iter_mut()
+        .find(|node| node.data.kind == "terminal")
+        .expect("switched terminal");
+    terminal.data.terminal_kind = Some("finish".to_string());
+    terminal.data.expression = Some("value".to_string());
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&switched)
+        .send()
+        .await
+        .expect("save removed arg and restored finish");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let restored: WorkflowDocument = response.json().await.expect("restored document");
+    assert!(restored.source.contains("finish value"));
+    assert!(
+        restored
+            .source
+            .contains("await display.show_message({ text: \"switched\" })?")
+    );
+    assert!(!restored.source.contains("tone:"));
+    assert!(restored.nodes.iter().any(|node| {
+        node.data.kind == "terminal"
+            && node.data.terminal_kind.as_deref() == Some("finish")
+            && node.data.expression.as_deref() == Some("value")
+    }));
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn lists_selects_projects_and_runs_built_in_workflows() {
     let state = AppState::with_run_timing(RunTiming {
         sleep_cap: Duration::from_millis(2),
@@ -1363,6 +1810,7 @@ fn new_flow_node(id: &str, kind: &str, subkind: Option<&str>, title: &str) -> Fl
             name_source: "derived".to_string(),
             operation: None,
             effect: None,
+            terminal_kind: None,
             fields: BTreeMap::new(),
             binding: None,
             target: None,
@@ -1372,6 +1820,7 @@ fn new_flow_node(id: &str, kind: &str, subkind: Option<&str>, title: &str) -> Fl
             clauses: Vec::new(),
             source: None,
             children: Vec::new(),
+            available_vars: Vec::new(),
         },
     }
 }

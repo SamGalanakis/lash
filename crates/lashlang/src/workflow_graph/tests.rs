@@ -617,6 +617,17 @@ fn nodes_expose_stable_identifiers_available_before_their_execution() {
 }
 
 #[test]
+fn standalone_pure_expressions_remain_computations() {
+    let graph = workflow_graph_from_source("1 + 1\n").unwrap();
+    assert!(matches!(
+        graph.main.nodes[0].kind,
+        WorkflowNodeKind::Computation { ref expression, binding: None }
+            if expression == "(1 + 1)"
+    ));
+    assert_lens_laws("1 + 1\n");
+}
+
+#[test]
 fn reference_type_literals_and_effectful_composites_are_typed() {
     let source = r#"type Item = { name: str }
 

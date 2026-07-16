@@ -25,6 +25,126 @@ pub struct SaveWorkflowResponse {
     pub id_map: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProjectWorkflowRequest {
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProjectWorkflowResponse {
+    pub document: WorkflowDocument,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SourceProjectionErrorBody {
+    pub error: SourceProjectionError,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SourceProjectionError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceProjectionErrorResponse {
+    pub(crate) body: SourceProjectionErrorBody,
+}
+
+impl SourceProjectionErrorResponse {
+    pub(crate) fn invalid_source(message: impl Into<String>) -> Self {
+        Self {
+            body: SourceProjectionErrorBody {
+                error: SourceProjectionError {
+                    code: "invalid_source".to_string(),
+                    message: message.into(),
+                },
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationCatalogEntry {
+    pub id: String,
+    pub label: String,
+    pub node_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subkind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_kind: Option<String>,
+    pub fields: Vec<OperationField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct OperationField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
+    pub default: Value,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationKind {
+    Expression,
+    AssignmentTarget,
+    Identifier,
+}
+
+impl ValidationKind {
+    pub(crate) fn error_code(self) -> &'static str {
+        match self {
+            Self::Expression => "invalid_expression",
+            Self::AssignmentTarget => "invalid_assignment_target",
+            Self::Identifier => "invalid_identifier",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ValidateRequest {
+    pub kind: ValidationKind,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ValidateResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ValidationError>,
+}
+
+impl ValidateResponse {
+    pub(crate) fn valid() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+
+    pub(crate) fn invalid(kind: ValidationKind, message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(ValidationError {
+                code: kind.error_code().to_string(),
+                message: message.into(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ValidationError {
+    pub code: String,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphRoots {
@@ -59,6 +179,8 @@ pub struct NodeData {
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_kind: Option<String>,
     #[serde(default)]
     pub fields: BTreeMap<String, EditableValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,6 +199,8 @@ pub struct NodeData {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChildGroup>,
+    #[serde(default)]
+    pub available_vars: Vec<String>,
 }
 
 fn derived_name_source() -> String {

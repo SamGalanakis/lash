@@ -11,8 +11,31 @@ use serde_json::json;
 
 use crate::{
     ChildGroup, EdgeData, EditableComprehensionClause, EditableValue, FlowEdge, FlowNode,
-    GraphRoots, NodeData, RenderErrorResponse, WorkflowDocument,
+    GraphRoots, NodeData, RenderErrorResponse, ValidateRequest, ValidateResponse, ValidationKind,
+    WorkflowDocument,
 };
+
+pub(crate) fn validate_fragment(request: ValidateRequest) -> ValidateResponse {
+    let result = match request.kind {
+        ValidationKind::Expression => parse_expression(&request.text)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        ValidationKind::AssignmentTarget => parse_assignment_target_fragment(&request.text)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        ValidationKind::Identifier => {
+            parse_assignment_target_fragment(&request.text).and_then(|target| {
+                target.is_simple().then_some(()).ok_or_else(|| {
+                    "expected an identifier without field or index access".to_string()
+                })
+            })
+        }
+    };
+    match result {
+        Ok(()) => ValidateResponse::valid(),
+        Err(message) => ValidateResponse::invalid(request.kind, message),
+    }
+}
 
 pub(crate) fn document_from_graph(
     version: u64,
@@ -46,6 +69,7 @@ pub(crate) fn document_from_graph(
                 name_source: name_source(process.name_source),
                 operation: None,
                 effect: None,
+                terminal_kind: None,
                 fields: BTreeMap::new(),
                 binding: None,
                 target: None,
@@ -59,6 +83,11 @@ pub(crate) fn document_from_graph(
                     scope: scope.clone(),
                     node_ids: children,
                 }],
+                available_vars: process
+                    .params
+                    .iter()
+                    .map(|param| param.name.to_string())
+                    .collect(),
             },
         });
         flatten_subgraph(
@@ -321,8 +350,10 @@ fn node_data(node: &WorkflowNode, children: Vec<ChildGroup>) -> NodeData {
         _ => None,
     };
     let expression = match &node.kind {
-        WorkflowNodeKind::Computation { expression, .. }
+        WorkflowNodeKind::Data { expression, .. }
+        | WorkflowNodeKind::Computation { expression, .. }
         | WorkflowNodeKind::StateUpdate { expression, .. } => Some(expression.clone()),
+        WorkflowNodeKind::Terminal { expression, .. } => terminal_value(expression),
         _ => None,
     };
     let condition = match &node.kind {
@@ -352,6 +383,7 @@ fn node_data(node: &WorkflowNode, children: Vec<ChildGroup>) -> NodeData {
         name_source: name_source(node.name_source),
         operation,
         effect,
+        terminal_kind: terminal_kind(node).map(str::to_string),
         fields: editable_fields(node),
         binding,
         target,
@@ -361,7 +393,17 @@ fn node_data(node: &WorkflowNode, children: Vec<ChildGroup>) -> NodeData {
         clauses,
         source,
         children,
+        available_vars: node.available_variables.clone(),
     }
+}
+
+fn terminal_value(expression: &str) -> Option<String> {
+    let expression = parse_expression(expression).ok()?;
+    let value = match expression {
+        Expr::Finish(value) | Expr::Fail(value) => value,
+        _ => return None,
+    };
+    canonical_expression_source(&value).ok()
 }
 
 fn editable_clause(clause: &WorkflowListComprehensionClause) -> EditableComprehensionClause {
@@ -607,14 +649,9 @@ fn node_from_flow_data(id: &str, data: &NodeData) -> Result<WorkflowNode, Render
             expression: editable_expression(id, data)?,
         },
         "call" => {
-            let (expression, parsed) = editable_parsed_expression(id, data)?;
-            let operation = first_receiver_operation(&parsed).ok_or_else(|| {
-                RenderErrorResponse::invalid_expression(
-                    id,
-                    "expression",
-                    "a call node needs a receiver call expression",
-                )
-            })?;
+            let (expression, parsed) = editable_call_expression(id, data)?;
+            let operation = first_receiver_operation(&parsed)
+                .expect("editable_call_expression guarantees a receiver call");
             WorkflowNodeKind::Call {
                 binding: data.binding.clone(),
                 operation: operation.to_string(),
@@ -622,7 +659,7 @@ fn node_from_flow_data(id: &str, data: &NodeData) -> Result<WorkflowNode, Render
             }
         }
         "effect" => {
-            let (expression, parsed) = editable_parsed_expression(id, data)?;
+            let (expression, parsed) = editable_effect_expression(id, data)?;
             let effect = match data.effect.as_deref() {
                 Some(effect) => parse_effect_kind(id, effect)?,
                 None => effect_kind(&parsed).ok_or_else(|| {
@@ -657,17 +694,8 @@ fn node_from_flow_data(id: &str, data: &NodeData) -> Result<WorkflowNode, Render
             expression: editable_expression(id, data)?,
         },
         "terminal" => {
-            let (expression, parsed) = editable_parsed_expression(id, data)?;
-            let terminal = match parsed {
-                Expr::Finish(_) => WorkflowTerminalKind::Finish,
-                Expr::Fail(_) => WorkflowTerminalKind::Fail,
-                _ => {
-                    return Err(RenderErrorResponse::invalid_node_payload(
-                        id,
-                        "a terminal node needs a `finish` or `fail` expression",
-                    ));
-                }
-            };
+            let terminal = parse_terminal_kind(id, data.terminal_kind.as_deref())?;
+            let expression = terminal_expression(id, &terminal, data.expression.as_ref())?;
             WorkflowNodeKind::Terminal {
                 terminal,
                 expression,
@@ -721,6 +749,7 @@ fn node_from_flow_data(id: &str, data: &NodeData) -> Result<WorkflowNode, Render
         description: data.description.clone(),
         name_source: parse_name_source(&data.name_source),
         kind,
+        available_variables: data.available_vars.clone(),
         outputs,
         execution_sites: Vec::new(),
         source_span: None,
@@ -746,20 +775,138 @@ fn editable_parsed_expression(
     Ok((source, expression))
 }
 
+fn editable_call_expression(
+    id: &str,
+    data: &NodeData,
+) -> Result<(String, Expr), RenderErrorResponse> {
+    let has_authored_expression = data.expression.is_some();
+    let mut expression = match &data.expression {
+        Some(source) => parse_expression(source).map_err(|error| {
+            RenderErrorResponse::invalid_expression(id, "expression", error.to_string())
+        })?,
+        None => {
+            let operation = required_text(id, data.operation.as_ref(), "operation")?;
+            parse_expression(&format!("await display.{operation}({{}})?")).map_err(|error| {
+                RenderErrorResponse::invalid_expression(id, "operation", error.to_string())
+            })?
+        }
+    };
+    if let Some(operation) = &data.operation {
+        *receiver_operation_mut(&mut expression).ok_or_else(|| {
+            RenderErrorResponse::invalid_expression(
+                id,
+                "expression",
+                "a call node needs a receiver call expression",
+            )
+        })? = operation.clone().into();
+    }
+    if first_receiver_operation(&expression).is_none() {
+        return Err(RenderErrorResponse::invalid_expression(
+            id,
+            "expression",
+            "a call node needs a receiver call expression",
+        ));
+    }
+    if !has_authored_expression || !data.fields.is_empty() {
+        apply_fields(id, &mut expression, &data.fields)?;
+    }
+    let source = canonical_expression_source(&expression).map_err(|error| {
+        RenderErrorResponse::invalid_expression(id, "expression", error.to_string())
+    })?;
+    Ok((source, expression))
+}
+
+fn editable_effect_expression(
+    id: &str,
+    data: &NodeData,
+) -> Result<(String, Expr), RenderErrorResponse> {
+    if data.expression.is_some() {
+        return editable_parsed_expression(id, data);
+    }
+    let effect = required_text(id, data.effect.as_ref(), "effect")?;
+    let expression = match effect.as_str() {
+        "sleep" => Expr::SleepFor(Box::new(
+            data.fields
+                .get("duration")
+                .ok_or_else(|| {
+                    RenderErrorResponse::invalid_node_payload(id, "sleep needs a `duration` field")
+                })?
+                .to_expr(id, "fields.duration")?,
+        )),
+        "wait_signal" => {
+            let Some(EditableValue::String(signal)) = data.fields.get("signal") else {
+                return Err(RenderErrorResponse::invalid_node_payload(
+                    id,
+                    "wait_signal needs a string `signal` field",
+                ));
+            };
+            Expr::WaitSignal {
+                name: signal.clone().into(),
+            }
+        }
+        _ => {
+            return Err(RenderErrorResponse::invalid_node_payload(
+                id,
+                format!("new effect `{effect}` needs an expression"),
+            ));
+        }
+    };
+    let source = canonical_expression_source(&expression).map_err(|error| {
+        RenderErrorResponse::invalid_expression(id, "expression", error.to_string())
+    })?;
+    Ok((source, expression))
+}
+
+fn parse_terminal_kind(
+    id: &str,
+    terminal_kind: Option<&str>,
+) -> Result<WorkflowTerminalKind, RenderErrorResponse> {
+    match terminal_kind {
+        Some("finish") => Ok(WorkflowTerminalKind::Finish),
+        Some("fail") => Ok(WorkflowTerminalKind::Fail),
+        Some(kind) => Err(RenderErrorResponse::invalid_node_payload(
+            id,
+            format!("unknown terminal kind `{kind}`"),
+        )),
+        None => Err(RenderErrorResponse::invalid_node_payload(
+            id,
+            "a terminal node needs `data.terminalKind`",
+        )),
+    }
+}
+
+fn terminal_expression(
+    id: &str,
+    terminal: &WorkflowTerminalKind,
+    value: Option<&String>,
+) -> Result<String, RenderErrorResponse> {
+    let value = required_text(id, value, "expression")?;
+    let value = parse_expression(&value).map_err(|error| {
+        RenderErrorResponse::invalid_expression(id, "expression", error.to_string())
+    })?;
+    let expression = match terminal {
+        WorkflowTerminalKind::Finish => Expr::Finish(Box::new(value)),
+        WorkflowTerminalKind::Fail => Expr::Fail(Box::new(value)),
+    };
+    canonical_expression_source(&expression).map_err(|error| {
+        RenderErrorResponse::invalid_expression(id, "expression", error.to_string())
+    })
+}
+
 fn parse_assignment_target(
     id: &str,
     source: &str,
 ) -> Result<lashlang::AssignTarget, RenderErrorResponse> {
-    let expression = parse_expression(&format!("{source} = null")).map_err(|error| {
-        RenderErrorResponse::invalid_assignment_target(id, "target", error.to_string())
-    })?;
+    parse_assignment_target_fragment(source)
+        .map_err(|message| RenderErrorResponse::invalid_assignment_target(id, "target", message))
+}
+
+fn parse_assignment_target_fragment(source: &str) -> Result<lashlang::AssignTarget, String> {
+    let expression =
+        parse_expression(&format!("{source} = null")).map_err(|error| error.to_string())?;
     match expression {
         Expr::Assign { target, .. } => Ok(target),
-        _ => Err(RenderErrorResponse::invalid_assignment_target(
-            id,
-            "target",
-            "expected an assignment target",
-        )),
+        _ => Err("expected an assignment target".to_string()),
     }
 }
 
@@ -796,6 +943,14 @@ fn first_receiver_operation(expression: &Expr) -> Option<&str> {
             },
             _ => None,
         },
+        _ => None,
+    }
+}
+
+fn receiver_operation_mut(expression: &mut Expr) -> Option<&mut compact_str::CompactString> {
+    match expression {
+        Expr::ReceiverCall { operation, .. } => Some(operation),
+        Expr::Await(inner) | Expr::ResultUnwrap(inner) => receiver_operation_mut(inner),
         _ => None,
     }
 }
@@ -858,10 +1013,49 @@ fn apply_editable_data(
         *source = updated.clone();
     }
     match &mut node.kind {
-        WorkflowNodeKind::Data { binding, .. }
-        | WorkflowNodeKind::Call { binding, .. }
-        | WorkflowNodeKind::Effect { binding, .. } => {
+        WorkflowNodeKind::Data {
+            binding,
+            expression,
+        } => {
             *binding = data.binding.clone();
+            *expression = canonical_editable_expression(&node_id, data.expression.as_ref())?;
+        }
+        WorkflowNodeKind::Call {
+            binding,
+            operation,
+            expression,
+        } => {
+            *binding = data.binding.clone();
+            let mut parsed = parse_stored_expression(&node_id, expression)?;
+            let edited_operation = required_text(&node_id, data.operation.as_ref(), "operation")?;
+            *receiver_operation_mut(&mut parsed).ok_or_else(|| {
+                RenderErrorResponse::invalid_node_payload(
+                    &node_id,
+                    "stored call expression has no receiver operation",
+                )
+            })? = edited_operation.into();
+            apply_fields(&node_id, &mut parsed, &data.fields)?;
+            *operation = first_receiver_operation(&parsed)
+                .expect("receiver operation was updated")
+                .to_string();
+            *expression = canonical_expression_source(&parsed).map_err(|error| {
+                RenderErrorResponse::invalid_expression(&node_id, "expression", error.to_string())
+            })?;
+        }
+        WorkflowNodeKind::Effect {
+            binding,
+            effect,
+            expression,
+        } => {
+            *binding = data.binding.clone();
+            let (edited_expression, parsed) = editable_effect_expression(&node_id, data)?;
+            *effect = effect_kind(&parsed).ok_or_else(|| {
+                RenderErrorResponse::invalid_node_payload(
+                    &node_id,
+                    "edited expression is not a recognized effect",
+                )
+            })?;
+            *expression = edited_expression;
         }
         WorkflowNodeKind::Computation {
             binding,
@@ -873,6 +1067,13 @@ fn apply_editable_data(
         WorkflowNodeKind::StateUpdate { target, expression } => {
             *target = required_text(&node_id, data.target.as_ref(), "target")?;
             *expression = required_text(&node_id, data.expression.as_ref(), "expression")?;
+        }
+        WorkflowNodeKind::Terminal {
+            terminal,
+            expression,
+        } => {
+            *terminal = parse_terminal_kind(&node_id, data.terminal_kind.as_deref())?;
+            *expression = terminal_expression(&node_id, terminal, data.expression.as_ref())?;
         }
         WorkflowNodeKind::Container(WorkflowContainer::If {
             binding, condition, ..
@@ -899,35 +1100,29 @@ fn apply_editable_data(
         }
         _ => {}
     }
-    let expression_text = match &mut node.kind {
-        WorkflowNodeKind::Data { expression, .. }
-        | WorkflowNodeKind::Call { expression, .. }
-        | WorkflowNodeKind::Effect { expression, .. }
-        | WorkflowNodeKind::Terminal { expression, .. } => Some(expression),
-        _ => None,
-    };
-    if let Some(expression_text) = expression_text {
-        let mut expression = parse_expression(expression_text).map_err(|error| {
-            RenderErrorResponse::document(
-                format!(
-                    "stored expression for node `{}` did not parse: {error}",
-                    node.id
-                ),
-                json!({ "nodeId": node.id.to_string(), "reason": error.to_string() }),
-            )
-        })?;
-        apply_fields(&node_id, &mut expression, &data.fields)?;
-        *expression_text = canonical_expression_source(&expression).map_err(|error| {
-            RenderErrorResponse::document(
-                format!(
-                    "edited fields for node `{}` are not sourceable: {error}",
-                    node.id
-                ),
-                json!({ "nodeId": node.id.to_string(), "reason": error.to_string() }),
-            )
-        })?;
-    }
     Ok(())
+}
+
+fn canonical_editable_expression(
+    node_id: &str,
+    expression: Option<&String>,
+) -> Result<String, RenderErrorResponse> {
+    let expression = required_text(node_id, expression, "expression")?;
+    let expression = parse_expression(&expression).map_err(|error| {
+        RenderErrorResponse::invalid_expression(node_id, "expression", error.to_string())
+    })?;
+    canonical_expression_source(&expression).map_err(|error| {
+        RenderErrorResponse::invalid_expression(node_id, "expression", error.to_string())
+    })
+}
+
+fn parse_stored_expression(node_id: &str, source: &str) -> Result<Expr, RenderErrorResponse> {
+    parse_expression(source).map_err(|error| {
+        RenderErrorResponse::document(
+            format!("stored expression for node `{node_id}` did not parse: {error}"),
+            json!({ "nodeId": node_id, "reason": error.to_string() }),
+        )
+    })
 }
 
 fn required_text(
@@ -992,16 +1187,10 @@ fn apply_fields(
     fields: &BTreeMap<String, EditableValue>,
 ) -> Result<(), RenderErrorResponse> {
     if let Some(entries) = receiver_fields_mut(expression) {
+        entries.clear();
         for (name, value) in fields {
             let value = value.to_expr(node_id, &format!("fields.{name}"))?;
-            if let Some((_, expression)) = entries
-                .iter_mut()
-                .find(|(existing, _)| existing.as_str() == name)
-            {
-                *expression = value;
-            } else {
-                entries.push((name.clone().into(), value));
-            }
+            entries.push((name.clone().into(), value));
         }
         return Ok(());
     }
@@ -1143,6 +1332,20 @@ fn effect_name(effect: &lashlang::WorkflowEffectKind) -> &'static str {
         WorkflowEffectKind::Wake => "wake",
         WorkflowEffectKind::Break => "break",
         WorkflowEffectKind::Continue => "continue",
+    }
+}
+
+fn terminal_kind(node: &WorkflowNode) -> Option<&'static str> {
+    match &node.kind {
+        WorkflowNodeKind::Terminal {
+            terminal: WorkflowTerminalKind::Finish,
+            ..
+        } => Some("finish"),
+        WorkflowNodeKind::Terminal {
+            terminal: WorkflowTerminalKind::Fail,
+            ..
+        } => Some("fail"),
+        _ => None,
     }
 }
 
