@@ -1,9 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde_json::Value;
 use workflow_graph_roundtrip::{
-    AppState, EditableValue, RunEvent, RunStatus, RunTiming, WorkflowCatalogEntry, WorkflowDocument,
+    AppState, ChildGroup, EditableValue, FlowNode, NodeData, RunEvent, RunStatus, RunTiming,
+    WorkflowCatalogEntry, WorkflowDocument,
 };
 
 #[tokio::test]
@@ -34,6 +35,7 @@ async fn lists_selects_projects_and_runs_built_in_workflows() {
             .map(|entry| (entry.id.as_str(), entry.name.as_str()))
             .collect::<Vec<_>>(),
         vec![
+            ("blank", "Blank workflow"),
             ("onboarding", "Onboarding"),
             ("traffic-lights", "Traffic Lights"),
             ("branching-approval", "Branching Approval"),
@@ -554,6 +556,331 @@ async fn delete_node_edit_round_trips_and_runs_the_saved_graph() {
 }
 
 #[tokio::test]
+async fn new_call_node_saves_reprojects_and_runs_with_canonical_correlation() {
+    let state = AppState::with_run_timing(RunTiming {
+        sleep_cap: Duration::from_millis(2),
+        signal_delay: Duration::from_millis(2),
+    })
+    .expect("default workflow");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    let mut call = new_flow_node("new:call", "call", None, "Set status");
+    call.data.expression =
+        Some("await display.set_status({ key: \"k\", value: \"v\" })?".to_string());
+    append_process_node(&mut document, call);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save workflow with new call");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: WorkflowDocument = response.json().await.expect("saved workflow");
+    assert!(
+        saved
+            .source
+            .contains("await display.set_status({ key: \"k\", value: \"v\" })?")
+    );
+    let call_id = saved
+        .nodes
+        .iter()
+        .find(|node| node.data.operation.as_deref() == Some("set_status"))
+        .expect("reprojected call node")
+        .id
+        .clone();
+    assert_ne!(call_id, "new:call");
+
+    let events = run_workflow(&client, &base).await;
+    assert!(!events.iter().any(|event| event.status == RunStatus::Failed));
+    assert!(events.iter().any(|event| {
+        event.node_id == call_id
+            && event.status == RunStatus::Succeeded
+            && event.display.statuses.get("k").map(String::as_str) == Some("v")
+    }));
+    assert!(
+        events
+            .iter()
+            .all(|event| saved.nodes.iter().any(|node| node.id == event.node_id))
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn new_if_while_and_for_containers_save_reproject_and_run() {
+    let state = AppState::with_run_timing(RunTiming {
+        sleep_cap: Duration::from_millis(2),
+        signal_delay: Duration::from_millis(2),
+    })
+    .expect("default workflow");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+
+    let mut if_child = new_flow_node("new:if-call", "call", None, "If message");
+    if_child.parent_id = Some("new:if".to_string());
+    if_child.data.expression =
+        Some("await display.show_message({ text: \"Created if body\" })?".to_string());
+    let mut if_node = new_flow_node("new:if", "container", Some("if"), "if");
+    if_node.data.condition = Some("true".to_string());
+    if_node.data.children = vec![
+        ChildGroup {
+            slot: "then".to_string(),
+            scope: "container:new-if:then".to_string(),
+            node_ids: vec![if_child.id.clone()],
+        },
+        ChildGroup {
+            slot: "else".to_string(),
+            scope: "container:new-if:else".to_string(),
+            node_ids: Vec::new(),
+        },
+    ];
+    append_process_node(&mut document, if_node);
+    document.nodes.push(if_child);
+
+    let mut while_child = new_flow_node("new:while-call", "call", None, "While message");
+    while_child.parent_id = Some("new:while".to_string());
+    while_child.data.expression =
+        Some("await display.show_message({ text: \"Created while body\" })?".to_string());
+    let mut while_node = new_flow_node("new:while", "container", Some("while"), "while");
+    while_node.data.condition = Some("false".to_string());
+    while_node.data.children = vec![ChildGroup {
+        slot: "body".to_string(),
+        scope: "container:new-while:body".to_string(),
+        node_ids: vec![while_child.id.clone()],
+    }];
+    append_process_node(&mut document, while_node);
+    document.nodes.push(while_child);
+
+    let mut for_child = new_flow_node("new:for-call", "call", None, "For status");
+    for_child.parent_id = Some("new:for".to_string());
+    for_child.data.expression =
+        Some("await display.set_status({ key: \"loop\", value: \"ran\" })?".to_string());
+    let mut for_node = new_flow_node("new:for", "container", Some("for"), "for item");
+    for_node.data.binding = Some("item".to_string());
+    for_node.data.iterable = Some("[1]".to_string());
+    for_node.data.children = vec![ChildGroup {
+        slot: "body".to_string(),
+        scope: "container:new-for:body".to_string(),
+        node_ids: vec![for_child.id.clone()],
+    }];
+    append_process_node(&mut document, for_node);
+    document.nodes.push(for_child);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save workflow with new containers");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: WorkflowDocument = response.json().await.expect("saved workflow");
+    assert!(saved.source.contains("if true"));
+    assert!(saved.source.contains("while false"));
+    assert!(saved.source.contains("for item in [1]"));
+    for subkind in ["if", "while", "for"] {
+        assert!(saved.nodes.iter().any(|node| {
+            node.data.kind == "container" && node.data.subkind.as_deref() == Some(subkind)
+        }));
+    }
+
+    let events = run_workflow(&client, &base).await;
+    assert!(!events.iter().any(|event| event.status == RunStatus::Failed));
+    let final_event = events.last().expect("terminal event");
+    assert_eq!(final_event.status, RunStatus::Succeeded);
+    assert_eq!(
+        final_event.display.statuses.get("loop").map(String::as_str),
+        Some("ran")
+    );
+    assert!(
+        final_event
+            .display
+            .messages
+            .iter()
+            .any(|message| message == "Created if body")
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn new_statement_containers_allow_empty_bodies() {
+    let state = AppState::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    let mut if_node = new_flow_node("new:empty-if", "container", Some("if"), "if");
+    if_node.data.condition = Some("true".to_string());
+    append_process_node(&mut document, if_node);
+    let mut while_node = new_flow_node("new:empty-while", "container", Some("while"), "while");
+    while_node.data.condition = Some("false".to_string());
+    append_process_node(&mut document, while_node);
+    let mut for_node = new_flow_node("new:empty-for", "container", Some("for"), "for item");
+    for_node.data.binding = Some("item".to_string());
+    for_node.data.iterable = Some("[]".to_string());
+    append_process_node(&mut document, for_node);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save empty statement containers");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: WorkflowDocument = response.json().await.expect("saved workflow");
+    assert!(saved.source.contains("if true {}"));
+    assert!(saved.source.contains("while false {}"));
+    assert!(saved.source.contains("for item in [] {}"));
+
+    let events = run_workflow(&client, &base).await;
+    assert_eq!(
+        events.last().expect("terminal event").status,
+        RunStatus::Succeeded
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn blank_workflow_grows_by_two_nodes_then_saves_and_runs() {
+    let state = AppState::with_run_timing(RunTiming {
+        sleep_cap: Duration::from_millis(2),
+        signal_delay: Duration::from_millis(2),
+    })
+    .expect("default workflow");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    assert_eq!(document.source, "process blank() {\n  finish 0\n}\n");
+
+    let mut status = new_flow_node("new:blank-status", "call", None, "Blank status");
+    status.data.expression =
+        Some("await display.set_status({ key: \"blank\", value: \"built\" })?".to_string());
+    append_process_node(&mut document, status);
+    let mut message = new_flow_node("new:blank-message", "call", None, "Blank message");
+    message.data.expression =
+        Some("await display.show_message({ text: \"Built from blank\" })?".to_string());
+    append_process_node(&mut document, message);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save grown blank workflow");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: WorkflowDocument = response.json().await.expect("saved workflow");
+    assert!(saved.source.contains("display.set_status"));
+    assert!(saved.source.contains("display.show_message"));
+
+    let events = run_workflow(&client, &base).await;
+    let final_event = events.last().expect("terminal event");
+    assert_eq!(final_event.status, RunStatus::Succeeded);
+    assert_eq!(
+        final_event
+            .display
+            .statuses
+            .get("blank")
+            .map(String::as_str),
+        Some("built")
+    );
+    assert!(
+        final_event
+            .display
+            .messages
+            .iter()
+            .any(|message| message == "Built from blank")
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn new_call_without_receiver_expression_returns_typed_error() {
+    let state = AppState::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    let mut call = new_flow_node("new:invalid-call", "call", None, "Invalid call");
+    call.data.expression = Some("1 + 2".to_string());
+    append_process_node(&mut document, call);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save invalid new call");
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = response.json().await.expect("typed error response");
+    assert_eq!(body["error"]["code"], "invalid_expression");
+    assert_eq!(body["error"]["details"]["nodeId"], "new:invalid-call");
+    assert_eq!(body["error"]["details"]["field"], "expression");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("needs a receiver call"))
+    );
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    let comprehension = new_flow_node(
+        "new:empty-comprehension",
+        "container",
+        Some("comprehension"),
+        "list comprehension",
+    );
+    append_process_node(&mut document, comprehension);
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save empty comprehension");
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = response.json().await.expect("typed error response");
+    assert_eq!(body["error"]["code"], "invalid_node_payload");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("container body cannot be empty"))
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn invalid_graph_post_returns_typed_unprocessable_entity() {
     let state = AppState::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -689,6 +1016,73 @@ async fn run_workflow(client: &reqwest::Client, base: &str) -> Vec<RunEvent> {
         .filter_map(|line| line.strip_prefix("data: "))
         .map(|data| serde_json::from_str::<RunEvent>(data).expect("run event JSON"))
         .collect()
+}
+
+async fn select_workflow(client: &reqwest::Client, base: &str, id: &str) -> WorkflowDocument {
+    let response = client
+        .post(format!("{base}/workflow/select"))
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .expect("POST /workflow/select");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response.json().await.expect("selected workflow document")
+}
+
+fn new_flow_node(id: &str, kind: &str, subkind: Option<&str>, title: &str) -> FlowNode {
+    FlowNode {
+        id: id.to_string(),
+        node_type: kind.to_string(),
+        parent_id: None,
+        data: NodeData {
+            kind: kind.to_string(),
+            subkind: subkind.map(str::to_string),
+            title: title.to_string(),
+            description: None,
+            name_source: "derived".to_string(),
+            operation: None,
+            effect: None,
+            fields: BTreeMap::new(),
+            binding: None,
+            target: None,
+            expression: None,
+            condition: None,
+            iterable: None,
+            clauses: Vec::new(),
+            source: None,
+            children: Vec::new(),
+        },
+    }
+}
+
+fn append_process_node(document: &mut WorkflowDocument, mut node: FlowNode) {
+    let process_index = document
+        .nodes
+        .iter()
+        .position(|candidate| candidate.node_type == "process")
+        .expect("process container");
+    let process_id = document.nodes[process_index].id.clone();
+    let terminal_id = document
+        .nodes
+        .iter()
+        .find_map(|candidate| (candidate.node_type == "terminal").then(|| candidate.id.clone()));
+    let body = document.nodes[process_index]
+        .data
+        .children
+        .iter_mut()
+        .find(|child| child.slot == "body")
+        .expect("process body");
+    let insert_at = terminal_id
+        .as_ref()
+        .and_then(|terminal_id| {
+            body.node_ids
+                .iter()
+                .position(|node_id| node_id == terminal_id)
+        })
+        .unwrap_or(body.node_ids.len());
+    body.node_ids.insert(insert_at, node.id.clone());
+    node.parent_id = Some(process_id);
+    document.nodes.push(node);
 }
 
 fn contains_key(value: &Value, key: &str) -> bool {

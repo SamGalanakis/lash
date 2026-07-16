@@ -16,6 +16,7 @@ const SMALL_W = 208;
 const HEADER_BAND = 60; // container title band (leaves clear space between the
 // editable condition/iterable/binding row and the group label + first body node)
 const GROUP_LABEL = 24; // slot label (then/else/body) height
+const ADD_ROW = 34; // reserved strip below a group's children for its "+ Add node" control
 const PAD = 24;
 const GROUP_GAP = 40;
 const NODESEP = 40;
@@ -130,10 +131,13 @@ export function layoutDocument(doc) {
     let x = PAD;
     let maxH = 0;
     for (const lg of laid) {
+      // Every group except a comprehension's single-expr `element` reserves a
+      // strip below its children for the "+ Add node" control.
+      lg.addRow = lg.slot === 'element' ? 0 : ADD_ROW;
       lg.offsetX = x;
       lg.offsetY = band + GROUP_LABEL;
       x += lg.width + GROUP_GAP;
-      maxH = Math.max(maxH, lg.height);
+      maxH = Math.max(maxH, lg.height + lg.addRow);
     }
     const innerRight = laid.length ? x - GROUP_GAP + PAD : PAD * 3;
     const totalW = Math.max(innerRight, 220);
@@ -152,7 +156,11 @@ export function layoutDocument(doc) {
         x: lg.offsetX,
         y: band,
         w: Math.max(lg.width, 80),
-        h: GROUP_LABEL + lg.height,
+        h: GROUP_LABEL + lg.height + lg.addRow,
+        // Where the children end (relative to the container) — the add control
+        // sits just below this, inside the reserved add row.
+        childrenH: lg.height,
+        addable: lg.addRow > 0,
       })),
     );
   }

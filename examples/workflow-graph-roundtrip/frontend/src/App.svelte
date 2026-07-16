@@ -7,10 +7,10 @@
   import DisplayPanel from './components/DisplayPanel.svelte';
   import SourceView from './components/SourceView.svelte';
   import { fetchWorkflow, fetchWorkflows, selectWorkflow, saveWorkflow } from './lib/api.js';
-  import { buildFlow, deleteNodeFromDoc } from './lib/graph.js';
+  import { buildFlow, deleteNodeFromDoc, addNodeToDoc } from './lib/graph.js';
   import { loadPositions, savePosition, clearPositions } from './lib/positions.js';
   import { RunController } from './lib/runStore.svelte.js';
-  import { NODE_KINDS } from './lib/nodeKinds.js';
+  import { NODE_KINDS, ADDABLE_KINDS, addableMeta } from './lib/nodeKinds.js';
 
   const run = new RunController();
   setContext('run', run);
@@ -45,8 +45,28 @@
     rebuild();
   }
 
+  // Insert a new default node of `kind` at the end of a container/process group
+  // (ownerId + slot). The new node lives only in the draft until Save round-trips
+  // it through the backend, which mints a canonical id.
+  function onAddNode(ownerId, slot, kind) {
+    addNodeToDoc(draftDoc, { ownerId, slot }, kind);
+    dirty = true;
+    saveOk = null;
+    rebuild();
+  }
+
+  // Insert a new default node at the end of the top-level (`main`) scope.
+  let mainMenuOpen = $state(false);
+  function onAddMain(kind) {
+    mainMenuOpen = false;
+    addNodeToDoc(draftDoc, { main: true }, kind);
+    dirty = true;
+    saveOk = null;
+    rebuild();
+  }
+
   function rebuild() {
-    const { flowNodes: fn, flowEdges: fe } = buildFlow(draftDoc, positions, onDelete);
+    const { flowNodes: fn, flowEdges: fe } = buildFlow(draftDoc, positions, onDelete, onAddNode);
     flowNodes = fn;
     flowEdges = fe;
     flowKey += 1; // remount SvelteFlow so layout + fitView re-run cleanly
@@ -199,6 +219,26 @@
             />
           </SvelteFlow>
         {/key}
+        <div class="palette">
+          <button
+            class="palette-btn"
+            class:is-open={mainMenuOpen}
+            onclick={() => (mainMenuOpen = !mainMenuOpen)}
+            title="Add a node to the top-level (main) scope"
+          >
+            + Add node <span class="palette-scope">· main</span>
+          </button>
+          {#if mainMenuOpen}
+            <div class="palette-menu">
+              {#each ADDABLE_KINDS as k (k)}
+                {@const m = addableMeta(k)}
+                <button class="palette-item" style="--c:{m.accent}" onclick={() => onAddMain(k)}>
+                  <span class="palette-glyph">{m.glyph}</span>{m.label}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
         <div class="canvas-hint">drag to arrange · positions saved locally, never in source</div>
       {/if}
     </section>
@@ -388,6 +428,82 @@
     border: 1px solid var(--line);
     pointer-events: none;
   }
+  .palette {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    z-index: 6;
+  }
+  .palette-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    color: var(--text);
+    background: rgba(10, 13, 19, 0.82);
+    border: 1px dashed color-mix(in srgb, var(--cyan) 50%, var(--line-strong));
+    border-radius: 9px;
+    padding: 7px 12px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    transition:
+      border-color 0.15s ease,
+      background 0.15s ease;
+  }
+  .palette-btn:hover,
+  .palette-btn.is-open {
+    border-style: solid;
+    border-color: var(--cyan);
+    background: rgba(14, 18, 26, 0.92);
+  }
+  .palette-scope {
+    color: var(--text-faint);
+  }
+  .palette-menu {
+    margin-top: 6px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 3px;
+    padding: 6px;
+    min-width: 210px;
+    background: var(--ink-2);
+    border: 1px solid var(--line-strong);
+    border-radius: 11px;
+    box-shadow: 0 16px 38px -14px rgba(0, 0, 0, 0.72);
+  }
+  .palette-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 6px 8px;
+    cursor: pointer;
+    text-align: left;
+    transition:
+      color 0.12s ease,
+      background 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .palette-item:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--c) 14%, transparent);
+    border-color: color-mix(in srgb, var(--c) 45%, transparent);
+  }
+  .palette-glyph {
+    color: var(--c);
+    font-size: 12px;
+    width: 14px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
   .overlay-msg {
     position: absolute;
     inset: 0;
