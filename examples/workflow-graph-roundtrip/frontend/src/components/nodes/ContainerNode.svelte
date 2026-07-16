@@ -1,76 +1,56 @@
 <script>
   import { Handle, Position } from '@xyflow/svelte';
   import { getContext } from 'svelte';
-  import {
-    kindMeta,
-    containerSubkind,
-    CONTAINER_SUBKINDS,
-    ADDABLE_KINDS,
-    addableMeta,
-  } from '../../lib/nodeKinds.js';
+  import { kindMeta, containerSubkind, CONTAINER_SUBKINDS } from '../../lib/nodeKinds.js';
+  import { groupOperations, operationMeta } from '../../lib/operations.js';
+  import ExpressionField from '../ExpressionField.svelte';
 
   let { id, data } = $props();
+
+  const run = getContext('run');
+  const mode = getContext('mode');
+  const ops = getContext('ops');
 
   // Which group's "+ Add node" menu is open (by slot), if any.
   let menuSlot = $state(null);
   function toggleMenu(slot) {
     menuSlot = menuSlot === slot ? null : slot;
   }
-  function pickKind(slot, kind) {
+  function pickOperation(slot, op) {
     menuSlot = null;
-    data.onAddNode?.(id, slot, kind);
+    data.onAddNode?.(id, slot, op);
   }
+  const opGroups = $derived(groupOperations(ops?.entries, { includePower: mode.power }));
 
-  const run = getContext('run');
   const node = $derived(data.node);
   const isProcess = $derived(node.data.kind === 'process');
   const meta = $derived(kindMeta(node.data.kind));
   const status = $derived(run.overlay[id] ?? null);
   const groups = $derived(data.groups ?? []);
+  const availableVars = $derived(node.data.availableVars ?? []);
+  const reads = $derived(data.reads ?? []);
+  const moveTargets = $derived(data.getMoveTargets ? data.getMoveTargets(id) : []);
+  let moveOpen = $state(false);
 
-  // Recover the container sub-kind (if / for / while / comprehension) — it is not
-  // an explicit DTO field. Each sub-kind surfaces the editable slice of the
-  // backend lens in place of its (redundant) derived title: `if`/`while` edit a
-  // condition, `for` edits its loop binding + iterable, and a comprehension
-  // edits its binding + for/if clauses.
   const subkind = $derived(isProcess ? null : containerSubkind(node));
-  const subMeta = $derived(subkind ? CONTAINER_SUBKINDS[subkind] ?? CONTAINER_SUBKINDS.loop : null);
+  const subMeta = $derived(subkind ? (CONTAINER_SUBKINDS[subkind] ?? CONTAINER_SUBKINDS.loop) : null);
   const isWhile = $derived(subkind === 'while');
   const isIf = $derived(subkind === 'if');
   const isFor = $derived(subkind === 'for');
   const isComprehension = $derived(subkind === 'comprehension');
-  // if / while both surface a single editable condition input.
   const isConditional = $derived(isWhile || isIf);
   const clauses = $derived(node.data.clauses ?? []);
 
+  function commit() {
+    data.onCommit?.();
+  }
   function onTitleInput(e) {
     node.data.title = e.currentTarget.value;
     node.data.nameSource = 'label';
   }
-  function onCondition(e) {
-    node.data.condition = e.currentTarget.value;
-  }
-  // `for` binding + iterable are required by the backend lens — keep the raw
-  // value (never coerce empty to undefined the way an optional binding would).
-  function onForBinding(e) {
-    node.data.binding = e.currentTarget.value;
-  }
-  function onIterable(e) {
-    node.data.iterable = e.currentTarget.value;
-  }
-  // Comprehension binding is optional — empty means "no `let` name".
   function onBinding(e) {
     const v = e.currentTarget.value;
     node.data.binding = v === '' ? undefined : v;
-  }
-  function onClauseBinding(i, e) {
-    node.data.clauses[i].binding = e.currentTarget.value;
-  }
-  function onClauseIterable(i, e) {
-    node.data.clauses[i].iterable = e.currentTarget.value;
-  }
-  function onClauseCondition(i, e) {
-    node.data.clauses[i].condition = e.currentTarget.value;
   }
 </script>
 
@@ -90,16 +70,23 @@
         : subMeta.label}</span
     >
     {#if isProcess}
-      <input class="ct-title" value={node.data.title} oninput={onTitleInput} spellcheck="false" />
+      <input
+        class="ct-title"
+        value={node.data.title}
+        oninput={onTitleInput}
+        onchange={commit}
+        spellcheck="false"
+      />
     {:else if isConditional}
       <span class="ct-cond">
         <span class="ct-paren">(</span>
-        <input
-          class="ct-cond-input nodrag"
+        <ExpressionField
           value={node.data.condition ?? ''}
-          oninput={onCondition}
-          spellcheck="false"
+          kind="expression"
+          {availableVars}
           placeholder="condition"
+          onInput={(text) => (node.data.condition = text)}
+          onCommit={commit}
         />
         <span class="ct-paren">)</span>
       </span>
@@ -108,17 +95,19 @@
         <input
           class="ct-cond-input ct-for-bind nodrag"
           value={node.data.binding ?? ''}
-          oninput={onForBinding}
+          oninput={(e) => (node.data.binding = e.currentTarget.value)}
+          onchange={commit}
           spellcheck="false"
           placeholder="binding"
         />
         <span class="ct-kw">in</span>
-        <input
-          class="ct-cond-input nodrag"
+        <ExpressionField
           value={node.data.iterable ?? ''}
-          oninput={onIterable}
-          spellcheck="false"
+          kind="expression"
+          {availableVars}
           placeholder="iterable"
+          onInput={(text) => (node.data.iterable = text)}
+          onCommit={commit}
         />
       </span>
     {:else if isComprehension}
@@ -128,6 +117,7 @@
           class="ct-cond-input ct-for-bind nodrag"
           value={node.data.binding ?? ''}
           oninput={onBinding}
+          onchange={commit}
           spellcheck="false"
           placeholder="binding (optional)"
         />
@@ -136,6 +126,37 @@
       <span class="ct-title-static">{node.data.title}</span>
     {/if}
     {#if status}<span class="ct-status ct-status--{status}">{status}</span>{/if}
+    {#if moveTargets.length}
+      <span class="ct-move-wrap nodrag">
+        <button
+          class="ct-icon"
+          class:is-open={moveOpen}
+          title="Move to another scope"
+          aria-label="Move branch to another scope"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            moveOpen = !moveOpen;
+          }}>⤴</button
+        >
+        {#if moveOpen}
+          <div class="ct-move-menu">
+            <div class="ct-move-label">move into</div>
+            {#each moveTargets as t (t.key)}
+              <button
+                class="ct-move-item"
+                onpointerdown={(e) => e.stopPropagation()}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  moveOpen = false;
+                  data.onMoveTo?.(id, t.dest);
+                }}>{t.label}</button
+              >
+            {/each}
+          </div>
+        {/if}
+      </span>
+    {/if}
     {#if !isProcess && data.onReorder}
       <span class="ct-reorder nodrag" title="Reorder within scope">
         <button
@@ -173,6 +194,16 @@
     {/if}
   </header>
 
+  {#if reads.length}
+    <div
+      class="ct-reads nodrag"
+      title={`reads variables from an enclosing scope: ${reads.join(', ')}`}
+    >
+      <span class="ct-reads-k">reads</span>
+      {#each reads as v (v)}<span class="ct-reads-v">{v}</span>{/each}
+    </div>
+  {/if}
+
   {#if isComprehension && clauses.length}
     <div class="ct-clauses nodrag">
       {#each clauses as clause, i (i)}
@@ -182,26 +213,29 @@
             <input
               class="ct-cond-input ct-for-bind"
               value={clause.binding ?? ''}
-              oninput={(e) => onClauseBinding(i, e)}
+              oninput={(e) => (node.data.clauses[i].binding = e.currentTarget.value)}
+              onchange={commit}
               spellcheck="false"
               placeholder="binding"
             />
             <span class="ct-kw">in</span>
-            <input
-              class="ct-cond-input"
+            <ExpressionField
               value={clause.iterable ?? ''}
-              oninput={(e) => onClauseIterable(i, e)}
-              spellcheck="false"
+              kind="expression"
+              {availableVars}
               placeholder="iterable"
+              onInput={(text) => (node.data.clauses[i].iterable = text)}
+              onCommit={commit}
             />
           {:else}
             <span class="ct-kw">if</span>
-            <input
-              class="ct-cond-input"
+            <ExpressionField
               value={clause.condition ?? ''}
-              oninput={(e) => onClauseCondition(i, e)}
-              spellcheck="false"
+              kind="expression"
+              {availableVars}
               placeholder="condition"
+              onInput={(text) => (node.data.clauses[i].condition = text)}
+              onCommit={commit}
             />
           {/if}
         </div>
@@ -230,19 +264,22 @@
         </button>
         {#if menuSlot === g.slot}
           <div class="ct-add-menu">
-            {#each ADDABLE_KINDS as k (k)}
-              {@const m = addableMeta(k)}
-              <button
-                class="ct-add-item"
-                style="--c:{m.accent}"
-                onpointerdown={(e) => e.stopPropagation()}
-                onclick={(e) => {
-                  e.stopPropagation();
-                  pickKind(g.slot, k);
-                }}
-              >
-                <span class="ct-add-glyph">{m.glyph}</span>{m.label}
-              </button>
+            {#each opGroups as grp (grp.id)}
+              <div class="ct-add-group">{grp.label}</div>
+              {#each grp.items as op (op.id)}
+                {@const m = operationMeta(op)}
+                <button
+                  class="ct-add-item"
+                  style="--c:{m.accent}"
+                  onpointerdown={(e) => e.stopPropagation()}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    pickOperation(g.slot, op);
+                  }}
+                >
+                  <span class="ct-add-glyph">{m.glyph}</span>{op.label}
+                </button>
+              {/each}
             {/each}
           </div>
         {/if}
@@ -290,6 +327,7 @@
     padding: 2px 7px;
     border-radius: 999px;
     white-space: nowrap;
+    flex-shrink: 0;
   }
   .ct-glyph {
     font-size: 11px;
@@ -327,6 +365,7 @@
     font-family: var(--font-mono);
     font-size: 14px;
     color: color-mix(in srgb, var(--accent) 75%, var(--text-dim));
+    flex-shrink: 0;
   }
   .ct-cond-input {
     flex: 1;
@@ -378,6 +417,31 @@
     gap: 5px;
     min-width: 0;
   }
+  .ct-reads {
+    position: absolute;
+    top: 38px;
+    left: 14px;
+    right: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+  }
+  .ct-reads-k {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--cyan) 80%, var(--text-dim));
+  }
+  .ct-reads-v {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--cyan);
+    background: color-mix(in srgb, var(--cyan) 12%, transparent);
+    border-radius: 5px;
+    padding: 1px 6px;
+  }
   .ct-status {
     font-family: var(--font-mono);
     font-size: 8.5px;
@@ -387,6 +451,7 @@
     border-radius: 5px;
     color: var(--cyan);
     background: color-mix(in srgb, var(--cyan) 18%, transparent);
+    flex-shrink: 0;
   }
   .ct-status--succeeded {
     color: #5fd08a;
@@ -401,10 +466,75 @@
     height: 20px;
     border-radius: 6px;
     padding: 0;
+    flex-shrink: 0;
   }
   .ct-del:hover {
     color: var(--rose);
     background: color-mix(in srgb, var(--rose) 16%, transparent);
+  }
+  .ct-move-wrap {
+    position: relative;
+    flex-shrink: 0;
+  }
+  .ct-icon {
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 12px;
+    line-height: 1;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    padding: 0;
+    transition:
+      color 0.15s ease,
+      background 0.15s ease;
+  }
+  .ct-icon:hover,
+  .ct-icon.is-open {
+    color: var(--cyan);
+    background: color-mix(in srgb, var(--cyan) 16%, transparent);
+  }
+  .ct-move-menu {
+    position: absolute;
+    top: calc(100% + 5px);
+    right: 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 150px;
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 5px;
+    background: var(--ink-2);
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    box-shadow: 0 14px 30px -12px rgba(0, 0, 0, 0.7);
+  }
+  .ct-move-label {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 2px 6px 4px;
+  }
+  .ct-move-item {
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    padding: 4px 7px;
+    cursor: pointer;
+  }
+  .ct-move-item:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--cyan) 12%, transparent);
+    border-color: color-mix(in srgb, var(--cyan) 40%, transparent);
   }
   .ct-reorder {
     display: inline-flex;
@@ -483,16 +613,26 @@
     top: calc(100% + 5px);
     left: 50%;
     transform: translateX(-50%);
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 3px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
     padding: 6px;
-    min-width: 190px;
+    min-width: 200px;
+    max-height: 300px;
+    overflow-y: auto;
     background: var(--ink-2, #0d1119);
     border: 1px solid var(--line-strong, #2a3346);
     border-radius: 10px;
     box-shadow: 0 14px 34px -12px rgba(0, 0, 0, 0.7);
     z-index: 20;
+  }
+  .ct-add-group {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 5px 7px 2px;
   }
   .ct-add-item {
     display: inline-flex;

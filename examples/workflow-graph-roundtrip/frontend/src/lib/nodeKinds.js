@@ -46,32 +46,8 @@ export const CONTAINER_SUBKINDS = {
 // Effect verbs that render as a "waiting"-capable node (sleeps / signal waits).
 export const WAITING_EFFECTS = new Set(['sleep', 'wait_signal', 'await_join']);
 
-// Kinds the "+ Add node" palette can insert into a scope, in menu order. Leaf
-// kinds map to a NODE_KINDS entry; the four container kinds (if/while/for/
-// comprehension) all render as `container` nodes but carry a distinct subkind.
-export const ADDABLE_KINDS = [
-  'call',
-  'effect',
-  'data',
-  'computation',
-  'state_update',
-  'terminal',
-  'if',
-  'while',
-  'for',
-  'comprehension',
-];
-
-// Menu label + glyph + accent for an addable kind (containers borrow the
-// container accent + their sub-kind glyph so the palette reads like the legend).
-export function addableMeta(kind) {
-  const sub = CONTAINER_SUBKINDS[kind];
-  if (sub) {
-    return { label: sub.label, glyph: sub.glyph, accent: NODE_KINDS.container.accent };
-  }
-  const meta = NODE_KINDS[kind] ?? kindMeta(kind);
-  return { label: meta.label, glyph: meta.glyph, accent: meta.accent };
-}
+// The "+ Add node" palette is fed by the operation catalog (lib/operations.js),
+// which is the single data home for what can be inserted — see groupOperations.
 
 // Human labels for the toy display tool operations.
 export const OP_LABELS = {

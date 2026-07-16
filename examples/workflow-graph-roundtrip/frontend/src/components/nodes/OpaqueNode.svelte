@@ -6,9 +6,11 @@
   let { id, data } = $props();
 
   const run = getContext('run');
+  const mode = getContext('mode');
   const node = $derived(data.node);
   const meta = kindMeta('opaque');
   const status = $derived(run.overlay[id] ?? null);
+  const rows = $derived(Math.min(Math.max((node.data.source ?? '').split('\n').length, 3), 16));
 </script>
 
 <div
@@ -35,14 +37,20 @@
     >
   </header>
   <div class="wf-title">{node.data.title}</div>
-  <textarea
-    class="opaque-src nodrag"
-    spellcheck="false"
-    rows={Math.min(Math.max((node.data.source ?? '').split('\n').length, 3), 16)}
-    value={node.data.source ?? ''}
-    oninput={(e) => (node.data.source = e.currentTarget.value)}
-  ></textarea>
-  <div class="opaque-note">verbatim Lashlang · one statement · rendered as-is</div>
+  {#if mode.power}
+    <textarea
+      class="opaque-src nodrag"
+      spellcheck="false"
+      {rows}
+      value={node.data.source ?? ''}
+      oninput={(e) => (node.data.source = e.currentTarget.value)}
+      onchange={() => data.onCommit?.()}
+    ></textarea>
+    <div class="opaque-note">verbatim Lashlang · one statement · rendered as-is</div>
+  {:else}
+    <pre class="opaque-ro">{node.data.source ?? ''}</pre>
+    <div class="opaque-note">raw statement · switch to Power to edit</div>
+  {/if}
   <Handle type="source" position={Position.Bottom} />
 </div>
 
@@ -146,6 +154,22 @@
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .opaque-ro {
+    margin: 0;
+    width: 100%;
+    background: #0a0d13;
+    border: 1px dashed var(--line-strong);
+    border-radius: 8px;
+    color: #ffd9c6;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    padding: 9px 10px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 260px;
+    overflow: auto;
   }
   .opaque-note {
     margin-top: 6px;

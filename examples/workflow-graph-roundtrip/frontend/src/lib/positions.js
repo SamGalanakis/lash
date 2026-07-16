@@ -35,6 +35,17 @@ export function clearPositions() {
   writeAll({});
 }
 
+// Forget a single node's dragged position so it falls back to auto-layout —
+// used when a drag becomes a reorder/move and the node should snap into its
+// laid-out slot rather than float at the drop point.
+export function clearPosition(nodeId) {
+  const all = readAll();
+  if (Object.prototype.hasOwnProperty.call(all, nodeId)) {
+    delete all[nodeId];
+    writeAll(all);
+  }
+}
+
 // Rewrite persisted position keys through a Save-response `idMap`
 // ({ "<oldId>": "<newId>", ... }). Node ids are remade on every Save, so a
 // dragged node's stored position would otherwise be orphaned under its old id.

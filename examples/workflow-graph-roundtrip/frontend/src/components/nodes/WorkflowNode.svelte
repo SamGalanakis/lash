@@ -2,65 +2,60 @@
   import { Handle, Position } from '@xyflow/svelte';
   import { getContext } from 'svelte';
   import { kindMeta, OP_LABELS, WAITING_EFFECTS } from '../../lib/nodeKinds.js';
+  import ExpressionField from '../ExpressionField.svelte';
 
   let { id, data } = $props();
 
   const run = getContext('run');
+  const mode = getContext('mode');
   const node = $derived(data.node);
   const meta = $derived(kindMeta(node.data.kind));
   const status = $derived(run.overlay[id] ?? null);
 
-  const isAssign = $derived(node.data.kind === 'state_update');
-  const isComputation = $derived(node.data.kind === 'computation');
-  const hasExpr = $derived(isAssign || isComputation);
-  // data / call / effect nodes carry an optional `let <binding> =` name. Their
-  // raw expression is not directly editable (the backend rebuilds it from the
-  // `fields` map), so binding is the only extra editable slice here.
-  const hasBinding = $derived(['data', 'call', 'effect'].includes(node.data.kind));
+  const kind = $derived(node.data.kind);
+  const isAssign = $derived(kind === 'state_update');
+  const isComputation = $derived(kind === 'computation');
+  const isData = $derived(kind === 'data');
+  const isTerminal = $derived(kind === 'terminal');
+  // call / effect are configured through their typed `fields` (record args /
+  // duration / signal) + an optional `let <binding> =` name; their raw call
+  // expression is rebuilt by the lens, so it is not shown as an input here.
+  const isInvoke = $derived(kind === 'call' || kind === 'effect');
+  const hasBinding = $derived(isInvoke || isData);
+  // state_update / computation always carry an editable expression; data /
+  // terminal expose one only when the backend surfaces `expression` on them.
+  const hasExpr = $derived(
+    isAssign || isComputation || ((isData || isTerminal) && node.data.expression !== undefined),
+  );
+
+  const availableVars = $derived(node.data.availableVars ?? []);
+  const reads = $derived(data.reads ?? []);
+  const moveTargets = $derived(data.getMoveTargets ? data.getMoveTargets(id) : []);
+  let moveOpen = $state(false);
 
   const subtitle = $derived(
     node.data.operation
-      ? OP_LABELS[node.data.operation] ?? node.data.operation
-      : node.data.effect ??
-          (isAssign ? 'assignment' : isComputation ? 'sequenced compute' : node.data.kind),
+      ? (OP_LABELS[node.data.operation] ?? node.data.operation)
+      : (node.data.effect ??
+          (isAssign ? 'assignment' : isComputation ? 'sequenced compute' : kind)),
   );
   const isWaitEffect = $derived(node.data.effect && WAITING_EFFECTS.has(node.data.effect));
+  const terminalKind = $derived(node.data.terminalKind ?? null);
 
   const fieldKeys = $derived(Object.keys(node.data.fields ?? {}));
 
-  // state_update titles are derived as "update <target>"; recover a default
-  // assignment target for display when the draft has no explicit override.
+  function commit() {
+    data.onCommit?.();
+  }
+
   function defaultTarget() {
     const m = (node.data.title ?? '').trim().match(/^update\s+(.+)$/i);
     return m ? m[1] : '';
-  }
-  function onTarget(e) {
-    node.data.target = e.currentTarget.value;
   }
   function onBinding(e) {
     const v = e.currentTarget.value;
     node.data.binding = v === '' ? undefined : v;
   }
-  function onExpr(e) {
-    node.data.expression = e.currentTarget.value;
-  }
-
-  function fieldType(v) {
-    if (typeof v === 'number') return 'number';
-    if (typeof v === 'boolean') return 'boolean';
-    if (typeof v === 'string') return 'string';
-    // A non-literal arg arrives as the sentinel object { "$expr": "<Lashlang>" }.
-    if (v !== null && typeof v === 'object' && typeof v.$expr === 'string') return 'expr';
-    return 'other';
-  }
-
-  // Write back keeping the sentinel shape (never collapse to a bare string).
-  // Save validates the Lashlang text; the typed-error banner surfaces malformed
-  // edits, so we do not parse client-side.
-  function onExprField(key, e) {
-    node.data.fields[key] = { $expr: e.currentTarget.value };
-  }
-
   function onTitleInput(e) {
     node.data.title = e.currentTarget.value;
     node.data.nameSource = 'label';
@@ -72,6 +67,14 @@
   function onNumber(key, e) {
     const n = Number(e.currentTarget.value);
     if (!Number.isNaN(n)) node.data.fields[key] = n;
+  }
+
+  function fieldType(v) {
+    if (typeof v === 'number') return 'number';
+    if (typeof v === 'boolean') return 'boolean';
+    if (typeof v === 'string') return 'string';
+    if (v !== null && typeof v === 'object' && typeof v.$expr === 'string') return 'expr';
+    return 'other';
   }
 </script>
 
@@ -86,12 +89,46 @@
   <Handle type="target" position={Position.Top} />
 
   <header class="wf-head">
-    <span class="wf-badge" title={node.data.kind}>
+    <span class="wf-badge" title={kind}>
       <span class="wf-glyph">{meta.glyph}</span>{meta.label}
     </span>
     <span class="wf-sub">{subtitle}</span>
+    {#if isTerminal && terminalKind}
+      <span class="wf-term wf-term--{terminalKind}">{terminalKind}</span>
+    {/if}
     {#if status}
       <span class="wf-status wf-status--{status}">{status}</span>
+    {/if}
+    {#if moveTargets.length}
+      <span class="wf-move-wrap nodrag">
+        <button
+          class="wf-icon"
+          class:is-open={moveOpen}
+          title="Move to another scope"
+          aria-label="Move node to another scope"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            moveOpen = !moveOpen;
+          }}>⤴</button
+        >
+        {#if moveOpen}
+          <div class="wf-move-menu">
+            <div class="wf-move-label">move into</div>
+            {#each moveTargets as t (t.key)}
+              <button
+                class="wf-move-item"
+                onpointerdown={(e) => e.stopPropagation()}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  moveOpen = false;
+                  data.onMoveTo?.(id, t.dest);
+                }}>{t.label}</button
+              >
+            {/each}
+          </div>
+        {/if}
+      </span>
     {/if}
     {#if data.onReorder}
       <span class="wf-reorder nodrag" title="Reorder within scope">
@@ -132,6 +169,7 @@
     class="wf-title"
     value={node.data.title}
     oninput={onTitleInput}
+    onchange={commit}
     spellcheck="false"
     placeholder="title"
   />
@@ -140,9 +178,17 @@
       class="wf-desc"
       value={node.data.description ?? ''}
       oninput={onDescInput}
+      onchange={commit}
       spellcheck="false"
       placeholder="description…"
     />
+  {/if}
+
+  {#if reads.length}
+    <div class="wf-reads" title={`reads variables from an enclosing scope: ${reads.join(', ')}`}>
+      <span class="wf-reads-k">reads</span>
+      {#each reads as v (v)}<span class="wf-reads-v">{v}</span>{/each}
+    </div>
   {/if}
 
   {#if hasBinding}
@@ -152,8 +198,9 @@
         class="wf-bind-input nodrag"
         value={node.data.binding ?? ''}
         oninput={onBinding}
+        onchange={commit}
         spellcheck="false"
-        placeholder="binding (optional)"
+        placeholder="name (optional)"
       />
       <span class="wf-bind-eq">=</span>
     </div>
@@ -171,13 +218,17 @@
               type="number"
               value={v}
               oninput={(e) => onNumber(key, e)}
+              onchange={commit}
             />
           {:else if fieldType(v) === 'boolean'}
             <input
               class="wf-check"
               type="checkbox"
               checked={v}
-              onchange={(e) => (node.data.fields[key] = e.currentTarget.checked)}
+              onchange={(e) => {
+                node.data.fields[key] = e.currentTarget.checked;
+                commit();
+              }}
             />
           {:else if fieldType(v) === 'string'}
             <input
@@ -186,18 +237,17 @@
               value={v}
               spellcheck="false"
               oninput={(e) => (node.data.fields[key] = e.currentTarget.value)}
+              onchange={commit}
             />
           {:else if fieldType(v) === 'expr'}
-            <div class="wf-exprfield nodrag">
-              <input
-                class="wf-input wf-input--expr"
-                type="text"
-                value={v.$expr}
-                spellcheck="false"
-                oninput={(e) => onExprField(key, e)}
-              />
-              <span class="wf-expr-badge" title="Lashlang expression — validated on Save">expr</span>
-            </div>
+            <ExpressionField
+              value={v.$expr}
+              kind="expression"
+              {availableVars}
+              placeholder="expression…"
+              onInput={(text) => (node.data.fields[key] = { $expr: text })}
+              onCommit={commit}
+            />
           {:else}
             <code class="wf-ro">{JSON.stringify(v)}</code>
           {/if}
@@ -208,37 +258,35 @@
 
   {#if hasExpr}
     <div class="wf-expr">
-      <div class="wf-expr-row">
-        {#if isAssign}
-          <input
-            class="wf-expr-lhs"
-            value={node.data.target ?? defaultTarget()}
-            oninput={onTarget}
-            spellcheck="false"
-            placeholder="target"
-          />
+      {#if isAssign}
+        <div class="wf-expr-row">
+          <div class="wf-expr-lhs-wrap">
+            <ExpressionField
+              value={node.data.target ?? defaultTarget()}
+              kind="assignment_target"
+              {availableVars}
+              placeholder="target"
+              onInput={(text) => (node.data.target = text)}
+              onCommit={commit}
+            />
+          </div>
           <span class="wf-expr-op" title="assignment">≔</span>
-        {:else}
-          <input
-            class="wf-expr-lhs wf-expr-lhs--opt"
-            value={node.data.binding ?? ''}
-            oninput={onBinding}
-            spellcheck="false"
-            placeholder="binding (optional)"
-          />
-          <span class="wf-expr-op" title="bind">=</span>
-        {/if}
-      </div>
-      <textarea
-        class="wf-expr-input nodrag"
-        rows="1"
+        </div>
+      {/if}
+      <ExpressionField
         value={node.data.expression ?? ''}
-        oninput={onExpr}
-        spellcheck="false"
+        kind="expression"
+        {availableVars}
         placeholder="expression…"
-      ></textarea>
+        onInput={(text) => (node.data.expression = text)}
+        onCommit={commit}
+      />
       <div class="wf-expr-note">
-        typed {isAssign ? 'assignment' : 'computation'} · canonical form rebuilt on save
+        {isAssign
+          ? 'typed assignment · canonical form rebuilt on save'
+          : isComputation
+            ? 'typed computation · canonical form rebuilt on save'
+            : 'value expression · canonical form rebuilt on save'}
       </div>
     </div>
   {/if}
@@ -301,6 +349,22 @@
     white-space: nowrap;
     flex: 1;
   }
+  .wf-term {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 2px 5px;
+    border-radius: 5px;
+  }
+  .wf-term--finish {
+    color: #5fd08a;
+    background: rgba(95, 208, 138, 0.16);
+  }
+  .wf-term--fail {
+    color: var(--rose);
+    background: color-mix(in srgb, var(--rose) 18%, transparent);
+  }
   .wf-status {
     font-family: var(--font-mono);
     font-size: 8.5px;
@@ -342,6 +406,75 @@
   .wf-del:hover {
     color: var(--rose);
     background: color-mix(in srgb, var(--rose) 16%, transparent);
+  }
+
+  .wf-move-wrap {
+    position: relative;
+    flex-shrink: 0;
+  }
+  .wf-icon {
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 12px;
+    line-height: 1;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    padding: 0;
+    transition:
+      color 0.15s ease,
+      background 0.15s ease;
+  }
+  .wf-icon:hover,
+  .wf-icon.is-open {
+    color: var(--cyan);
+    background: color-mix(in srgb, var(--cyan) 16%, transparent);
+  }
+  .wf-move-menu {
+    position: absolute;
+    top: calc(100% + 5px);
+    right: 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 150px;
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 5px;
+    background: var(--ink-2);
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    box-shadow: 0 14px 30px -12px rgba(0, 0, 0, 0.7);
+  }
+  .wf-move-label {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 2px 6px 4px;
+  }
+  .wf-move-item {
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    padding: 4px 7px;
+    cursor: pointer;
+    transition:
+      color 0.12s ease,
+      background 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .wf-move-item:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--cyan) 12%, transparent);
+    border-color: color-mix(in srgb, var(--cyan) 40%, transparent);
   }
 
   .wf-reorder {
@@ -397,6 +530,33 @@
     font-size: 11.5px;
     padding: 1px 0 4px;
     margin-bottom: 4px;
+  }
+
+  .wf-reads {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    margin: 2px 0 6px;
+    padding: 4px 7px;
+    background: color-mix(in srgb, var(--cyan) 7%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--cyan) 30%, var(--line));
+    border-radius: 7px;
+  }
+  .wf-reads-k {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--cyan) 80%, var(--text-dim));
+  }
+  .wf-reads-v {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--cyan);
+    background: color-mix(in srgb, var(--cyan) 12%, transparent);
+    border-radius: 5px;
+    padding: 1px 6px;
   }
 
   .wf-bind {
@@ -488,34 +648,6 @@
     font-size: 10.5px;
     color: var(--text-dim);
   }
-  /* expression-valued field: code input with an "expr" affordance badge */
-  .wf-exprfield {
-    position: relative;
-    display: flex;
-    align-items: center;
-    min-width: 0;
-  }
-  .wf-input--expr {
-    background: #0a0d13;
-    border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
-    color: #eaf2ff;
-    padding-right: 42px;
-    letter-spacing: 0.01em;
-  }
-  .wf-expr-badge {
-    position: absolute;
-    right: 6px;
-    font-family: var(--font-mono);
-    font-size: 8px;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
-    border-radius: 4px;
-    padding: 1px 4px;
-    pointer-events: none;
-  }
   .wf-wait-note {
     margin-top: 8px;
     font-family: var(--font-mono);
@@ -536,51 +668,16 @@
     align-items: center;
     gap: 7px;
   }
-  .wf-expr-lhs {
+  .wf-expr-lhs-wrap {
     flex: 1;
     min-width: 0;
-    background: var(--ink-2);
-    border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
-    border-radius: 7px;
-    color: var(--accent);
-    font-family: var(--font-mono);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 5px 8px;
-  }
-  .wf-expr-lhs--opt {
-    color: var(--text-dim);
-    font-weight: 500;
-    border-color: var(--line);
-  }
-  .wf-expr-lhs:focus {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+    display: flex;
   }
   .wf-expr-op {
     font-family: var(--font-mono);
     font-size: 14px;
     color: var(--accent);
     flex-shrink: 0;
-  }
-  .wf-expr-input {
-    width: 100%;
-    background: #0a0d13;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    color: #eaf2ff;
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    line-height: 1.5;
-    padding: 7px 9px;
-    resize: vertical;
-    tab-size: 2;
-  }
-  .wf-expr-input:focus {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .wf-expr-note {
     font-family: var(--font-mono);

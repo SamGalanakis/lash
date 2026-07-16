@@ -6,14 +6,49 @@
   import OpaqueNode from './components/nodes/OpaqueNode.svelte';
   import DisplayPanel from './components/DisplayPanel.svelte';
   import SourceView from './components/SourceView.svelte';
-  import { fetchWorkflow, fetchWorkflows, selectWorkflow, saveWorkflow } from './lib/api.js';
-  import { buildFlow, deleteNodeFromDoc, addNodeToDoc, reorderNodeInDoc } from './lib/graph.js';
-  import { loadPositions, savePosition, clearPositions, migratePositions } from './lib/positions.js';
+  import {
+    fetchWorkflow,
+    fetchWorkflows,
+    selectWorkflow,
+    saveWorkflow,
+    fetchOperations,
+    projectSource,
+  } from './lib/api.js';
+  import {
+    buildFlow,
+    deleteNodeFromDoc,
+    addNodeToDoc,
+    reorderNodeInDoc,
+    moveNodeToGroup,
+    moveTargetsFor,
+    scopeOf,
+  } from './lib/graph.js';
+  import {
+    loadPositions,
+    savePosition,
+    clearPosition,
+    clearPositions,
+    migratePositions,
+  } from './lib/positions.js';
   import { RunController } from './lib/runStore.svelte.js';
-  import { NODE_KINDS, ADDABLE_KINDS, addableMeta } from './lib/nodeKinds.js';
+  import { ModeController } from './lib/mode.svelte.js';
+  import { History } from './lib/history.svelte.js';
+  import { groupOperations, operationMeta } from './lib/operations.js';
+  import { NODE_KINDS } from './lib/nodeKinds.js';
 
   const run = new RunController();
   setContext('run', run);
+
+  const mode = new ModeController();
+  setContext('mode', mode);
+
+  // Operation catalog store (the palette's data home). `entries` stays null
+  // until `/operations` resolves; groupOperations falls back to a built-in
+  // catalog of the same shape, so the palette works even against an old backend.
+  const ops = $state({ entries: null });
+  setContext('ops', ops);
+
+  const history = new History();
 
   const nodeTypes = { workflow: WorkflowNode, container: ContainerNode, opaque: OpaqueNode };
 
@@ -35,71 +70,110 @@
   let catalog = $state([]);
   let selectedId = $state('onboarding');
   let switching = $state(false);
+  // Whether the backend serves POST /project (text→graph). Probed once at load
+  // so the Power source pane offers live editing only when it will actually work.
+  let projectSupported = $state(false);
 
   const legend = Object.entries(NODE_KINDS);
+  const mainGroups = $derived(groupOperations(ops.entries, { includePower: mode.power }));
+
+  // Handlers threaded into every flow node (see buildFlow).
+  const handlers = {
+    onDelete,
+    onAddNode,
+    onReorder,
+    onCommit,
+    onMoveTo,
+    getMoveTargets: (id) => moveTargetsFor(draftDoc, id),
+  };
+
+  // Record a committed edit (blur of a field): mark the draft dirty and push a
+  // history snapshot. Field values are already written live into the draft.
+  function onCommit() {
+    dirty = true;
+    saveOk = null;
+    history.commit(draftDoc);
+  }
 
   function onDelete(id) {
     deleteNodeFromDoc(draftDoc, id);
     dirty = true;
     saveOk = null;
+    history.commit(draftDoc);
     rebuild();
   }
 
-  // Insert a new default node of `kind` at the end of a container/process group
-  // (ownerId + slot). The new node lives only in the draft until Save round-trips
-  // it through the backend, which mints a canonical id.
-  function onAddNode(ownerId, slot, kind) {
-    addNodeToDoc(draftDoc, { ownerId, slot }, kind);
+  // Insert a node from an operation-catalog entry at the end of a container slot.
+  function onAddNode(ownerId, slot, operation) {
+    addNodeToDoc(draftDoc, { ownerId, slot }, operation);
     dirty = true;
     saveOk = null;
+    history.commit(draftDoc);
     rebuild();
   }
 
-  // Insert a new default node at the end of the top-level (`main`) scope.
   let mainMenuOpen = $state(false);
-  function onAddMain(kind) {
+  function onAddMain(operation) {
     mainMenuOpen = false;
-    addNodeToDoc(draftDoc, { main: true }, kind);
+    addNodeToDoc(draftDoc, { main: true }, operation);
     dirty = true;
     saveOk = null;
+    history.commit(draftDoc);
     rebuild();
   }
 
-  // Move a statement within its scope's execution order (up/down). The backend
-  // reprojects source from the new `nodeIds` order on the next Save.
   function onReorder(id, direction) {
     if (reorderNodeInDoc(draftDoc, id, direction)) {
       dirty = true;
       saveOk = null;
+      history.commit(draftDoc);
       rebuild(new Set([id]));
     }
   }
 
-  // `keepSelection` (a Set of node ids) re-marks those nodes selected on the
-  // freshly rebuilt flow — used to preserve selection across a reorder or Save.
+  // Move a node into another scope (container slot or top-level) via the node's
+  // "move into" menu. Snap it out of any dragged position so it lays out cleanly.
+  function onMoveTo(id, dest) {
+    if (moveNodeToGroup(draftDoc, id, dest)) {
+      clearPosition(id);
+      positions = loadPositions();
+      dirty = true;
+      saveOk = null;
+      history.commit(draftDoc);
+      rebuild(new Set([id]));
+    }
+  }
+
   function rebuild(keepSelection = null) {
-    const { flowNodes: fn, flowEdges: fe } = buildFlow(
-      draftDoc,
-      positions,
-      onDelete,
-      onAddNode,
-      onReorder,
-    );
+    const { flowNodes: fn, flowEdges: fe } = buildFlow(draftDoc, positions, handlers);
     if (keepSelection && keepSelection.size) {
       for (const n of fn) if (keepSelection.has(n.id)) n.selected = true;
     }
     flowNodes = fn;
     flowEdges = fe;
-    flowKey += 1; // remount SvelteFlow so layout + fitView re-run cleanly
   }
 
   async function loadInitial() {
     loading = true;
     loadError = null;
     try {
-      const [doc, list] = await Promise.all([fetchWorkflow(), fetchWorkflows().catch(() => [])]);
+      const [doc, list, operations] = await Promise.all([
+        fetchWorkflow(),
+        fetchWorkflows().catch(() => []),
+        fetchOperations().catch(() => null),
+      ]);
       catalog = list;
+      ops.entries = operations;
       adoptDocument(doc);
+      // Probe /project support without adopting the result (projecting the
+      // canonical source yields an equivalent document we discard).
+      projectSource(doc.source)
+        .then((probe) => {
+          projectSupported = !probe.unsupported;
+        })
+        .catch(() => {
+          projectSupported = false;
+        });
     } catch (err) {
       loadError = err?.message ?? String(err);
     } finally {
@@ -107,9 +181,6 @@
     }
   }
 
-  // Switching examples resets the backend's current workflow to that built-in
-  // and loads it just like the initial GET: fresh draft, re-layout, clear
-  // overlay. The current draft is intentionally discarded (backend contract).
   async function onSelect(id) {
     if (switching || id === selectedId) return;
     switching = true;
@@ -128,13 +199,35 @@
     }
   }
 
+  // Adopt a canonical (saved / selected) document as a fresh, clean draft.
+  // Re-keys the SvelteFlow instance so its viewport re-fits for the new graph.
   function adoptDocument(doc, keepSelection = null) {
-    // Deep clone into a fresh reactive draft the host owns and mutates.
     draftDoc = structuredClone(doc);
     canonicalSource = doc.source;
     savedVersion = doc.version;
     dirty = false;
+    history.reset(draftDoc);
+    flowKey += 1;
     rebuild(keepSelection);
+  }
+
+  // Adopt a document projected from edited source (Power source pane). Unlike a
+  // saved document this is an unsaved draft: keep it dirty and start a new
+  // history baseline entry from it.
+  function adoptProjected(doc) {
+    draftDoc = structuredClone(doc);
+    canonicalSource = doc.source;
+    dirty = true;
+    saveOk = null;
+    history.commit(draftDoc);
+    flowKey += 1;
+    rebuild();
+  }
+
+  async function handleProject(text) {
+    const result = await projectSource(text);
+    if (result.ok) adoptProjected(result.document);
+    return result;
   }
 
   async function onSave() {
@@ -142,20 +235,11 @@
     saving = true;
     saveError = null;
     saveOk = null;
-    // Capture the current selection BEFORE the id remint so it can be migrated
-    // through the response idMap and survive the rebuild.
     const selectedIds = flowNodes.filter((n) => n.selected).map((n) => n.id);
-    // Serialize the draft (a plain snapshot, without any layout/UI cruft).
     const payload = JSON.parse(JSON.stringify(draftDoc));
     const result = await saveWorkflow(payload);
     saving = false;
     if (result.ok) {
-      // Save remints every node id. When the backend reports the old→new id map,
-      // migrate the id-keyed sidecars (persisted positions in localStorage and
-      // the live selection) THROUGH it before rendering the canonical document,
-      // so dragged positions stay put and the selected node stays selected.
-      // Missing entries (deleted nodes) simply drop out. Older backends omit
-      // idMap entirely — fall back to the prior behavior (selection resets).
       let keepSelection = null;
       if (result.idMap) {
         migratePositions(result.idMap);
@@ -174,32 +258,90 @@
     }
   }
 
+  // --- Undo / redo -----------------------------------------------------------
+  function applySnapshot(doc) {
+    if (!doc) return;
+    draftDoc = doc;
+    dirty = history.index > 0;
+    saveOk = null;
+    rebuild();
+  }
+  function doUndo() {
+    applySnapshot(history.undo());
+  }
+  function doRedo() {
+    applySnapshot(history.redo());
+  }
+  function onKeydown(e) {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    if (e.key.toLowerCase() !== 'z') return;
+    const t = e.target;
+    // Let native text undo win inside editable fields.
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    e.preventDefault();
+    if (e.shiftKey) doRedo();
+    else doUndo();
+  }
+
   function onPlay() {
     saveOk = null;
     run.start();
   }
-
   function onResetLayout() {
     clearPositions();
     positions = {};
     rebuild();
   }
-
   function onReload() {
     run.stop();
     loadInitial();
   }
 
+  // A drag that changes a node's order within its own scope becomes a reorder
+  // (it snaps into the laid-out slot); otherwise it is a free arrangement that
+  // persists as a stored position.
+  function tryReorderByDrag(n) {
+    const scope = scopeOf(draftDoc, n.id);
+    if (!scope || scope.nodeIds.length < 2) return false;
+    const tops = new Map(flowNodes.map((f) => [f.id, f.position?.y ?? 0]));
+    const droppedTop = n.position.y;
+    let index = 0;
+    for (const sid of scope.nodeIds) {
+      if (sid === n.id) continue;
+      if ((tops.get(sid) ?? 0) < droppedTop) index += 1;
+    }
+    if (!reorderNodeInDoc(draftDoc, n.id, index)) return false;
+    clearPosition(n.id);
+    return true;
+  }
+
   function handleDragStop({ targetNode, nodes }) {
     const moved = nodes && nodes.length ? nodes : targetNode ? [targetNode] : [];
+    let reordered = false;
     for (const n of moved) {
-      if (n?.position) savePosition(n.id, n.position);
+      if (!n?.id || !n.position) continue;
+      let didReorder = false;
+      try {
+        didReorder = tryReorderByDrag(n);
+      } catch {
+        didReorder = false;
+      }
+      if (didReorder) reordered = true;
+      else savePosition(n.id, n.position);
     }
     positions = loadPositions();
+    if (reordered) {
+      dirty = true;
+      saveOk = null;
+      history.commit(draftDoc);
+      rebuild();
+    }
   }
 
   loadInitial();
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <div class="studio">
   <header class="topbar">
@@ -210,16 +352,37 @@
         <div class="brand-sub">lashlang · code ⇄ graph ⇄ live run</div>
       </div>
     </div>
-    <nav class="legend">
-      {#each legend as [kind, meta] (kind)}
-        <span class="legend-item" style="--c:{meta.accent}">
-          <span class="legend-dot"></span>{meta.label}
-        </span>
-      {/each}
-      <span class="legend-sep"></span>
-      <span class="legend-item legend-edge"><span class="legend-line seq"></span>sequence</span>
-      <span class="legend-item legend-edge"><span class="legend-line data"></span>data</span>
-    </nav>
+
+    <div class="topbar-right">
+      <div class="mode-switch" role="group" aria-label="Editor mode">
+        <button
+          class="mode-btn"
+          class:is-active={mode.simplified}
+          onclick={() => mode.set('simplified')}
+          title="Guided editing for building workflows visually"
+        >
+          Simplified
+        </button>
+        <button
+          class="mode-btn"
+          class:is-active={mode.power}
+          onclick={() => mode.set('power')}
+          title="Raw Lashlang inputs, any node kind, and a live editable source pane"
+        >
+          Power
+        </button>
+      </div>
+      <nav class="legend">
+        {#each legend as [kind, meta] (kind)}
+          <span class="legend-item" style="--c:{meta.accent}">
+            <span class="legend-dot"></span>{meta.label}
+          </span>
+        {/each}
+        <span class="legend-sep"></span>
+        <span class="legend-item legend-edge"><span class="legend-line seq"></span>sequence</span>
+        <span class="legend-item legend-edge"><span class="legend-line data"></span>data</span>
+      </nav>
+    </div>
   </header>
 
   <main class="body">
@@ -249,8 +412,7 @@
             <MiniMap
               pannable
               zoomable
-              nodeColor={(n) =>
-                NODE_KINDS[n.data?.node?.data?.kind]?.accent ?? '#5c6a80'}
+              nodeColor={(n) => NODE_KINDS[n.data?.node?.data?.kind]?.accent ?? '#5c6a80'}
               maskColor="rgba(8,11,17,0.72)"
             />
           </SvelteFlow>
@@ -266,16 +428,27 @@
           </button>
           {#if mainMenuOpen}
             <div class="palette-menu">
-              {#each ADDABLE_KINDS as k (k)}
-                {@const m = addableMeta(k)}
-                <button class="palette-item" style="--c:{m.accent}" onclick={() => onAddMain(k)}>
-                  <span class="palette-glyph">{m.glyph}</span>{m.label}
-                </button>
+              {#each mainGroups as grp (grp.id)}
+                <div class="palette-group">{grp.label}</div>
+                {#each grp.items as op (op.id)}
+                  {@const m = operationMeta(op)}
+                  <button
+                    class="palette-item"
+                    style="--c:{m.accent}"
+                    onclick={() => onAddMain(op)}
+                  >
+                    <span class="palette-glyph">{m.glyph}</span>{op.label}
+                  </button>
+                {/each}
               {/each}
             </div>
           {/if}
         </div>
-        <div class="canvas-hint">drag to arrange · positions saved locally, never in source</div>
+        <div class="canvas-hint">
+          {mode.simplified
+            ? 'drag to reorder within a scope · use the ⤴ menu to move between scopes'
+            : 'power mode · raw Lashlang everywhere · edit the source pane to reshape the graph'}
+        </div>
       {/if}
     </section>
 
@@ -323,6 +496,18 @@
           {saving ? 'saving…' : 'Save'}
         </button>
         <div class="ctrl-minor">
+          <button
+            class="btn btn-ghost"
+            onclick={doUndo}
+            disabled={!history.canUndo}
+            title="Undo (Ctrl/Cmd-Z)">undo</button
+          >
+          <button
+            class="btn btn-ghost"
+            onclick={doRedo}
+            disabled={!history.canRedo}
+            title="Redo (Ctrl/Cmd-Shift-Z)">redo</button
+          >
           <button class="btn btn-ghost" onclick={onResetLayout} title="Clear saved positions"
             >reset layout</button
           >
@@ -346,13 +531,21 @@
         <div class="banner banner-ok">{saveOk}</div>
       {/if}
       {#if run.error}
-        <div class="banner banner-err"><div class="banner-title">run error</div><div class="banner-msg">{run.error}</div></div>
+        <div class="banner banner-err">
+          <div class="banner-title">run error</div>
+          <div class="banner-msg">{run.error}</div>
+        </div>
       {/if}
 
       <DisplayPanel {run} />
 
       {#if draftDoc}
-        <SourceView source={canonicalSource} version={savedVersion} {dirty} />
+        <SourceView
+          source={canonicalSource}
+          version={savedVersion}
+          {dirty}
+          onProject={projectSupported ? handleProject : undefined}
+        />
       {/if}
     </aside>
   </main>
@@ -401,6 +594,46 @@
     color: var(--text-faint);
     letter-spacing: 0.05em;
   }
+
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .mode-switch {
+    display: inline-flex;
+    padding: 3px;
+    gap: 2px;
+    background: var(--ink-2);
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+  }
+  .mode-btn {
+    font-family: var(--font-ui);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      background 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+  .mode-btn:hover {
+    color: var(--text);
+  }
+  .mode-btn.is-active {
+    color: var(--ink);
+    background: linear-gradient(180deg, var(--cyan), #1fbfae);
+    box-shadow: 0 4px 14px -6px var(--cyan);
+  }
+
   .legend {
     display: flex;
     flex-wrap: wrap;
@@ -463,6 +696,7 @@
     border-radius: 6px;
     border: 1px solid var(--line);
     pointer-events: none;
+    max-width: 60%;
   }
   .palette {
     position: absolute;
@@ -499,15 +733,25 @@
   }
   .palette-menu {
     margin-top: 6px;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 3px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
     padding: 6px;
     min-width: 210px;
+    max-height: 60vh;
+    overflow-y: auto;
     background: var(--ink-2);
     border: 1px solid var(--line-strong);
     border-radius: 11px;
     box-shadow: 0 16px 38px -14px rgba(0, 0, 0, 0.72);
+  }
+  .palette-group {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 5px 8px 2px;
   }
   .palette-item {
     display: inline-flex;
@@ -645,6 +889,7 @@
   .ctrl-minor {
     grid-column: 1 / -1;
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
   }
   .btn {
@@ -691,7 +936,7 @@
     box-shadow: 0 8px 22px -12px rgba(120, 150, 200, 0.6);
   }
   .btn-ghost {
-    flex: 1;
+    flex: 1 1 40%;
     font-size: 11px;
     font-weight: 500;
     padding: 8px 10px;
@@ -699,7 +944,7 @@
     color: var(--text-dim);
     border-style: dashed;
   }
-  .btn-ghost:hover {
+  .btn-ghost:hover:not(:disabled) {
     color: var(--text);
     background: var(--ink-3);
   }
