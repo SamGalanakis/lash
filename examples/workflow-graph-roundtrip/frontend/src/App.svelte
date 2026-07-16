@@ -42,10 +42,11 @@
   const mode = new ModeController();
   setContext('mode', mode);
 
-  // Operation catalog store (the palette's data home). `entries` stays null
-  // until `/operations` resolves; groupOperations falls back to a built-in
-  // catalog of the same shape, so the palette works even against an old backend.
-  const ops = $state({ entries: null });
+  // Operation catalog store — host-owned data from GET /operations, the single
+  // source of truth for the palette. `entries` is null until it resolves;
+  // `error` is set when the endpoint is unreachable so the palette can show a
+  // non-blocking empty state instead of a duplicated hard-coded catalog.
+  const ops = $state({ entries: null, error: false });
   setContext('ops', ops);
 
   const history = new History();
@@ -164,6 +165,7 @@
       ]);
       catalog = list;
       ops.entries = operations;
+      ops.error = operations == null;
       adoptDocument(doc);
       // Probe /project support without adopting the result (projecting the
       // canonical source yields an equivalent document we discard).
@@ -428,19 +430,27 @@
           </button>
           {#if mainMenuOpen}
             <div class="palette-menu">
-              {#each mainGroups as grp (grp.id)}
-                <div class="palette-group">{grp.label}</div>
-                {#each grp.items as op (op.id)}
-                  {@const m = operationMeta(op)}
-                  <button
-                    class="palette-item"
-                    style="--c:{m.accent}"
-                    onclick={() => onAddMain(op)}
-                  >
-                    <span class="palette-glyph">{m.glyph}</span>{op.label}
-                  </button>
+              {#if mainGroups.length}
+                {#each mainGroups as grp (grp.id)}
+                  <div class="palette-group">{grp.label}</div>
+                  {#each grp.items as op (op.id)}
+                    {@const m = operationMeta(op)}
+                    <button
+                      class="palette-item"
+                      style="--c:{m.accent}"
+                      onclick={() => onAddMain(op)}
+                    >
+                      <span class="palette-glyph">{m.glyph}</span>{op.label}
+                    </button>
+                  {/each}
                 {/each}
-              {/each}
+              {:else}
+                <div class="palette-empty">
+                  {ops.error
+                    ? 'operation catalog unavailable — reload to retry'
+                    : 'loading operations…'}
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
@@ -752,6 +762,14 @@
     text-transform: uppercase;
     color: var(--text-faint);
     padding: 5px 8px 2px;
+  }
+  .palette-empty {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.5;
+    color: var(--text-faint);
+    padding: 10px 8px;
+    text-align: center;
   }
   .palette-item {
     display: inline-flex;

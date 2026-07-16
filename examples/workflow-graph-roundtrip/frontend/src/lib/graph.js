@@ -1,4 +1,5 @@
 import { layoutDocument } from './layout.js';
+import { fieldDefaultValue } from './operations.js';
 
 // Build SvelteFlow nodes + edges from a draft WorkflowDocument.
 //
@@ -161,23 +162,9 @@ function slotText(field) {
   return String(field.default ?? '');
 }
 
-// A field's default as an EditableValue for the `data.fields` map.
-function seedFieldValue(field) {
-  switch (field.type) {
-    case 'number':
-      return Number(field.default ?? 0) || 0;
-    case 'boolean':
-      return !!field.default;
-    case 'expression':
-      return { $expr: String(field.default ?? '') };
-    default:
-      return String(field.default ?? '');
-  }
-}
-
 function seedFields(fields) {
   const out = {};
-  for (const field of fields ?? []) out[field.name] = seedFieldValue(field);
+  for (const field of fields ?? []) out[field.name] = fieldDefaultValue(field);
   return out;
 }
 
@@ -231,7 +218,9 @@ function nodeDataFromOperation(op) {
       data.fields = seedFields(op.fields);
       break;
     case 'terminal':
-      data.expression = `${op.terminalKind ?? 'finish'} ${slotText(byName.expression) || '0'}`;
+      // The lens wraps this value with the finish/fail keyword from
+      // `terminalKind` (set above), so seed the bare value only.
+      data.expression = slotText(byName.expression) || '0';
       break;
     case 'data':
     case 'computation': {

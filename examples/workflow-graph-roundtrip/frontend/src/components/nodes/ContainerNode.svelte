@@ -264,23 +264,29 @@
         </button>
         {#if menuSlot === g.slot}
           <div class="ct-add-menu">
-            {#each opGroups as grp (grp.id)}
-              <div class="ct-add-group">{grp.label}</div>
-              {#each grp.items as op (op.id)}
-                {@const m = operationMeta(op)}
-                <button
-                  class="ct-add-item"
-                  style="--c:{m.accent}"
-                  onpointerdown={(e) => e.stopPropagation()}
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    pickOperation(g.slot, op);
-                  }}
-                >
-                  <span class="ct-add-glyph">{m.glyph}</span>{op.label}
-                </button>
+            {#if opGroups.length}
+              {#each opGroups as grp (grp.id)}
+                <div class="ct-add-group">{grp.label}</div>
+                {#each grp.items as op (op.id)}
+                  {@const m = operationMeta(op)}
+                  <button
+                    class="ct-add-item"
+                    style="--c:{m.accent}"
+                    onpointerdown={(e) => e.stopPropagation()}
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      pickOperation(g.slot, op);
+                    }}
+                  >
+                    <span class="ct-add-glyph">{m.glyph}</span>{op.label}
+                  </button>
+                {/each}
               {/each}
-            {/each}
+            {:else}
+              <div class="ct-add-empty">
+                {ops?.error ? 'catalog unavailable — reload' : 'loading operations…'}
+              </div>
+            {/if}
           </div>
         {/if}
       </div>
@@ -633,6 +639,13 @@
     text-transform: uppercase;
     color: var(--text-faint);
     padding: 5px 7px 2px;
+  }
+  .ct-add-empty {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-faint);
+    padding: 8px 7px;
+    text-align: center;
   }
   .ct-add-item {
     display: inline-flex;

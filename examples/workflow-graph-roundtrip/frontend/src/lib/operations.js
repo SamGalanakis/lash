@@ -1,158 +1,19 @@
-// The operation catalog is the single data home for the "+ Add node" palette:
-// what a non-expert can add, its friendly label, and the typed default fields
-// that seed a fully-formed node. At runtime the catalog comes from the backend
-// (`GET /operations`); FALLBACK_OPERATIONS below is the same-shape catalog used
-// only when an older backend does not serve that endpoint, so the palette
-// always shows real labels and never falls back to raw kind strings.
+// The operation catalog is host-owned data: the backend's `GET /operations` is
+// the single source of truth for what a palette can insert and how each node's
+// typed fields are shaped (ADR 0026 stance — no client-side catalog to drift).
+// If the endpoint is unreachable the palette shows an error/empty state rather
+// than falling back to a duplicated hard-coded list.
+//
+// A catalog entry is
+//   { id, label, nodeKind, subkind?, operation?, effect?, terminalKind?,
+//     fields: [{ name, type, default }] }
+// where `type` is string | number | boolean | expression | identifier |
+// assignment_target.
 
 import { NODE_KINDS, CONTAINER_SUBKINDS, kindMeta } from './nodeKinds.js';
 
-// Same shape as a `GET /operations` entry:
-//   { id, label, nodeKind, subkind?, operation?, effect?, terminalKind?,
-//     fields: [{ name, type, default }] }
-// `type` is string | number | boolean | expression | identifier |
-// assignment_target. Defaults mirror the backend's own catalog so an add
-// round-trips identically whether the catalog was fetched or fell back.
-export const FALLBACK_OPERATIONS = [
-  {
-    id: 'display.show_message',
-    label: 'Show message',
-    nodeKind: 'call',
-    operation: 'show_message',
-    fields: [{ name: 'text', type: 'string', default: '' }],
-  },
-  {
-    id: 'display.set_status',
-    label: 'Set status',
-    nodeKind: 'call',
-    operation: 'set_status',
-    fields: [
-      { name: 'key', type: 'string', default: '' },
-      { name: 'value', type: 'string', default: '' },
-    ],
-  },
-  {
-    id: 'display.add_item',
-    label: 'Add item',
-    nodeKind: 'call',
-    operation: 'add_item',
-    fields: [
-      { name: 'list', type: 'string', default: '' },
-      { name: 'item', type: 'string', default: '' },
-    ],
-  },
-  {
-    id: 'display.set_light',
-    label: 'Set light',
-    nodeKind: 'call',
-    operation: 'set_light',
-    fields: [
-      { name: 'name', type: 'string', default: '' },
-      { name: 'state', type: 'string', default: '' },
-    ],
-  },
-  {
-    id: 'display.set_progress',
-    label: 'Set progress',
-    nodeKind: 'call',
-    operation: 'set_progress',
-    fields: [{ name: 'pct', type: 'number', default: 0 }],
-  },
-  {
-    id: 'display.highlight',
-    label: 'Highlight',
-    nodeKind: 'call',
-    operation: 'highlight',
-    fields: [{ name: 'target', type: 'string', default: '' }],
-  },
-  {
-    id: 'effect.sleep',
-    label: 'Sleep',
-    nodeKind: 'effect',
-    effect: 'sleep',
-    fields: [{ name: 'duration', type: 'expression', default: '"1s"' }],
-  },
-  {
-    id: 'effect.wait_signal',
-    label: 'Wait for signal',
-    nodeKind: 'effect',
-    effect: 'wait_signal',
-    fields: [{ name: 'signal', type: 'string', default: 'continue' }],
-  },
-  {
-    id: 'control.if',
-    label: 'If / branch',
-    nodeKind: 'container',
-    subkind: 'if',
-    fields: [{ name: 'condition', type: 'expression', default: 'true' }],
-  },
-  {
-    id: 'control.while',
-    label: 'While loop',
-    nodeKind: 'container',
-    subkind: 'while',
-    fields: [{ name: 'condition', type: 'expression', default: 'false' }],
-  },
-  {
-    id: 'control.for',
-    label: 'For each',
-    nodeKind: 'container',
-    subkind: 'for',
-    fields: [
-      { name: 'binding', type: 'identifier', default: 'item' },
-      { name: 'iterable', type: 'expression', default: '[1, 2, 3]' },
-    ],
-  },
-  {
-    id: 'control.comprehension',
-    label: 'Comprehension',
-    nodeKind: 'container',
-    subkind: 'comprehension',
-    fields: [{ name: 'binding', type: 'identifier', default: 'items' }],
-  },
-  {
-    id: 'stmt.assign',
-    label: 'Set variable',
-    nodeKind: 'state_update',
-    fields: [
-      { name: 'target', type: 'assignment_target', default: 'state.count' },
-      { name: 'expression', type: 'expression', default: '0' },
-    ],
-  },
-  {
-    id: 'stmt.let',
-    label: 'Define value',
-    nodeKind: 'data',
-    fields: [
-      { name: 'binding', type: 'identifier', default: 'value' },
-      { name: 'expression', type: 'expression', default: '0' },
-    ],
-  },
-  {
-    id: 'stmt.compute',
-    label: 'Compute',
-    nodeKind: 'computation',
-    fields: [{ name: 'expression', type: 'expression', default: '1 + 1' }],
-  },
-  {
-    id: 'stmt.finish',
-    label: 'Finish',
-    nodeKind: 'terminal',
-    terminalKind: 'finish',
-    fields: [{ name: 'expression', type: 'expression', default: '0' }],
-  },
-  // Power-only: an escape hatch that inserts a verbatim Lashlang statement.
-  {
-    id: 'stmt.opaque',
-    label: 'Raw statement',
-    nodeKind: 'opaque',
-    powerOnly: true,
-    fields: [{ name: 'source', type: 'string', default: 'display.show_message({ text: "raw" })' }],
-  },
-];
-
-// Palette groups, in menu order. Each catalog entry lands in the first group
-// whose `kinds` include its nodeKind; unmatched kinds fall into "Other".
+// Palette groups, in menu order. Each entry lands in the first group whose
+// `kinds` include its nodeKind; unmatched kinds fall into "Other".
 const GROUPS = [
   { id: 'actions', label: 'Actions', kinds: ['call', 'effect'] },
   { id: 'control', label: 'Control flow', kinds: ['container', 'terminal'] },
@@ -160,12 +21,15 @@ const GROUPS = [
   { id: 'advanced', label: 'Advanced', kinds: ['opaque'] },
 ];
 
+// Kinds hidden from the Simplified palette (raw escape hatches).
+const POWER_KINDS = new Set(['opaque']);
+
 // Group a catalog into `[{ id, label, items }]`, dropping empty groups.
-// Simplified mode hides power-only operations (raw statements / opaque).
+// Returns `[]` for a missing/empty catalog so the palette can show an empty
+// state. Simplified mode additionally hides raw power-only kinds.
 export function groupOperations(catalog, { includePower = true } = {}) {
-  const entries = (catalog && catalog.length ? catalog : FALLBACK_OPERATIONS).filter(
-    (op) => includePower || !op.powerOnly,
-  );
+  const entries = (catalog ?? []).filter((op) => includePower || !POWER_KINDS.has(op.nodeKind));
+  if (!entries.length) return [];
   const groups = GROUPS.map((g) => ({
     id: g.id,
     label: g.label,
@@ -175,6 +39,46 @@ export function groupOperations(catalog, { includePower = true } = {}) {
   const other = entries.filter((op) => !claimed.has(op.nodeKind));
   if (other.length) groups.push({ id: 'other', label: 'Other', items: other });
   return groups.filter((g) => g.items.length);
+}
+
+// The catalog entries a node of `nodeKind` can switch between (its operation
+// options) — display calls for `call`, sleep/wait_signal for `effect`, etc.
+export function operationsForKind(catalog, nodeKind) {
+  return (catalog ?? []).filter((op) => op.nodeKind === nodeKind);
+}
+
+// A single field's default as an EditableValue for the `data.fields` map.
+export function fieldDefaultValue(field) {
+  switch (field.type) {
+    case 'number':
+      return Number(field.default ?? 0) || 0;
+    case 'boolean':
+      return !!field.default;
+    case 'expression':
+      return { $expr: String(field.default ?? '') };
+    default:
+      return String(field.default ?? '');
+  }
+}
+
+// The seed `data.fields` map for an operation entry (used to prefill the arg
+// form when a node is inserted or switched to a different operation).
+export function catalogFieldsMap(op) {
+  const out = {};
+  for (const field of op.fields ?? []) out[field.name] = fieldDefaultValue(field);
+  return out;
+}
+
+// The catalog entry a node currently matches, so an operation `<select>` can
+// preselect it: calls key on `operation`, effects on `effect`, terminals on
+// `terminalKind`.
+export function currentOperationId(catalog, node) {
+  const kind = node?.data?.kind;
+  const match = (predicate) => (catalog ?? []).find(predicate)?.id ?? null;
+  if (kind === 'call') return match((op) => op.operation === node.data.operation);
+  if (kind === 'effect') return match((op) => op.effect === node.data.effect);
+  if (kind === 'terminal') return match((op) => op.terminalKind === node.data.terminalKind);
+  return null;
 }
 
 // Menu glyph + accent for a catalog entry (containers borrow the container

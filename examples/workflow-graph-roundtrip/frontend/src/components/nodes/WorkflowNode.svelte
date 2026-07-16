@@ -1,13 +1,20 @@
 <script>
   import { Handle, Position } from '@xyflow/svelte';
   import { getContext } from 'svelte';
-  import { kindMeta, OP_LABELS, WAITING_EFFECTS } from '../../lib/nodeKinds.js';
+  import { kindMeta, WAITING_EFFECTS } from '../../lib/nodeKinds.js';
+  import {
+    operationsForKind,
+    catalogFieldsMap,
+    currentOperationId,
+    fieldDefaultValue,
+  } from '../../lib/operations.js';
   import ExpressionField from '../ExpressionField.svelte';
 
   let { id, data } = $props();
 
   const run = getContext('run');
   const mode = getContext('mode');
+  const ops = getContext('ops');
   const node = $derived(data.node);
   const meta = $derived(kindMeta(node.data.kind));
   const status = $derived(run.overlay[id] ?? null);
@@ -33,18 +40,79 @@
   const moveTargets = $derived(data.getMoveTargets ? data.getMoveTargets(id) : []);
   let moveOpen = $state(false);
 
-  const subtitle = $derived(
-    node.data.operation
-      ? (OP_LABELS[node.data.operation] ?? node.data.operation)
-      : (node.data.effect ??
-          (isAssign ? 'assignment' : isComputation ? 'sequenced compute' : kind)),
-  );
   const isWaitEffect = $derived(node.data.effect && WAITING_EFFECTS.has(node.data.effect));
-  const terminalKind = $derived(node.data.terminalKind ?? null);
+  const terminalKind = $derived(node.data.terminalKind ?? 'finish');
+  // Invoke nodes surface their operation as an editable <select>; other kinds
+  // get a short descriptive subtitle in the header.
+  const subtitle = $derived(
+    isAssign
+      ? 'assignment'
+      : isComputation
+        ? 'sequenced compute'
+        : isData
+          ? 'value'
+          : isTerminal
+            ? 'terminal'
+            : kind,
+  );
 
   const fieldKeys = $derived(Object.keys(node.data.fields ?? {}));
 
+  // Operation catalog entries this node may switch between (display.* for a
+  // call, sleep/wait_signal for an effect), and the entry it currently matches.
+  const opOptions = $derived(isInvoke ? operationsForKind(ops?.entries, kind) : []);
+  const currentOpId = $derived(currentOperationId(ops?.entries, node));
+
   function commit() {
+    // Effects are rebuilt from `data.effect` + `fields` by the lens; drop any
+    // seeded raw expression so the structured path wins once the user edits.
+    if (kind === 'effect') delete node.data.expression;
+    data.onCommit?.();
+  }
+
+  // Switch an existing call/effect to a different operation: point the node at
+  // the chosen operation and reset the arg form to that operation's typed
+  // defaults. The backend swaps the receiver (calls) / rebuilds from effect +
+  // fields (effects), so this round-trips without delete + re-add.
+  function switchOperation(event) {
+    const op = (ops?.entries ?? []).find((o) => o.id === event.currentTarget.value);
+    if (!op) return;
+    if (kind === 'call') node.data.operation = op.operation;
+    else {
+      node.data.effect = op.effect;
+      delete node.data.expression;
+    }
+    node.data.fields = catalogFieldsMap(op);
+    data.onCommit?.();
+  }
+
+  function setTerminalKind(next) {
+    node.data.terminalKind = next;
+    data.onCommit?.();
+  }
+
+  // Add / remove record arguments on a call node. The lens rebuilds the receiver
+  // record from `data.fields` verbatim, so both are authoritative.
+  let addingField = $state(false);
+  let newFieldName = $state('');
+  let newFieldType = $state('string');
+  function addField() {
+    const name = newFieldName.trim();
+    const fields = node.data.fields ?? {};
+    if (!name || Object.prototype.hasOwnProperty.call(fields, name)) return;
+    node.data.fields = {
+      ...fields,
+      [name]: fieldDefaultValue({ type: newFieldType, default: newFieldType === 'number' ? 0 : '' }),
+    };
+    newFieldName = '';
+    newFieldType = 'string';
+    addingField = false;
+    data.onCommit?.();
+  }
+  function removeField(key) {
+    const next = { ...(node.data.fields ?? {}) };
+    delete next[key];
+    node.data.fields = next;
     data.onCommit?.();
   }
 
@@ -92,9 +160,30 @@
     <span class="wf-badge" title={kind}>
       <span class="wf-glyph">{meta.glyph}</span>{meta.label}
     </span>
-    <span class="wf-sub">{subtitle}</span>
-    {#if isTerminal && terminalKind}
-      <span class="wf-term wf-term--{terminalKind}">{terminalKind}</span>
+    {#if !isInvoke}
+      <span class="wf-sub">{subtitle}</span>
+    {/if}
+    {#if isTerminal}
+      <span class="wf-term-toggle nodrag" role="group" aria-label="Terminal kind">
+        <button
+          class="wf-term-btn"
+          class:is-active={terminalKind === 'finish'}
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            setTerminalKind('finish');
+          }}>finish</button
+        >
+        <button
+          class="wf-term-btn wf-term-btn--fail"
+          class:is-active={terminalKind === 'fail'}
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            setTerminalKind('fail');
+          }}>fail</button
+        >
+      </span>
     {/if}
     {#if status}
       <span class="wf-status wf-status--{status}">{status}</span>
@@ -191,6 +280,28 @@
     </div>
   {/if}
 
+  {#if isInvoke && opOptions.length}
+    <label class="wf-op nodrag">
+      <span class="wf-op-k">{kind === 'call' ? 'action' : 'effect'}</span>
+      <div class="wf-op-wrap">
+        <select
+          class="wf-op-select"
+          value={currentOpId}
+          onpointerdown={(e) => e.stopPropagation()}
+          onchange={switchOperation}
+        >
+          {#if currentOpId === null}
+            <option value={null} disabled>— choose —</option>
+          {/if}
+          {#each opOptions as op (op.id)}
+            <option value={op.id}>{op.label}</option>
+          {/each}
+        </select>
+        <span class="wf-op-caret">▾</span>
+      </div>
+    </label>
+  {/if}
+
   {#if hasBinding}
     <div class="wf-bind">
       <span class="wf-bind-kw">let</span>
@@ -206,11 +317,11 @@
     </div>
   {/if}
 
-  {#if fieldKeys.length}
+  {#if fieldKeys.length || kind === 'call'}
     <div class="wf-fields">
       {#each fieldKeys as key (key)}
         {@const v = node.data.fields[key]}
-        <label class="wf-field">
+        <label class="wf-field" class:has-remove={kind === 'call'}>
           <span class="wf-key">{key}</span>
           {#if fieldType(v) === 'number'}
             <input
@@ -251,8 +362,49 @@
           {:else}
             <code class="wf-ro">{JSON.stringify(v)}</code>
           {/if}
+          {#if kind === 'call'}
+            <button
+              class="wf-field-del"
+              title="Remove argument"
+              aria-label="Remove argument {key}"
+              onpointerdown={(e) => e.stopPropagation()}
+              onclick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                removeField(key);
+              }}>×</button
+            >
+          {/if}
         </label>
       {/each}
+      {#if kind === 'call'}
+        <div class="wf-addfield nodrag">
+          {#if addingField}
+            <input
+              class="wf-af-name"
+              placeholder="name"
+              bind:value={newFieldName}
+              spellcheck="false"
+              onpointerdown={(e) => e.stopPropagation()}
+              onkeydown={(e) => e.key === 'Enter' && addField()}
+            />
+            <select
+              class="wf-af-type"
+              bind:value={newFieldType}
+              onpointerdown={(e) => e.stopPropagation()}
+            >
+              <option value="string">text</option>
+              <option value="number">number</option>
+              <option value="expression">expr</option>
+            </select>
+            <button class="wf-af-ok" title="Add argument" onclick={addField}>✓</button>
+            <button class="wf-af-cancel" title="Cancel" onclick={() => (addingField = false)}>×</button
+            >
+          {:else}
+            <button class="wf-af-open" onclick={() => (addingField = true)}>+ add field</button>
+          {/if}
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -349,21 +501,42 @@
     white-space: nowrap;
     flex: 1;
   }
-  .wf-term {
+  .wf-term-toggle {
+    display: inline-flex;
+    gap: 1px;
+    padding: 1px;
+    background: var(--ink-2);
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    flex: 1;
+    max-width: 130px;
+  }
+  .wf-term-btn {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
     font-family: var(--font-mono);
     font-size: 8.5px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    padding: 2px 5px;
+    padding: 3px 6px;
     border-radius: 5px;
+    cursor: pointer;
+    transition:
+      color 0.12s ease,
+      background 0.12s ease;
   }
-  .wf-term--finish {
-    color: #5fd08a;
-    background: rgba(95, 208, 138, 0.16);
+  .wf-term-btn:hover {
+    color: var(--text-dim);
   }
-  .wf-term--fail {
-    color: var(--rose);
-    background: color-mix(in srgb, var(--rose) 18%, transparent);
+  .wf-term-btn.is-active {
+    color: #041012;
+    background: #5fd08a;
+  }
+  .wf-term-btn--fail.is-active {
+    color: #180208;
+    background: var(--rose);
   }
   .wf-status {
     font-family: var(--font-mono);
@@ -532,6 +705,58 @@
     margin-bottom: 4px;
   }
 
+  .wf-op {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 2px 0 6px;
+  }
+  .wf-op-k {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+  .wf-op-wrap {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+  }
+  .wf-op-select {
+    appearance: none;
+    width: 100%;
+    background: color-mix(in srgb, var(--accent) 8%, var(--ink-2));
+    border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line));
+    border-radius: 7px;
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-weight: 600;
+    font-size: 12px;
+    padding: 5px 26px 5px 9px;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+  }
+  .wf-op-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .wf-op-select option {
+    background: var(--ink-2);
+    color: var(--text);
+  }
+  .wf-op-caret {
+    position: absolute;
+    right: 9px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--accent);
+    font-size: 9px;
+    pointer-events: none;
+  }
+
   .wf-reads {
     display: flex;
     flex-wrap: wrap;
@@ -609,6 +834,102 @@
     grid-template-columns: 62px 1fr;
     align-items: center;
     gap: 8px;
+  }
+  .wf-field.has-remove {
+    grid-template-columns: 58px 1fr auto;
+  }
+  .wf-field-del {
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 14px;
+    line-height: 1;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    padding: 0;
+    cursor: pointer;
+    transition:
+      color 0.12s ease,
+      background 0.12s ease;
+  }
+  .wf-field-del:hover {
+    color: var(--rose);
+    background: color-mix(in srgb, var(--rose) 16%, transparent);
+  }
+  .wf-addfield {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 2px;
+  }
+  .wf-af-open {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.04em;
+    color: var(--text-faint);
+    background: transparent;
+    border: 1px dashed var(--line-strong);
+    border-radius: 6px;
+    padding: 4px 9px;
+    cursor: pointer;
+    transition:
+      color 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .wf-af-open:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--line-strong));
+  }
+  .wf-af-name {
+    flex: 1;
+    min-width: 0;
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 4px 7px;
+  }
+  .wf-af-name:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .wf-af-type {
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 4px 5px;
+    cursor: pointer;
+  }
+  .wf-af-ok,
+  .wf-af-cancel {
+    border: none;
+    background: transparent;
+    font-size: 13px;
+    line-height: 1;
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .wf-af-ok {
+    color: #5fd08a;
+  }
+  .wf-af-ok:hover {
+    background: rgba(95, 208, 138, 0.16);
+  }
+  .wf-af-cancel {
+    color: var(--text-faint);
+  }
+  .wf-af-cancel:hover {
+    color: var(--rose);
+    background: color-mix(in srgb, var(--rose) 16%, transparent);
   }
   .wf-key {
     font-family: var(--font-mono);

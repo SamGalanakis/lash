@@ -46,15 +46,6 @@ export const CONTAINER_SUBKINDS = {
 // Effect verbs that render as a "waiting"-capable node (sleeps / signal waits).
 export const WAITING_EFFECTS = new Set(['sleep', 'wait_signal', 'await_join']);
 
-// The "+ Add node" palette is fed by the operation catalog (lib/operations.js),
-// which is the single data home for what can be inserted — see groupOperations.
-
-// Human labels for the toy display tool operations.
-export const OP_LABELS = {
-  show_message: 'show message',
-  set_status: 'set status',
-  add_item: 'add item',
-  set_light: 'set light',
-  set_progress: 'set progress',
-  highlight: 'highlight',
-};
+// The "+ Add node" palette and per-node operation labels are fed by the
+// operation catalog (lib/operations.js) served from GET /operations — the
+// single data home for what can be inserted and how each operation is named.
