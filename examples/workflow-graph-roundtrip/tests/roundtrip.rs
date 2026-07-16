@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::Value;
 use workflow_graph_roundtrip::{
     AppState, ChildGroup, EditableValue, FlowNode, NodeData, RunEvent, RunStatus, RunTiming,
-    WorkflowCatalogEntry, WorkflowDocument,
+    SaveWorkflowResponse, WorkflowCatalogEntry, WorkflowDocument,
 };
 
 #[tokio::test]
@@ -662,6 +662,11 @@ async fn new_call_node_saves_reprojects_and_runs_with_canonical_correlation() {
     call.data.expression =
         Some("await display.set_status({ key: \"k\", value: \"v\" })?".to_string());
     append_process_node(&mut document, call);
+    let posted_ids = document
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
 
     let response = client
         .post(format!("{base}/workflow"))
@@ -670,7 +675,26 @@ async fn new_call_node_saves_reprojects_and_runs_with_canonical_correlation() {
         .await
         .expect("save workflow with new call");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let saved: WorkflowDocument = response.json().await.expect("saved workflow");
+    let saved_response: SaveWorkflowResponse = response.json().await.expect("saved workflow");
+    let saved = saved_response.document;
+    assert_eq!(saved_response.id_map.len(), posted_ids.len());
+    assert!(posted_ids.iter().all(|posted_id| {
+        saved_response
+            .id_map
+            .get(posted_id)
+            .is_some_and(|reprojected_id| saved.nodes.iter().any(|node| &node.id == reprojected_id))
+    }));
+    assert!(
+        saved_response
+            .id_map
+            .get("new:call")
+            .is_some_and(|reprojected_id| {
+                saved.nodes.iter().any(|node| {
+                    &node.id == reprojected_id
+                        && node.data.operation.as_deref() == Some("set_status")
+                })
+            })
+    );
     assert!(
         saved
             .source

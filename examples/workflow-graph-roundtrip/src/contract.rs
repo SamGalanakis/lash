@@ -17,6 +17,14 @@ pub struct WorkflowDocument {
     pub roots: GraphRoots,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveWorkflowResponse {
+    #[serde(flatten)]
+    pub document: WorkflowDocument,
+    pub id_map: BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphRoots {

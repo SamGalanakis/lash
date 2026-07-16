@@ -30,7 +30,7 @@ pub use catalog::{SelectWorkflowRequest, WorkflowCatalogEntry};
 pub use contract::{
     ChildGroup, DisplayDelta, DisplayState, EdgeData, EditableComprehensionClause, EditableValue,
     FlowEdge, FlowNode, GraphRoots, NodeData, RenderErrorResponse, RunEvent, RunStatus,
-    WorkflowDocument,
+    SaveWorkflowResponse, WorkflowDocument,
 };
 pub use runtime::RunTiming;
 
@@ -183,7 +183,7 @@ async fn get_workflow(State(state): State<AppState>) -> Json<WorkflowDocument> {
 async fn save_workflow(
     State(state): State<AppState>,
     Json(document): Json<WorkflowDocument>,
-) -> Result<Json<WorkflowDocument>, RenderErrorResponse> {
+) -> Result<Json<SaveWorkflowResponse>, RenderErrorResponse> {
     let current = state.current();
     if document.version != current.version {
         return Err(RenderErrorResponse::version_conflict(
@@ -191,15 +191,16 @@ async fn save_workflow(
             current.version,
         ));
     }
-    let graph = graph::graph_from_document(document, &current.graph)?;
+    let graph = graph::graph_from_document(document.clone(), &current.graph)?;
     let source = workflow_graph_to_source(&graph).map_err(RenderErrorResponse::from)?;
     let graph = workflow_graph_from_source(&source).map_err(RenderErrorResponse::projection)?;
     let saved = state.save(source, graph);
-    Ok(Json(graph::document_from_graph(
-        saved.version,
-        saved.source,
-        saved.graph,
-    )))
+    let reprojected = graph::document_from_graph(saved.version, saved.source, saved.graph);
+    let id_map = graph::reconcile_node_ids(&document, &reprojected);
+    Ok(Json(SaveWorkflowResponse {
+        document: reprojected,
+        id_map,
+    }))
 }
 
 async fn run_workflow(
