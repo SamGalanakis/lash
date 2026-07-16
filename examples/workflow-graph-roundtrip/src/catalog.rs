@@ -22,6 +22,12 @@ pub(crate) struct BuiltInWorkflow {
     pub source: &'static str,
 }
 
+const BLANK_WORKFLOW: &str = r#"
+process blank() {
+  finish 0
+}
+"#;
+
 const TRAFFIC_LIGHTS_WORKFLOW: &str = r#"
 @label(title: "Traffic lights", description: "Cycle a three-light signal twice")
 process traffic_lights() {
@@ -95,6 +101,12 @@ process counter_loop() {
 "#;
 
 pub(crate) const BUILT_IN_WORKFLOWS: &[BuiltInWorkflow] = &[
+    BuiltInWorkflow {
+        id: "blank",
+        name: "Blank workflow",
+        description: "An empty starter you build up by adding nodes.",
+        source: BLANK_WORKFLOW,
+    },
     BuiltInWorkflow {
         id: "onboarding",
         name: "Onboarding",

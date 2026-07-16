@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lashlang::{
-    Expr, WorkflowContainer, WorkflowDeclaration, WorkflowEdge, WorkflowEdgeKind, WorkflowGraph,
-    WorkflowListComprehensionClause, WorkflowNode, WorkflowNodeId, WorkflowNodeKind,
-    WorkflowNodeNameSource, WorkflowSubgraph, canonical_expression_source, parse_expression,
+    Expr, VariableVersion, WorkflowContainer, WorkflowDeclaration, WorkflowEdge, WorkflowEdgeKind,
+    WorkflowEffectKind, WorkflowGraph, WorkflowListComprehensionClause, WorkflowNode,
+    WorkflowNodeId, WorkflowNodeKind, WorkflowNodeNameSource, WorkflowSubgraph,
+    WorkflowTerminalKind, canonical_assign_target_source, canonical_expression_source,
+    parse_expression,
 };
 use serde_json::json;
 
@@ -38,6 +40,7 @@ pub(crate) fn document_from_graph(
             parent_id: None,
             data: NodeData {
                 kind: "process".to_string(),
+                subkind: None,
                 title: process.display_name.clone(),
                 description: process.description.clone(),
                 name_source: name_source(process.name_source),
@@ -240,6 +243,7 @@ fn node_data(node: &WorkflowNode, children: Vec<ChildGroup>) -> NodeData {
     };
     NodeData {
         kind: node_kind(node).to_string(),
+        subkind: node_subkind(node).map(str::to_string),
         title: node.name.clone(),
         description: node.description.clone(),
         name_source: name_source(node.name_source),
@@ -364,19 +368,20 @@ fn build_subgraph(
                 json!({ "scope": scope, "nodeId": id }),
             )
         })?;
-        let mut node = baseline_nodes.get(id).cloned().ok_or_else(|| {
-            RenderErrorResponse::document(
-                format!("flow node `{id}` does not exist in workflow version"),
-                json!({ "nodeId": id }),
-            )
-        })?;
-        apply_editable_data(&mut node, &flow.data)?;
+        let (mut node, is_new) = match baseline_nodes.get(id).cloned() {
+            Some(mut node) => {
+                apply_editable_data(&mut node, &flow.data)?;
+                (node, false)
+            }
+            None => (node_from_flow_data(id, &flow.data)?, true),
+        };
         rebuild_children(
             &mut node,
             &flow.data.children,
             flow_nodes,
             baseline_nodes,
             flow_edges,
+            is_new,
         )?;
         nodes.push(node);
     }
@@ -437,6 +442,7 @@ fn rebuild_children(
     flow_nodes: &BTreeMap<&str, &FlowNode>,
     baseline_nodes: &BTreeMap<String, WorkflowNode>,
     flow_edges: &BTreeMap<&str, Vec<&FlowEdge>>,
+    allow_empty_default: bool,
 ) -> Result<(), RenderErrorResponse> {
     let build = |slot: &str| -> Result<Option<Box<WorkflowSubgraph>>, RenderErrorResponse> {
         children
@@ -453,6 +459,9 @@ fn rebuild_children(
                 .map(Box::new)
             })
             .transpose()
+            .map(|graph| {
+                graph.or_else(|| allow_empty_default.then(|| Box::new(WorkflowSubgraph::default())))
+            })
     };
     match &mut node.kind {
         WorkflowNodeKind::Container(WorkflowContainer::If {
@@ -471,10 +480,265 @@ fn rebuild_children(
         }
         WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { element, .. }) => {
             *element = build("element")?;
+            if allow_empty_default
+                && element
+                    .as_deref()
+                    .is_some_and(|element| element.nodes.is_empty())
+            {
+                return Err(RenderErrorResponse::invalid_node_payload(
+                    &node.id.to_string(),
+                    "container body cannot be empty; a list comprehension needs one element node",
+                ));
+            }
         }
         _ => {}
     }
     Ok(())
+}
+
+fn node_from_flow_data(id: &str, data: &NodeData) -> Result<WorkflowNode, RenderErrorResponse> {
+    let mut outputs = Vec::new();
+    let kind = match data.kind.as_str() {
+        "data" => WorkflowNodeKind::Data {
+            binding: data.binding.clone(),
+            expression: editable_expression(id, data)?,
+        },
+        "call" => {
+            let (expression, parsed) = editable_parsed_expression(id, data)?;
+            let operation = first_receiver_operation(&parsed).ok_or_else(|| {
+                RenderErrorResponse::invalid_expression(
+                    id,
+                    "expression",
+                    "a call node needs a receiver call expression",
+                )
+            })?;
+            WorkflowNodeKind::Call {
+                binding: data.binding.clone(),
+                operation: operation.to_string(),
+                expression,
+            }
+        }
+        "effect" => {
+            let (expression, parsed) = editable_parsed_expression(id, data)?;
+            let effect = match data.effect.as_deref() {
+                Some(effect) => parse_effect_kind(id, effect)?,
+                None => effect_kind(&parsed).ok_or_else(|| {
+                    RenderErrorResponse::invalid_node_payload(
+                        id,
+                        "an effect node needs `data.effect` or a recognized effect expression",
+                    )
+                })?,
+            };
+            WorkflowNodeKind::Effect {
+                binding: data.binding.clone(),
+                effect,
+                expression,
+            }
+        }
+        "state_update" => {
+            let target = required_text(id, data.target.as_ref(), "target")?;
+            let target = parse_assignment_target(id, &target)?;
+            outputs.push(VariableVersion {
+                variable: target.root.to_string(),
+                version: 0,
+            });
+            WorkflowNodeKind::StateUpdate {
+                target: canonical_assign_target_source(&target).map_err(|error| {
+                    RenderErrorResponse::invalid_assignment_target(id, "target", error.to_string())
+                })?,
+                expression: editable_expression(id, data)?,
+            }
+        }
+        "computation" => WorkflowNodeKind::Computation {
+            binding: data.binding.clone(),
+            expression: editable_expression(id, data)?,
+        },
+        "terminal" => {
+            let (expression, parsed) = editable_parsed_expression(id, data)?;
+            let terminal = match parsed {
+                Expr::Finish(_) => WorkflowTerminalKind::Finish,
+                Expr::Fail(_) => WorkflowTerminalKind::Fail,
+                _ => {
+                    return Err(RenderErrorResponse::invalid_node_payload(
+                        id,
+                        "a terminal node needs a `finish` or `fail` expression",
+                    ));
+                }
+            };
+            WorkflowNodeKind::Terminal {
+                terminal,
+                expression,
+            }
+        }
+        "opaque" => WorkflowNodeKind::Opaque {
+            source: required_text(id, data.source.as_ref(), "source")?,
+        },
+        "container" => WorkflowNodeKind::Container(match data.subkind.as_deref() {
+            Some("if") => WorkflowContainer::If {
+                binding: data.binding.clone(),
+                condition: required_text(id, data.condition.as_ref(), "condition")?,
+                then_is_block: true,
+                else_is_block: true,
+                then_graph: Some(Box::new(WorkflowSubgraph::default())),
+                else_graph: Some(Box::new(WorkflowSubgraph::default())),
+            },
+            Some("while") => WorkflowContainer::While {
+                condition: required_text(id, data.condition.as_ref(), "condition")?,
+                body: Some(Box::new(WorkflowSubgraph::default())),
+            },
+            Some("for") => WorkflowContainer::For {
+                binding: required_text(id, data.binding.as_ref(), "binding")?,
+                iterable: required_text(id, data.iterable.as_ref(), "iterable")?,
+                body: Some(Box::new(WorkflowSubgraph::default())),
+            },
+            Some("comprehension") => WorkflowContainer::ListComprehension {
+                binding: data.binding.clone(),
+                clauses: data.clauses.iter().map(workflow_clause).collect(),
+                element: Some(Box::new(WorkflowSubgraph::default())),
+            },
+            subkind => {
+                return Err(RenderErrorResponse::unknown_node_kind(
+                    id,
+                    "container",
+                    subkind,
+                ));
+            }
+        }),
+        kind => {
+            return Err(RenderErrorResponse::unknown_node_kind(
+                id,
+                kind,
+                data.subkind.as_deref(),
+            ));
+        }
+    };
+    Ok(WorkflowNode {
+        id: workflow_node_id(id),
+        name: data.title.clone(),
+        description: data.description.clone(),
+        name_source: parse_name_source(&data.name_source),
+        kind,
+        outputs,
+        execution_sites: Vec::new(),
+        source_span: None,
+    })
+}
+
+fn editable_expression(id: &str, data: &NodeData) -> Result<String, RenderErrorResponse> {
+    editable_parsed_expression(id, data).map(|(source, _)| source)
+}
+
+fn editable_parsed_expression(
+    id: &str,
+    data: &NodeData,
+) -> Result<(String, Expr), RenderErrorResponse> {
+    let source = required_text(id, data.expression.as_ref(), "expression")?;
+    let mut expression = parse_expression(&source).map_err(|error| {
+        RenderErrorResponse::invalid_expression(id, "expression", error.to_string())
+    })?;
+    apply_fields(&mut expression, &data.fields);
+    let source = canonical_expression_source(&expression).map_err(|error| {
+        RenderErrorResponse::invalid_expression(id, "expression", error.to_string())
+    })?;
+    Ok((source, expression))
+}
+
+fn parse_assignment_target(
+    id: &str,
+    source: &str,
+) -> Result<lashlang::AssignTarget, RenderErrorResponse> {
+    let expression = parse_expression(&format!("{source} = null")).map_err(|error| {
+        RenderErrorResponse::invalid_assignment_target(id, "target", error.to_string())
+    })?;
+    match expression {
+        Expr::Assign { target, .. } => Ok(target),
+        _ => Err(RenderErrorResponse::invalid_assignment_target(
+            id,
+            "target",
+            "expected an assignment target",
+        )),
+    }
+}
+
+fn workflow_node_id(id: &str) -> WorkflowNodeId {
+    serde_json::from_value(serde_json::Value::String(id.to_string())).unwrap_or_else(|_| {
+        let placeholder = format!(
+            "new-node-{}",
+            id.as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        serde_json::from_value(serde_json::Value::String(placeholder))
+            .expect("generated workflow node ids are valid")
+    })
+}
+
+fn first_receiver_operation(expression: &Expr) -> Option<&str> {
+    match expression {
+        Expr::ReceiverCall { operation, .. } => Some(operation.as_str()),
+        Expr::Await(inner) => match inner.as_ref() {
+            Expr::ReceiverCall { operation, .. } => Some(operation.as_str()),
+            Expr::ResultUnwrap(inner) => match inner.as_ref() {
+                Expr::ReceiverCall { operation, .. } => Some(operation.as_str()),
+                _ => None,
+            },
+            _ => None,
+        },
+        Expr::ResultUnwrap(inner) => match inner.as_ref() {
+            Expr::ReceiverCall { operation, .. } => Some(operation.as_str()),
+            Expr::Await(inner) => match inner.as_ref() {
+                Expr::ReceiverCall { operation, .. } => Some(operation.as_str()),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn effect_kind(expression: &Expr) -> Option<WorkflowEffectKind> {
+    if let Expr::ResultUnwrap(inner) = expression {
+        return direct_effect_kind(inner);
+    }
+    direct_effect_kind(expression)
+}
+
+fn direct_effect_kind(expression: &Expr) -> Option<WorkflowEffectKind> {
+    match expression {
+        Expr::StartProcess(_) => Some(WorkflowEffectKind::StartProcess),
+        Expr::Await(_) => Some(WorkflowEffectKind::AwaitJoin),
+        Expr::SignalRun { .. } => Some(WorkflowEffectKind::SignalRun),
+        Expr::WaitSignal { .. } => Some(WorkflowEffectKind::WaitSignal),
+        Expr::SleepFor(_) | Expr::SleepUntil(_) => Some(WorkflowEffectKind::Sleep),
+        Expr::Cancel(_) => Some(WorkflowEffectKind::Cancel),
+        Expr::Print(_) => Some(WorkflowEffectKind::Print),
+        Expr::Yield(_) => Some(WorkflowEffectKind::Yield),
+        Expr::Wake(_) => Some(WorkflowEffectKind::Wake),
+        Expr::Break => Some(WorkflowEffectKind::Break),
+        Expr::Continue => Some(WorkflowEffectKind::Continue),
+        _ => None,
+    }
+}
+
+fn parse_effect_kind(id: &str, effect: &str) -> Result<WorkflowEffectKind, RenderErrorResponse> {
+    match effect {
+        "start_process" => Ok(WorkflowEffectKind::StartProcess),
+        "await_join" => Ok(WorkflowEffectKind::AwaitJoin),
+        "signal_run" => Ok(WorkflowEffectKind::SignalRun),
+        "wait_signal" => Ok(WorkflowEffectKind::WaitSignal),
+        "sleep" => Ok(WorkflowEffectKind::Sleep),
+        "cancel" => Ok(WorkflowEffectKind::Cancel),
+        "print" => Ok(WorkflowEffectKind::Print),
+        "yield" => Ok(WorkflowEffectKind::Yield),
+        "wake" => Ok(WorkflowEffectKind::Wake),
+        "break" => Ok(WorkflowEffectKind::Break),
+        "continue" => Ok(WorkflowEffectKind::Continue),
+        _ => Err(RenderErrorResponse::invalid_node_payload(
+            id,
+            format!("unknown effect kind `{effect}`"),
+        )),
+    }
 }
 
 fn apply_editable_data(
@@ -726,6 +990,18 @@ fn node_kind(node: &WorkflowNode) -> &'static str {
         WorkflowNodeKind::Terminal { .. } => "terminal",
         WorkflowNodeKind::Container(_) => "container",
         WorkflowNodeKind::Opaque { .. } => "opaque",
+    }
+}
+
+fn node_subkind(node: &WorkflowNode) -> Option<&'static str> {
+    match node.kind {
+        WorkflowNodeKind::Container(WorkflowContainer::If { .. }) => Some("if"),
+        WorkflowNodeKind::Container(WorkflowContainer::While { .. }) => Some("while"),
+        WorkflowNodeKind::Container(WorkflowContainer::For { .. }) => Some("for"),
+        WorkflowNodeKind::Container(WorkflowContainer::ListComprehension { .. }) => {
+            Some("comprehension")
+        }
+        _ => None,
     }
 }
 

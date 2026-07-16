@@ -39,9 +39,12 @@ pub struct FlowNode {
 #[serde(rename_all = "camelCase")]
 pub struct NodeData {
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subkind: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default = "derived_name_source")]
     pub name_source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
@@ -65,6 +68,10 @@ pub struct NodeData {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChildGroup>,
+}
+
+fn derived_name_source() -> String {
+    "derived".to_string()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -277,6 +284,58 @@ impl RenderErrorResponse {
             "invalid_graph_document",
             message,
             details,
+        )
+    }
+
+    pub(crate) fn invalid_expression(
+        node_id: &str,
+        field: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_expression",
+            format!("node `{node_id}` has invalid `{field}` expression text: {message}"),
+            json!({ "nodeId": node_id, "field": field, "reason": message }),
+        )
+    }
+
+    pub(crate) fn invalid_assignment_target(
+        node_id: &str,
+        field: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_assignment_target",
+            format!("node `{node_id}` has invalid `{field}` assignment target text: {message}"),
+            json!({ "nodeId": node_id, "field": field, "reason": message }),
+        )
+    }
+
+    pub(crate) fn invalid_node_payload(node_id: &str, message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_node_payload",
+            format!("node `{node_id}` has an invalid payload: {message}"),
+            json!({ "nodeId": node_id, "reason": message }),
+        )
+    }
+
+    pub(crate) fn unknown_node_kind(node_id: &str, kind: &str, subkind: Option<&str>) -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown_node_kind",
+            match subkind {
+                Some(subkind) => {
+                    format!("flow node `{node_id}` has unknown kind `{kind}:{subkind}`")
+                }
+                None => format!("flow node `{node_id}` has unknown kind `{kind}`"),
+            },
+            json!({ "nodeId": node_id, "kind": kind, "subkind": subkind }),
         )
     }
 
