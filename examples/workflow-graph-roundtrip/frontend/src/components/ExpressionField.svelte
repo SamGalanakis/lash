@@ -12,6 +12,7 @@
     operandType,
   } from '../lib/fields.js';
   import ScalarBuilder from './ScalarBuilder.svelte';
+  import IdentifierField from './IdentifierField.svelte';
 
   // A single editable Lashlang-text slot, rendered by mode:
   //  - Power: a raw multi-line code input (plus variable picker + validation).
@@ -265,42 +266,15 @@
     </div>
   {:else if builder === 'comparison'}
     <div class="xf-row xf-cmp">
-      {#if vars.length}
-        <select
-          class="xf-cmp-lhs"
-          value={lhs}
-          onpointerdown={(e) => e.stopPropagation()}
-          onfocus={() => (cmpEditing = true)}
-          onchange={(e) => {
-            lhs = e.currentTarget.value;
-            emitCmp();
-          }}
-          onblur={() => {
-            cmpEditing = false;
-            onCommit?.();
-          }}
-        >
-          {#if !vars.includes(lhs)}<option value={lhs}>{lhs || '— variable —'}</option>{/if}
-          {#each vars as v (v)}<option value={v}>{v}</option>{/each}
-        </select>
-      {:else}
-        <input
-          class="xf-cmp-lhs xf-cmp-plain"
-          value={lhs}
-          placeholder="variable"
-          spellcheck="false"
-          onpointerdown={(e) => e.stopPropagation()}
-          onfocus={() => (cmpEditing = true)}
-          oninput={(e) => {
-            lhs = e.currentTarget.value;
-            emitCmp();
-          }}
-          onblur={() => {
-            cmpEditing = false;
-            onCommit?.();
-          }}
-        />
-      {/if}
+      <ScalarBuilder
+        value={lhs}
+        compact
+        availableVars={vars}
+        onChange={(enc) => {
+          lhs = enc;
+          emitCmp();
+        }}
+      />
       <select
         class="xf-cmp-op"
         value={op}
@@ -423,42 +397,24 @@
     </div>
   {:else if builder === 'target'}
     <div class="xf-row xf-target">
-      {#if vars.length}
-        <select
-          class="xf-target-base"
+      <span class="xf-target-base">
+        <IdentifierField
           value={tBase}
-          onpointerdown={(e) => e.stopPropagation()}
-          onfocus={() => (tEditing = true)}
-          onchange={(e) => {
-            tBase = e.currentTarget.value;
+          variant="box"
+          placeholder="variable / new name"
+          ariaLabel="Assignment target"
+          options={vars}
+          onInput={(text) => {
+            tEditing = true;
+            tBase = text;
             emitTarget();
           }}
-          onblur={() => {
-            tEditing = false;
-            onCommit?.();
-          }}
-        >
-          {#if !vars.includes(tBase)}<option value={tBase}>{tBase || '— variable —'}</option>{/if}
-          {#each vars as v (v)}<option value={v}>{v}</option>{/each}
-        </select>
-      {:else}
-        <input
-          class="xf-target-base xf-target-plain"
-          value={tBase}
-          placeholder="variable"
-          spellcheck="false"
-          onpointerdown={(e) => e.stopPropagation()}
-          onfocus={() => (tEditing = true)}
-          oninput={(e) => {
-            tBase = e.currentTarget.value;
-            emitTarget();
-          }}
-          onblur={() => {
+          onCommit={() => {
             tEditing = false;
             onCommit?.();
           }}
         />
-      {/if}
+      </span>
       <input
         class="xf-target-tail"
         value={tTail}
@@ -548,8 +504,7 @@
     border-color: var(--accent, var(--cyan));
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--cyan)) 14%, transparent);
   }
-  .xf.has-error .xf-input,
-  .xf.has-error .xf-cmp-plain {
+  .xf.has-error .xf-input {
     border-color: var(--rose);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--rose) 16%, transparent);
   }
@@ -566,7 +521,6 @@
   .xf-val {
     align-items: center;
   }
-  .xf-cmp-lhs,
   .xf-cmp-op {
     background: #0a0d13;
     border: 1px solid color-mix(in srgb, var(--accent, var(--cyan)) 26%, var(--line));
@@ -576,23 +530,14 @@
     font-size: 11px;
     padding: 4px 6px;
     min-width: 0;
+    flex: 0 0 auto;
+    text-align: center;
+    cursor: pointer;
   }
-  .xf-cmp-lhs:focus,
   .xf-cmp-op:focus {
     outline: none;
     border-color: var(--accent, var(--cyan));
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--cyan)) 14%, transparent);
-  }
-  .xf-cmp-lhs {
-    flex: 1 1 40%;
-    color: var(--accent, var(--cyan));
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .xf-cmp-op {
-    flex: 0 0 auto;
-    text-align: center;
-    cursor: pointer;
   }
 
   /* list builder */
@@ -702,28 +647,23 @@
   .xf-target {
     align-items: center;
   }
-  .xf-target-base,
+  .xf-target-base {
+    display: inline-flex;
+    align-items: center;
+    flex: 1 1 45%;
+    min-width: 0;
+  }
   .xf-target-tail {
+    flex: 1 1 45%;
+    min-width: 0;
     background: #0a0d13;
     border: 1px solid color-mix(in srgb, var(--accent, var(--cyan)) 26%, var(--line));
     border-radius: 6px;
-    color: #eaf2ff;
+    color: var(--text-dim);
     font-family: var(--font-mono);
     font-size: 11px;
     padding: 4px 6px;
-    min-width: 0;
   }
-  .xf-target-base {
-    flex: 1 1 45%;
-    color: var(--accent, var(--cyan));
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .xf-target-tail {
-    flex: 1 1 45%;
-    color: var(--text-dim);
-  }
-  .xf-target-base:focus,
   .xf-target-tail:focus {
     outline: none;
     border-color: var(--accent, var(--cyan));

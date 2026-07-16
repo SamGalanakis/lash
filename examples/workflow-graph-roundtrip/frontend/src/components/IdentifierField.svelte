@@ -1,11 +1,13 @@
 <script>
   import { validateFragment } from '../lib/api.js';
 
-  // A plain name input that validates as a Lashlang `identifier` inline (via the
-  // same /validate path ExpressionField uses for expressions), so a bad process
-  // name, param/signal name, or loop binding fails at the field with a red
-  // underline + message instead of only at Save. `variant` picks the look:
-  // 'title' (borderless, large) or 'box' (bordered, compact).
+  // A name input that validates as a Lashlang `identifier` inline (via the same
+  // /validate path ExpressionField uses for expressions), so a bad process name,
+  // param/signal name, loop binding, or a brand-new assignment target fails at
+  // the field with a red underline + message instead of only at Save. `variant`
+  // picks the look: 'title' (borderless, large) or 'box' (bordered, compact).
+  // When `options` is non-empty the input becomes a combobox (a native datalist)
+  // — pick an in-scope name or type a new identifier.
   let {
     value = '',
     onInput,
@@ -13,7 +15,11 @@
     placeholder = 'name',
     variant = 'box',
     ariaLabel = 'identifier',
+    options = [],
   } = $props();
+
+  const opts = $derived(Array.isArray(options) ? options : []);
+  const listId = `idf-dl-${Math.random().toString(36).slice(2)}`;
 
   let error = $state(null);
   let timer = null;
@@ -50,9 +56,15 @@
     {placeholder}
     aria-label={ariaLabel}
     spellcheck="false"
+    list={opts.length ? listId : undefined}
     oninput={onInputEvent}
     onblur={onBlur}
   />
+  {#if opts.length}
+    <datalist id={listId}>
+      {#each opts as o (o)}<option value={o}></option>{/each}
+    </datalist>
+  {/if}
 </span>
 
 <style>

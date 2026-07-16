@@ -195,6 +195,31 @@ describe('variable-vs-variable comparisons', () => {
     // A variable not in scope is not offered as a pick (stays literal/expression).
     expect(operandType('missing', vars)).toBe('expression');
   });
+
+  it('decodes a literal-LHS comparison (0 < count) with both operands typed', () => {
+    const vars = ['count'];
+    const parsed = parseComparison('0 < count');
+    expect(parsed).toEqual({ lhs: '0', op: '<', rhs: 'count' });
+    // LHS is a scalar literal, RHS an in-scope variable — both operand builders
+    // populate (neither is empty).
+    expect(operandType(parsed.lhs, vars)).toBe('number');
+    expect(operandType(parsed.rhs, vars)).toBe('var');
+  });
+
+  it('decodes a var-LHS comparison (count < 3) with both operands typed', () => {
+    const vars = ['count'];
+    const parsed = parseComparison('(count < 3)');
+    expect(parsed).toEqual({ lhs: 'count', op: '<', rhs: '3' });
+    expect(operandType(parsed.lhs, vars)).toBe('var');
+    expect(operandType(parsed.rhs, vars)).toBe('number');
+  });
+
+  it('re-encodes a literal-LHS comparison bare and round-trips through the wrap', () => {
+    const parsed = parseComparison('(0 < count)');
+    const emitted = `${parsed.lhs} ${parsed.op} ${parsed.rhs}`;
+    expect(emitted).toBe('0 < count');
+    expect(parseComparison(`(${emitted})`)).toEqual(parsed);
+  });
 });
 
 describe('operandType — var-vs-scalar classification for the value builder', () => {
