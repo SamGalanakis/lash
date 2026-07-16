@@ -27,8 +27,13 @@ export async function selectWorkflow(id) {
   return res.json();
 }
 
-// Returns { ok: true, document } on success, or { ok: false, status, error }
-// carrying the typed render error so the UI can show it without losing the draft.
+// Returns { ok: true, document, idMap } on success, or { ok: false, status,
+// error } carrying the typed render error so the UI can show it without losing
+// the draft. `idMap` ({ "<oldId>": "<newId>", ... }, one entry per posted node)
+// lets the caller migrate id-keyed sidecars (positions, selection) across the
+// id remint that every Save performs. It arrives either as a sibling key on the
+// document body or wrapped in an { document, idMap } envelope; both are handled.
+// Older backends omit it entirely (idMap: null → caller falls back gracefully).
 export async function saveWorkflow(document) {
   const res = await fetch('/workflow', {
     method: 'POST',
@@ -36,7 +41,17 @@ export async function saveWorkflow(document) {
     body: JSON.stringify(document),
   });
   if (res.ok) {
-    return { ok: true, document: await res.json() };
+    const body = await res.json();
+    if (body && typeof body === 'object') {
+      if (body.idMap && body.document) {
+        return { ok: true, document: body.document, idMap: body.idMap };
+      }
+      if (body.idMap) {
+        const { idMap, ...doc } = body;
+        return { ok: true, document: doc, idMap };
+      }
+    }
+    return { ok: true, document: body, idMap: null };
   }
   let body = null;
   try {

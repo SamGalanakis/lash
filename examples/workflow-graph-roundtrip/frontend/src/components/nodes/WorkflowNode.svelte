@@ -49,7 +49,16 @@
     if (typeof v === 'number') return 'number';
     if (typeof v === 'boolean') return 'boolean';
     if (typeof v === 'string') return 'string';
+    // A non-literal arg arrives as the sentinel object { "$expr": "<Lashlang>" }.
+    if (v !== null && typeof v === 'object' && typeof v.$expr === 'string') return 'expr';
     return 'other';
+  }
+
+  // Write back keeping the sentinel shape (never collapse to a bare string).
+  // Save validates the Lashlang text; the typed-error banner surfaces malformed
+  // edits, so we do not parse client-side.
+  function onExprField(key, e) {
+    node.data.fields[key] = { $expr: e.currentTarget.value };
   }
 
   function onTitleInput(e) {
@@ -83,6 +92,30 @@
     <span class="wf-sub">{subtitle}</span>
     {#if status}
       <span class="wf-status wf-status--{status}">{status}</span>
+    {/if}
+    {#if data.onReorder}
+      <span class="wf-reorder nodrag" title="Reorder within scope">
+        <button
+          class="wf-move"
+          title="Move earlier in execution order"
+          aria-label="Move node earlier"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            data.onReorder(id, 'up');
+          }}>▲</button
+        >
+        <button
+          class="wf-move"
+          title="Move later in execution order"
+          aria-label="Move node later"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            data.onReorder(id, 'down');
+          }}>▼</button
+        >
+      </span>
     {/if}
     <button
       class="wf-del"
@@ -154,6 +187,17 @@
               spellcheck="false"
               oninput={(e) => (node.data.fields[key] = e.currentTarget.value)}
             />
+          {:else if fieldType(v) === 'expr'}
+            <div class="wf-exprfield nodrag">
+              <input
+                class="wf-input wf-input--expr"
+                type="text"
+                value={v.$expr}
+                spellcheck="false"
+                oninput={(e) => onExprField(key, e)}
+              />
+              <span class="wf-expr-badge" title="Lashlang expression — validated on Save">expr</span>
+            </div>
           {:else}
             <code class="wf-ro">{JSON.stringify(v)}</code>
           {/if}
@@ -300,6 +344,32 @@
     background: color-mix(in srgb, var(--rose) 16%, transparent);
   }
 
+  .wf-reorder {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 1px;
+    flex-shrink: 0;
+  }
+  .wf-move {
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 8px;
+    line-height: 1;
+    width: 17px;
+    height: 10px;
+    padding: 0;
+    border-radius: 3px;
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      background 0.15s ease;
+  }
+  .wf-move:hover {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+
   .wf-title {
     width: 100%;
     background: transparent;
@@ -417,6 +487,34 @@
     font-family: var(--font-mono);
     font-size: 10.5px;
     color: var(--text-dim);
+  }
+  /* expression-valued field: code input with an "expr" affordance badge */
+  .wf-exprfield {
+    position: relative;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .wf-input--expr {
+    background: #0a0d13;
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+    color: #eaf2ff;
+    padding-right: 42px;
+    letter-spacing: 0.01em;
+  }
+  .wf-expr-badge {
+    position: absolute;
+    right: 6px;
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+    border-radius: 4px;
+    padding: 1px 4px;
+    pointer-events: none;
   }
   .wf-wait-note {
     margin-top: 8px;

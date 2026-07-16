@@ -40,8 +40,15 @@ export function layoutDocument(doc) {
       const lines = (node.data.source ?? '').split('\n').length;
       h += Math.min(Math.max(lines, 3), 16) * 17 + 34;
     } else {
-      const fieldCount = Object.keys(node.data.fields ?? {}).length;
+      const fields = node.data.fields ?? {};
+      const fieldCount = Object.keys(fields).length;
       h += fieldCount * 48;
+      // Expression-valued fields ({ "$expr": "…" }) render as a code input with
+      // an "expr" affordance badge — a touch taller than a plain literal row.
+      const exprCount = Object.values(fields).filter(
+        (v) => v !== null && typeof v === 'object' && typeof v.$expr === 'string',
+      ).length;
+      h += exprCount * 10;
       // Typed assignment / computation nodes render dedicated expression rows
       // that are not part of `fields`, so reserve space for them here.
       if (kind === 'state_update') h += 52; // target ≔ expression

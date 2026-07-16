@@ -136,6 +136,30 @@
       <span class="ct-title-static">{node.data.title}</span>
     {/if}
     {#if status}<span class="ct-status ct-status--{status}">{status}</span>{/if}
+    {#if !isProcess && data.onReorder}
+      <span class="ct-reorder nodrag" title="Reorder within scope">
+        <button
+          class="ct-move"
+          title="Move earlier in execution order"
+          aria-label="Move branch earlier"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            data.onReorder(id, 'up');
+          }}>▲</button
+        >
+        <button
+          class="ct-move"
+          title="Move later in execution order"
+          aria-label="Move branch later"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            data.onReorder(id, 'down');
+          }}>▼</button
+        >
+      </span>
+    {/if}
     {#if !isProcess}
       <button
         class="ct-del"
@@ -381,6 +405,31 @@
   .ct-del:hover {
     color: var(--rose);
     background: color-mix(in srgb, var(--rose) 16%, transparent);
+  }
+  .ct-reorder {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 1px;
+    flex-shrink: 0;
+  }
+  .ct-move {
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 8px;
+    line-height: 1;
+    width: 17px;
+    height: 10px;
+    padding: 0;
+    border-radius: 3px;
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      background 0.15s ease;
+  }
+  .ct-move:hover {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .ct-slot {
     position: absolute;

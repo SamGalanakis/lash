@@ -7,7 +7,7 @@ import { layoutDocument } from './layout.js';
 // edit inside a node component mutates the draft that Save serializes back.
 // Positions come from auto-layout, overridden by any user-dragged position
 // persisted out-of-band in localStorage.
-export function buildFlow(doc, storedPositions, onDelete, onAddNode) {
+export function buildFlow(doc, storedPositions, onDelete, onAddNode, onReorder) {
   const { positions, sizes, groupLayouts } = layoutDocument(doc);
   const nodeMap = new Map(doc.nodes.map((n) => [n.id, n]));
 
@@ -50,6 +50,7 @@ export function buildFlow(doc, storedPositions, onDelete, onAddNode) {
         groups: groupLayouts.get(node.id) ?? null,
         onDelete,
         onAddNode,
+        onReorder,
       },
       // Containers must sit behind their children.
       zIndex: isContainer ? 0 : 1,
@@ -319,4 +320,79 @@ export function deleteNodeFromDoc(doc, nodeId) {
       grp.nodeIds = grp.nodeIds.filter((id) => !toRemove.has(id));
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Reordering statements within a scope.
+//
+// Execution order == the order of ids in a group's `nodeIds`; the backend
+// renders source from that order and reprojects. Locate the group that owns
+// `nodeId` (the top-level `main` root or a container/process child group),
+// then move the id within that list. Mirrors deleteNodeFromDoc's
+// draft-mutation style. Sequence edges within the scope are re-chained locally
+// for immediate visual correctness — the backend recomputes them regardless on
+// reproject. Mutates `doc`; returns true if the order actually changed.
+// ---------------------------------------------------------------------------
+
+// Resolve the group list (and its sequence-edge scope) that contains `nodeId`.
+// Top-level `main` nodes carry the `main` scope; processes are parallel
+// top-level definitions with no sequence ordering (scope null, no re-chain).
+function findGroupOf(doc, nodeId) {
+  const main = doc.roots?.main ?? [];
+  if (main.includes(nodeId)) return { nodeIds: main, scope: 'main' };
+  const procs = doc.roots?.processes ?? [];
+  if (procs.includes(nodeId)) return { nodeIds: procs, scope: null };
+  for (const n of doc.nodes) {
+    for (const grp of n.data.children ?? []) {
+      if (grp.nodeIds.includes(nodeId)) return { nodeIds: grp.nodeIds, scope: grp.scope ?? null };
+    }
+  }
+  return null;
+}
+
+// Drop every sequence edge in `scope` and re-chain consecutive members of the
+// (already reordered) group so the drawn arrows match the new order.
+function rechainSequenceEdges(doc, group) {
+  const scope = group.scope;
+  if (!scope) return;
+  const ids = group.nodeIds;
+  doc.edges = doc.edges.filter((e) => !(e.data?.kind === 'sequence' && e.data?.scope === scope));
+  const takenEdges = new Set(doc.edges.map((e) => e.id));
+  for (let i = 0; i + 1 < ids.length; i += 1) {
+    doc.edges.push({
+      id: mintEdgeId(takenEdges),
+      source: ids[i],
+      target: ids[i + 1],
+      data: { kind: 'sequence', scope },
+    });
+  }
+}
+
+// Move `nodeId` within its scope. `direction` is 'up' | 'down' or a target
+// index. A trailing terminal (`finish`/`fail`) is a barrier: a non-terminal
+// node cannot move after it (clamp), and a terminal itself never moves.
+export function reorderNodeInDoc(doc, nodeId, direction) {
+  const group = findGroupOf(doc, nodeId);
+  if (!group) return false;
+  const ids = group.nodeIds;
+  const from = ids.indexOf(nodeId);
+  if (from === -1) return false;
+
+  const kindOf = new Map(doc.nodes.map((n) => [n.id, n.data?.kind]));
+  if (kindOf.get(nodeId) === 'terminal') return false; // terminals stay put
+
+  // A trailing terminal reserves the last slot; movable nodes stop before it.
+  const lastId = ids[ids.length - 1];
+  const hasTrailingTerminal = lastId !== undefined && kindOf.get(lastId) === 'terminal';
+  const maxIndex = hasTrailingTerminal ? ids.length - 2 : ids.length - 1;
+
+  let to = direction === 'up' ? from - 1 : direction === 'down' ? from + 1 : Number(direction);
+  if (Number.isNaN(to)) return false;
+  to = Math.max(0, Math.min(to, maxIndex));
+  if (to === from) return false;
+
+  ids.splice(from, 1);
+  ids.splice(to, 0, nodeId);
+  rechainSequenceEdges(doc, group);
+  return true;
 }

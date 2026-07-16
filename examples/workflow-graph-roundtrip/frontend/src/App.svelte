@@ -7,8 +7,8 @@
   import DisplayPanel from './components/DisplayPanel.svelte';
   import SourceView from './components/SourceView.svelte';
   import { fetchWorkflow, fetchWorkflows, selectWorkflow, saveWorkflow } from './lib/api.js';
-  import { buildFlow, deleteNodeFromDoc, addNodeToDoc } from './lib/graph.js';
-  import { loadPositions, savePosition, clearPositions } from './lib/positions.js';
+  import { buildFlow, deleteNodeFromDoc, addNodeToDoc, reorderNodeInDoc } from './lib/graph.js';
+  import { loadPositions, savePosition, clearPositions, migratePositions } from './lib/positions.js';
   import { RunController } from './lib/runStore.svelte.js';
   import { NODE_KINDS, ADDABLE_KINDS, addableMeta } from './lib/nodeKinds.js';
 
@@ -65,8 +65,29 @@
     rebuild();
   }
 
-  function rebuild() {
-    const { flowNodes: fn, flowEdges: fe } = buildFlow(draftDoc, positions, onDelete, onAddNode);
+  // Move a statement within its scope's execution order (up/down). The backend
+  // reprojects source from the new `nodeIds` order on the next Save.
+  function onReorder(id, direction) {
+    if (reorderNodeInDoc(draftDoc, id, direction)) {
+      dirty = true;
+      saveOk = null;
+      rebuild(new Set([id]));
+    }
+  }
+
+  // `keepSelection` (a Set of node ids) re-marks those nodes selected on the
+  // freshly rebuilt flow — used to preserve selection across a reorder or Save.
+  function rebuild(keepSelection = null) {
+    const { flowNodes: fn, flowEdges: fe } = buildFlow(
+      draftDoc,
+      positions,
+      onDelete,
+      onAddNode,
+      onReorder,
+    );
+    if (keepSelection && keepSelection.size) {
+      for (const n of fn) if (keepSelection.has(n.id)) n.selected = true;
+    }
     flowNodes = fn;
     flowEdges = fe;
     flowKey += 1; // remount SvelteFlow so layout + fitView re-run cleanly
@@ -107,13 +128,13 @@
     }
   }
 
-  function adoptDocument(doc) {
+  function adoptDocument(doc, keepSelection = null) {
     // Deep clone into a fresh reactive draft the host owns and mutates.
     draftDoc = structuredClone(doc);
     canonicalSource = doc.source;
     savedVersion = doc.version;
     dirty = false;
-    rebuild();
+    rebuild(keepSelection);
   }
 
   async function onSave() {
@@ -121,12 +142,27 @@
     saving = true;
     saveError = null;
     saveOk = null;
+    // Capture the current selection BEFORE the id remint so it can be migrated
+    // through the response idMap and survive the rebuild.
+    const selectedIds = flowNodes.filter((n) => n.selected).map((n) => n.id);
     // Serialize the draft (a plain snapshot, without any layout/UI cruft).
     const payload = JSON.parse(JSON.stringify(draftDoc));
     const result = await saveWorkflow(payload);
     saving = false;
     if (result.ok) {
-      adoptDocument(result.document);
+      // Save remints every node id. When the backend reports the old→new id map,
+      // migrate the id-keyed sidecars (persisted positions in localStorage and
+      // the live selection) THROUGH it before rendering the canonical document,
+      // so dragged positions stay put and the selected node stays selected.
+      // Missing entries (deleted nodes) simply drop out. Older backends omit
+      // idMap entirely — fall back to the prior behavior (selection resets).
+      let keepSelection = null;
+      if (result.idMap) {
+        migratePositions(result.idMap);
+        positions = loadPositions();
+        keepSelection = new Set(selectedIds.map((oldId) => result.idMap[oldId] ?? oldId));
+      }
+      adoptDocument(result.document, keepSelection);
       saveOk = `saved as v${result.document.version}`;
       run.reset();
     } else {
