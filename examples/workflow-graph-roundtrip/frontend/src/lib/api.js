@@ -62,6 +62,74 @@ export async function saveWorkflow(document) {
   return { ok: false, status: res.status, error: body?.error ?? null };
 }
 
+// Operation catalog — the data home for the "+ Add node" palette. Returns an
+// array of catalog entries `[{ id, label, nodeKind, subkind?, operation?,
+// effect?, terminalKind?, fields:[{name,type,default}] }]`, or `null` when the
+// backend does not serve `/operations` (older build) so the caller can fall
+// back to its built-in catalog and never crash.
+export async function fetchOperations() {
+  try {
+    const res = await fetch('/operations', { headers: { accept: 'application/json' } });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return Array.isArray(body) ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+// Validate one editable text fragment against the lens. `kind` is
+// `expression` | `assignment_target` | `identifier`. Returns `{ ok:true }` or
+// `{ ok:false, error:{ code, message } }`. A missing endpoint (older backend)
+// or any transport failure resolves to `{ ok:true, unsupported:true }` so the
+// UI degrades to "no inline verdict" rather than showing false errors.
+export async function validateFragment(kind, text) {
+  try {
+    const res = await fetch('/validate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind, text }),
+    });
+    if (!res.ok) return { ok: true, unsupported: true };
+    const body = await res.json();
+    if (body && typeof body.ok === 'boolean') return body;
+    return { ok: true, unsupported: true };
+  } catch {
+    return { ok: true, unsupported: true };
+  }
+}
+
+// Project canonical source text into a WorkflowDocument (text→graph) for the
+// editable source pane. Returns `{ ok:true, document }`, a typed
+// `{ ok:false, status, error }` on a 4xx parse error, or
+// `{ ok:false, unsupported:true }` when the backend has no `/project` route so
+// the pane stays read-only rather than erroring.
+export async function projectSource(source) {
+  let res;
+  try {
+    res = await fetch('/project', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source }),
+    });
+  } catch (err) {
+    return { ok: false, error: { code: 'network', message: err?.message ?? String(err) } };
+  }
+  if (res.ok) {
+    const body = await res.json();
+    const document = body?.document ?? body;
+    return { ok: true, document };
+  }
+  if (res.status === 404) return { ok: false, unsupported: true };
+  let error = null;
+  try {
+    error = (await res.json())?.error ?? null;
+  } catch {
+    error = null;
+  }
+  return { ok: false, status: res.status, error };
+}
+
 // Opens POST /run and yields parsed run-event payloads as they stream in.
 // Each call is a brand-new run/invocation. `signal` aborts it (a new Play).
 export async function* runWorkflow(signal) {
