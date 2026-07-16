@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use workflow_graph_roundtrip::{
-    AppState, ChildGroup, EditableValue, FlowNode, NodeData, RunEvent, RunStatus, RunTiming,
-    SaveWorkflowResponse, WorkflowCatalogEntry, WorkflowDocument,
+    AppState, ChildGroup, EditableComprehensionClause, EditableValue, FlowNode, NodeData, RunEvent,
+    RunStatus, RunTiming, SaveWorkflowResponse, WorkflowCatalogEntry, WorkflowDocument,
 };
 
 #[tokio::test]
@@ -28,7 +28,7 @@ async fn operation_catalog_and_fragment_validation_match_the_editor_contract() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let entries: Value = response.json().await.expect("operation catalog JSON");
     let entries = entries.as_array().expect("operation catalog array");
-    assert_eq!(entries.len(), 15);
+    assert_eq!(entries.len(), 18);
     assert_eq!(
         entries[0],
         serde_json::json!({
@@ -61,11 +61,37 @@ async fn operation_catalog_and_fragment_validation_match_the_editor_contract() {
             ]
         }),
         serde_json::json!({
+            "id": "control.comprehension",
+            "label": "List comprehension",
+            "nodeKind": "container",
+            "subkind": "comprehension",
+            "fields": [
+                { "name": "binding", "type": "identifier", "default": "items" }
+            ]
+        }),
+        serde_json::json!({
+            "id": "stmt.opaque",
+            "label": "Raw statement",
+            "nodeKind": "opaque",
+            "fields": [{
+                "name": "source",
+                "type": "expression",
+                "default": "await display.show_message({ text: \"raw\" })?"
+            }]
+        }),
+        serde_json::json!({
             "id": "stmt.finish",
             "label": "Finish",
             "nodeKind": "terminal",
             "terminalKind": "finish",
             "fields": [{ "name": "expression", "type": "expression", "default": "0" }]
+        }),
+        serde_json::json!({
+            "id": "stmt.fail",
+            "label": "Fail",
+            "nodeKind": "terminal",
+            "terminalKind": "fail",
+            "fields": [{ "name": "expression", "type": "expression", "default": "\"error\"" }]
         }),
         serde_json::json!({
             "id": "effect.sleep",
@@ -134,6 +160,143 @@ async fn operation_catalog_and_fragment_validation_match_the_editor_contract() {
         );
         assert!(body["error"].get("details").is_none());
     }
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn newly_catalogued_nodes_save_reproject_and_run_from_their_catalog_shapes() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(
+        listener,
+        AppState::default(),
+    ));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    let entries: Vec<Value> = client
+        .get(format!("{base}/operations"))
+        .send()
+        .await
+        .expect("GET /operations")
+        .json()
+        .await
+        .expect("operation catalog JSON");
+    let entry = |id: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .unwrap_or_else(|| panic!("catalog entry {id}"))
+    };
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    let mut comprehension =
+        new_flow_node_from_catalog(entry("control.comprehension"), "new:comprehension");
+    comprehension.data.clauses = vec![
+        EditableComprehensionClause::For {
+            binding: "item".to_string(),
+            iterable: "[1, 2, 3]".to_string(),
+        },
+        EditableComprehensionClause::If {
+            condition: "item > 1".to_string(),
+        },
+    ];
+    comprehension.data.children.push(ChildGroup {
+        slot: "element".to_string(),
+        scope: "container:new:comprehension:element".to_string(),
+        node_ids: vec!["new:comprehension-element".to_string()],
+    });
+    append_process_node(&mut document, comprehension);
+    let mut element = new_flow_node(
+        "new:comprehension-element",
+        "computation",
+        None,
+        "Double item",
+    );
+    element.parent_id = Some("new:comprehension".to_string());
+    element.data.expression = Some("item * 2".to_string());
+    document.nodes.push(element);
+
+    append_process_node(
+        &mut document,
+        new_flow_node_from_catalog(entry("stmt.opaque"), "new:opaque"),
+    );
+
+    let finish_id = document
+        .nodes
+        .iter()
+        .find(|node| node.data.terminal_kind.as_deref() == Some("finish"))
+        .expect("blank workflow finish node")
+        .id
+        .clone();
+    document.nodes.retain(|node| node.id != finish_id);
+    document
+        .edges
+        .retain(|edge| edge.source != finish_id && edge.target != finish_id);
+    for node in &mut document.nodes {
+        for child in &mut node.data.children {
+            child.node_ids.retain(|node_id| node_id != &finish_id);
+        }
+    }
+    append_process_node(
+        &mut document,
+        new_flow_node_from_catalog(entry("stmt.fail"), "new:fail"),
+    );
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save newly catalogued nodes");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: SaveWorkflowResponse = response.json().await.expect("saved workflow");
+    assert!(
+        ["new:comprehension", "new:opaque", "new:fail"]
+            .iter()
+            .all(|id| saved.id_map.contains_key(*id))
+    );
+    assert!(saved.document.nodes.iter().any(|node| {
+        node.data.kind == "container"
+            && node.data.subkind.as_deref() == Some("comprehension")
+            && node.data.binding.as_deref() == Some("items")
+            && node.data.clauses
+                == [
+                    EditableComprehensionClause::For {
+                        binding: "item".to_string(),
+                        iterable: "[1, 2, 3]".to_string(),
+                    },
+                    EditableComprehensionClause::If {
+                        condition: "(item > 1)".to_string(),
+                    },
+                ]
+    }));
+    assert!(saved.document.nodes.iter().any(|node| {
+        node.data.operation.as_deref() == Some("show_message")
+            && node
+                .data
+                .fields
+                .get("text")
+                .is_some_and(|value| value == &EditableValue::String("raw".to_string()))
+    }));
+    assert!(saved.document.nodes.iter().any(|node| {
+        node.data.kind == "terminal"
+            && node.data.terminal_kind.as_deref() == Some("fail")
+            && node.data.expression.as_deref() == Some("\"error\"")
+    }));
+    let graph = lashlang::workflow_graph_from_source(&saved.document.source)
+        .expect("saved catalog-created workflow reprojects");
+    assert_eq!(
+        lashlang::workflow_graph_to_source(&graph).expect("reprojected workflow renders"),
+        saved.document.source
+    );
+
+    let events = run_workflow(&client, &base).await;
+    let last = events.last().expect("terminal run event");
+    assert_eq!(last.status, RunStatus::Failed);
+    assert!(last.display.messages.iter().any(|message| message == "raw"));
 
     server.abort();
 }
@@ -1823,6 +1986,41 @@ fn new_flow_node(id: &str, kind: &str, subkind: Option<&str>, title: &str) -> Fl
             available_vars: Vec::new(),
         },
     }
+}
+
+fn new_flow_node_from_catalog(entry: &Value, id: &str) -> FlowNode {
+    let text = |key: &str| entry[key].as_str();
+    let kind = text("nodeKind").expect("catalog nodeKind");
+    let mut node = new_flow_node(
+        id,
+        kind,
+        text("subkind"),
+        text("label").expect("catalog label"),
+    );
+    node.data.operation = text("operation").map(str::to_string);
+    node.data.effect = text("effect").map(str::to_string);
+    node.data.terminal_kind = text("terminalKind").map(str::to_string);
+    for field in entry["fields"].as_array().expect("catalog fields") {
+        let name = field["name"].as_str().expect("catalog field name");
+        let default = field["default"]
+            .as_str()
+            .unwrap_or_else(|| panic!("catalog field {name} string default"))
+            .to_string();
+        match name {
+            "binding" => node.data.binding = Some(default),
+            "target" => node.data.target = Some(default),
+            "expression" => node.data.expression = Some(default),
+            "condition" => node.data.condition = Some(default),
+            "iterable" => node.data.iterable = Some(default),
+            "source" => node.data.source = Some(default),
+            _ => {
+                node.data
+                    .fields
+                    .insert(name.to_string(), EditableValue::String(default));
+            }
+        }
+    }
+    node
 }
 
 fn append_process_node(document: &mut WorkflowDocument, mut node: FlowNode) {
