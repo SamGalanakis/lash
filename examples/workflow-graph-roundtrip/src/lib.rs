@@ -29,11 +29,11 @@ use tokio_stream::wrappers::ReceiverStream;
 
 pub use catalog::{SelectWorkflowRequest, WorkflowCatalogEntry};
 pub use contract::{
-    ChildGroup, DisplayDelta, DisplayState, EdgeData, EditableComprehensionClause, EditableValue,
-    FlowEdge, FlowNode, GraphRoots, NodeData, OperationCatalogEntry, OperationField,
-    ProjectWorkflowRequest, ProjectWorkflowResponse, RenderErrorResponse, RunEvent, RunStatus,
-    SaveWorkflowResponse, SourceProjectionErrorResponse, ValidateRequest, ValidateResponse,
-    ValidationKind, WorkflowDocument,
+    ChildGroup, DisplayDelta, DisplayState, EdgeData, EditableComprehensionClause,
+    EditableProcessField, EditableValue, FlowEdge, FlowNode, GraphRoots, NodeData,
+    OperationCatalogEntry, OperationField, ProjectWorkflowRequest, ProjectWorkflowResponse,
+    RenderErrorResponse, RunEvent, RunStatus, SaveWorkflowResponse, SourceProjectionErrorResponse,
+    ValidateRequest, ValidateResponse, ValidationKind, WorkflowDocument,
 };
 pub use runtime::RunTiming;
 

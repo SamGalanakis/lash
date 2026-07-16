@@ -25,9 +25,9 @@ pub use artifact::{
 };
 pub use ast::{
     AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ExprFolder, ExprVisitor,
-    LabelMetadata, ListComprehensionClause, ProcessDecl, ProcessParam, ProcessStartExpr, Program,
-    ResourceRefExpr, TypeDecl, TypeExpr, TypeField, UnaryOp, fold_expr_children, format_type_expr,
-    walk_expr,
+    LabelMetadata, ListComprehensionClause, ProcessDecl, ProcessParam, ProcessSignalDecl,
+    ProcessStartExpr, Program, ResourceRefExpr, TypeDecl, TypeExpr, TypeField, UnaryOp,
+    fold_expr_children, format_type_expr, walk_expr,
 };
 pub use compile::{
     ModuleCompileDiagnostic, ModuleCompileError, ModuleCompileOutput, ModuleCompileRequest,
@@ -47,7 +47,7 @@ pub use linker::{
     LashlangLanguageFeatures, LinkError, LinkedModule, NamedDataType, NamedDataTypeError,
     ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding, ValueConstructorBinding,
 };
-pub use parser::{ParseError, parse, parse_expression};
+pub use parser::{ParseError, parse, parse_expression, parse_type_expression};
 pub use runtime::{
     AbilityOp, AbilityResult, BudgetedJsonProjectionConfig, BudgetedJsonProjector, CompileStats,
     CompiledLinkedProgram, CompiledProcessCache, CompiledProcessCacheKey, CompiledProgram,

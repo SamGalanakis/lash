@@ -27,6 +27,16 @@ pub(crate) fn entries() -> Vec<OperationCatalogEntry> {
         .collect::<Vec<_>>();
     entries.extend([
         entry(
+            "proc.process",
+            "Process",
+            "process",
+            None,
+            None,
+            None,
+            None,
+            vec![field("name", "identifier", json!("my_process"))],
+        ),
+        entry(
             "effect.sleep",
             "Sleep",
             "effect",

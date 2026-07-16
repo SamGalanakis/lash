@@ -20,6 +20,17 @@ mod tests {
     }
 
     #[test]
+    fn type_expression_fragment_consumes_the_complete_input() {
+        assert_eq!(
+            parse_type_expression("list[str | null]").expect("type fragment should parse"),
+            TypeExpr::List(Box::new(TypeExpr::Union(vec![TypeExpr::Str, TypeExpr::Null])))
+        );
+        let error = parse_type_expression("any trailing")
+            .expect_err("trailing type fragment input should be rejected");
+        assert!(error.to_string().contains("end of type expression"));
+    }
+
+    #[test]
     fn bare_finish_requires_value() {
         let err = parse("finish").expect_err("bare finish should be rejected");
         assert!(matches!(err, ParseError::MissingFinishValue { .. }));

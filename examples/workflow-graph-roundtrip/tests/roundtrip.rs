@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 use workflow_graph_roundtrip::{
-    AppState, ChildGroup, EditableComprehensionClause, EditableValue, FlowNode, NodeData, RunEvent,
-    RunStatus, RunTiming, SaveWorkflowResponse, WorkflowCatalogEntry, WorkflowDocument,
+    AppState, ChildGroup, EditableComprehensionClause, EditableProcessField, EditableValue,
+    FlowNode, NodeData, RunEvent, RunStatus, RunTiming, SaveWorkflowResponse, WorkflowCatalogEntry,
+    WorkflowDocument,
 };
 
 #[tokio::test]
@@ -28,7 +29,7 @@ async fn operation_catalog_and_fragment_validation_match_the_editor_contract() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let entries: Value = response.json().await.expect("operation catalog JSON");
     let entries = entries.as_array().expect("operation catalog array");
-    assert_eq!(entries.len(), 18);
+    assert_eq!(entries.len(), 19);
     assert_eq!(
         entries[0],
         serde_json::json!({
@@ -50,6 +51,14 @@ async fn operation_catalog_and_fragment_validation_match_the_editor_contract() {
             })
     }));
     for expected in [
+        serde_json::json!({
+            "id": "proc.process",
+            "label": "Process",
+            "nodeKind": "process",
+            "fields": [
+                { "name": "name", "type": "identifier", "default": "my_process" }
+            ]
+        }),
         serde_json::json!({
             "id": "control.for",
             "label": "For each",
@@ -160,6 +169,209 @@ async fn operation_catalog_and_fragment_validation_match_the_editor_contract() {
         );
         assert!(body["error"].get("details").is_none());
     }
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn catalog_process_shape_adds_a_seeded_top_level_process_that_reprojects_and_runs() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(
+        listener,
+        AppState::default(),
+    ));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    let entries: Vec<Value> = client
+        .get(format!("{base}/operations"))
+        .send()
+        .await
+        .expect("GET /operations")
+        .json()
+        .await
+        .expect("operation catalog JSON");
+    let process_entry = entries
+        .iter()
+        .find(|entry| entry["id"] == "proc.process")
+        .expect("process catalog entry");
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    let process = new_flow_node_from_catalog(process_entry, "new:process");
+    assert_eq!(process.data.name.as_deref(), Some("my_process"));
+    document.roots.processes.insert(0, process.id.clone());
+    document.nodes.push(process);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save added process");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: SaveWorkflowResponse = response.json().await.expect("saved workflow");
+    assert!(saved.id_map.contains_key("new:process"));
+    assert_eq!(saved.document.roots.processes.len(), 2);
+    assert!(
+        saved
+            .document
+            .source
+            .starts_with("process my_process() {\n  finish 0\n}\n\nprocess blank()")
+    );
+    let added = saved
+        .document
+        .nodes
+        .iter()
+        .find(|node| node.data.name.as_deref() == Some("my_process"))
+        .expect("reprojected added process");
+    assert_eq!(added.data.kind, "process");
+    assert!(added.data.params.is_empty());
+    assert!(added.data.signals.is_empty());
+    let body = added
+        .data
+        .children
+        .iter()
+        .find(|child| child.slot == "body")
+        .expect("seeded process body");
+    assert_eq!(body.node_ids.len(), 1);
+    assert!(saved.document.nodes.iter().any(|node| {
+        node.id == body.node_ids[0]
+            && node.data.terminal_kind.as_deref() == Some("finish")
+            && node.data.expression.as_deref() == Some("0")
+    }));
+    let graph = lashlang::workflow_graph_from_source(&saved.document.source)
+        .expect("added process source reprojects");
+    assert_eq!(
+        lashlang::workflow_graph_to_source(&graph).expect("added process graph renders"),
+        saved.document.source
+    );
+
+    let events = run_workflow(&client, &base).await;
+    assert_eq!(
+        events.last().expect("terminal run event").status,
+        RunStatus::Succeeded
+    );
+    assert_eq!(
+        events.last().expect("terminal run event").node_id,
+        body.node_ids[0]
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn process_name_params_and_signals_add_remove_and_round_trip() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(
+        listener,
+        AppState::default(),
+    ));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    let process = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.data.kind == "process")
+        .expect("blank process");
+    process.data.name = Some("renamed".to_string());
+    process.data.params = vec![
+        EditableProcessField {
+            name: "input".to_string(),
+            field_type: "int".to_string(),
+        },
+        EditableProcessField {
+            name: "enabled".to_string(),
+            field_type: "bool".to_string(),
+        },
+    ];
+    process.data.signals = vec![
+        EditableProcessField {
+            name: "continue".to_string(),
+            field_type: "any".to_string(),
+        },
+        EditableProcessField {
+            name: "stop".to_string(),
+            field_type: "str".to_string(),
+        },
+    ];
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save edited process signature");
+    let status = response.status();
+    let body = response.bytes().await.expect("process signature response");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let mut saved: SaveWorkflowResponse = serde_json::from_slice(&body).expect("saved workflow");
+    assert_eq!(
+        saved.document.source,
+        "process renamed(input: int, enabled: bool) signals { continue: any, stop: str } {\n  finish 0\n}\n"
+    );
+
+    let process = saved
+        .document
+        .nodes
+        .iter_mut()
+        .find(|node| node.data.kind == "process")
+        .expect("reprojected renamed process");
+    process.data.name = Some("revised".to_string());
+    process.data.params.pop();
+    process.data.signals.pop();
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&saved.document)
+        .send()
+        .await
+        .expect("save reduced process signature");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: SaveWorkflowResponse = response.json().await.expect("saved workflow");
+    assert_eq!(
+        saved.document.source,
+        "process revised(input: int) signals { continue: any } {\n  finish 0\n}\n"
+    );
+    let process = saved
+        .document
+        .nodes
+        .iter()
+        .find(|node| node.data.kind == "process")
+        .expect("reprojected revised process");
+    assert_eq!(process.data.name.as_deref(), Some("revised"));
+    assert_eq!(
+        process.data.params,
+        [EditableProcessField {
+            name: "input".to_string(),
+            field_type: "int".to_string(),
+        }]
+    );
+    assert_eq!(
+        process.data.signals,
+        [EditableProcessField {
+            name: "continue".to_string(),
+            field_type: "any".to_string(),
+        }]
+    );
+    assert_eq!(process.data.available_vars, ["input"]);
+    let graph = lashlang::workflow_graph_from_source(&saved.document.source)
+        .expect("edited signature source reprojects");
+    assert_eq!(
+        lashlang::workflow_graph_to_source(&graph).expect("edited signature graph renders"),
+        saved.document.source
+    );
 
     server.abort();
 }
@@ -297,6 +509,132 @@ async fn newly_catalogued_nodes_save_reproject_and_run_from_their_catalog_shapes
     let last = events.last().expect("terminal run event");
     assert_eq!(last.status, RunStatus::Failed);
     assert!(last.display.messages.iter().any(|message| message == "raw"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn added_comprehension_if_and_second_for_clause_save_reproject_and_run() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(
+        listener,
+        AppState::default(),
+    ));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    let mut comprehension = new_flow_node(
+        "new:editable-comprehension",
+        "container",
+        Some("comprehension"),
+        "list comprehension",
+    );
+    comprehension.data.binding = Some("items".to_string());
+    comprehension.data.clauses = vec![EditableComprehensionClause::For {
+        binding: "item".to_string(),
+        iterable: "[1, 2, 3]".to_string(),
+    }];
+    comprehension.data.children.push(ChildGroup {
+        slot: "element".to_string(),
+        scope: "container:new:editable-comprehension:element".to_string(),
+        node_ids: vec!["new:editable-comprehension-element".to_string()],
+    });
+    append_process_node(&mut document, comprehension);
+    let mut element = new_flow_node(
+        "new:editable-comprehension-element",
+        "computation",
+        None,
+        "comprehension element",
+    );
+    element.parent_id = Some("new:editable-comprehension".to_string());
+    element.data.expression = Some("item".to_string());
+    document.nodes.push(element);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save initial comprehension");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let mut saved: SaveWorkflowResponse = response.json().await.expect("saved comprehension");
+    let comprehension_id = saved
+        .document
+        .nodes
+        .iter()
+        .find(|node| node.data.subkind.as_deref() == Some("comprehension"))
+        .expect("reprojected comprehension")
+        .id
+        .clone();
+    let comprehension = saved
+        .document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == comprehension_id)
+        .expect("editable comprehension");
+    comprehension.data.clauses.extend([
+        EditableComprehensionClause::If {
+            condition: "item > 1".to_string(),
+        },
+        EditableComprehensionClause::For {
+            binding: "multiplier".to_string(),
+            iterable: "[10, 100]".to_string(),
+        },
+    ]);
+    let element = saved
+        .document
+        .nodes
+        .iter_mut()
+        .find(|node| node.parent_id.as_deref() == Some(&comprehension_id))
+        .expect("editable comprehension element");
+    element.data.expression = Some("item * multiplier".to_string());
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&saved.document)
+        .send()
+        .await
+        .expect("save added comprehension clauses");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: SaveWorkflowResponse = response.json().await.expect("saved added clauses");
+    let comprehension = saved
+        .document
+        .nodes
+        .iter()
+        .find(|node| node.data.subkind.as_deref() == Some("comprehension"))
+        .expect("reprojected edited comprehension");
+    assert_eq!(
+        comprehension.data.clauses,
+        [
+            EditableComprehensionClause::For {
+                binding: "item".to_string(),
+                iterable: "[1, 2, 3]".to_string(),
+            },
+            EditableComprehensionClause::If {
+                condition: "(item > 1)".to_string(),
+            },
+            EditableComprehensionClause::For {
+                binding: "multiplier".to_string(),
+                iterable: "[10, 100]".to_string(),
+            },
+        ]
+    );
+    let graph = lashlang::workflow_graph_from_source(&saved.document.source)
+        .expect("edited comprehension source reprojects");
+    assert_eq!(
+        lashlang::workflow_graph_to_source(&graph).expect("edited comprehension graph renders"),
+        saved.document.source
+    );
+    let events = run_workflow(&client, &base).await;
+    assert_eq!(
+        events.last().expect("terminal run event").status,
+        RunStatus::Succeeded
+    );
+    assert!(!events.iter().any(|event| event.status == RunStatus::Failed));
 
     server.abort();
 }
@@ -1969,6 +2307,9 @@ fn new_flow_node(id: &str, kind: &str, subkind: Option<&str>, title: &str) -> Fl
             kind: kind.to_string(),
             subkind: subkind.map(str::to_string),
             title: title.to_string(),
+            name: None,
+            params: Vec::new(),
+            signals: Vec::new(),
             description: None,
             name_source: "derived".to_string(),
             operation: None,
@@ -2007,6 +2348,7 @@ fn new_flow_node_from_catalog(entry: &Value, id: &str) -> FlowNode {
             .unwrap_or_else(|| panic!("catalog field {name} string default"))
             .to_string();
         match name {
+            "name" => node.data.name = Some(default),
             "binding" => node.data.binding = Some(default),
             "target" => node.data.target = Some(default),
             "expression" => node.data.expression = Some(default),

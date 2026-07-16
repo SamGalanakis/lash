@@ -172,6 +172,12 @@ pub struct NodeData {
     pub subkind: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<EditableProcessField>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<EditableProcessField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default = "derived_name_source")]
     pub name_source: String,
@@ -201,6 +207,13 @@ pub struct NodeData {
     pub children: Vec<ChildGroup>,
     #[serde(default)]
     pub available_vars: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditableProcessField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
 }
 
 fn derived_name_source() -> String {

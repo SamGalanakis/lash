@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lashlang::{
-    Expr, VariableVersion, WorkflowContainer, WorkflowDeclaration, WorkflowEdge, WorkflowEdgeKind,
-    WorkflowEffectKind, WorkflowGraph, WorkflowListComprehensionClause, WorkflowNode,
-    WorkflowNodeId, WorkflowNodeKind, WorkflowNodeNameSource, WorkflowSubgraph,
+    Expr, ProcessParam, VariableVersion, WorkflowContainer, WorkflowDeclaration, WorkflowEdge,
+    WorkflowEdgeKind, WorkflowEffectKind, WorkflowGraph, WorkflowListComprehensionClause,
+    WorkflowNode, WorkflowNodeId, WorkflowNodeKind, WorkflowNodeNameSource, WorkflowSubgraph,
     WorkflowTerminalKind, canonical_assign_target_source, canonical_expression_source,
     parse_expression,
 };
@@ -13,6 +13,12 @@ use crate::{
     ChildGroup, EdgeData, EditableComprehensionClause, EditableValue, FlowEdge, FlowNode,
     GraphRoots, NodeData, RenderErrorResponse, ValidateRequest, ValidateResponse, ValidationKind,
     WorkflowDocument,
+};
+
+mod process;
+
+use process::{
+    editable_process_param, editable_process_signal, process_from_data, seeded_process_body,
 };
 
 pub(crate) fn validate_fragment(request: ValidateRequest) -> ValidateResponse {
@@ -65,6 +71,13 @@ pub(crate) fn document_from_graph(
                 kind: "process".to_string(),
                 subkind: None,
                 title: process.display_name.clone(),
+                name: Some(process.name.clone()),
+                params: process.params.iter().map(editable_process_param).collect(),
+                signals: process
+                    .signals
+                    .iter()
+                    .map(editable_process_signal)
+                    .collect(),
                 description: process.description.clone(),
                 name_source: name_source(process.name_source),
                 operation: None,
@@ -140,6 +153,16 @@ pub(crate) fn graph_from_document(
         .nodes()
         .map(|node| (node.id.to_string(), node.clone()))
         .collect::<BTreeMap<_, _>>();
+    let baseline_processes = baseline
+        .declarations
+        .iter()
+        .filter_map(|declaration| match declaration {
+            WorkflowDeclaration::Process(process) => {
+                Some((process.id.to_string(), process.clone()))
+            }
+            WorkflowDeclaration::Type(_) => None,
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut graph = baseline.clone();
     graph.schema_version = document.schema_version;
     graph.main = build_subgraph(
@@ -149,46 +172,76 @@ pub(crate) fn graph_from_document(
         &baseline_nodes,
         &edges,
     )?;
-    for declaration in &mut graph.declarations {
-        let WorkflowDeclaration::Process(process) = declaration else {
-            continue;
-        };
-        let process_id = process.id.to_string();
+    let mut declarations = baseline
+        .declarations
+        .iter()
+        .filter(|declaration| matches!(declaration, WorkflowDeclaration::Type(_)))
+        .cloned()
+        .collect::<Vec<_>>();
+    for process_id in &document.roots.processes {
         let flow_process = nodes.get(process_id.as_str()).copied().ok_or_else(|| {
             RenderErrorResponse::document(
                 format!("missing process container `{process_id}`"),
                 json!({ "processId": process_id }),
             )
         })?;
-        process.display_name = flow_process.data.title.clone();
-        process.description = flow_process.data.description.clone();
-        process.name_source = parse_name_source(&flow_process.data.name_source);
-        if !document
-            .roots
-            .processes
-            .iter()
-            .any(|root| root == &process_id)
-        {
-            return Err(RenderErrorResponse::document(
-                format!("missing process root `{process_id}`"),
-                json!({ "processId": process_id }),
+        if flow_process.data.kind != "process" {
+            return Err(RenderErrorResponse::invalid_node_payload(
+                process_id,
+                "a process root needs `data.kind` set to `process`",
             ));
         }
-        let body = flow_process
-            .data
-            .children
-            .iter()
-            .find(|child| child.slot == "body")
-            .ok_or_else(|| {
-                RenderErrorResponse::document(
-                    format!("process container `{process_id}` is missing its body"),
-                    json!({ "processId": process_id, "child": "body" }),
-                )
-            })?;
-        process.body =
-            build_subgraph(&body.scope, &body.node_ids, &nodes, &baseline_nodes, &edges)?;
+        let is_new = !baseline_processes.contains_key(process_id);
+        let mut process = process_from_data(
+            process_id,
+            &flow_process.data,
+            baseline_processes.get(process_id).cloned(),
+        )?;
+        process.body = rebuild_process_body(
+            process_id,
+            &flow_process.data,
+            &nodes,
+            &baseline_nodes,
+            &edges,
+            is_new,
+            &process.params,
+        )?;
+        declarations.push(WorkflowDeclaration::Process(process));
     }
+    graph.declarations = declarations;
     Ok(graph)
+}
+
+fn rebuild_process_body(
+    process_id: &str,
+    data: &NodeData,
+    flow_nodes: &BTreeMap<&str, &FlowNode>,
+    baseline_nodes: &BTreeMap<String, WorkflowNode>,
+    flow_edges: &BTreeMap<&str, Vec<&FlowEdge>>,
+    is_new: bool,
+    params: &[ProcessParam],
+) -> Result<WorkflowSubgraph, RenderErrorResponse> {
+    let body = data.children.iter().find(|child| child.slot == "body");
+    match body {
+        Some(body) => {
+            if is_new && body.node_ids.is_empty() {
+                Ok(seeded_process_body(process_id, params))
+            } else {
+                build_subgraph(
+                    &body.scope,
+                    &body.node_ids,
+                    flow_nodes,
+                    baseline_nodes,
+                    flow_edges,
+                )
+            }
+        }
+        None if is_new => Ok(seeded_process_body(process_id, params)),
+        None => Err(RenderErrorResponse::document(
+            format!("process container `{process_id}` is missing its body"),
+            json!({ "processId": process_id, "child": "body" }),
+        )),
+    }
 }
 
 pub(crate) fn reconcile_node_ids(
@@ -379,6 +432,9 @@ fn node_data(node: &WorkflowNode, children: Vec<ChildGroup>) -> NodeData {
         kind: node_kind(node).to_string(),
         subkind: node_subkind(node).map(str::to_string),
         title: node.name.clone(),
+        name: None,
+        params: Vec::new(),
+        signals: Vec::new(),
         description: node.description.clone(),
         name_source: name_source(node.name_source),
         operation,
