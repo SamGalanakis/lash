@@ -1,5 +1,6 @@
 import dagre from '@dagrejs/dagre';
 import { containerSubkind } from './nodeKinds.js';
+import { parseList } from './fields.js';
 
 // Auto-layout for a positionless WorkflowDocument.
 //
@@ -69,12 +70,29 @@ export function layoutDocument(doc) {
   // in the base band; a list comprehension additionally stacks one editable
   // row per for/if clause below it, so grow the band to keep the clause rows
   // from overlapping the element group.
+  // Extra stacked rows an iterable's list builder needs: one per scalar item
+  // plus the "+ item" control. A variable / non-literal iterable stays a single
+  // inline row (0 extra). Only literal lists expand the header band.
+  function listBuilderRows(iterable) {
+    const parsed = parseList(iterable ?? '');
+    if (!parsed || parsed.items.length === 0) return 0;
+    return parsed.items.length + 1;
+  }
+
   function headerBand(node) {
-    if (containerSubkind(node) === 'comprehension') {
+    const subkind = containerSubkind(node);
+    if (subkind === 'comprehension') {
       // One row per clause (builder rows are a touch taller), plus a row for
-      // the "+ for / + if clause" controls.
-      const clauseCount = (node.data.clauses ?? []).length;
-      return HEADER_BAND + clauseCount * 30 + 34;
+      // the "+ for / + if clause" controls. A `for` clause whose iterable is a
+      // literal list stacks the list builder's item rows, so add for those too.
+      const clauses = node.data.clauses ?? [];
+      const listRows = clauses.reduce((sum, c) => sum + listBuilderRows(c.iterable), 0);
+      return HEADER_BAND + clauses.length * 30 + 34 + listRows * 28;
+    }
+    if (subkind === 'for') {
+      // The iterable's list builder stacks one row per scalar item (plus a mode
+      // toggle + an "+ item" control) when it holds a literal list.
+      return HEADER_BAND + listBuilderRows(node.data.iterable) * 28;
     }
     if (node.data.kind === 'process') {
       // Editable signature: one row per param + per signal, plus the two

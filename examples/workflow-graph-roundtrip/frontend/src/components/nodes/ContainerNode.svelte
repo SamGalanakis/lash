@@ -3,7 +3,9 @@
   import { getContext } from 'svelte';
   import { kindMeta, containerSubkind, CONTAINER_SUBKINDS } from '../../lib/nodeKinds.js';
   import { groupOperations, operationMeta } from '../../lib/operations.js';
+  import { clauseAdded, clauseRemoved } from '../../lib/fields.js';
   import ExpressionField from '../ExpressionField.svelte';
+  import IdentifierField from '../IdentifierField.svelte';
 
   let { id, data } = $props();
 
@@ -52,12 +54,8 @@
     (data.onRebuild ?? data.onCommit)?.();
   }
   // A process's canonical name is `data.name` (an identifier); its display title
-  // mirrors it, so edit both together — renaming round-trips into the source.
-  function onProcessName(e) {
-    const v = e.currentTarget.value;
-    node.data.name = v;
-    node.data.title = v;
-  }
+  // mirrors it, so IdentifierField writes both together — renaming round-trips
+  // into the source.
   function addParam() {
     node.data.params = [...(node.data.params ?? []), { name: 'arg', type: 'any' }];
     relayout();
@@ -74,22 +72,15 @@
     node.data.signals = (node.data.signals ?? []).filter((_, j) => j !== i);
     relayout();
   }
-  function onBinding(e) {
-    const v = e.currentTarget.value;
-    node.data.binding = v === '' ? undefined : v;
-  }
-
   // Comprehension clause add/remove. The lens rebuilds `data.clauses` verbatim,
   // so mutating the array is authoritative. Adding/removing a clause changes the
   // container's height, so route through onRebuild (commit + relayout).
   function addClause(kind) {
-    const clause =
-      kind === 'for' ? { kind: 'for', binding: 'x', iterable: '[1, 2, 3]' } : { kind: 'if', condition: 'true' };
-    node.data.clauses = [...(node.data.clauses ?? []), clause];
+    node.data.clauses = clauseAdded(node.data.clauses, kind);
     (data.onRebuild ?? data.onCommit)?.();
   }
   function removeClause(index) {
-    node.data.clauses = (node.data.clauses ?? []).filter((_, i) => i !== index);
+    node.data.clauses = clauseRemoved(node.data.clauses, index);
     (data.onRebuild ?? data.onCommit)?.();
   }
 </script>
@@ -110,13 +101,16 @@
         : subMeta.label}</span
     >
     {#if isProcess}
-      <input
-        class="ct-title"
+      <IdentifierField
         value={node.data.name ?? node.data.title}
-        oninput={onProcessName}
-        onchange={commit}
-        spellcheck="false"
+        variant="title"
         placeholder="process_name"
+        ariaLabel="Process name"
+        onInput={(v) => {
+          node.data.name = v;
+          node.data.title = v;
+        }}
+        onCommit={commit}
       />
     {:else if isConditional}
       <span class="ct-cond">
@@ -134,19 +128,21 @@
       </span>
     {:else if isFor}
       <span class="ct-for">
-        <input
-          class="ct-cond-input ct-for-bind nodrag"
-          value={node.data.binding ?? ''}
-          oninput={(e) => (node.data.binding = e.currentTarget.value)}
-          onchange={commit}
-          spellcheck="false"
-          placeholder="binding"
-        />
+        <span class="ct-for-bind nodrag">
+          <IdentifierField
+            value={node.data.binding ?? ''}
+            variant="box"
+            placeholder="binding"
+            ariaLabel="Loop binding"
+            onInput={(v) => (node.data.binding = v)}
+            onCommit={commit}
+          />
+        </span>
         <span class="ct-kw">in</span>
         <ExpressionField
           value={node.data.iterable ?? ''}
           kind="expression"
-          builder="value"
+          builder="list"
           {availableVars}
           placeholder="iterable"
           onInput={(text) => (node.data.iterable = text)}
@@ -156,14 +152,16 @@
     {:else if isComprehension}
       <span class="ct-for">
         <span class="ct-kw">let</span>
-        <input
-          class="ct-cond-input ct-for-bind nodrag"
-          value={node.data.binding ?? ''}
-          oninput={onBinding}
-          onchange={commit}
-          spellcheck="false"
-          placeholder="binding (optional)"
-        />
+        <span class="ct-for-bind nodrag">
+          <IdentifierField
+            value={node.data.binding ?? ''}
+            variant="box"
+            placeholder="binding (optional)"
+            ariaLabel="Comprehension binding"
+            onInput={(v) => (node.data.binding = v === '' ? undefined : v)}
+            onCommit={commit}
+          />
+        </span>
       </span>
     {:else}
       <span class="ct-title-static">{node.data.title}</span>
@@ -251,19 +249,21 @@
         <div class="ct-clause">
           {#if clause.kind === 'for'}
             <span class="ct-kw">for</span>
-            <input
-              class="ct-cond-input ct-for-bind"
-              value={clause.binding ?? ''}
-              oninput={(e) => (node.data.clauses[i].binding = e.currentTarget.value)}
-              onchange={commit}
-              spellcheck="false"
-              placeholder="binding"
-            />
+            <span class="ct-for-bind">
+              <IdentifierField
+                value={clause.binding ?? ''}
+                variant="box"
+                placeholder="binding"
+                ariaLabel="Clause binding"
+                onInput={(v) => (node.data.clauses[i].binding = v)}
+                onCommit={commit}
+              />
+            </span>
             <span class="ct-kw">in</span>
             <ExpressionField
               value={clause.iterable ?? ''}
               kind="expression"
-              builder="value"
+              builder="list"
               {availableVars}
               placeholder="iterable"
               onInput={(text) => (node.data.clauses[i].iterable = text)}
@@ -320,14 +320,16 @@
         <span class="ct-sig-label">params</span>
         {#each params as p, i (i)}
           <div class="ct-sig-row">
-            <input
-              class="ct-sig-name"
-              value={p.name}
-              oninput={(e) => (node.data.params[i].name = e.currentTarget.value)}
-              onchange={commit}
-              spellcheck="false"
-              placeholder="name"
-            />
+            <span class="ct-sig-name">
+              <IdentifierField
+                value={p.name}
+                variant="bare"
+                placeholder="name"
+                ariaLabel="Parameter name"
+                onInput={(v) => (node.data.params[i].name = v)}
+                onCommit={commit}
+              />
+            </span>
             <span class="ct-sig-colon">:</span>
             <input
               class="ct-sig-type"
@@ -362,14 +364,16 @@
         <span class="ct-sig-label">signals</span>
         {#each signals as s, i (i)}
           <div class="ct-sig-row">
-            <input
-              class="ct-sig-name"
-              value={s.name}
-              oninput={(e) => (node.data.signals[i].name = e.currentTarget.value)}
-              onchange={commit}
-              spellcheck="false"
-              placeholder="name"
-            />
+            <span class="ct-sig-name">
+              <IdentifierField
+                value={s.name}
+                variant="bare"
+                placeholder="name"
+                ariaLabel="Signal name"
+                onInput={(v) => (node.data.signals[i].name = v)}
+                onCommit={commit}
+              />
+            </span>
             <span class="ct-sig-colon">:</span>
             <input
               class="ct-sig-type"
@@ -533,22 +537,6 @@
     color: color-mix(in srgb, var(--accent) 75%, var(--text-dim));
     flex-shrink: 0;
   }
-  .ct-cond-input {
-    flex: 1;
-    min-width: 0;
-    background: var(--ink-2);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
-    border-radius: 6px;
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    padding: 3px 7px;
-  }
-  .ct-cond-input:focus {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
-  }
   .ct-for {
     display: flex;
     align-items: center;
@@ -557,9 +545,10 @@
     min-width: 0;
   }
   .ct-for-bind {
+    display: inline-flex;
+    align-items: center;
     flex: 0 1 40%;
-    color: var(--accent);
-    font-weight: 600;
+    min-width: 0;
   }
   .ct-kw {
     font-family: var(--font-mono);
@@ -655,26 +644,22 @@
     border-radius: 7px;
     padding: 2px 4px 2px 6px;
   }
-  .ct-sig-name,
+  .ct-sig-name {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    width: 52px;
+  }
   .ct-sig-type {
     background: transparent;
     border: none;
-    color: var(--text);
+    color: var(--text-dim);
     font-family: var(--font-mono);
     font-size: 10.5px;
     padding: 1px 0;
     min-width: 0;
-    width: 52px;
-  }
-  .ct-sig-name {
-    color: var(--accent);
-    font-weight: 600;
-  }
-  .ct-sig-type {
     width: 40px;
-    color: var(--text-dim);
   }
-  .ct-sig-name:focus,
   .ct-sig-type:focus {
     outline: none;
   }

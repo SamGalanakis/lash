@@ -77,6 +77,20 @@ export function catalogFieldsMap(op) {
   return out;
 }
 
+// The `data` patch to apply when switching an existing call/effect to a
+// different operation: point at the new operation (calls swap the receiver via
+// `operation`; effects rebuild from `effect` + fields, so drop any stored
+// `expression`) and refill the arg form from the new operation's typed defaults.
+export function operationSwitchPatch(nodeKind, op) {
+  const patch = { fields: catalogFieldsMap(op) };
+  if (nodeKind === 'call') patch.operation = op.operation;
+  else if (nodeKind === 'effect') {
+    patch.effect = op.effect;
+    patch.clearExpression = true;
+  }
+  return patch;
+}
+
 // The catalog entry a node currently matches, so an operation `<select>` can
 // preselect it: calls key on `operation`, effects on `effect`, terminals on
 // `terminalKind`.

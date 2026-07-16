@@ -74,3 +74,92 @@ export function encodeLiteral(type, value) {
       return String(value ?? '');
   }
 }
+
+// A bare boolean literal — a freshly-seeded if/while condition — which the
+// comparison builder treats as "start a fresh comparison" rather than raw.
+export function isBoolLiteral(text) {
+  const t = (text ?? '').trim();
+  return t === 'true' || t === 'false';
+}
+
+// A simple variable reference (`items`, `state.list`) — used by the list builder
+// to offer "iterate an in-scope variable" instead of a literal list.
+export function isSimpleReference(text) {
+  return /^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test((text ?? '').trim());
+}
+
+// Split a comma-separated fragment at top level (respecting quotes + brackets).
+// Returns null on unbalanced input.
+function splitTopLevel(source) {
+  const out = [];
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  let cur = '';
+  for (const ch of source) {
+    if (inStr) {
+      cur += ch;
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = true;
+      cur += ch;
+    } else if (ch === '[' || ch === '(' || ch === '{') {
+      depth += 1;
+      cur += ch;
+    } else if (ch === ']' || ch === ')' || ch === '}') {
+      depth -= 1;
+      cur += ch;
+    } else if (ch === ',' && depth === 0) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (inStr || depth !== 0) return null;
+  out.push(cur);
+  return out;
+}
+
+// Parse a `[a, b, c]` list of scalar literals for the list builder. Returns
+// `{ items: [{type,value}] }`, or null when the text is not a flat scalar list
+// (nested lists / expressions stay on the raw editor).
+export function parseList(text) {
+  const t = (text ?? '').trim();
+  if (!t.startsWith('[') || !t.endsWith(']')) return null;
+  const inner = t.slice(1, -1).trim();
+  if (inner === '') return { items: [] };
+  const parts = splitTopLevel(inner);
+  if (parts === null) return null;
+  const items = [];
+  for (const part of parts) {
+    const lit = parseLiteral(part.trim());
+    if (lit.type === 'expression') return null;
+    items.push(lit);
+  }
+  return { items };
+}
+
+// Encode scalar items back into a canonical Lashlang list literal.
+export function encodeList(items) {
+  return `[${(items ?? []).map((it) => encodeLiteral(it.type, it.value)).join(', ')}]`;
+}
+
+// A fresh comprehension clause of the given kind, seeded sensibly.
+export function makeClause(kind) {
+  return kind === 'for'
+    ? { kind: 'for', binding: 'x', iterable: '[1, 2, 3]' }
+    : { kind: 'if', condition: 'true' };
+}
+
+// Immutable clause list edits (extracted so they can be unit-tested).
+export function clauseAdded(clauses, kind) {
+  return [...(clauses ?? []), makeClause(kind)];
+}
+export function clauseRemoved(clauses, index) {
+  return (clauses ?? []).filter((_, i) => i !== index);
+}

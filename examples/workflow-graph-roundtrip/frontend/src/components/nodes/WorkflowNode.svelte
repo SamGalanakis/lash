@@ -4,9 +4,9 @@
   import { kindMeta, WAITING_EFFECTS } from '../../lib/nodeKinds.js';
   import {
     operationsForKind,
-    catalogFieldsMap,
     currentOperationId,
     fieldDefaultValue,
+    operationSwitchPatch,
   } from '../../lib/operations.js';
   import ExpressionField from '../ExpressionField.svelte';
 
@@ -77,12 +77,11 @@
   function switchOperation(event) {
     const op = (ops?.entries ?? []).find((o) => o.id === event.currentTarget.value);
     if (!op) return;
-    if (kind === 'call') node.data.operation = op.operation;
-    else {
-      node.data.effect = op.effect;
-      delete node.data.expression;
-    }
-    node.data.fields = catalogFieldsMap(op);
+    const patch = operationSwitchPatch(kind, op);
+    if (patch.operation !== undefined) node.data.operation = patch.operation;
+    if (patch.effect !== undefined) node.data.effect = patch.effect;
+    if (patch.clearExpression) delete node.data.expression;
+    node.data.fields = patch.fields;
     data.onCommit?.();
   }
 
