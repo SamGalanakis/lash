@@ -9,6 +9,7 @@ import {
   isBoolLiteral,
   isSimpleReference,
   isComplexExpression,
+  operandType,
   clauseAdded,
   clauseRemoved,
   makeClause,
@@ -21,7 +22,7 @@ function autoRaw(builder, value, vars = []) {
   if (isComplexExpression(value)) return true;
   const empty = (value ?? '').trim() === '';
   if (builder === 'comparison') return !(parseComparison(value) || empty || isBoolLiteral(value));
-  if (builder === 'value') return parseLiteral(value).type === 'expression';
+  if (builder === 'value') return operandType(value, vars) === 'expression';
   if (builder === 'list') {
     return !(
       parseList(value) ||
@@ -172,6 +173,53 @@ describe('parenthesized conditions (the lens emits these)', () => {
   });
 });
 
+describe('variable-vs-variable comparisons', () => {
+  it('decodes both operands as bare references', () => {
+    expect(parseComparison('count < limit')).toEqual({ lhs: 'count', op: '<', rhs: 'limit' });
+    expect(parseComparison('(a < b)')).toEqual({ lhs: 'a', op: '<', rhs: 'b' });
+  });
+
+  it('re-encodes bare and round-trips stably through the lens wrap', () => {
+    const parsed = parseComparison('(count < limit)');
+    const emitted = `${parsed.lhs} ${parsed.op} ${parsed.rhs}`;
+    expect(emitted).toBe('count < limit'); // bare, valid, balanced
+    expect(parseComparison(`(${emitted})`)).toEqual(parsed);
+  });
+
+  it('classifies each RHS operand as var vs literal against scope', () => {
+    const vars = ['count', 'limit'];
+    // RHS is an in-scope variable → the RHS builder shows it as a variable.
+    expect(operandType(parseComparison('count < limit').rhs, vars)).toBe('var');
+    // RHS is a literal → the RHS builder shows a scalar.
+    expect(operandType(parseComparison('count < 3').rhs, vars)).toBe('number');
+    // A variable not in scope is not offered as a pick (stays literal/expression).
+    expect(operandType('missing', vars)).toBe('expression');
+  });
+});
+
+describe('operandType — var-vs-scalar classification for the value builder', () => {
+  const vars = ['x', 'y', 'state.count'];
+
+  it('picks an in-scope variable (bare or dotted) when it matches scope', () => {
+    expect(operandType('y', vars)).toBe('var');
+    expect(operandType('state.count', vars)).toBe('var');
+    expect(operandType('  x  ', vars)).toBe('var');
+  });
+
+  it('classifies scalar literals by kind', () => {
+    expect(operandType('42', vars)).toBe('number');
+    expect(operandType('"hi"', vars)).toBe('string');
+    expect(operandType('true', vars)).toBe('boolean');
+  });
+
+  it('leaves compound / out-of-scope values as expression (raw)', () => {
+    expect(operandType('a + b', vars)).toBe('expression');
+    expect(operandType('compute(x)', vars)).toBe('expression');
+    expect(operandType('notInScope', vars)).toBe('expression');
+    expect(operandType('y', [])).toBe('expression'); // no scope supplied
+  });
+});
+
 describe('builder-selection (autoRaw) — locks the raw-vs-builder decision', () => {
   it('keeps a parenthesized comparison on the builder, not raw', () => {
     expect(autoRaw('comparison', '(x < 2)')).toBe(false);
@@ -195,10 +243,12 @@ describe('builder-selection (autoRaw) — locks the raw-vs-builder decision', ()
     expect(autoRaw('list', 'range(0, n)')).toBe(true);
   });
 
-  it('value: literals use the builder, expressions stay raw', () => {
+  it('value: literals and in-scope vars use the builder, expressions stay raw', () => {
     expect(autoRaw('value', '42')).toBe(false);
     expect(autoRaw('value', '"hi"')).toBe(false);
+    expect(autoRaw('value', 'y', ['y'])).toBe(false); // in-scope variable
     expect(autoRaw('value', 'a + b')).toBe(true);
+    expect(autoRaw('value', 'y', [])).toBe(true); // no scope → not a var
   });
 
   it('target: dotted references use the builder, index/calls stay raw', () => {

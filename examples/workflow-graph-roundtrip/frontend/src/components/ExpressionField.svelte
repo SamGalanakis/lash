@@ -7,9 +7,9 @@
     isSimpleReference,
     COMPARISON_OPS,
     parseComparison,
-    parseLiteral,
     encodeLiteral,
     parseList,
+    operandType,
   } from '../lib/fields.js';
   import ScalarBuilder from './ScalarBuilder.svelte';
 
@@ -44,7 +44,6 @@
 
   const hasBuilder = $derived(!!builder && !mode.power);
   const cmp = $derived(builder === 'comparison' ? parseComparison(value) : null);
-  const lit = $derived(builder === 'value' ? parseLiteral(value) : null);
   const vars = $derived(Array.isArray(availableVars) ? availableVars : []);
 
   const autoRaw = $derived.by(() => {
@@ -52,7 +51,9 @@
     if (isComplexExpression(value)) return true;
     const empty = (value ?? '').trim() === '';
     if (builder === 'comparison') return !(cmp || empty || isBoolLiteral(value));
-    if (builder === 'value') return lit?.type === 'expression';
+    // A value field shows the builder for scalars AND in-scope variables; only a
+    // compound expression (arithmetic, call, deep member) stays on the raw editor.
+    if (builder === 'value') return operandType(value, vars) === 'expression';
     if (builder === 'list') {
       return !(
         parseList(value) ||
@@ -319,6 +320,7 @@
       <ScalarBuilder
         value={rhs}
         compact
+        availableVars={vars}
         onChange={(enc) => {
           rhs = enc;
           emitCmp();
@@ -486,7 +488,7 @@
     </div>
   {:else}
     <div class="xf-row xf-val">
-      <ScalarBuilder value={value} onChange={(enc) => emit(enc)} />
+      <ScalarBuilder value={value} availableVars={vars} onChange={(enc) => emit(enc)} />
       <button
         class="xf-toggle"
         title="Edit as raw expression"

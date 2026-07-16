@@ -1,33 +1,46 @@
 <script>
-  import { parseLiteral, encodeLiteral } from '../lib/fields.js';
+  import { parseLiteral, encodeLiteral, operandType } from '../lib/fields.js';
 
-  // A typed scalar literal editor: [number | text | true·false] + a value input,
-  // emitting canonical Lashlang (`3`, `"done"`, `true`). Reused by the value
-  // builder, the comparison RHS, and each list item so string values pick up
-  // their quotes automatically. Non-scalar values never reach it (the parent
-  // routes those to the raw editor).
-  let { value = '', onChange, compact = false } = $props();
+  // A typed operand editor: [var | number | text | true·false] + a value input,
+  // emitting canonical Lashlang (`count`, `3`, `"done"`, `true`). Reused by the
+  // value builder, both comparison operands, and each list item, so string
+  // values pick up their quotes automatically and an in-scope variable can be
+  // picked instead of a literal. The `var` option only appears when the parent
+  // supplies `availableVars`. Compound values never reach it (the parent routes
+  // those to the raw editor).
+  let { value = '', onChange, compact = false, availableVars = [] } = $props();
 
-  let type = $state('string');
-  let text = $state('');
+  const vars = $derived(Array.isArray(availableVars) ? availableVars : []);
+
+  let type = $state('string'); // 'var' | 'number' | 'string' | 'boolean'
+  let text = $state(''); // literal text for scalar types
+  let varName = $state(''); // selected variable for type === 'var'
   let editing = $state(false);
 
   $effect(() => {
     if (editing) return;
-    const parsed = parseLiteral(value);
-    if (parsed.type !== 'expression') {
-      type = parsed.type;
-      text = parsed.value;
+    const kind = operandType(value, vars);
+    if (kind === 'var') {
+      type = 'var';
+      varName = (value ?? '').trim();
+    } else if (kind !== 'expression') {
+      type = kind;
+      text = parseLiteral(value).value;
     }
   });
 
   function emit() {
-    onChange?.(encodeLiteral(type, text));
+    onChange?.(type === 'var' ? varName : encodeLiteral(type, text));
   }
   function onType(next) {
     type = next;
-    if (next === 'boolean' && text !== 'true' && text !== 'false') text = 'true';
-    if (next === 'number' && !/^-?\d*\.?\d*$/.test(text)) text = '';
+    if (next === 'var') {
+      if (!vars.includes(varName)) varName = vars[0] ?? '';
+    } else if (next === 'boolean' && text !== 'true' && text !== 'false') {
+      text = 'true';
+    } else if (next === 'number' && !/^-?\d*\.?\d*$/.test(text)) {
+      text = '';
+    }
     emit();
   }
 </script>
@@ -39,11 +52,25 @@
     onpointerdown={(e) => e.stopPropagation()}
     onchange={(e) => onType(e.currentTarget.value)}
   >
+    {#if vars.length}<option value="var">var</option>{/if}
     <option value="number">num</option>
     <option value="string">text</option>
     <option value="boolean">bool</option>
   </select>
-  {#if type === 'boolean'}
+  {#if type === 'var'}
+    <select
+      class="sb-val sb-var"
+      value={varName}
+      onpointerdown={(e) => e.stopPropagation()}
+      onchange={(e) => {
+        varName = e.currentTarget.value;
+        emit();
+      }}
+    >
+      {#if !vars.includes(varName)}<option value={varName}>{varName || '— variable —'}</option>{/if}
+      {#each vars as v (v)}<option value={v}>{v}</option>{/each}
+    </select>
+  {:else if type === 'boolean'}
     <select
       class="sb-val"
       value={text}
@@ -101,6 +128,11 @@
   .sb-val {
     flex: 1;
     width: 100%;
+  }
+  .sb-var {
+    color: var(--accent, var(--cyan));
+    font-weight: 600;
+    cursor: pointer;
   }
   .sb-type:focus,
   .sb-val:focus {

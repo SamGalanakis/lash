@@ -157,6 +157,18 @@ export function isSimpleReference(text) {
   return /^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test((text ?? '').trim());
 }
 
+// Classify an operand for the scalar/variable builder (comparison operands,
+// value fields, list items). Returns `'var'` when the value is an in-scope
+// variable, a scalar literal kind (`number`/`string`/`boolean`), or
+// `'expression'` for a compound value that must stay on the raw editor.
+export function operandType(value, vars = []) {
+  const trimmed = (value ?? '').trim();
+  if (Array.isArray(vars) && vars.length && isSimpleReference(value) && vars.includes(trimmed)) {
+    return 'var';
+  }
+  return parseLiteral(value).type;
+}
+
 // Split a comma-separated fragment at top level (respecting quotes + brackets).
 // Returns null on unbalanced input.
 function splitTopLevel(source) {
