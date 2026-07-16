@@ -327,6 +327,93 @@ async fn edited_counter_loop_condition_saves_reprojects_and_runs() {
 }
 
 #[tokio::test]
+async fn expression_valued_call_fields_save_reproject_and_reject_malformed_edits() {
+    let state = AppState::with_run_timing(RunTiming {
+        sleep_cap: Duration::from_millis(2),
+        signal_delay: Duration::from_millis(2),
+    })
+    .expect("default workflow");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "counter-loop").await;
+    let expected_progress = lashlang::canonical_expression_source(
+        &lashlang::parse_expression("state.count * 20 + 20").expect("progress expression"),
+    )
+    .expect("canonical progress expression");
+    let expected_item = lashlang::canonical_expression_source(
+        &lashlang::parse_expression("state.count").expect("item expression"),
+    )
+    .expect("canonical item expression");
+    assert!(document.nodes.iter().any(|node| {
+        node.data.operation.as_deref() == Some("add_item")
+            && node.data.fields.get("item") == Some(&EditableValue::Expr(expected_item.clone()))
+    }));
+    let progress = document
+        .nodes
+        .iter_mut()
+        .find(|node| {
+            node.data.operation.as_deref() == Some("set_progress")
+                && node.data.fields.get("pct")
+                    == Some(&EditableValue::Expr(expected_progress.clone()))
+        })
+        .expect("expression-valued progress node");
+    progress.data.fields.insert(
+        "pct".to_string(),
+        EditableValue::Expr("state.count * 10 + 10".to_string()),
+    );
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save expression-valued field");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let mut saved: WorkflowDocument = response.json().await.expect("saved workflow");
+    let edited_progress = lashlang::canonical_expression_source(
+        &lashlang::parse_expression("state.count * 10 + 10").expect("edited expression"),
+    )
+    .expect("canonical edited expression");
+    assert!(saved.nodes.iter().any(|node| {
+        node.data.operation.as_deref() == Some("set_progress")
+            && node.data.fields.get("pct") == Some(&EditableValue::Expr(edited_progress.clone()))
+    }));
+    assert!(saved.source.contains(&edited_progress));
+
+    let malformed = saved
+        .nodes
+        .iter_mut()
+        .find(|node| {
+            node.data.operation.as_deref() == Some("set_progress")
+                && node.data.fields.get("pct")
+                    == Some(&EditableValue::Expr(edited_progress.clone()))
+        })
+        .expect("edited progress node");
+    malformed.data.fields.insert(
+        "pct".to_string(),
+        EditableValue::Expr("state.count +".to_string()),
+    );
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&saved)
+        .send()
+        .await
+        .expect("save malformed expression-valued field");
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = response.json().await.expect("typed expression error");
+    assert_eq!(body["error"]["code"], "invalid_expression");
+    assert_eq!(body["error"]["details"]["field"], "fields.pct");
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn edited_if_condition_and_for_iterable_save_reproject_and_run() {
     let state = AppState::with_run_timing(RunTiming {
         sleep_cap: Duration::from_millis(2),

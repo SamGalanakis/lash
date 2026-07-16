@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use axum::http::StatusCode;
 use lashlang::GraphRenderError;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,15 +90,111 @@ pub struct ChildGroup {
     pub node_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EditableValue {
     Null,
     Bool(bool),
     Number(f64),
     String(String),
     List(Vec<EditableValue>),
+    Expr(String),
     Object(BTreeMap<String, EditableValue>),
+}
+
+impl Serialize for EditableValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Null => serializer.serialize_none(),
+            Self::Bool(value) => serializer.serialize_bool(*value),
+            Self::Number(value) => serializer.serialize_f64(*value),
+            Self::String(value) => serializer.serialize_str(value),
+            Self::List(values) => values.serialize(serializer),
+            Self::Expr(source) => BTreeMap::from([("$expr", source)]).serialize(serializer),
+            Self::Object(entries) => entries.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EditableValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::from_json(Value::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+impl EditableValue {
+    fn from_json(value: Value) -> Result<Self, String> {
+        match value {
+            Value::Null => Ok(Self::Null),
+            Value::Bool(value) => Ok(Self::Bool(value)),
+            Value::Number(value) => value
+                .as_f64()
+                .map(Self::Number)
+                .ok_or_else(|| format!("editable number `{value}` is outside the f64 range")),
+            Value::String(value) => Ok(Self::String(value)),
+            Value::Array(values) => values
+                .into_iter()
+                .map(Self::from_json)
+                .collect::<Result<_, _>>()
+                .map(Self::List),
+            Value::Object(mut entries)
+                if entries.len() == 1 && entries.get("$expr").is_some_and(Value::is_string) =>
+            {
+                let Value::String(source) = entries.remove("$expr").expect("checked expression")
+                else {
+                    unreachable!("checked expression value is a string")
+                };
+                Ok(Self::Expr(source))
+            }
+            Value::Object(entries) => entries
+                .into_iter()
+                .map(|(key, value)| Ok((key, Self::from_json(value)?)))
+                .collect::<Result<_, String>>()
+                .map(Self::Object),
+        }
+    }
+}
+
+#[cfg(test)]
+mod editable_value_tests {
+    use super::*;
+
+    #[test]
+    fn expression_sentinel_round_trips_without_changing_literal_shapes() {
+        let expression = EditableValue::Expr("(state.count + 1)".to_string());
+        let encoded = serde_json::to_value(&expression).expect("serialize expression value");
+        assert_eq!(encoded, json!({ "$expr": "(state.count + 1)" }));
+        assert_eq!(
+            serde_json::from_value::<EditableValue>(encoded).expect("deserialize expression value"),
+            expression
+        );
+
+        for (editable, encoded) in [
+            (EditableValue::Null, json!(null)),
+            (EditableValue::Bool(true), json!(true)),
+            (EditableValue::Number(5.0), json!(5.0)),
+            (EditableValue::String("s".to_string()), json!("s")),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&editable).expect("serialize literal value"),
+                encoded
+            );
+        }
+
+        let object = json!({ "$expr": "literal member", "other": true });
+        assert!(matches!(
+            serde_json::from_value::<EditableValue>(object).expect("deserialize object value"),
+            EditableValue::Object(entries)
+                if entries.len() == 2
+                    && entries.get("$expr")
+                        == Some(&EditableValue::String("literal member".to_string()))
+        ));
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -289,7 +386,7 @@ impl RenderErrorResponse {
 
     pub(crate) fn invalid_expression(
         node_id: &str,
-        field: &'static str,
+        field: &str,
         message: impl Into<String>,
     ) -> Self {
         let message = message.into();

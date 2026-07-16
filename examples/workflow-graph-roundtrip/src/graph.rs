@@ -636,7 +636,7 @@ fn editable_parsed_expression(
     let mut expression = parse_expression(&source).map_err(|error| {
         RenderErrorResponse::invalid_expression(id, "expression", error.to_string())
     })?;
-    apply_fields(&mut expression, &data.fields);
+    apply_fields(id, &mut expression, &data.fields)?;
     let source = canonical_expression_source(&expression).map_err(|error| {
         RenderErrorResponse::invalid_expression(id, "expression", error.to_string())
     })?;
@@ -813,7 +813,7 @@ fn apply_editable_data(
                 json!({ "nodeId": node.id.to_string(), "reason": error.to_string() }),
             )
         })?;
-        apply_fields(&mut expression, &data.fields);
+        apply_fields(&node_id, &mut expression, &data.fields)?;
         *expression_text = canonical_expression_source(&expression).map_err(|error| {
             RenderErrorResponse::document(
                 format!(
@@ -868,15 +868,13 @@ fn editable_fields(node: &WorkflowNode) -> BTreeMap<String, EditableValue> {
     if let Some(fields) = receiver_fields(&expression) {
         return fields
             .iter()
-            .filter_map(|(name, value)| {
-                EditableValue::from_expr(value).map(|value| (name.to_string(), value))
-            })
+            .map(|(name, value)| (name.to_string(), EditableValue::from_expr(value)))
             .collect();
     }
     match &expression {
-        Expr::SleepFor(value) | Expr::SleepUntil(value) => EditableValue::from_expr(value)
-            .map(|value| BTreeMap::from([("duration".to_string(), value)]))
-            .unwrap_or_default(),
+        Expr::SleepFor(value) | Expr::SleepUntil(value) => {
+            BTreeMap::from([("duration".to_string(), EditableValue::from_expr(value))])
+        }
         Expr::WaitSignal { name } => BTreeMap::from([(
             "signal".to_string(),
             EditableValue::String(name.to_string()),
@@ -885,24 +883,29 @@ fn editable_fields(node: &WorkflowNode) -> BTreeMap<String, EditableValue> {
     }
 }
 
-fn apply_fields(expression: &mut Expr, fields: &BTreeMap<String, EditableValue>) {
+fn apply_fields(
+    node_id: &str,
+    expression: &mut Expr,
+    fields: &BTreeMap<String, EditableValue>,
+) -> Result<(), RenderErrorResponse> {
     if let Some(entries) = receiver_fields_mut(expression) {
         for (name, value) in fields {
+            let value = value.to_expr(node_id, &format!("fields.{name}"))?;
             if let Some((_, expression)) = entries
                 .iter_mut()
                 .find(|(existing, _)| existing.as_str() == name)
             {
-                *expression = value.to_expr();
+                *expression = value;
             } else {
-                entries.push((name.clone().into(), value.to_expr()));
+                entries.push((name.clone().into(), value));
             }
         }
-        return;
+        return Ok(());
     }
     match expression {
         Expr::SleepFor(value) | Expr::SleepUntil(value) => {
             if let Some(duration) = fields.get("duration") {
-                **value = duration.to_expr();
+                **value = duration.to_expr(node_id, "fields.duration")?;
             }
         }
         Expr::WaitSignal { name } => {
@@ -912,6 +915,7 @@ fn apply_fields(expression: &mut Expr, fields: &BTreeMap<String, EditableValue>)
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn receiver_fields(expression: &Expr) -> Option<&Vec<(compact_str::CompactString, Expr)>> {
@@ -939,7 +943,16 @@ fn receiver_fields_mut(
 }
 
 impl EditableValue {
-    fn from_expr(expression: &Expr) -> Option<Self> {
+    fn from_expr(expression: &Expr) -> Self {
+        Self::literal_from_expr(expression).unwrap_or_else(|| {
+            Self::Expr(
+                canonical_expression_source(expression)
+                    .expect("a parsed editable expression must remain sourceable"),
+            )
+        })
+    }
+
+    fn literal_from_expr(expression: &Expr) -> Option<Self> {
         match expression {
             Expr::Null => Some(Self::Null),
             Expr::Bool(value) => Some(Self::Bool(*value)),
@@ -947,32 +960,40 @@ impl EditableValue {
             Expr::String(value) => Some(Self::String(value.to_string())),
             Expr::List(values) => values
                 .iter()
-                .map(Self::from_expr)
+                .map(Self::literal_from_expr)
                 .collect::<Option<Vec<_>>>()
                 .map(Self::List),
             Expr::Record(entries) => entries
                 .iter()
-                .map(|(key, value)| Some((key.to_string(), Self::from_expr(value)?)))
+                .map(|(key, value)| Some((key.to_string(), Self::literal_from_expr(value)?)))
                 .collect::<Option<BTreeMap<_, _>>>()
                 .map(Self::Object),
             _ => None,
         }
     }
 
-    fn to_expr(&self) -> Expr {
-        match self {
+    fn to_expr(&self, node_id: &str, field: &str) -> Result<Expr, RenderErrorResponse> {
+        Ok(match self {
             Self::Null => Expr::Null,
             Self::Bool(value) => Expr::Bool(*value),
             Self::Number(value) => Expr::Number(*value),
             Self::String(value) => Expr::String(value.clone().into()),
-            Self::List(values) => Expr::List(values.iter().map(Self::to_expr).collect()),
+            Self::List(values) => Expr::List(
+                values
+                    .iter()
+                    .map(|value| value.to_expr(node_id, field))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::Expr(source) => parse_expression(source).map_err(|error| {
+                RenderErrorResponse::invalid_expression(node_id, field, error.to_string())
+            })?,
             Self::Object(entries) => Expr::Record(
                 entries
                     .iter()
-                    .map(|(key, value)| (key.clone().into(), value.to_expr()))
-                    .collect(),
+                    .map(|(key, value)| Ok((key.clone().into(), value.to_expr(node_id, field)?)))
+                    .collect::<Result<_, RenderErrorResponse>>()?,
             ),
-        }
+        })
     }
 }
 
