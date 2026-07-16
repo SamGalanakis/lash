@@ -580,6 +580,43 @@ finish item
 }
 
 #[test]
+fn nodes_expose_stable_identifiers_available_before_their_execution() {
+    let graph = workflow_graph_from_source(
+        r#"process scoped(record: any) {
+  state = { count: 0 }
+  first = 1
+  for item in [1] { nested = first + item }
+  finish state
+}
+"#,
+    )
+    .unwrap();
+    let process = graph.process("scoped").unwrap();
+    assert_eq!(process.body.nodes[0].available_variables, ["record"]);
+    assert_eq!(
+        process.body.nodes[1].available_variables,
+        ["record", "state"]
+    );
+    assert_eq!(
+        process.body.nodes[2].available_variables,
+        ["first", "record", "state"]
+    );
+    let WorkflowNodeKind::Container(WorkflowContainer::For { body, .. }) =
+        &process.body.nodes[2].kind
+    else {
+        panic!("expected for container")
+    };
+    assert_eq!(
+        body.as_deref().unwrap().nodes[0].available_variables,
+        ["first", "item", "record", "state"]
+    );
+    assert_eq!(
+        process.body.nodes[3].available_variables,
+        ["first", "nested", "record", "state"]
+    );
+}
+
+#[test]
 fn reference_type_literals_and_effectful_composites_are_typed() {
     let source = r#"type Item = { name: str }
 

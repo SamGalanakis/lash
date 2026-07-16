@@ -133,6 +133,9 @@ pub struct WorkflowNode {
     pub description: Option<String>,
     pub name_source: WorkflowNodeNameSource,
     pub kind: WorkflowNodeKind,
+    /// Identifiers visible before this node executes, in stable lexical order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_variables: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<VariableVersion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -472,6 +475,7 @@ impl<'a> GraphProjector<'a> {
         } else {
             None
         };
+        let available_variables = versions.known.iter().cloned().collect();
         let (kind, derived_name, outputs) = self.project_kind(expression, owner, path, versions);
         let (name, description, name_source) = match label {
             Some(label) => (
@@ -488,6 +492,7 @@ impl<'a> GraphProjector<'a> {
             description,
             name_source,
             kind,
+            available_variables,
             outputs,
             execution_sites,
             source_span,
