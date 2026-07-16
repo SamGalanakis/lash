@@ -1275,6 +1275,50 @@ async fn edited_counter_loop_condition_saves_reprojects_and_runs() {
 }
 
 #[tokio::test]
+async fn bare_counter_loop_condition_rewraps_canonically_and_runs() {
+    let state = AppState::with_run_timing(RunTiming {
+        sleep_cap: Duration::from_millis(2),
+        signal_delay: Duration::from_millis(2),
+    })
+    .expect("default workflow");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "counter-loop").await;
+    let while_node = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.node_type == "container" && node.data.title == "while")
+        .expect("counter-loop while node");
+    while_node.data.condition = Some("state.count < 1".to_string());
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save bare counter-loop condition");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: WorkflowDocument = response.json().await.expect("saved counter-loop");
+    assert!(saved.source.contains("while (state.count < 1)"));
+
+    let events = run_workflow(&client, &base).await;
+    assert!(!events.is_empty());
+    assert!(!events.iter().any(|event| event.status == RunStatus::Failed));
+    assert_eq!(
+        events.last().expect("terminal event").status,
+        RunStatus::Succeeded
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn expression_valued_call_fields_save_reproject_and_reject_malformed_edits() {
     let state = AppState::with_run_timing(RunTiming {
         sleep_cap: Duration::from_millis(2),
