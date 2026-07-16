@@ -17,10 +17,13 @@ export function kindMeta(kind) {
   return NODE_KINDS[kind] ?? { label: kind, hue: 220, glyph: '•', accent: '#8aa0c0' };
 }
 
-// A container node (data.kind === 'container') has no explicit sub-kind in the
-// DTO — the backend distinguishes `if` / `for` / `while` / list comprehension by
-// its child slots and derived title. Recover it for badge + framing choices.
+// A container node (data.kind === 'container') carries an explicit `subkind`
+// once the backend projects/round-trips it (and the host sets it on freshly
+// added containers). When present it is authoritative; otherwise we recover it
+// from the child slots + derived title (older projections, defensive path).
 export function containerSubkind(node) {
+  const explicit = node?.data?.subkind;
+  if (explicit) return explicit;
   const slots = (node?.data?.children ?? []).map((g) => g.slot);
   if (slots.includes('then') || slots.includes('else')) return 'if';
   if (slots.includes('element')) return 'comprehension';
@@ -42,6 +45,33 @@ export const CONTAINER_SUBKINDS = {
 
 // Effect verbs that render as a "waiting"-capable node (sleeps / signal waits).
 export const WAITING_EFFECTS = new Set(['sleep', 'wait_signal', 'await_join']);
+
+// Kinds the "+ Add node" palette can insert into a scope, in menu order. Leaf
+// kinds map to a NODE_KINDS entry; the four container kinds (if/while/for/
+// comprehension) all render as `container` nodes but carry a distinct subkind.
+export const ADDABLE_KINDS = [
+  'call',
+  'effect',
+  'data',
+  'computation',
+  'state_update',
+  'terminal',
+  'if',
+  'while',
+  'for',
+  'comprehension',
+];
+
+// Menu label + glyph + accent for an addable kind (containers borrow the
+// container accent + their sub-kind glyph so the palette reads like the legend).
+export function addableMeta(kind) {
+  const sub = CONTAINER_SUBKINDS[kind];
+  if (sub) {
+    return { label: sub.label, glyph: sub.glyph, accent: NODE_KINDS.container.accent };
+  }
+  const meta = NODE_KINDS[kind] ?? kindMeta(kind);
+  return { label: meta.label, glyph: meta.glyph, accent: meta.accent };
+}
 
 // Human labels for the toy display tool operations.
 export const OP_LABELS = {

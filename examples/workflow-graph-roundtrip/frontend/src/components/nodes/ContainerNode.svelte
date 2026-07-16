@@ -1,9 +1,25 @@
 <script>
   import { Handle, Position } from '@xyflow/svelte';
   import { getContext } from 'svelte';
-  import { kindMeta, containerSubkind, CONTAINER_SUBKINDS } from '../../lib/nodeKinds.js';
+  import {
+    kindMeta,
+    containerSubkind,
+    CONTAINER_SUBKINDS,
+    ADDABLE_KINDS,
+    addableMeta,
+  } from '../../lib/nodeKinds.js';
 
   let { id, data } = $props();
+
+  // Which group's "+ Add node" menu is open (by slot), if any.
+  let menuSlot = $state(null);
+  function toggleMenu(slot) {
+    menuSlot = menuSlot === slot ? null : slot;
+  }
+  function pickKind(slot, kind) {
+    menuSlot = null;
+    data.onAddNode?.(id, slot, kind);
+  }
 
   const run = getContext('run');
   const node = $derived(data.node);
@@ -171,6 +187,43 @@
 
   {#each groups as g (g.slot)}
     <span class="ct-slot" style="left:{g.x}px; top:{g.y - 4}px; width:{g.w}px;">{g.slot}</span>
+  {/each}
+
+  {#each groups as g (g.slot)}
+    {#if g.addable && data.onAddNode}
+      <div class="ct-add nodrag" style="left:{g.x}px; top:{g.y + g.h - 32}px; width:{g.w}px;">
+        <button
+          class="ct-add-btn"
+          class:is-open={menuSlot === g.slot}
+          title="Add a node to the end of this {g.slot}"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            toggleMenu(g.slot);
+          }}
+        >
+          + Add node
+        </button>
+        {#if menuSlot === g.slot}
+          <div class="ct-add-menu">
+            {#each ADDABLE_KINDS as k (k)}
+              {@const m = addableMeta(k)}
+              <button
+                class="ct-add-item"
+                style="--c:{m.accent}"
+                onpointerdown={(e) => e.stopPropagation()}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  pickKind(g.slot, k);
+                }}
+              >
+                <span class="ct-add-glyph">{m.glyph}</span>{m.label}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
   {/each}
 
   <Handle type="source" position={Position.Bottom} />
@@ -346,5 +399,80 @@
     box-shadow:
       inset 0 0 70px -34px color-mix(in srgb, var(--cyan) 70%, transparent),
       0 0 0 1px color-mix(in srgb, var(--cyan) 40%, transparent);
+  }
+
+  .ct-add {
+    position: absolute;
+    display: flex;
+    justify-content: center;
+    z-index: 3;
+  }
+  .ct-add-btn {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: color-mix(in srgb, var(--accent) 80%, var(--text-dim));
+    background: color-mix(in srgb, var(--accent) 8%, rgba(10, 14, 21, 0.85));
+    border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--line));
+    border-radius: 8px;
+    padding: 5px 12px;
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      background 0.15s ease,
+      border-color 0.15s ease;
+  }
+  .ct-add-btn:hover,
+  .ct-add-btn.is-open {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, rgba(10, 14, 21, 0.92));
+    border-style: solid;
+    border-color: var(--accent);
+  }
+  .ct-add-menu {
+    position: absolute;
+    top: calc(100% + 5px);
+    left: 50%;
+    transform: translateX(-50%);
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 3px;
+    padding: 6px;
+    min-width: 190px;
+    background: var(--ink-2, #0d1119);
+    border: 1px solid var(--line-strong, #2a3346);
+    border-radius: 10px;
+    box-shadow: 0 14px 34px -12px rgba(0, 0, 0, 0.7);
+    z-index: 20;
+  }
+  .ct-add-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-dim);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 5px 7px;
+    cursor: pointer;
+    text-align: left;
+    transition:
+      color 0.12s ease,
+      background 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .ct-add-item:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--c) 14%, transparent);
+    border-color: color-mix(in srgb, var(--c) 45%, transparent);
+  }
+  .ct-add-glyph {
+    color: var(--c);
+    font-size: 11px;
+    width: 13px;
+    text-align: center;
+    flex-shrink: 0;
   }
 </style>
