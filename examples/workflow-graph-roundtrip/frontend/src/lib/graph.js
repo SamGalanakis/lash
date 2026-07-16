@@ -305,6 +305,40 @@ function resolveGroup(doc, target) {
   return { nodeIds: group.nodeIds, parentId: owner.id, scope: group.scope };
 }
 
+// Insert a new top-level process from the `proc.process` catalog entry. It joins
+// `roots.processes` with a `body` slot seeded with one default action node (an
+// empty body is also accepted — the backend seeds `finish 0`). The process's
+// name comes from the catalog `name` field default. Mutates `doc`; returns the
+// new process id.
+export function addProcessToDoc(doc, operation, catalog = []) {
+  const taken = new Set(doc.nodes.map((n) => n.id));
+  const id = mintNodeId(taken);
+  const nameField = (operation.fields ?? []).find((f) => f.name === 'name');
+  const name = String(nameField?.default ?? 'my_process');
+
+  const childId = mintNodeId(taken);
+  const childData = seedChildFor(null, catalog);
+  doc.nodes.push({ id: childId, type: childData.kind, parentId: id, data: childData });
+
+  doc.nodes.push({
+    id,
+    type: 'process',
+    data: {
+      kind: 'process',
+      title: name,
+      name,
+      nameSource: 'derived',
+      params: [],
+      signals: [],
+      children: [{ slot: 'body', scope: `process:${id}`, nodeIds: [childId] }],
+    },
+  });
+  doc.roots ??= { main: [], processes: [] };
+  doc.roots.processes ??= [];
+  doc.roots.processes.push(id);
+  return id;
+}
+
 // Insert a new node built from an operation-catalog entry into the target
 // group. Mirrors deleteNodeFromDoc's draft-mutation style: splice the id into
 // the group's nodeIds (BEFORE a trailing terminal so the new node isn't dead
@@ -314,6 +348,10 @@ function resolveGroup(doc, target) {
 // are never added here — the backend recomputes them on reproject. Mutates
 // `doc`; returns the new node id (or null if the target could not be resolved).
 export function addNodeToDoc(doc, target, operation, catalog = []) {
+  // A process is a top-level declaration, not a body statement: it joins
+  // `roots.processes` with its own body slot rather than an owner's group.
+  if (operation.nodeKind === 'process') return addProcessToDoc(doc, operation, catalog);
+
   const taken = new Set(doc.nodes.map((n) => n.id));
   const takenEdges = new Set(doc.edges.map((e) => e.id));
   const group = resolveGroup(doc, target);
@@ -541,7 +579,8 @@ function resolveDestination(doc, dest) {
 // are excluded. Returns `[{ key, label, dest }]` for a "move to…" menu.
 export function moveTargetsFor(doc, nodeId) {
   const node = doc.nodes.find((n) => n.id === nodeId);
-  if (!node || node.data?.kind === 'terminal') return [];
+  // Terminals stay put; processes are always top-level and never move into a scope.
+  if (!node || node.data?.kind === 'terminal' || node.data?.kind === 'process') return [];
   const own = descendantsOf(doc, nodeId);
   own.add(nodeId);
   const current = findGroupOf(doc, nodeId);

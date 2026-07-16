@@ -18,17 +18,25 @@ const GROUPS = [
   { id: 'actions', label: 'Actions', kinds: ['call', 'effect'] },
   { id: 'control', label: 'Control flow', kinds: ['container', 'terminal'] },
   { id: 'data', label: 'Data', kinds: ['data', 'computation', 'state_update'] },
+  { id: 'process', label: 'Process', kinds: ['process'] },
   { id: 'advanced', label: 'Advanced', kinds: ['opaque'] },
 ];
 
 // Kinds hidden from the Simplified palette (raw escape hatches).
 const POWER_KINDS = new Set(['opaque']);
 
+// Kinds that may only be inserted at the top level, not into a container slot.
+const TOP_LEVEL_KINDS = new Set(['process']);
+
 // Group a catalog into `[{ id, label, items }]`, dropping empty groups.
 // Returns `[]` for a missing/empty catalog so the palette can show an empty
-// state. Simplified mode additionally hides raw power-only kinds.
-export function groupOperations(catalog, { includePower = true } = {}) {
-  const entries = (catalog ?? []).filter((op) => includePower || !POWER_KINDS.has(op.nodeKind));
+// state. Simplified mode hides raw power-only kinds; `topLevel:false` (a
+// container's add-menu) additionally hides top-level-only kinds like `process`.
+export function groupOperations(catalog, { includePower = true, topLevel = true } = {}) {
+  const entries = (catalog ?? []).filter(
+    (op) =>
+      (includePower || !POWER_KINDS.has(op.nodeKind)) && (topLevel || !TOP_LEVEL_KINDS.has(op.nodeKind)),
+  );
   if (!entries.length) return [];
   const groups = GROUPS.map((g) => ({
     id: g.id,

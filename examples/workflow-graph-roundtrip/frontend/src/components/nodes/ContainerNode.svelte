@@ -20,7 +20,9 @@
     menuSlot = null;
     data.onAddNode?.(id, slot, op);
   }
-  const opGroups = $derived(groupOperations(ops?.entries, { includePower: mode.power }));
+  const opGroups = $derived(
+    groupOperations(ops?.entries, { includePower: mode.power, topLevel: false }),
+  );
 
   const node = $derived(data.node);
   const isProcess = $derived(node.data.kind === 'process');
@@ -40,13 +42,37 @@
   const isComprehension = $derived(subkind === 'comprehension');
   const isConditional = $derived(isWhile || isIf);
   const clauses = $derived(node.data.clauses ?? []);
+  const params = $derived(node.data.params ?? []);
+  const signals = $derived(node.data.signals ?? []);
 
   function commit() {
     data.onCommit?.();
   }
-  function onTitleInput(e) {
-    node.data.title = e.currentTarget.value;
-    node.data.nameSource = 'label';
+  function relayout() {
+    (data.onRebuild ?? data.onCommit)?.();
+  }
+  // A process's canonical name is `data.name` (an identifier); its display title
+  // mirrors it, so edit both together — renaming round-trips into the source.
+  function onProcessName(e) {
+    const v = e.currentTarget.value;
+    node.data.name = v;
+    node.data.title = v;
+  }
+  function addParam() {
+    node.data.params = [...(node.data.params ?? []), { name: 'arg', type: 'any' }];
+    relayout();
+  }
+  function removeParam(i) {
+    node.data.params = (node.data.params ?? []).filter((_, j) => j !== i);
+    relayout();
+  }
+  function addSignal() {
+    node.data.signals = [...(node.data.signals ?? []), { name: 'sig', type: 'any' }];
+    relayout();
+  }
+  function removeSignal(i) {
+    node.data.signals = (node.data.signals ?? []).filter((_, j) => j !== i);
+    relayout();
   }
   function onBinding(e) {
     const v = e.currentTarget.value;
@@ -86,10 +112,11 @@
     {#if isProcess}
       <input
         class="ct-title"
-        value={node.data.title}
-        oninput={onTitleInput}
+        value={node.data.name ?? node.data.title}
+        oninput={onProcessName}
         onchange={commit}
         spellcheck="false"
+        placeholder="process_name"
       />
     {:else if isConditional}
       <span class="ct-cond">
@@ -197,17 +224,15 @@
         >
       </span>
     {/if}
-    {#if !isProcess}
-      <button
-        class="ct-del"
-        title="Delete branch"
-        aria-label="Delete branch"
-        onclick={(e) => {
-          e.stopPropagation();
-          data.onDelete(id);
-        }}>×</button
-      >
-    {/if}
+    <button
+      class="ct-del"
+      title={isProcess ? 'Delete process' : 'Delete branch'}
+      aria-label={isProcess ? 'Delete process' : 'Delete branch'}
+      onclick={(e) => {
+        e.stopPropagation();
+        data.onDelete(id);
+      }}>×</button
+    >
   </header>
 
   {#if reads.length}
@@ -289,10 +314,92 @@
     </div>
   {/if}
 
-  {#if isProcess && availableVars.length}
-    <div class="ct-params nodrag" title="process parameters (edit in source)">
-      <span class="ct-params-k">params</span>
-      {#each availableVars as p (p)}<span class="ct-params-v">{p}</span>{/each}
+  {#if isProcess}
+    <div class="ct-sig nodrag">
+      <div class="ct-sig-group">
+        <span class="ct-sig-label">params</span>
+        {#each params as p, i (i)}
+          <div class="ct-sig-row">
+            <input
+              class="ct-sig-name"
+              value={p.name}
+              oninput={(e) => (node.data.params[i].name = e.currentTarget.value)}
+              onchange={commit}
+              spellcheck="false"
+              placeholder="name"
+            />
+            <span class="ct-sig-colon">:</span>
+            <input
+              class="ct-sig-type"
+              value={p.type}
+              oninput={(e) => (node.data.params[i].type = e.currentTarget.value)}
+              onchange={commit}
+              spellcheck="false"
+              placeholder="type"
+            />
+            <button
+              class="ct-sig-del"
+              title="Remove parameter"
+              aria-label="Remove parameter"
+              onpointerdown={(e) => e.stopPropagation()}
+              onclick={(e) => {
+                e.stopPropagation();
+                removeParam(i);
+              }}>×</button
+            >
+          </div>
+        {/each}
+        <button
+          class="ct-sig-add"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            addParam();
+          }}>+ param</button
+        >
+      </div>
+      <div class="ct-sig-group">
+        <span class="ct-sig-label">signals</span>
+        {#each signals as s, i (i)}
+          <div class="ct-sig-row">
+            <input
+              class="ct-sig-name"
+              value={s.name}
+              oninput={(e) => (node.data.signals[i].name = e.currentTarget.value)}
+              onchange={commit}
+              spellcheck="false"
+              placeholder="name"
+            />
+            <span class="ct-sig-colon">:</span>
+            <input
+              class="ct-sig-type"
+              value={s.type}
+              oninput={(e) => (node.data.signals[i].type = e.currentTarget.value)}
+              onchange={commit}
+              spellcheck="false"
+              placeholder="type"
+            />
+            <button
+              class="ct-sig-del"
+              title="Remove signal"
+              aria-label="Remove signal"
+              onpointerdown={(e) => e.stopPropagation()}
+              onclick={(e) => {
+                e.stopPropagation();
+                removeSignal(i);
+              }}>×</button
+            >
+          </div>
+        {/each}
+        <button
+          class="ct-sig-add"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            addSignal();
+          }}>+ signal</button
+        >
+      </div>
     </div>
   {/if}
 
@@ -515,30 +622,100 @@
     color: var(--accent);
     border-color: var(--accent);
   }
-  .ct-params {
+  .ct-sig {
     position: absolute;
-    top: 38px;
+    top: 40px;
     left: 14px;
     right: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ct-sig-group {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 5px;
   }
-  .ct-params-k {
+  .ct-sig-label {
     font-family: var(--font-mono);
     font-size: 8.5px;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--text-faint);
+    width: 44px;
+    flex-shrink: 0;
   }
-  .ct-params-v {
+  .ct-sig-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: color-mix(in srgb, var(--accent) 8%, var(--ink-2));
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+    border-radius: 7px;
+    padding: 2px 4px 2px 6px;
+  }
+  .ct-sig-name,
+  .ct-sig-type {
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    padding: 1px 0;
+    min-width: 0;
+    width: 52px;
+  }
+  .ct-sig-name {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .ct-sig-type {
+    width: 40px;
+    color: var(--text-dim);
+  }
+  .ct-sig-name:focus,
+  .ct-sig-type:focus {
+    outline: none;
+  }
+  .ct-sig-colon {
+    color: var(--text-faint);
     font-family: var(--font-mono);
     font-size: 10px;
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    border-radius: 5px;
-    padding: 1px 6px;
+  }
+  .ct-sig-del {
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 12px;
+    line-height: 1;
+    width: 15px;
+    height: 15px;
+    border-radius: 4px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .ct-sig-del:hover {
+    color: var(--rose);
+    background: color-mix(in srgb, var(--rose) 16%, transparent);
+  }
+  .ct-sig-add {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.03em;
+    color: color-mix(in srgb, var(--accent) 80%, var(--text-dim));
+    background: transparent;
+    border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--line));
+    border-radius: 6px;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition:
+      color 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .ct-sig-add:hover {
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .ct-reads {
     position: absolute;
