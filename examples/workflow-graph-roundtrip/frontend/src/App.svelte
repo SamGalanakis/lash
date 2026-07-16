@@ -84,6 +84,7 @@
     onAddNode,
     onReorder,
     onCommit,
+    onRebuild,
     onMoveTo,
     getMoveTargets: (id) => moveTargetsFor(draftDoc, id),
   };
@@ -96,6 +97,15 @@
     history.commit(draftDoc);
   }
 
+  // A structural change already applied to the draft (e.g. adding/removing a
+  // comprehension clause) that also needs a relayout: commit + rebuild.
+  function onRebuild() {
+    dirty = true;
+    saveOk = null;
+    history.commit(draftDoc);
+    rebuild();
+  }
+
   function onDelete(id) {
     deleteNodeFromDoc(draftDoc, id);
     dirty = true;
@@ -106,7 +116,7 @@
 
   // Insert a node from an operation-catalog entry at the end of a container slot.
   function onAddNode(ownerId, slot, operation) {
-    addNodeToDoc(draftDoc, { ownerId, slot }, operation);
+    addNodeToDoc(draftDoc, { ownerId, slot }, operation, ops.entries ?? []);
     dirty = true;
     saveOk = null;
     history.commit(draftDoc);
@@ -116,7 +126,7 @@
   let mainMenuOpen = $state(false);
   function onAddMain(operation) {
     mainMenuOpen = false;
-    addNodeToDoc(draftDoc, { main: true }, operation);
+    addNodeToDoc(draftDoc, { main: true }, operation, ops.entries ?? []);
     dirty = true;
     saveOk = null;
     history.commit(draftDoc);
@@ -201,15 +211,39 @@
     }
   }
 
+  // A stable signature of the graph's SHAPE (kinds + nesting + slot structure),
+  // independent of the node ids that every Save remints. Used to decide whether
+  // a Save actually reshaped the graph or just relabeled it.
+  function shapeSignature(doc) {
+    if (!doc) return '';
+    const byId = new Map((doc.nodes ?? []).map((n) => [n.id, n]));
+    const sig = (id) => {
+      const n = byId.get(id);
+      if (!n) return '';
+      const groups = (n.data?.children ?? [])
+        .map((g) => `${g.slot}[${g.nodeIds.map(sig).join(',')}]`)
+        .join('');
+      return `${n.data?.kind}:${n.data?.subkind ?? ''}(${groups})`;
+    };
+    const roots = [
+      ...(doc.roots?.processes ?? []).map(sig),
+      '|',
+      ...(doc.roots?.main ?? []).map(sig),
+    ];
+    return roots.join(';');
+  }
+
   // Adopt a canonical (saved / selected) document as a fresh, clean draft.
-  // Re-keys the SvelteFlow instance so its viewport re-fits for the new graph.
-  function adoptDocument(doc, keepSelection = null) {
+  // `refit` re-keys the SvelteFlow instance so its viewport re-fits — wanted on a
+  // workflow switch, but not on a Save that left the graph shape unchanged (the
+  // migrated positions keep every node in place, so a re-fit would just jump).
+  function adoptDocument(doc, keepSelection = null, { refit = true } = {}) {
     draftDoc = structuredClone(doc);
     canonicalSource = doc.source;
     savedVersion = doc.version;
     dirty = false;
     history.reset(draftDoc);
-    flowKey += 1;
+    if (refit) flowKey += 1;
     rebuild(keepSelection);
   }
 
@@ -238,6 +272,7 @@
     saveError = null;
     saveOk = null;
     const selectedIds = flowNodes.filter((n) => n.selected).map((n) => n.id);
+    const shapeBefore = shapeSignature(draftDoc);
     const payload = JSON.parse(JSON.stringify(draftDoc));
     const result = await saveWorkflow(payload);
     saving = false;
@@ -248,7 +283,10 @@
         positions = loadPositions();
         keepSelection = new Set(selectedIds.map((oldId) => result.idMap[oldId] ?? oldId));
       }
-      adoptDocument(result.document, keepSelection);
+      // Only re-fit the viewport when the Save actually reshaped the graph;
+      // a same-shape save keeps every node in place, so a re-fit would just jump.
+      const refit = shapeSignature(result.document) !== shapeBefore;
+      adoptDocument(result.document, keepSelection, { refit });
       saveOk = `saved as v${result.document.version}`;
       run.reset();
     } else {

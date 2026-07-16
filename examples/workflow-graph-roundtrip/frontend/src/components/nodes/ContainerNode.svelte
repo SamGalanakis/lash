@@ -52,6 +52,20 @@
     const v = e.currentTarget.value;
     node.data.binding = v === '' ? undefined : v;
   }
+
+  // Comprehension clause add/remove. The lens rebuilds `data.clauses` verbatim,
+  // so mutating the array is authoritative. Adding/removing a clause changes the
+  // container's height, so route through onRebuild (commit + relayout).
+  function addClause(kind) {
+    const clause =
+      kind === 'for' ? { kind: 'for', binding: 'x', iterable: '[1, 2, 3]' } : { kind: 'if', condition: 'true' };
+    node.data.clauses = [...(node.data.clauses ?? []), clause];
+    (data.onRebuild ?? data.onCommit)?.();
+  }
+  function removeClause(index) {
+    node.data.clauses = (node.data.clauses ?? []).filter((_, i) => i !== index);
+    (data.onRebuild ?? data.onCommit)?.();
+  }
 </script>
 
 <div
@@ -83,6 +97,7 @@
         <ExpressionField
           value={node.data.condition ?? ''}
           kind="expression"
+          builder="comparison"
           {availableVars}
           placeholder="condition"
           onInput={(text) => (node.data.condition = text)}
@@ -104,6 +119,7 @@
         <ExpressionField
           value={node.data.iterable ?? ''}
           kind="expression"
+          builder="value"
           {availableVars}
           placeholder="iterable"
           onInput={(text) => (node.data.iterable = text)}
@@ -204,7 +220,7 @@
     </div>
   {/if}
 
-  {#if isComprehension && clauses.length}
+  {#if isComprehension}
     <div class="ct-clauses nodrag">
       {#each clauses as clause, i (i)}
         <div class="ct-clause">
@@ -222,6 +238,7 @@
             <ExpressionField
               value={clause.iterable ?? ''}
               kind="expression"
+              builder="value"
               {availableVars}
               placeholder="iterable"
               onInput={(text) => (node.data.clauses[i].iterable = text)}
@@ -232,14 +249,50 @@
             <ExpressionField
               value={clause.condition ?? ''}
               kind="expression"
+              builder="comparison"
               {availableVars}
               placeholder="condition"
               onInput={(text) => (node.data.clauses[i].condition = text)}
               onCommit={commit}
             />
           {/if}
+          <button
+            class="ct-clause-del"
+            title="Remove clause"
+            aria-label="Remove clause"
+            onpointerdown={(e) => e.stopPropagation()}
+            onclick={(e) => {
+              e.stopPropagation();
+              removeClause(i);
+            }}>×</button
+          >
         </div>
       {/each}
+      <div class="ct-clause-add">
+        <button
+          class="ct-clause-addbtn"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            addClause('for');
+          }}>+ for clause</button
+        >
+        <button
+          class="ct-clause-addbtn"
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => {
+            e.stopPropagation();
+            addClause('if');
+          }}>+ if clause</button
+        >
+      </div>
+    </div>
+  {/if}
+
+  {#if isProcess && availableVars.length}
+    <div class="ct-params nodrag" title="process parameters (edit in source)">
+      <span class="ct-params-k">params</span>
+      {#each availableVars as p (p)}<span class="ct-params-v">{p}</span>{/each}
     </div>
   {/if}
 
@@ -422,6 +475,70 @@
     align-items: center;
     gap: 5px;
     min-width: 0;
+  }
+  .ct-clause-del {
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 13px;
+    line-height: 1;
+    width: 17px;
+    height: 17px;
+    border-radius: 5px;
+    padding: 0;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .ct-clause-del:hover {
+    color: var(--rose);
+    background: color-mix(in srgb, var(--rose) 16%, transparent);
+  }
+  .ct-clause-add {
+    display: flex;
+    gap: 5px;
+  }
+  .ct-clause-addbtn {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.03em;
+    color: color-mix(in srgb, var(--accent) 80%, var(--text-dim));
+    background: transparent;
+    border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--line));
+    border-radius: 6px;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition:
+      color 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .ct-clause-addbtn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .ct-params {
+    position: absolute;
+    top: 38px;
+    left: 14px;
+    right: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+  }
+  .ct-params-k {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .ct-params-v {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-radius: 5px;
+    padding: 1px 6px;
   }
   .ct-reads {
     position: absolute;

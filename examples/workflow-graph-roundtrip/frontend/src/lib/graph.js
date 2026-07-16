@@ -9,7 +9,8 @@ import { fieldDefaultValue } from './operations.js';
 // Positions come from auto-layout, overridden by any user-dragged position
 // persisted out-of-band in localStorage.
 export function buildFlow(doc, storedPositions, handlers = {}) {
-  const { onDelete, onAddNode, onReorder, onCommit, onMoveTo, getMoveTargets } = handlers;
+  const { onDelete, onAddNode, onReorder, onCommit, onRebuild, onMoveTo, getMoveTargets } =
+    handlers;
   const { positions, sizes, groupLayouts } = layoutDocument(doc);
   const nodeMap = new Map(doc.nodes.map((n) => [n.id, n]));
 
@@ -54,6 +55,7 @@ export function buildFlow(doc, storedPositions, handlers = {}) {
         onAddNode,
         onReorder,
         onCommit,
+        onRebuild,
         onMoveTo,
         getMoveTargets,
       },
@@ -145,8 +147,8 @@ function mintEdgeId(taken) {
 
 // --- Building a node from an operation-catalog entry -----------------------
 //
-// The operation catalog (GET /operations, or the built-in fallback) is the sole
-// data home for what a palette can insert. An entry is
+// The operation catalog (GET /operations) is the sole data home for what a
+// palette can insert. An entry is
 //   { id, label, nodeKind, subkind?, operation?, effect?, terminalKind?,
 //     fields:[{ name, type, default }] }.
 // `nodeDataFromOperation` turns one entry into the node `data` payload the lens
@@ -251,12 +253,16 @@ function nodeDataFromOperation(op) {
   return data;
 }
 
-// A ready-to-run default child seeded into a fresh container slot: a `call`,
-// except a comprehension's single-expression `element` slot (a bare value).
-function seedChildFor(subkind) {
+// A ready-to-run default child seeded into a fresh container slot: the catalog's
+// first action (`call`) operation, except a comprehension's single-expression
+// `element` slot (a bare value). Falls back to a minimal call if the catalog is
+// empty (adding is only reachable once the catalog has loaded, so this is rare).
+function seedChildFor(subkind, catalog) {
   if (subkind === 'comprehension') {
     return { kind: 'data', title: 'x', nameSource: 'derived', expression: 'x' };
   }
+  const action = (catalog ?? []).find((op) => op.nodeKind === 'call');
+  if (action) return nodeDataFromOperation(action);
   return {
     kind: 'call',
     title: 'Show message',
@@ -307,7 +313,7 @@ function resolveGroup(doc, target) {
 // Container entries also get their slot group(s) + one seeded child. Data edges
 // are never added here — the backend recomputes them on reproject. Mutates
 // `doc`; returns the new node id (or null if the target could not be resolved).
-export function addNodeToDoc(doc, target, operation) {
+export function addNodeToDoc(doc, target, operation, catalog = []) {
   const taken = new Set(doc.nodes.map((n) => n.id));
   const takenEdges = new Set(doc.edges.map((e) => e.id));
   const group = resolveGroup(doc, target);
@@ -323,7 +329,7 @@ export function addNodeToDoc(doc, target, operation) {
       const nodeIds = [];
       if (seeded) {
         const childId = mintNodeId(taken);
-        const childData = seedChildFor(operation.subkind);
+        const childData = seedChildFor(operation.subkind, catalog);
         doc.nodes.push({
           id: childId,
           type: childData.kind,

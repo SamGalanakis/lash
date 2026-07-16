@@ -354,6 +354,7 @@
             <ExpressionField
               value={v.$expr}
               kind="expression"
+              builder="value"
               {availableVars}
               placeholder="expression…"
               onInput={(text) => (node.data.fields[key] = { $expr: text })}
@@ -428,6 +429,7 @@
       <ExpressionField
         value={node.data.expression ?? ''}
         kind="expression"
+        builder="value"
         {availableVars}
         placeholder="expression…"
         onInput={(text) => (node.data.expression = text)}

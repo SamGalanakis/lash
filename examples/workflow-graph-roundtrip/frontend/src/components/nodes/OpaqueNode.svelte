@@ -36,7 +36,17 @@
       }}>×</button
     >
   </header>
-  <div class="wf-title">{node.data.title}</div>
+  <input
+    class="wf-title nodrag"
+    value={node.data.title}
+    oninput={(e) => {
+      node.data.title = e.currentTarget.value;
+      node.data.nameSource = 'label';
+    }}
+    onchange={() => data.onCommit?.()}
+    spellcheck="false"
+    placeholder="title"
+  />
   {#if mode.power}
     <textarea
       class="opaque-src nodrag"
@@ -132,10 +142,20 @@
     background: color-mix(in srgb, var(--rose) 16%, transparent);
   }
   .wf-title {
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-bottom: 1px dashed transparent;
     color: var(--text);
+    font-family: var(--font-ui);
     font-weight: 600;
     font-size: 13px;
+    padding: 1px 0 3px;
     margin-bottom: 6px;
+  }
+  .wf-title:focus {
+    outline: none;
+    border-bottom-color: var(--accent);
   }
   .opaque-src {
     width: 100%;

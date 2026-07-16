@@ -71,8 +71,10 @@ export function layoutDocument(doc) {
   // from overlapping the element group.
   function headerBand(node) {
     if (containerSubkind(node) === 'comprehension') {
+      // One row per clause (builder rows are a touch taller), plus a row for
+      // the "+ for / + if clause" controls.
       const clauseCount = (node.data.clauses ?? []).length;
-      return HEADER_BAND + (clauseCount ? clauseCount * 26 + 8 : 0);
+      return HEADER_BAND + clauseCount * 30 + 34;
     }
     return HEADER_BAND;
   }
