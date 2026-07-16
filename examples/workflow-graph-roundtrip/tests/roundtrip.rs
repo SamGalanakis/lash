@@ -933,6 +933,216 @@ async fn blank_workflow_grows_by_two_nodes_then_saves_and_runs() {
 }
 
 #[tokio::test]
+async fn reordered_process_statements_save_reproject_and_run_in_node_id_order() {
+    let state = AppState::with_run_timing(RunTiming {
+        sleep_cap: Duration::from_millis(2),
+        signal_delay: Duration::from_millis(2),
+    })
+    .expect("default workflow");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "blank").await;
+    let mut first = new_flow_node("new:first", "call", None, "First message");
+    first.data.expression = Some("await display.show_message({ text: \"First\" })?".to_string());
+    append_process_node(&mut document, first);
+    let mut second = new_flow_node("new:second", "call", None, "Second message");
+    second.data.expression = Some("await display.show_message({ text: \"Second\" })?".to_string());
+    append_process_node(&mut document, second);
+
+    let process = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.node_type == "process")
+        .expect("process container");
+    let body = process
+        .data
+        .children
+        .iter_mut()
+        .find(|child| child.slot == "body")
+        .expect("process body");
+    let first_index = body
+        .node_ids
+        .iter()
+        .position(|id| id == "new:first")
+        .expect("first node membership");
+    let second_index = body
+        .node_ids
+        .iter()
+        .position(|id| id == "new:second")
+        .expect("second node membership");
+    body.node_ids.swap(first_index, second_index);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save reordered workflow");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: SaveWorkflowResponse = response.json().await.expect("saved reordered workflow");
+    let second_source_index = saved
+        .document
+        .source
+        .find("text: \"Second\"")
+        .expect("second statement source");
+    let first_source_index = saved
+        .document
+        .source
+        .find("text: \"First\"")
+        .expect("first statement source");
+    assert!(second_source_index < first_source_index);
+
+    let events = run_workflow(&client, &base).await;
+    assert!(!events.iter().any(|event| event.status == RunStatus::Failed));
+    assert_eq!(
+        events.last().expect("terminal event").display.messages,
+        vec!["Second".to_string(), "First".to_string()]
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn moved_statement_between_scopes_saves_reprojects_and_runs_in_new_scope() {
+    let state = AppState::with_run_timing(RunTiming {
+        sleep_cap: Duration::from_millis(2),
+        signal_delay: Duration::from_millis(2),
+    })
+    .expect("default workflow");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let server = tokio::spawn(workflow_graph_roundtrip::serve(listener, state));
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let mut document = select_workflow(&client, &base, "branching-approval").await;
+    let process_id = document
+        .nodes
+        .iter()
+        .find(|node| node.node_type == "process")
+        .expect("process container")
+        .id
+        .clone();
+    let moved_id = document
+        .nodes
+        .iter()
+        .find(|node| {
+            node.data.fields.get("text")
+                == Some(&EditableValue::String("Approval needs review".to_string()))
+        })
+        .expect("inner else-branch message")
+        .id
+        .clone();
+    let original_parent = document
+        .nodes
+        .iter()
+        .find(|node| node.id == moved_id)
+        .and_then(|node| node.parent_id.clone())
+        .expect("nested message parent");
+    assert_ne!(original_parent, process_id);
+
+    for node in &mut document.nodes {
+        for child in &mut node.data.children {
+            child.node_ids.retain(|id| id != &moved_id);
+        }
+    }
+    let terminal_id = document
+        .nodes
+        .iter()
+        .find(|node| node.node_type == "terminal")
+        .expect("terminal node")
+        .id
+        .clone();
+    let process = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == process_id)
+        .expect("process container");
+    let body = process
+        .data
+        .children
+        .iter_mut()
+        .find(|child| child.slot == "body")
+        .expect("process body");
+    let terminal_index = body
+        .node_ids
+        .iter()
+        .position(|id| id == &terminal_id)
+        .expect("terminal membership");
+    body.node_ids.insert(terminal_index, moved_id.clone());
+    document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == moved_id)
+        .expect("moved message node")
+        .parent_id = Some(process_id);
+
+    let response = client
+        .post(format!("{base}/workflow"))
+        .json(&document)
+        .send()
+        .await
+        .expect("save moved workflow");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved: SaveWorkflowResponse = response.json().await.expect("saved moved workflow");
+    let canonical_moved_id = saved
+        .id_map
+        .get(&moved_id)
+        .expect("moved node ID reconciliation");
+    let canonical_process = saved
+        .document
+        .nodes
+        .iter()
+        .find(|node| node.node_type == "process")
+        .expect("canonical process");
+    assert_eq!(
+        saved
+            .document
+            .nodes
+            .iter()
+            .find(|node| &node.id == canonical_moved_id)
+            .and_then(|node| node.parent_id.as_ref()),
+        Some(&canonical_process.id)
+    );
+    assert!(canonical_process.data.children.iter().any(|child| {
+        child.slot == "body" && child.node_ids.iter().any(|id| id == canonical_moved_id)
+    }));
+    let highlight_index = saved
+        .document
+        .source
+        .find("target: \"result\"")
+        .expect("result highlight source");
+    let moved_index = saved
+        .document
+        .source
+        .find("text: \"Approval needs review\"")
+        .expect("moved message source");
+    assert!(highlight_index < moved_index);
+
+    let events = run_workflow(&client, &base).await;
+    assert!(!events.iter().any(|event| event.status == RunStatus::Failed));
+    assert!(
+        events
+            .last()
+            .expect("terminal event")
+            .display
+            .messages
+            .iter()
+            .any(|message| message == "Approval needs review")
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn new_call_without_receiver_expression_returns_typed_error() {
     let state = AppState::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
