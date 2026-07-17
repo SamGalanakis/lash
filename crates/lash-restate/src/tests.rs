@@ -3614,14 +3614,15 @@ async fn snapshot_lashlang_registration(
         "#,
     )
     .expect("snapshot lashlang module");
+    let contract = SnapshotRecoveryTool::definition().contract();
     let mut resources = lashlang::LashlangHostCatalog::new();
     resources.add_module_operation(
         ["tools"],
         "Tools",
         "snapshot_echo",
         "tool:snapshot_echo",
-        lashlang::TypeExpr::Any,
-        lashlang::TypeExpr::Any,
+        lashlang::json_schema_to_type_expr(contract.input_schema.canonical()),
+        lashlang::json_schema_to_type_expr(contract.output_schema.canonical()),
     );
     let linked_module = lashlang::LinkedModule::link(
         module,
