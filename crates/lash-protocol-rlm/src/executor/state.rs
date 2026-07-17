@@ -15,10 +15,10 @@ pub struct RlmExecutionState {
     pub(super) scratch: ExecutionScratch,
     pub(super) linked_programs: lashlang::LinkedProgramCache,
     pub(super) stored_lashlang_modules: BTreeSet<lashlang::ModuleRef>,
-    /// Per-turn record of deferred tool resolutions, keyed by Lashlang
+    /// Active-link record of deferred tool resolutions, keyed by Lashlang
     /// call-path. Snapshotted/restored with the rest of the execution state so
-    /// a re-driven or recovered turn replays the recorded grants and
-    /// `NotAvailable` results without calling the resolver again.
+    /// a re-driven or recovered link replays the recorded grants and
+    /// `NotAvailable` results without leaking them into a later code effect.
     pub(super) deferred_resolutions: lash_lashlang_runtime::DeferredResolutionRecord,
     pub(super) scratch_dir: tempfile::TempDir,
     pub(super) dirty: bool,

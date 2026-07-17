@@ -10,7 +10,7 @@
 //! [`lashlang::LinkedModule::link`]: collect the call-paths the program
 //! references but the host environment does not provide, resolve the unknowns,
 //! fold `Resolved` grants into the host environment, then link. Each resolution
-//! is recorded so a re-driven turn reuses it without calling the resolver
+//! is recorded so a re-driven link reuses it without calling the resolver
 //! again, and the flat Tool Catalog is never mutated — resolution is
 //! link-scoped only.
 
@@ -85,16 +85,70 @@ pub trait DeferredToolResolver: Send + Sync {
 /// no deferral.
 pub type SharedDeferredToolResolver = Arc<dyn DeferredToolResolver>;
 
+/// Stable identity of one `ExecCode` link. The scope distinguishes logical
+/// turns and protocol iterations, while the effect and replay keys distinguish
+/// individual code effects and their durable re-drives.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeferredResolutionLinkKey {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_iteration: Option<usize>,
+    pub effect_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_key: Option<String>,
+}
+
+impl DeferredResolutionLinkKey {
+    pub fn from_exec_code_invocation(invocation: &lash_core::RuntimeInvocation) -> Option<Self> {
+        if invocation.effect_kind() != Some(lash_core::RuntimeEffectKind::ExecCode) {
+            return None;
+        }
+        Some(Self {
+            session_id: invocation.scope.session_id.clone(),
+            turn_id: invocation.scope.turn_id.clone(),
+            turn_index: invocation.scope.turn_index,
+            protocol_iteration: invocation.scope.protocol_iteration,
+            effect_id: invocation.effect_id()?.to_string(),
+            replay_key: invocation.replay_key().map(str::to_string),
+        })
+    }
+}
+
 /// A per-link record of every deferred resolution, keyed by call-path within
 /// the execution scope. Replay/recovery applies the record so the resolver is
 /// never called twice for the same link. Captures both `Resolved` grants (with
 /// their Tool Execution Binding) and negative `NotAvailable` results.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct DeferredResolutionRecord {
+    /// The code link whose outcomes are stored in `resolutions`. `None` is the
+    /// inactive state before an executor selects its first link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_key: Option<DeferredResolutionLinkKey>,
     pub resolutions: BTreeMap<String, Resolution>,
 }
 
 impl DeferredResolutionRecord {
+    /// Select the active code link, retaining outcomes only when the stable
+    /// identity matches. A new link replaces the entire record so authority and
+    /// negative availability results cannot leak across code effects.
+    pub fn select_link(&mut self, link_key: DeferredResolutionLinkKey) {
+        if self.link_key.as_ref() != Some(&link_key) {
+            self.link_key = Some(link_key);
+            self.resolutions.clear();
+        }
+    }
+
+    /// Clear the active link when execution has no stable `ExecCode` identity.
+    /// Such an invocation cannot safely reuse durable resolution outcomes.
+    pub fn clear_link(&mut self) {
+        self.link_key = None;
+        self.resolutions.clear();
+    }
+
     pub fn get(&self, path: &str) -> Option<&Resolution> {
         self.resolutions.get(path)
     }
@@ -143,7 +197,7 @@ fn already_provided(host_environment: &LashlangHostEnvironment, call_path: &str)
 /// into `host_environment`. Returns the augmented host environment; the caller
 /// links (or compiles via a cache) against it.
 ///
-/// Every resolution is written to `record` so a re-driven or recovered turn
+/// Every resolution is written to `record` so a re-driven or recovered link
 /// replays the recorded outcomes without calling the resolver again. The flat
 /// Tool Catalog is never mutated — resolution is link-scoped only.
 pub async fn resolve_and_fold_deferred(

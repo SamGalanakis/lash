@@ -863,8 +863,9 @@ pub use catalogue_preview::{
     catalogue_preview_entry_from_catalog_record, catalogue_preview_entry_from_manifest,
 };
 pub use deferred::{
-    DeferredResolutionRecord, DeferredToolResolver, Resolution, SharedDeferredToolResolver,
-    ToolGrant, link_with_deferred_resolution, resolve_and_fold_deferred,
+    DeferredResolutionLinkKey, DeferredResolutionRecord, DeferredToolResolver, Resolution,
+    SharedDeferredToolResolver, ToolGrant, link_with_deferred_resolution,
+    resolve_and_fold_deferred,
 };
 pub use process::{
     lashlang_process_event_types, lashlang_process_signal_event_types, lashlang_type_expr_schema,
