@@ -1043,6 +1043,7 @@ pub fn is_resolved_type_assignable(source: &TypeExpr, target: &TypeExpr) -> bool
         (TypeExpr::List(source), TypeExpr::List(target)) => {
             is_resolved_type_assignable(source, target)
         }
+        (TypeExpr::Dict, TypeExpr::Object(_)) => true,
         (TypeExpr::Object(_), TypeExpr::Dict) => true,
         (TypeExpr::Object(source), TypeExpr::Object(target)) => {
             object_type_assignable(source, target)
@@ -1217,6 +1218,31 @@ mod tests {
 
         assert!(is_resolved_type_assignable(&compatible, &target));
         assert!(!is_resolved_type_assignable(&incompatible, &target));
+    }
+
+    #[test]
+    fn resolved_type_assignability_treats_dict_as_gradual_at_object_targets() {
+        let object = TypeExpr::Object(vec![required_field("value", TypeExpr::Str)]);
+
+        assert!(is_resolved_type_assignable(&TypeExpr::Dict, &object));
+        assert!(is_resolved_type_assignable(&object, &TypeExpr::Dict));
+        assert!(!is_resolved_type_assignable(&TypeExpr::Int, &object));
+    }
+
+    #[test]
+    fn resolved_type_assignability_rejects_named_nested_list_mismatches() {
+        assert!(!is_resolved_type_assignable(
+            &TypeExpr::List(Box::new(TypeExpr::Str)),
+            &TypeExpr::List(Box::new(TypeExpr::Int)),
+        ));
+    }
+
+    #[test]
+    fn resolved_type_assignability_accepts_named_nested_list_any_consistency() {
+        assert!(is_resolved_type_assignable(
+            &TypeExpr::List(Box::new(TypeExpr::Any)),
+            &TypeExpr::List(Box::new(TypeExpr::Int)),
+        ));
     }
 
     #[test]
