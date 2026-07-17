@@ -12,9 +12,8 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use crate::common::{
-    DEFAULT_HTTP_TRANSPORT, DEFAULT_MAX_OUTPUT_TOKENS, reasoning_config, reasoning_config_json,
-};
+use crate::common::{DEFAULT_HTTP_TRANSPORT, DEFAULT_MAX_OUTPUT_TOKENS, reasoning_intent};
+use crate::reasoning::ReasoningWireIntent;
 use crate::responses_shared as shared;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash_core::llm::types::{
@@ -500,7 +499,7 @@ impl CodexProvider {
         let tools = Self::build_tools(req)?;
         let (instructions, input) =
             shared::build_responses_input(req, shared::ResponsesInputOptions::CODEX);
-        let requested_reasoning = reasoning_config(req);
+        let requested_reasoning = reasoning_intent(req);
         let policy = resolve_generation_policy(
             &req.generation,
             &self.options,
@@ -531,7 +530,11 @@ impl CodexProvider {
             body["tool_choice"] = json!(shared::tool_choice_value(&req.tool_choice));
         }
         if let Some(config) = policy.thinking {
-            let mut reasoning = reasoning_config_json(config);
+            let mut reasoning = match config {
+                ReasoningWireIntent::Effort(effort) => json!({ "effort": effort }),
+                ReasoningWireIntent::Budget(max_tokens) => json!({ "max_tokens": max_tokens }),
+                ReasoningWireIntent::ToggleFalse => json!({ "enabled": false }),
+            };
             if policy.expose_thinking {
                 reasoning["summary"] = json!("auto");
             }

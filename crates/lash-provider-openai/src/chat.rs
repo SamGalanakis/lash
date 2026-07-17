@@ -361,10 +361,17 @@ impl OpenAiCompatibleProvider {
         if stream && compat.streaming_usage {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        if let Some(reasoning) = reasoning_config(req)
-            && compat.reasoning_format != OpenAiCompatReasoningFormat::None
-        {
-            body["reasoning"] = reasoning_config_json(reasoning);
+        if let Some(intent) = reasoning_intent(req) {
+            compat
+                .reasoning_format
+                .encode(CompletionEndpoint::ChatCompletions, &intent, &mut body)
+                .map_err(|error| {
+                    reasoning_encode_transport_error(
+                        CompletionEndpoint::ChatCompletions,
+                        &intent,
+                        error,
+                    )
+                })?;
         }
         if let Some(output_spec) = &req.output_spec {
             body["response_format"] = match output_spec {

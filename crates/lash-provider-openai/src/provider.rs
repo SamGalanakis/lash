@@ -21,6 +21,11 @@ impl OpenAiCompatibleProvider {
         self
     }
 
+    pub fn with_reasoning_format(mut self, format: ReasoningWireFormat) -> Self {
+        self.compat.reasoning_format = Some(format);
+        self
+    }
+
     pub fn with_schema_capabilities(mut self, capabilities: ProviderSchemaCapabilities) -> Self {
         self.compat.schema_capabilities = Some(capabilities);
         self

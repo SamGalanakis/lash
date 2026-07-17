@@ -2,8 +2,8 @@ use crate::support::*;
 
 const CACHE_SESSION_ID_MAX_CHARS: usize = 256;
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum CompletionEndpoint {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionEndpoint {
     Responses,
     ChatCompletions,
 }
@@ -16,56 +16,56 @@ struct ResponseContext {
 }
 
 impl CompletionEndpoint {
-    fn request_trace_name(self) -> &'static str {
+    pub(crate) fn request_trace_name(self) -> &'static str {
         match self {
             Self::Responses => "responses",
             Self::ChatCompletions => "chat/completions",
         }
     }
 
-    fn path(self) -> &'static str {
+    pub(crate) fn path(self) -> &'static str {
         match self {
             Self::Responses => "responses",
             Self::ChatCompletions => "chat/completions",
         }
     }
 
-    fn serialize_error(self) -> &'static str {
+    pub(crate) fn serialize_error(self) -> &'static str {
         match self {
             Self::Responses => "Failed to serialize Responses body",
             Self::ChatCompletions => "Failed to serialize Chat Completions body",
         }
     }
 
-    fn response_start_timeout_error(self) -> &'static str {
+    pub(crate) fn response_start_timeout_error(self) -> &'static str {
         match self {
             Self::Responses => "OpenAI-compatible response start timed out",
             Self::ChatCompletions => "OpenAI-compatible chat response start timed out",
         }
     }
 
-    fn response_body_timeout_error(self) -> &'static str {
+    pub(crate) fn response_body_timeout_error(self) -> &'static str {
         match self {
             Self::Responses => "OpenAI-compatible response body timed out",
             Self::ChatCompletions => "OpenAI-compatible chat response body timed out",
         }
     }
 
-    fn stream_chunk_timeout_error(self) -> &'static str {
+    pub(crate) fn stream_chunk_timeout_error(self) -> &'static str {
         match self {
             Self::Responses => "OpenAI-compatible stream chunk timed out",
             Self::ChatCompletions => "OpenAI-compatible chat stream chunk timed out",
         }
     }
 
-    fn request_failed_prefix(self) -> &'static str {
+    pub(crate) fn request_failed_prefix(self) -> &'static str {
         match self {
             Self::Responses => "OpenAI-compatible request failed",
             Self::ChatCompletions => "OpenAI-compatible chat request failed",
         }
     }
 
-    fn http_summary(self, url: &str, stream: bool) -> String {
+    pub(crate) fn http_summary(self, url: &str, stream: bool) -> String {
         if stream {
             format!("HTTP POST {url} (stream)")
         } else {
