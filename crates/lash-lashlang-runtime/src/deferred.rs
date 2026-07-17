@@ -1,8 +1,8 @@
 //! RLM-only deferred tool resolution.
 //!
-//! A host-provided [`DeferredToolResolver`] resolves a Lashlang call-path that
-//! is absent from the link-time [`LashlangHostEnvironment`] into a [`ToolGrant`]
-//! (which carries its Tool Execution Binding) or reports `NotAvailable`. The
+//! A host-provided [`DeferredToolResolver`] resolves Lashlang call-paths absent
+//! from the link-time [`LashlangHostEnvironment`] into [`ToolGrant`] values
+//! (which carry their Tool Execution Bindings) or reports `NotAvailable`. The
 //! resolver resolves on demand only — it does not enumerate, advertise, or rank
 //! tools.
 //!
@@ -72,13 +72,27 @@ pub enum Resolution {
     NotAvailable,
 }
 
-/// RLM-only, host-provided resolution of a Lashlang call-path absent from the
+/// RLM-only, host-provided resolution of Lashlang call-paths absent from the
 /// link-time host environment. The resolver resolves on demand only.
 #[async_trait]
 pub trait DeferredToolResolver: Send + Sync {
-    /// Resolve a fully-qualified Lashlang call-path (e.g. `web.fetch`) into a
-    /// [`ToolGrant`] or report `NotAvailable`.
-    async fn resolve(&self, path: &str) -> Resolution;
+    /// Resolve a deterministic batch of fully-qualified Lashlang call-paths
+    /// (e.g. `web.fetch`). The batch contains only paths not already provided
+    /// by the host environment or recorded for this link.
+    ///
+    /// Resolution is non-transactional: every returned path has its own
+    /// outcome, partial success is normal, and an input path omitted from the
+    /// returned map is recorded as [`Resolution::NotAvailable`]. Entries for
+    /// paths outside the input batch are ignored.
+    async fn resolve(&self, paths: &[&str]) -> BTreeMap<String, Resolution>;
+
+    /// Reinstall the process-local execution route for a recorded grant before
+    /// it is folded into a re-driven link. This is replay rehydration only: it
+    /// must not make an authorization decision or widen the recorded grant.
+    ///
+    /// Hosts whose grants need no process-local routing can use this default
+    /// no-op implementation.
+    fn install_recorded_grant(&self, _path: &str, _grant: &ToolGrant) {}
 }
 
 /// A handle to the host's deferred resolver, optional because most hosts ship
@@ -192,10 +206,10 @@ fn already_provided(host_environment: &LashlangHostEnvironment, call_path: &str)
 }
 
 /// `gather → resolve`: collect every module call-path `program` references,
-/// resolve the ones `host_environment` does not already provide (without
-/// failing fast on the first), record the outcomes, and fold `Resolved` grants
-/// into `host_environment`. Returns the augmented host environment; the caller
-/// links (or compiles via a cache) against it.
+/// resolve the ones `host_environment` does not already provide in one
+/// record-filtered batch, record the per-path outcomes, and fold `Resolved`
+/// grants into `host_environment`. Returns the augmented host environment; the
+/// caller links (or compiles via a cache) against it.
 ///
 /// Every resolution is written to `record` so a re-driven or recovered link
 /// replays the recorded outcomes without calling the resolver again. The flat
@@ -212,12 +226,32 @@ pub async fn resolve_and_fold_deferred(
         .filter(|path| !already_provided(&host_environment, path))
         .collect::<Vec<_>>();
 
+    let unknown = unresolved
+        .iter()
+        .filter(|path| record.get(path).is_none())
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut resolved = if let Some(resolver) = resolver
+        && !unknown.is_empty()
+    {
+        resolver.resolve(&unknown).await
+    } else {
+        BTreeMap::new()
+    };
+
     for path in unresolved {
-        // Replay: a recorded outcome wins and is never re-resolved.
+        // Replay: a recorded outcome wins and is never re-authorized. A
+        // recorded grant is reinstalled into any process-local host route
+        // before it is folded back into the link environment.
         let resolution = if let Some(recorded) = record.get(&path) {
+            if let Resolution::Resolved(grant) = recorded
+                && let Some(resolver) = resolver
+            {
+                resolver.install_recorded_grant(&path, grant);
+            }
             recorded.clone()
-        } else if let Some(resolver) = resolver {
-            let resolution = resolver.resolve(&path).await;
+        } else if resolver.is_some() {
+            let resolution = resolved.remove(&path).unwrap_or(Resolution::NotAvailable);
             record.record(path.clone(), resolution.clone());
             resolution
         } else {
@@ -252,6 +286,7 @@ pub async fn link_with_deferred_resolution(
 mod tests {
     use super::*;
     use crate::{LashlangSurface, LashlangToolBinding, ToolDefinitionLashlangExt};
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn grant(name: &str, module: &str, operation: &str) -> ToolGrant {
@@ -269,17 +304,60 @@ mod tests {
     struct CountingResolver {
         grant: ToolGrant,
         calls: Arc<AtomicUsize>,
+        batches: Arc<Mutex<Vec<Vec<String>>>>,
+        installed: Arc<Mutex<Vec<(String, ToolGrant)>>>,
     }
 
     #[async_trait]
     impl DeferredToolResolver for CountingResolver {
-        async fn resolve(&self, path: &str) -> Resolution {
+        async fn resolve(&self, paths: &[&str]) -> BTreeMap<String, Resolution> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if path == "web.fetch" {
-                Resolution::Resolved(Box::new(self.grant.clone()))
-            } else {
-                Resolution::NotAvailable
-            }
+            self.batches
+                .lock()
+                .expect("batches")
+                .push(paths.iter().map(|path| (*path).to_string()).collect());
+            paths
+                .iter()
+                .filter(|path| **path == "web.fetch")
+                .map(|path| {
+                    (
+                        (*path).to_string(),
+                        Resolution::Resolved(Box::new(self.grant.clone())),
+                    )
+                })
+                .collect()
+        }
+
+        fn install_recorded_grant(&self, path: &str, grant: &ToolGrant) {
+            self.installed
+                .lock()
+                .expect("installed grants")
+                .push((path.to_string(), grant.clone()));
+        }
+    }
+
+    struct ResolverHarness {
+        resolver: SharedDeferredToolResolver,
+        calls: Arc<AtomicUsize>,
+        batches: Arc<Mutex<Vec<Vec<String>>>>,
+        installed: Arc<Mutex<Vec<(String, ToolGrant)>>>,
+    }
+
+    fn resolver_harness() -> ResolverHarness {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let installed = Arc::new(Mutex::new(Vec::new()));
+        let resolver = Arc::new(CountingResolver {
+            grant: grant("fetch_url", "web", "fetch"),
+            calls: Arc::clone(&calls),
+            batches: Arc::clone(&batches),
+            installed: Arc::clone(&installed),
+        });
+        ResolverHarness {
+            resolver,
+            calls,
+            batches,
+            installed,
         }
     }
 
@@ -292,24 +370,25 @@ mod tests {
 
     #[tokio::test]
     async fn resolves_deferred_call_path_and_records_grant() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let resolver: SharedDeferredToolResolver = Arc::new(CountingResolver {
-            grant: grant("fetch_url", "web", "fetch"),
-            calls: Arc::clone(&calls),
-        });
+        let harness = resolver_harness();
         let program = lashlang::parse(r#"await web.fetch({ url: "x" })?"#).expect("parse");
         let mut record = DeferredResolutionRecord::default();
 
         link_with_deferred_resolution(
             program,
             empty_host_environment(),
-            Some(&resolver),
+            Some(&harness.resolver),
             &mut record,
         )
         .await
         .expect("deferred resolution links");
 
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *harness.batches.lock().expect("batches"),
+            vec![vec!["web.fetch".to_string()]]
+        );
+        assert!(harness.installed.lock().expect("installed").is_empty());
         assert!(matches!(
             record.get("web.fetch"),
             Some(Resolution::Resolved(_))
@@ -318,55 +397,55 @@ mod tests {
 
     #[tokio::test]
     async fn replay_reuses_record_without_calling_resolver() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let resolver: SharedDeferredToolResolver = Arc::new(CountingResolver {
-            grant: grant("fetch_url", "web", "fetch"),
-            calls: Arc::clone(&calls),
-        });
+        let harness = resolver_harness();
         let program = lashlang::parse(r#"await web.fetch({ url: "x" })?"#).expect("parse");
 
         let mut record = DeferredResolutionRecord::default();
         link_with_deferred_resolution(
             program.clone(),
             empty_host_environment(),
-            Some(&resolver),
+            Some(&harness.resolver),
             &mut record,
         )
         .await
         .expect("first link");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.calls.load(Ordering::SeqCst), 1);
+        assert!(harness.installed.lock().expect("installed").is_empty());
 
         // Re-drive the same link with the recorded resolutions: the resolver is
         // never called again.
         link_with_deferred_resolution(
             program,
             empty_host_environment(),
-            Some(&resolver),
+            Some(&harness.resolver),
             &mut record,
         )
         .await
         .expect("replayed link");
         assert_eq!(
-            calls.load(Ordering::SeqCst),
+            harness.calls.load(Ordering::SeqCst),
             1,
             "replay must not re-resolve"
+        );
+        let installed = harness.installed.lock().expect("installed");
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].0, "web.fetch");
+        assert_eq!(
+            installed[0].1.execution_binding,
+            serde_json::json!({ "account": "fetch_url" })
         );
     }
 
     #[tokio::test]
     async fn not_available_surfaces_clean_link_error_and_is_recorded() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let resolver: SharedDeferredToolResolver = Arc::new(CountingResolver {
-            grant: grant("fetch_url", "web", "fetch"),
-            calls: Arc::clone(&calls),
-        });
+        let harness = resolver_harness();
         let program = lashlang::parse(r#"await mystery.run({})?"#).expect("parse");
         let mut record = DeferredResolutionRecord::default();
 
         let err = link_with_deferred_resolution(
             program.clone(),
             empty_host_environment(),
-            Some(&resolver),
+            Some(&harness.resolver),
             &mut record,
         )
         .await
@@ -378,15 +457,91 @@ mod tests {
         ));
 
         // Replay reuses the recorded NotAvailable without re-resolving.
-        let calls_before = calls.load(Ordering::SeqCst);
+        let calls_before = harness.calls.load(Ordering::SeqCst);
         link_with_deferred_resolution(
             program,
             empty_host_environment(),
-            Some(&resolver),
+            Some(&harness.resolver),
             &mut record,
         )
         .await
         .expect_err("replayed unavailable call-path still errors");
-        assert_eq!(calls.load(Ordering::SeqCst), calls_before);
+        assert_eq!(harness.calls.load(Ordering::SeqCst), calls_before);
+        assert!(harness.installed.lock().expect("installed").is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolves_unknown_paths_in_one_record_filtered_batch() {
+        let harness = resolver_harness();
+        let program =
+            lashlang::parse("await web.fetch({})?\nawait mystery.run({})?\nawait web.fetch({})?")
+                .expect("parse");
+        let mut record = DeferredResolutionRecord::default();
+
+        let host = resolve_and_fold_deferred(
+            &program,
+            empty_host_environment(),
+            Some(&harness.resolver),
+            &mut record,
+        )
+        .await;
+
+        assert_eq!(harness.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *harness.batches.lock().expect("batches"),
+            vec![vec!["mystery.run".to_string(), "web.fetch".to_string()]]
+        );
+        assert!(host.resources.provides_module_operation("web", "fetch"));
+        assert!(!host.resources.provides_module_operation("mystery", "run"));
+        assert!(matches!(
+            record.get("mystery.run"),
+            Some(Resolution::NotAvailable)
+        ));
+
+        // Every referenced path now has a recorded outcome, so the filtered
+        // unknown bag is empty and no second batch is sent. Only the recorded
+        // positive grant is replay-installed.
+        let replayed = resolve_and_fold_deferred(
+            &program,
+            empty_host_environment(),
+            Some(&harness.resolver),
+            &mut record,
+        )
+        .await;
+        assert_eq!(harness.calls.load(Ordering::SeqCst), 1);
+        assert!(replayed.resources.provides_module_operation("web", "fetch"));
+        assert_eq!(harness.installed.lock().expect("installed").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn excludes_recorded_paths_from_a_non_empty_batch() {
+        let harness = resolver_harness();
+        let program =
+            lashlang::parse("await web.fetch({})?\nawait mystery.run({})?").expect("parse");
+        let mut record = DeferredResolutionRecord::default();
+        record.record(
+            "web.fetch",
+            Resolution::Resolved(Box::new(grant("fetch_url", "web", "fetch"))),
+        );
+
+        let host = resolve_and_fold_deferred(
+            &program,
+            empty_host_environment(),
+            Some(&harness.resolver),
+            &mut record,
+        )
+        .await;
+
+        assert_eq!(harness.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *harness.batches.lock().expect("batches"),
+            vec![vec!["mystery.run".to_string()]]
+        );
+        assert_eq!(harness.installed.lock().expect("installed").len(), 1);
+        assert!(host.resources.provides_module_operation("web", "fetch"));
+        assert!(matches!(
+            record.get("mystery.run"),
+            Some(Resolution::NotAvailable)
+        ));
     }
 }
