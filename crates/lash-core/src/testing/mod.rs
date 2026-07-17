@@ -357,6 +357,31 @@ pub fn code_execution_context() -> crate::RuntimeExecutionContext<'static> {
     code_execution_context_with_tool_catalog(crate::ToolCatalog::from_tool_definitions(Vec::new()))
 }
 
+/// Build an empty code-execution context carrying the stable parent invocation
+/// that production installs around an `ExecCode` effect.
+pub fn code_execution_context_with_invocation(
+    invocation: crate::RuntimeInvocation,
+) -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context().with_parent_invocation(invocation)
+}
+
+/// Build the stable invocation installed around an `ExecCode` effect.
+pub fn exec_code_invocation(
+    session_id: impl Into<String>,
+    turn_id: impl Into<String>,
+    turn_index: usize,
+    protocol_iteration: usize,
+    effect_id: impl Into<String>,
+    replay_key: impl Into<String>,
+) -> crate::RuntimeInvocation {
+    crate::RuntimeInvocation::effect(
+        crate::RuntimeScope::for_turn(session_id, turn_id, turn_index, protocol_iteration),
+        effect_id,
+        crate::RuntimeEffectKind::ExecCode,
+        replay_key,
+    )
+}
+
 pub fn code_execution_context_with_trigger_store(
     trigger_store: Arc<dyn crate::TriggerStore>,
 ) -> crate::RuntimeExecutionContext<'static> {

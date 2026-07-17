@@ -91,6 +91,7 @@ async fn execute_code_inner(
     lashlang_execution_trace_config: RlmLashlangExecutionTraceConfig,
 ) -> ExecResponse {
     state.dirty = true;
+    select_deferred_resolution_link(state, &ctx);
     let mut host_environment = match lashlang_surface.host_environment(ctx.tool_catalog().as_ref())
     {
         Ok(host_environment) => host_environment,
@@ -111,7 +112,7 @@ async fn execute_code_inner(
     // gather → resolve → link: fold any deferred call-paths the program
     // references into the host environment before compiling. The resolution
     // record lives in the (snapshotted) execution state, so a re-driven or
-    // recovered turn replays it without re-calling the resolver. The flat Tool
+    // recovered link replays it without re-calling the resolver. The flat Tool
     // Catalog is never mutated — resolution is link-scoped only. A resolver is
     // present only under hosts that configure RLM deferral; most hosts ship
     // none and this is a no-op.
@@ -307,6 +308,24 @@ async fn execute_code_inner(
         duration_ms: start.elapsed().as_millis() as u64,
         terminal_finish,
     }
+}
+
+fn select_deferred_resolution_link(
+    state: &mut RlmExecutionState,
+    ctx: &RuntimeExecutionContext<'_>,
+) {
+    let Some(invocation) = ctx.parent_invocation() else {
+        state.deferred_resolutions.clear_link();
+        return;
+    };
+    let Some(link_key) =
+        lash_lashlang_runtime::DeferredResolutionLinkKey::from_exec_code_invocation(invocation)
+    else {
+        state.deferred_resolutions.clear_link();
+        return;
+    };
+
+    state.deferred_resolutions.select_link(link_key);
 }
 
 fn deferred_execution_grants(
@@ -818,14 +837,16 @@ mod tests {
         }
     }
 
-    fn empty_rlm_host_environment() -> lashlang::LashlangHostEnvironment {
-        LashlangSurface::default()
-            .host_environment(&lash_core::ToolCatalog::default())
-            .expect("host environment")
+    fn deferred_matrix_request() -> ExecRequest {
+        ExecRequest {
+            language: "lashlang".to_string(),
+            code: "await web.fetch({})?\nawait mystery.x({})?".to_string(),
+            accept_finish: true,
+        }
     }
 
     #[test]
-    fn deferred_resolution_record_replays_across_snapshot_without_re_resolving() {
+    fn deferred_resolution_record_is_scoped_to_the_exec_code_link() {
         block_on(async {
             let calls = Arc::new(AtomicUsize::new(0));
             let resolver: lash_lashlang_runtime::SharedDeferredToolResolver =
@@ -833,30 +854,42 @@ mod tests {
                     calls: Arc::clone(&calls),
                 });
 
-            // First drive: resolve `web.fetch` (1 resolver call) and `mystery.x`
-            // (NotAvailable, 1 call). The record captures both.
-            let mut state = RlmExecutionState::new().expect("state");
-            let program = lashlang::parse(r#"await web.fetch({})?"#).expect("parse");
-            let env = lash_lashlang_runtime::resolve_and_fold_deferred(
-                &program,
-                empty_rlm_host_environment(),
-                Some(&resolver),
-                &mut state.deferred_resolutions,
+            let first_invocation = lash_core::testing::exec_code_invocation(
+                "test-session",
+                "turn-1",
+                1,
+                0,
+                "effect-1",
+                "replay:effect-1",
+            );
+            let first_ctx =
+                lash_core::testing::code_execution_context_with_invocation(first_invocation);
+            assert!(first_ctx.tool_catalog().tools.is_empty());
+            let (mut state, first) = execute_code(
+                RlmExecutionState::new().expect("state"),
+                first_ctx.clone(),
+                deferred_matrix_request(),
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                LashlangSurface::default(),
+                Some(resolver.clone()),
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
             )
-            .await;
-            assert!(env.resources.provides_module_operation("web", "fetch"));
-            let mystery = lashlang::parse(r#"await mystery.x({})?"#).expect("parse");
-            let _ = lash_lashlang_runtime::resolve_and_fold_deferred(
-                &mystery,
-                empty_rlm_host_environment(),
-                Some(&resolver),
-                &mut state.deferred_resolutions,
-            )
-            .await;
+            .await
+            .expect("first drive");
+            assert!(first.error.is_some(), "mystery.x must remain unresolved");
             assert_eq!(calls.load(Ordering::SeqCst), 2, "resolved each path once");
+            assert!(matches!(
+                state.deferred_resolutions.get("web.fetch"),
+                Some(lash_lashlang_runtime::Resolution::Resolved(_))
+            ));
+            assert!(matches!(
+                state.deferred_resolutions.get("mystery.x"),
+                Some(lash_lashlang_runtime::Resolution::NotAvailable)
+            ));
+            assert!(first_ctx.tool_catalog().tools.is_empty());
 
-            // Snapshot and restore into a fresh state, modeling a re-driven /
-            // recovered turn.
             let snapshot = state
                 .snapshot_execution_state()
                 .expect("snapshot")
@@ -866,30 +899,82 @@ mod tests {
                 .restore_execution_state(&snapshot)
                 .expect("restore");
 
-            // Re-drive both links: the resolver is never called again; the
-            // recorded Resolved grant still folds in, and the recorded
-            // NotAvailable still leaves its symbol unresolved.
-            let env = lash_lashlang_runtime::resolve_and_fold_deferred(
-                &program,
-                empty_rlm_host_environment(),
-                Some(&resolver),
-                &mut restored.deferred_resolutions,
+            // Same stable link: both positive and negative outcomes survive the
+            // snapshot and win without another authorization decision.
+            let (restored, replay) = execute_code(
+                restored,
+                first_ctx.clone(),
+                deferred_matrix_request(),
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                LashlangSurface::default(),
+                Some(resolver.clone()),
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
             )
-            .await;
-            assert!(env.resources.provides_module_operation("web", "fetch"));
-            let env = lash_lashlang_runtime::resolve_and_fold_deferred(
-                &mystery,
-                empty_rlm_host_environment(),
-                Some(&resolver),
-                &mut restored.deferred_resolutions,
-            )
-            .await;
-            assert!(!env.resources.provides_module_operation("mystery", "x"));
-            assert_eq!(
-                calls.load(Ordering::SeqCst),
-                2,
-                "replay must not re-resolve either path"
+            .await
+            .expect("same-link replay");
+            assert!(replay.error.is_some());
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "same link must replay");
+
+            // A second code effect in the same logical turn is a different link
+            // and must resolve the same paths against current authority.
+            let second_ctx = lash_core::testing::code_execution_context_with_invocation(
+                lash_core::testing::exec_code_invocation(
+                    "test-session",
+                    "turn-1",
+                    1,
+                    0,
+                    "effect-2",
+                    "replay:effect-2",
+                ),
             );
+            let (restored, second_link) = execute_code(
+                restored,
+                second_ctx.clone(),
+                deferred_matrix_request(),
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                LashlangSurface::default(),
+                Some(resolver.clone()),
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
+            )
+            .await
+            .expect("different link");
+            assert!(second_link.error.is_some());
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            assert!(second_ctx.tool_catalog().tools.is_empty());
+
+            // A new logical turn also selects a fresh record, even when the
+            // program references exactly the same paths.
+            let next_turn_ctx = lash_core::testing::code_execution_context_with_invocation(
+                lash_core::testing::exec_code_invocation(
+                    "test-session",
+                    "turn-2",
+                    2,
+                    0,
+                    "effect-3",
+                    "replay:effect-3",
+                ),
+            );
+            let (restored, next_turn) = execute_code(
+                restored,
+                next_turn_ctx.clone(),
+                deferred_matrix_request(),
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                LashlangSurface::default(),
+                Some(resolver),
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
+            )
+            .await
+            .expect("new turn");
+            assert!(next_turn.error.is_some());
+            assert_eq!(calls.load(Ordering::SeqCst), 6);
+            assert!(next_turn_ctx.tool_catalog().tools.is_empty());
+            assert_eq!(restored.deferred_resolutions.resolutions.len(), 2);
         });
     }
 

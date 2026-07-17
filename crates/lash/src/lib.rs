@@ -128,8 +128,9 @@ pub mod tools {
     };
     #[cfg(feature = "rlm")]
     pub use lash_lashlang_runtime::{
-        DeferredResolutionRecord, DeferredToolResolver, Resolution as DeferredToolResolution,
-        SharedDeferredToolResolver, ToolGrant as DeferredToolGrant,
+        DeferredResolutionLinkKey, DeferredResolutionRecord, DeferredToolResolver,
+        Resolution as DeferredToolResolution, SharedDeferredToolResolver,
+        ToolGrant as DeferredToolGrant,
     };
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
     /// `resolve_contract`: supply the [`ToolDefinition`]s once and an
