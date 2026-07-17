@@ -6,6 +6,13 @@
   import { clauseAdded, clauseRemoved } from '../../lib/fields.js';
   import ExpressionField from '../ExpressionField.svelte';
   import IdentifierField from '../IdentifierField.svelte';
+  import { nodeDiagnostics } from '../../lib/facets.js';
+
+  // A `for`/comprehension iterable is structurally a list: the lens rejects a
+  // non-list target with a diagnostic. We surface that as a `list[any]` expected
+  // type so the iterable's variable picker offers only list-typed (and gradual)
+  // vars — a purely UI fact, not client-side Lashlang re-parsing.
+  const ITERABLE_TYPE = 'list[any]';
 
   let { id, data } = $props();
 
@@ -32,6 +39,8 @@
   const status = $derived(run.overlay[id] ?? null);
   const groups = $derived(data.groups ?? []);
   const availableVars = $derived(node.data.availableVars ?? []);
+  const diagnostics = $derived(nodeDiagnostics(node));
+  const hasDiag = $derived(diagnostics.length > 0);
   const reads = $derived(data.reads ?? []);
   const moveTargets = $derived(data.getMoveTargets ? data.getMoveTargets(id) : []);
   let moveOpen = $state(false);
@@ -90,6 +99,7 @@
   class:is-process={isProcess}
   class:is-running={status === 'running'}
   class:is-done={status === 'succeeded'}
+  class:has-diag={hasDiag}
   style="--accent:{meta.accent}; width:{data.width}px; height:{data.height}px;"
 >
   <Handle type="target" position={Position.Top} />
@@ -144,6 +154,7 @@
           kind="expression"
           builder="list"
           {availableVars}
+          expectedType={ITERABLE_TYPE}
           placeholder="iterable"
           onInput={(text) => (node.data.iterable = text)}
           onCommit={commit}
@@ -243,6 +254,17 @@
     </div>
   {/if}
 
+  {#if hasDiag}
+    <div
+      class="ct-diag nodrag"
+      role="alert"
+      title={diagnostics.map((d) => d.message).join('\n')}
+    >
+      <span class="ct-diag-mark">●</span>
+      <span class="ct-diag-msg">{diagnostics[0].message}</span>
+    </div>
+  {/if}
+
   {#if isComprehension}
     <div class="ct-clauses nodrag">
       {#each clauses as clause, i (i)}
@@ -265,6 +287,7 @@
               kind="expression"
               builder="list"
               {availableVars}
+              expectedType={ITERABLE_TYPE}
               placeholder="iterable"
               onInput={(text) => (node.data.clauses[i].iterable = text)}
               onCommit={commit}
@@ -858,6 +881,41 @@
     text-align: center;
     pointer-events: none;
   }
+  .wf-container.has-diag {
+    border-color: color-mix(in srgb, var(--rose) 55%, var(--line));
+    box-shadow:
+      inset 0 0 70px -34px color-mix(in srgb, var(--rose) 55%, transparent),
+      0 0 0 1px color-mix(in srgb, var(--rose) 38%, transparent);
+  }
+  .ct-diag {
+    position: absolute;
+    top: 34px;
+    left: 14px;
+    right: 12px;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: color-mix(in srgb, var(--rose) 16%, rgba(10, 14, 21, 0.92));
+    border: 1px solid color-mix(in srgb, var(--rose) 42%, transparent);
+    border-radius: 7px;
+  }
+  .ct-diag-mark {
+    color: var(--rose);
+    font-size: 8px;
+    flex-shrink: 0;
+  }
+  .ct-diag-msg {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    line-height: 1.35;
+    color: #ffb4c6;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .wf-container.is-running {
     border-color: var(--cyan);
     box-shadow:

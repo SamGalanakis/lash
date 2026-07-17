@@ -9,6 +9,14 @@
     operationSwitchPatch,
   } from '../../lib/operations.js';
   import ExpressionField from '../ExpressionField.svelte';
+  import {
+    expectedArgFieldType,
+    nodeDiagnostics,
+    enumMembers,
+    enumMemberFromText,
+    describeExpectedType,
+    diagnosticFieldHint,
+  } from '../../lib/facets.js';
 
   let { id, data } = $props();
 
@@ -36,6 +44,11 @@
   );
 
   const availableVars = $derived(node.data.availableVars ?? []);
+  // Derived, read-only type diagnostics for THIS node (definite type errors).
+  const diagnostics = $derived(nodeDiagnostics(node));
+  const hasDiag = $derived(diagnostics.length > 0);
+  // Whether a diagnostic points at a specific field (for a local underline).
+  const diagFields = $derived(new Set(diagnostics.map((d) => diagnosticFieldHint(d.kind)).filter(Boolean)));
   const reads = $derived(data.reads ?? []);
   const moveTargets = $derived(data.getMoveTargets ? data.getMoveTargets(id) : []);
   let moveOpen = $state(false);
@@ -151,6 +164,7 @@
   class:is-waiting={status === 'waiting'}
   class:is-done={status === 'succeeded'}
   class:is-failed={status === 'failed'}
+  class:has-diag={hasDiag}
   style="--accent:{meta.accent}; width:{data.width}px; min-height:{data.height}px;"
 >
   <Handle type="target" position={Position.Top} />
@@ -320,16 +334,40 @@
     <div class="wf-fields">
       {#each fieldKeys as key (key)}
         {@const v = node.data.fields[key]}
+        {@const expected = expectedArgFieldType(node, key)}
+        {@const enumOpts = enumMembers(expected)}
+        {@const hint = describeExpectedType(expected)}
         <label class="wf-field" class:has-remove={kind === 'call'}>
           <span class="wf-key">{key}</span>
-          {#if fieldType(v) === 'number'}
-            <input
-              class="wf-input wf-input--num"
-              type="number"
-              value={v}
-              oninput={(e) => onNumber(key, e)}
-              onchange={commit}
-            />
+          {#if fieldType(v) === 'string' && enumOpts}
+            <span class="wf-field-cell">
+              <select
+                class="wf-input wf-enum nodrag"
+                value={enumMemberFromText(v, enumOpts) ?? '__custom__'}
+                onpointerdown={(e) => e.stopPropagation()}
+                onchange={(e) => {
+                  node.data.fields[key] = e.currentTarget.value;
+                  commit();
+                }}
+              >
+                {#if enumMemberFromText(v, enumOpts) === null}
+                  <option value="__custom__" disabled>{v ? v : '— choose —'}</option>
+                {/if}
+                {#each enumOpts as member (member)}<option value={member}>{member}</option>{/each}
+              </select>
+              {#if hint}<span class="wf-fieldhint">expects {hint}</span>{/if}
+            </span>
+          {:else if fieldType(v) === 'number'}
+            <span class="wf-field-cell">
+              <input
+                class="wf-input wf-input--num"
+                type="number"
+                value={v}
+                oninput={(e) => onNumber(key, e)}
+                onchange={commit}
+              />
+              {#if hint}<span class="wf-fieldhint">expects {hint}</span>{/if}
+            </span>
           {:else if fieldType(v) === 'boolean'}
             <input
               class="wf-check"
@@ -341,20 +379,24 @@
               }}
             />
           {:else if fieldType(v) === 'string'}
-            <input
-              class="wf-input"
-              type="text"
-              value={v}
-              spellcheck="false"
-              oninput={(e) => (node.data.fields[key] = e.currentTarget.value)}
-              onchange={commit}
-            />
+            <span class="wf-field-cell">
+              <input
+                class="wf-input"
+                type="text"
+                value={v}
+                spellcheck="false"
+                oninput={(e) => (node.data.fields[key] = e.currentTarget.value)}
+                onchange={commit}
+              />
+              {#if hint}<span class="wf-fieldhint">expects {hint}</span>{/if}
+            </span>
           {:else if fieldType(v) === 'expr'}
             <ExpressionField
               value={v.$expr}
               kind="expression"
               builder="value"
               {availableVars}
+              expectedType={expected}
               placeholder="expression…"
               onInput={(text) => (node.data.fields[key] = { $expr: text })}
               onCommit={commit}
@@ -448,6 +490,17 @@
   {#if isWaitEffect}
     <div class="wf-wait-note">
       {node.data.effect === 'sleep' ? 'pauses the run' : 'waits for a signal'}
+    </div>
+  {/if}
+
+  {#if hasDiag}
+    <div class="wf-diag" role="alert">
+      {#each diagnostics as d (d.kind + d.message)}
+        <div class="wf-diag-row" title={d.kind}>
+          <span class="wf-diag-mark">●</span>
+          <span class="wf-diag-msg">{d.message}</span>
+        </div>
+      {/each}
     </div>
   {/if}
 
@@ -971,6 +1024,51 @@
     font-size: 10.5px;
     color: var(--text-dim);
   }
+  .wf-field-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .wf-enum {
+    appearance: none;
+    cursor: pointer;
+  }
+  .wf-fieldhint {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.03em;
+    color: var(--text-faint);
+  }
+
+  /* inline type diagnostics — definite errors surfaced on the node */
+  .wf-diag {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 8px;
+    background: color-mix(in srgb, var(--rose) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--rose) 40%, transparent);
+    border-radius: 8px;
+  }
+  .wf-diag-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .wf-diag-mark {
+    color: var(--rose);
+    font-size: 8px;
+    line-height: 1.6;
+    flex-shrink: 0;
+  }
+  .wf-diag-msg {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    line-height: 1.4;
+    color: #ffb4c6;
+  }
   .wf-wait-note {
     margin-top: 8px;
     font-family: var(--font-mono);
@@ -1007,6 +1105,15 @@
     font-size: 9px;
     color: var(--text-faint);
     letter-spacing: 0.03em;
+  }
+
+  /* definite type error — red left rail + ring so the node reads as broken */
+  .wf-node.has-diag {
+    border-color: color-mix(in srgb, var(--rose) 55%, var(--line));
+    border-left-color: var(--rose);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--rose) 35%, transparent),
+      var(--shadow);
   }
 
   /* run overlay states */

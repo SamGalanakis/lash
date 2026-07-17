@@ -11,6 +11,13 @@
     parseList,
     operandType,
   } from '../lib/fields.js';
+  import {
+    compatibleVarNames,
+    enumMembers,
+    enumMemberToText,
+    enumMemberFromText,
+    describeExpectedType,
+  } from '../lib/facets.js';
   import ScalarBuilder from './ScalarBuilder.svelte';
   import IdentifierField from './IdentifierField.svelte';
 
@@ -21,11 +28,16 @@
   //    `builder="comparison"` a [variable ▾][op ▾][scalar] builder, `builder="list"`
   //    a list-of-scalars chip editor or an in-scope list variable. Every field
   //    keeps a raw escape toggle for anything the builder cannot express.
+  //  - `availableVars` is the node's typed facet `[{ name, type }]` (older
+  //    backends send names-only; both are tolerated).
+  //  - `expectedType` is the slot's derived type facet, used to (a) offer only
+  //    type-compatible variables, (b) render an enum dropdown, (c) show a hint.
   let {
     value = '',
     kind = 'expression',
     builder = null,
     availableVars = [],
+    expectedType = null,
     placeholder = 'expression…',
     onInput,
     onCommit,
@@ -45,7 +57,17 @@
 
   const hasBuilder = $derived(!!builder && !mode.power);
   const cmp = $derived(builder === 'comparison' ? parseComparison(value) : null);
-  const vars = $derived(Array.isArray(availableVars) ? availableVars : []);
+  // Only TYPE-COMPATIBLE variables are offered (gradual Any/Dict always pass).
+  // The raw editor stays reachable as an escape hatch, so filtering never makes
+  // a variable truly unreachable.
+  const vars = $derived(compatibleVarNames(availableVars, expectedType));
+  // Enum-typed slots render a member dropdown instead of a free field.
+  const enumOpts = $derived(enumMembers(expectedType));
+  const hasEnum = $derived(!!enumOpts && !mode.power);
+  const enumSelected = $derived(hasEnum ? enumMemberFromText(value, enumOpts) : null);
+  // A subtle expected-type hint (`expects str`) shown under the field; null for
+  // gradual types where a hint would be noise.
+  const expectHint = $derived(describeExpectedType(expectedType));
 
   const autoRaw = $derived.by(() => {
     if (!hasBuilder) return true;
@@ -65,7 +87,9 @@
     if (builder === 'target') return !(empty || isSimpleReference(value));
     return true;
   });
-  const showRaw = $derived(mode.power || (userRaw ?? autoRaw));
+  // An enum slot shows its dropdown by default (unless the user escaped to raw).
+  const showEnum = $derived(hasEnum && userRaw !== true);
+  const showRaw = $derived(mode.power || (!showEnum && (userRaw ?? autoRaw)));
 
   // --- inline validation -----------------------------------------------------
   async function runValidate(text) {
@@ -264,6 +288,35 @@
         >
       {/if}
     </div>
+  {:else if showEnum}
+    <div class="xf-row xf-enum">
+      <select
+        class="xf-enum-select nodrag"
+        value={enumSelected ?? '__custom__'}
+        onpointerdown={(e) => e.stopPropagation()}
+        onchange={(e) => {
+          emit(enumMemberToText(e.currentTarget.value));
+        }}
+        onblur={() => onCommit?.()}
+      >
+        {#if enumSelected === null}
+          <option value="__custom__" disabled>{value?.trim() ? value : '— choose —'}</option>
+        {/if}
+        {#each enumOpts as member (member)}
+          <option value={member}>{member}</option>
+        {/each}
+      </select>
+      <button
+        class="xf-toggle"
+        title="Edit as raw expression"
+        aria-label="Edit as raw expression"
+        onpointerdown={(e) => e.stopPropagation()}
+        onclick={(e) => {
+          e.stopPropagation();
+          userRaw = true;
+        }}>{'</>'}</button
+      >
+    </div>
   {:else if builder === 'comparison'}
     <div class="xf-row xf-cmp">
       <ScalarBuilder
@@ -457,6 +510,11 @@
       >
     </div>
   {/if}
+  {#if expectHint && !error}
+    <div class="xf-expect" title="expected type for this slot">
+      expects <span class="xf-expect-ty">{expectHint}</span>
+    </div>
+  {/if}
   {#if error}
     <div class="xf-err">{error}</div>
   {/if}
@@ -514,6 +572,43 @@
     line-height: 1.35;
     color: var(--rose);
     letter-spacing: 0.01em;
+  }
+  .xf-expect {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    line-height: 1.3;
+    color: var(--text-faint);
+    letter-spacing: 0.03em;
+  }
+  .xf-expect-ty {
+    color: color-mix(in srgb, var(--accent, var(--cyan)) 78%, var(--text-dim));
+  }
+
+  /* enum dropdown */
+  .xf-enum {
+    align-items: center;
+  }
+  .xf-enum-select {
+    flex: 1;
+    min-width: 0;
+    appearance: none;
+    background: #0a0d13;
+    border: 1px solid color-mix(in srgb, var(--accent, var(--cyan)) 30%, var(--line));
+    border-radius: 7px;
+    color: #eaf2ff;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 5px 8px;
+    cursor: pointer;
+  }
+  .xf-enum-select:focus {
+    outline: none;
+    border-color: var(--accent, var(--cyan));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--cyan)) 14%, transparent);
+  }
+  .xf-enum-select option {
+    background: var(--ink-2);
+    color: var(--text);
   }
 
   /* comparison builder */
