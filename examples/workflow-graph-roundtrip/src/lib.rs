@@ -21,7 +21,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use lashlang::{
-    GraphRenderError, WorkflowGraph, workflow_graph_from_source, workflow_graph_to_source,
+    GraphRenderError, WorkflowGraph, workflow_graph_from_source,
+    workflow_graph_from_source_with_facets, workflow_graph_to_source,
 };
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -30,10 +31,11 @@ use tokio_stream::wrappers::ReceiverStream;
 pub use catalog::{SelectWorkflowRequest, WorkflowCatalogEntry};
 pub use contract::{
     ChildGroup, DisplayDelta, DisplayState, EdgeData, EditableComprehensionClause,
-    EditableProcessField, EditableValue, FlowEdge, FlowNode, GraphRoots, NodeData,
-    OperationCatalogEntry, OperationField, ProjectWorkflowRequest, ProjectWorkflowResponse,
-    RenderErrorResponse, RunEvent, RunStatus, SaveWorkflowResponse, SourceProjectionErrorResponse,
-    ValidateRequest, ValidateResponse, ValidationKind, WorkflowDocument,
+    EditableProcessField, EditableValue, ExpectedArgumentType, FlowEdge, FlowNode, GraphRoots,
+    NodeData, OperationCatalogEntry, OperationField, ProjectWorkflowRequest,
+    ProjectWorkflowResponse, RenderErrorResponse, RunEvent, RunStatus, SaveWorkflowResponse,
+    SourceProjectionErrorResponse, TypeDiagnostic, TypedVariable, ValidateRequest,
+    ValidateResponse, ValidationKind, WorkflowDocument,
 };
 pub use runtime::RunTiming;
 
@@ -165,7 +167,8 @@ async fn project_source(
     Json(request): Json<ProjectWorkflowRequest>,
 ) -> Result<Json<ProjectWorkflowResponse>, SourceProjectionErrorResponse> {
     let version = state.current().version;
-    let graph = workflow_graph_from_source(&request.source)
+    let environment = runtime::host_environment();
+    let graph = workflow_graph_from_source_with_facets(&request.source, Some(&environment))
         .map_err(|error| SourceProjectionErrorResponse::invalid_source(error.to_string()))?;
     let source = workflow_graph_to_source(&graph)
         .map_err(|error| SourceProjectionErrorResponse::invalid_source(error.to_string()))?;
@@ -183,10 +186,13 @@ async fn select_workflow(
     let graph = workflow_graph_from_source(source).map_err(RenderErrorResponse::projection)?;
     let source = workflow_graph_to_source(&graph).map_err(RenderErrorResponse::from)?;
     let saved = state.save(source, graph);
+    let environment = runtime::host_environment();
+    let graph = workflow_graph_from_source_with_facets(&saved.source, Some(&environment))
+        .map_err(RenderErrorResponse::projection)?;
     Ok(Json(graph::document_from_graph(
         saved.version,
         saved.source,
-        saved.graph,
+        graph,
     )))
 }
 
@@ -201,10 +207,13 @@ pub async fn serve_addr(addr: SocketAddr, state: AppState) -> std::io::Result<()
 
 async fn get_workflow(State(state): State<AppState>) -> Json<WorkflowDocument> {
     let saved = state.current();
+    let environment = runtime::host_environment();
+    let graph = workflow_graph_from_source_with_facets(&saved.source, Some(&environment))
+        .expect("saved workflow source should reproject with type facets");
     Json(graph::document_from_graph(
         saved.version,
         saved.source,
-        saved.graph,
+        graph,
     ))
 }
 
@@ -223,7 +232,10 @@ async fn save_workflow(
     let source = workflow_graph_to_source(&graph).map_err(RenderErrorResponse::from)?;
     let graph = workflow_graph_from_source(&source).map_err(RenderErrorResponse::projection)?;
     let saved = state.save(source, graph);
-    let reprojected = graph::document_from_graph(saved.version, saved.source, saved.graph);
+    let environment = runtime::host_environment();
+    let faceted_graph = workflow_graph_from_source_with_facets(&saved.source, Some(&environment))
+        .map_err(RenderErrorResponse::projection)?;
+    let reprojected = graph::document_from_graph(saved.version, saved.source, faceted_graph);
     let id_map = graph::reconcile_node_ids(&document, &reprojected);
     Ok(Json(SaveWorkflowResponse {
         document: reprojected,

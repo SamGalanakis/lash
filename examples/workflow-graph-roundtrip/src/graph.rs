@@ -5,14 +5,14 @@ use lashlang::{
     WorkflowEdgeKind, WorkflowEffectKind, WorkflowGraph, WorkflowListComprehensionClause,
     WorkflowNode, WorkflowNodeId, WorkflowNodeKind, WorkflowNodeNameSource, WorkflowSubgraph,
     WorkflowTerminalKind, canonical_assign_target_source, canonical_expression_source,
-    parse_expression,
+    format_type_expr, parse_expression,
 };
 use serde_json::json;
 
 use crate::{
-    ChildGroup, EdgeData, EditableComprehensionClause, EditableValue, FlowEdge, FlowNode,
-    GraphRoots, NodeData, RenderErrorResponse, ValidateRequest, ValidateResponse, ValidationKind,
-    WorkflowDocument,
+    ChildGroup, EdgeData, EditableComprehensionClause, EditableValue, ExpectedArgumentType,
+    FlowEdge, FlowNode, GraphRoots, NodeData, RenderErrorResponse, TypeDiagnostic, TypedVariable,
+    ValidateRequest, ValidateResponse, ValidationKind, WorkflowDocument,
 };
 
 mod process;
@@ -99,8 +99,13 @@ pub(crate) fn document_from_graph(
                 available_vars: process
                     .params
                     .iter()
-                    .map(|param| param.name.to_string())
+                    .map(|param| TypedVariable {
+                        name: param.name.to_string(),
+                        variable_type: format_type_expr(&param.ty),
+                    })
                     .collect(),
+                expected_arg_types: Vec::new(),
+                diagnostics: Vec::new(),
             },
         });
         flatten_subgraph(
@@ -113,6 +118,7 @@ pub(crate) fn document_from_graph(
     }
     WorkflowDocument {
         schema_version: graph.schema_version,
+        facet_schema_version: graph.facet_schema_version,
         version,
         source,
         nodes,
@@ -165,6 +171,7 @@ pub(crate) fn graph_from_document(
         .collect::<BTreeMap<_, _>>();
     let mut graph = baseline.clone();
     graph.schema_version = document.schema_version;
+    graph.facet_schema_version = None;
     graph.main = build_subgraph(
         "main",
         &document.roots.main,
@@ -449,7 +456,50 @@ fn node_data(node: &WorkflowNode, children: Vec<ChildGroup>) -> NodeData {
         clauses,
         source,
         children,
-        available_vars: node.available_variables.clone(),
+        available_vars: node
+            .type_facets
+            .as_ref()
+            .map(|facets| {
+                facets
+                    .available_variables
+                    .iter()
+                    .map(|variable| TypedVariable {
+                        name: variable.name.clone(),
+                        variable_type: format_type_expr(&variable.ty),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        expected_arg_types: node
+            .type_facets
+            .as_ref()
+            .map(|facets| {
+                facets
+                    .expected_arguments
+                    .iter()
+                    .map(|argument| ExpectedArgumentType {
+                        slot: argument.slot.clone(),
+                        expected_type: format_type_expr(&argument.ty),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        diagnostics: node
+            .type_facets
+            .as_ref()
+            .map(|facets| {
+                facets
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| TypeDiagnostic {
+                        node_id: diagnostic.node_id.to_string(),
+                        kind: diagnostic.kind.clone(),
+                        message: diagnostic.message.clone(),
+                        span: diagnostic.span,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -805,7 +855,8 @@ fn node_from_flow_data(id: &str, data: &NodeData) -> Result<WorkflowNode, Render
         description: data.description.clone(),
         name_source: parse_name_source(&data.name_source),
         kind,
-        available_variables: data.available_vars.clone(),
+        available_variables: Vec::new(),
+        type_facets: None,
         outputs,
         execution_sites: Vec::new(),
         source_span: None,

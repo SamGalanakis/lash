@@ -221,9 +221,7 @@ fn literal_type(expr: &Expr) -> TypeExpr {
         Expr::Bool(_) => TypeExpr::Bool,
         Expr::Number(_) => TypeExpr::Float,
         Expr::String(_) => TypeExpr::Str,
-        Expr::TypeLiteral(_) => {
-            unreachable!("type literals are represented by linker-only schema witnesses")
-        }
+        Expr::TypeLiteral(_) => TypeExpr::Any,
         Expr::Break | Expr::Continue => TypeExpr::Null,
         Expr::LabelAnnotated { expr, .. } => literal_type(expr),
         _ => TypeExpr::Any,
@@ -350,6 +348,38 @@ fn index_type(
             Ok(union_type(items))
         }
         _ => Ok(TypeExpr::Any),
+    }
+}
+
+fn iterable_item_type(target: &TypeExpr, span: Option<Span>) -> Result<TypeExpr, LinkError> {
+    match target {
+        TypeExpr::List(item) => Ok(*item.clone()),
+        TypeExpr::Any | TypeExpr::Dict | TypeExpr::Ref(_) => Ok(TypeExpr::Any),
+        TypeExpr::Union(items) => {
+            let mut item_types = Vec::new();
+            let mut has_non_list = false;
+            for item in items {
+                match iterable_item_type(item, span) {
+                    Ok(item) => item_types.push(item),
+                    Err(LinkError::IncompatibleIterationTarget { .. }) => has_non_list = true,
+                    Err(error) => return Err(error),
+                }
+            }
+            if item_types.is_empty() {
+                Err(LinkError::IncompatibleIterationTarget {
+                    actual: format_type_expr(target),
+                    span,
+                })
+            } else if has_non_list {
+                Ok(TypeExpr::Any)
+            } else {
+                Ok(union_type(item_types))
+            }
+        }
+        _ => Err(LinkError::IncompatibleIterationTarget {
+            actual: format_type_expr(target),
+            span,
+        }),
     }
 }
 

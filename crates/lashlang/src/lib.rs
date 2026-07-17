@@ -95,12 +95,14 @@ pub use trigger::{
 };
 pub use typed_output::parse_output_schema;
 pub use workflow_graph::{
-    GraphRenderError, VariableVersion, WORKFLOW_GRAPH_SCHEMA_VERSION, WorkflowContainer,
-    WorkflowDeclaration, WorkflowEdge, WorkflowEdgeKind, WorkflowEffectKind, WorkflowGraph,
+    GraphRenderError, VariableVersion, WORKFLOW_GRAPH_SCHEMA_VERSION,
+    WORKFLOW_TYPE_FACET_SCHEMA_VERSION, WorkflowContainer, WorkflowDeclaration, WorkflowEdge,
+    WorkflowEdgeKind, WorkflowEffectKind, WorkflowExpectedArgument, WorkflowGraph,
     WorkflowGraphBuildError, WorkflowListComprehensionClause, WorkflowNode, WorkflowNodeId,
-    WorkflowNodeKind, WorkflowNodeNameSource, WorkflowProcess, WorkflowSubgraph,
-    WorkflowTerminalKind, node_id_for_execution_site, runtime_execution_site_for_workflow_site,
-    workflow_graph_from_source, workflow_graph_to_source,
+    WorkflowNodeKind, WorkflowNodeNameSource, WorkflowNodeTypeFacets, WorkflowProcess,
+    WorkflowSubgraph, WorkflowTerminalKind, WorkflowTypeDiagnostic, WorkflowTypedVariable,
+    node_id_for_execution_site, runtime_execution_site_for_workflow_site,
+    workflow_graph_from_source, workflow_graph_from_source_with_facets, workflow_graph_to_source,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {

@@ -158,6 +158,11 @@ pub enum LinkError {
         right: String,
         span: Option<Span>,
     },
+    #[error("cannot iterate over {actual}; expected a list")]
+    IncompatibleIterationTarget {
+        actual: String,
+        span: Option<Span>,
+    },
     #[error("failed to hash linked module: {message}")]
     ModuleHash { message: String },
 }
@@ -202,7 +207,8 @@ impl LinkError {
             | Self::ProcessLifecycleOutsideProcess { span, .. }
             | Self::OpaqueHostDescriptorAccess { span, .. }
             | Self::UnknownObjectField { span, .. }
-            | Self::IncompatibleBinaryOperands { span, .. } => *span,
+            | Self::IncompatibleBinaryOperands { span, .. }
+            | Self::IncompatibleIterationTarget { span, .. } => *span,
             Self::ModuleHash { .. } => None,
         }
     }

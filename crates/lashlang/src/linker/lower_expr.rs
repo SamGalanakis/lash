@@ -144,8 +144,10 @@ impl<'module> Linker<'module> {
                     match clause {
                         ListComprehensionClause::For { binding, iterable } => {
                             let (iterable, iterable_binding) = self.lower_expr(iterable, scope)?;
-                            let item_ty =
-                                self.index_type(&binding_type(iterable_binding.as_ref()), scope.span)?;
+                            let item_ty = self.iterable_item_type(
+                                &binding_type(iterable_binding.as_ref()),
+                                scope.span,
+                            )?;
                             previous_bindings.push((
                                 binding.to_string(),
                                 scope.bind(binding.as_str(), self.binding_for_type(&item_ty)),
@@ -259,8 +261,10 @@ impl<'module> Linker<'module> {
                 body,
             } => {
                 let (iterable, iterable_binding) = self.lower_expr(iterable, scope)?;
-                let item_ty =
-                    self.index_type(&binding_type(iterable_binding.as_ref()), scope.span)?;
+                let item_ty = self.iterable_item_type(
+                    &binding_type(iterable_binding.as_ref()),
+                    scope.span,
+                )?;
                 let before = scope.clone();
                 let mut body_scope = scope.clone();
                 let previous = body_scope.bind(

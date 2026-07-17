@@ -422,7 +422,7 @@ impl<'module> Linker<'module> {
                 body,
             } => {
                 let iterable_ty = self.infer_expr_type(iterable, scope)?;
-                let item_ty = self.index_type(&iterable_ty, scope.span)?;
+                let item_ty = self.iterable_item_type(&iterable_ty, scope.span)?;
                 let before = scope.clone();
                 let mut body_scope = scope.clone();
                 let previous = body_scope.bind(
@@ -471,6 +471,12 @@ impl<'module> Linker<'module> {
         scope: &mut Scope,
         expected: Option<&TypeExpr>,
     ) -> Result<TypeExpr, LinkError> {
+        if let (Some(facts), Some(expected)) = (&self.expected_type_facts, expected) {
+            facts.borrow_mut().by_expression.insert(
+                expr as *const Expr as usize,
+                self.resolve_type_aliases(expected),
+            );
+        }
         self.reject_trigger_event_special_form(expr, scope.span)?;
         self.validate_expected_literals(expr, expected, scope.span)?;
         if matches!(expr, Expr::Variable(_) | Expr::Field { .. })
@@ -560,7 +566,7 @@ impl<'module> Linker<'module> {
                     match clause {
                         ListComprehensionClause::For { binding, iterable } => {
                             let iterable_ty = self.infer_expr_type(iterable, scope)?;
-                            let item_ty = self.index_type(&iterable_ty, scope.span)?;
+                            let item_ty = self.iterable_item_type(&iterable_ty, scope.span)?;
                             previous_bindings.push((
                                 binding.to_string(),
                                 scope.bind(binding.as_str(), self.binding_for_type(&item_ty)),
@@ -633,7 +639,7 @@ impl<'module> Linker<'module> {
                 body,
             } => {
                 let iterable_ty = self.infer_expr_type(iterable, scope)?;
-                let item_ty = self.index_type(&iterable_ty, scope.span)?;
+                let item_ty = self.iterable_item_type(&iterable_ty, scope.span)?;
                 let before = scope.clone();
                 let mut body_scope = scope.clone();
                 let previous = body_scope.bind(

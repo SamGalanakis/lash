@@ -756,12 +756,17 @@ async fn projected_available_vars_follow_ssa_and_nested_lexical_scope() {
     let body: Value = response.json().await.expect("scoped project JSON");
     let document: WorkflowDocument =
         serde_json::from_value(body["document"].clone()).expect("scoped document");
+    assert_eq!(
+        document.facet_schema_version,
+        Some(lashlang::WORKFLOW_TYPE_FACET_SCHEMA_VERSION)
+    );
     let state = document
         .nodes
         .iter()
         .find(|node| node.data.binding.as_deref() == Some("state"))
         .expect("state binding");
     assert_eq!(state.data.available_vars, ["record"]);
+    assert_eq!(state.data.available_vars[0].variable_type, "any");
     let first = document
         .nodes
         .iter()
@@ -782,6 +787,16 @@ async fn projected_available_vars_follow_ssa_and_nested_lexical_scope() {
     assert_eq!(
         nested.data.available_vars,
         ["first", "item", "record", "state"]
+    );
+    assert_eq!(
+        nested
+            .data
+            .available_vars
+            .iter()
+            .find(|variable| variable.name == "item")
+            .expect("typed loop binding")
+            .variable_type,
+        "float"
     );
     let terminal = document
         .nodes
@@ -2369,6 +2384,8 @@ fn new_flow_node(id: &str, kind: &str, subkind: Option<&str>, title: &str) -> Fl
             source: None,
             children: Vec::new(),
             available_vars: Vec::new(),
+            expected_arg_types: Vec::new(),
+            diagnostics: Vec::new(),
         },
     }
 }

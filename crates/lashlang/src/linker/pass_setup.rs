@@ -14,6 +14,7 @@ struct Linker<'module> {
     process_types: BTreeMap<String, TypeExpr>,
     type_names: BTreeSet<String>,
     type_defs: BTreeMap<String, TypeExpr>,
+    expected_type_facts: Option<RefCell<ExpectedTypeFacts>>,
 }
 
 impl<'module> Linker<'module> {
@@ -25,7 +26,13 @@ impl<'module> Linker<'module> {
             process_types: BTreeMap::new(),
             type_names: BTreeSet::new(),
             type_defs: BTreeMap::new(),
+            expected_type_facts: None,
         }
+    }
+
+    fn with_expected_type_facts(mut self) -> Self {
+        self.expected_type_facts = Some(RefCell::new(ExpectedTypeFacts::default()));
+        self
     }
 
     fn link_program(&mut self) -> Result<Program, LinkError> {
@@ -525,6 +532,14 @@ impl<'module> Linker<'module> {
         index_type(&target, span, |name| {
             self.surface.resources.is_known_opaque_value_type(name)
         })
+    }
+
+    fn iterable_item_type(
+        &self,
+        target: &TypeExpr,
+        span: Option<Span>,
+    ) -> Result<TypeExpr, LinkError> {
+        iterable_item_type(&self.resolve_type_aliases(target), span)
     }
 
     fn ensure_feature(

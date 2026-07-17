@@ -55,6 +55,7 @@ pub(super) fn seeded_process_body(process_id: &str, params: &[ProcessParam]) -> 
                 expression: "finish 0".to_string(),
             },
             available_variables: params.iter().map(|param| param.name.to_string()).collect(),
+            type_facets: None,
             outputs: Vec::new(),
             execution_sites: Vec::new(),
             source_span: None,

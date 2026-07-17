@@ -1,4 +1,5 @@
 use super::*;
+use crate::TypeField;
 
 const REPRESENTATIVE: &str = r#"type Input = { enabled: bool, values: list[num] }
 
@@ -614,6 +615,103 @@ fn nodes_expose_stable_identifiers_available_before_their_execution() {
         process.body.nodes[3].available_variables,
         ["first", "nested", "record", "state"]
     );
+}
+
+#[test]
+fn catalog_projection_exposes_typed_facets_non_fatally() {
+    let mut catalog = crate::LashlangHostCatalog::new();
+    catalog.add_module_operation(
+        ["tools"],
+        "Tools",
+        "lookup",
+        "lookup",
+        TypeExpr::Object(vec![TypeField {
+            name: "query".into(),
+            ty: TypeExpr::Str,
+            optional: false,
+        }]),
+        TypeExpr::Object(vec![TypeField {
+            name: "answer".into(),
+            ty: TypeExpr::Str,
+            optional: false,
+        }]),
+    );
+    let environment = crate::LashlangHostEnvironment::new(catalog, crate::LashlangAbilities::all())
+        .with_language_features(
+            crate::LashlangLanguageFeatures::default().with_label_annotations(),
+        );
+    let source = r##"process workflow(name: str) {
+  query = name
+  result = await tools.lookup({ query: query })?
+  for item in "not a list" { seen = item }
+  finish result
+}
+"##;
+
+    let graph = workflow_graph_from_source_with_facets(source, Some(&environment)).unwrap();
+    assert_eq!(
+        graph.facet_schema_version,
+        Some(WORKFLOW_TYPE_FACET_SCHEMA_VERSION)
+    );
+    let process = graph.process("workflow").unwrap();
+
+    let call_facets = process.body.nodes[1].type_facets.as_ref().unwrap();
+    assert!(
+        call_facets
+            .available_variables
+            .iter()
+            .any(|variable| { variable.name == "query" && variable.ty == TypeExpr::Str })
+    );
+    assert!(
+        call_facets
+            .expected_arguments
+            .iter()
+            .any(|argument| { argument.slot == "arg[0].query" && argument.ty == TypeExpr::Str })
+    );
+
+    let loop_facets = process.body.nodes[2].type_facets.as_ref().unwrap();
+    assert!(loop_facets.available_variables.iter().any(|variable| {
+        variable.name == "result"
+            && variable.ty
+                == TypeExpr::Object(vec![TypeField {
+                    name: "answer".into(),
+                    ty: TypeExpr::Str,
+                    optional: false,
+                }])
+    }));
+    assert!(loop_facets.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == "incompatible_iteration_target"
+            && diagnostic.message.contains("expected a list")
+    }));
+}
+
+#[test]
+fn type_facets_are_ignored_by_put_and_canonicalization() {
+    let source = "value = \"text\"\nfinish value\n";
+    let canonical = canonical_program_source(&parse(source).unwrap()).unwrap();
+    let environment = crate::LashlangHostEnvironment::new(
+        crate::LashlangHostCatalog::new(),
+        crate::LashlangAbilities::all(),
+    );
+    let mut graph = workflow_graph_from_source_with_facets(source, Some(&environment)).unwrap();
+    graph.facet_schema_version = Some(WORKFLOW_TYPE_FACET_SCHEMA_VERSION + 99);
+    let terminal_id = graph.main.nodes[1].id.clone();
+    graph.main.nodes[1]
+        .type_facets
+        .as_mut()
+        .unwrap()
+        .diagnostics
+        .push(WorkflowTypeDiagnostic {
+            node_id: terminal_id,
+            kind: "client_echo".to_string(),
+            message: "must not become source".to_string(),
+            span: None,
+        });
+
+    assert_eq!(workflow_graph_to_source(&graph).unwrap(), canonical);
+    let reprojected = workflow_graph_from_source(&canonical).unwrap();
+    assert_eq!(reprojected.facet_schema_version, None);
+    assert!(reprojected.nodes().all(|node| node.type_facets.is_none()));
 }
 
 #[test]

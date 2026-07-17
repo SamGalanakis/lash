@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use axum::http::StatusCode;
-use lashlang::GraphRenderError;
+use lashlang::{GraphRenderError, Span};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowDocument {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet_schema_version: Option<u32>,
     pub version: u64,
     pub source: String,
     pub nodes: Vec<FlowNode>,
@@ -206,7 +208,41 @@ pub struct NodeData {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChildGroup>,
     #[serde(default)]
-    pub available_vars: Vec<String>,
+    pub available_vars: Vec<TypedVariable>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_arg_types: Vec<ExpectedArgumentType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<TypeDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedVariable {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub variable_type: String,
+}
+
+impl PartialEq<&str> for TypedVariable {
+    fn eq(&self, other: &&str) -> bool {
+        self.name == *other
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpectedArgumentType {
+    pub slot: String,
+    #[serde(rename = "type")]
+    pub expected_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeDiagnostic {
+    pub node_id: String,
+    pub kind: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

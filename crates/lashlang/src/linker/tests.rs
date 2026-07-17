@@ -1463,6 +1463,19 @@ mod tests {
         .expect("parse unknown iterable");
         LinkedModule::link(unknown, full_host_environment())
             .expect("unknown iterable elements should remain gradual");
+
+        let non_list = crate::parse(
+            r#"
+            process consume() {
+              for item in "not a list" { seen = item }
+            }
+            "#,
+        )
+        .expect("parse non-list iterable");
+        assert!(matches!(
+            LinkedModule::link(non_list, full_host_environment()),
+            Err(LinkError::IncompatibleIterationTarget { .. })
+        ));
     }
 
     #[test]
@@ -1700,6 +1713,14 @@ mod tests {
             LinkedModule::link(missing_in_validation, typed_output_host_environment()),
             Err(LinkError::UnknownObjectField { field, .. }) if field == "undeclared"
         ));
+    }
+
+    #[test]
+    fn literal_type_defensively_degrades_type_literals_to_any() {
+        assert_eq!(
+            literal_type(&Expr::TypeLiteral(Box::new(TypeExpr::Str))),
+            TypeExpr::Any
+        );
     }
 
     #[test]
