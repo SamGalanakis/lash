@@ -9,7 +9,9 @@ use crate::ast::{
     AssignPathStep, BinaryOp, Declaration, Expr, LabelMetadata, ListComprehensionClause,
     ProcessDecl, Program, ResourceRefExpr, TypeExpr, UnaryOp,
 };
-use crate::linker::{LashlangAbilities, LashlangHostCatalog, LashlangLanguageFeatures};
+use crate::linker::{
+    LashlangAbilities, LashlangHostCatalog, LashlangLanguageFeatures, ResourceOperationBinding,
+};
 
 pub const LASHLANG_SEMANTIC_HASH_VERSION: &str = "lashlang-semantic-v2";
 pub const LASHLANG_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -525,6 +527,14 @@ fn write_host_requirements(writer: &mut HashWriter, requirements: &HostRequireme
             writer.atom(operation);
             write_type(writer, &binding.input_ty);
             write_type(writer, &binding.output_ty);
+            if let Some(output_from_input) = &binding.output_from_input {
+                writer.atom("output-from-input");
+                writer.atom(&output_from_input.input_field);
+                if let Some(default_schema) = &output_from_input.default_schema {
+                    writer.atom("default-schema");
+                    write_type(writer, default_schema);
+                }
+            }
         }
     }
     writer.atom("named-data-types");
@@ -1452,43 +1462,44 @@ impl<'program> RequirementsCollector<'program> {
         path: Option<Vec<String>>,
         operation: &str,
     ) {
-        let (operation, input_ty, output_ty) =
-            self.resource_operation_requirement(&resource_type, operation);
+        let (operation, binding) = self.resource_operation_requirement(&resource_type, operation);
         if let (Some(catalog), Some(path)) = (self.resource_catalog, path.as_ref()) {
             let alias = path.join(".");
             if let Some(module_binding) =
                 catalog.resolve_module_operation(&resource_type, &alias, &operation)
             {
-                self.requirements.resources.add_module_operation(
+                self.requirements.resources.add_module_operation_binding(
                     path.iter().map(String::as_str),
                     resource_type,
                     operation,
                     module_binding.host_operation.clone(),
-                    input_ty,
-                    output_ty,
+                    binding,
                 );
                 return;
             }
         }
         self.requirements
             .resources
-            .add_operation(resource_type, operation, input_ty, output_ty);
+            .add_operation_binding(resource_type, operation, binding);
     }
 
     fn resource_operation_requirement(
         &self,
         resource_type: &str,
         operation: &str,
-    ) -> (String, TypeExpr, TypeExpr) {
+    ) -> (String, ResourceOperationBinding) {
         if let Some(catalog) = self.resource_catalog
             && let Some(binding) = catalog.resolve_operation(resource_type, operation)
         {
-            return (
-                operation.to_string(),
-                binding.input_ty.clone(),
-                binding.output_ty.clone(),
-            );
+            return (operation.to_string(), binding.clone());
         }
-        (operation.to_string(), TypeExpr::Any, TypeExpr::Any)
+        (
+            operation.to_string(),
+            ResourceOperationBinding {
+                input_ty: TypeExpr::Any,
+                output_ty: TypeExpr::Any,
+                output_from_input: None,
+            },
+        )
     }
 }

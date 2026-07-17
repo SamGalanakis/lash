@@ -376,16 +376,53 @@ pub fn lashlang_resources_from_tool_catalog(
     // Every catalog member is callable; membership is the execution gate.
     for entry in catalog.tools.iter() {
         let lashlang_binding = required_tool_lashlang_executable(&entry.manifest)?;
-        host_catalog.add_module_operation(
+        let operation_binding = catalog
+            .resolve_contract(&entry.manifest.name)
+            .as_deref()
+            .map(lashlang_tool_contract_types)
+            .unwrap_or(lashlang::ResourceOperationBinding {
+                input_ty: lashlang::TypeExpr::Any,
+                output_ty: lashlang::TypeExpr::Any,
+                output_from_input: None,
+            });
+        host_catalog.add_module_operation_binding(
             lashlang_binding.module_path.iter().map(String::as_str),
             lashlang_binding.authority_type.clone(),
             lashlang_binding.operation.clone(),
             entry.manifest.id.to_string(),
-            lashlang::TypeExpr::Any,
-            lashlang::TypeExpr::Any,
+            operation_binding,
         );
     }
     Ok(host_catalog)
+}
+
+fn lashlang_tool_contract_types(
+    contract: &lash_core::ToolContract,
+) -> lashlang::ResourceOperationBinding {
+    let input_ty = lashlang::json_schema_to_type_expr(contract.input_schema.canonical());
+    let (output_ty, output_from_input) = match &contract.output_contract {
+        lash_core::ToolOutputContract::Static => (
+            lashlang::json_schema_to_type_expr(contract.output_schema.canonical()),
+            None,
+        ),
+        lash_core::ToolOutputContract::FromInputSchema {
+            input_field,
+            default_schema,
+        } => (
+            lashlang::TypeExpr::Any,
+            Some(lashlang::OutputFromInputBinding {
+                input_field: input_field.clone(),
+                default_schema: default_schema
+                    .as_ref()
+                    .map(lashlang::json_schema_to_type_expr),
+            }),
+        ),
+    };
+    lashlang::ResourceOperationBinding {
+        input_ty,
+        output_ty,
+        output_from_input,
+    }
 }
 
 pub fn lashlang_host_environment_satisfies_requirements(
@@ -1107,6 +1144,125 @@ mod tests {
         assert_eq!(binding.operation, "read");
         assert_eq!(binding.authority_type, "Filesystem");
         assert_eq!(binding.aliases, vec!["cat"]);
+    }
+
+    #[test]
+    fn tool_catalog_imports_declared_static_schema_types() {
+        let tool = lash_core::ToolDefinition::raw(
+            "tool:test/read_file",
+            "read_file",
+            "read a file",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "retries": { "type": "integer" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": ["string", "null"] }
+            }),
+        )
+        .with_lashlang_binding(
+            LashlangToolBinding::new(["fs"], "read").with_authority_type("Filesystem"),
+        );
+        let catalog = lash_core::ToolCatalog::from_tool_definitions(vec![tool]);
+
+        let resources =
+            lashlang_resources_from_tool_catalog(&catalog).expect("tool schemas import");
+        let operation = resources
+            .resolve_operation("Filesystem", "read")
+            .expect("operation is registered");
+
+        assert_eq!(
+            operation.input_ty,
+            lashlang::TypeExpr::Object(vec![
+                lashlang::TypeField {
+                    name: "path".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: false,
+                },
+                lashlang::TypeField {
+                    name: "retries".into(),
+                    ty: lashlang::TypeExpr::Int,
+                    optional: true,
+                },
+            ])
+        );
+        assert_eq!(
+            operation.output_ty,
+            lashlang::TypeExpr::List(Box::new(lashlang::TypeExpr::Union(vec![
+                lashlang::TypeExpr::Str,
+                lashlang::TypeExpr::Null,
+            ])))
+        );
+    }
+
+    #[test]
+    fn from_input_schema_tool_imports_contract_marker_and_default() {
+        let tool = lash_core::ToolDefinition::raw(
+            "tool:test/generate",
+            "generate",
+            "generate typed output",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "schema": {} },
+                "required": ["schema"],
+                "additionalProperties": false
+            }),
+            serde_json::json!({ "type": "string" }),
+        )
+        .with_output_from_input_schema("schema", Some(serde_json::json!({ "type": "string" })))
+        .with_lashlang_binding(
+            LashlangToolBinding::new(["generate"], "run").with_authority_type("Generator"),
+        );
+        let catalog = lash_core::ToolCatalog::from_tool_definitions(vec![tool]);
+
+        let resources =
+            lashlang_resources_from_tool_catalog(&catalog).expect("tool schemas import");
+        let operation = resources
+            .resolve_operation("Generator", "run")
+            .expect("operation is registered");
+
+        assert_eq!(
+            operation.input_ty,
+            lashlang::TypeExpr::Object(vec![lashlang::TypeField {
+                name: "schema".into(),
+                ty: lashlang::TypeExpr::Any,
+                optional: false,
+            }])
+        );
+        assert_eq!(operation.output_ty, lashlang::TypeExpr::Any);
+        assert_eq!(
+            operation.output_from_input,
+            Some(lashlang::OutputFromInputBinding {
+                input_field: "schema".to_string(),
+                default_schema: Some(lashlang::TypeExpr::Str),
+            })
+        );
+    }
+
+    #[test]
+    fn representable_type_schema_subset_round_trips() {
+        let types = [
+            lashlang::TypeExpr::Any,
+            lashlang::TypeExpr::Str,
+            lashlang::TypeExpr::Int,
+            lashlang::TypeExpr::Float,
+            lashlang::TypeExpr::Bool,
+            lashlang::TypeExpr::Null,
+            lashlang::TypeExpr::Enum(vec!["fast".into(), "safe".into()]),
+            lashlang::TypeExpr::List(Box::new(lashlang::TypeExpr::Str)),
+            lashlang::TypeExpr::Union(vec![lashlang::TypeExpr::Str, lashlang::TypeExpr::Null]),
+        ];
+
+        for expected in types {
+            let schema = lashlang_type_expr_schema(&expected);
+            assert_eq!(lashlang::json_schema_to_type_expr(&schema), expected);
+        }
     }
 
     #[test]

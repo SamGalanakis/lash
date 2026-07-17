@@ -88,6 +88,7 @@ impl ToolState {
         self.generation
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn with_generation(mut self, generation: u64) -> Self {
         self.generation = generation;
         self

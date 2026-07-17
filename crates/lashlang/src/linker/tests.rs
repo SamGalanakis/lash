@@ -24,6 +24,36 @@ mod tests {
             TypeExpr::Any,
             TypeExpr::Any,
         );
+        for (operation, input_ty) in [
+            ("accept_str", TypeExpr::Str),
+            ("accept_int", TypeExpr::Int),
+            ("accept_float", TypeExpr::Float),
+            (
+                "accept_mode",
+                TypeExpr::Enum(vec!["default".into(), "careful".into()]),
+            ),
+        ] {
+            catalog.add_module_operation(
+                ["tools"],
+                "Tools",
+                operation,
+                operation,
+                input_ty,
+                TypeExpr::Null,
+            );
+        }
+        catalog.add_module_operation(
+            ["tools"],
+            "Tools",
+            "accept_config",
+            "accept_config",
+            TypeExpr::Object(vec![TypeField {
+                name: "mode".into(),
+                ty: TypeExpr::Enum(vec!["default".into()]),
+                optional: false,
+            }]),
+            TypeExpr::Null,
+        );
         crate::add_trigger_resource_operations(&mut catalog);
         catalog
             .add_trigger_source_constructor(
@@ -1301,6 +1331,490 @@ mod tests {
             matches!(&err, LinkError::UnknownResourceOperation { operation, .. } if operation == "does_not_exist"),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn expected_enum_slots_reject_wrong_literals_but_admit_members_and_broad_strings() {
+        let wrong = crate::parse(r#"await tools.accept_mode("nope")?"#)
+            .expect("parse wrong enum literal");
+        assert!(matches!(
+            LinkedModule::link(wrong, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+
+        let member = crate::parse(r#"await tools.accept_mode("default")?"#)
+            .expect("parse enum member");
+        LinkedModule::link(member, full_host_environment()).expect("enum member should link");
+
+        let broad = crate::parse(
+            r#"
+            process forward(mode: str) {
+              await tools.accept_mode(mode)?
+            }
+            "#,
+        )
+        .expect("parse broad string input");
+        LinkedModule::link(broad, full_host_environment())
+            .expect("broad strings remain gradually consistent with enums");
+
+        let nested = crate::parse(r#"await tools.accept_config({ mode: "nope" })?"#)
+            .expect("parse nested wrong enum literal");
+        assert!(matches!(
+            LinkedModule::link(nested, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+
+        let container = crate::parse(
+            r#"
+            process mutate(state: { mode: enum["default"] }) {
+              state.mode = "nope"
+            }
+            "#,
+        )
+        .expect("parse container expected type");
+        assert!(matches!(
+            LinkedModule::link(container, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+
+        let declared_return = crate::parse(
+            r#"process choose() -> enum["default"] { finish "nope" }"#,
+        )
+        .expect("parse declared enum return");
+        assert!(matches!(
+            LinkedModule::link(declared_return, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+
+        let declared_argument = crate::parse(
+            r#"
+            process select(mode: enum["default"]) { finish mode }
+            start select(mode: "nope")
+            "#,
+        )
+        .expect("parse declared enum argument");
+        assert!(matches!(
+            LinkedModule::link(declared_argument, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+    }
+
+    #[test]
+    fn union_expected_types_do_not_treat_dict_as_accepting_string_literals() {
+        let program = crate::parse(
+            r#"
+            process select(mode: enum["a"] | dict) { finish mode }
+            start select(mode: "nope")
+            "#,
+        )
+        .expect("parse union expected type");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+    }
+
+    #[test]
+    fn branch_assignments_join_to_a_union_instead_of_first_wins() {
+        let program = crate::parse(
+            r#"
+            process choose(flag: bool) {
+              value = "initial"
+              if flag { value = "text" } else { value = 1 }
+              await tools.accept_str(value)?
+            }
+            "#,
+        )
+        .expect("parse branch join");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual.contains('|')
+        ));
+    }
+
+    #[test]
+    fn for_bindings_use_list_elements_and_unknown_iterables_remain_gradual() {
+        let known = crate::parse(
+            r#"
+            process consume() {
+              for item in ["one", "two"] {
+                await tools.accept_int(item)?
+              }
+            }
+            "#,
+        )
+        .expect("parse known iterable");
+        assert!(matches!(
+            LinkedModule::link(known, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { .. })
+        ));
+
+        let unknown = crate::parse(
+            r#"
+            process consume(items: any) {
+              for item in items {
+                await tools.accept_int(item)?
+              }
+            }
+            "#,
+        )
+        .expect("parse unknown iterable");
+        LinkedModule::link(unknown, full_host_environment())
+            .expect("unknown iterable elements should remain gradual");
+    }
+
+    #[test]
+    fn awaited_process_handles_carry_the_inferred_process_output() {
+        let program = crate::parse(
+            r#"
+            process child() { finish { value: "text" } }
+            result = await start child()
+            await tools.accept_int(result.value)?
+            "#,
+        )
+        .expect("parse awaited process output");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual.contains("str")
+        ));
+    }
+
+    #[test]
+    fn field_assignments_update_the_tracked_object_field_type() {
+        let program = crate::parse(
+            r#"
+            state = { value: "text" }
+            state.value = 1
+            await tools.accept_str(state.value)?
+            "#,
+        )
+        .expect("parse state mutation");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual == "float"
+        ));
+    }
+
+    #[test]
+    fn missing_known_object_fields_are_errors_but_open_shapes_stay_gradual() {
+        let known = crate::parse("value = { present: 1 }\nfinish value.missing")
+            .expect("parse known object field access");
+        assert!(matches!(
+            LinkedModule::link(known, full_host_environment()),
+            Err(LinkError::UnknownObjectField { field, .. }) if field == "missing"
+        ));
+
+        let open = crate::parse(
+            r#"
+            process inspect(map: dict, unknown: any) {
+              finish [map.missing, unknown.missing]
+            }
+            "#,
+        )
+        .expect("parse open shape field access");
+        LinkedModule::link(open, full_host_environment())
+            .expect("dict and any field access should stay gradual");
+    }
+
+    #[test]
+    fn union_field_assignments_update_matching_members_and_reject_unknown_fields() {
+        let matching = crate::parse(
+            r#"
+            process mutate(flag: bool) {
+              value = { a: 0 }
+              if flag { value = { a: 0 } } else { value = { b: 0 } }
+              value.a = 1
+            }
+            "#,
+        )
+        .expect("parse union field assignment");
+        LinkedModule::link(matching, full_host_environment())
+            .expect("a field present on one union member should remain assignable");
+
+        let missing = crate::parse(
+            r#"
+            process mutate(flag: bool) {
+              value = { a: 0 }
+              if flag { value = { a: 0 } } else { value = { b: 0 } }
+              value.c = 1
+            }
+            "#,
+        )
+        .expect("parse missing union field assignment");
+        assert!(matches!(
+            LinkedModule::link(missing, full_host_environment()),
+            Err(LinkError::UnknownObjectField { field, .. }) if field == "c"
+        ));
+    }
+
+    #[test]
+    fn binary_operators_reject_known_category_errors_but_admit_unknown_maps() {
+        let known = crate::parse("finish {} + 1").expect("parse bad binary operands");
+        assert!(matches!(
+            LinkedModule::link(known, full_host_environment()),
+            Err(LinkError::IncompatibleBinaryOperands { .. })
+        ));
+
+        let gradual = crate::parse(
+            r#"
+            process combine(map: dict, unknown: any) {
+              left = map + 1
+              finish left + unknown
+            }
+            "#,
+        )
+        .expect("parse gradual binary operands");
+        LinkedModule::link(gradual, full_host_environment())
+            .expect("dict and any operands should stay gradual");
+    }
+
+    #[test]
+    fn equality_accepts_a_compatible_union_member_but_rejects_known_category_mismatches() {
+        let union = crate::parse(
+            r#"
+            process compare(flag: bool, number: int) {
+              value = "initial"
+              if flag { value = number } else { value = "text" }
+              equal = value == "text"
+              not_equal = "text" != value
+              finish [equal, not_equal]
+            }
+            "#,
+        )
+        .expect("parse union equality");
+        LinkedModule::link(union, full_host_environment())
+            .expect("equality should accept a category-compatible union member");
+
+        let incompatible = crate::parse("finish {} == 1").expect("parse incompatible equality");
+        assert!(matches!(
+            LinkedModule::link(incompatible, full_host_environment()),
+            Err(LinkError::IncompatibleBinaryOperands { .. })
+        ));
+    }
+
+    #[test]
+    fn loop_carried_mutation_is_widened_after_one_forward_pass() {
+        let program = crate::parse(
+            r#"
+            state = { value: "before" }
+            while true {
+              state.value = 1
+            }
+            await tools.accept_float(state.value)?
+            "#,
+        )
+        .expect("parse loop-carried mutation");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual.contains("str") && actual.contains("float")
+        ));
+    }
+
+    fn typed_output_host_environment() -> LashlangHostEnvironment {
+        let input_ty = TypeExpr::Object(vec![
+            TypeField {
+                name: "task".into(),
+                ty: TypeExpr::Str,
+                optional: false,
+            },
+            TypeField {
+                name: "output".into(),
+                ty: TypeExpr::Any,
+                optional: true,
+            },
+        ]);
+        let mut resources = LashlangHostCatalog::new();
+        for (module, authority, default_schema) in [
+            ("agents", "Agents", None),
+            ("llm", "Llm", Some(TypeExpr::Str)),
+        ] {
+            resources.add_module_operation_binding(
+                [module],
+                authority,
+                if module == "agents" { "spawn" } else { "query" },
+                format!("{module}_typed_output"),
+                ResourceOperationBinding {
+                    input_ty: input_ty.clone(),
+                    output_ty: TypeExpr::Any,
+                    output_from_input: Some(OutputFromInputBinding {
+                        input_field: "output".to_string(),
+                        default_schema,
+                    }),
+                },
+            );
+        }
+        resources.add_module_operation(
+            ["static_tool"],
+            "StaticTool",
+            "run",
+            "static_run",
+            TypeExpr::Any,
+            TypeExpr::Object(vec![TypeField {
+                name: "declared".into(),
+                ty: TypeExpr::Str,
+                optional: false,
+            }]),
+        );
+        LashlangHostEnvironment::new(resources, LashlangAbilities::all())
+    }
+
+    #[test]
+    fn closed_type_literals_type_outputs_in_lowering_and_validation() {
+        let direct = crate::parse(
+            r#"
+            result = (await agents.spawn({ task: "inspect", output: Type { declared: str } }))?
+            result.declared
+            "#,
+        )
+        .expect("parse direct typed output");
+        LinkedModule::link(direct, typed_output_host_environment())
+            .expect("declared output field should link");
+
+        let missing_in_lowering = crate::parse(
+            r#"
+            result = (await agents.spawn({ task: "inspect", output: Type { declared: str } }))?
+            result.undeclared
+            "#,
+        )
+        .expect("parse missing direct output field");
+        assert!(matches!(
+            LinkedModule::link(missing_in_lowering, typed_output_host_environment()),
+            Err(LinkError::UnknownObjectField { field, .. }) if field == "undeclared"
+        ));
+
+        let missing_in_validation = crate::parse(
+            r#"
+            process ask(llm: Llm) {
+              result = (await llm.query({ task: "inspect", output: Type { declared: str } }))?
+              finish result.undeclared
+            }
+            "#,
+        )
+        .expect("parse process typed output");
+        assert!(matches!(
+            LinkedModule::link(missing_in_validation, typed_output_host_environment()),
+            Err(LinkError::UnknownObjectField { field, .. }) if field == "undeclared"
+        ));
+    }
+
+    #[test]
+    fn declared_aliases_make_nested_type_literal_witnesses_closed() {
+        let program = crate::parse(
+            r#"
+            type Inner = { value: str }
+            result = (await agents.spawn({ task: "inspect", output: Type { nested: Inner } }))?
+            result.nested.value
+            "#,
+        )
+        .expect("parse aliased typed output");
+        LinkedModule::link(program, typed_output_host_environment())
+            .expect("declared aliases should close a schema witness");
+    }
+
+    #[test]
+    fn record_shorthand_types_outputs_and_rejects_missing_fields() {
+        let declared = crate::parse(
+            r#"
+            result = (await agents.spawn({
+              task: "inspect",
+              output: { declared: "str", count: "int", tags: "list[str]" }
+            }))?
+            [result.declared, result.count, result.tags]
+            "#,
+        )
+        .expect("parse shorthand output");
+        LinkedModule::link(declared, typed_output_host_environment())
+            .expect("record shorthand fields should link");
+
+        let missing = crate::parse(
+            r#"
+            result = (await llm.query({ task: "inspect", output: { declared: "str" } }))?
+            result.undeclared
+            "#,
+        )
+        .expect("parse shorthand missing field");
+        assert!(matches!(
+            LinkedModule::link(missing, typed_output_host_environment()),
+            Err(LinkError::UnknownObjectField { field, .. }) if field == "undeclared"
+        ));
+    }
+
+    #[test]
+    fn dynamic_and_stored_schema_witnesses_stay_any() {
+        for source in [
+            r#"
+            shape = Type { declared: str }
+            result = (await agents.spawn({ task: "inspect", output: shape }))?
+            result.undeclared
+            "#,
+            r#"
+            inner = Type { value: str }
+            result = (await agents.spawn({
+              task: "inspect",
+              output: Type { nested: inner }
+            }))?
+            result.undeclared
+            "#,
+        ] {
+            let program = crate::parse(source).expect("parse dynamic schema witness");
+            LinkedModule::link(program, typed_output_host_environment())
+                .expect("dynamic schema witnesses must stay gradual");
+        }
+    }
+
+    #[test]
+    fn missing_witness_uses_default_schema_and_static_tools_are_unchanged() {
+        let default_matches = crate::parse(
+            r#"
+            process ask(llm: Llm) -> str {
+              finish (await llm.query({ task: "plain text" }))?
+            }
+            "#,
+        )
+        .expect("parse default output");
+        LinkedModule::link(default_matches, typed_output_host_environment())
+            .expect("llm query should default to str");
+
+        let default_mismatch = crate::parse(
+            r#"
+            process ask(llm: Llm) -> int {
+              finish (await llm.query({ task: "plain text" }))?
+            }
+            "#,
+        )
+        .expect("parse mismatched default output");
+        assert!(matches!(
+            LinkedModule::link(default_mismatch, typed_output_host_environment()),
+            Err(LinkError::IncompatibleProcessReturn { expected, actual, .. })
+                if expected == "int" && actual == "str"
+        ));
+
+        let static_output = crate::parse(
+            r#"
+            result = (await static_tool.run({}))?
+            result.declared
+            "#,
+        )
+        .expect("parse static output");
+        LinkedModule::link(static_output, typed_output_host_environment())
+            .expect("static P2 output type should be preserved");
+
+        let static_missing = crate::parse(
+            r#"
+            result = (await static_tool.run({}))?
+            result.undeclared
+            "#,
+        )
+        .expect("parse static missing output field");
+        assert!(matches!(
+            LinkedModule::link(static_missing, typed_output_host_environment()),
+            Err(LinkError::UnknownObjectField { field, .. }) if field == "undeclared"
+        ));
     }
 
     #[tokio::test]

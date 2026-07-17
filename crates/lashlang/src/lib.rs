@@ -4,6 +4,7 @@ mod builtins;
 mod compile;
 mod identity;
 mod introspection;
+mod json_schema;
 mod lexer;
 mod linker;
 mod parser;
@@ -11,6 +12,7 @@ mod runtime;
 mod source;
 mod tracking;
 mod trigger;
+mod typed_output;
 mod workflow_graph;
 
 #[cfg(any(test, feature = "testing"))]
@@ -41,11 +43,13 @@ pub use introspection::{
     ResourceTypeIntrospection, TriggerSourceIntrospection, TypeView, ValueConstructorIntrospection,
     referenced_module_call_paths,
 };
+pub use json_schema::json_schema_to_type_expr;
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
     LashlangAbilities, LashlangHostCatalog, LashlangHostCatalogError, LashlangHostEnvironment,
     LashlangLanguageFeatures, LinkError, LinkedModule, NamedDataType, NamedDataTypeError,
-    ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding, ValueConstructorBinding,
+    OutputFromInputBinding, ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding,
+    ValueConstructorBinding,
 };
 pub use parser::{ParseError, parse, parse_expression, parse_type_expression};
 pub use runtime::{
@@ -89,6 +93,7 @@ pub use trigger::{
     check_trigger_compatibility, event_type_for_source, is_trigger_resource_type, list_call_args,
     register_call_args, trigger_event_placeholder_expr,
 };
+pub use typed_output::parse_output_schema;
 pub use workflow_graph::{
     GraphRenderError, VariableVersion, WORKFLOW_GRAPH_SCHEMA_VERSION, WorkflowContainer,
     WorkflowDeclaration, WorkflowEdge, WorkflowEdgeKind, WorkflowEffectKind, WorkflowGraph,

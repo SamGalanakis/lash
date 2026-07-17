@@ -162,6 +162,15 @@ pub struct ModuleInstanceCatalog {
 pub struct ResourceOperationBinding {
     pub input_ty: TypeExpr,
     pub output_ty: TypeExpr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_from_input: Option<OutputFromInputBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputFromInputBinding {
+    pub input_field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_schema: Option<TypeExpr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

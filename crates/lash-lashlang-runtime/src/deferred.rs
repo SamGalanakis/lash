@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::{LashlangHostEnvironment, required_tool_lashlang_executable};
+use crate::{
+    LashlangHostEnvironment, lashlang_tool_contract_types, required_tool_lashlang_executable,
+};
 
 /// A host-authorized tool capability resolved for a deferred call-path. It
 /// carries the callable contract and Lashlang identity (via the tool
@@ -115,13 +117,13 @@ fn fold_grant(
     grant: &ToolGrant,
 ) -> Result<(), String> {
     let binding = required_tool_lashlang_executable(&grant.definition.manifest)?;
-    host_environment.resources.add_module_operation(
+    let operation_binding = lashlang_tool_contract_types(&grant.definition.contract);
+    host_environment.resources.add_module_operation_binding(
         binding.module_path.iter().map(String::as_str),
         binding.authority_type.clone(),
         binding.operation.clone(),
         grant.definition.manifest.id.to_string(),
-        lashlang::TypeExpr::Any,
-        lashlang::TypeExpr::Any,
+        operation_binding,
     );
     Ok(())
 }
@@ -234,6 +236,43 @@ mod tests {
         LashlangSurface::default()
             .host_environment(&catalog)
             .expect("empty host environment")
+    }
+
+    #[test]
+    fn deferred_grant_imports_declared_schema_types() {
+        let definition = lash_core::ToolDefinition::raw(
+            "tool:fetch_url",
+            "fetch_url",
+            "Fetch a URL",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+            serde_json::json!({ "type": "boolean" }),
+        )
+        .with_lashlang_binding(
+            LashlangToolBinding::new(["web"], "fetch").with_authority_type("Web"),
+        );
+        let grant = ToolGrant::new(definition);
+        let mut environment = empty_host_environment();
+
+        fold_grant(&mut environment, &grant).expect("grant folds");
+
+        let operation = environment
+            .resources
+            .resolve_operation("Web", "fetch")
+            .expect("deferred operation is registered");
+        assert_eq!(
+            operation.input_ty,
+            lashlang::TypeExpr::Object(vec![lashlang::TypeField {
+                name: "url".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            }])
+        );
+        assert_eq!(operation.output_ty, lashlang::TypeExpr::Bool);
     }
 
     #[tokio::test]
