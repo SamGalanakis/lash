@@ -796,7 +796,7 @@ async fn projected_available_vars_follow_ssa_and_nested_lexical_scope() {
             .find(|variable| variable.name == "item")
             .expect("typed loop binding")
             .variable_type,
-        "float"
+        "int"
     );
     let terminal = document
         .nodes
