@@ -1400,6 +1400,22 @@ mod tests {
     }
 
     #[test]
+    fn union_expected_types_do_not_treat_dict_as_accepting_string_literals() {
+        let program = crate::parse(
+            r#"
+            process select(mode: enum["a"] | dict) { finish mode }
+            start select(mode: "nope")
+            "#,
+        )
+        .expect("parse union expected type");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+    }
+
+    #[test]
     fn branch_assignments_join_to_a_union_instead_of_first_wins() {
         let program = crate::parse(
             r#"
@@ -1505,6 +1521,37 @@ mod tests {
     }
 
     #[test]
+    fn union_field_assignments_update_matching_members_and_reject_unknown_fields() {
+        let matching = crate::parse(
+            r#"
+            process mutate(flag: bool) {
+              value = { a: 0 }
+              if flag { value = { a: 0 } } else { value = { b: 0 } }
+              value.a = 1
+            }
+            "#,
+        )
+        .expect("parse union field assignment");
+        LinkedModule::link(matching, full_host_environment())
+            .expect("a field present on one union member should remain assignable");
+
+        let missing = crate::parse(
+            r#"
+            process mutate(flag: bool) {
+              value = { a: 0 }
+              if flag { value = { a: 0 } } else { value = { b: 0 } }
+              value.c = 1
+            }
+            "#,
+        )
+        .expect("parse missing union field assignment");
+        assert!(matches!(
+            LinkedModule::link(missing, full_host_environment()),
+            Err(LinkError::UnknownObjectField { field, .. }) if field == "c"
+        ));
+    }
+
+    #[test]
     fn binary_operators_reject_known_category_errors_but_admit_unknown_maps() {
         let known = crate::parse("finish {} + 1").expect("parse bad binary operands");
         assert!(matches!(
@@ -1523,6 +1570,30 @@ mod tests {
         .expect("parse gradual binary operands");
         LinkedModule::link(gradual, full_host_environment())
             .expect("dict and any operands should stay gradual");
+    }
+
+    #[test]
+    fn equality_accepts_a_compatible_union_member_but_rejects_known_category_mismatches() {
+        let union = crate::parse(
+            r#"
+            process compare(flag: bool, number: int) {
+              value = "initial"
+              if flag { value = number } else { value = "text" }
+              equal = value == "text"
+              not_equal = "text" != value
+              finish [equal, not_equal]
+            }
+            "#,
+        )
+        .expect("parse union equality");
+        LinkedModule::link(union, full_host_environment())
+            .expect("equality should accept a category-compatible union member");
+
+        let incompatible = crate::parse("finish {} == 1").expect("parse incompatible equality");
+        assert!(matches!(
+            LinkedModule::link(incompatible, full_host_environment()),
+            Err(LinkError::IncompatibleBinaryOperands { .. })
+        ));
     }
 
     #[test]

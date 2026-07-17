@@ -269,7 +269,7 @@ impl<'module> Linker<'module> {
             }
             (Expr::String(value), TypeExpr::Union(items)) => {
                 let accepts = items.iter().any(|item| match item {
-                    TypeExpr::Any | TypeExpr::Dict | TypeExpr::Str => true,
+                    TypeExpr::Any | TypeExpr::Str => true,
                     TypeExpr::Enum(members) => members.contains(value),
                     _ => false,
                 });

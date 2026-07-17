@@ -162,6 +162,37 @@ fn update_type_path(
         (TypeExpr::List(item), AssignPathStep::Index(_)) => Ok(TypeExpr::List(Box::new(
             update_type_path(*item, rest, value_ty, span)?,
         ))),
+        (TypeExpr::Union(items), AssignPathStep::Field(field)) => {
+            let mut updated = false;
+            let mut missing_error = None;
+            let items = items
+                .into_iter()
+                .map(|item| {
+                    if !type_has_field(&item, field) {
+                        return Ok(item);
+                    }
+                    match update_type_path(item.clone(), steps, value_ty, span) {
+                        Ok(item) => {
+                            updated = true;
+                            Ok(item)
+                        }
+                        Err(error @ LinkError::UnknownObjectField { .. }) => {
+                            missing_error = Some(error);
+                            Ok(item)
+                        }
+                        Err(error) => Err(error),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if updated {
+                Ok(union_type(items))
+            } else {
+                Err(missing_error.unwrap_or_else(|| LinkError::UnknownObjectField {
+                    field: field.to_string(),
+                    span,
+                }))
+            }
+        }
         (TypeExpr::Union(items), _) => Ok(union_type(
             items
                 .into_iter()
@@ -171,6 +202,15 @@ fn update_type_path(
         (TypeExpr::Any, _) => Ok(TypeExpr::Any),
         (TypeExpr::Dict, _) => Ok(TypeExpr::Dict),
         (other, _) => Ok(other),
+    }
+}
+
+fn type_has_field(ty: &TypeExpr, field: &str) -> bool {
+    match ty {
+        TypeExpr::Any | TypeExpr::Dict => true,
+        TypeExpr::Object(fields) => fields.iter().any(|candidate| candidate.name == field),
+        TypeExpr::Union(items) => items.iter().any(|item| type_has_field(item, field)),
+        _ => false,
     }
 }
 
@@ -364,7 +404,7 @@ fn binary_operands_compatible(
                 || matches!((left, right), (TypeExpr::List(_), TypeExpr::List(_)))
         }
         crate::ast::BinaryOp::Equal | crate::ast::BinaryOp::NotEqual => {
-            type_category(left) == type_category(right)
+            equality_operands_compatible(left, right)
         }
         crate::ast::BinaryOp::Less
         | crate::ast::BinaryOp::LessEqual
@@ -372,6 +412,15 @@ fn binary_operands_compatible(
         | crate::ast::BinaryOp::GreaterEqual => {
             type_is_scalar(left) && type_is_scalar(right)
         }
+    }
+}
+
+fn equality_operands_compatible(left: &TypeExpr, right: &TypeExpr) -> bool {
+    match (left, right) {
+        (TypeExpr::Union(items), other) | (other, TypeExpr::Union(items)) => items
+            .iter()
+            .any(|item| equality_operands_compatible(item, other)),
+        _ => type_is_gradual(left) || type_is_gradual(right) || type_category(left) == type_category(right),
     }
 }
 
