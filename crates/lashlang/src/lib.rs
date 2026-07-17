@@ -5,6 +5,7 @@ mod compile;
 mod graph;
 mod identity;
 mod introspection;
+mod json_schema;
 mod lexer;
 mod linker;
 mod parser;
@@ -45,6 +46,7 @@ pub use introspection::{
     ResourceTypeIntrospection, TriggerSourceIntrospection, TypeView, ValueConstructorIntrospection,
     referenced_module_call_paths,
 };
+pub use json_schema::json_schema_to_type_expr;
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
     LashlangAbilities, LashlangHostCatalog, LashlangHostCatalogError, LashlangHostEnvironment,

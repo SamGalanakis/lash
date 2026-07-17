@@ -1035,6 +1035,7 @@ pub fn is_resolved_type_assignable(source: &TypeExpr, target: &TypeExpr) -> bool
             .iter()
             .any(|target| is_resolved_type_assignable(source, target)),
         (TypeExpr::Int, TypeExpr::Float) => true,
+        (TypeExpr::Str, TypeExpr::Enum(_)) => true,
         (TypeExpr::Enum(_), TypeExpr::Str) => true,
         (TypeExpr::Enum(sources), TypeExpr::Enum(targets)) => {
             sources.iter().all(|source| targets.contains(source))
@@ -1190,6 +1191,18 @@ mod tests {
         assert!(!is_resolved_type_assignable(
             &TypeExpr::Bool,
             &TypeExpr::Float
+        ));
+    }
+
+    #[test]
+    fn resolved_type_assignability_treats_strings_as_consistent_with_string_enums() {
+        let target = TypeExpr::Enum(vec!["a".into(), "b".into()]);
+
+        assert!(is_resolved_type_assignable(&TypeExpr::Str, &target));
+        assert!(!is_resolved_type_assignable(&TypeExpr::Int, &target));
+        assert!(is_resolved_type_assignable(
+            &TypeExpr::Enum(vec!["a".into()]),
+            &TypeExpr::Str
         ));
     }
 
