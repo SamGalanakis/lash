@@ -44,6 +44,12 @@ pub enum LinkError {
         actual: String,
         span: Option<Span>,
     },
+    #[error("expected {expected}, got incompatible literal {actual}")]
+    IncompatibleExpectedLiteral {
+        expected: String,
+        actual: String,
+        span: Option<Span>,
+    },
     #[error("process `{process}` return type is incompatible: expected {expected}, got {actual}")]
     IncompatibleProcessReturn {
         process: String,
@@ -119,14 +125,12 @@ pub enum LinkError {
         suggestion: String,
         span: Option<Span>,
     },
-    #[error(
-        "process `{process}` argument `{arg}` has incompatible authority type: expected {expected}, got {actual}"
-    )]
+    #[error("process `{process}` argument `{arg}` expects {expected}, got {actual}")]
     IncompatibleProcessArgument {
-        process: String,
-        arg: String,
-        expected: String,
-        actual: String,
+        process: Box<str>,
+        arg: Box<str>,
+        expected: Box<str>,
+        actual: Box<str>,
         span: Option<Span>,
     },
     #[error("lashlang feature `{feature}` is disabled by this host")]
@@ -143,6 +147,15 @@ pub enum LinkError {
     OpaqueHostDescriptorAccess {
         type_name: String,
         access: String,
+        span: Option<Span>,
+    },
+    #[error("object type has no field `{field}`")]
+    UnknownObjectField { field: String, span: Option<Span> },
+    #[error("operator `{operator}` does not accept {left} and {right}")]
+    IncompatibleBinaryOperands {
+        operator: &'static str,
+        left: String,
+        right: String,
         span: Option<Span>,
     },
     #[error("failed to hash linked module: {message}")]
@@ -165,6 +178,7 @@ impl LinkError {
             | Self::UnknownType { span, .. }
             | Self::IncompatibleConstructorInput { span, .. }
             | Self::IncompatibleOperationInput { span, .. }
+            | Self::IncompatibleExpectedLiteral { span, .. }
             | Self::IncompatibleProcessReturn { span, .. }
             | Self::InvalidTriggerRegistration { span }
             | Self::InvalidTriggerInputs { span }
@@ -186,7 +200,9 @@ impl LinkError {
             | Self::IncompatibleProcessArgument { span, .. }
             | Self::FeatureDisabled { span, .. }
             | Self::ProcessLifecycleOutsideProcess { span, .. }
-            | Self::OpaqueHostDescriptorAccess { span, .. } => *span,
+            | Self::OpaqueHostDescriptorAccess { span, .. }
+            | Self::UnknownObjectField { span, .. }
+            | Self::IncompatibleBinaryOperands { span, .. } => *span,
             Self::ModuleHash { .. } => None,
         }
     }

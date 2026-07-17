@@ -246,6 +246,111 @@ impl<'module> Linker<'module> {
         crate::trigger::is_resolved_type_assignable(&source, &target)
     }
 
+    fn validate_expected_literals(
+        &self,
+        expr: &Expr,
+        expected: Option<&TypeExpr>,
+        span: Option<Span>,
+    ) -> Result<(), LinkError> {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        let expected = self.resolve_type_aliases(expected);
+        match (expr, &expected) {
+            (Expr::LabelAnnotated { expr, .. }, _) => {
+                self.validate_expected_literals(expr, Some(&expected), span)
+            }
+            (Expr::String(value), TypeExpr::Enum(members)) if !members.contains(value) => {
+                Err(LinkError::IncompatibleExpectedLiteral {
+                    expected: format_type_expr(&expected),
+                    actual: format!("\"{value}\""),
+                    span,
+                })
+            }
+            (Expr::String(value), TypeExpr::Union(items)) => {
+                let accepts = items.iter().any(|item| match item {
+                    TypeExpr::Any | TypeExpr::Dict | TypeExpr::Str => true,
+                    TypeExpr::Enum(members) => members.contains(value),
+                    _ => false,
+                });
+                if accepts {
+                    Ok(())
+                } else {
+                    Err(LinkError::IncompatibleExpectedLiteral {
+                        expected: format_type_expr(&expected),
+                        actual: format!("\"{value}\""),
+                        span,
+                    })
+                }
+            }
+            (Expr::Record(entries), TypeExpr::Object(fields)) => {
+                for (name, value) in entries {
+                    if let Some(field) = fields.iter().find(|field| field.name == *name) {
+                        self.validate_expected_literals(value, Some(&field.ty), span)?;
+                    }
+                }
+                Ok(())
+            }
+            (Expr::List(items) | Expr::Tuple(items), TypeExpr::List(item)) => {
+                for value in items {
+                    self.validate_expected_literals(value, Some(item), span)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn assignment_target_type(
+        &self,
+        target: &crate::ast::AssignTarget,
+        scope: &Scope,
+    ) -> Result<Option<TypeExpr>, LinkError> {
+        let Some(mut ty) = scope.binding_type(&target.root) else {
+            return Ok(None);
+        };
+        for step in &target.steps {
+            ty = match step {
+                AssignPathStep::Field(field) => self.field_type(&ty, field, scope.span)?,
+                AssignPathStep::Index(_) => self.index_type(&ty, scope.span)?,
+            };
+        }
+        Ok(Some(ty))
+    }
+
+    fn validate_binary_operands(
+        &self,
+        op: crate::ast::BinaryOp,
+        left: &TypeExpr,
+        right: &TypeExpr,
+        span: Option<Span>,
+    ) -> Result<(), LinkError> {
+        let left = self.resolve_type_aliases(left);
+        let right = self.resolve_type_aliases(right);
+        if binary_operands_compatible(op, &left, &right) {
+            Ok(())
+        } else {
+            Err(LinkError::IncompatibleBinaryOperands {
+                operator: binary_op_source(op),
+                left: format_type_expr(&left),
+                right: format_type_expr(&right),
+                span,
+            })
+        }
+    }
+
+    fn process_output_type(&self, process: &str) -> TypeExpr {
+        match self.process_types.get(process) {
+            // Awaited process handles are runtime result envelopes. Preserve
+            // the inferred payload as the known branch while keeping the
+            // envelope gradual; `?` does not narrow gradual information.
+            Some(TypeExpr::Process { output, .. }) => {
+                union_type(vec![*output.clone(), TypeExpr::Any])
+            }
+            _ => TypeExpr::Any,
+        }
+    }
+
     fn validate_type_refs(&self, ty: &TypeExpr, span: Option<Span>) -> Result<(), LinkError> {
         match ty {
             TypeExpr::Ref(name) => {
@@ -368,6 +473,7 @@ impl<'module> Linker<'module> {
                     )?;
                 }
                 let mut scope = Scope::new(false, true, span);
+                scope.expected_return = process.return_ty.clone();
                 let mut seen = BTreeSet::new();
                 for param in &process.params {
                     if !seen.insert(param.name.to_string()) {

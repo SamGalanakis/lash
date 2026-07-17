@@ -7,29 +7,43 @@ impl<'module> Linker<'module> {
         actual: Option<&Binding>,
         span: Option<Span>,
     ) -> Result<(), LinkError> {
-        let Some(expected_resource) = self.resource_type_for_type(expected_ty) else {
-            return Ok(());
-        };
-        match actual {
-            Some(Binding::Resource { resource_type }) if *resource_type == expected_resource => {
-                Ok(())
-            }
-            Some(Binding::Resource { resource_type }) => {
-                Err(LinkError::IncompatibleProcessArgument {
-                    process: process.to_string(),
-                    arg: arg.to_string(),
-                    expected: expected_resource,
-                    actual: resource_type.clone(),
+        if let Some(expected_resource) = self.resource_type_for_type(expected_ty) {
+            return match actual {
+                Some(Binding::Resource { resource_type })
+                    if *resource_type == expected_resource =>
+                {
+                    Ok(())
+                }
+                Some(Binding::Resource { resource_type }) => {
+                    Err(LinkError::IncompatibleProcessArgument {
+                        process: process.into(),
+                        arg: arg.into(),
+                        expected: expected_resource.into(),
+                        actual: resource_type.as_str().into(),
+                        span,
+                    })
+                }
+                _ => Err(LinkError::IncompatibleProcessArgument {
+                    process: process.into(),
+                    arg: arg.into(),
+                    expected: expected_resource.into(),
+                    actual: "value".into(),
                     span,
-                })
-            }
-            _ => Err(LinkError::IncompatibleProcessArgument {
-                process: process.to_string(),
-                arg: arg.to_string(),
-                expected: expected_resource,
-                actual: "value".to_string(),
+                }),
+            };
+        }
+        let actual_ty = binding_type(actual);
+        if self.is_type_assignable(&actual_ty, expected_ty) {
+            Ok(())
+        } else {
+            Err(LinkError::IncompatibleProcessArgument {
+                process: process.into(),
+                arg: arg.into(),
+                expected: format_type_expr(&self.resolve_type_aliases(expected_ty))
+                    .into_boxed_str(),
+                actual: format_type_expr(&self.resolve_type_aliases(&actual_ty)).into_boxed_str(),
                 span,
-            }),
+            })
         }
     }
 
@@ -267,7 +281,8 @@ impl<'module> Linker<'module> {
                 lowered.push((name.clone(), crate::trigger_event_placeholder_expr()));
                 continue;
             }
-            let (lowered_value, binding) = self.lower_expr(value, scope)?;
+            let (lowered_value, binding) =
+                self.lower_expr_expected(value, scope, Some(&param.ty))?;
             self.validate_process_arg_binding(
                 process,
                 name.as_str(),
@@ -334,6 +349,7 @@ impl<'module> Linker<'module> {
         span: Option<Span>,
     ) -> Result<TypeExpr, LinkError> {
         let mut scope = Scope::new(false, true, span);
+        scope.expected_return = process.return_ty.clone();
         for param in &process.params {
             scope.bind(param.name.as_str(), self.binding_for_type(&param.ty));
         }
@@ -350,10 +366,17 @@ impl<'module> Linker<'module> {
     fn infer_completion(&self, expr: &Expr, scope: &mut Scope) -> Result<Completion, LinkError> {
         match expr {
             Expr::LabelAnnotated { expr, .. } => self.infer_completion(expr, scope),
-            Expr::Finish(value) => Ok(Completion {
-                finishes: vec![self.infer_expr_type(value, scope)?],
-                can_fallthrough: false,
-            }),
+            Expr::Finish(value) => {
+                let expected_return = scope.expected_return.clone();
+                Ok(Completion {
+                    finishes: vec![self.infer_expr_type_expected(
+                        value,
+                        scope,
+                        expected_return.as_ref(),
+                    )?],
+                    can_fallthrough: false,
+                })
+            }
             Expr::Fail(_) => Ok(Completion {
                 finishes: Vec::new(),
                 can_fallthrough: false,
@@ -384,8 +407,7 @@ impl<'module> Linker<'module> {
                 let then_completion = self.infer_completion(then_block, &mut then_scope)?;
                 let mut else_scope = scope.clone();
                 let else_completion = self.infer_completion(else_block, &mut else_scope)?;
-                scope.merge_from(then_scope);
-                scope.merge_from(else_scope);
+                scope.join_branches(then_scope, else_scope);
                 let mut finishes = then_completion.finishes;
                 finishes.extend(else_completion.finishes);
                 Ok(Completion {
@@ -399,22 +421,37 @@ impl<'module> Linker<'module> {
                 iterable,
                 body,
             } => {
-                self.infer_expr_type(iterable, scope)?;
-                let previous = scope.bind(binding.as_str(), Binding::Value(TypeExpr::Any));
-                let mut completion = self.infer_completion(body, scope)?;
-                scope.restore(binding.as_str(), previous);
+                let iterable_ty = self.infer_expr_type(iterable, scope)?;
+                let item_ty = self.index_type(&iterable_ty, scope.span)?;
+                let before = scope.clone();
+                let mut body_scope = scope.clone();
+                let previous = body_scope.bind(
+                    binding.as_str(),
+                    self.binding_for_type(&item_ty),
+                );
+                let mut completion = self.infer_completion(body, &mut body_scope)?;
+                body_scope.restore(binding.as_str(), previous);
+                scope.widen_loop(before, body_scope);
                 completion.can_fallthrough = true;
                 Ok(completion)
             }
             Expr::While { condition, body } => {
                 self.infer_expr_type(condition, scope)?;
-                let mut completion = self.infer_completion(body, scope)?;
+                let before = scope.clone();
+                let mut body_scope = scope.clone();
+                let mut completion = self.infer_completion(body, &mut body_scope)?;
+                scope.widen_loop(before, body_scope);
                 completion.can_fallthrough = true;
                 Ok(completion)
             }
-            Expr::Assign { target, expr } if target.steps.is_empty() => {
-                let ty = self.infer_expr_type(expr, scope)?;
-                scope.bind(target.root.as_str(), self.binding_for_type(&ty));
+            Expr::Assign { target, expr } => {
+                let expected = self.assignment_target_type(target, scope)?;
+                let ty = self.infer_expr_type_expected(expr, scope, expected.as_ref())?;
+                if target.steps.is_empty() {
+                    scope.bind(target.root.as_str(), self.binding_for_type(&ty));
+                } else {
+                    scope.update_path(target, &ty)?;
+                }
                 Ok(Completion::fallthrough())
             }
             other => {
@@ -425,18 +462,35 @@ impl<'module> Linker<'module> {
     }
 
     fn infer_expr_type(&self, expr: &Expr, scope: &mut Scope) -> Result<TypeExpr, LinkError> {
+        self.infer_expr_type_expected(expr, scope, None)
+    }
+
+    fn infer_expr_type_expected(
+        &self,
+        expr: &Expr,
+        scope: &mut Scope,
+        expected: Option<&TypeExpr>,
+    ) -> Result<TypeExpr, LinkError> {
         self.reject_trigger_event_special_form(expr, scope.span)?;
+        self.validate_expected_literals(expr, expected, scope.span)?;
         if matches!(expr, Expr::Variable(_) | Expr::Field { .. })
             && let Some(resource) = self.resolve_module_expr(expr, scope)
         {
             return Ok(TypeExpr::Ref(resource.resource_type));
         }
         Ok(match expr {
-            Expr::LabelAnnotated { expr, .. } => self.infer_expr_type(expr, scope)?,
+            Expr::LabelAnnotated { expr, .. } => {
+                self.infer_expr_type_expected(expr, scope, expected)?
+            }
             Expr::Block(expressions) => {
                 let mut last = TypeExpr::Null;
-                for expression in expressions {
-                    last = self.infer_expr_type(expression, scope)?;
+                let last_index = expressions.len().saturating_sub(1);
+                for (index, expression) in expressions.iter().enumerate() {
+                    last = self.infer_expr_type_expected(
+                        expression,
+                        scope,
+                        (index == last_index).then_some(expected).flatten(),
+                    )?;
                 }
                 last
             }
@@ -473,13 +527,29 @@ impl<'module> Linker<'module> {
             Expr::Tuple(items) => TypeExpr::List(Box::new(union_type(
                 items
                     .iter()
-                    .map(|item| self.infer_expr_type(item, scope))
+                    .map(|item| {
+                        let expected_item = expected.and_then(|expected| {
+                            match self.resolve_type_aliases(expected) {
+                                TypeExpr::List(item) => Some(*item),
+                                _ => None,
+                            }
+                        });
+                        self.infer_expr_type_expected(item, scope, expected_item.as_ref())
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
             ))),
             Expr::List(items) => TypeExpr::List(Box::new(union_type(
                 items
                     .iter()
-                    .map(|item| self.infer_expr_type(item, scope))
+                    .map(|item| {
+                        let expected_item = expected.and_then(|expected| {
+                            match self.resolve_type_aliases(expected) {
+                                TypeExpr::List(item) => Some(*item),
+                                _ => None,
+                            }
+                        });
+                        self.infer_expr_type_expected(item, scope, expected_item.as_ref())
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
             ))),
             Expr::ListComprehension { element, clauses } => {
@@ -509,18 +579,34 @@ impl<'module> Linker<'module> {
                 entries
                     .iter()
                     .map(|(name, value)| {
+                        let expected_field = expected.and_then(|expected| {
+                            match self.resolve_type_aliases(expected) {
+                                TypeExpr::Object(fields) => fields
+                                    .into_iter()
+                                    .find(|field| field.name == *name)
+                                    .map(|field| field.ty),
+                                _ => None,
+                            }
+                        });
                         Ok(TypeField {
                             name: name.clone(),
-                            ty: self.infer_expr_type(value, scope)?,
+                            ty: self.infer_expr_type_expected(
+                                value,
+                                scope,
+                                expected_field.as_ref(),
+                            )?,
                             optional: false,
                         })
                     })
                     .collect::<Result<Vec<_>, LinkError>>()?,
             ),
             Expr::Assign { target, expr } => {
-                let ty = self.infer_expr_type(expr, scope)?;
+                let target_expected = self.assignment_target_type(target, scope)?;
+                let ty = self.infer_expr_type_expected(expr, scope, target_expected.as_ref())?;
                 if target.steps.is_empty() {
                     scope.bind(target.root.as_str(), self.binding_for_type(&ty));
+                } else {
+                    scope.update_path(target, &ty)?;
                 }
                 ty
             }
@@ -531,11 +617,12 @@ impl<'module> Linker<'module> {
             } => {
                 self.infer_expr_type(condition, scope)?;
                 let mut then_scope = scope.clone();
-                let then_ty = self.infer_expr_type(then_block, &mut then_scope)?;
+                let then_ty =
+                    self.infer_expr_type_expected(then_block, &mut then_scope, expected)?;
                 let mut else_scope = scope.clone();
-                let else_ty = self.infer_expr_type(else_block, &mut else_scope)?;
-                scope.merge_from(then_scope);
-                scope.merge_from(else_scope);
+                let else_ty =
+                    self.infer_expr_type_expected(else_block, &mut else_scope, expected)?;
+                scope.join_branches(then_scope, else_scope);
                 union_type(vec![then_ty, else_ty])
             }
             Expr::For {
@@ -543,18 +630,28 @@ impl<'module> Linker<'module> {
                 iterable,
                 body,
             } => {
-                self.infer_expr_type(iterable, scope)?;
-                let previous = scope.bind(binding.as_str(), Binding::Value(TypeExpr::Any));
-                self.infer_expr_type(body, scope)?;
-                scope.restore(binding.as_str(), previous);
+                let iterable_ty = self.infer_expr_type(iterable, scope)?;
+                let item_ty = self.index_type(&iterable_ty, scope.span)?;
+                let before = scope.clone();
+                let mut body_scope = scope.clone();
+                let previous = body_scope.bind(
+                    binding.as_str(),
+                    self.binding_for_type(&item_ty),
+                );
+                self.infer_expr_type(body, &mut body_scope)?;
+                body_scope.restore(binding.as_str(), previous);
+                scope.widen_loop(before, body_scope);
                 TypeExpr::Null
             }
             Expr::While { condition, body } => {
                 self.infer_expr_type(condition, scope)?;
-                self.infer_expr_type(body, scope)?;
+                let before = scope.clone();
+                let mut body_scope = scope.clone();
+                self.infer_expr_type(body, &mut body_scope)?;
+                scope.widen_loop(before, body_scope);
                 TypeExpr::Null
             }
-            Expr::StartProcess(_) => TypeExpr::Any,
+            Expr::StartProcess(start) => self.process_output_type(start.process.as_str()),
             Expr::ResourceRef(resource) => TypeExpr::Ref(resource.resource_type.clone()),
             Expr::ReceiverCall {
                 receiver,
@@ -616,10 +713,32 @@ impl<'module> Linker<'module> {
                 {
                     self.validate_trigger_operation_args(trigger_operation, args, scope)?
                 } else {
+                    let mut arg_types = Vec::with_capacity(args.len());
+                    for arg in args {
+                        let expected_arg =
+                            expected_call_arg_type(&binding.input_ty, args.len());
+                        arg_types.push(self.infer_expr_type_expected(
+                            arg,
+                            scope,
+                            expected_arg,
+                        )?);
+                    }
+                    let actual_input = call_input_type(arg_types);
+                    if !self.is_type_assignable(&actual_input, &binding.input_ty) {
+                        return Err(LinkError::IncompatibleOperationInput {
+                            operation: operation.to_string(),
+                            expected: format_type_expr(
+                                &self.resolve_type_aliases(&binding.input_ty),
+                            ),
+                            actual: format_type_expr(&self.resolve_type_aliases(&actual_input)),
+                            span: scope.span,
+                        });
+                    }
                     binding.output_ty.clone()
                 }
             }
-            Expr::Await(inner) | Expr::ResultUnwrap(inner) => self.infer_expr_type(inner, scope)?,
+            Expr::Await(inner) => self.infer_expr_type_expected(inner, scope, expected)?,
+            Expr::ResultUnwrap(inner) => self.infer_expr_type_expected(inner, scope, expected)?,
             Expr::SleepFor(_) | Expr::SleepUntil(_) => TypeExpr::Null,
             Expr::WaitSignal { .. } => TypeExpr::Any,
             Expr::SignalRun { .. }
@@ -628,7 +747,10 @@ impl<'module> Linker<'module> {
             | Expr::Yield(_)
             | Expr::Wake(_)
             | Expr::Fail(_) => TypeExpr::Null,
-            Expr::Finish(inner) => self.infer_expr_type(inner, scope)?,
+            Expr::Finish(inner) => {
+                let return_expected = scope.expected_return.clone();
+                self.infer_expr_type_expected(inner, scope, return_expected.as_ref())?
+            }
             Expr::BuiltinCall { name, .. } => builtin_return_type(name.as_str()),
             Expr::Field { target, field } => {
                 self.field_type(&self.infer_expr_type(target, scope)?, field, scope.span)?
@@ -640,7 +762,12 @@ impl<'module> Linker<'module> {
                 crate::ast::UnaryOp::Not => TypeExpr::Bool,
                 crate::ast::UnaryOp::Negate => TypeExpr::Float,
             },
-            Expr::Binary { op, .. } => binary_return_type(*op),
+            Expr::Binary { left, op, right } => {
+                let left = self.infer_expr_type(left, scope)?;
+                let right = self.infer_expr_type(right, scope)?;
+                self.validate_binary_operands(*op, &left, &right, scope.span)?;
+                binary_return_type(*op)
+            }
         })
     }
 }

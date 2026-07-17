@@ -4,7 +4,17 @@ impl<'module> Linker<'module> {
         expr: &Expr,
         scope: &mut Scope,
     ) -> Result<(Expr, Option<Binding>), LinkError> {
+        self.lower_expr_expected(expr, scope, None)
+    }
+
+    fn lower_expr_expected(
+        &self,
+        expr: &Expr,
+        scope: &mut Scope,
+        expected: Option<&TypeExpr>,
+    ) -> Result<(Expr, Option<Binding>), LinkError> {
         self.reject_trigger_event_special_form(expr, scope.span)?;
+        self.validate_expected_literals(expr, expected, scope.span)?;
         if matches!(expr, Expr::Variable(_) | Expr::Field { .. })
             && let Some(resource) = self.resolve_module_expr(expr, scope)
         {
@@ -19,8 +29,13 @@ impl<'module> Linker<'module> {
             Expr::Block(expressions) => {
                 let mut lowered = Vec::with_capacity(expressions.len());
                 let mut last = None;
-                for expression in expressions {
-                    let (expr, binding) = self.lower_expr(expression, scope)?;
+                let last_index = expressions.len().saturating_sub(1);
+                for (index, expression) in expressions.iter().enumerate() {
+                    let (expr, binding) = self.lower_expr_expected(
+                        expression,
+                        scope,
+                        (index == last_index).then_some(expected).flatten(),
+                    )?;
                     lowered.push(expr);
                     last = binding;
                 }
@@ -32,7 +47,7 @@ impl<'module> Linker<'module> {
                     "label annotations",
                     scope.span,
                 )?;
-                let (expr, binding) = self.lower_expr(expr, scope)?;
+                let (expr, binding) = self.lower_expr_expected(expr, scope, expected)?;
                 (
                     Expr::LabelAnnotated {
                         label: label.clone(),
@@ -75,8 +90,15 @@ impl<'module> Linker<'module> {
             Expr::Tuple(items) => {
                 let mut lowered = Vec::with_capacity(items.len());
                 let mut item_types = Vec::with_capacity(items.len());
+                let expected_item = expected.and_then(|expected| {
+                    match self.resolve_type_aliases(expected) {
+                        TypeExpr::List(item) => Some(*item),
+                        _ => None,
+                    }
+                });
                 for item in items {
-                    let (item, binding) = self.lower_expr(item, scope)?;
+                    let (item, binding) =
+                        self.lower_expr_expected(item, scope, expected_item.as_ref())?;
                     lowered.push(item);
                     item_types.push(binding_type(binding.as_ref()));
                 }
@@ -90,8 +112,15 @@ impl<'module> Linker<'module> {
             Expr::List(items) => {
                 let mut lowered = Vec::with_capacity(items.len());
                 let mut item_types = Vec::with_capacity(items.len());
+                let expected_item = expected.and_then(|expected| {
+                    match self.resolve_type_aliases(expected) {
+                        TypeExpr::List(item) => Some(*item),
+                        _ => None,
+                    }
+                });
                 for item in items {
-                    let (item, binding) = self.lower_expr(item, scope)?;
+                    let (item, binding) =
+                        self.lower_expr_expected(item, scope, expected_item.as_ref())?;
                     lowered.push(item);
                     item_types.push(binding_type(binding.as_ref()));
                 }
@@ -144,7 +173,17 @@ impl<'module> Linker<'module> {
                 let mut lowered = Vec::with_capacity(entries.len());
                 let mut fields = Vec::with_capacity(entries.len());
                 for (name, value) in entries {
-                    let (value, binding) = self.lower_expr(value, scope)?;
+                    let expected_field = expected.and_then(|expected| {
+                        match self.resolve_type_aliases(expected) {
+                            TypeExpr::Object(fields) => fields
+                                .into_iter()
+                                .find(|field| field.name == *name)
+                                .map(|field| field.ty),
+                            _ => None,
+                        }
+                    });
+                    let (value, binding) =
+                        self.lower_expr_expected(value, scope, expected_field.as_ref())?;
                     fields.push(TypeField {
                         name: name.clone(),
                         ty: binding_type(binding.as_ref()),
@@ -163,17 +202,17 @@ impl<'module> Linker<'module> {
                         self.lower_expr(index, scope)?;
                     }
                 }
-                let (lowered, binding) = self.lower_expr(expr, scope)?;
+                let target_expected = self.assignment_target_type(target, scope)?;
+                let (lowered, binding) =
+                    self.lower_expr_expected(expr, scope, target_expected.as_ref())?;
                 if target.steps.is_empty() {
                     scope.bind(
                         target.root.as_str(),
                         binding.clone().unwrap_or(any_binding()),
                     );
-                } else if scope.get(&target.root).is_none() && !scope.allow_unknown_globals {
-                    return Err(LinkError::UnknownName {
-                        name: target.root.to_string(),
-                        span: scope.span,
-                    });
+                } else {
+                    let value_ty = binding_type(binding.as_ref());
+                    scope.update_path(target, &value_ty)?;
                 }
                 (
                     Expr::Assign {
@@ -190,11 +229,12 @@ impl<'module> Linker<'module> {
             } => {
                 let condition = self.lower_expr(condition, scope)?.0;
                 let mut then_scope = scope.clone();
-                let (then_block, then_binding) = self.lower_expr(then_block, &mut then_scope)?;
+                let (then_block, then_binding) =
+                    self.lower_expr_expected(then_block, &mut then_scope, expected)?;
                 let mut else_scope = scope.clone();
-                let (else_block, else_binding) = self.lower_expr(else_block, &mut else_scope)?;
-                scope.merge_from(then_scope);
-                scope.merge_from(else_scope);
+                let (else_block, else_binding) =
+                    self.lower_expr_expected(else_block, &mut else_scope, expected)?;
+                scope.join_branches(then_scope, else_scope);
                 (
                     Expr::If {
                         condition: Box::new(condition),
@@ -212,10 +252,18 @@ impl<'module> Linker<'module> {
                 iterable,
                 body,
             } => {
-                let iterable = self.lower_expr(iterable, scope)?.0;
-                let previous = scope.bind(binding.as_str(), Binding::Value(TypeExpr::Any));
-                let body = self.lower_expr(body, scope)?.0;
-                scope.restore(binding.as_str(), previous);
+                let (iterable, iterable_binding) = self.lower_expr(iterable, scope)?;
+                let item_ty =
+                    self.index_type(&binding_type(iterable_binding.as_ref()), scope.span)?;
+                let before = scope.clone();
+                let mut body_scope = scope.clone();
+                let previous = body_scope.bind(
+                    binding.as_str(),
+                    self.binding_for_type(&item_ty),
+                );
+                let body = self.lower_expr(body, &mut body_scope)?.0;
+                body_scope.restore(binding.as_str(), previous);
+                scope.widen_loop(before, body_scope);
                 (
                     Expr::For {
                         binding: binding.clone(),
@@ -227,7 +275,10 @@ impl<'module> Linker<'module> {
             }
             Expr::While { condition, body } => {
                 let condition = self.lower_expr(condition, scope)?.0;
-                let body = self.lower_expr(body, scope)?.0;
+                let before = scope.clone();
+                let mut body_scope = scope.clone();
+                let body = self.lower_expr(body, &mut body_scope)?.0;
+                scope.widen_loop(before, body_scope);
                 (
                     Expr::While {
                         condition: Box::new(condition),
@@ -260,7 +311,8 @@ impl<'module> Linker<'module> {
                             span: scope.span,
                         });
                     };
-                    let (lowered, binding) = self.lower_expr(value, scope)?;
+                    let (lowered, binding) =
+                        self.lower_expr_expected(value, scope, Some(&param.ty))?;
                     self.validate_process_arg_binding(
                         process.name.as_str(),
                         arg.as_str(),
@@ -284,7 +336,9 @@ impl<'module> Linker<'module> {
                         process: start.process.clone(),
                         args: lowered_args,
                     }),
-                    Some(Binding::Value(TypeExpr::Any)),
+                    Some(Binding::Value(
+                        self.process_output_type(start.process.as_str()),
+                    )),
                 )
             }
             Expr::ProcessRef { process } => {
@@ -335,7 +389,11 @@ impl<'module> Linker<'module> {
                                 span: scope.span,
                             });
                         }
-                        let (input, input_binding) = self.lower_expr(&args[0], scope)?;
+                        let (input, input_binding) = self.lower_expr_expected(
+                            &args[0],
+                            scope,
+                            Some(&constructor.input_ty),
+                        )?;
                         let actual_ty = binding_type(input_binding.as_ref());
                         if !self.is_type_assignable(&actual_ty, &constructor.input_ty) {
                             return Err(LinkError::IncompatibleConstructorInput {
@@ -438,7 +496,10 @@ impl<'module> Linker<'module> {
                 let mut lowered_args = Vec::with_capacity(args.len());
                 let mut arg_types = Vec::with_capacity(args.len());
                 for arg in args {
-                    let (arg, binding) = self.lower_expr(arg, scope)?;
+                    let expected_arg =
+                        expected_call_arg_type(&operation_binding.input_ty, args.len());
+                    let (arg, binding) =
+                        self.lower_expr_expected(arg, scope, expected_arg)?;
                     lowered_args.push(arg);
                     arg_types.push(binding_type(binding.as_ref()));
                 }
@@ -463,7 +524,7 @@ impl<'module> Linker<'module> {
                 )
             }
             Expr::Await(inner) => {
-                let (inner, binding) = self.lower_expr(inner, scope)?;
+                let (inner, binding) = self.lower_expr_expected(inner, scope, expected)?;
                 (Expr::Await(Box::new(inner)), binding)
             }
             Expr::SleepFor(inner) => {
@@ -516,7 +577,7 @@ impl<'module> Linker<'module> {
                 )
             }
             Expr::ResultUnwrap(inner) => {
-                let (inner, binding) = self.lower_expr(inner, scope)?;
+                let (inner, binding) = self.lower_expr_expected(inner, scope, expected)?;
                 (Expr::ResultUnwrap(Box::new(inner)), binding)
             }
             Expr::Cancel(inner) => (
@@ -536,7 +597,9 @@ impl<'module> Linker<'module> {
                 Some(Binding::Value(TypeExpr::Null)),
             ),
             Expr::Finish(inner) => {
-                let (inner, binding) = self.lower_expr(inner, scope)?;
+                let expected_return = scope.expected_return.clone();
+                let (inner, binding) =
+                    self.lower_expr_expected(inner, scope, expected_return.as_ref())?;
                 let finish_ty = binding_type(binding.as_ref());
                 (Expr::Finish(Box::new(inner)), Some(Binding::Value(finish_ty)))
             }
@@ -611,14 +674,24 @@ impl<'module> Linker<'module> {
                     crate::ast::UnaryOp::Negate => TypeExpr::Float,
                 })),
             ),
-            Expr::Binary { left, op, right } => (
-                Expr::Binary {
-                    left: Box::new(self.lower_expr(left, scope)?.0),
-                    op: *op,
-                    right: Box::new(self.lower_expr(right, scope)?.0),
-                },
-                Some(Binding::Value(binary_return_type(*op))),
-            ),
+            Expr::Binary { left, op, right } => {
+                let (left, left_binding) = self.lower_expr(left, scope)?;
+                let (right, right_binding) = self.lower_expr(right, scope)?;
+                self.validate_binary_operands(
+                    *op,
+                    &binding_type(left_binding.as_ref()),
+                    &binding_type(right_binding.as_ref()),
+                    scope.span,
+                )?;
+                (
+                    Expr::Binary {
+                        left: Box::new(left),
+                        op: *op,
+                        right: Box::new(right),
+                    },
+                    Some(Binding::Value(binary_return_type(*op))),
+                )
+            }
         })
     }
 

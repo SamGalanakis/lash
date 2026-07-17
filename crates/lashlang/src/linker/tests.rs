@@ -24,6 +24,36 @@ mod tests {
             TypeExpr::Any,
             TypeExpr::Any,
         );
+        for (operation, input_ty) in [
+            ("accept_str", TypeExpr::Str),
+            ("accept_int", TypeExpr::Int),
+            ("accept_float", TypeExpr::Float),
+            (
+                "accept_mode",
+                TypeExpr::Enum(vec!["default".into(), "careful".into()]),
+            ),
+        ] {
+            catalog.add_module_operation(
+                ["tools"],
+                "Tools",
+                operation,
+                operation,
+                input_ty,
+                TypeExpr::Null,
+            );
+        }
+        catalog.add_module_operation(
+            ["tools"],
+            "Tools",
+            "accept_config",
+            "accept_config",
+            TypeExpr::Object(vec![TypeField {
+                name: "mode".into(),
+                ty: TypeExpr::Enum(vec!["default".into()]),
+                optional: false,
+            }]),
+            TypeExpr::Null,
+        );
         crate::add_trigger_resource_operations(&mut catalog);
         catalog
             .add_trigger_source_constructor(
@@ -1301,6 +1331,217 @@ mod tests {
             matches!(&err, LinkError::UnknownResourceOperation { operation, .. } if operation == "does_not_exist"),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn expected_enum_slots_reject_wrong_literals_but_admit_members_and_broad_strings() {
+        let wrong = crate::parse(r#"await tools.accept_mode("nope")?"#)
+            .expect("parse wrong enum literal");
+        assert!(matches!(
+            LinkedModule::link(wrong, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+
+        let member = crate::parse(r#"await tools.accept_mode("default")?"#)
+            .expect("parse enum member");
+        LinkedModule::link(member, full_host_environment()).expect("enum member should link");
+
+        let broad = crate::parse(
+            r#"
+            process forward(mode: str) {
+              await tools.accept_mode(mode)?
+            }
+            "#,
+        )
+        .expect("parse broad string input");
+        LinkedModule::link(broad, full_host_environment())
+            .expect("broad strings remain gradually consistent with enums");
+
+        let nested = crate::parse(r#"await tools.accept_config({ mode: "nope" })?"#)
+            .expect("parse nested wrong enum literal");
+        assert!(matches!(
+            LinkedModule::link(nested, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+
+        let container = crate::parse(
+            r#"
+            process mutate(state: { mode: enum["default"] }) {
+              state.mode = "nope"
+            }
+            "#,
+        )
+        .expect("parse container expected type");
+        assert!(matches!(
+            LinkedModule::link(container, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+
+        let declared_return = crate::parse(
+            r#"process choose() -> enum["default"] { finish "nope" }"#,
+        )
+        .expect("parse declared enum return");
+        assert!(matches!(
+            LinkedModule::link(declared_return, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+
+        let declared_argument = crate::parse(
+            r#"
+            process select(mode: enum["default"]) { finish mode }
+            start select(mode: "nope")
+            "#,
+        )
+        .expect("parse declared enum argument");
+        assert!(matches!(
+            LinkedModule::link(declared_argument, full_host_environment()),
+            Err(LinkError::IncompatibleExpectedLiteral { .. })
+        ));
+    }
+
+    #[test]
+    fn branch_assignments_join_to_a_union_instead_of_first_wins() {
+        let program = crate::parse(
+            r#"
+            process choose(flag: bool) {
+              value = "initial"
+              if flag { value = "text" } else { value = 1 }
+              await tools.accept_str(value)?
+            }
+            "#,
+        )
+        .expect("parse branch join");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual.contains('|')
+        ));
+    }
+
+    #[test]
+    fn for_bindings_use_list_elements_and_unknown_iterables_remain_gradual() {
+        let known = crate::parse(
+            r#"
+            process consume() {
+              for item in ["one", "two"] {
+                await tools.accept_int(item)?
+              }
+            }
+            "#,
+        )
+        .expect("parse known iterable");
+        assert!(matches!(
+            LinkedModule::link(known, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { .. })
+        ));
+
+        let unknown = crate::parse(
+            r#"
+            process consume(items: any) {
+              for item in items {
+                await tools.accept_int(item)?
+              }
+            }
+            "#,
+        )
+        .expect("parse unknown iterable");
+        LinkedModule::link(unknown, full_host_environment())
+            .expect("unknown iterable elements should remain gradual");
+    }
+
+    #[test]
+    fn awaited_process_handles_carry_the_inferred_process_output() {
+        let program = crate::parse(
+            r#"
+            process child() { finish { value: "text" } }
+            result = await start child()
+            await tools.accept_int(result.value)?
+            "#,
+        )
+        .expect("parse awaited process output");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual.contains("str")
+        ));
+    }
+
+    #[test]
+    fn field_assignments_update_the_tracked_object_field_type() {
+        let program = crate::parse(
+            r#"
+            state = { value: "text" }
+            state.value = 1
+            await tools.accept_str(state.value)?
+            "#,
+        )
+        .expect("parse state mutation");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual == "float"
+        ));
+    }
+
+    #[test]
+    fn missing_known_object_fields_are_errors_but_open_shapes_stay_gradual() {
+        let known = crate::parse("value = { present: 1 }\nfinish value.missing")
+            .expect("parse known object field access");
+        assert!(matches!(
+            LinkedModule::link(known, full_host_environment()),
+            Err(LinkError::UnknownObjectField { field, .. }) if field == "missing"
+        ));
+
+        let open = crate::parse(
+            r#"
+            process inspect(map: dict, unknown: any) {
+              finish [map.missing, unknown.missing]
+            }
+            "#,
+        )
+        .expect("parse open shape field access");
+        LinkedModule::link(open, full_host_environment())
+            .expect("dict and any field access should stay gradual");
+    }
+
+    #[test]
+    fn binary_operators_reject_known_category_errors_but_admit_unknown_maps() {
+        let known = crate::parse("finish {} + 1").expect("parse bad binary operands");
+        assert!(matches!(
+            LinkedModule::link(known, full_host_environment()),
+            Err(LinkError::IncompatibleBinaryOperands { .. })
+        ));
+
+        let gradual = crate::parse(
+            r#"
+            process combine(map: dict, unknown: any) {
+              left = map + 1
+              finish left + unknown
+            }
+            "#,
+        )
+        .expect("parse gradual binary operands");
+        LinkedModule::link(gradual, full_host_environment())
+            .expect("dict and any operands should stay gradual");
+    }
+
+    #[test]
+    fn loop_carried_mutation_is_widened_after_one_forward_pass() {
+        let program = crate::parse(
+            r#"
+            state = { value: "before" }
+            while true {
+              state.value = 1
+            }
+            await tools.accept_float(state.value)?
+            "#,
+        )
+        .expect("parse loop-carried mutation");
+
+        assert!(matches!(
+            LinkedModule::link(program, full_host_environment()),
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual.contains("str") && actual.contains("float")
+        ));
     }
 
     #[tokio::test]
