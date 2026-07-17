@@ -499,8 +499,10 @@ impl<'module> Linker<'module> {
             | Expr::Number(_)
             | Expr::String(_)
             | Expr::Break
-            | Expr::Continue
-            | Expr::TypeLiteral(_) => literal_type(expr),
+            | Expr::Continue => literal_type(expr),
+            Expr::TypeLiteral(_) => {
+                binding_type(self.closed_schema_witness_binding(expr).as_ref())
+            }
             Expr::Variable(name) => {
                 if let Some(binding) = scope.get(name) {
                     binding_type(Some(&binding))
@@ -734,7 +736,7 @@ impl<'module> Linker<'module> {
                             span: scope.span,
                         });
                     }
-                    binding.output_ty.clone()
+                    self.operation_call_output_type(binding, args)
                 }
             }
             Expr::Await(inner) => self.infer_expr_type_expected(inner, scope, expected)?,

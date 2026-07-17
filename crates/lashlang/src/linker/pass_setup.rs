@@ -1,6 +1,9 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Binding {
     Value(TypeExpr),
+    /// A compile-time schema descriptor. This metatype is linker-only: its
+    /// described shape cannot be written in Lashlang's surface type grammar.
+    SchemaWitness { described_ty: TypeExpr },
     Resource { resource_type: String },
 }
 
@@ -176,6 +179,112 @@ impl<'module> Linker<'module> {
 
     fn resolve_type_aliases(&self, ty: &TypeExpr) -> TypeExpr {
         self.resolve_type_aliases_inner(ty, &mut BTreeSet::new())
+    }
+
+    fn closed_schema_witness_binding(&self, expr: &Expr) -> Option<Binding> {
+        let described_ty = match strip_label_annotation(expr) {
+            Expr::TypeLiteral(ty) => {
+                self.close_schema_type_expr(ty, &mut BTreeSet::new())?
+            }
+            Expr::Record(entries) => {
+                let mut shorthand = serde_json::Map::new();
+                for (name, descriptor) in entries {
+                    let Expr::String(descriptor) = strip_label_annotation(descriptor) else {
+                        return None;
+                    };
+                    shorthand.insert(
+                        name.to_string(),
+                        serde_json::Value::String(descriptor.to_string()),
+                    );
+                }
+                let schema = crate::parse_output_schema(Some(&serde_json::Value::Object(
+                    shorthand,
+                )))
+                .ok()??;
+                crate::json_schema_to_type_expr(&schema)
+            }
+            _ => return None,
+        };
+        Some(Binding::SchemaWitness { described_ty })
+    }
+
+    fn close_schema_type_expr(
+        &self,
+        ty: &TypeExpr,
+        resolving: &mut BTreeSet<String>,
+    ) -> Option<TypeExpr> {
+        Some(match ty {
+            TypeExpr::Ref(name) => {
+                if !resolving.insert(name.to_string()) {
+                    return None;
+                }
+                let closed = self.close_schema_type_expr(
+                    self.type_defs.get(name.as_str())?,
+                    resolving,
+                );
+                resolving.remove(name.as_str());
+                closed?
+            }
+            TypeExpr::List(item) => {
+                TypeExpr::List(Box::new(self.close_schema_type_expr(item, resolving)?))
+            }
+            TypeExpr::Object(fields) => TypeExpr::Object(
+                fields
+                    .iter()
+                    .map(|field| {
+                        Some(TypeField {
+                            name: field.name.clone(),
+                            ty: self.close_schema_type_expr(&field.ty, resolving)?,
+                            optional: field.optional,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            TypeExpr::Union(items) => TypeExpr::Union(
+                items
+                    .iter()
+                    .map(|item| self.close_schema_type_expr(item, resolving))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            TypeExpr::Process {
+                input,
+                output,
+                input_count,
+            } => TypeExpr::Process {
+                input: Box::new(self.close_schema_type_expr(input, resolving)?),
+                output: Box::new(self.close_schema_type_expr(output, resolving)?),
+                input_count: *input_count,
+            },
+            TypeExpr::TriggerHandle(event) => TypeExpr::TriggerHandle(Box::new(
+                self.close_schema_type_expr(event, resolving)?,
+            )),
+            TypeExpr::Any
+            | TypeExpr::Str
+            | TypeExpr::Int
+            | TypeExpr::Float
+            | TypeExpr::Bool
+            | TypeExpr::Dict
+            | TypeExpr::Null
+            | TypeExpr::Enum(_) => ty.clone(),
+        })
+    }
+
+    fn operation_call_output_type(
+        &self,
+        operation: &ResourceOperationBinding,
+        args: &[Expr],
+    ) -> TypeExpr {
+        let Some(output_from_input) = &operation.output_from_input else {
+            return operation.output_ty.clone();
+        };
+        direct_call_input_field(args, &output_from_input.input_field)
+            .and_then(|witness| self.closed_schema_witness_binding(witness))
+            .and_then(|binding| match binding {
+                Binding::SchemaWitness { described_ty } => Some(described_ty),
+                Binding::Value(_) | Binding::Resource { .. } => None,
+            })
+            .or_else(|| output_from_input.default_schema.clone())
+            .unwrap_or(TypeExpr::Any)
     }
 
     fn resolve_type_aliases_inner(&self, ty: &TypeExpr, seen: &mut BTreeSet<String>) -> TypeExpr {

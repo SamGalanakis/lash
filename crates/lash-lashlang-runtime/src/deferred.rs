@@ -117,14 +117,13 @@ fn fold_grant(
     grant: &ToolGrant,
 ) -> Result<(), String> {
     let binding = required_tool_lashlang_executable(&grant.definition.manifest)?;
-    let (input_ty, output_ty) = lashlang_tool_contract_types(&grant.definition.contract);
-    host_environment.resources.add_module_operation(
+    let operation_binding = lashlang_tool_contract_types(&grant.definition.contract);
+    host_environment.resources.add_module_operation_binding(
         binding.module_path.iter().map(String::as_str),
         binding.authority_type.clone(),
         binding.operation.clone(),
         grant.definition.manifest.id.to_string(),
-        input_ty,
-        output_ty,
+        operation_binding,
     );
     Ok(())
 }

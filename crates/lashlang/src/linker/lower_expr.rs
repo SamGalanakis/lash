@@ -85,8 +85,14 @@ impl<'module> Linker<'module> {
             | Expr::Number(_)
             | Expr::String(_)
             | Expr::Break
-            | Expr::Continue
-            | Expr::TypeLiteral(_) => (expr.clone(), Some(Binding::Value(literal_type(expr)))),
+            | Expr::Continue => (expr.clone(), Some(Binding::Value(literal_type(expr)))),
+            Expr::TypeLiteral(_) => (
+                expr.clone(),
+                Some(
+                    self.closed_schema_witness_binding(expr)
+                        .unwrap_or_else(any_binding),
+                ),
+            ),
             Expr::Tuple(items) => {
                 let mut lowered = Vec::with_capacity(items.len());
                 let mut item_types = Vec::with_capacity(items.len());
@@ -520,7 +526,9 @@ impl<'module> Linker<'module> {
                         operation: operation.clone(),
                         args: lowered_args,
                     },
-                    Some(Binding::Value(operation_binding.output_ty.clone())),
+                    Some(Binding::Value(
+                        self.operation_call_output_type(&operation_binding, args),
+                    )),
                 )
             }
             Expr::Await(inner) => {

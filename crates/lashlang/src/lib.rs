@@ -13,6 +13,7 @@ mod runtime;
 mod source;
 mod tracking;
 mod trigger;
+mod typed_output;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -51,7 +52,8 @@ pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
     LashlangAbilities, LashlangHostCatalog, LashlangHostCatalogError, LashlangHostEnvironment,
     LashlangLanguageFeatures, LinkError, LinkedModule, NamedDataType, NamedDataTypeError,
-    ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding, ValueConstructorBinding,
+    OutputFromInputBinding, ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding,
+    ValueConstructorBinding,
 };
 pub use parser::{ParseError, parse};
 pub use runtime::{
@@ -93,6 +95,7 @@ pub use trigger::{
     check_trigger_compatibility, event_type_for_source, is_trigger_resource_type, list_call_args,
     register_call_args, trigger_event_placeholder_expr,
 };
+pub use typed_output::parse_output_schema;
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
     let span = error.span().unwrap_or(Span {

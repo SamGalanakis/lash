@@ -376,18 +376,21 @@ pub fn lashlang_resources_from_tool_catalog(
     // Every catalog member is callable; membership is the execution gate.
     for entry in catalog.tools.iter() {
         let lashlang_binding = required_tool_lashlang_executable(&entry.manifest)?;
-        let (input_ty, output_ty) = catalog
+        let operation_binding = catalog
             .resolve_contract(&entry.manifest.name)
             .as_deref()
             .map(lashlang_tool_contract_types)
-            .unwrap_or((lashlang::TypeExpr::Any, lashlang::TypeExpr::Any));
-        host_catalog.add_module_operation(
+            .unwrap_or(lashlang::ResourceOperationBinding {
+                input_ty: lashlang::TypeExpr::Any,
+                output_ty: lashlang::TypeExpr::Any,
+                output_from_input: None,
+            });
+        host_catalog.add_module_operation_binding(
             lashlang_binding.module_path.iter().map(String::as_str),
             lashlang_binding.authority_type.clone(),
             lashlang_binding.operation.clone(),
             entry.manifest.id.to_string(),
-            input_ty,
-            output_ty,
+            operation_binding,
         );
     }
     Ok(host_catalog)
@@ -395,15 +398,31 @@ pub fn lashlang_resources_from_tool_catalog(
 
 fn lashlang_tool_contract_types(
     contract: &lash_core::ToolContract,
-) -> (lashlang::TypeExpr, lashlang::TypeExpr) {
+) -> lashlang::ResourceOperationBinding {
     let input_ty = lashlang::json_schema_to_type_expr(contract.input_schema.canonical());
-    let output_ty = match &contract.output_contract {
-        lash_core::ToolOutputContract::Static => {
-            lashlang::json_schema_to_type_expr(contract.output_schema.canonical())
-        }
-        lash_core::ToolOutputContract::FromInputSchema { .. } => lashlang::TypeExpr::Any,
+    let (output_ty, output_from_input) = match &contract.output_contract {
+        lash_core::ToolOutputContract::Static => (
+            lashlang::json_schema_to_type_expr(contract.output_schema.canonical()),
+            None,
+        ),
+        lash_core::ToolOutputContract::FromInputSchema {
+            input_field,
+            default_schema,
+        } => (
+            lashlang::TypeExpr::Any,
+            Some(lashlang::OutputFromInputBinding {
+                input_field: input_field.clone(),
+                default_schema: default_schema
+                    .as_ref()
+                    .map(lashlang::json_schema_to_type_expr),
+            }),
+        ),
     };
-    (input_ty, output_ty)
+    lashlang::ResourceOperationBinding {
+        input_ty,
+        output_ty,
+        output_from_input,
+    }
 }
 
 pub fn lashlang_host_environment_satisfies_requirements(
@@ -1113,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn from_input_schema_tool_imports_input_but_keeps_output_any() {
+    fn from_input_schema_tool_imports_contract_marker_and_default() {
         let tool = lash_core::ToolDefinition::raw(
             "tool:test/generate",
             "generate",
@@ -1126,7 +1145,7 @@ mod tests {
             }),
             serde_json::json!({ "type": "string" }),
         )
-        .with_output_from_input_schema("schema", None)
+        .with_output_from_input_schema("schema", Some(serde_json::json!({ "type": "string" })))
         .with_lashlang_binding(
             LashlangToolBinding::new(["generate"], "run").with_authority_type("Generator"),
         );
@@ -1147,6 +1166,13 @@ mod tests {
             }])
         );
         assert_eq!(operation.output_ty, lashlang::TypeExpr::Any);
+        assert_eq!(
+            operation.output_from_input,
+            Some(lashlang::OutputFromInputBinding {
+                input_field: "schema".to_string(),
+                default_schema: Some(lashlang::TypeExpr::Str),
+            })
+        );
     }
 
     #[test]

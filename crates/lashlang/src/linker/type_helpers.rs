@@ -107,6 +107,7 @@ fn any_binding() -> Binding {
 fn binding_type(binding: Option<&Binding>) -> TypeExpr {
     match binding {
         Some(Binding::Value(ty)) => ty.clone(),
+        Some(Binding::SchemaWitness { .. }) => TypeExpr::Any,
         Some(Binding::Resource { resource_type }) => TypeExpr::Ref(resource_type.as_str().into()),
         None => TypeExpr::Any,
     }
@@ -220,11 +221,32 @@ fn literal_type(expr: &Expr) -> TypeExpr {
         Expr::Bool(_) => TypeExpr::Bool,
         Expr::Number(_) => TypeExpr::Float,
         Expr::String(_) => TypeExpr::Str,
-        Expr::TypeLiteral(_) => TypeExpr::Any,
+        Expr::TypeLiteral(_) => {
+            unreachable!("type literals are represented by linker-only schema witnesses")
+        }
         Expr::Break | Expr::Continue => TypeExpr::Null,
         Expr::LabelAnnotated { expr, .. } => literal_type(expr),
         _ => TypeExpr::Any,
     }
+}
+
+fn strip_label_annotation(mut expr: &Expr) -> &Expr {
+    while let Expr::LabelAnnotated { expr: inner, .. } = expr {
+        expr = inner;
+    }
+    expr
+}
+
+fn direct_call_input_field<'a>(args: &'a [Expr], input_field: &str) -> Option<&'a Expr> {
+    let [argument] = args else {
+        return None;
+    };
+    let Expr::Record(entries) = strip_label_annotation(argument) else {
+        return None;
+    };
+    entries
+        .iter()
+        .find_map(|(name, value)| (name == input_field).then_some(value))
 }
 
 fn union_type(items: Vec<TypeExpr>) -> TypeExpr {

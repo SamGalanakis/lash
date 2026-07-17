@@ -77,17 +77,28 @@ impl LashlangHostCatalog {
         input_ty: TypeExpr,
         output_ty: TypeExpr,
     ) {
+        self.add_operation_binding(
+            resource_type,
+            operation,
+            ResourceOperationBinding {
+                input_ty,
+                output_ty,
+                output_from_input: None,
+            },
+        );
+    }
+
+    pub fn add_operation_binding(
+        &mut self,
+        resource_type: impl Into<String>,
+        operation: impl Into<String>,
+        binding: ResourceOperationBinding,
+    ) {
         self.resource_types
             .entry(resource_type.into())
             .or_default()
             .operations
-            .insert(
-                operation.into(),
-                ResourceOperationBinding {
-                    input_ty,
-                    output_ty,
-                },
-            );
+            .insert(operation.into(), binding);
     }
 
     pub fn add_module_operation(
@@ -99,13 +110,34 @@ impl LashlangHostCatalog {
         input_ty: TypeExpr,
         output_ty: TypeExpr,
     ) {
+        self.add_module_operation_binding(
+            module_path,
+            resource_type,
+            operation,
+            host_operation,
+            ResourceOperationBinding {
+                input_ty,
+                output_ty,
+                output_from_input: None,
+            },
+        );
+    }
+
+    pub fn add_module_operation_binding(
+        &mut self,
+        module_path: impl IntoIterator<Item = impl Into<String>>,
+        resource_type: impl Into<String>,
+        operation: impl Into<String>,
+        host_operation: impl Into<String>,
+        binding: ResourceOperationBinding,
+    ) {
         let path = module_path.into_iter().map(Into::into).collect::<Vec<_>>();
         assert!(!path.is_empty(), "module path must not be empty");
         let resource_type = resource_type.into();
         let operation = operation.into();
         self.add_module_instance(path.iter().map(String::as_str), resource_type.clone())
             .expect("module operation resource type cannot conflict with existing module alias");
-        self.add_operation(resource_type, operation.clone(), input_ty, output_ty);
+        self.add_operation_binding(resource_type, operation.clone(), binding);
         let key = module_path_key(&path);
         self.module_instances
             .get_mut(&key)
