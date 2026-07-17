@@ -730,6 +730,8 @@ mod tests {
 
     struct CountingDeferredResolver {
         calls: Arc<AtomicUsize>,
+        batches: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        installed: Arc<AtomicUsize>,
     }
 
     fn deferred_fetch_definition() -> lash_core::ToolDefinition {
@@ -748,15 +750,33 @@ mod tests {
 
     #[async_trait::async_trait]
     impl lash_lashlang_runtime::DeferredToolResolver for CountingDeferredResolver {
-        async fn resolve(&self, path: &str) -> lash_lashlang_runtime::Resolution {
+        async fn resolve(
+            &self,
+            paths: &[&str],
+        ) -> BTreeMap<String, lash_lashlang_runtime::Resolution> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if path == "web.fetch" {
-                lash_lashlang_runtime::Resolution::Resolved(Box::new(
-                    lash_lashlang_runtime::ToolGrant::new(deferred_fetch_definition()),
-                ))
-            } else {
-                lash_lashlang_runtime::Resolution::NotAvailable
-            }
+            self.batches
+                .lock()
+                .expect("resolver batches")
+                .push(paths.iter().map(|path| (*path).to_string()).collect());
+            paths
+                .iter()
+                .map(|path| {
+                    let resolution = if *path == "web.fetch" {
+                        lash_lashlang_runtime::Resolution::Resolved(Box::new(
+                            lash_lashlang_runtime::ToolGrant::new(deferred_fetch_definition()),
+                        ))
+                    } else {
+                        lash_lashlang_runtime::Resolution::NotAvailable
+                    };
+                    ((*path).to_string(), resolution)
+                })
+                .collect()
+        }
+
+        fn install_recorded_grant(&self, path: &str, _grant: &lash_lashlang_runtime::ToolGrant) {
+            assert_eq!(path, "web.fetch");
+            self.installed.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -821,19 +841,28 @@ mod tests {
 
     #[async_trait::async_trait]
     impl lash_lashlang_runtime::DeferredToolResolver for BindingDeferredResolver {
-        async fn resolve(&self, path: &str) -> lash_lashlang_runtime::Resolution {
+        async fn resolve(
+            &self,
+            paths: &[&str],
+        ) -> BTreeMap<String, lash_lashlang_runtime::Resolution> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if path == "web.fetch" {
-                lash_lashlang_runtime::Resolution::Resolved(Box::new(
-                    lash_lashlang_runtime::ToolGrant::new(deferred_fetch_definition())
-                        .with_execution_binding(serde_json::json!({
-                            "kind": "test",
-                            "route": "deferred"
-                        })),
-                ))
-            } else {
-                lash_lashlang_runtime::Resolution::NotAvailable
-            }
+            paths
+                .iter()
+                .map(|path| {
+                    let resolution = if *path == "web.fetch" {
+                        lash_lashlang_runtime::Resolution::Resolved(Box::new(
+                            lash_lashlang_runtime::ToolGrant::new(deferred_fetch_definition())
+                                .with_execution_binding(serde_json::json!({
+                                    "kind": "test",
+                                    "route": "deferred"
+                                })),
+                        ))
+                    } else {
+                        lash_lashlang_runtime::Resolution::NotAvailable
+                    };
+                    ((*path).to_string(), resolution)
+                })
+                .collect()
         }
     }
 
@@ -849,9 +878,13 @@ mod tests {
     fn deferred_resolution_record_is_scoped_to_the_exec_code_link() {
         block_on(async {
             let calls = Arc::new(AtomicUsize::new(0));
+            let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let installed = Arc::new(AtomicUsize::new(0));
             let resolver: lash_lashlang_runtime::SharedDeferredToolResolver =
                 Arc::new(CountingDeferredResolver {
                     calls: Arc::clone(&calls),
+                    batches: Arc::clone(&batches),
+                    installed: Arc::clone(&installed),
                 });
 
             let first_invocation = lash_core::testing::exec_code_invocation(
@@ -879,7 +912,8 @@ mod tests {
             .await
             .expect("first drive");
             assert!(first.error.is_some(), "mystery.x must remain unresolved");
-            assert_eq!(calls.load(Ordering::SeqCst), 2, "resolved each path once");
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "one batch per link");
+            assert_eq!(installed.load(Ordering::SeqCst), 0);
             assert!(matches!(
                 state.deferred_resolutions.get("web.fetch"),
                 Some(lash_lashlang_runtime::Resolution::Resolved(_))
@@ -915,7 +949,8 @@ mod tests {
             .await
             .expect("same-link replay");
             assert!(replay.error.is_some());
-            assert_eq!(calls.load(Ordering::SeqCst), 2, "same link must replay");
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "same link must replay");
+            assert_eq!(installed.load(Ordering::SeqCst), 1);
 
             // A second code effect in the same logical turn is a different link
             // and must resolve the same paths against current authority.
@@ -943,7 +978,8 @@ mod tests {
             .await
             .expect("different link");
             assert!(second_link.error.is_some());
-            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(installed.load(Ordering::SeqCst), 1);
             assert!(second_ctx.tool_catalog().tools.is_empty());
 
             // A new logical turn also selects a fresh record, even when the
@@ -972,9 +1008,18 @@ mod tests {
             .await
             .expect("new turn");
             assert!(next_turn.error.is_some());
-            assert_eq!(calls.load(Ordering::SeqCst), 6);
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            assert_eq!(installed.load(Ordering::SeqCst), 1);
             assert!(next_turn_ctx.tool_catalog().tools.is_empty());
             assert_eq!(restored.deferred_resolutions.resolutions.len(), 2);
+            assert_eq!(
+                *batches.lock().expect("resolver batches"),
+                vec![
+                    vec!["mystery.x".to_string(), "web.fetch".to_string()],
+                    vec!["mystery.x".to_string(), "web.fetch".to_string()],
+                    vec!["mystery.x".to_string(), "web.fetch".to_string()],
+                ]
+            );
         });
     }
 
