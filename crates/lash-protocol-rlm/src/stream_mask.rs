@@ -421,6 +421,7 @@ mod tests {
                 text: text.to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..lash_core::LlmResponse::default()
         }
     }
@@ -531,6 +532,7 @@ mod tests {
                     response_meta: None,
                 },
             ],
+            response_metadata: Default::default(),
             ..lash_core::LlmResponse::default()
         };
 

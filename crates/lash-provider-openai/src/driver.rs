@@ -178,6 +178,8 @@ pub(crate) async fn complete(
     }
 
     let provider_request_id = first_header_value(&resp.headers, "x-request-id").map(str::to_string);
+    let mut capture = ResponseMetadataCapture::from_compat(&compat);
+    capture.capture_headers(&resp.headers);
     let is_sse = header_contains(&resp.headers, "content-type", "text/event-stream");
 
     let response_context = ResponseContext {
@@ -193,6 +195,7 @@ pub(crate) async fn complete(
             resp.body,
             timeouts.chunk_timeout,
             response_context,
+            &mut capture,
         )
         .await
     } else {
@@ -202,12 +205,14 @@ pub(crate) async fn complete(
             resp.body,
             timeouts.request_timeout,
             response_context,
+            &mut capture,
         )
         .await
     };
     let mut response = match response {
         Ok(response) => response,
         Err(mut failure) => {
+            let response_metadata = capture.into_map();
             if failure.request_body.is_none() {
                 failure.request_body = Some(request_body_for_error.clone());
             }
@@ -215,6 +220,9 @@ pub(crate) async fn complete(
                 && partial.request_body.is_none()
             {
                 partial.request_body = Some(request_body_for_error.clone());
+            }
+            if let Some(partial) = failure.partial_response.as_deref_mut() {
+                partial.response_metadata = response_metadata;
             }
             if let (Some(partial), Some(provider_request_id)) = (
                 failure.partial_response.as_deref_mut(),
@@ -244,6 +252,7 @@ pub(crate) async fn complete(
             .get_or_insert_with(ExecutionEvidence::default)
             .provider_request_id = Some(provider_request_id);
     }
+    response.response_metadata = capture.into_map();
     Ok(response)
 }
 
@@ -253,6 +262,7 @@ async fn complete_buffered_response(
     body: LlmHttpBody,
     timeout: Option<std::time::Duration>,
     context: ResponseContext,
+    capture: &mut ResponseMetadataCapture,
 ) -> Result<LlmResponse, LlmTransportError> {
     let ResponseContext {
         stream_events,
@@ -264,12 +274,22 @@ async fn complete_buffered_response(
     let text = read_http_body_text(body, timeout, endpoint.response_body_timeout_error()).await?;
     emit_provider_trace(provider_trace.as_ref(), "openai_compatible", &text);
     match endpoint {
-        CompletionEndpoint::Responses => {
-            complete_buffered_responses(provider, text, stream_events, url, stream_termination)
-        }
-        CompletionEndpoint::ChatCompletions => {
-            complete_buffered_chat(provider, text, stream_events, url, stream_termination)
-        }
+        CompletionEndpoint::Responses => complete_buffered_responses(
+            provider,
+            text,
+            stream_events,
+            url,
+            stream_termination,
+            capture,
+        ),
+        CompletionEndpoint::ChatCompletions => complete_buffered_chat(
+            provider,
+            text,
+            stream_events,
+            url,
+            stream_termination,
+            capture,
+        ),
     }
 }
 
@@ -279,14 +299,17 @@ fn complete_buffered_responses(
     stream_events: Option<LlmEventSender>,
     url: String,
     stream_termination: Option<StreamTermination>,
+    capture: &mut ResponseMetadataCapture,
 ) -> Result<LlmResponse, LlmTransportError> {
     let mut state = ResponsesStreamState::default();
     if text.trim_start().starts_with("data:") || text.contains("\ndata:") {
+        capture.capture_sse_body(&text)?;
         OpenAiCompatibleProvider::parse_sse_payload(&text, &mut state)?;
     } else {
         let value: Value = serde_json::from_str(&text).map_err(|e| {
             LlmTransportError::new(format!("Invalid Responses JSON: {e}")).with_raw(text.clone())
         })?;
+        capture.capture_body(&value);
         state.provider_usage = value.get("usage").cloned();
         state.usage = usage_from_response_value(&value);
         state.parts = OpenAiCompatibleProvider::response_parts_from_value(&value);
@@ -351,6 +374,7 @@ fn complete_buffered_responses(
         request_body: None,
         http_summary: Some(CompletionEndpoint::Responses.http_summary(&url, false)),
         execution_evidence: None,
+        response_metadata: Default::default(),
     })
 }
 
@@ -360,16 +384,19 @@ fn complete_buffered_chat(
     stream_events: Option<LlmEventSender>,
     url: String,
     stream_termination: Option<StreamTermination>,
+    capture: &mut ResponseMetadataCapture,
 ) -> Result<LlmResponse, LlmTransportError> {
     let mut state = ChatStreamState::default();
     let mut parsed_parts = None;
     if text.trim_start().starts_with("data:") || text.contains("\ndata:") {
+        capture.capture_sse_body(&text)?;
         OpenAiCompatibleProvider::parse_chat_sse_payload(&text, &mut state)?;
     } else {
         let value: Value = serde_json::from_str(&text).map_err(|e| {
             LlmTransportError::new(format!("Invalid Chat Completions JSON: {e}"))
                 .with_raw(text.clone())
         })?;
+        capture.capture_body(&value);
         state.capture_response_value(&value);
         state.provider_usage = value.get("usage").cloned();
         state.usage = usage_from_response_value(&value);
@@ -437,6 +464,7 @@ fn complete_buffered_chat(
         request_body: None,
         http_summary: Some(CompletionEndpoint::ChatCompletions.http_summary(&url, false)),
         execution_evidence,
+        response_metadata: Default::default(),
     })
 }
 
@@ -446,37 +474,14 @@ async fn drive_streaming_response(
     body: LlmHttpBody,
     chunk_timeout: std::time::Duration,
     context: ResponseContext,
+    capture: &mut ResponseMetadataCapture,
 ) -> Result<LlmResponse, LlmTransportError> {
-    let ResponseContext {
-        stream_events,
-        provider_trace,
-        url,
-        stream_termination,
-    } = context;
     match endpoint {
         CompletionEndpoint::Responses => {
-            drive_streaming_responses(
-                provider,
-                body,
-                stream_events,
-                provider_trace,
-                url,
-                chunk_timeout,
-                stream_termination,
-            )
-            .await
+            drive_streaming_responses(provider, body, chunk_timeout, context, capture).await
         }
         CompletionEndpoint::ChatCompletions => {
-            drive_streaming_chat(
-                provider,
-                body,
-                stream_events,
-                provider_trace,
-                url,
-                chunk_timeout,
-                stream_termination,
-            )
-            .await
+            drive_streaming_chat(provider, body, chunk_timeout, context, capture).await
         }
     }
 }
@@ -484,12 +489,16 @@ async fn drive_streaming_response(
 async fn drive_streaming_responses(
     provider: &OpenAiCompatibleProvider,
     body: LlmHttpBody,
-    stream_events: Option<LlmEventSender>,
-    provider_trace: Option<LlmProviderTraceSender>,
-    url: String,
     chunk_timeout: std::time::Duration,
-    stream_termination: StreamTermination,
+    context: ResponseContext,
+    capture: &mut ResponseMetadataCapture,
 ) -> Result<LlmResponse, LlmTransportError> {
+    let ResponseContext {
+        stream_events,
+        provider_trace,
+        url,
+        stream_termination,
+    } = context;
     let mut state = ResponsesStreamState::default();
     let mut emitted_parts = Vec::new();
     let expose_thinking = provider.options.expose_thinking;
@@ -499,6 +508,11 @@ async fn drive_streaming_responses(
         CompletionEndpoint::Responses.stream_chunk_timeout_error(),
         |raw| {
             emit_provider_trace(provider_trace.as_ref(), "openai_compatible", raw);
+            if capture.is_active()
+                && let Ok(value) = serde_json::from_str(raw)
+            {
+                capture.capture_body(&value);
+            }
             let prev_usage = state.usage.clone();
             OpenAiCompatibleProvider::process_sse_event(raw, &mut state, Some(&mut emitted_parts))?;
             emit_stream_progress(
@@ -579,18 +593,23 @@ async fn drive_streaming_responses(
         request_body: None,
         http_summary: Some(CompletionEndpoint::Responses.http_summary(&url, true)),
         execution_evidence: None,
+        response_metadata: Default::default(),
     })
 }
 
 async fn drive_streaming_chat(
     provider: &OpenAiCompatibleProvider,
     body: LlmHttpBody,
-    stream_events: Option<LlmEventSender>,
-    provider_trace: Option<LlmProviderTraceSender>,
-    url: String,
     chunk_timeout: std::time::Duration,
-    stream_termination: StreamTermination,
+    context: ResponseContext,
+    capture: &mut ResponseMetadataCapture,
 ) -> Result<LlmResponse, LlmTransportError> {
+    let ResponseContext {
+        stream_events,
+        provider_trace,
+        url,
+        stream_termination,
+    } = context;
     let mut state = ChatStreamState::default();
     let expose_thinking = provider.options.expose_thinking;
     let stream_result = drive_sse_response(
@@ -599,6 +618,11 @@ async fn drive_streaming_chat(
         CompletionEndpoint::ChatCompletions.stream_chunk_timeout_error(),
         |raw| {
             emit_provider_trace(provider_trace.as_ref(), "openai_compatible", raw);
+            if capture.is_active()
+                && let Ok(value) = serde_json::from_str(raw)
+            {
+                capture.capture_body(&value);
+            }
             let prev_usage = state.usage.clone();
             OpenAiCompatibleProvider::process_chat_sse_event(raw, &mut state)?;
             emit_stream_progress(
@@ -664,6 +688,7 @@ async fn drive_streaming_chat(
         request_body: None,
         http_summary: Some(CompletionEndpoint::ChatCompletions.http_summary(&url, true)),
         execution_evidence,
+        response_metadata: Default::default(),
     })
 }
 
@@ -684,5 +709,6 @@ fn chat_response_from_state(state: ChatStreamState, url: &str) -> LlmResponse {
         request_body: None,
         http_summary: Some(CompletionEndpoint::ChatCompletions.http_summary(url, true)),
         execution_evidence,
+        response_metadata: Default::default(),
     }
 }

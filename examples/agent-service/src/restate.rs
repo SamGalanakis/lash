@@ -534,6 +534,7 @@ finish "done via Restate E2E"
                         text: text.to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             })

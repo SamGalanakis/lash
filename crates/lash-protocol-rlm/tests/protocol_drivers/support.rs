@@ -285,6 +285,7 @@ pub(crate) fn rlm_response(parts: Vec<LlmOutputPart>) -> LlmResponse {
     LlmResponse {
         full_text,
         parts,
+        response_metadata: Default::default(),
         ..LlmResponse::default()
     }
 }

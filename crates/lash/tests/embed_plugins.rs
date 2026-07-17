@@ -173,6 +173,7 @@ fn response_text(text: &str) -> LlmResponse {
             text: text.to_string(),
             response_meta: None,
         }],
+        response_metadata: Default::default(),
         ..LlmResponse::default()
     }
 }
@@ -185,6 +186,7 @@ fn response_tool_call() -> LlmResponse {
             input_json: "{}".to_string(),
             replay: None,
         }],
+        response_metadata: Default::default(),
         ..LlmResponse::default()
     }
 }

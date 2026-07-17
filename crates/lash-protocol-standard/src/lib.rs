@@ -779,6 +779,7 @@ mod tests {
                         .to_string(),
                         replay: None,
                     }],
+                    response_metadata: Default::default(),
                     ..lash_core::LlmResponse::default()
                 });
             }
@@ -793,6 +794,7 @@ mod tests {
                     text: "done".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..lash_core::LlmResponse::default()
             })
         }

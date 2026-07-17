@@ -153,6 +153,7 @@ impl RuntimeEffectController for RecordingEffectController {
                             cache_write_input_tokens: 0,
                             reasoning_output_tokens: 0,
                         },
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     }),
                     text_streamed: false,
@@ -259,6 +260,7 @@ impl RuntimeEffectController for RecordingEffectController {
                             response_meta: None,
                         }],
                         usage,
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     }),
                     call_record: Some(crate::LlmCallRecord {
@@ -435,6 +437,7 @@ fn done_once_provider() -> TestProvider {
                 text: "Done".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }])
@@ -499,6 +502,7 @@ async fn standard_turn_llm_and_checkpoint_effects_cross_controller_once() {
                 cache_write_input_tokens: 0,
                 reasoning_output_tokens: 0,
             },
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -557,6 +561,7 @@ async fn turn_effect_envelope_does_not_carry_checkpoint_payload() {
                 cache_write_input_tokens: 0,
                 reasoning_output_tokens: 0,
             },
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -686,6 +691,7 @@ async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
                 text: "Done".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -727,6 +733,7 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
                 text: "Done".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -953,6 +960,7 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
                     input_json: serde_json::json!({}).to_string(),
                     replay: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -964,6 +972,7 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
                     text: "nested answer".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -975,6 +984,7 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
                     text: "finished".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1095,6 +1105,7 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
                                 cache_write_input_tokens: 0,
                                 reasoning_output_tokens: 0,
                             },
+                            response_metadata: Default::default(),
                             ..LlmResponse::default()
                         }),
                         text_streamed: false,
@@ -1292,6 +1303,7 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
                     input_json: serde_json::json!({}).to_string(),
                     replay: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1303,6 +1315,7 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
                     text: "finished".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1369,6 +1382,7 @@ async fn tool_attempt_effect_crosses_controller_per_child_attempt_and_runs_local
                         replay: None,
                     },
                 ],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1380,6 +1394,7 @@ async fn tool_attempt_effect_crosses_controller_per_child_attempt_and_runs_local
                     text: "finished".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1465,6 +1480,7 @@ async fn tool_batch_serializes_child_attempts_when_controller_disallows_concurre
                         replay: None,
                     },
                 ],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1476,6 +1492,7 @@ async fn tool_batch_serializes_child_attempts_when_controller_disallows_concurre
                     text: "finished".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1639,6 +1656,7 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
                 cache_write_input_tokens: 0,
                 reasoning_output_tokens: 2,
             },
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -1704,6 +1722,7 @@ async fn in_turn_direct_completion_uses_effect_controller_without_out_of_band_co
                 cache_write_input_tokens: 0,
                 reasoning_output_tokens: 0,
             },
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -1771,6 +1790,7 @@ async fn direct_effect_restores_required_streaming_for_provider_execution() {
                         text: "direct answer".to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }
@@ -1820,6 +1840,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
                 cache_write_input_tokens: 0,
                 reasoning_output_tokens: 1,
             },
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);

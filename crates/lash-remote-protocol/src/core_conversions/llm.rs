@@ -283,6 +283,7 @@ impl RemoteLlmResponse {
             request_body,
             http_summary,
             execution_evidence,
+            response_metadata,
         } = value;
         let mut diagnostics = Vec::new();
         if let Some(message) = terminal_diagnostic {
@@ -305,7 +306,7 @@ impl RemoteLlmResponse {
                 usage: provider_usage,
                 request_body,
                 http_summary,
-                data: HashMap::new(),
+                data: response_metadata,
             },
             execution_evidence: execution_evidence.map(Into::into),
         }
@@ -329,7 +330,7 @@ impl From<RemoteLlmResponse> for core_llm::LlmResponse {
             usage: provider_usage,
             request_body,
             http_summary,
-            data: _,
+            data: response_metadata,
         } = provider_metadata;
         Self {
             full_text,
@@ -341,6 +342,7 @@ impl From<RemoteLlmResponse> for core_llm::LlmResponse {
             request_body,
             http_summary,
             execution_evidence: execution_evidence.map(Into::into),
+            response_metadata,
         }
     }
 }

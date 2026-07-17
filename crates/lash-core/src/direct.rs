@@ -501,6 +501,7 @@ mod tests {
                             ..Default::default()
                         },
                         terminal_reason: LlmTerminalReason::Stop,
+                        response_metadata: Default::default(),
                         ..Default::default()
                     })
                 }
@@ -542,6 +543,7 @@ mod tests {
                 Ok(LlmResponse {
                     full_text: r#"{"items":[]}"#.to_string(),
                     terminal_reason: LlmTerminalReason::Stop,
+                    response_metadata: Default::default(),
                     ..Default::default()
                 })
             })
@@ -648,6 +650,7 @@ mod tests {
                     Ok(LlmResponse {
                         full_text: "ok".to_string(),
                         terminal_reason: LlmTerminalReason::Stop,
+                        response_metadata: Default::default(),
                         ..Default::default()
                     })
                 }

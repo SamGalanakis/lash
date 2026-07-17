@@ -39,9 +39,36 @@ impl LlmHttpTransport for ScriptedHttpTransport {
     }
 }
 
-#[derive(Debug, Default)]
+const DEFAULT_RECORDING_RESPONSE_BODY: &str = r#"{"id":"gen-123","model":"test-model","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}"#;
+
+#[derive(Debug)]
 struct RecordingHttpTransport {
     requests: std::sync::Mutex<Vec<LlmHttpRequest>>,
+    response_headers: Vec<(String, String)>,
+    response_body: &'static str,
+}
+
+impl Default for RecordingHttpTransport {
+    fn default() -> Self {
+        Self {
+            requests: std::sync::Mutex::new(Vec::new()),
+            response_headers: Vec::new(),
+            response_body: DEFAULT_RECORDING_RESPONSE_BODY,
+        }
+    }
+}
+
+impl RecordingHttpTransport {
+    fn responding_with(
+        response_headers: Vec<(String, String)>,
+        response_body: &'static str,
+    ) -> Self {
+        Self {
+            requests: std::sync::Mutex::new(Vec::new()),
+            response_headers,
+            response_body,
+        }
+    }
 }
 
 fn openrouter_provider() -> OpenAiCompatibleProvider {
@@ -77,10 +104,8 @@ impl LlmHttpTransport for RecordingHttpTransport {
         self.requests.lock().expect("request lock").push(request);
         Ok(lash_llm_transport::LlmHttpResponse {
             status: 200,
-            headers: Vec::new(),
-            body: LlmHttpBody::buffered(
-                r#"{"id":"gen-123","model":"test-model","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}"#,
-            ),
+            headers: self.response_headers.clone(),
+            body: LlmHttpBody::buffered(self.response_body),
         })
     }
 }
@@ -237,6 +262,95 @@ async fn direct_openai_prompt_cache_key_does_not_enable_body_session_affinity() 
             .iter()
             .all(|(name, _)| !name.eq_ignore_ascii_case("x-client-request-id"))
     );
+}
+
+#[tokio::test]
+async fn response_metadata_captures_only_allowlisted_headers() {
+    let transport = Arc::new(RecordingHttpTransport::responding_with(
+        vec![
+            ("x-opper-cost".to_string(), "0.000008".to_string()),
+            ("set-cookie".to_string(), "secret=value".to_string()),
+        ],
+        DEFAULT_RECORDING_RESPONSE_BODY,
+    ));
+    let mut provider = OpenAiCompatibleProvider::new("key", "https://proxy.example/v1")
+        .with_compat(OpenAiCompat {
+            response_metadata_headers: Some(vec!["X-Opper-Cost".to_string()]),
+            ..OpenAiCompat::default()
+        })
+        .with_transport(transport);
+
+    let response = provider
+        .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(
+        response.response_metadata["header:x-opper-cost"],
+        json!("0.000008")
+    );
+    assert!(!response.response_metadata.contains_key("header:set-cookie"));
+}
+
+#[tokio::test]
+async fn response_metadata_is_empty_without_explicit_allowlists() {
+    let transport = Arc::new(RecordingHttpTransport::responding_with(
+        vec![("x-opper-cost".to_string(), "0.000008".to_string())],
+        r#"{"id":"gen-123","model":"test-model","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"cost":0.000063}"#,
+    ));
+    let mut provider =
+        OpenAiCompatibleProvider::new("key", "https://proxy.example/v1").with_transport(transport);
+
+    let response = provider
+        .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+        .await
+        .expect("request succeeds");
+
+    assert!(response.response_metadata.is_empty());
+}
+
+#[tokio::test]
+async fn response_metadata_captures_buffered_body_json_pointers() {
+    let transport = Arc::new(RecordingHttpTransport::responding_with(
+        Vec::new(),
+        r#"{"id":"gen-123","model":"test-model","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"cost":0.000063}"#,
+    ));
+    let mut provider = OpenAiCompatibleProvider::new("key", "https://proxy.example/v1")
+        .with_compat(OpenAiCompat {
+            response_metadata_body_paths: Some(vec!["/cost".to_string(), "/missing".to_string()]),
+            ..OpenAiCompat::default()
+        })
+        .with_transport(transport);
+
+    let response = provider
+        .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.response_metadata["body:/cost"], json!(0.000063));
+    assert!(!response.response_metadata.contains_key("body:/missing"));
+}
+
+#[tokio::test]
+async fn response_metadata_captures_buffered_responses_endpoint_observations() {
+    let transport = Arc::new(RecordingHttpTransport::responding_with(
+        vec![("x-opper-cost".to_string(), "0.000008".to_string())],
+        r#"{"id":"resp-123","model":"test-model","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}],"cost":0.000063}"#,
+    ));
+    let mut provider = OpenAiProvider::new("key").with_transport(transport);
+    provider.inner.compat.response_metadata_headers = Some(vec!["X-Opper-Cost".to_string()]);
+    provider.inner.compat.response_metadata_body_paths = Some(vec!["/cost".to_string()]);
+
+    let response = provider
+        .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+        .await
+        .expect("Responses request succeeds");
+
+    assert_eq!(
+        response.response_metadata["header:x-opper-cost"],
+        json!("0.000008")
+    );
+    assert_eq!(response.response_metadata["body:/cost"], json!(0.000063));
 }
 
 #[test]
@@ -1098,6 +1212,8 @@ fn openai_compat_config_serializes_when_non_default() {
     let provider = openrouter_provider().with_compat(OpenAiCompat {
         max_tokens_field: Some(OpenAiCompatMaxTokensField::MaxCompletionTokens),
         streaming_usage: Some(false),
+        response_metadata_headers: Some(vec!["X-Opper-Cost".to_string()]),
+        response_metadata_body_paths: Some(vec!["/cost".to_string()]),
         ..OpenAiCompat::default()
     });
 
@@ -1108,6 +1224,27 @@ fn openai_compat_config_serializes_when_non_default() {
         json!("max_completion_tokens")
     );
     assert_eq!(config["compat"]["streaming_usage"], false);
+    assert_eq!(
+        config["compat"]["response_metadata_headers"],
+        json!(["X-Opper-Cost"])
+    );
+    assert_eq!(
+        config["compat"]["response_metadata_body_paths"],
+        json!(["/cost"])
+    );
+
+    let round_trip = OpenAiCompatibleProviderFactory
+        .deserialize(config)
+        .expect("response metadata allowlists deserialize");
+    let serialized = round_trip.provider.serialize_config();
+    assert_eq!(
+        serialized["compat"]["response_metadata_headers"],
+        json!(["X-Opper-Cost"])
+    );
+    assert_eq!(
+        serialized["compat"]["response_metadata_body_paths"],
+        json!(["/cost"])
+    );
 }
 
 #[test]
@@ -1694,6 +1831,7 @@ fn responses_final_answer_phase_hides_commentary_from_visible_text() {
     let response = LlmResponse {
         full_text: state.full_text.clone(),
         parts,
+        response_metadata: Default::default(),
         ..LlmResponse::default()
     };
     let visible = lash_core::normalized_response_parts(&response);
@@ -1887,6 +2025,92 @@ fn single_stream_transport(body: &'static str) -> Arc<ScriptedHttpTransport> {
             body,
         )])),
     })
+}
+
+#[tokio::test]
+async fn response_metadata_streaming_body_capture_is_last_wins() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}],\"cost\":0.1}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"cost\":0.2}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let transport = Arc::new(RecordingHttpTransport::responding_with(
+        vec![("content-type".to_string(), "text/event-stream".to_string())],
+        body,
+    ));
+    let mut provider = OpenAiCompatibleProvider::new("key", "https://proxy.example/v1")
+        .with_compat(OpenAiCompat {
+            response_metadata_body_paths: Some(vec!["/cost".to_string()]),
+            ..OpenAiCompat::default()
+        })
+        .with_transport(transport);
+
+    let response = provider
+        .complete(streamed_request(Arc::new(
+            std::sync::Mutex::new(Vec::new()),
+        )))
+        .await
+        .expect("terminal stream succeeds and [DONE] is tolerated");
+
+    assert_eq!(response.response_metadata["body:/cost"], json!(0.2));
+}
+
+#[tokio::test]
+async fn response_metadata_buffered_sse_body_capture_is_last_wins() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}],\"cost\":0.1}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"cost\":0.2}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let transport = Arc::new(RecordingHttpTransport::responding_with(Vec::new(), body));
+    let mut provider = OpenAiCompatibleProvider::new("key", "https://proxy.example/v1")
+        .with_compat(OpenAiCompat {
+            response_metadata_body_paths: Some(vec!["/cost".to_string()]),
+            ..OpenAiCompat::default()
+        })
+        .with_transport(transport);
+
+    let response = provider
+        .complete(request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+        .await
+        .expect("buffered SSE-shaped response succeeds and [DONE] is tolerated");
+
+    assert_eq!(response.response_metadata["body:/cost"], json!(0.2));
+}
+
+#[tokio::test]
+async fn response_metadata_headers_are_preserved_on_partial_stream_responses() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let transport = Arc::new(RecordingHttpTransport::responding_with(
+        vec![
+            ("content-type".to_string(), "text/event-stream".to_string()),
+            ("x-opper-cost".to_string(), "0.000008".to_string()),
+        ],
+        body,
+    ));
+    let mut provider = OpenAiCompatibleProvider::new("key", "https://proxy.example/v1")
+        .with_compat(OpenAiCompat {
+            stream_termination: Some(StreamTermination::RequireTerminalEvidence),
+            response_metadata_headers: Some(vec!["X-Opper-Cost".to_string()]),
+            ..OpenAiCompat::default()
+        })
+        .with_transport(transport);
+
+    let error = provider
+        .complete(streamed_request(Arc::new(
+            std::sync::Mutex::new(Vec::new()),
+        )))
+        .await
+        .expect_err("missing terminal evidence returns a partial response");
+    let partial = error.partial_response.expect("partial response");
+
+    assert_eq!(
+        partial.response_metadata["header:x-opper-cost"],
+        json!("0.000008")
+    );
 }
 
 #[tokio::test]

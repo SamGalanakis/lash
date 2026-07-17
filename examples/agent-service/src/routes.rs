@@ -749,6 +749,7 @@ finish "done through route"
                         text: text.to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             })

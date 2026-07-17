@@ -72,6 +72,7 @@ fn rlm_driver_state_with_wrong_plugin_id_fails_loudly() {
                 text: lashlang_block("print \"hi\""),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     });
@@ -107,6 +108,7 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
                 text: lashlang_block_with_prose("Reason first.", "print \"hi\""),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     });
@@ -209,6 +211,7 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
                 text: lashlang_block("ok = await tools.ok({})\nfail = await tools.fail({})\nstop = await tools.stop({})\nresults = { a: ok, b: fail, c: stop }"),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     });

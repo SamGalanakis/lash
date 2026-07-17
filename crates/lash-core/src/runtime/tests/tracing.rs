@@ -15,6 +15,7 @@ async fn standard_runtime_emits_single_tool_call_trace_pair_per_call() {
                     input_json: r#"{"value":"sample"}"#.to_string(),
                     replay: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -26,6 +27,7 @@ async fn standard_runtime_emits_single_tool_call_trace_pair_per_call() {
                     text: "done".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -138,6 +140,7 @@ async fn standard_runtime_trace_records_stream_event_entries() {
                 text: "Hello world".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -307,6 +310,7 @@ async fn extended_runtime_trace_records_provider_stream_events() {
                     text: "Hello".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             })
         })
@@ -391,6 +395,7 @@ async fn standard_runtime_trace_omits_stream_event_entries_by_default() {
                 text: "Hello world".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);

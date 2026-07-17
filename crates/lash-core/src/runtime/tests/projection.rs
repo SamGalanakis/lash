@@ -53,6 +53,7 @@ async fn tool_result_projector_only_changes_model_observation() {
                         replay: None,
                     },
                 ],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -64,6 +65,7 @@ async fn tool_result_projector_only_changes_model_observation() {
                     text: "done".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -129,6 +131,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
                 cache_write_input_tokens: 0,
                 reasoning_output_tokens: 2,
             },
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -246,6 +249,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
                 cache_write_input_tokens: 0,
                 reasoning_output_tokens: 2,
             },
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);

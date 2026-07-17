@@ -166,6 +166,7 @@ impl Provider for AnthropicProvider {
             request_body,
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
             execution_evidence: None,
+            response_metadata: Default::default(),
         })
     }
 
@@ -192,6 +193,7 @@ impl AnthropicProvider {
             request_body,
             http_summary: Some(format!("HTTP POST {url} (stream)")),
             execution_evidence: None,
+            response_metadata: Default::default(),
         }
     }
 }

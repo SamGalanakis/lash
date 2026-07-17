@@ -709,6 +709,7 @@ async fn complete_seed_probe_request(
                 text: lashlang_block("finish { len: len(chunk) }"),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..Default::default()
         })
     } else {
@@ -718,6 +719,7 @@ async fn complete_seed_probe_request(
                 text: state.parent_response.clone(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..Default::default()
         })
     }

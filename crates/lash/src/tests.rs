@@ -1384,6 +1384,7 @@ fn mock_provider() -> ProviderHandle {
                     cache_write_input_tokens: 0,
                     reasoning_output_tokens: 0,
                 },
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             })
         })
@@ -1400,6 +1401,7 @@ fn tool_roundtrip_provider() -> ProviderHandle {
                 input_json: "{}".to_string(),
                 replay: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         },
         LlmResponse {
@@ -1408,6 +1410,7 @@ fn tool_roundtrip_provider() -> ProviderHandle {
                 text: "done".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         },
     ])));
@@ -1433,6 +1436,7 @@ fn agent_frame_switch_provider() -> ProviderHandle {
                 .to_string(),
                 replay: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         },
         text_response("done after frame switch"),
@@ -1454,6 +1458,7 @@ fn text_response(text: &str) -> LlmResponse {
             text: text.to_string(),
             response_meta: None,
         }],
+        response_metadata: Default::default(),
         ..LlmResponse::default()
     }
 }
@@ -1474,6 +1479,7 @@ fn queued_text_provider(texts: Vec<impl Into<String>>) -> ProviderHandle {
                         text,
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 }
             })
@@ -1515,6 +1521,7 @@ fn semantic_group_provider() -> ProviderHandle {
                         }),
                     },
                 ],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             })
         })
@@ -1532,6 +1539,7 @@ fn text_provider(kind: &'static str, _model: &'static str, text: &'static str) -
                     text: text.to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             })
         })
@@ -1562,6 +1570,7 @@ fn recording_text_provider(
                         text: text.to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }
@@ -1637,6 +1646,7 @@ fn recording_prompt_provider(seen: Arc<std::sync::Mutex<Vec<String>>>) -> Provid
                         text: "ok".to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }
@@ -1685,6 +1695,7 @@ fn retry_once_provider() -> ProviderHandle {
                         text: "retried".to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }

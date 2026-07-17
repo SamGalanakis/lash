@@ -416,6 +416,7 @@ fn checkpoint_pending_llm(
         id,
         result: Ok(LlmResponse {
             full_text: "runtime perf benchmark ok".to_string(),
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
         text_streamed: false,

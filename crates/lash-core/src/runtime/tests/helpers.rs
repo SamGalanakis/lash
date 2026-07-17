@@ -84,6 +84,7 @@ pub(crate) fn stream_accumulator_preserves_reasoning_when_final_response_has_too
                 opaque: Some("sig".to_string()),
             }),
         }],
+        response_metadata: Default::default(),
         ..Default::default()
     };
 
@@ -118,6 +119,7 @@ pub(crate) fn stream_accumulator_does_not_duplicate_complete_final_response() {
                 response_meta: None,
             },
         ],
+        response_metadata: Default::default(),
         ..Default::default()
     };
 

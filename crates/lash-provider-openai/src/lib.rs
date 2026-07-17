@@ -8,6 +8,7 @@ mod driver;
 mod factory;
 mod provider;
 mod reasoning;
+mod response_metadata;
 mod responses;
 pub mod responses_shared;
 pub mod schema;

@@ -619,6 +619,11 @@ pub struct LlmResponse {
     pub http_summary: Option<String>,
     #[serde(default)]
     pub execution_evidence: Option<ExecutionEvidence>,
+    /// Allowlisted wire observations captured by the provider driver
+    /// (`header:<lowercased-name>` and `body:<json-pointer>` keys). Population is
+    /// host-supplied endpoint configuration; empty unless explicitly requested.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub response_metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug)]

@@ -215,6 +215,7 @@ async fn standard_runtime_assembles_stream_only_text_response() {
                 text: "What time is it?".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -414,6 +415,7 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
                     text: "stopped".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -484,6 +486,7 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
                         replay: None,
                     },
                 ],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -495,6 +498,7 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
                     text: "unexpected follow-up".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -582,6 +586,7 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
                     input_json: "{}".to_string(),
                     replay: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -593,6 +598,7 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
                     text: "unexpected follow-up".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -679,6 +685,7 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
                     text: "done".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -731,6 +738,7 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
                     response_meta: None,
                 },
             ],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -794,6 +802,7 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
                 response_meta: None,
             }],
             usage: LlmUsage::default(),
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -848,6 +857,7 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
                 cache_write_input_tokens: 0,
                 reasoning_output_tokens: 0,
             },
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);

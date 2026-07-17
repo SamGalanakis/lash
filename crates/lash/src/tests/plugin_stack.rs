@@ -187,6 +187,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                     input_json: "{}".to_string(),
                     replay: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             },
             LlmResponse {
@@ -195,6 +196,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                     text: "done".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             },
         ])));
