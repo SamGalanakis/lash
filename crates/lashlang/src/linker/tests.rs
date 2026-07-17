@@ -235,6 +235,86 @@ mod tests {
     }
 
     #[test]
+    fn linked_module_accepts_restate_board_process_with_imported_schemas() {
+        let mut catalog = LashlangHostCatalog::new();
+        let read_input = crate::json_schema_to_type_expr(&serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }));
+        let read_output =
+            crate::json_schema_to_type_expr(&serde_json::json!({ "type": "object" }));
+        let play_input = crate::json_schema_to_type_expr(&serde_json::json!({
+            "type": "object",
+            "properties": {
+                "cell": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8
+                }
+            },
+            "required": ["cell"],
+            "additionalProperties": false
+        }));
+        let play_output =
+            crate::json_schema_to_type_expr(&serde_json::json!({ "type": "object" }));
+
+        assert_eq!(read_output, TypeExpr::Dict);
+        assert_eq!(
+            play_input,
+            TypeExpr::Object(vec![TypeField {
+                name: "cell".into(),
+                ty: TypeExpr::Int,
+                optional: false,
+            }])
+        );
+        catalog.add_module_operation(
+            ["board"],
+            "Board",
+            "read",
+            "read",
+            read_input,
+            read_output,
+        );
+        catalog.add_module_operation(
+            ["board"],
+            "Board",
+            "play",
+            "play",
+            play_input,
+            play_output,
+        );
+        let environment =
+            LashlangHostEnvironment::new(catalog, LashlangAbilities::all());
+        let program = crate::parse(
+            r#"
+            process play_center_once(board_tool: Board) {
+              state = await board_tool.read({})?
+              if state.turn == "O" and contains(state.legal_moves, 4) {
+                move = await board_tool.play({ cell: 4 })?
+                finish { before: state, move: move, played: true }
+              } else { finish { before: state, played: false } }
+            }
+            handle = start play_center_once(board_tool: board)
+            result = (await handle)?
+            finish "done via Restate E2E"
+            "#,
+        )
+        .expect("parse Restate board process");
+
+        LinkedModule::link(program, environment.clone())
+            .expect("link Restate board process with imported schemas");
+
+        let fractional = crate::parse("await board.play({ cell: 4.5 })?")
+            .expect("parse fractional board call");
+        assert!(matches!(
+            LinkedModule::link(fractional, environment),
+            Err(LinkError::IncompatibleOperationInput { expected, actual, .. })
+                if expected == "{ cell: int }" && actual == "{ cell: float }"
+        ));
+    }
+
+    #[test]
     fn linked_module_allows_trigger_registration_name_to_match_target_process() {
         let program = crate::parse(
             r#"
@@ -1508,7 +1588,7 @@ mod tests {
 
         assert!(matches!(
             LinkedModule::link(program, full_host_environment()),
-            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual == "float"
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual == "int"
         ));
     }
 
@@ -1624,7 +1704,7 @@ mod tests {
 
         assert!(matches!(
             LinkedModule::link(program, full_host_environment()),
-            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual.contains("str") && actual.contains("float")
+            Err(LinkError::IncompatibleOperationInput { actual, .. }) if actual.contains("str") && actual.contains("int")
         ));
     }
 

@@ -219,6 +219,7 @@ fn literal_type(expr: &Expr) -> TypeExpr {
     match expr {
         Expr::Null => TypeExpr::Null,
         Expr::Bool(_) => TypeExpr::Bool,
+        Expr::Number(value) if value.is_finite() && value.fract() == 0.0 => TypeExpr::Int,
         Expr::Number(_) => TypeExpr::Float,
         Expr::String(_) => TypeExpr::Str,
         Expr::TypeLiteral(_) => TypeExpr::Any,
