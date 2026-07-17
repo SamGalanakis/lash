@@ -44,14 +44,16 @@ impl OpenAiCompatibleProvider {
         if compat.store {
             body["store"] = json!(false);
         }
-        if let Some(config) = reasoning_config(req)
-            && compat.reasoning_format != OpenAiCompatReasoningFormat::None
-        {
-            let mut reasoning = reasoning_config_json(config);
-            if policy.expose_thinking {
-                reasoning["summary"] = json!("auto");
-            }
-            body["reasoning"] = reasoning;
+        if let Some(intent) = reasoning_intent(req) {
+            compat
+                .reasoning_format
+                .encode(CompletionEndpoint::Responses, &intent, &mut body)
+                .map_err(|error| {
+                    reasoning_encode_transport_error(CompletionEndpoint::Responses, &intent, error)
+                })?;
+        }
+        if policy.expose_thinking && body["reasoning"].is_object() {
+            body["reasoning"]["summary"] = json!("auto");
         }
         if let Some(output_spec) = &req.output_spec {
             let format = match output_spec {

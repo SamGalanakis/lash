@@ -9,14 +9,6 @@ pub enum OpenAiCompatMaxTokensField {
     Omit,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenAiCompatReasoningFormat {
-    None,
-    OpenAi,
-    OpenRouter,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OpenAiCompat {
@@ -29,7 +21,7 @@ pub struct OpenAiCompat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens_field: Option<OpenAiCompatMaxTokensField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_format: Option<OpenAiCompatReasoningFormat>,
+    pub reasoning_format: Option<ReasoningWireFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_session_affinity: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,7 +44,7 @@ impl OpenAiCompat {
     /// Explicit endpoint capabilities for OpenRouter and compatible proxies.
     pub fn openrouter() -> Self {
         Self {
-            reasoning_format: Some(OpenAiCompatReasoningFormat::OpenRouter),
+            reasoning_format: Some(ReasoningWireFormat::openrouter()),
             cache_session_affinity: Some(true),
             stream_termination: Some(StreamTermination::RequireTerminalEvidence),
             ..Self::default()
@@ -65,7 +57,7 @@ pub(crate) struct OpenAiResolvedCompat {
     pub(crate) stream_termination: StreamTermination,
     pub(crate) request_fields: bool,
     pub(crate) max_tokens_field: OpenAiCompatMaxTokensField,
-    pub(crate) reasoning_format: OpenAiCompatReasoningFormat,
+    pub(crate) reasoning_format: ReasoningWireFormat,
     pub(crate) cache_session_affinity: bool,
     pub(crate) prompt_cache_key: bool,
     pub(crate) prompt_cache_retention: bool,
@@ -109,8 +101,8 @@ impl OpenAiCompatibleProvider {
             CompletionEndpoint::ChatCompletions => OpenAiCompatMaxTokensField::MaxTokens,
         };
         let reasoning_format = match endpoint {
-            CompletionEndpoint::Responses if direct_openai => OpenAiCompatReasoningFormat::OpenAi,
-            _ => OpenAiCompatReasoningFormat::None,
+            CompletionEndpoint::Responses if direct_openai => ReasoningWireFormat::openai(),
+            _ => ReasoningWireFormat::none(),
         };
         let defaults = OpenAiResolvedCompat {
             stream_termination: StreamTermination::RequireTerminalEvidence,
@@ -143,6 +135,7 @@ impl OpenAiCompatibleProvider {
             reasoning_format: self
                 .compat
                 .reasoning_format
+                .clone()
                 .unwrap_or(defaults.reasoning_format),
             cache_session_affinity: self
                 .compat

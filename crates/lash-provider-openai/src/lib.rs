@@ -7,6 +7,7 @@ mod config;
 mod driver;
 mod factory;
 mod provider;
+mod reasoning;
 mod responses;
 pub mod responses_shared;
 pub mod schema;
@@ -19,7 +20,10 @@ mod tests;
 pub use codex::{CodexProvider, CodexProviderFactory};
 pub use common::{OPENAI_BASE_URL, OPENROUTER_BASE_URL};
 pub use config::{
-    OpenAiCompat, OpenAiCompatMaxTokensField, OpenAiCompatReasoningFormat,
-    OpenAiCompatibleProvider, OpenAiProvider,
+    OpenAiCompat, OpenAiCompatMaxTokensField, OpenAiCompatibleProvider, OpenAiProvider,
 };
+pub use driver::CompletionEndpoint;
 pub use factory::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
+pub use reasoning::{
+    ReasoningEncodeError, ReasoningWireEncoder, ReasoningWireFormat, ReasoningWireIntent,
+};

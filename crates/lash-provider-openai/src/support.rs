@@ -38,4 +38,5 @@ pub(crate) use crate::chat::*;
 pub(crate) use crate::common::*;
 pub(crate) use crate::config::*;
 pub(crate) use crate::driver::*;
+pub(crate) use crate::reasoning::*;
 pub(crate) use crate::responses_shared::{ResponsesStreamState, role_name, tool_choice_value};

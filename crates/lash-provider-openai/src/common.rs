@@ -6,6 +6,8 @@ use lash_core::provider::{ReasoningDisableEncoding, ReasoningEncoding, Reasoning
 use lash_llm_transport::util::emit_provider_trace;
 use lash_llm_transport::{LlmHttpTransport, ReqwestLlmHttpTransport};
 
+use crate::reasoning::ReasoningWireIntent;
+
 pub(crate) use lash_llm_transport::{
     merge_usage,
     openai_terminal_reason_from_chat_finish_reason as terminal_reason_from_chat_finish_reason,
@@ -19,45 +21,28 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OpenAiReasoningConfig {
-    Effort(String),
-    Budget(u32),
-    ToggleFalse,
-}
-
-pub(crate) fn reasoning_config(req: &LlmRequest) -> Option<OpenAiReasoningConfig> {
+pub(crate) fn reasoning_intent(req: &LlmRequest) -> Option<ReasoningWireIntent> {
     let reasoning = req.model_capability.reasoning.as_ref()?;
     match &req.model_variant {
         ReasoningSelection::ProviderDefault => None,
         ReasoningSelection::Effort(effort) => match &reasoning.encoding {
-            ReasoningEncoding::Effort => Some(OpenAiReasoningConfig::Effort(effort.clone())),
+            ReasoningEncoding::Effort => Some(ReasoningWireIntent::Effort(effort.clone())),
             ReasoningEncoding::Budget(budgets) => budgets
                 .get(effort)
                 .copied()
-                .map(OpenAiReasoningConfig::Budget),
+                .map(ReasoningWireIntent::Budget),
         },
         ReasoningSelection::Disabled => match reasoning.disable.as_ref()? {
             ReasoningDisableEncoding::Native => {
-                Some(OpenAiReasoningConfig::Effort("none".to_string()))
+                Some(ReasoningWireIntent::Effort("none".to_string()))
             }
             ReasoningDisableEncoding::Omit => None,
             ReasoningDisableEncoding::Effort(effort) => {
-                Some(OpenAiReasoningConfig::Effort(effort.clone()))
+                Some(ReasoningWireIntent::Effort(effort.clone()))
             }
-            ReasoningDisableEncoding::Budget(budget) => {
-                Some(OpenAiReasoningConfig::Budget(*budget))
-            }
-            ReasoningDisableEncoding::ToggleFalse => Some(OpenAiReasoningConfig::ToggleFalse),
+            ReasoningDisableEncoding::Budget(budget) => Some(ReasoningWireIntent::Budget(*budget)),
+            ReasoningDisableEncoding::ToggleFalse => Some(ReasoningWireIntent::ToggleFalse),
         },
-    }
-}
-
-pub(crate) fn reasoning_config_json(config: OpenAiReasoningConfig) -> Value {
-    match config {
-        OpenAiReasoningConfig::Effort(effort) => json!({ "effort": effort }),
-        OpenAiReasoningConfig::Budget(max_tokens) => json!({ "max_tokens": max_tokens }),
-        OpenAiReasoningConfig::ToggleFalse => json!({ "enabled": false }),
     }
 }
 
