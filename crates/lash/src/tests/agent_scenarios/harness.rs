@@ -793,6 +793,7 @@ fn scripted_provider(
                         text,
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }

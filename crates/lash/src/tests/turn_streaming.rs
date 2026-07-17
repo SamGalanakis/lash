@@ -398,6 +398,7 @@ fn runtime_batch_provider() -> ProviderHandle {
                 .to_string(),
                 replay: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         },
         LlmResponse {
@@ -406,6 +407,7 @@ fn runtime_batch_provider() -> ProviderHandle {
                 text: "done".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         },
     ])));
@@ -2065,6 +2067,7 @@ fn rlm_streamed_lashlang_cell_uses_captured_body_when_final_text_is_raw() -> Res
                         text: RAW_FINAL.to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             })

@@ -67,6 +67,7 @@ impl Provider for PartialStreamFailureProvider {
                     provider_response_id: Some("resp-partial".to_string()),
                     ..ExecutionEvidence::default()
                 }),
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }))
     }
@@ -96,6 +97,7 @@ impl Provider for TerminalProvider {
         Ok(LlmResponse {
             full_text: self.text.to_string(),
             terminal_reason: self.reason,
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         })
     }
@@ -147,6 +149,7 @@ impl Provider for MutatingProvider {
             request_body: None,
             http_summary: None,
             execution_evidence: None,
+            response_metadata: Default::default(),
         })
     }
 
@@ -195,6 +198,7 @@ impl Provider for FailingProvider {
             request_body: None,
             http_summary: None,
             execution_evidence: None,
+            response_metadata: Default::default(),
         })
     }
 
@@ -263,6 +267,7 @@ impl Provider for StatusFailingProvider {
             request_body: None,
             http_summary: None,
             execution_evidence: None,
+            response_metadata: Default::default(),
         })
     }
 

@@ -631,8 +631,8 @@ pub struct RemoteProviderMetadata {
     pub request_body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_summary: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub data: HashMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub data: BTreeMap<String, serde_json::Value>,
 }
 
 impl RemoteProviderMetadata {

@@ -208,6 +208,7 @@ fn text_response(text: &str) -> TestProvider {
                 text: text.to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }])
@@ -457,6 +458,7 @@ async fn composed_session_catalog_discovers_callable_tool_without_exposing_hidde
                 input_json: "{}".to_string(),
                 replay: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);

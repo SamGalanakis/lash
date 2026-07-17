@@ -195,6 +195,7 @@ async fn continue_as_frame_rotation_reconciles_newly_advertised_tool() {
                     input_json: "{}".to_string(),
                     replay: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -207,6 +208,7 @@ async fn continue_as_frame_rotation_reconciles_newly_advertised_tool() {
                     input_json: "{}".to_string(),
                     replay: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -577,6 +579,7 @@ async fn turn_provider_override_does_not_persist_into_session_policy_or_agent_fr
                     text: "alt response".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             })
         })
@@ -693,6 +696,7 @@ async fn normal_turn_stores_effective_user_text_in_state() {
                 text: "Done".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -863,6 +867,7 @@ async fn assembled_turn_reports_turn_timing_from_injected_clock() {
                 text: "Done".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -904,6 +909,7 @@ async fn queued_checkpoint_input_continues_standard_turn() {
                     text: "First answer.".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -915,6 +921,7 @@ async fn queued_checkpoint_input_continues_standard_turn() {
                     text: "Second answer.".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -999,6 +1006,7 @@ async fn queued_checkpoint_input_preserves_images() {
                         text: text.to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }
@@ -1082,6 +1090,7 @@ async fn checkpoint_hook_can_inject_messages() {
                     text: "First answer.".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1093,6 +1102,7 @@ async fn checkpoint_hook_can_inject_messages() {
                     text: "Second answer.".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1141,6 +1151,7 @@ async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicat
                     text: "first".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1152,6 +1163,7 @@ async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicat
                     text: "answer".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -1286,6 +1298,7 @@ async fn next_turn_input_turn_claims_process_wake_at_active_checkpoint() {
                         text: text.to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }
@@ -1379,6 +1392,7 @@ async fn selected_process_wake_drain_does_not_claim_pending_next_turn_input() {
                 text: "selected wake response".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -1499,6 +1513,7 @@ async fn process_wake_claimed_at_checkpoint_is_completed_when_turn_is_cancelled(
                             text: "initial queued input response".to_string(),
                             response_meta: None,
                         }],
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     });
                 }
@@ -1672,6 +1687,7 @@ async fn long_turn_keeps_claims_live_across_session_lease_renewals() {
                         text: "stalled turn response".to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }
@@ -1806,6 +1822,7 @@ async fn queued_frame_switch_finishes_follow_on_before_next_queued_turn() {
                                 input_json: serde_json::json!({}).to_string(),
                                 replay: None,
                             }],
+                            response_metadata: Default::default(),
                             ..LlmResponse::default()
                         })
                     }
@@ -1815,6 +1832,7 @@ async fn queued_frame_switch_finishes_follow_on_before_next_queued_turn() {
                             text: "follow-on complete".to_string(),
                             response_meta: None,
                         }],
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     }),
                     2 => Ok(LlmResponse {
@@ -1823,6 +1841,7 @@ async fn queued_frame_switch_finishes_follow_on_before_next_queued_turn() {
                             text: "second queued complete".to_string(),
                             response_meta: None,
                         }],
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     }),
                     index => panic!("unexpected provider call {index}"),
@@ -1922,6 +1941,7 @@ async fn committed_frame_handoff_survives_before_inline_claim_and_pump_recovers_
                             input_json: "{}".to_string(),
                             replay: None,
                         }],
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     }),
                     1 => Ok(LlmResponse {
@@ -1930,6 +1950,7 @@ async fn committed_frame_handoff_survives_before_inline_claim_and_pump_recovers_
                             text: "recovered follow-on".to_string(),
                             response_meta: None,
                         }],
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     }),
                     index => panic!("unexpected provider call {index}"),
@@ -2022,6 +2043,7 @@ async fn mid_chain_cancellation_commits_one_cancelled_terminal_and_settles_hando
                         input_json: "{}".to_string(),
                         replay: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }
@@ -2175,6 +2197,7 @@ async fn stream_prepared_turn_follows_agent_frame_switch() {
                             input_json: "{}".to_string(),
                             replay: None,
                         }],
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     }),
                     1 => Ok(LlmResponse {
@@ -2183,6 +2206,7 @@ async fn stream_prepared_turn_follows_agent_frame_switch() {
                             text: "prepared follow-on complete".to_string(),
                             response_meta: None,
                         }],
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     }),
                     index => panic!("unexpected provider call {index}"),
@@ -2266,6 +2290,7 @@ async fn frame_switch_limit_commits_terminal_error_and_settles_claim() {
                         input_json: "{}".to_string(),
                         replay: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }
@@ -2336,6 +2361,7 @@ async fn leading_session_command_drains_before_queued_turn() {
                 text: "queued answer".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -2382,6 +2408,7 @@ async fn later_session_command_does_not_jump_earlier_queued_turn() {
                 text: "first turn answer".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -2455,6 +2482,7 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
                         text: "saw event".to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }
@@ -2729,6 +2757,7 @@ async fn truncated_retry_resets_partial_tool_calls_and_retains_failed_attempt_us
                                     "prompt_tokens": 11,
                                     "completion_tokens": 2
                                 })),
+                                response_metadata: Default::default(),
                                 ..LlmResponse::default()
                             }));
                     }
@@ -2741,6 +2770,7 @@ async fn truncated_retry_resets_partial_tool_calls_and_retains_failed_attempt_us
                             response_meta: None,
                         }],
                         terminal_reason: crate::LlmTerminalReason::Stop,
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     })
                 }
@@ -2830,6 +2860,7 @@ async fn idle_queued_work_noops_without_claiming_when_session_lane_is_held() {
                 text: "queued answer".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -2993,6 +3024,7 @@ async fn lease_loss_stops_foreground_turn_before_final_commit() {
                             text: "should not commit".to_string(),
                             response_meta: None,
                         }],
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     })
                 }
@@ -3075,6 +3107,7 @@ async fn final_commit_lease_expiry_surfaces_session_execution_lease_lost() {
                 text: "should not commit".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -3119,6 +3152,7 @@ async fn prepared_checkpoint_lease_expiry_surfaces_session_execution_lease_lost(
                 text: "provider should not be reached".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -3165,6 +3199,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
                     text: "first answer".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -3176,6 +3211,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
                     text: "acknowledged".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -3468,6 +3504,7 @@ async fn session_manager_can_run_child_session_turn() {
                 text: "child session".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     }]);
@@ -3798,6 +3835,7 @@ async fn turn_driver_normalizes_alias_effort_into_outgoing_request() {
                         text: "ok".to_string(),
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..LlmResponse::default()
                 })
             }

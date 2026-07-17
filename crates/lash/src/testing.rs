@@ -293,6 +293,7 @@ finish "registered"
                         text,
                         response_meta: None,
                     }],
+                    response_metadata: Default::default(),
                     ..crate::provider::LlmResponse::default()
                 })
             })

@@ -134,6 +134,7 @@ async fn captured_rlm_iterations() -> Vec<LlmRequest> {
                             text,
                             response_meta: None,
                         }],
+                        response_metadata: Default::default(),
                         ..lash_core::LlmResponse::default()
                     })
                 }

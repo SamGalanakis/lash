@@ -89,6 +89,7 @@ fn stream_accumulator_preserves_reasoning_when_final_response_has_tool_call() {
                 opaque: Some("sig".to_string()),
             }),
         }],
+        response_metadata: Default::default(),
         ..Default::default()
     };
 
@@ -123,6 +124,7 @@ fn stream_accumulator_does_not_duplicate_complete_final_response() {
                 response_meta: None,
             },
         ],
+        response_metadata: Default::default(),
         ..Default::default()
     };
 

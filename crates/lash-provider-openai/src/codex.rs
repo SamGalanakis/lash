@@ -1829,6 +1829,7 @@ impl Provider for CodexProvider {
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", self.responses_url)),
                 execution_evidence: None,
+                response_metadata: Default::default(),
             });
         }
 

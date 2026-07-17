@@ -194,6 +194,13 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         lash_core::SchemaDialect::OPENAI_TOOL_PARAMETERS
     );
 
+    let response_metadata = BTreeMap::from([
+        ("body:/cost".to_string(), serde_json::json!(0.000063)),
+        (
+            "header:x-opper-cost".to_string(),
+            serde_json::json!("0.000008"),
+        ),
+    ]);
     let response = core_llm::LlmResponse {
         full_text: "done".to_string(),
         parts: vec![core_llm::LlmOutputPart::Text {
@@ -219,9 +226,11 @@ fn llm_request_and_response_round_trip_owned_dtos() {
             reasoning_output_tokens: Some(0),
             provider_finish_reason: Some("stop".to_string()),
         }),
+        response_metadata: response_metadata.clone(),
     };
     let remote = RemoteLlmResponse::from_core("request-1", response);
     remote.validate().expect("valid remote response");
+    assert_eq!(remote.provider_metadata.data, response_metadata);
     let core = core_llm::LlmResponse::from(remote);
     assert_eq!(core.full_text, "done");
     assert_eq!(core.terminal_reason, core_llm::LlmTerminalReason::Stop);
@@ -235,6 +244,7 @@ fn llm_request_and_response_round_trip_owned_dtos() {
         core.provider_usage,
         Some(serde_json::json!({"provider": "usage"}))
     );
+    assert_eq!(core.response_metadata, response_metadata);
 }
 
 #[test]

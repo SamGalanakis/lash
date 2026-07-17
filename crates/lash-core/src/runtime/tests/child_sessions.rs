@@ -161,6 +161,7 @@ async fn durable_managed_child_writes_to_its_own_attachment_namespace() {
                     text: "done".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -543,6 +544,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                     reasoning_output_tokens: Some(0),
                     ..Default::default()
                 }),
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -565,6 +567,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                     reasoning_output_tokens: Some(99),
                     ..Default::default()
                 }),
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -751,6 +754,7 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                     text: "cached child".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },
@@ -762,6 +766,7 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                     text: "done".to_string(),
                     response_meta: None,
                 }],
+                response_metadata: Default::default(),
                 ..LlmResponse::default()
             }),
         },

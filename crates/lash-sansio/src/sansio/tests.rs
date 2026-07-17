@@ -678,6 +678,7 @@ fn driver_can_finish_via_checkpoint() {
                 text: "Hello".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     });
@@ -731,6 +732,7 @@ fn checkpoint_after_llm_result_replays_checkpoint_without_second_llm() {
                 text: "Hello".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     });
@@ -770,6 +772,7 @@ fn output_limit_stops_as_incomplete_without_assistant_message() {
             }],
             terminal_reason: LlmTerminalReason::OutputLimit,
             terminal_diagnostic: Some("hit output limit".to_string()),
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     });
@@ -817,6 +820,7 @@ fn context_overflow_response_stops_as_provider_error() {
         result: Ok(LlmResponse {
             terminal_reason: LlmTerminalReason::ContextOverflow,
             terminal_diagnostic: Some("context window exceeded".to_string()),
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     });
@@ -855,6 +859,7 @@ fn checkpoint_messages_resume_prepare_protocol_iteration() {
                 text: "Hello".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     });
@@ -1238,6 +1243,7 @@ fn iteration_execution_environment_sync_can_refresh_prompt_and_tools() {
                 text: "advance".to_string(),
                 response_meta: None,
             }],
+            response_metadata: Default::default(),
             ..LlmResponse::default()
         }),
     });

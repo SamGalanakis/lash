@@ -136,6 +136,7 @@ fn tool_call_response() -> LlmResponse {
             input_json: "{}".to_string(),
             replay: None,
         }],
+        response_metadata: Default::default(),
         ..LlmResponse::default()
     }
 }
@@ -147,6 +148,7 @@ fn text_response(text: &str) -> LlmResponse {
             text: text.to_string(),
             response_meta: None,
         }],
+        response_metadata: Default::default(),
         ..LlmResponse::default()
     }
 }
@@ -584,6 +586,7 @@ async fn claims_settle_for_finish_cancel_error_and_chain_bound() {
                             input_json: "{}".to_string(),
                             replay: None,
                         }],
+                        response_metadata: Default::default(),
                         ..LlmResponse::default()
                     })
                 }

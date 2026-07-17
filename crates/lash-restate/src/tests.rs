@@ -1835,6 +1835,7 @@ async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
                             text: "committed once".to_string(),
                             response_meta: None,
                         }],
+                        response_metadata: Default::default(),
                         ..lash_core::LlmResponse::default()
                     })
                 }

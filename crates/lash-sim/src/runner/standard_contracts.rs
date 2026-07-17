@@ -530,6 +530,7 @@ pub(super) fn llm_response_with_parts(full_text: String, parts: Vec<LlmOutputPar
     LlmResponse {
         full_text,
         parts,
+        response_metadata: Default::default(),
         ..Default::default()
     }
 }
@@ -557,6 +558,7 @@ pub(super) fn tool_call_llm_response(
             input_json: input_json.to_string(),
             replay: None,
         }],
+        response_metadata: Default::default(),
         ..Default::default()
     }
 }

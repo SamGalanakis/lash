@@ -108,6 +108,7 @@ impl GoogleOAuthProvider {
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", url)),
                 execution_evidence: None,
+                response_metadata: Default::default(),
             });
         }
 
@@ -176,6 +177,7 @@ impl GoogleOAuthProvider {
                 request_body: request_body.clone(),
                 http_summary: Some(format!("HTTP POST {url} (stream)")),
                 execution_evidence: None,
+                response_metadata: Default::default(),
             }
         };
         if let Err(error) = stream_result {
@@ -228,6 +230,7 @@ impl GoogleOAuthProvider {
             request_body,
             http_summary: Some(format!("HTTP POST {}", url)),
             execution_evidence: None,
+            response_metadata: Default::default(),
         })
     }
 
