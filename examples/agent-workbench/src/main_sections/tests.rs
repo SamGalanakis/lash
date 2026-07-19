@@ -739,7 +739,7 @@ finish "gap source"
             .await
             .expect("read cancellation gate");
         assert!(matches!(
-            duplicate,
+            duplicate.outcome,
             lash::TurnCancelOutcome::AlreadyRequested(_)
         ));
         let _ = std::fs::remove_dir_all(data_dir);

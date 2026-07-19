@@ -39,7 +39,8 @@ async fn cancel_before_start_duplicate_replay_and_terminal_attach(host: Arc<dyn 
         .request_cancel(request(address.clone(), "request-1"))
         .await
         .expect("request cancellation");
-    let evidence = match first {
+    assert_eq!(first.durability_tier, host.durability_tier());
+    let evidence = match first.outcome {
         TurnCancelOutcome::Requested(evidence) => evidence,
         other => panic!("expected requested, got {other:?}"),
     };
@@ -48,7 +49,7 @@ async fn cancel_before_start_duplicate_replay_and_terminal_attach(host: Arc<dyn 
         .await
         .expect("duplicate cancellation");
     assert!(matches!(
-        duplicate,
+        duplicate.outcome,
         TurnCancelOutcome::AlreadyRequested(TurnCancellationEvidence { ref request_id, .. })
             if request_id == "request-1"
     ));
@@ -127,7 +128,7 @@ async fn completion_seal_vs_cancel_is_first_writer_wins(host: Arc<dyn EffectHost
         active.settle_before_commit(host.as_ref(), false),
         driver.request_cancel(request(address.clone(), "race-request")),
     );
-    let terminal = match (seal.expect("seal"), cancel.expect("cancel")) {
+    let terminal = match (seal.expect("seal"), cancel.expect("cancel").outcome) {
         (None, TurnCancelOutcome::CompletionWonRace) => TurnTerminal::Committed {
             outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
                 text: "completion won".to_string(),
@@ -221,7 +222,8 @@ async fn exact_scope_and_session_sweep_isolation(host: Arc<dyn EffectHost>) {
         driver
             .request_cancel(request(address_a.clone(), "request-a"))
             .await
-            .expect("cancel a"),
+            .expect("cancel a")
+            .outcome,
         TurnCancelOutcome::Requested(_)
     ));
     assert!(
@@ -235,14 +237,16 @@ async fn exact_scope_and_session_sweep_isolation(host: Arc<dyn EffectHost>) {
         driver
             .request_cancel(request(address_b, "request-b"))
             .await
-            .expect("cancel b"),
+            .expect("cancel b")
+            .outcome,
         TurnCancelOutcome::Requested(_)
     ));
     assert!(matches!(
         driver
             .request_cancel(request(address_future, "request-future"))
             .await
-            .expect("cancel future"),
+            .expect("cancel future")
+            .outcome,
         TurnCancelOutcome::Requested(_)
     ));
 }
@@ -265,7 +269,8 @@ async fn session_deletion_revokes_control_promises(host: Arc<dyn EffectHost>) {
         driver
             .request_cancel(request(address, "request-after-delete"))
             .await
-            .expect("revoked outcome"),
+            .expect("revoked outcome")
+            .outcome,
         TurnCancelOutcome::UnknownOrRevoked
     ));
     assert!(

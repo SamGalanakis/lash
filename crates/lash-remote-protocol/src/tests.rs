@@ -243,7 +243,12 @@ fn remote_turn_cancel_envelopes_round_trip() {
         RemoteTurnCancelOutcome::CompletionWonRace,
         RemoteTurnCancelOutcome::UnknownOrRevoked,
     ] {
-        let receipt = RemoteTurnCancelReceipt::new("session", "turn", outcome);
+        let receipt = RemoteTurnCancelReceipt::new(
+            "session",
+            "turn",
+            RemoteTurnControlDurabilityTier::Durable,
+            outcome,
+        );
         receipt.validate().expect("valid cancellation receipt");
         let decoded: RemoteTurnCancelReceipt = serde_json::from_value(
             serde_json::to_value(&receipt).expect("serialize cancellation receipt"),

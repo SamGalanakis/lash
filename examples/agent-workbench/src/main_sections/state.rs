@@ -229,6 +229,7 @@ struct CommandAccepted {
 #[derive(Clone, Debug, Serialize)]
 struct TurnCancelReceipt {
     address: lash::TurnAddress,
+    durability_tier: lash::DurabilityTier,
     outcome: lash::TurnCancelOutcome,
     terminal: Option<lash::TurnTerminal>,
 }

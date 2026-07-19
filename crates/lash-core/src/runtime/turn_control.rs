@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -112,6 +113,19 @@ pub enum TurnCancelOutcome {
     UnknownOrRevoked,
 }
 
+/// Result of addressing one turn-cancellation gate.
+///
+/// [`durability_tier`](Self::durability_tier) describes the keyed-promise
+/// deployment that accepted the request. [`crate::DurabilityTier::Inline`]
+/// receipts are process-local: they do not prove that an owner in another OS
+/// process observed the request. Durable cross-process cancellation requires
+/// a [`crate::DurabilityTier::Durable`] effect-host deployment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnCancelReceipt {
+    pub durability_tier: crate::DurabilityTier,
+    pub outcome: TurnCancelOutcome,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum TurnTerminal {
@@ -135,11 +149,18 @@ pub trait TurnAttach: Send + Sync {
 
 /// Cooperative, exact-turn control compiled onto Lash's keyed-promise seam.
 ///
-/// `Requested` means the durable cancellation request won the gate. Lash asks
-/// the running or replayed owner to unwind and commit a cancelled result; it
-/// cannot guarantee that detached tasks, subprocesses, or non-cooperative
-/// providers have stopped. Engine invocation cancellation remains a host-owned
-/// break-glass action and is never proof of a Lash `Cancelled` result.
+/// `Requested` means the cancellation request won this driver's keyed-promise
+/// gate. On an inline effect host that promise is process-local, so the driver
+/// only reaches owners in the same OS process. A durable effect-host deployment
+/// is required for another process or replayed owner to observe the request.
+/// The returned [`TurnCancelReceipt`] exposes that tier so hosts can gate their
+/// UX rather than treating an inline receipt as cross-process proof.
+///
+/// Lash asks the running or replayed owner to unwind and commit a cancelled
+/// result; it cannot guarantee that detached tasks, subprocesses, or
+/// non-cooperative providers have stopped. Engine invocation cancellation
+/// remains a host-owned break-glass action and is never proof of a Lash
+/// `Cancelled` result.
 ///
 /// Session and turn ids are routing identity, not authorization. Hosts must
 /// enforce authorization before exposing this driver across a trust boundary.
@@ -169,12 +190,13 @@ impl TurnWorkDriver {
     pub async fn request_cancel(
         &self,
         request: TurnCancelRequest,
-    ) -> Result<TurnCancelOutcome, RuntimeError> {
+    ) -> Result<TurnCancelReceipt, RuntimeError> {
         request.validate()?;
+        let durability_tier = self.effect_host.durability_tier();
         let key = cancel_gate_key(self.effect_host.as_ref(), &request.address).await?;
         let evidence = request.evidence();
         let resolution = gate_resolution(TurnGateTerminal::CancelRequested(evidence.clone()))?;
-        match self
+        let outcome = match self
             .effect_host
             .resolve_await_event(&key, resolution)
             .await?
@@ -187,7 +209,11 @@ impl TurnWorkDriver {
                 TurnGateTerminal::CompletionSealed => Ok(TurnCancelOutcome::CompletionWonRace),
             },
             ResolveOutcome::UnknownOrRevoked => Ok(TurnCancelOutcome::UnknownOrRevoked),
-        }
+        }?;
+        Ok(TurnCancelReceipt {
+            durability_tier,
+            outcome,
+        })
     }
 
     pub async fn await_terminal(
@@ -204,6 +230,30 @@ impl TurnWorkDriver {
             .await_await_event(&key, CancellationToken::new(), None)
             .await?;
         decode_terminal(address, resolution)
+    }
+
+    /// Await a terminal publication for at most `timeout`.
+    ///
+    /// Timing out only stops this caller's attachment. It never resolves or
+    /// poisons the turn's first-writer-wins keyed promises.
+    pub async fn await_terminal_with_timeout(
+        &self,
+        address: &TurnAddress,
+        timeout: Duration,
+    ) -> Result<TurnTerminal, RuntimeError> {
+        tokio::time::timeout(timeout, self.await_terminal(address))
+            .await
+            .map_err(|_| {
+                RuntimeError::new(
+                    "turn_terminal_await_timeout",
+                    format!(
+                        "timed out awaiting terminal for turn `{}` in session `{}` after {} ms",
+                        address.turn_id,
+                        address.session_id,
+                        timeout.as_millis()
+                    ),
+                )
+            })?
     }
 }
 
@@ -427,7 +477,8 @@ mod tests {
             .request_cancel(request(address.clone(), "request-1"))
             .await
             .expect("request cancellation");
-        let evidence = match first {
+        assert_eq!(first.durability_tier, crate::DurabilityTier::Inline);
+        let evidence = match first.outcome {
             TurnCancelOutcome::Requested(evidence) => evidence,
             other => panic!("expected requested, got {other:?}"),
         };
@@ -438,7 +489,7 @@ mod tests {
             .await
             .expect("duplicate cancellation");
         assert!(matches!(
-            duplicate,
+            duplicate.outcome,
             TurnCancelOutcome::AlreadyRequested(TurnCancellationEvidence { ref request_id, .. })
                 if request_id == "request-1"
         ));
@@ -488,7 +539,7 @@ mod tests {
             active.settle_before_commit(host.as_ref(), false),
             driver.request_cancel(request(address, "race-request")),
         );
-        match (seal.expect("seal"), cancel.expect("cancel")) {
+        match (seal.expect("seal"), cancel.expect("cancel").outcome) {
             (None, TurnCancelOutcome::CompletionWonRace) => {}
             (Some(evidence), TurnCancelOutcome::Requested(requested)) => {
                 assert_eq!(evidence, requested);
@@ -506,7 +557,7 @@ mod tests {
             .request_cancel(request(address.clone(), "request-before-replay"))
             .await
             .expect("request cancellation");
-        let expected = match requested {
+        let expected = match requested.outcome {
             TurnCancelOutcome::Requested(evidence) => evidence,
             other => panic!("expected requested, got {other:?}"),
         };
@@ -564,21 +615,24 @@ mod tests {
             driver
                 .request_cancel(request(address_a.clone(), "request-a-duplicate"))
                 .await
-                .expect("duplicate a"),
+                .expect("duplicate a")
+                .outcome,
             TurnCancelOutcome::AlreadyRequested(_)
         ));
         assert!(matches!(
             driver
                 .request_cancel(request(address_b, "request-b"))
                 .await
-                .expect("cancel b"),
+                .expect("cancel b")
+                .outcome,
             TurnCancelOutcome::Requested(_)
         ));
         assert!(matches!(
             driver
                 .request_cancel(request(address_future, "request-future"))
                 .await
-                .expect("cancel future"),
+                .expect("cancel future")
+                .outcome,
             TurnCancelOutcome::Requested(_)
         ));
     }
@@ -595,8 +649,50 @@ mod tests {
             driver
                 .request_cancel(request(address, "request-after-delete"))
                 .await
-                .expect("revoked outcome"),
+                .expect("revoked outcome")
+                .outcome,
             TurnCancelOutcome::UnknownOrRevoked
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_attachment_timeout_does_not_poison_later_publication() {
+        let host = Arc::new(InlineEffectHost::default());
+        let driver = TurnWorkDriver::new(host.clone());
+        let address = address("terminal-timeout");
+        let error = driver
+            .await_terminal_with_timeout(&address, Duration::from_millis(1))
+            .await
+            .expect_err("unpublished terminal must time out");
+        assert_eq!(error.code.as_str(), "turn_terminal_await_timeout");
+
+        let active = ActiveTurnControl::new(host.as_ref(), address.clone())
+            .await
+            .expect("active control after timed-out attach");
+        active
+            .settle_before_commit(host.as_ref(), false)
+            .await
+            .expect("seal after timed-out attach");
+        active
+            .publish_terminal(
+                host.as_ref(),
+                &TurnTerminal::Committed {
+                    outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
+                        text: "done".to_string(),
+                    }),
+                    cancellation: None,
+                    session_revision: None,
+                },
+            )
+            .await
+            .expect("publish after timed-out attach");
+        assert!(matches!(
+            driver.await_terminal(&address).await.expect("late attach"),
+            TurnTerminal::Committed {
+                outcome: TurnOutcome::Finished(_),
+                cancellation: None,
+                ..
+            }
         ));
     }
 

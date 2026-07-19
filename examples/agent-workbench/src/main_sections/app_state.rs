@@ -61,7 +61,7 @@ impl AppState {
         for address in active {
             let request_id = format!("workbench-stop-{}", uuid::Uuid::new_v4());
             let driver = self.core.turn_work_driver();
-            let outcome = driver
+            let receipt = driver
                 .request_cancel(lash::TurnCancelRequest::new(
                     address.clone(),
                     request_id.clone(),
@@ -70,7 +70,7 @@ impl AppState {
                 .await
                 .map_err(|err| AppError::internal(err.to_string()))?;
             let terminal = if matches!(
-                outcome,
+                &receipt.outcome,
                 lash::TurnCancelOutcome::Requested(_)
                     | lash::TurnCancelOutcome::AlreadyRequested(_)
             ) {
@@ -92,13 +92,15 @@ impl AppState {
                     "session_id": address.session_id,
                     "turn_id": address.turn_id,
                     "request_id": request_id,
-                    "outcome": format!("{outcome:?}"),
+                    "durability_tier": receipt.durability_tier,
+                    "outcome": format!("{:?}", receipt.outcome),
                     "terminal": terminal,
                 }),
             );
             receipts.push(TurnCancelReceipt {
                 address,
-                outcome,
+                durability_tier: receipt.durability_tier,
+                outcome: receipt.outcome,
                 terminal,
             });
         }

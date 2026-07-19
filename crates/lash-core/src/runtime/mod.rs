@@ -165,8 +165,8 @@ use state::{
     apply_session_head, normalize_session_graph, open_agent_frame_in_state_with_clock,
 };
 pub use turn_control::{
-    TurnAddress, TurnAttach, TurnCancelOutcome, TurnCancelRequest, TurnCancelSource,
-    TurnCancellationEvidence, TurnTerminal, TurnWorkDriver,
+    TurnAddress, TurnAttach, TurnCancelOutcome, TurnCancelReceipt, TurnCancelRequest,
+    TurnCancelSource, TurnCancellationEvidence, TurnTerminal, TurnWorkDriver,
 };
 pub use turn_input_ingress::{
     PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,

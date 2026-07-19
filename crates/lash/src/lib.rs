@@ -43,14 +43,14 @@ pub use crate::turn::{
     message_role, message_text,
 };
 pub use lash_core::{
-    AwaitEventKey, AwaitEventWaitIdentity, ExecutionSummary, ExternalCompletionError, InputItem,
-    LlmCallRecord, ModelLimits, ModelSpec, PendingTurnInput, PendingTurnInputCancelOutcome,
-    PendingTurnInputCancelResult, PendingTurnInputCancelTarget,
+    AwaitEventKey, AwaitEventWaitIdentity, DurabilityTier, ExecutionSummary,
+    ExternalCompletionError, InputItem, LlmCallRecord, ModelLimits, ModelSpec, PendingTurnInput,
+    PendingTurnInputCancelOutcome, PendingTurnInputCancelResult, PendingTurnInputCancelTarget,
     PendingTurnInputSuffixCancelOutcome, PluginStack, Resolution, ResolveOutcome, SessionCommand,
     SessionCommandReceipt, SessionCreateRequest, SessionSpec, SessionStartPoint, TurnActivity,
     TurnActivityId, TurnActivitySink, TurnAddress, TurnAttach, TurnCancelOutcome,
-    TurnCancelRequest, TurnCancelSource, TurnCancellationEvidence, TurnCause, TurnEvent,
-    TurnFinish, TurnInput, TurnOutcome, TurnStop, TurnTerminal, TurnWorkDriver,
+    TurnCancelReceipt, TurnCancelRequest, TurnCancelSource, TurnCancellationEvidence, TurnCause,
+    TurnEvent, TurnFinish, TurnInput, TurnOutcome, TurnStop, TurnTerminal, TurnWorkDriver,
 };
 /// Cooperative cancellation handle accepted by
 /// [`TurnBuilder::cancel`](crate::TurnBuilder::cancel); re-exported so
@@ -323,6 +323,7 @@ pub mod remote {
         pub use lash_remote_protocol::turn_control::{
             RemoteTurnCancelOutcome, RemoteTurnCancelReceipt, RemoteTurnCancelRequest,
             RemoteTurnCancelSource, RemoteTurnCancellationEvidence,
+            RemoteTurnControlDurabilityTier,
         };
     }
 

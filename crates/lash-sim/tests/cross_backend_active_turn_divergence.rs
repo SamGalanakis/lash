@@ -372,7 +372,10 @@ async fn drive_first_party_cancel_before_start(
         ))
         .await
         .expect("cancel before start");
-    assert!(matches!(first, lash::TurnCancelOutcome::Requested(_)));
+    assert!(matches!(
+        first.outcome,
+        lash::TurnCancelOutcome::Requested(_)
+    ));
 
     let duplicate = driver
         .request_cancel(lash::TurnCancelRequest::new(
@@ -383,7 +386,7 @@ async fn drive_first_party_cancel_before_start(
         .await
         .expect("duplicate cancel");
     let duplicate_preserved_original = matches!(
-        duplicate,
+        duplicate.outcome,
         lash::TurnCancelOutcome::AlreadyRequested(lash::TurnCancellationEvidence {
             ref request_id,
             ..
@@ -454,7 +457,10 @@ async fn sqlite_reopen_preserves_cancelled_turn_commit_and_allows_next_turn() {
         ))
         .await
         .expect("request cancellation before SQLite turn");
-    assert!(matches!(outcome, lash::TurnCancelOutcome::Requested(_)));
+    assert!(matches!(
+        outcome.outcome,
+        lash::TurnCancelOutcome::Requested(_)
+    ));
     let first_session = first_core
         .session(session_id)
         .open_fresh()

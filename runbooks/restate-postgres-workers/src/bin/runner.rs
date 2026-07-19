@@ -1197,7 +1197,11 @@ async fn drive_turn_control_scenarios(
         .request_cancel(cancel_request(&before, before_evidence_id))
         .await
         .context("request cancellation before turn start")?;
-    assert_requested(&before_outcome, before_evidence_id)?;
+    anyhow::ensure!(
+        before_outcome.durability_tier == lash::DurabilityTier::Durable,
+        "before-start cancel used non-durable control: {before_outcome:?}"
+    );
+    assert_requested(&before_outcome.outcome, before_evidence_id)?;
     submit_workflow(ingress_url, &before).await?;
     let before_terminal = driver
         .await_terminal(&turn_address(&before))
@@ -1219,7 +1223,11 @@ async fn drive_turn_control_scenarios(
         .request_cancel(cancel_request(&cross, cross_evidence_id))
         .await
         .context("request cross-process cancellation")?;
-    assert_requested(&cross_outcome, cross_evidence_id)?;
+    anyhow::ensure!(
+        cross_outcome.durability_tier == lash::DurabilityTier::Durable,
+        "cross-process cancel used non-durable control: {cross_outcome:?}"
+    );
+    assert_requested(&cross_outcome.outcome, cross_evidence_id)?;
     let cross_terminal = driver
         .await_terminal(&turn_address(&cross))
         .await
@@ -1250,7 +1258,7 @@ async fn drive_turn_control_scenarios(
         .await_terminal(&turn_address(&race))
         .await
         .context("attach to completion/cancel race terminal")?;
-    match race_outcome {
+    match race_outcome.outcome {
         TurnCancelOutcome::Requested(_) | TurnCancelOutcome::AlreadyRequested(_) => {
             assert_cancelled_terminal(&race_terminal, race_evidence_id)?;
         }
@@ -1271,7 +1279,7 @@ async fn drive_turn_control_scenarios(
         .request_cancel(cancel_request(&recovery, recovery_evidence_id))
         .await
         .context("request cancellation during owner recovery")?;
-    assert_requested(&recovery_outcome, recovery_evidence_id)?;
+    assert_requested(&recovery_outcome.outcome, recovery_evidence_id)?;
     let recovery_terminal = driver
         .await_terminal(&turn_address(&recovery))
         .await
@@ -1528,7 +1536,7 @@ async fn drive_durable_wait_index_scenarios(
         .await
         .context("create turn control gate before revoke")?;
     anyhow::ensure!(
-        matches!(initial, TurnCancelOutcome::Requested(_)),
+        matches!(initial.outcome, TurnCancelOutcome::Requested(_)),
         "initial turn cancellation was not accepted: {initial:?}"
     );
     host.revoke_await_events_for_session(DEFAULT_SESSION_ID)
@@ -1543,7 +1551,7 @@ async fn drive_durable_wait_index_scenarios(
         .await
         .context("request cancellation after revoke")?;
     anyhow::ensure!(
-        matches!(revoked, TurnCancelOutcome::UnknownOrRevoked),
+        matches!(revoked.outcome, TurnCancelOutcome::UnknownOrRevoked),
         "revoked turn control gate remained addressable: {revoked:?}"
     );
     assert_no_problem_lash_restate_invocations(admin_url).await?;

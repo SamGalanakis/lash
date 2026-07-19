@@ -531,16 +531,19 @@ impl LashSession {
     /// Request cooperative cancellation of exactly one turn in this session.
     ///
     /// The request is compiled onto the deployment's keyed-promise control
-    /// seam, so another process or a replayed owner can observe it. Detached
-    /// effects are not guaranteed to stop. `turn_id` is routing identity, not
-    /// authorization; hosts must authorize callers before invoking this API.
+    /// seam. An inline effect host is process-local; another process or a
+    /// replayed owner can observe the request only with a durable engine
+    /// deployment. The returned receipt exposes that durability tier so hosts
+    /// can gate their UX. Detached effects are not guaranteed to stop.
+    /// `turn_id` is routing identity, not authorization; hosts must authorize
+    /// callers before invoking this API.
     pub async fn request_turn_cancel(
         &self,
         turn_id: &str,
         request_id: impl Into<String>,
         source: lash_core::TurnCancelSource,
         reason: Option<String>,
-    ) -> Result<lash_core::TurnCancelOutcome> {
+    ) -> Result<lash_core::TurnCancelReceipt> {
         let mut request = lash_core::TurnCancelRequest::new(
             lash_core::TurnAddress::new(self.session_id(), turn_id),
             request_id,

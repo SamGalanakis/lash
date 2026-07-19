@@ -13,8 +13,8 @@ use futures_util::StreamExt;
 use lash::observe::{RemoteSessionObservationStreamItem, SessionCursor};
 use lash::rlm::RlmTurnBuilderExt as _;
 use lash::{
-    LashSession, TurnActivity, TurnActivitySink, TurnCancelOutcome, TurnCancelRequest,
-    TurnCancelSource, TurnEvent, TurnInput, TurnOutput,
+    DurabilityTier, LashSession, TurnActivity, TurnActivitySink, TurnCancelOutcome,
+    TurnCancelRequest, TurnCancelSource, TurnEvent, TurnInput, TurnOutput,
 };
 use lash_remote_protocol::{
     RemoteLiveReplayGap, RemoteSessionCursor, RemoteSessionObservation,
@@ -68,6 +68,7 @@ pub(crate) struct CancelTurnRequest {
 pub(crate) struct CancelTurnResponse {
     session_id: String,
     turn_id: String,
+    durability_tier: DurabilityTier,
     outcome: TurnCancelOutcome,
 }
 
@@ -367,7 +368,7 @@ pub(crate) async fn cancel_turn(
         TurnCancelSource::UserInterrupt,
     );
     cancel.reason = request.reason;
-    let outcome = state
+    let receipt = state
         .turn_work_driver()
         .request_cancel(cancel)
         .await
@@ -375,7 +376,8 @@ pub(crate) async fn cancel_turn(
     Ok(Json(CancelTurnResponse {
         session_id: chat_id,
         turn_id,
-        outcome,
+        durability_tier: receipt.durability_tier,
+        outcome: receipt.outcome,
     }))
 }
 
