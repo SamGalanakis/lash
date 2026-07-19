@@ -37,7 +37,7 @@ class ReleaseVersionTest(unittest.TestCase):
                 root / "Cargo.toml",
                 """
                 [workspace]
-                members = ["crates/public-crate", "e2e/private-crate"]
+                members = ["crates/public-crate", "runbooks/private-crate"]
                 resolver = "3"
 
                 [workspace.package]
@@ -59,7 +59,7 @@ class ReleaseVersionTest(unittest.TestCase):
             )
             write(root / "crates/public-crate/src/lib.rs", "")
             write(
-                root / "e2e/private-crate/Cargo.toml",
+                root / "runbooks/private-crate/Cargo.toml",
                 """
                 [package]
                 name = "private-crate"
@@ -71,7 +71,7 @@ class ReleaseVersionTest(unittest.TestCase):
                 public-crate = { workspace = true }
                 """,
             )
-            write(root / "e2e/private-crate/src/lib.rs", "")
+            write(root / "runbooks/private-crate/src/lib.rs", "")
             for doc_path in [
                 root / "README.md",
                 root / "docs/index.html",

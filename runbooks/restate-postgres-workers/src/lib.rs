@@ -87,7 +87,7 @@ pub fn s3_store_from_env() -> Result<S3AttachmentStore> {
         endpoint_url: Some(env("MINIO_ENDPOINT", "http://minio:9000")),
         region: env("MINIO_REGION", "us-east-1"),
         bucket: env("MINIO_BUCKET", "lash-attachments"),
-        prefix: Some(env("MINIO_PREFIX", "e2e/restate-postgres-workers")),
+        prefix: Some(env("MINIO_PREFIX", "runbooks/restate-postgres-workers")),
         access_key_id: Some(env("MINIO_ACCESS_KEY", "minioadmin")),
         secret_access_key: Some(env("MINIO_SECRET_KEY", "minioadmin")),
         path_style: true,

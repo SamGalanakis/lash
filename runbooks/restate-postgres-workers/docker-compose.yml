@@ -80,7 +80,7 @@ services:
       MINIO_REGION: us-east-1
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
-      MINIO_PREFIX: e2e/restate-postgres-workers
+      MINIO_PREFIX: runbooks/restate-postgres-workers
       MOCK_PROVIDER_BASE_URL: http://mock-provider:18001
       LASH_E2E_TRACE_DIR: /e2e-traces
     volumes:
@@ -110,7 +110,7 @@ services:
       MINIO_REGION: us-east-1
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
-      MINIO_PREFIX: e2e/restate-postgres-workers
+      MINIO_PREFIX: runbooks/restate-postgres-workers
       MOCK_PROVIDER_BASE_URL: http://mock-provider:18001
       LASH_E2E_TRACE_DIR: /e2e-traces
     volumes:
@@ -150,7 +150,7 @@ services:
       MINIO_REGION: us-east-1
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
-      MINIO_PREFIX: e2e/restate-postgres-workers
+      MINIO_PREFIX: runbooks/restate-postgres-workers
       MOCK_PROVIDER_BASE_URL: http://mock-provider:18001
       LASH_E2E_TRACE_DIR: /e2e-traces
     volumes:
