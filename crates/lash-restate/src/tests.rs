@@ -1143,6 +1143,7 @@ struct ReplayableRecordingContext {
     runs: Mutex<Vec<String>>,
     records: Mutex<HashMap<String, Vec<u8>>>,
     replaying: AtomicBool,
+    events: Arc<RecordingContext>,
 }
 
 impl ReplayableRecordingContext {
@@ -1393,13 +1394,13 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
 
     fn await_event<'run>(
         &'run self,
-        _request: RestateDurableWaitAwaitRequest,
-        _cancellation: tokio_util::sync::CancellationToken,
+        request: RestateDurableWaitAwaitRequest,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
-        Box::pin(async { Err(TerminalError::new("event await is unsupported")) })
+        self.events.await_event(request, cancellation)
     }
 
     fn await_process_terminal<'run>(
@@ -1414,23 +1415,23 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
 
     fn resolve_event<'run>(
         &'run self,
-        _request: RestateDurableWaitResolveRequest,
+        request: RestateDurableWaitResolveRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResolveOutcome, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
-        Box::pin(async { Err(TerminalError::new("event resolve is unsupported")) })
+        self.events.resolve_event(request)
     }
 
     fn update_session_waits<'run>(
         &'run self,
-        _session_id: String,
-        _revoke: bool,
+        session_id: String,
+        revoke: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
-        Box::pin(async { Err(TerminalError::new("session wait update is unsupported")) })
+        self.events.update_session_waits(session_id, revoke)
     }
 }
 
