@@ -901,6 +901,11 @@ fn process_incarnation_id() -> &'static str {
         .as_str()
 }
 
+/// Select a host id that must be unique to this process's PID namespace among
+/// all workbench instances sharing the session store. Container deployments
+/// should set `AGENT_WORKBENCH_LEASE_HOST_ID` to a pod/container identity when
+/// `/etc/machine-id` may be image-baked; hostname is the next fallback when no
+/// machine id is present.
 fn local_host_id() -> String {
     std::env::var("AGENT_WORKBENCH_LEASE_HOST_ID")
         .ok()

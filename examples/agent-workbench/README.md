@@ -79,6 +79,10 @@ Configuration is read from `.env` or the process environment:
 - `AGENT_WORKBENCH_TOKIO_STACK_BYTES`: Tokio worker thread stack for the
   workbench process, default `8388608`. Override only when diagnosing stack
   regressions or comparing runtime stack-size lanes.
+- `AGENT_WORKBENCH_LEASE_HOST_ID`: identity of this workbench's PID namespace
+  among every instance sharing the session store. Set it to a unique pod or
+  container id when `/etc/machine-id` may be baked into the image; otherwise
+  the workbench uses machine id, then hostname as a fallback.
 - `OPENROUTER_MODEL`: default `anthropic/claude-sonnet-4.6`.
 - `OPENROUTER_MODEL_VARIANT`: default `high`; choose `provider default` in
   the UI to send no variant for models without configurable thinking.

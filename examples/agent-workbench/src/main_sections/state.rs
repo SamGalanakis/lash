@@ -212,6 +212,8 @@ struct TurnCancelReceipt {
     durability_tier: lash::DurabilityTier,
     outcome: lash::TurnCancelOutcome,
     terminal: Option<lash::TurnTerminal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_error: Option<lash::runtime::RuntimeError>,
 }
 
 #[derive(Clone, Debug, Serialize)]

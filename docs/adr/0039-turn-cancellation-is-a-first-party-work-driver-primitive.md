@@ -41,6 +41,10 @@ Turn cancellation has three operational layers:
    destruction is not cooperative evidence and must never be projected as Lash `Cancelled`; the
    authoritative result is unknown unless a live/replayed owner commits one.
 
+For turns blocked in local composite execution, graceful cancellation cannot interrupt that work;
+the demonstrated break-glass is an admin `KILL`, run last because a killed handler cannot release
+the shared-session lease.
+
 The keyed-promise implementation uses the existing `AwaitEventResolver` operations and engine
 journal. Reserved `TurnCancelGate` and `TurnTerminal` identities are indexed as control promises:
 ordinary durable-wait cancellation does not sweep them, while session deletion revokes them. This
