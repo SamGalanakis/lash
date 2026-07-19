@@ -10,6 +10,7 @@ async fn app_state(State(state): State<AppState>) -> Json<StateSnapshot> {
     Json(StateSnapshot {
         settings: state.settings(),
         messages: state.messages_snapshot(),
+        active_turns: state.active_turns.for_session(&state.current_session_id()),
     })
 }
 
@@ -284,15 +285,16 @@ async fn inject_message(
     Ok(Json(CommandAccepted { accepted: true }))
 }
 
-async fn cancel_turn(State(state): State<AppState>) -> Result<Json<CommandAccepted>, AppError> {
+async fn cancel_turn(State(state): State<AppState>) -> Result<Json<TurnCancelResponse>, AppError> {
     let session_id = state.current_session_id();
-    let cancelled = state.cancel_turns_for_session(&session_id).await?;
+    let cancellations = state.cancel_turns_for_session(&session_id).await?;
     state.trace(
         "api.turn.cancel",
-        json!({ "session_id": session_id, "cancelled": cancelled }),
+        json!({ "session_id": session_id, "cancellations": cancellations }),
     );
-    Ok(Json(CommandAccepted {
-        accepted: cancelled > 0,
+    Ok(Json(TurnCancelResponse {
+        accepted: !cancellations.is_empty(),
+        cancellations,
     }))
 }
 
@@ -341,6 +343,7 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
     Ok(Json(StateSnapshot {
         settings: state.settings(),
         messages: Vec::new(),
+        active_turns: Vec::new(),
     }))
 }
 

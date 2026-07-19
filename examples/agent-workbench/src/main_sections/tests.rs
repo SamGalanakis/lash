@@ -170,14 +170,32 @@ mod tests {
     fn reset_session_rotation_replaces_workbench_session_id() {
         let ids = WorkbenchSessionIds::fresh();
         let original = ids.current();
-
         let (old, new) = ids.rotate();
-
         assert_eq!(old, original);
         assert_eq!(ids.current(), new);
         assert_ne!(old, new);
         assert!(old.starts_with(SESSION_ID_PREFIX));
         assert!(new.starts_with(SESSION_ID_PREFIX));
+    }
+
+    #[test]
+    fn turn_routing_state_survives_web_process_reconstruction() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_path = temp.path().join("session-id");
+        let turns_path = temp.path().join("active-turns.json");
+        let session_ids = WorkbenchSessionIds::persistent(&session_path).expect("session ids");
+        let session_id = session_ids.current();
+        let turns = ActiveTurns::persistent(&turns_path).expect("active turns");
+        turns.insert(&session_id, "durable-stop-turn");
+        drop(session_ids);
+        drop(turns);
+        let recovered_ids = WorkbenchSessionIds::persistent(session_path).expect("recover ids");
+        let recovered_turns = ActiveTurns::persistent(turns_path).expect("recover turns");
+        assert_eq!(recovered_ids.current(), session_id);
+        assert_eq!(
+            recovered_turns.for_session(&session_id),
+            vec![lash::TurnAddress::new(session_id, "durable-stop-turn")]
+        );
     }
 
     #[test]
@@ -666,12 +684,48 @@ finish "gap source"
         };
         let session_id = state.current_session_id();
         state.track_turn(&session_id, "turn-cancel");
-
-        let Json(accepted) = cancel_turn(State(state.clone()))
+        state
+            .core
+            .turn_work_driver()
+            .request_cancel(lash::TurnCancelRequest::new(
+                lash::TurnAddress::new(&session_id, "turn-cancel"),
+                "original-stop",
+                lash::TurnCancelSource::UserInterrupt,
+            ))
             .await
-            .expect("cancel turn");
+            .expect("seed cancellation request");
+        let session = state
+            .core
+            .session(&session_id)
+            .open()
+            .await
+            .expect("open cancelled session");
+        let (cancelled, turn) = tokio::join!(
+            cancel_turn(State(state.clone())),
+            session
+                .turn(lash::TurnInput::text("already cancelled"))
+                .turn_id("turn-cancel")
+                .run(),
+        );
+        let Json(accepted) = cancelled.expect("cancel turn");
+        let turn = turn.expect("cancelled turn commits");
 
         assert!(accepted.accepted);
+        assert!(matches!(
+            turn.result.outcome,
+            lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
+        ));
+        assert!(matches!(
+            accepted.cancellations.as_slice(),
+            [TurnCancelReceipt {
+                outcome: lash::TurnCancelOutcome::AlreadyRequested(_),
+                terminal: Some(lash::TurnTerminal::Committed {
+                    cancellation: Some(lash::TurnCancellationEvidence { request_id, .. }),
+                    ..
+                }),
+                ..
+            }] if request_id == "original-stop"
+        ));
         assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
         let duplicate = state
             .core
@@ -697,8 +751,6 @@ finish "gap source"
         });
     }
 
-    // Names other than the prompt's illustrative work/personal must resolve too:
-    // an account called "test" should yield a usable `inbox.test` authority.
     async fn inbox_authority_resolves_for_any_account_name_inner() {
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-inbox-{}", uuid::Uuid::new_v4()));

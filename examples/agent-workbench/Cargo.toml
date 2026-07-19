@@ -43,6 +43,7 @@ uuid = { workspace = true, features = ["v4"] }
 lash-lashlang-runtime = { workspace = true }
 lash = { workspace = true, features = ["rlm", "testing"] }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
+tempfile = { workspace = true }
 
 [features]
 default = []

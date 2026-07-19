@@ -48,6 +48,7 @@ impl ModelSelection {
 struct StateSnapshot {
     settings: Settings,
     messages: Vec<ChatMessage>,
+    active_turns: Vec<lash::TurnAddress>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -133,21 +134,38 @@ enum StreamItem {
 #[derive(Clone, Default)]
 struct ActiveTurns {
     inner: Arc<Mutex<BTreeSet<(String, String)>>>,
+    path: Option<Arc<PathBuf>>,
 }
 
 impl ActiveTurns {
+    fn persistent(path: PathBuf) -> AnyhowResult<Self> {
+        let turns = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("decode active turns `{}`", path.display()))?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read active turns `{}`", path.display()));
+            }
+        };
+        let active = Self {
+            inner: Arc::new(Mutex::new(turns)),
+            path: Some(Arc::new(path)),
+        };
+        active.persist();
+        Ok(active)
+    }
+
     fn insert(&self, session_id: impl Into<String>, turn_id: impl Into<String>) {
-        self.inner
-            .lock()
-            .expect("active turn lock")
-            .insert((session_id.into(), turn_id.into()));
+        let mut active = self.inner.lock().expect("active turn lock");
+        active.insert((session_id.into(), turn_id.into()));
+        self.persist_snapshot(&active);
     }
 
     fn remove(&self, session_id: &str, turn_id: &str) {
-        self.inner
-            .lock()
-            .expect("active turn lock")
-            .remove(&(session_id.to_string(), turn_id.to_string()));
+        let mut active = self.inner.lock().expect("active turn lock");
+        active.remove(&(session_id.to_string(), turn_id.to_string()));
+        self.persist_snapshot(&active);
     }
 
     fn guard(&self, session_id: &str, turn_id: &str) -> ActiveTurnGuard {
@@ -167,6 +185,28 @@ impl ActiveTurns {
             .map(|(session_id, turn_id)| lash::TurnAddress::new(session_id, turn_id))
             .collect()
     }
+
+    fn persist(&self) {
+        let active = self.inner.lock().expect("active turn lock");
+        self.persist_snapshot(&active);
+    }
+
+    fn persist_snapshot(&self, active: &BTreeSet<(String, String)>) {
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        let bytes = serde_json::to_vec(active).expect("serialize active turns");
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes)
+            .unwrap_or_else(|err| panic!("write active turns `{}`: {err}", temporary.display()));
+        std::fs::rename(&temporary, path).unwrap_or_else(|err| {
+            panic!(
+                "replace active turns `{}` from `{}`: {err}",
+                path.display(),
+                temporary.display()
+            )
+        });
+    }
 }
 
 struct ActiveTurnGuard {
@@ -184,6 +224,19 @@ impl Drop for ActiveTurnGuard {
 #[derive(Debug, Serialize)]
 struct CommandAccepted {
     accepted: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TurnCancelReceipt {
+    address: lash::TurnAddress,
+    outcome: lash::TurnCancelOutcome,
+    terminal: Option<lash::TurnTerminal>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TurnCancelResponse {
+    accepted: bool,
+    cancellations: Vec<TurnCancelReceipt>,
 }
 
 /// Best-effort [`ProcessEventSink`](lash::process::ProcessEventSink) that hands

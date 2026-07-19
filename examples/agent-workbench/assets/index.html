@@ -2585,7 +2585,15 @@
     function stopTurn() {
       if (controller) controller.abort();
       fetch("/api/turn/cancel", { method: "POST" })
-        .catch(() => {})
+        .then(async response => {
+          if (!response.ok) throw new Error("stop request failed (" + response.status + ")");
+          const receipt = await response.json();
+          const committed = (receipt.cancellations || []).find(item => item.terminal?.status === "committed");
+          const evidence = committed?.terminal?.cancellation;
+          if (evidence) renderNote("turn stopped · request " + evidence.request_id);
+          else if (!receipt.accepted) renderNote("turn already finished");
+        })
+        .catch(error => renderError("couldn't stop the turn: " + (error.message || error)))
         .finally(() => {
           if (!resetInFlight) setBusy(false, "ready");
         });
@@ -3039,6 +3047,7 @@
       webState.textContent = state.settings.web_configured ? "ready" : "not configured";
       sessionId.textContent = state.settings.session_id;
       for (const message of state.messages) renderMessage(message);
+      if ((state.active_turns || []).length) setBusy(true, "turn running · restored");
     }
 
     async function fetchStateSnapshot() {

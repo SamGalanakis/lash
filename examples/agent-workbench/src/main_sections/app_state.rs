@@ -52,28 +52,40 @@ impl AppState {
 
     /// Fan out exact-address cooperative cancellation to the active turns the
     /// UI submitted for `session_id`.
-    async fn cancel_turns_for_session(&self, session_id: &str) -> Result<usize, AppError> {
+    async fn cancel_turns_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TurnCancelReceipt>, AppError> {
         let active = self.active_turns.for_session(session_id);
-        let mut cancelled = 0;
+        let mut receipts = Vec::with_capacity(active.len());
         for address in active {
             let request_id = format!("workbench-stop-{}", uuid::Uuid::new_v4());
-            let outcome = self
-                .core
-                .turn_work_driver()
+            let driver = self.core.turn_work_driver();
+            let outcome = driver
                 .request_cancel(lash::TurnCancelRequest::new(
                     address.clone(),
                     request_id.clone(),
                     lash::TurnCancelSource::UserInterrupt,
-                ))
+                ).with_reason("workbench Stop control"))
                 .await
                 .map_err(|err| AppError::internal(err.to_string()))?;
-            if matches!(
+            let terminal = if matches!(
                 outcome,
                 lash::TurnCancelOutcome::Requested(_)
                     | lash::TurnCancelOutcome::AlreadyRequested(_)
             ) {
-                cancelled += 1;
-            }
+                let terminal = driver
+                    .await_terminal(&address)
+                    .await
+                    .map_err(|err| AppError::internal(err.to_string()))?;
+                self.active_turns
+                    .remove(&address.session_id, &address.turn_id);
+                Some(terminal)
+            } else {
+                self.active_turns
+                    .remove(&address.session_id, &address.turn_id);
+                None
+            };
             self.trace(
                 "turn.cancel_requested",
                 json!({
@@ -81,13 +93,19 @@ impl AppState {
                     "turn_id": address.turn_id,
                     "request_id": request_id,
                     "outcome": format!("{outcome:?}"),
+                    "terminal": terminal,
                 }),
             );
+            receipts.push(TurnCancelReceipt {
+                address,
+                outcome,
+                terminal,
+            });
         }
-        if cancelled > 0 {
+        if !receipts.is_empty() {
             self.publish(StreamItem::Done);
         }
-        Ok(cancelled)
+        Ok(receipts)
     }
 
     fn push_message(&self, role: impl Into<String>, text: impl Into<String>) -> ChatMessage {
@@ -157,13 +175,33 @@ fn trace_work_item(item: &WorkItem) -> Value {
 #[derive(Clone, Debug)]
 struct WorkbenchSessionIds {
     current: Arc<Mutex<String>>,
+    path: Option<Arc<PathBuf>>,
 }
 
 impl WorkbenchSessionIds {
     fn fresh() -> Self {
         Self {
             current: Arc::new(Mutex::new(new_session_id())),
+            path: None,
         }
+    }
+
+    fn persistent(path: PathBuf) -> AnyhowResult<Self> {
+        let current = match std::fs::read_to_string(&path) {
+            Ok(session_id) if !session_id.trim().is_empty() => session_id,
+            Ok(_) => new_session_id(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => new_session_id(),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read workbench session id `{}`", path.display()));
+            }
+        };
+        let ids = Self {
+            current: Arc::new(Mutex::new(current)),
+            path: Some(Arc::new(path)),
+        };
+        ids.persist();
+        Ok(ids)
     }
 
     fn current(&self) -> String {
@@ -175,7 +213,26 @@ impl WorkbenchSessionIds {
         let old = current.clone();
         let new = new_session_id();
         *current = new.clone();
+        drop(current);
+        self.persist();
         (old, new)
+    }
+
+    fn persist(&self) {
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        let temporary = path.with_extension("tmp");
+        let current = self.current();
+        std::fs::write(&temporary, current)
+            .unwrap_or_else(|err| panic!("write session id `{}`: {err}", temporary.display()));
+        std::fs::rename(&temporary, path).unwrap_or_else(|err| {
+            panic!(
+                "replace session id `{}` from `{}`: {err}",
+                path.display(),
+                temporary.display()
+            )
+        });
     }
 }
 
