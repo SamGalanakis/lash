@@ -138,6 +138,8 @@ agent-workbench-restate-e2e:
   AGENT_WORKBENCH_E2E_ENDPOINT_URL="$endpoint_url" \
   cargo test -p agent-workbench \
     live_restate_ -- --ignored --nocapture --test-threads=1
+  cargo test -p lash-core \
+    turn_input_claims_supersede_across_session_lease_generations
 
 restate-postgres-workers-e2e:
   bash "{{repo}}/scripts/restate-postgres-workers-e2e.sh"

@@ -12,6 +12,187 @@ fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable() {
     });
 }
 
+#[test]
+#[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
+fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle() {
+    run_async_test_on_stack_budget_multi_thread("workbench-turn-ingress-e2e", 4, || {
+        live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_inner()
+    });
+}
+
+async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_inner() {
+    let ingress_url = std::env::var("RESTATE_INGRESS_URL")
+        .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");
+    let admin_url = std::env::var("RESTATE_ADMIN_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
+    let endpoint_bind: SocketAddr = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:19081".to_string())
+        .parse()
+        .expect("valid workbench E2E endpoint bind");
+    let endpoint_url = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_URL")
+        .unwrap_or_else(|_| format!("http://{endpoint_bind}"));
+    let data_dir = std::env::temp_dir().join(format!(
+        "agent-workbench-turn-ingress-e2e-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&data_dir).expect("create turn ingress E2E data dir");
+
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requests_for_provider = Arc::clone(&requests);
+    let (provider_call_tx, mut provider_call_rx) = mpsc::unbounded_channel::<usize>();
+    let response_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let response_index_for_provider = Arc::clone(&response_index);
+    let provider = lash::testing::TestProvider::builder()
+        .kind("workbench-turn-ingress-e2e")
+        .complete(move |request| {
+            let requests = Arc::clone(&requests_for_provider);
+            let provider_call_tx = provider_call_tx.clone();
+            let response_index = Arc::clone(&response_index_for_provider);
+            async move {
+                let serialized = serde_json::to_string(&request).expect("serialize provider request");
+                requests
+                    .lock()
+                    .expect("provider request lock")
+                    .push(serialized);
+                let call_index = response_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = provider_call_tx.send(call_index);
+                Ok(match call_index {
+                    0 => text_response("<lashlang>\nsleep for \"2s\"\n</lashlang>"),
+                    1 => text_response("<lashlang>\nfinish \"current turn settled\"\n</lashlang>"),
+                    2 => text_response("<lashlang>\nfinish \"queued turn settled\"\n</lashlang>"),
+                    other => panic!("unexpected provider call {other}"),
+                })
+            }
+        })
+        .build()
+        .into_handle();
+    let harness = live_workbench_restate_state_with_provider(
+        &data_dir,
+        ingress_url,
+        provider,
+        WorkbenchSessionIds::fresh(),
+        ActiveTurns::default(),
+    )
+    .await;
+    restate::spawn_restate_endpoint(
+        endpoint_bind,
+        harness.state.clone(),
+        harness.process_deployment,
+        harness.process_worker,
+    );
+    wait_for_endpoint_socket(endpoint_bind).await;
+    register_restate_deployment(&admin_url, &endpoint_url).await;
+
+    let turn_invocation_id = run_workbench_turn_via_restate(
+        &harness.state,
+        "initial turn input_ingress_gate=true",
+    )
+    .await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(20), provider_call_rx.recv())
+            .await
+            .expect("first provider call timeout"),
+        Some(0)
+    );
+
+    let Json(injected) = enqueue_turn_input(
+        State(harness.state.clone()),
+        Json(TurnInputRequest {
+            text: "active injection marker".to_string(),
+            ingress: TurnInputIngressRequest::ActiveTurn,
+        }),
+    )
+    .await
+    .expect("enqueue active-turn input through workbench API");
+    let Json(queued) = enqueue_turn_input(
+        State(harness.state.clone()),
+        Json(TurnInputRequest {
+            text: "queued next marker".to_string(),
+            ingress: TurnInputIngressRequest::NextTurn,
+        }),
+    )
+    .await
+    .expect("enqueue next-turn input through workbench API");
+    assert!(matches!(
+        injected.ingress,
+        lash::persistence::TurnInputIngress::ActiveTurn { .. }
+    ));
+    assert!(matches!(
+        queued.ingress,
+        lash::persistence::TurnInputIngress::NextTurn
+    ));
+
+    for expected in [1, 2] {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(30), provider_call_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("provider call {expected} timeout")),
+            Some(expected)
+        );
+    }
+    wait_for_restate_invocation_success(
+        &harness.state,
+        &turn_invocation_id,
+        Duration::from_secs(30),
+    )
+    .await;
+    wait_for_workbench_message(
+        &harness.state,
+        "queued turn settled",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let captured = requests.lock().expect("provider request lock").clone();
+    assert_eq!(captured.len(), 3, "unexpected provider request sequence");
+    assert_eq!(
+        captured
+            .iter()
+            .map(|request| request.matches("active injection marker").count())
+            .sum::<usize>(),
+        1,
+        "active-turn injection must reach provider context exactly once: {captured:#?}"
+    );
+    assert!(!captured[0].contains("queued next marker"));
+    assert!(!captured[1].contains("queued next marker"));
+    assert_eq!(captured[2].matches("queued next marker").count(), 1);
+
+    let session = harness
+        .state
+        .core
+        .session(harness.state.current_session_id())
+        .open()
+        .await
+        .expect("open settled ingress session");
+    let read_view = session.read_view();
+    assert_eq!(read_view.turn_index(), 2, "queued input must commit its own turn");
+    let committed = read_view
+        .messages()
+        .iter()
+        .map(lash::message_text)
+        .collect::<Vec<_>>();
+    assert!(
+        committed.iter().any(|text| text.contains("queued next marker")),
+        "queued input missing from committed transcript: {committed:#?}"
+    );
+    assert!(
+        committed
+            .iter()
+            .all(|text| !text.contains("active injection marker")),
+        "active injection must remain transient: {committed:#?}"
+    );
+    assert!(
+        session
+            .pending_turn_inputs()
+            .await
+            .expect("pending inputs after settle")
+            .is_empty(),
+        "both ingress claims must settle"
+    );
+    session.close().await.expect("close ingress session");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
 async fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable_inner() {
     let ingress_url = std::env::var("RESTATE_INGRESS_URL")
         .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");

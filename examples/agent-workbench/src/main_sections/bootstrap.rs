@@ -253,6 +253,7 @@ async fn async_main() -> AnyhowResult<()> {
         .route("/api/state", get(app_state))
         .route("/api/events", get(session_events))
         .route("/api/turn", post(send_turn))
+        .route("/api/turn/input", post(enqueue_turn_input))
         .route("/api/turn/cancel", post(cancel_turn))
         .route("/api/reset", post(reset_chat))
         .route("/api/button-trigger", post(button_trigger))

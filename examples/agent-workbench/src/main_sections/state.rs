@@ -49,6 +49,7 @@ struct StateSnapshot {
     settings: Settings,
     messages: Vec<ChatMessage>,
     active_turns: Vec<lash::TurnAddress>,
+    pending_turn_inputs: Vec<lash::PendingTurnInput>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -64,6 +65,28 @@ struct TurnRequest {
     text: String,
     model: Option<String>,
     model_variant: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TurnInputIngressRequest {
+    ActiveTurn,
+    NextTurn,
+}
+
+#[derive(Debug, Deserialize)]
+struct TurnInputRequest {
+    text: String,
+    ingress: TurnInputIngressRequest,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TurnInputReceipt {
+    accepted: bool,
+    input_id: String,
+    ingress: lash::persistence::TurnInputIngress,
+    state: lash::persistence::TurnInputState,
+    text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +150,7 @@ enum StreamItem {
         gap: Box<RemoteLiveReplayGap>,
     },
     Message { message: ChatMessage },
+    TurnInput { receipt: TurnInputReceipt },
     Error { message: String },
     Done,
 }

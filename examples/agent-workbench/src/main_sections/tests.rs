@@ -241,6 +241,16 @@ mod tests {
     }
 
     #[test]
+    fn workbench_ui_distinguishes_running_turn_ingress_actions() {
+        assert!(ui::INDEX_HTML.contains("id=\"injectNow\""));
+        assert!(ui::INDEX_HTML.contains("id=\"queueNext\""));
+        assert!(ui::INDEX_HTML.contains("injected now"));
+        assert!(ui::INDEX_HTML.contains("queued next"));
+        assert!(ui::INDEX_HTML.contains("/api/turn/input"));
+        assert!(ui::INDEX_HTML.contains("item.type === \"turn_input\""));
+    }
+
+    #[test]
     fn mail_received_event_type_matches_source_type() {
         let resources = workbench_lashlang_resources();
         let binding = resources
@@ -514,6 +524,7 @@ finish "observed through live replay"
                 }
                 StreamItem::ReplayGap { .. }
                 | StreamItem::Message { .. }
+                | StreamItem::TurnInput { .. }
                 | StreamItem::Error { .. }
                 | StreamItem::Done => {}
             }

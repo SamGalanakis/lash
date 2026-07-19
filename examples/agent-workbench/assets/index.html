@@ -832,6 +832,38 @@
       text-align: center;
     }
 
+    .ingress-receipt {
+      display: grid;
+      grid-template-columns: 112px minmax(0, 1fr);
+      gap: var(--space-md);
+      margin: var(--space-sm) 0;
+      padding: var(--space-sm) var(--space-md);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--form);
+    }
+
+    .ingress-receipt.active-turn {
+      border-color: var(--line-strong);
+      background: var(--sodium-tint);
+    }
+
+    .ingress-kind {
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+    }
+
+    .ingress-receipt.active-turn .ingress-kind { color: var(--sodium-soft); }
+
+    .ingress-text {
+      color: var(--chalk-mid);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     /* machine-activity panels — restrained, mono, collapsible */
 
     .reasoning,
@@ -912,6 +944,15 @@
       gap: var(--space-sm);
     }
 
+    .composer-actions {
+      align-self: end;
+      display: grid;
+      gap: var(--space-2xs);
+      min-width: 132px;
+    }
+
+    .composer-actions[hidden] { display: none; }
+
     .composer textarea {
       width: 100%;
       min-height: 56px;
@@ -949,6 +990,27 @@
     }
     .send:hover { background: var(--sodium-soft); }
     .send:disabled { background: var(--ash); color: var(--ash-text); cursor: not-allowed; }
+
+    .ingress-action {
+      min-height: 40px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: transparent;
+      color: var(--chalk-mid);
+      font-family: var(--font-ui);
+      font-size: 0.74rem;
+      letter-spacing: 0.03em;
+      cursor: pointer;
+    }
+
+    .ingress-action.inject {
+      background: var(--sodium);
+      color: var(--form-deep);
+    }
+
+    .ingress-action:hover { border-color: var(--sodium); color: var(--chalk); }
+    .ingress-action.inject:hover { background: var(--sodium-soft); color: var(--form-deep); }
+    .ingress-action:disabled { opacity: 0.45; cursor: not-allowed; }
 
     /* ─── right rail · work ledger ─── */
 
@@ -1815,7 +1877,15 @@
 
       <form id="composer" class="composer">
         <textarea id="prompt" rows="2" placeholder="ask the agent — enter to send, shift + enter for a newline"></textarea>
-        <button id="send" class="send" type="submit">send</button>
+        <div id="idleActions" class="composer-actions">
+          <button id="send" class="send" type="submit">send</button>
+        </div>
+        <div id="runningActions" class="composer-actions" hidden aria-label="Running turn input actions">
+          <button id="injectNow" class="ingress-action inject" type="button"
+                  title="Inject this input once at the running turn's next checkpoint">inject now</button>
+          <button id="queueNext" class="ingress-action" type="button"
+                  title="Commit this draft as a separate turn after the running turn settles">queue next</button>
+        </div>
       </form>
     </main>
 
@@ -1895,6 +1965,10 @@
     const composer = document.getElementById("composer");
     const promptInput = document.getElementById("prompt");
     const sendButton = document.getElementById("send");
+    const idleActions = document.getElementById("idleActions");
+    const runningActions = document.getElementById("runningActions");
+    const injectNowButton = document.getElementById("injectNow");
+    const queueNextButton = document.getElementById("queueNext");
     const stopButton = document.getElementById("stop");
     const buttonTriggerButtons = Array.from(document.querySelectorAll("[data-trigger-button]"));
     const triggerButtons = buttonTriggerButtons;
@@ -1907,6 +1981,7 @@
     const sessionId = document.getElementById("sessionId");
 
     const renderedMessages = new Set();
+    const renderedIngressInputs = new Set();
     let assistantDraft = null;
     let assistantDraftText = "";
     let reasoning = null;
@@ -1953,6 +2028,11 @@
 
     function setBusy(next, label) {
       busy = next;
+      idleActions.hidden = next;
+      runningActions.hidden = !next;
+      promptInput.placeholder = next
+        ? "add input to the running turn, or draft the next full turn"
+        : "ask the agent — enter to send, shift + enter for a newline";
       syncCommandAvailability();
       stopButton.hidden = !next;
       busyPill.classList.toggle("run", next);
@@ -2142,6 +2222,30 @@
       scrollToEnd();
     }
 
+    function ingressScope(ingress) {
+      return ingress?.scope || ingress || "next_turn";
+    }
+
+    function renderIngressReceipt(receipt) {
+      if (!receipt?.input_id || renderedIngressInputs.has(receipt.input_id)) return;
+      renderedIngressInputs.add(receipt.input_id);
+      clearEmpty();
+      const scope = ingressScope(receipt.ingress);
+      const node = document.createElement("div");
+      node.className = "ingress-receipt " + (scope === "active_turn" ? "active-turn" : "next-turn");
+      node.dataset.inputId = receipt.input_id;
+      node.dataset.ingress = scope;
+      const kind = document.createElement("div");
+      kind.className = "ingress-kind";
+      kind.textContent = scope === "active_turn" ? "injected now" : "queued next";
+      const body = document.createElement("div");
+      body.className = "ingress-text";
+      body.textContent = receipt.text || "input accepted";
+      node.append(kind, body);
+      timeline.appendChild(node);
+      scrollToEnd();
+    }
+
     function ensureAssistantDraft() {
       if (assistantDraft) return assistantDraft;
       clearEmpty();
@@ -2168,6 +2272,8 @@
     function syncCommandAvailability() {
       const unavailable = busy || modelEmpty();
       sendButton.disabled = unavailable;
+      injectNowButton.disabled = !busy || modelEmpty();
+      queueNextButton.disabled = !busy || modelEmpty();
       for (const button of triggerButtons) {
         button.setAttribute("aria-disabled", String(unavailable));
       }
@@ -2557,6 +2663,7 @@
 
     function handleStreamItem(item) {
       if (item.type === "message") renderMessage(item.message);
+      if (item.type === "turn_input") renderIngressReceipt(item.receipt);
       if (item.type === "replay_cursor") replayCursor = item.cursor;
       if (item.type === "replay_gap") recoverReplayGap(item.gap);
       if (item.type === "observation") handleObservation(item.event);
@@ -2719,6 +2826,32 @@
       promptInput.value = "";
       postCommand("/api/turn", { text, ...selectedModelPayload() });
     });
+
+    async function submitRunningInput(ingress) {
+      const text = promptInput.value.trim();
+      if (!text) { promptInput.focus(); return; }
+      if (modelEmpty()) { validateModel(); modelInput.focus(); return; }
+      try {
+        const response = await fetch("/api/turn/input", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, ingress })
+        });
+        if (!response.ok) {
+          renderError(errorTextFrom(await response.text(), "input submission failed"));
+          return;
+        }
+        const receipt = await response.json();
+        renderIngressReceipt(receipt);
+        lastUserText = text;
+        promptInput.value = "";
+      } catch (error) {
+        renderError(error.message || String(error));
+      }
+    }
+
+    injectNowButton.addEventListener("click", () => submitRunningInput("active_turn"));
+    queueNextButton.addEventListener("click", () => submitRunningInput("next_turn"));
 
     promptInput.addEventListener("keydown", event => {
       if (event.key === "Enter" && !event.shiftKey) {
@@ -3047,6 +3180,15 @@
       webState.textContent = state.settings.web_configured ? "ready" : "not configured";
       sessionId.textContent = state.settings.session_id;
       for (const message of state.messages) renderMessage(message);
+      for (const pending of state.pending_turn_inputs || []) {
+        const textItem = (pending.input?.items || []).find(item => item.Text?.text);
+        renderIngressReceipt({
+          input_id: pending.input_id,
+          ingress: pending.ingress,
+          state: pending.state,
+          text: textItem?.Text?.text || "pending input"
+        });
+      }
       if ((state.active_turns || []).length) setBusy(true, "turn running · restored");
     }
 

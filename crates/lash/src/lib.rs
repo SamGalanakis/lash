@@ -157,8 +157,8 @@ pub mod persistence {
         PendingTurnInputClaimDiagnostics, PendingTurnInputDraft, QueuedWorkBatch,
         QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkClass,
         QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState,
-        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, TurnInputClaim,
-        TurnInputCompletion,
+        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, TurnInputCheckpointBoundary,
+        TurnInputClaim, TurnInputCompletion, TurnInputIngress, TurnInputState,
     };
     pub use lash_core::store::queued_work;
     pub use lash_core::store::{

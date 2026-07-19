@@ -15,7 +15,8 @@ use lash::persistence::{
     SessionCommitStore, SessionExecutionLease, SessionExecutionLeaseClaimOutcome,
     SessionExecutionLeaseCompletion, SessionExecutionLeaseFence, SessionExecutionLeaseStore,
     SessionMeta, SessionNodeRecord, SessionReadScope, StoreError, StoreMaintenance, TurnInputClaim,
-    TurnInputStore, VacuumReport, load_persisted_session_state,
+    TurnInputCheckpointBoundary, TurnInputIngress, TurnInputState, TurnInputStore, VacuumReport,
+    load_persisted_session_state,
     load_persisted_session_state_active_path,
 };
 use lash::usage::{TokenLedgerEntry, TokenUsage};
@@ -406,6 +407,14 @@ fn model_spec_types_are_nameable(spec: ModelSpec, limits: ModelLimits) {
 fn cancellation_token_is_at_root(token: lash::CancellationToken, session: &lash::LashSession) {
     token.cancel();
     let _: usize = session.cancel_running_turns();
+}
+
+fn turn_input_ingress_types_are_nameable(
+    ingress: TurnInputIngress,
+    boundary: TurnInputCheckpointBoundary,
+    state: TurnInputState,
+) {
+    let _ = (ingress, boundary, state);
 }
 
 async fn queued_work_wait_is_nameable(session: &lash::LashSession) -> lash::Result<()> {

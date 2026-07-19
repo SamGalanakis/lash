@@ -6,12 +6,24 @@ async fn index() -> Html<&'static str> {
     Html(ui::INDEX_HTML)
 }
 
-async fn app_state(State(state): State<AppState>) -> Json<StateSnapshot> {
-    Json(StateSnapshot {
+async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>, AppError> {
+    let session = state
+        .core
+        .session(state.current_session_id())
+        .open()
+        .await
+        .map_err(AppError::internal)?;
+    let pending_turn_inputs = session
+        .pending_turn_inputs()
+        .await
+        .map_err(AppError::internal)?;
+    session.close().await.map_err(AppError::internal)?;
+    Ok(Json(StateSnapshot {
         settings: state.settings(),
         messages: state.messages_snapshot(),
         active_turns: state.active_turns.for_session(&state.current_session_id()),
-    })
+        pending_turn_inputs,
+    }))
 }
 
 async fn session_events(
@@ -98,6 +110,62 @@ async fn send_turn(
         return Err(err);
     }
     Ok(Json(CommandAccepted { accepted: true }))
+}
+
+async fn enqueue_turn_input(
+    State(state): State<AppState>,
+    Json(request): Json<TurnInputRequest>,
+) -> Result<Json<TurnInputReceipt>, AppError> {
+    let text = request.text.trim().to_string();
+    if text.is_empty() {
+        return Err(AppError::bad_request("message text is required"));
+    }
+    let session_id = state.current_session_id();
+    let ingress = match request.ingress {
+        TurnInputIngressRequest::ActiveTurn => {
+            let active = state.active_turns.for_session(&session_id);
+            let [address] = active.as_slice() else {
+                return Err(AppError::conflict(
+                    "inject now requires exactly one running turn",
+                ));
+            };
+            lash::persistence::TurnInputIngress::active_turn(
+                address.turn_id.clone(),
+                lash::persistence::TurnInputCheckpointBoundary::AfterWork,
+            )
+        }
+        TurnInputIngressRequest::NextTurn => lash::persistence::TurnInputIngress::next_turn(),
+    };
+    let source_id = format!("workbench-turn-input-{}", uuid::Uuid::new_v4());
+    let session = state
+        .core
+        .session(session_id.clone())
+        .open()
+        .await
+        .map_err(AppError::internal)?;
+    let pending = session
+        .enqueue(lash::TurnInput::text(text.clone()))
+        .id(source_id)
+        .ingress(ingress)
+        .send()
+        .await
+        .map_err(AppError::internal)?;
+    session.close().await.map_err(AppError::internal)?;
+    let receipt = TurnInputReceipt {
+        accepted: true,
+        input_id: pending.input_id.clone(),
+        ingress: pending.ingress.clone(),
+        state: pending.state,
+        text,
+    };
+    state.trace(
+        "turn_input.enqueued",
+        serde_json::to_value(&receipt).unwrap_or(Value::Null),
+    );
+    state.publish(StreamItem::TurnInput {
+        receipt: receipt.clone(),
+    });
+    Ok(Json(receipt))
 }
 
 async fn button_trigger(
@@ -344,6 +412,7 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
         settings: state.settings(),
         messages: Vec::new(),
         active_turns: Vec::new(),
+        pending_turn_inputs: Vec::new(),
     }))
 }
 
