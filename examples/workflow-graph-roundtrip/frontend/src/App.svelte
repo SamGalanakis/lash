@@ -252,7 +252,7 @@
   // workflow switch, but not on a Save that left the graph shape unchanged (the
   // migrated positions keep every node in place, so a re-fit would just jump).
   function adoptDocument(doc, keepSelection = null, { refit = true } = {}) {
-    draftDoc = structuredClone(doc);
+    draftDoc = structuredClone($state.snapshot(doc));
     canonicalSource = doc.source;
     savedVersion = doc.version;
     dirty = false;
@@ -265,7 +265,7 @@
   // saved document this is an unsaved draft: keep it dirty and start a new
   // history baseline entry from it.
   function adoptProjected(doc) {
-    draftDoc = structuredClone(doc);
+    draftDoc = structuredClone($state.snapshot(doc));
     canonicalSource = doc.source;
     dirty = true;
     saveOk = null;
@@ -453,8 +453,9 @@
       {#if loading}
         <div class="overlay-msg">projecting graph…</div>
       {:else if loadError}
+        {@const netFail = /fetch|network|failed to fetch|load failed/i.test(loadError)}
         <div class="overlay-msg error">
-          backend unreachable<br /><span class="mono">{loadError}</span>
+          {netFail ? 'backend unreachable' : "couldn't load the editor"}<br /><span class="mono">{loadError}</span>
           <button class="btn" onclick={onReload}>retry</button>
         </div>
       {:else}

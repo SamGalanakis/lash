@@ -8,7 +8,9 @@
 // never alias the live draft.
 
 const LIMIT = 200;
-const clone = (doc) => structuredClone(doc);
+// `doc` may be a Svelte 5 $state proxy (draftDoc), which structuredClone cannot
+// clone ("#<Object> could not be cloned"). Snapshot to a plain object first.
+const clone = (doc) => structuredClone($state.snapshot(doc));
 
 export class History {
   // The stack itself is not reactive (it is only read on undo/redo); `index`
