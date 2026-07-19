@@ -100,6 +100,57 @@ process counter_loop() {
 }
 "#;
 
+const SUMMARIZE_EMAILS_WORKFLOW: &str = r#"
+@label(title: "Summarize my top 5 emails", description: "Read and summarize the latest important messages")
+process summarize_top_emails() {
+  emails = await gmail.list_recent({ count: 5 })?
+  summaries = [
+    await llm.query({
+      task: "Summarize this email in one sentence",
+      inputs: { from: email.from, subject: email.subject, snippet: email.snippet }
+    })?
+    for email in emails
+  ]
+  digest = await llm.query({
+    task: "Format these five summaries as a concise numbered email digest",
+    inputs: { summaries: summaries }
+  })?
+  await display.show_message({ text: digest })?
+  finish digest
+}
+"#;
+
+const RESEARCH_NVIDIA_WORKFLOW: &str = r#"
+@label(title: "Research NVIDIA stock", description: "Collect a concise stock outlook and key risks")
+process research_nvidia_stock() {
+  search = await web.search({ query: "NVIDIA stock outlook" })?
+  research = await agents.spawn({
+    capability: "explore",
+    task: "Research NVIDIA's stock outlook from the supplied web search results",
+    seed: { search_results: search.results },
+    output: Type { summary: str, risks: str }
+  })?
+  await display.show_message({ text: research.summary })?
+  finish research
+}
+"#;
+
+const TEAM_STANDUP_WORKFLOW: &str = r#"
+@label(title: "Team standup digest", description: "Combine Slack and GitHub activity into a daily brief")
+process team_standup_digest() {
+  messages = await slack.recent({ channel: "team-platform", since: "yesterday" })?
+  activity = await github.recent({ repo: "acme/widgets", since: "yesterday" })?
+  standup = await agents.spawn({
+    capability: "peer",
+    task: "Synthesize a concise team standup digest and call out blockers",
+    seed: { slack_messages: messages, github_activity: activity },
+    output: Type { digest: str, blockers: list[str] }
+  })?
+  await display.show_message({ text: standup.digest })?
+  finish standup
+}
+"#;
+
 pub(crate) const BUILT_IN_WORKFLOWS: &[BuiltInWorkflow] = &[
     BuiltInWorkflow {
         id: "blank",
@@ -112,6 +163,24 @@ pub(crate) const BUILT_IN_WORKFLOWS: &[BuiltInWorkflow] = &[
         name: "Onboarding",
         description: "A labeled onboarding flow with a signal wait, branch, and mixed display updates.",
         source: DEFAULT_WORKFLOW,
+    },
+    BuiltInWorkflow {
+        id: "summarize-emails",
+        name: "Summarize my top 5 emails",
+        description: "List five recent emails, summarize each one, and show the digest.",
+        source: SUMMARIZE_EMAILS_WORKFLOW,
+    },
+    BuiltInWorkflow {
+        id: "research-nvidia-stock",
+        name: "Research NVIDIA stock",
+        description: "Research NVIDIA's stock outlook and show a concise mocked briefing.",
+        source: RESEARCH_NVIDIA_WORKFLOW,
+    },
+    BuiltInWorkflow {
+        id: "team-standup-digest",
+        name: "Team standup digest",
+        description: "Collect Slack and GitHub activity, then present a daily team brief.",
+        source: TEAM_STANDUP_WORKFLOW,
     },
     BuiltInWorkflow {
         id: "traffic-lights",

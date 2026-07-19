@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::display;
+use crate::mock_tools;
 use crate::{OperationCatalogEntry, OperationField};
 
 pub(crate) fn entries() -> Vec<OperationCatalogEntry> {
@@ -25,6 +26,26 @@ pub(crate) fn entries() -> Vec<OperationCatalogEntry> {
                 .collect(),
         })
         .collect::<Vec<_>>();
+    entries.extend(mock_tools::OPERATIONS.iter().map(|operation| {
+        OperationCatalogEntry {
+            id: format!("{}.{}", operation.module, operation.operation),
+            label: operation.label.to_string(),
+            node_kind: "call".to_string(),
+            subkind: None,
+            operation: Some(operation.operation.to_string()),
+            effect: None,
+            terminal_kind: None,
+            fields: operation
+                .fields
+                .iter()
+                .map(|field| OperationField {
+                    name: field.name.to_string(),
+                    field_type: field.field_type.to_string(),
+                    default: field.default.json(),
+                })
+                .collect(),
+        }
+    }));
     entries.extend([
         entry(
             "proc.process",
@@ -230,6 +251,20 @@ mod tests {
                 .expect("display operation catalog entry");
             assert_eq!(entry.id, format!("display.{}", operation.operation));
             assert_eq!(entry.fields.len(), operation.fields.len());
+        }
+    }
+
+    #[test]
+    fn every_mocked_tool_has_exactly_one_catalog_entry() {
+        let entries = entries();
+        for operation in mock_tools::OPERATIONS {
+            let id = format!("{}.{}", operation.module, operation.operation);
+            let matching = entries
+                .iter()
+                .filter(|entry| entry.id == id)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "catalog entry for {id}");
+            assert_eq!(matching[0].fields.len(), operation.fields.len());
         }
     }
 }
