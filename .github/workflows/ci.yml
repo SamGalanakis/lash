@@ -8,6 +8,10 @@ name: CI
 # green commit on main. Ordinary merges never tag or publish.
 
 on:
+  # Manual re-validation for when GitHub drops a push event (merge commit
+  # d70ce7ea got zero check suites). Recovery-only: no inputs, never invoked
+  # from another workflow, and unrelated to the removed pass-2 bump chain.
+  workflow_dispatch:
   pull_request:
   push:
     branches:

@@ -368,9 +368,13 @@ class ConfidenceGateCiContractTest(unittest.TestCase):
         self.assertNotIn("Dispatch validation pass", workflow)
         self.assertNotIn("Sync release version to staging", workflow)
         self.assertNotIn("gh workflow run ci.yml", workflow)
-        # ci.yml is no longer workflow_dispatch-triggered (that trigger only
-        # existed to re-validate the bump commit as pass 2).
-        self.assertNotIn("workflow_dispatch:", workflow)
+        # ci.yml carries a bare workflow_dispatch trigger so a maintainer can
+        # re-run trunk validation when GitHub drops a push event (it happened
+        # to merge commit d70ce7ea: zero check suites were created). This is
+        # NOT the old pass-2 bump-commit revalidation chain — the assertions
+        # above and below keep that chain dead; the dispatch trigger must stay
+        # input-less and must never be invoked from a workflow.
+        self.assertIn("workflow_dispatch:", workflow)
         self.assertNotIn("prepare-release:", workflow)
         self.assertIn("workflow_dispatch:", release)
 
