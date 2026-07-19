@@ -46,10 +46,6 @@ impl AppState {
         self.active_turns.insert(session_id, turn_id);
     }
 
-    fn clear_turn_on_drop(&self, session_id: &str, turn_id: &str) -> ActiveTurnGuard {
-        self.active_turns.guard(session_id, turn_id)
-    }
-
     /// Fan out exact-address cooperative cancellation to the active turns the
     /// UI submitted for `session_id`.
     async fn cancel_turns_for_session(
@@ -449,6 +445,7 @@ fn work_event_from_observed(event: lash::process::ObservedProcessEvent) -> WorkE
 struct AppError {
     status: StatusCode,
     message: String,
+    retryable: bool,
 }
 
 impl AppError {
@@ -456,6 +453,7 @@ impl AppError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            retryable: false,
         }
     }
 
@@ -463,6 +461,7 @@ impl AppError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            retryable: false,
         }
     }
 
@@ -470,6 +469,7 @@ impl AppError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.to_string(),
+            retryable: false,
         }
     }
 
@@ -477,6 +477,15 @@ impl AppError {
         Self {
             status: StatusCode::GATEWAY_TIMEOUT,
             message: message.into(),
+            retryable: false,
+        }
+    }
+
+    fn runtime(error: lash::EmbedError) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            retryable: error.is_retryable(),
+            message: error.to_string(),
         }
     }
 }

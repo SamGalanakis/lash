@@ -242,6 +242,7 @@ impl RuntimeTurnDriver<'_> {
         protocol_iteration: usize,
         invocation: crate::RuntimeInvocation,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancellation: &CancellationToken,
     ) -> Result<crate::ExecResponse, String> {
         let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionStreamEvent>(100);
         let (turn_event_tx, mut turn_event_rx) = mpsc::channel::<TurnActivity>(100);
@@ -297,6 +298,7 @@ impl RuntimeTurnDriver<'_> {
             .with_tracing(self.execution_tracing(protocol_iteration))
             .with_code_block_graph_key(code_block_graph_key);
         let context = context.with_parent_invocation(invocation);
+        let context = context.with_cancellation_token(cancellation.clone());
         let result = match code_executor {
             Some(code_executor) => code_executor
                 .execute_code(

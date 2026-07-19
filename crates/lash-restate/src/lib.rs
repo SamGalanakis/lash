@@ -3039,12 +3039,23 @@ where
                     unreachable!("timer execution is only selected for sleep effects");
                 };
                 let duration = Duration::from_millis(*duration_ms);
-                if let Err(err) = self.context.sleep_send(duration).await {
-                    tracing_sleep_error(&envelope.invocation, &err);
-                    return Err(RuntimeEffectControllerError::new(
-                        "restate_effect_controller",
-                        err.to_string(),
-                    ));
+                let cancellation = local_executor.into_sleep_cancellation();
+                tokio::select! {
+                    result = self.context.sleep_send(duration) => {
+                        if let Err(err) = result {
+                            tracing_sleep_error(&envelope.invocation, &err);
+                            return Err(RuntimeEffectControllerError::new(
+                                "restate_effect_controller",
+                                err.to_string(),
+                            ));
+                        }
+                    }
+                    _ = cancellation.cancelled() => {
+                        return Err(RuntimeEffectControllerError::new(
+                            "runtime_effect_sleep_cancelled",
+                            "runtime effect sleep was cancelled",
+                        ));
+                    }
                 }
                 Ok(RuntimeEffectOutcome::Sleep)
             }
@@ -3283,13 +3294,14 @@ enum RestateEffectExecution {
 fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExecution {
     match command {
         RuntimeEffectCommand::Process { .. } => RestateEffectExecution::DirectProcess,
-        RuntimeEffectCommand::ToolBatch { .. } => RestateEffectExecution::DirectLocal,
+        RuntimeEffectCommand::ToolBatch { .. } | RuntimeEffectCommand::ExecCode { .. } => {
+            RestateEffectExecution::DirectLocal
+        }
         RuntimeEffectCommand::Sleep { .. } => RestateEffectExecution::Timer,
         RuntimeEffectCommand::AwaitEvent { .. } => RestateEffectExecution::AwaitEvent,
         RuntimeEffectCommand::LlmCall { .. }
         | RuntimeEffectCommand::Direct { .. }
         | RuntimeEffectCommand::ToolAttempt { .. }
-        | RuntimeEffectCommand::ExecCode { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
         | RuntimeEffectCommand::SyncExecutionEnvironment { .. }
         | RuntimeEffectCommand::DurableStep { .. } => RestateEffectExecution::JournaledRun,

@@ -54,15 +54,39 @@ async fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable_inne
         .await
         .expect("submit recovery E2E turn");
     wait_for_provider_owner(&data_dir, first_pid, Duration::from_secs(20)).await;
+    wait_for_trace_event_count(
+        &data_dir.join("trace.jsonl"),
+        "llm_call_completed",
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let first_generation = session_lease_generation(&data_dir);
 
     first.kill().await.expect("kill first ingress owner");
     first.wait().await.expect("reap first ingress owner");
 
+    let restart_started = tokio::time::Instant::now();
     let mut replacement = spawn_recovery_e2e_child(&data_dir, endpoint_bind, &ingress_url);
-    let replacement_pid = replacement.id().expect("replacement recovery child pid");
+    let _replacement_pid = replacement.id().expect("replacement recovery child pid");
     wait_for_endpoint_socket(endpoint_bind).await;
     register_restate_deployment(&admin_url, &endpoint_url).await;
-    wait_for_provider_owner(&data_dir, replacement_pid, Duration::from_secs(45)).await;
+    wait_for_session_lease_generation(
+        &data_dir,
+        first_generation + 1,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        restart_started.elapsed() < Duration::from_secs(10),
+        "replacement waited for the session lease TTL instead of fencing the dead owner"
+    );
+    assert_eq!(
+        session_lease_generation(&data_dir),
+        first_generation + 1,
+        "replacement must resume under a superseding session-lease generation"
+    );
 
     let recovered_active_turns = ActiveTurns::persistent(data_dir.join("active-turns.json"))
         .expect("reopen recovered active-turn routing");
@@ -162,8 +186,9 @@ async fn live_restate_recovery_child() {
             async move {
                 std::fs::write(provider_owner_path, std::process::id().to_string())
                     .expect("record provider owner pid");
-                std::future::pending::<()>().await;
-                Ok(text_response("<lashlang>\nfinish \"unreachable\"\n</lashlang>"))
+                Ok(text_response(
+                    "<lashlang>\nsleep for \"60s\"\nfinish \"unreachable\"\n</lashlang>",
+                ))
             }
         })
         .build()
@@ -210,6 +235,42 @@ async fn wait_for_provider_owner(
             trace_tail(&data_dir.join("trace.jsonl")),
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn session_lease_generation(data_dir: &std::path::Path) -> i64 {
+    let sessions_dir = data_dir.join("lash-sessions");
+    let database_path = std::fs::read_dir(&sessions_dir)
+        .expect("read recovery E2E session store directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "db"))
+        .expect("locate recovery E2E SQLite session store");
+    rusqlite::Connection::open(database_path)
+        .expect("open recovery E2E SQLite session store")
+        .query_row(
+            "SELECT lease_fencing_token FROM session_execution_leases",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read recovery E2E session lease generation")
+}
+
+async fn wait_for_session_lease_generation(
+    data_dir: &std::path::Path,
+    expected: i64,
+    timeout: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if session_lease_generation(data_dir) == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "replacement did not supersede the dead session-lease generation within {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

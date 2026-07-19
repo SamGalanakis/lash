@@ -168,14 +168,6 @@ impl ActiveTurns {
         self.persist_snapshot(&active);
     }
 
-    fn guard(&self, session_id: &str, turn_id: &str) -> ActiveTurnGuard {
-        ActiveTurnGuard {
-            active: self.clone(),
-            session_id: session_id.to_string(),
-            turn_id: turn_id.to_string(),
-        }
-    }
-
     fn for_session(&self, session_id: &str) -> Vec<lash::TurnAddress> {
         self.inner
             .lock()
@@ -206,18 +198,6 @@ impl ActiveTurns {
                 temporary.display()
             )
         });
-    }
-}
-
-struct ActiveTurnGuard {
-    active: ActiveTurns,
-    session_id: String,
-    turn_id: String,
-}
-
-impl Drop for ActiveTurnGuard {
-    fn drop(&mut self) {
-        self.active.remove(&self.session_id, &self.turn_id);
     }
 }
 
