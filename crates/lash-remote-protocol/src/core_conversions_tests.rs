@@ -702,6 +702,7 @@ fn remote_turn_result_maps_core_semantics() {
         outcome: lash_core::TurnOutcome::Finished(lash_core::TurnFinish::AssistantMessage {
             text: "done".to_string(),
         }),
+        cancellation: None,
         assistant_output: lash_core::AssistantOutput {
             safe_text: "done".to_string(),
             raw_text: "done".to_string(),

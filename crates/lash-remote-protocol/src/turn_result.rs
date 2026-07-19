@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::ensure_protocol_version;
 use crate::llm::{RemoteLlmTerminalReason, RemoteProviderFailureKind};
 use crate::registry_errors::{RemoteProtocolError, require_non_empty};
+use crate::turn_control::RemoteTurnCancellationEvidence;
 use crate::usage_activity::{RemoteTokenLedgerEntry, RemoteTurnActivity, RemoteUsage};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -19,6 +20,9 @@ pub struct RemoteTurnResult {
     pub turn_id: String,
     pub status: RemoteTurnStatus,
     pub outcome: RemoteTurnOutcome,
+    /// Present exactly when `status == cancelled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<RemoteTurnCancellationEvidence>,
     pub assistant_output: RemoteAssistantOutput,
     #[serde(default)]
     pub usage: RemoteTurnUsageSummary,
@@ -39,6 +43,16 @@ impl RemoteTurnResult {
         ensure_protocol_version(self.protocol_version)?;
         require_non_empty("RemoteTurnResult", "session_id", &self.session_id)?;
         require_non_empty("RemoteTurnResult", "turn_id", &self.turn_id)?;
+        if (self.status == RemoteTurnStatus::Cancelled) != self.cancellation.is_some() {
+            return Err(RemoteProtocolError::InvalidEnvelope {
+                type_name: "RemoteTurnResult",
+                message: "cancellation evidence must be present if and only if status is cancelled"
+                    .to_string(),
+            });
+        }
+        if let Some(cancellation) = self.cancellation.as_ref() {
+            cancellation.validate()?;
+        }
         for activity in &self.activities {
             if activity.protocol_version != self.protocol_version {
                 return Err(RemoteProtocolError::MismatchedNestedProtocolVersion {

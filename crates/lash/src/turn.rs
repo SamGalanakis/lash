@@ -108,6 +108,11 @@ pub struct TurnBuilder {
 }
 
 impl TurnBuilder {
+    /// Install a process-local cooperative token.
+    ///
+    /// This low-level hook remains for provider plumbing, shutdown, and tests.
+    /// Host-facing stop controls should use `TurnWorkDriver::request_cancel`
+    /// with an exact session/turn address.
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
         self
@@ -315,6 +320,7 @@ pub struct ScopedTurnBuilder<'run> {
 }
 
 impl<'run> ScopedTurnBuilder<'run> {
+    /// Install a low-level process-local cancellation token.
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.builder = self.builder.cancel(cancel);
         self
@@ -883,6 +889,9 @@ pub(crate) async fn stream_prepared_agent_frame_run(
 pub struct TurnResult {
     pub state: SessionSnapshot,
     pub outcome: TurnOutcome,
+    /// Durable request evidence, present exactly when `outcome` is cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<lash_core::TurnCancellationEvidence>,
     pub assistant_output: AssistantOutput,
     /// Parent's own LLM tokens for this turn. Does **not** include child
     /// sessions; see [`children_usage`](Self::children_usage) and
@@ -910,6 +919,7 @@ impl TurnResult {
         Self {
             state: turn.state,
             outcome: turn.outcome,
+            cancellation: turn.cancellation,
             assistant_output: turn.assistant_output,
             usage: turn.token_usage,
             children_usage: turn.children_usage,

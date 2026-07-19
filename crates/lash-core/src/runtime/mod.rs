@@ -26,6 +26,7 @@ mod state;
 pub(crate) mod tests;
 mod turn_boundary;
 mod turn_commit_draft;
+pub(crate) mod turn_control;
 mod turn_driver;
 mod turn_graph_editor;
 mod turn_input_ingress;
@@ -162,6 +163,10 @@ pub use state::RuntimeSessionState;
 use state::{
     append_session_nodes_to_state_with_clock, apply_residency_on_load, apply_session_checkpoint,
     apply_session_head, normalize_session_graph, open_agent_frame_in_state_with_clock,
+};
+pub use turn_control::{
+    TurnAddress, TurnAttach, TurnCancelOutcome, TurnCancelRequest, TurnCancelSource,
+    TurnCancellationEvidence, TurnTerminal, TurnWorkDriver,
 };
 pub use turn_input_ingress::{
     PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
@@ -639,6 +644,9 @@ pub struct TurnIssue {
 pub struct AssembledTurn {
     pub state: SessionSnapshot,
     pub outcome: crate::TurnOutcome,
+    /// Durable request evidence, present exactly when `outcome` is cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<TurnCancellationEvidence>,
     pub assistant_output: AssistantOutput,
     pub execution: ExecutionSummary,
     #[serde(default)]

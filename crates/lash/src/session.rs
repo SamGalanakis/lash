@@ -528,14 +528,39 @@ impl LashSession {
         }
     }
 
+    /// Request cooperative cancellation of exactly one turn in this session.
+    ///
+    /// The request is compiled onto the deployment's keyed-promise control
+    /// seam, so another process or a replayed owner can observe it. Detached
+    /// effects are not guaranteed to stop. `turn_id` is routing identity, not
+    /// authorization; hosts must authorize callers before invoking this API.
+    pub async fn request_turn_cancel(
+        &self,
+        turn_id: &str,
+        request_id: impl Into<String>,
+        source: lash_core::TurnCancelSource,
+        reason: Option<String>,
+    ) -> Result<lash_core::TurnCancelOutcome> {
+        let mut request = lash_core::TurnCancelRequest::new(
+            lash_core::TurnAddress::new(self.session_id(), turn_id),
+            request_id,
+            source,
+        );
+        request.reason = reason;
+        lash_core::TurnWorkDriver::new(self.effect_host())
+            .request_cancel(request)
+            .await
+            .map_err(EmbedError::Runtime)
+    }
+
     /// Cancel every turn currently executing through this opened session
     /// (including its clones) and report how many were signalled.
     ///
-    /// This is the affordance behind a UI "stop" control: hold a clone of the
-    /// session wherever the stop arrives and call this, instead of threading a
-    /// [`CancellationToken`](crate::CancellationToken) into every turn call
-    /// ([`TurnBuilder::cancel`](crate::TurnBuilder::cancel) remains the
-    /// per-turn hook when you need one). A cancelled turn finishes with
+    /// This process-local compatibility lever is intended for shutdown,
+    /// provider plumbing, and tests. Host-facing stop controls should retain an
+    /// exact turn id and call [`request_turn_cancel`](Self::request_turn_cancel)
+    /// so cancellation survives separately opened handles and durable replay.
+    /// A cancelled turn finishes with
     /// `TurnOutcome::Stopped(TurnStop::Cancelled)` and commits like any other
     /// turn; the session stays usable.
     ///

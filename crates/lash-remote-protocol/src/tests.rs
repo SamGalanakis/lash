@@ -143,6 +143,7 @@ fn remote_turn_result_json_round_trips() {
                 text: "done".to_string(),
             },
         },
+        cancellation: None,
         assistant_output: RemoteAssistantOutput {
             safe_text: "done".to_string(),
             raw_text: "done".to_string(),
@@ -176,6 +177,69 @@ fn remote_turn_result_json_round_trips() {
     assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(decoded.session_id, "session");
     assert_eq!(decoded.tool_calls.len(), 1);
+}
+
+#[test]
+fn remote_turn_result_requires_cancellation_evidence_iff_cancelled() {
+    let mut result = RemoteTurnResult {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        session_id: "session".to_string(),
+        turn_id: "turn".to_string(),
+        status: RemoteTurnStatus::Cancelled,
+        outcome: RemoteTurnOutcome::Stopped {
+            stop: RemoteTurnStop::Cancelled,
+        },
+        cancellation: None,
+        assistant_output: RemoteAssistantOutput::default(),
+        usage: RemoteTurnUsageSummary::default(),
+        execution: RemoteExecutionSummary::default(),
+        tool_calls: Vec::new(),
+        issues: Vec::new(),
+        activities: Vec::new(),
+        metadata: HashMap::new(),
+    };
+    assert!(result.validate().is_err());
+
+    result.cancellation = Some(RemoteTurnCancellationEvidence {
+        request_id: "request-1".to_string(),
+        source: RemoteTurnCancelSource::UserInterrupt,
+        reason: Some("stop".to_string()),
+    });
+    result.validate().expect("cancelled result with evidence");
+
+    result.status = RemoteTurnStatus::Completed;
+    assert!(result.validate().is_err());
+}
+
+#[test]
+fn remote_turn_cancel_envelopes_round_trip() {
+    let request = RemoteTurnCancelRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        session_id: "session".to_string(),
+        turn_id: "turn".to_string(),
+        request_id: "request-1".to_string(),
+        source: RemoteTurnCancelSource::Host,
+        reason: Some("superseded by newer input".to_string()),
+    };
+    request.validate().expect("valid cancellation request");
+    let decoded: RemoteTurnCancelRequest = serde_json::from_value(
+        serde_json::to_value(&request).expect("serialize cancellation request"),
+    )
+    .expect("deserialize cancellation request");
+    assert_eq!(decoded, request);
+
+    let receipt = RemoteTurnCancelReceipt::new(
+        "session",
+        "turn",
+        RemoteTurnCancelOutcome::Requested {
+            cancellation: RemoteTurnCancellationEvidence {
+                request_id: "request-1".to_string(),
+                source: RemoteTurnCancelSource::Host,
+                reason: None,
+            },
+        },
+    );
+    receipt.validate().expect("valid cancellation receipt");
 }
 
 #[test]
@@ -658,8 +722,8 @@ fn wrong_protocol_versions_are_rejected() {
     assert!(matches!(
         request.validate(),
         Err(RemoteProtocolError::UnsupportedProtocolVersion {
-            actual: 9,
-            expected: 10,
+            actual: 10,
+            expected: 11,
         })
     ));
 
@@ -741,7 +805,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 10);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 11);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());

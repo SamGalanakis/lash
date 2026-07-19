@@ -28,6 +28,7 @@ struct AwaitEventEntry {
     /// [`AwaitEventRegistry::cancel_session`] to find a session's outstanding
     /// waits without re-deriving key hashes.
     session_id: Option<String>,
+    turn_control: bool,
     terminal: Option<Resolution>,
     notify: Arc<Notify>,
 }
@@ -36,6 +37,7 @@ impl AwaitEventEntry {
     fn for_key(key: &AwaitEventKey) -> Self {
         Self {
             session_id: key.scope.session_id().map(ToOwned::to_owned),
+            turn_control: key.wait.is_turn_control(),
             terminal: None,
             notify: Arc::new(Notify::new()),
         }
@@ -236,7 +238,10 @@ impl AwaitEventRegistry {
     pub(super) fn cancel_session(&self, session_id: &str) -> Result<(), RuntimeError> {
         let mut state = self.locked_state()?;
         for entry in state.entries.values_mut() {
-            if entry.session_id.as_deref() != Some(session_id) || entry.terminal.is_some() {
+            if entry.session_id.as_deref() != Some(session_id)
+                || entry.turn_control
+                || entry.terminal.is_some()
+            {
                 continue;
             }
             entry.terminal = Some(Resolution::Cancelled);

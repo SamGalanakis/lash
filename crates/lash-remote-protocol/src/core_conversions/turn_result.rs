@@ -39,6 +39,7 @@ impl RemoteTurnResult {
         let lash_core::AssembledTurn {
             state: _,
             outcome,
+            cancellation,
             assistant_output,
             execution,
             token_usage,
@@ -66,6 +67,7 @@ impl RemoteTurnResult {
             turn_id: turn_id.into(),
             status,
             outcome,
+            cancellation: cancellation.map(Into::into),
             assistant_output: assistant_output.into(),
             usage: RemoteTurnUsageSummary {
                 parent,

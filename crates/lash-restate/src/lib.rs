@@ -78,7 +78,8 @@ use lash_core::{
     Resolution, ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectCommand,
     RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
     RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
-    RuntimeInvocation, ScopedEffectController, watch_process_registry_with_sink,
+    RuntimeInvocation, ScopedEffectController, TurnAddress, TurnAttach, TurnTerminal,
+    TurnWorkDriver, watch_process_registry_with_sink,
 };
 use lash_http_transport::{
     HttpMethod, HttpRequest, HttpResponse, HttpTransport, HttpTransportError, ReqwestClient,
@@ -195,6 +196,8 @@ pub struct RestateDurableWaitAddress {
     pub workflow_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub classification: RestateDurableWaitClassification,
 }
 
 impl RestateDurableWaitAddress {
@@ -202,8 +205,21 @@ impl RestateDurableWaitAddress {
         Self {
             workflow_key: format!("{:x}", Sha256::digest(key.key_id.as_bytes())),
             session_id: key.scope.session_id().map(str::to_string),
+            classification: if key.wait.is_turn_control() {
+                RestateDurableWaitClassification::TurnControl
+            } else {
+                RestateDurableWaitClassification::DurableWait
+            },
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestateDurableWaitClassification {
+    #[default]
+    DurableWait,
+    TurnControl,
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -2141,6 +2157,17 @@ async fn resolve_indexed_waits(
     Ok(())
 }
 
+fn split_cancellable_waits(
+    waits: Vec<RestateDurableWaitAddress>,
+) -> (
+    Vec<RestateDurableWaitAddress>,
+    Vec<RestateDurableWaitAddress>,
+) {
+    waits
+        .into_iter()
+        .partition(|wait| wait.classification == RestateDurableWaitClassification::DurableWait)
+}
+
 impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
     async fn register(
         &self,
@@ -2164,7 +2191,9 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         Json(request): Json<RestateDurableWaitIndexRequest>,
     ) -> HandlerResult<Json<()>> {
         let mut state = load_durable_wait_index(&ctx).await?;
-        state.waits.retain(|wait| wait != &request.address);
+        if request.address.classification == RestateDurableWaitClassification::DurableWait {
+            state.waits.retain(|wait| wait != &request.address);
+        }
         ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
         Ok(Json(()))
     }
@@ -2209,7 +2238,8 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
 
     async fn cancel_all(&self, ctx: ObjectContext<'_>) -> HandlerResult<Json<()>> {
         let mut state = load_durable_wait_index(&ctx).await?;
-        let waits = std::mem::take(&mut state.waits);
+        let (waits, controls) = split_cancellable_waits(std::mem::take(&mut state.waits));
+        state.waits = controls;
         ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
         resolve_indexed_waits(&ctx, waits).await?;
         Ok(Json(()))
@@ -2222,6 +2252,115 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
         resolve_indexed_waits(&ctx, waits).await?;
         Ok(Json(()))
+    }
+}
+
+/// Restate ingress attachment to a turn's reserved terminal keyed promise.
+#[derive(Clone)]
+pub struct RestateTurnAttach {
+    ingress: RestateIngressClient,
+}
+
+impl RestateTurnAttach {
+    pub fn new(connection: impl Into<RestateConnection>) -> Self {
+        Self {
+            ingress: RestateIngressClient::new(connection),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnAttach for RestateTurnAttach {
+    async fn await_terminal(&self, address: &TurnAddress) -> Result<TurnTerminal, RuntimeError> {
+        let key = restate_await_event_key(
+            &ExecutionScope::turn(&address.session_id, &address.turn_id),
+            AwaitEventWaitIdentity::TurnTerminal,
+        )?;
+        let durable_address = RestateDurableWaitAddress::for_key(&key);
+        let workflow_key = durable_address.workflow_key.clone();
+        let registration = self
+            .ingress
+            .call_object_json::<_, RestateDurableWaitRegistration>(
+                "LashDurableWaitIndex",
+                &address.session_id,
+                "register",
+                &RestateDurableWaitIndexRequest {
+                    address: durable_address.clone(),
+                },
+            )
+            .await
+            .map_err(|err| RuntimeError::new("restate_turn_terminal_attach", err.to_string()))?;
+        if registration == RestateDurableWaitRegistration::Revoked {
+            return Err(RuntimeError::new(
+                "turn_control_unknown_or_revoked",
+                format!(
+                    "terminal promise for turn `{}` in session `{}` was revoked",
+                    address.turn_id, address.session_id
+                ),
+            ));
+        }
+        let resolution = self
+            .ingress
+            .call_workflow_json::<_, Resolution>(
+                "LashDurableWaitWorkflow",
+                &workflow_key,
+                "await_resolution",
+                &RestateDurableWaitAwaitRequest {
+                    address: durable_address,
+                    timeout_ms: None,
+                },
+            )
+            .await
+            .map_err(|err| RuntimeError::new("restate_turn_terminal_attach", err.to_string()))?;
+        match resolution {
+            Resolution::Ok(value) => serde_json::from_value(value)
+                .map_err(|err| RuntimeError::new("restate_turn_terminal_decode", err.to_string())),
+            other => Err(RuntimeError::new(
+                "restate_turn_terminal_invalid_resolution",
+                format!(
+                    "terminal promise for turn `{}` in session `{}` resolved with {other:?}",
+                    address.turn_id, address.session_id
+                ),
+            )),
+        }
+    }
+}
+
+/// Bundled Restate wiring for foreground-turn control.
+///
+/// Use the returned effect host to configure Lash turn execution and the
+/// returned driver for out-of-process cancellation/terminal attachment. Bind
+/// `LashDurableWaitWorkflowImpl` and `LashDurableWaitIndexImpl` on the endpoint;
+/// no Restate Admin API access is involved.
+pub struct RestateTurnDeployment {
+    effect_host: Arc<RestateEffectHost>,
+    driver: TurnWorkDriver,
+    attach: Arc<RestateTurnAttach>,
+}
+
+impl RestateTurnDeployment {
+    pub fn new(connection: impl Into<RestateConnection>) -> Self {
+        let connection = connection.into();
+        let effect_host = Arc::new(RestateEffectHost::with_ingress_url(connection.clone()));
+        let attach = Arc::new(RestateTurnAttach::new(connection));
+        let driver = TurnWorkDriver::new(effect_host.clone()).with_attach(attach.clone());
+        Self {
+            effect_host,
+            driver,
+            attach,
+        }
+    }
+
+    pub fn effect_host(&self) -> Arc<RestateEffectHost> {
+        Arc::clone(&self.effect_host)
+    }
+
+    pub fn turn_work_driver(&self) -> TurnWorkDriver {
+        self.driver.clone()
+    }
+
+    pub fn turn_attach(&self) -> Arc<RestateTurnAttach> {
+        Arc::clone(&self.attach)
     }
 }
 

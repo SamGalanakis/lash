@@ -23,6 +23,7 @@ mod process_registry;
 mod runtime_persistence;
 mod session_store_factory;
 mod trigger_store;
+mod turn_control;
 
 pub use artifact_store::*;
 pub use attachment_store::*;
@@ -33,6 +34,7 @@ pub use process_registry::*;
 pub use runtime_persistence::*;
 pub use session_store_factory::*;
 pub use trigger_store::*;
+pub use turn_control::*;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -201,6 +203,7 @@ mod tests {
         effect_host(|| Arc::new(crate::InlineEffectHost::default())).await;
         effect_host_await_events(|| Arc::new(crate::InlineEffectHost::default())).await;
         effect_host_durable_steps(|| Arc::new(crate::InlineEffectHost::default())).await;
+        turn_work_driver(Arc::new(crate::InlineEffectHost::default())).await;
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ use super::*;
 include!("core_conversions/triggers.rs");
 include!("core_conversions/processes.rs");
 include!("core_conversions/turn_input.rs");
+include!("core_conversions/turn_control.rs");
 include!("core_conversions/llm.rs");
 include!("core_conversions/turn_result.rs");
 include!("core_conversions/observations.rs");

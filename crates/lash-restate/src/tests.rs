@@ -14,6 +14,33 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 #[test]
+fn restate_session_cancel_sweep_excludes_turn_control_addresses() {
+    let durable_wait = RestateDurableWaitAddress {
+        workflow_key: "tool-wait".to_string(),
+        session_id: Some("session".to_string()),
+        classification: RestateDurableWaitClassification::DurableWait,
+    };
+    let cancel_gate = RestateDurableWaitAddress {
+        workflow_key: "turn-cancel".to_string(),
+        session_id: Some("session".to_string()),
+        classification: RestateDurableWaitClassification::TurnControl,
+    };
+    let terminal = RestateDurableWaitAddress {
+        workflow_key: "turn-terminal".to_string(),
+        session_id: Some("session".to_string()),
+        classification: RestateDurableWaitClassification::TurnControl,
+    };
+
+    let (cancelled, retained) = split_cancellable_waits(vec![
+        durable_wait.clone(),
+        cancel_gate.clone(),
+        terminal.clone(),
+    ]);
+    assert_eq!(cancelled, vec![durable_wait]);
+    assert_eq!(retained, vec![cancel_gate, terminal]);
+}
+
+#[test]
 fn restate_effect_name_uses_lash_replay_key() {
     let invocation = RuntimeInvocation::effect(
         lash_core::runtime::RuntimeScope::for_turn("session", "turn", 1, 2),
@@ -31,6 +58,13 @@ fn restate_effect_name_uses_lash_replay_key() {
 #[tokio::test]
 async fn restate_effect_host_satisfies_scope_factory_conformance() {
     lash_core::testing::conformance::effect_host(|| Arc::new(RestateEffectHost::new())).await;
+}
+
+#[tokio::test]
+async fn restate_turn_work_driver_satisfies_shared_conformance() {
+    let context = Arc::new(RecordingContext::default());
+    let host: Arc<dyn EffectHost> = Arc::new(RestateRuntimeEffectController::new(context));
+    lash_core::testing::conformance::turn_work_driver(host).await;
 }
 
 #[tokio::test]
@@ -836,6 +870,9 @@ impl RecordingContext {
     }
 
     fn settle_session_wait(&self, address: &RestateDurableWaitAddress) {
+        if address.classification == RestateDurableWaitClassification::TurnControl {
+            return;
+        }
         let Some(session_id) = address.session_id.as_deref() else {
             return;
         };
@@ -1079,7 +1116,18 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
             .expect("session waits lock")
             .remove(&session_id)
             .unwrap_or_default();
-        for address in waits {
+        let (resolve, retain): (Vec<_>, Vec<_>) = if revoke {
+            (waits, Vec::new())
+        } else {
+            split_cancellable_waits(waits)
+        };
+        if !retain.is_empty() {
+            self.session_waits
+                .lock()
+                .expect("session waits lock")
+                .insert(session_id, retain);
+        }
+        for address in resolve {
             self.terminalize_durable_event(RestateDurableWaitResolveRequest {
                 address,
                 resolution: Resolution::Cancelled,
