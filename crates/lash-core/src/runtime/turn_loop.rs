@@ -666,6 +666,58 @@ impl LashRuntime {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_cancelled_turn_after_effect_abort(
+        &mut self,
+        driver: RuntimeTurnDriver<'_>,
+        mut assembler: TurnAssembler,
+        cancellation_messages: crate::MessageSequence,
+        events: &dyn EventSink,
+        finish_scoped_effect_controller: &ScopedEffectController<'_>,
+        cancel: &CancellationToken,
+        session_execution_lease: Option<&SessionExecutionLeaseGuard>,
+        session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
+        turn_control: &ActiveTurnControl,
+        turn_index: usize,
+        trace_turn_id: String,
+    ) -> Result<PhysicalTurnExecution, RuntimeError> {
+        let RuntimeTurnDriver {
+            session,
+            policy,
+            turn_pipeline,
+            pending_queue_claims,
+            pending_turn_input_claims,
+            ..
+        } = driver;
+        self.session = Some(session);
+        let outcome_event = SessionStreamEvent::TurnOutcome {
+            outcome: TurnOutcome::Stopped(TurnStop::Cancelled),
+        };
+        assembler.push(&outcome_event);
+        emit_session_event_to_sink(events, outcome_event).await;
+        assembler.push(&SessionStreamEvent::Done);
+        emit_session_event_to_sink(events, SessionStreamEvent::Done).await;
+        self.finish_turn(
+            TurnFinishInput {
+                turn_pipeline,
+                assembler,
+                new_messages: cancellation_messages,
+                policy,
+                turn_index,
+                queued_work_claims: pending_queue_claims,
+                turn_input_claims: pending_turn_input_claims,
+                trace_turn_id,
+            },
+            events,
+            finish_scoped_effect_controller,
+            cancel,
+            session_execution_lease,
+            session_execution_lease_release_policy,
+            turn_control,
+        )
+        .await
+    }
+
     fn emit_completed_turn_trace(
         &self,
         state: &SessionSnapshot,
@@ -1907,7 +1959,7 @@ impl LashRuntime {
             .session
             .take()
             .expect("lash runtime session must be available");
-        let mut driver = RuntimeTurnDriver {
+        let mut driver = Box::new(RuntimeTurnDriver {
             session,
             policy: resolved_turn_policy,
             host: self.host.clone(),
@@ -1930,7 +1982,7 @@ impl LashRuntime {
             session_execution_lease: session_execution_fence,
             runtime_lease_owner: self.runtime_lease_owner.clone(),
             turn_phase_probe: self.turn_phase_probe.clone(),
-        };
+        });
         let protocol_run_offset = 0;
         let cancellation_messages = prepared.messages.clone();
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
@@ -1954,42 +2006,20 @@ impl LashRuntime {
             Ok(result) => result,
             Err(_err) if cancel.is_cancelled() && turn_control.evidence().is_some() => {
                 self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
-                let RuntimeTurnDriver {
-                    session,
-                    policy,
-                    turn_pipeline,
-                    pending_queue_claims,
-                    pending_turn_input_claims,
-                    ..
-                } = driver;
-                self.session = Some(session);
-                let outcome_event = SessionStreamEvent::TurnOutcome {
-                    outcome: TurnOutcome::Stopped(TurnStop::Cancelled),
-                };
-                assembler.push(&outcome_event);
-                emit_session_event_to_sink(events, outcome_event).await;
-                assembler.push(&SessionStreamEvent::Done);
-                emit_session_event_to_sink(events, SessionStreamEvent::Done).await;
-                return self
-                    .finish_turn(
-                        TurnFinishInput {
-                            turn_pipeline,
-                            assembler,
-                            new_messages: cancellation_messages,
-                            policy,
-                            turn_index,
-                            queued_work_claims: pending_queue_claims,
-                            turn_input_claims: pending_turn_input_claims,
-                            trace_turn_id,
-                        },
-                        events,
-                        &finish_scoped_effect_controller,
-                        &cancel,
-                        session_execution_lease,
-                        session_execution_lease_release_policy,
-                        turn_control.as_ref(),
-                    )
-                    .await;
+                return Box::pin(self.finish_cancelled_turn_after_effect_abort(
+                    *driver,
+                    assembler,
+                    cancellation_messages,
+                    events,
+                    &finish_scoped_effect_controller,
+                    &cancel,
+                    session_execution_lease,
+                    session_execution_lease_release_policy,
+                    turn_control.as_ref(),
+                    turn_index,
+                    trace_turn_id,
+                ))
+                .await;
             }
             Err(err) => {
                 self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
@@ -1998,7 +2028,7 @@ impl LashRuntime {
                     pending_queue_claims,
                     pending_turn_input_claims,
                     ..
-                } = driver;
+                } = *driver;
                 self.session = Some(session);
                 self.abandon_queued_work_claims_after_lease_loss(&err, &pending_queue_claims)
                     .await;
@@ -2022,7 +2052,7 @@ impl LashRuntime {
             pending_queue_claims,
             pending_turn_input_claims,
             ..
-        } = driver;
+        } = *driver;
         self.session = Some(session);
         let pending_queue_claims_for_abandon = pending_queue_claims.clone();
         let pending_turn_input_claims_for_abandon = pending_turn_input_claims.clone();
