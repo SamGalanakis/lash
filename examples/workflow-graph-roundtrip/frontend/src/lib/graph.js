@@ -1,4 +1,5 @@
 import { layoutDocument } from './layout.js';
+import { fieldDefaultValue } from './operations.js';
 
 // Build SvelteFlow nodes + edges from a draft WorkflowDocument.
 //
@@ -7,7 +8,9 @@ import { layoutDocument } from './layout.js';
 // edit inside a node component mutates the draft that Save serializes back.
 // Positions come from auto-layout, overridden by any user-dragged position
 // persisted out-of-band in localStorage.
-export function buildFlow(doc, storedPositions, onDelete, onAddNode) {
+export function buildFlow(doc, storedPositions, handlers = {}) {
+  const { onDelete, onAddNode, onReorder, onCommit, onRebuild, onMoveTo, getMoveTargets } =
+    handlers;
   const { positions, sizes, groupLayouts } = layoutDocument(doc);
   const nodeMap = new Map(doc.nodes.map((n) => [n.id, n]));
 
@@ -50,6 +53,11 @@ export function buildFlow(doc, storedPositions, onDelete, onAddNode) {
         groups: groupLayouts.get(node.id) ?? null,
         onDelete,
         onAddNode,
+        onReorder,
+        onCommit,
+        onRebuild,
+        onMoveTo,
+        getMoveTargets,
       },
       // Containers must sit behind their children.
       zIndex: isContainer ? 0 : 1,
@@ -65,16 +73,23 @@ export function buildFlow(doc, storedPositions, onDelete, onAddNode) {
   // Cross-scope data edges — a variable defined in one scope but consumed
   // inside a nested container (e.g. `state`, defined in the process body, read
   // inside the `while` body) — cannot be routed by the per-scope layout, so
-  // SvelteFlow draws them as floating dashed lines whose label chips land on
-  // top of node headers and borders. We do not render them at all: the
-  // consuming node already displays the variable name in its own body, so no
-  // information is lost and the graph reads cleanly.
+  // SvelteFlow would draw them as floating dashed lines whose label chips land
+  // on top of node headers and borders. We do not draw them; instead we surface
+  // the dependency as an in-node "reads: …" chip on the consuming node, so the
+  // data flow stays legible without spaghetti.
   const parentOf = new Map(doc.nodes.map((n) => [n.id, n.parentId ?? null]));
+  const readsByNode = new Map();
   const flowEdges = [];
   for (const edge of doc.edges) {
     const isData = edge.data?.kind === 'data';
     if (isData && parentOf.get(edge.source) !== parentOf.get(edge.target)) {
-      continue; // cross-scope data edge — drop it (see note above)
+      const variable = edge.data?.variable;
+      if (variable) {
+        let set = readsByNode.get(edge.target);
+        if (!set) readsByNode.set(edge.target, (set = new Set()));
+        set.add(variable);
+      }
+      continue; // cross-scope data edge — surfaced as a chip, not an arrow
     }
     flowEdges.push({
       id: edge.id,
@@ -88,6 +103,12 @@ export function buildFlow(doc, storedPositions, onDelete, onAddNode) {
       zIndex: 2,
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
     });
+  }
+
+  // Attach cross-scope "reads" to each consuming node so it can render a chip.
+  for (const fn of flowNodes) {
+    const reads = readsByNode.get(fn.id);
+    if (reads && reads.size) fn.data.reads = [...reads];
   }
 
   return { flowNodes, flowEdges };
@@ -124,55 +145,132 @@ function mintEdgeId(taken) {
   return id;
 }
 
-// Editable field defaults per kind. Each must parse as Lashlang (the user edits
-// after inserting). Containers additionally declare a `subkind` and seed exactly
-// one default child so their body is never empty. Returns the `data` payload
-// (minus `children`, which addNodeToDoc fills in once the child ids exist).
-function defaultNodeData(kind) {
-  const base = { kind, nameSource: 'derived' };
-  switch (kind) {
-    case 'call':
-      return { ...base, title: 'call', expression: 'display.show_message({ text: "new message" })' };
-    case 'effect':
-      return { ...base, title: 'sleep', effect: 'sleep', expression: 'sleep for "250ms"' };
-    case 'data':
-      return { ...base, title: 'data', binding: 'value', expression: '0' };
-    case 'state_update':
-      return { ...base, title: 'update state.count', target: 'state.count', expression: 'state.count + 1' };
-    case 'computation':
-      // binding intentionally omitted (optional `let` name).
-      return { ...base, title: 'computation', expression: '1 + 1' };
-    case 'terminal':
-      return { ...base, title: 'finish', expression: '0' };
-    case 'if':
-      return { ...base, kind: 'container', subkind: 'if', title: 'if', condition: 'true' };
-    case 'while':
-      // condition deliberately false so a pre-edit Run cannot infinite-loop.
-      return { ...base, kind: 'container', subkind: 'while', title: 'while', condition: 'false' };
-    case 'for':
-      return { ...base, kind: 'container', subkind: 'for', title: 'for', binding: 'item', iterable: '[1, 2, 3]' };
-    case 'comprehension':
-      return {
-        ...base,
-        kind: 'container',
-        subkind: 'comprehension',
-        title: 'comprehension',
-        binding: 'items',
-        clauses: [{ kind: 'for', binding: 'x', iterable: '[1, 2, 3]' }],
-      };
+// --- Building a node from an operation-catalog entry -----------------------
+//
+// The operation catalog (GET /operations) is the sole data home for what a
+// palette can insert. An entry is
+//   { id, label, nodeKind, subkind?, operation?, effect?, terminalKind?,
+//     fields:[{ name, type, default }] }.
+// `nodeDataFromOperation` turns one entry into the node `data` payload the lens
+// accepts: value-bearing leaves (call/effect/terminal/data) carry a canonical
+// `expression`; structured nodes carry their text slots; call/effect also seed
+// `data.fields` so their arguments are editable the instant they are inserted.
+
+// A field's default as canonical (unquoted) slot text.
+function slotText(field) {
+  if (!field) return '';
+  if (field.type === 'number') return String(Number(field.default ?? 0) || 0);
+  if (field.type === 'boolean') return field.default ? 'true' : 'false';
+  return String(field.default ?? '');
+}
+
+function seedFields(fields) {
+  const out = {};
+  for (const field of fields ?? []) out[field.name] = fieldDefaultValue(field);
+  return out;
+}
+
+// One `name: value` record argument for a synthesized receiver call.
+function recordArg(field) {
+  const value = field.default;
+  switch (field.type) {
+    case 'number':
+      return `${field.name}: ${Number(value ?? 0) || 0}`;
+    case 'boolean':
+      return `${field.name}: ${value ? 'true' : 'false'}`;
+    case 'string':
+      return `${field.name}: ${JSON.stringify(String(value ?? ''))}`;
     default:
-      return { ...base, title: kind };
+      return `${field.name}: ${String(value ?? '')}`; // expression / identifier — raw
   }
 }
 
-// The single child seeded into a fresh container's slot: a default `call`, except
-// a comprehension's `element` slot which is a single value expression (`x`).
-function seedChildFor(kind) {
-  if (kind === 'comprehension') {
-    // A bare expression projects to a `data` node (binding-less value).
+function synthCallExpression(op) {
+  const args = (op.fields ?? []).map(recordArg).join(', ');
+  return `display.${op.operation}({ ${args} })`;
+}
+
+function synthEffectExpression(op, byName) {
+  if (op.effect === 'sleep') return `sleep for ${slotText(byName.duration) || '"1s"'}`;
+  if (op.effect === 'wait_signal') {
+    return `wait_signal(${JSON.stringify(String(byName.signal?.default ?? 'continue'))})`;
+  }
+  return slotText(byName.expression) || 'sleep for "1s"';
+}
+
+function nodeDataFromOperation(op) {
+  const kind = op.nodeKind;
+  const data = { kind, title: op.label ?? kind, nameSource: 'derived' };
+  if (op.subkind) data.subkind = op.subkind;
+  if (op.operation) data.operation = op.operation;
+  if (op.effect) data.effect = op.effect;
+  if (op.terminalKind) data.terminalKind = op.terminalKind;
+  const byName = Object.fromEntries((op.fields ?? []).map((f) => [f.name, f]));
+
+  switch (kind) {
+    case 'opaque':
+      data.source = String(byName.source?.default ?? '');
+      break;
+    case 'call':
+      data.expression = synthCallExpression(op);
+      data.fields = seedFields(op.fields);
+      break;
+    case 'effect':
+      data.expression = synthEffectExpression(op, byName);
+      data.fields = seedFields(op.fields);
+      break;
+    case 'terminal':
+      // The lens wraps this value with the finish/fail keyword from
+      // `terminalKind` (set above), so seed the bare value only.
+      data.expression = slotText(byName.expression) || '0';
+      break;
+    case 'data':
+    case 'computation': {
+      const binding = slotText(byName.binding);
+      if (binding) data.binding = binding;
+      data.expression = slotText(byName.expression) || '0';
+      break;
+    }
+    case 'state_update':
+      data.target = slotText(byName.target) || 'state.count';
+      data.expression = slotText(byName.expression) || '0';
+      break;
+    case 'container':
+      if (op.subkind === 'if' || op.subkind === 'while') {
+        data.condition = slotText(byName.condition) || (op.subkind === 'while' ? 'false' : 'true');
+      } else if (op.subkind === 'for') {
+        data.binding = slotText(byName.binding) || 'item';
+        data.iterable = slotText(byName.iterable) || '[1, 2, 3]';
+      } else if (op.subkind === 'comprehension') {
+        const binding = slotText(byName.binding);
+        if (binding) data.binding = binding;
+        data.clauses = [{ kind: 'for', binding: 'x', iterable: '[1, 2, 3]' }];
+      }
+      break;
+    default:
+      break;
+  }
+  return data;
+}
+
+// A ready-to-run default child seeded into a fresh container slot: the catalog's
+// first action (`call`) operation, except a comprehension's single-expression
+// `element` slot (a bare value). Falls back to a minimal call if the catalog is
+// empty (adding is only reachable once the catalog has loaded, so this is rare).
+function seedChildFor(subkind, catalog) {
+  if (subkind === 'comprehension') {
     return { kind: 'data', title: 'x', nameSource: 'derived', expression: 'x' };
   }
-  return defaultNodeData('call');
+  const action = (catalog ?? []).find((op) => op.nodeKind === 'call');
+  if (action) return nodeDataFromOperation(action);
+  return {
+    kind: 'call',
+    title: 'Show message',
+    nameSource: 'derived',
+    operation: 'show_message',
+    expression: 'display.show_message({ text: "" })',
+    fields: { text: '' },
+  };
 }
 
 // Container slot layout per subkind: which slots exist and which one is seeded
@@ -207,31 +305,69 @@ function resolveGroup(doc, target) {
   return { nodeIds: group.nodeIds, parentId: owner.id, scope: group.scope };
 }
 
-// Insert a new default node of `kind` into the target group. Mirrors
-// deleteNodeFromDoc's draft-mutation style: splice the id into the group's
-// nodeIds (BEFORE a trailing terminal so the new node isn't dead code after a
-// `finish`/`fail`), push the FlowNode, set parentId to match how buildFlow reads
-// membership, and chain sequence edges around the new position. Container kinds
-// also get their slot group(s) + one seeded child. Data edges are never added
-// here — the backend recomputes them on reproject. Mutates `doc`; returns the
-// new node id (or null if the target could not be resolved).
-export function addNodeToDoc(doc, target, kind) {
+// Insert a new top-level process from the `proc.process` catalog entry. It joins
+// `roots.processes` with a `body` slot seeded with one default action node (an
+// empty body is also accepted — the backend seeds `finish 0`). The process's
+// name comes from the catalog `name` field default. Mutates `doc`; returns the
+// new process id.
+export function addProcessToDoc(doc, operation, catalog = []) {
+  const taken = new Set(doc.nodes.map((n) => n.id));
+  const id = mintNodeId(taken);
+  const nameField = (operation.fields ?? []).find((f) => f.name === 'name');
+  const name = String(nameField?.default ?? 'my_process');
+
+  const childId = mintNodeId(taken);
+  const childData = seedChildFor(null, catalog);
+  doc.nodes.push({ id: childId, type: childData.kind, parentId: id, data: childData });
+
+  doc.nodes.push({
+    id,
+    type: 'process',
+    data: {
+      kind: 'process',
+      title: name,
+      name,
+      nameSource: 'derived',
+      params: [],
+      signals: [],
+      children: [{ slot: 'body', scope: `process:${id}`, nodeIds: [childId] }],
+    },
+  });
+  doc.roots ??= { main: [], processes: [] };
+  doc.roots.processes ??= [];
+  doc.roots.processes.push(id);
+  return id;
+}
+
+// Insert a new node built from an operation-catalog entry into the target
+// group. Mirrors deleteNodeFromDoc's draft-mutation style: splice the id into
+// the group's nodeIds (BEFORE a trailing terminal so the new node isn't dead
+// code after a `finish`/`fail`), push the FlowNode, set parentId to match how
+// buildFlow reads membership, and chain sequence edges around the new position.
+// Container entries also get their slot group(s) + one seeded child. Data edges
+// are never added here — the backend recomputes them on reproject. Mutates
+// `doc`; returns the new node id (or null if the target could not be resolved).
+export function addNodeToDoc(doc, target, operation, catalog = []) {
+  // A process is a top-level declaration, not a body statement: it joins
+  // `roots.processes` with its own body slot rather than an owner's group.
+  if (operation.nodeKind === 'process') return addProcessToDoc(doc, operation, catalog);
+
   const taken = new Set(doc.nodes.map((n) => n.id));
   const takenEdges = new Set(doc.edges.map((e) => e.id));
   const group = resolveGroup(doc, target);
   if (!group) return null;
 
   const id = mintNodeId(taken);
-  const data = defaultNodeData(kind);
+  const data = nodeDataFromOperation(operation);
 
   // Seed container slot groups (+ their initial child nodes) before appending.
   if (data.kind === 'container') {
     data.children = [];
-    for (const { slot, seeded } of containerSlots(kind)) {
+    for (const { slot, seeded } of containerSlots(operation.subkind)) {
       const nodeIds = [];
       if (seeded) {
         const childId = mintNodeId(taken);
-        const childData = seedChildFor(kind);
+        const childData = seedChildFor(operation.subkind, catalog);
         doc.nodes.push({
           id: childId,
           type: childData.kind,
@@ -319,4 +455,205 @@ export function deleteNodeFromDoc(doc, nodeId) {
       grp.nodeIds = grp.nodeIds.filter((id) => !toRemove.has(id));
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Reordering statements within a scope.
+//
+// Execution order == the order of ids in a group's `nodeIds`; the backend
+// renders source from that order and reprojects. Locate the group that owns
+// `nodeId` (the top-level `main` root or a container/process child group),
+// then move the id within that list. Mirrors deleteNodeFromDoc's
+// draft-mutation style. Sequence edges within the scope are re-chained locally
+// for immediate visual correctness — the backend recomputes them regardless on
+// reproject. Mutates `doc`; returns true if the order actually changed.
+// ---------------------------------------------------------------------------
+
+// Resolve the group list (and its sequence-edge scope) that contains `nodeId`.
+// Top-level `main` nodes carry the `main` scope; processes are parallel
+// top-level definitions with no sequence ordering (scope null, no re-chain).
+function findGroupOf(doc, nodeId) {
+  const main = doc.roots?.main ?? [];
+  if (main.includes(nodeId)) return { nodeIds: main, scope: 'main' };
+  const procs = doc.roots?.processes ?? [];
+  if (procs.includes(nodeId)) return { nodeIds: procs, scope: null };
+  for (const n of doc.nodes) {
+    for (const grp of n.data.children ?? []) {
+      if (grp.nodeIds.includes(nodeId)) return { nodeIds: grp.nodeIds, scope: grp.scope ?? null };
+    }
+  }
+  return null;
+}
+
+// Drop every sequence edge in `scope` and re-chain consecutive members of the
+// (already reordered) group so the drawn arrows match the new order.
+function rechainSequenceEdges(doc, group) {
+  const scope = group.scope;
+  if (!scope) return;
+  const ids = group.nodeIds;
+  doc.edges = doc.edges.filter((e) => !(e.data?.kind === 'sequence' && e.data?.scope === scope));
+  const takenEdges = new Set(doc.edges.map((e) => e.id));
+  for (let i = 0; i + 1 < ids.length; i += 1) {
+    doc.edges.push({
+      id: mintEdgeId(takenEdges),
+      source: ids[i],
+      target: ids[i + 1],
+      data: { kind: 'sequence', scope },
+    });
+  }
+}
+
+// Move `nodeId` within its scope. `direction` is 'up' | 'down' or a target
+// index. A trailing terminal (`finish`/`fail`) is a barrier: a non-terminal
+// node cannot move after it (clamp), and a terminal itself never moves.
+export function reorderNodeInDoc(doc, nodeId, direction) {
+  const group = findGroupOf(doc, nodeId);
+  if (!group) return false;
+  const ids = group.nodeIds;
+  const from = ids.indexOf(nodeId);
+  if (from === -1) return false;
+
+  const kindOf = new Map(doc.nodes.map((n) => [n.id, n.data?.kind]));
+  if (kindOf.get(nodeId) === 'terminal') return false; // terminals stay put
+
+  // A trailing terminal reserves the last slot; movable nodes stop before it.
+  const lastId = ids[ids.length - 1];
+  const hasTrailingTerminal = lastId !== undefined && kindOf.get(lastId) === 'terminal';
+  const maxIndex = hasTrailingTerminal ? ids.length - 2 : ids.length - 1;
+
+  let to = direction === 'up' ? from - 1 : direction === 'down' ? from + 1 : Number(direction);
+  if (Number.isNaN(to)) return false;
+  to = Math.max(0, Math.min(to, maxIndex));
+  if (to === from) return false;
+
+  ids.splice(from, 1);
+  ids.splice(to, 0, nodeId);
+  rechainSequenceEdges(doc, group);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Moving a node into a different scope (container slot ↔ top-level main).
+//
+// The backend supports move-scope through membership: a node's parentId +
+// which group's nodeIds it belongs to determine its owning block. We update
+// that membership + parentId and re-chain the sequence edges in both the source
+// and destination scopes. Data edges are recomputed by the backend on reproject.
+// ---------------------------------------------------------------------------
+
+// A container's whole descendant subtree (used to forbid moving it into itself).
+function descendantsOf(doc, nodeId) {
+  const map = new Map(doc.nodes.map((n) => [n.id, n]));
+  const out = new Set();
+  (function walk(id) {
+    const node = map.get(id);
+    for (const grp of node?.data.children ?? []) {
+      for (const child of grp.nodeIds) {
+        if (!out.has(child)) {
+          out.add(child);
+          walk(child);
+        }
+      }
+    }
+  })(nodeId);
+  return out;
+}
+
+// Resolve a destination descriptor ({ main:true } | { ownerId, slot }) to its
+// concrete nodeIds list, sequence scope, and parentId (undefined for main).
+function resolveDestination(doc, dest) {
+  if (dest?.main) {
+    doc.roots ??= { main: [], processes: [] };
+    doc.roots.main ??= [];
+    return { nodeIds: doc.roots.main, scope: 'main', parentId: undefined };
+  }
+  const owner = doc.nodes.find((n) => n.id === dest?.ownerId);
+  const group = (owner?.data.children ?? []).find((g) => g.slot === dest?.slot);
+  if (!group) return null;
+  return { nodeIds: group.nodeIds, scope: group.scope, parentId: owner.id };
+}
+
+// Enumerate the scopes a node may move INTO: top-level `main`, plus every
+// insertable container slot that is not the node's current scope nor inside the
+// node's own subtree. `element` slots (comprehension) hold exactly one node and
+// are excluded. Returns `[{ key, label, dest }]` for a "move to…" menu.
+export function moveTargetsFor(doc, nodeId) {
+  const node = doc.nodes.find((n) => n.id === nodeId);
+  // Terminals stay put; processes are always top-level and never move into a scope.
+  if (!node || node.data?.kind === 'terminal' || node.data?.kind === 'process') return [];
+  const own = descendantsOf(doc, nodeId);
+  own.add(nodeId);
+  const current = findGroupOf(doc, nodeId);
+  const targets = [];
+  const mainIds = doc.roots?.main ?? [];
+  if (!(current && current.nodeIds === mainIds)) {
+    targets.push({ key: 'main', label: 'top level', dest: { main: true } });
+  }
+  for (const owner of doc.nodes) {
+    if (own.has(owner.id)) continue;
+    for (const grp of owner.data?.children ?? []) {
+      if (grp.slot === 'element') continue;
+      if (current && grp.nodeIds === current.nodeIds) continue;
+      const ownerLabel = owner.data?.title?.trim() || owner.data?.subkind || owner.data?.kind;
+      targets.push({
+        key: `${owner.id}:${grp.slot}`,
+        label: `${ownerLabel} · ${grp.slot}`,
+        dest: { ownerId: owner.id, slot: grp.slot },
+      });
+    }
+  }
+  return targets;
+}
+
+// Move `nodeId` into `dest`, inserting at `insertIndex` (clamped before a
+// trailing terminal). A same-scope destination degrades to a reorder. A
+// container cannot move into its own subtree. Mutates `doc`; returns true when
+// the document actually changed.
+export function moveNodeToGroup(doc, nodeId, dest, insertIndex = Infinity) {
+  const node = doc.nodes.find((n) => n.id === nodeId);
+  if (!node) return false;
+  const kindOf = new Map(doc.nodes.map((n) => [n.id, n.data?.kind]));
+  if (kindOf.get(nodeId) === 'terminal') return false;
+
+  if (dest && !dest.main) {
+    if (dest.ownerId === nodeId) return false;
+    if (descendantsOf(doc, nodeId).has(dest.ownerId)) return false;
+  }
+
+  const target = resolveDestination(doc, dest);
+  if (!target) return false;
+
+  const source = findGroupOf(doc, nodeId);
+  if (!source) return false;
+  if (source.nodeIds === target.nodeIds) {
+    return reorderNodeInDoc(doc, nodeId, insertIndex);
+  }
+
+  const from = source.nodeIds.indexOf(nodeId);
+  if (from === -1) return false;
+  source.nodeIds.splice(from, 1);
+
+  const destIds = target.nodeIds;
+  const lastId = destIds[destIds.length - 1];
+  const trailingTerminal = lastId !== undefined && kindOf.get(lastId) === 'terminal';
+  const maxIndex = trailingTerminal ? destIds.length - 1 : destIds.length;
+  let at = Number.isFinite(insertIndex) ? insertIndex : destIds.length;
+  at = Math.max(0, Math.min(at, maxIndex));
+  destIds.splice(at, 0, nodeId);
+
+  if (target.parentId === undefined) delete node.parentId;
+  else node.parentId = target.parentId;
+
+  rechainSequenceEdges(doc, source);
+  rechainSequenceEdges(doc, { nodeIds: target.nodeIds, scope: target.scope });
+  return true;
+}
+
+// The sequence scope + ordered sibling ids that contain `nodeId` (for
+// drag-to-reorder hit-testing in the host). Returns null for unsequenced
+// scopes (parallel processes) where order is meaningless.
+export function scopeOf(doc, nodeId) {
+  const group = findGroupOf(doc, nodeId);
+  if (!group || !group.scope) return null;
+  return { scope: group.scope, nodeIds: group.nodeIds.slice() };
 }

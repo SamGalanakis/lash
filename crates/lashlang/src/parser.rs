@@ -127,6 +127,28 @@ fn parse_expression_with_context(
     Ok(expression)
 }
 
+/// Parse exactly one type expression for workflow-editing fields.
+pub fn parse_type_expression(source: &str) -> Result<TypeExpr, ParseError> {
+    let tokens = lex(source)?;
+    let mut parser = Parser {
+        tokens,
+        index: 0,
+        loop_depth: 0,
+        process_depth: 0,
+        nesting_depth: 0,
+    };
+    let ty = parser.parse_type_expr()?;
+    if !parser.at_eof() {
+        let token = parser.peek();
+        return Err(ParseError::Expected {
+            expected: "end of type expression",
+            found: render_kind(&token.kind),
+            span: token.span,
+        });
+    }
+    Ok(ty)
+}
+
 /// Maximum syntactic nesting depth (nested expressions *and* nested blocks).
 /// Bounds recursive-descent stack growth so adversarial model-emitted source
 /// (deeply nested brackets or `if`/`for` bodies) returns a `ParseError` instead

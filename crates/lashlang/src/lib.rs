@@ -4,6 +4,7 @@ mod builtins;
 mod compile;
 mod identity;
 mod introspection;
+mod json_schema;
 mod lexer;
 mod linker;
 mod parser;
@@ -11,6 +12,7 @@ mod runtime;
 mod source;
 mod tracking;
 mod trigger;
+mod typed_output;
 mod workflow_graph;
 
 #[cfg(any(test, feature = "testing"))]
@@ -25,9 +27,9 @@ pub use artifact::{
 };
 pub use ast::{
     AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ExprFolder, ExprVisitor,
-    LabelMetadata, ListComprehensionClause, ProcessDecl, ProcessParam, ProcessStartExpr, Program,
-    ResourceRefExpr, TypeDecl, TypeExpr, TypeField, UnaryOp, fold_expr_children, format_type_expr,
-    walk_expr,
+    LabelMetadata, ListComprehensionClause, ProcessDecl, ProcessParam, ProcessSignalDecl,
+    ProcessStartExpr, Program, ResourceRefExpr, TypeDecl, TypeExpr, TypeField, UnaryOp,
+    fold_expr_children, format_type_expr, walk_expr,
 };
 pub use compile::{
     ModuleCompileDiagnostic, ModuleCompileError, ModuleCompileOutput, ModuleCompileRequest,
@@ -41,13 +43,15 @@ pub use introspection::{
     ResourceTypeIntrospection, TriggerSourceIntrospection, TypeView, ValueConstructorIntrospection,
     referenced_module_call_paths,
 };
+pub use json_schema::json_schema_to_type_expr;
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
     LashlangAbilities, LashlangHostCatalog, LashlangHostCatalogError, LashlangHostEnvironment,
     LashlangLanguageFeatures, LinkError, LinkedModule, NamedDataType, NamedDataTypeError,
-    ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding, ValueConstructorBinding,
+    OutputFromInputBinding, ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding,
+    ValueConstructorBinding,
 };
-pub use parser::{ParseError, parse, parse_expression};
+pub use parser::{ParseError, parse, parse_expression, parse_type_expression};
 pub use runtime::{
     AbilityOp, AbilityResult, BudgetedJsonProjectionConfig, BudgetedJsonProjector, CompileStats,
     CompiledLinkedProgram, CompiledProcessCache, CompiledProcessCacheKey, CompiledProgram,
@@ -89,13 +93,16 @@ pub use trigger::{
     check_trigger_compatibility, event_type_for_source, is_trigger_resource_type, list_call_args,
     register_call_args, trigger_event_placeholder_expr,
 };
+pub use typed_output::parse_output_schema;
 pub use workflow_graph::{
-    GraphRenderError, VariableVersion, WORKFLOW_GRAPH_SCHEMA_VERSION, WorkflowContainer,
-    WorkflowDeclaration, WorkflowEdge, WorkflowEdgeKind, WorkflowEffectKind, WorkflowGraph,
+    GraphRenderError, VariableVersion, WORKFLOW_GRAPH_SCHEMA_VERSION,
+    WORKFLOW_TYPE_FACET_SCHEMA_VERSION, WorkflowContainer, WorkflowDeclaration, WorkflowEdge,
+    WorkflowEdgeKind, WorkflowEffectKind, WorkflowExpectedArgument, WorkflowGraph,
     WorkflowGraphBuildError, WorkflowListComprehensionClause, WorkflowNode, WorkflowNodeId,
-    WorkflowNodeKind, WorkflowNodeNameSource, WorkflowProcess, WorkflowSubgraph,
-    WorkflowTerminalKind, node_id_for_execution_site, runtime_execution_site_for_workflow_site,
-    workflow_graph_from_source, workflow_graph_to_source,
+    WorkflowNodeKind, WorkflowNodeNameSource, WorkflowNodeTypeFacets, WorkflowProcess,
+    WorkflowSubgraph, WorkflowTerminalKind, WorkflowTypeDiagnostic, WorkflowTypedVariable,
+    node_id_for_execution_site, runtime_execution_site_for_workflow_site,
+    workflow_graph_from_source, workflow_graph_from_source_with_facets, workflow_graph_to_source,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {

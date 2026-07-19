@@ -6,14 +6,51 @@
   import OpaqueNode from './components/nodes/OpaqueNode.svelte';
   import DisplayPanel from './components/DisplayPanel.svelte';
   import SourceView from './components/SourceView.svelte';
-  import { fetchWorkflow, fetchWorkflows, selectWorkflow, saveWorkflow } from './lib/api.js';
-  import { buildFlow, deleteNodeFromDoc, addNodeToDoc } from './lib/graph.js';
-  import { loadPositions, savePosition, clearPositions } from './lib/positions.js';
+  import {
+    fetchWorkflow,
+    fetchWorkflows,
+    selectWorkflow,
+    saveWorkflow,
+    fetchOperations,
+    projectSource,
+  } from './lib/api.js';
+  import {
+    buildFlow,
+    deleteNodeFromDoc,
+    addNodeToDoc,
+    reorderNodeInDoc,
+    moveNodeToGroup,
+    moveTargetsFor,
+    scopeOf,
+  } from './lib/graph.js';
+  import {
+    loadPositions,
+    savePosition,
+    clearPosition,
+    clearPositions,
+    migratePositions,
+  } from './lib/positions.js';
   import { RunController } from './lib/runStore.svelte.js';
-  import { NODE_KINDS, ADDABLE_KINDS, addableMeta } from './lib/nodeKinds.js';
+  import { ModeController } from './lib/mode.svelte.js';
+  import { History } from './lib/history.svelte.js';
+  import { groupOperations, operationMeta } from './lib/operations.js';
+  import { NODE_KINDS } from './lib/nodeKinds.js';
+  import { blockingDiagnostics, clearFacetDiagnostics } from './lib/facets.js';
 
   const run = new RunController();
   setContext('run', run);
+
+  const mode = new ModeController();
+  setContext('mode', mode);
+
+  // Operation catalog store — host-owned data from GET /operations, the single
+  // source of truth for the palette. `entries` is null until it resolves;
+  // `error` is set when the endpoint is unreachable so the palette can show a
+  // non-blocking empty state instead of a duplicated hard-coded catalog.
+  const ops = $state({ entries: null, error: false });
+  setContext('ops', ops);
+
+  const history = new History();
 
   const nodeTypes = { workflow: WorkflowNode, container: ContainerNode, opaque: OpaqueNode };
 
@@ -35,50 +72,134 @@
   let catalog = $state([]);
   let selectedId = $state('onboarding');
   let switching = $state(false);
+  // Whether the backend serves POST /project (text→graph). Probed once at load
+  // so the Power source pane offers live editing only when it will actually work.
+  let projectSupported = $state(false);
 
   const legend = Object.entries(NODE_KINDS);
+  const mainGroups = $derived(groupOperations(ops.entries, { includePower: mode.power }));
+
+  // Definite type-error diagnostics on the current draft (host-derived facets).
+  // These block Save (item 5). They are cleared on the next edit — a client edit
+  // makes the last derivation stale, and a stale error is worse than none — so
+  // the block only bites on a KNOWN-broken graph the user has not yet touched.
+  const blockingDiags = $derived(draftDoc ? blockingDiagnostics(draftDoc) : []);
+
+  // Handlers threaded into every flow node (see buildFlow).
+  const handlers = {
+    onDelete,
+    onAddNode,
+    onReorder,
+    onCommit,
+    onRebuild,
+    onMoveTo,
+    getMoveTargets: (id) => moveTargetsFor(draftDoc, id),
+  };
+
+  // Record a committed edit (blur of a field): mark the draft dirty and push a
+  // history snapshot. Field values are already written live into the draft.
+  function onCommit() {
+    dirty = true;
+    saveOk = null;
+    clearFacetDiagnostics(draftDoc);
+    history.commit(draftDoc);
+  }
+
+  // A structural change already applied to the draft (e.g. adding/removing a
+  // comprehension clause) that also needs a relayout: commit + rebuild.
+  function onRebuild() {
+    dirty = true;
+    saveOk = null;
+    clearFacetDiagnostics(draftDoc);
+    history.commit(draftDoc);
+    rebuild();
+  }
 
   function onDelete(id) {
     deleteNodeFromDoc(draftDoc, id);
     dirty = true;
     saveOk = null;
+    clearFacetDiagnostics(draftDoc);
+    history.commit(draftDoc);
     rebuild();
   }
 
-  // Insert a new default node of `kind` at the end of a container/process group
-  // (ownerId + slot). The new node lives only in the draft until Save round-trips
-  // it through the backend, which mints a canonical id.
-  function onAddNode(ownerId, slot, kind) {
-    addNodeToDoc(draftDoc, { ownerId, slot }, kind);
+  // Insert a node from an operation-catalog entry at the end of a container slot.
+  function onAddNode(ownerId, slot, operation) {
+    addNodeToDoc(draftDoc, { ownerId, slot }, operation, ops.entries ?? []);
     dirty = true;
     saveOk = null;
+    clearFacetDiagnostics(draftDoc);
+    history.commit(draftDoc);
     rebuild();
   }
 
-  // Insert a new default node at the end of the top-level (`main`) scope.
   let mainMenuOpen = $state(false);
-  function onAddMain(kind) {
+  function onAddMain(operation) {
     mainMenuOpen = false;
-    addNodeToDoc(draftDoc, { main: true }, kind);
+    addNodeToDoc(draftDoc, { main: true }, operation, ops.entries ?? []);
     dirty = true;
     saveOk = null;
+    clearFacetDiagnostics(draftDoc);
+    history.commit(draftDoc);
     rebuild();
   }
 
-  function rebuild() {
-    const { flowNodes: fn, flowEdges: fe } = buildFlow(draftDoc, positions, onDelete, onAddNode);
+  function onReorder(id, direction) {
+    if (reorderNodeInDoc(draftDoc, id, direction)) {
+      dirty = true;
+      saveOk = null;
+      clearFacetDiagnostics(draftDoc);
+      history.commit(draftDoc);
+      rebuild(new Set([id]));
+    }
+  }
+
+  // Move a node into another scope (container slot or top-level) via the node's
+  // "move into" menu. Snap it out of any dragged position so it lays out cleanly.
+  function onMoveTo(id, dest) {
+    if (moveNodeToGroup(draftDoc, id, dest)) {
+      clearPosition(id);
+      positions = loadPositions();
+      dirty = true;
+      saveOk = null;
+      clearFacetDiagnostics(draftDoc);
+      history.commit(draftDoc);
+      rebuild(new Set([id]));
+    }
+  }
+
+  function rebuild(keepSelection = null) {
+    const { flowNodes: fn, flowEdges: fe } = buildFlow(draftDoc, positions, handlers);
+    if (keepSelection && keepSelection.size) {
+      for (const n of fn) if (keepSelection.has(n.id)) n.selected = true;
+    }
     flowNodes = fn;
     flowEdges = fe;
-    flowKey += 1; // remount SvelteFlow so layout + fitView re-run cleanly
   }
 
   async function loadInitial() {
     loading = true;
     loadError = null;
     try {
-      const [doc, list] = await Promise.all([fetchWorkflow(), fetchWorkflows().catch(() => [])]);
+      const [doc, list, operations] = await Promise.all([
+        fetchWorkflow(),
+        fetchWorkflows().catch(() => []),
+        fetchOperations().catch(() => null),
+      ]);
       catalog = list;
+      ops.entries = operations;
+      ops.error = operations == null;
       adoptDocument(doc);
+      // Probe /project support without adopting the result (projecting the
+      // canonical source yields an equivalent document we discard).
+      projectSource(doc.source)
+        .then((probe) => {
+          projectSupported = !probe.unsupported;
+        })
+        .catch(() => {
+          projectSupported = false;
+        });
     } catch (err) {
       loadError = err?.message ?? String(err);
     } finally {
@@ -86,9 +207,6 @@
     }
   }
 
-  // Switching examples resets the backend's current workflow to that built-in
-  // and loads it just like the initial GET: fresh draft, re-layout, clear
-  // overlay. The current draft is intentionally discarded (backend contract).
   async function onSelect(id) {
     if (switching || id === selectedId) return;
     switching = true;
@@ -107,26 +225,90 @@
     }
   }
 
-  function adoptDocument(doc) {
-    // Deep clone into a fresh reactive draft the host owns and mutates.
-    draftDoc = structuredClone(doc);
+  // A stable signature of the graph's SHAPE (kinds + nesting + slot structure),
+  // independent of the node ids that every Save remints. Used to decide whether
+  // a Save actually reshaped the graph or just relabeled it.
+  function shapeSignature(doc) {
+    if (!doc) return '';
+    const byId = new Map((doc.nodes ?? []).map((n) => [n.id, n]));
+    const sig = (id) => {
+      const n = byId.get(id);
+      if (!n) return '';
+      const groups = (n.data?.children ?? [])
+        .map((g) => `${g.slot}[${g.nodeIds.map(sig).join(',')}]`)
+        .join('');
+      return `${n.data?.kind}:${n.data?.subkind ?? ''}(${groups})`;
+    };
+    const roots = [
+      ...(doc.roots?.processes ?? []).map(sig),
+      '|',
+      ...(doc.roots?.main ?? []).map(sig),
+    ];
+    return roots.join(';');
+  }
+
+  // Adopt a canonical (saved / selected) document as a fresh, clean draft.
+  // `refit` re-keys the SvelteFlow instance so its viewport re-fits — wanted on a
+  // workflow switch, but not on a Save that left the graph shape unchanged (the
+  // migrated positions keep every node in place, so a re-fit would just jump).
+  function adoptDocument(doc, keepSelection = null, { refit = true } = {}) {
+    draftDoc = structuredClone($state.snapshot(doc));
     canonicalSource = doc.source;
     savedVersion = doc.version;
     dirty = false;
+    history.reset(draftDoc);
+    if (refit) flowKey += 1;
+    rebuild(keepSelection);
+  }
+
+  // Adopt a document projected from edited source (Power source pane). Unlike a
+  // saved document this is an unsaved draft: keep it dirty and start a new
+  // history baseline entry from it.
+  function adoptProjected(doc) {
+    draftDoc = structuredClone($state.snapshot(doc));
+    canonicalSource = doc.source;
+    dirty = true;
+    saveOk = null;
+    history.commit(draftDoc);
+    flowKey += 1;
     rebuild();
+  }
+
+  async function handleProject(text) {
+    const result = await projectSource(text);
+    if (result.ok) adoptProjected(result.document);
+    return result;
   }
 
   async function onSave() {
     if (!draftDoc) return;
+    // Save-time rejection: a definite type-error diagnostic blocks Save. Only
+    // real (host-derived) diagnostics block; unknowns never do. The draft is
+    // kept so the user can fix the flagged node and try again.
+    if (blockingDiags.length) {
+      saveOk = null;
+      saveError = null;
+      return;
+    }
     saving = true;
     saveError = null;
     saveOk = null;
-    // Serialize the draft (a plain snapshot, without any layout/UI cruft).
+    const selectedIds = flowNodes.filter((n) => n.selected).map((n) => n.id);
+    const shapeBefore = shapeSignature(draftDoc);
     const payload = JSON.parse(JSON.stringify(draftDoc));
     const result = await saveWorkflow(payload);
     saving = false;
     if (result.ok) {
-      adoptDocument(result.document);
+      let keepSelection = null;
+      if (result.idMap) {
+        migratePositions(result.idMap);
+        positions = loadPositions();
+        keepSelection = new Set(selectedIds.map((oldId) => result.idMap[oldId] ?? oldId));
+      }
+      // Only re-fit the viewport when the Save actually reshaped the graph;
+      // a same-shape save keeps every node in place, so a re-fit would just jump.
+      const refit = shapeSignature(result.document) !== shapeBefore;
+      adoptDocument(result.document, keepSelection, { refit });
       saveOk = `saved as v${result.document.version}`;
       run.reset();
     } else {
@@ -138,32 +320,91 @@
     }
   }
 
+  // --- Undo / redo -----------------------------------------------------------
+  function applySnapshot(doc) {
+    if (!doc) return;
+    draftDoc = doc;
+    dirty = history.index > 0;
+    saveOk = null;
+    rebuild();
+  }
+  function doUndo() {
+    applySnapshot(history.undo());
+  }
+  function doRedo() {
+    applySnapshot(history.redo());
+  }
+  function onKeydown(e) {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    if (e.key.toLowerCase() !== 'z') return;
+    const t = e.target;
+    // Let native text undo win inside editable fields.
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    e.preventDefault();
+    if (e.shiftKey) doRedo();
+    else doUndo();
+  }
+
   function onPlay() {
     saveOk = null;
     run.start();
   }
-
   function onResetLayout() {
     clearPositions();
     positions = {};
     rebuild();
   }
-
   function onReload() {
     run.stop();
     loadInitial();
   }
 
+  // A drag that changes a node's order within its own scope becomes a reorder
+  // (it snaps into the laid-out slot); otherwise it is a free arrangement that
+  // persists as a stored position.
+  function tryReorderByDrag(n) {
+    const scope = scopeOf(draftDoc, n.id);
+    if (!scope || scope.nodeIds.length < 2) return false;
+    const tops = new Map(flowNodes.map((f) => [f.id, f.position?.y ?? 0]));
+    const droppedTop = n.position.y;
+    let index = 0;
+    for (const sid of scope.nodeIds) {
+      if (sid === n.id) continue;
+      if ((tops.get(sid) ?? 0) < droppedTop) index += 1;
+    }
+    if (!reorderNodeInDoc(draftDoc, n.id, index)) return false;
+    clearPosition(n.id);
+    return true;
+  }
+
   function handleDragStop({ targetNode, nodes }) {
     const moved = nodes && nodes.length ? nodes : targetNode ? [targetNode] : [];
+    let reordered = false;
     for (const n of moved) {
-      if (n?.position) savePosition(n.id, n.position);
+      if (!n?.id || !n.position) continue;
+      let didReorder = false;
+      try {
+        didReorder = tryReorderByDrag(n);
+      } catch {
+        didReorder = false;
+      }
+      if (didReorder) reordered = true;
+      else savePosition(n.id, n.position);
     }
     positions = loadPositions();
+    if (reordered) {
+      dirty = true;
+      saveOk = null;
+      clearFacetDiagnostics(draftDoc);
+      history.commit(draftDoc);
+      rebuild();
+    }
   }
 
   loadInitial();
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <div class="studio">
   <header class="topbar">
@@ -174,16 +415,37 @@
         <div class="brand-sub">lashlang · code ⇄ graph ⇄ live run</div>
       </div>
     </div>
-    <nav class="legend">
-      {#each legend as [kind, meta] (kind)}
-        <span class="legend-item" style="--c:{meta.accent}">
-          <span class="legend-dot"></span>{meta.label}
-        </span>
-      {/each}
-      <span class="legend-sep"></span>
-      <span class="legend-item legend-edge"><span class="legend-line seq"></span>sequence</span>
-      <span class="legend-item legend-edge"><span class="legend-line data"></span>data</span>
-    </nav>
+
+    <div class="topbar-right">
+      <div class="mode-switch" role="group" aria-label="Editor mode">
+        <button
+          class="mode-btn"
+          class:is-active={mode.simplified}
+          onclick={() => mode.set('simplified')}
+          title="Guided editing for building workflows visually"
+        >
+          Simplified
+        </button>
+        <button
+          class="mode-btn"
+          class:is-active={mode.power}
+          onclick={() => mode.set('power')}
+          title="Raw Lashlang inputs, any node kind, and a live editable source pane"
+        >
+          Power
+        </button>
+      </div>
+      <nav class="legend">
+        {#each legend as [kind, meta] (kind)}
+          <span class="legend-item" style="--c:{meta.accent}">
+            <span class="legend-dot"></span>{meta.label}
+          </span>
+        {/each}
+        <span class="legend-sep"></span>
+        <span class="legend-item legend-edge"><span class="legend-line seq"></span>sequence</span>
+        <span class="legend-item legend-edge"><span class="legend-line data"></span>data</span>
+      </nav>
+    </div>
   </header>
 
   <main class="body">
@@ -191,8 +453,9 @@
       {#if loading}
         <div class="overlay-msg">projecting graph…</div>
       {:else if loadError}
+        {@const netFail = /fetch|network|failed to fetch|load failed/i.test(loadError)}
         <div class="overlay-msg error">
-          backend unreachable<br /><span class="mono">{loadError}</span>
+          {netFail ? 'backend unreachable' : "couldn't load the editor"}<br /><span class="mono">{loadError}</span>
           <button class="btn" onclick={onReload}>retry</button>
         </div>
       {:else}
@@ -213,8 +476,7 @@
             <MiniMap
               pannable
               zoomable
-              nodeColor={(n) =>
-                NODE_KINDS[n.data?.node?.data?.kind]?.accent ?? '#5c6a80'}
+              nodeColor={(n) => NODE_KINDS[n.data?.node?.data?.kind]?.accent ?? '#5c6a80'}
               maskColor="rgba(8,11,17,0.72)"
             />
           </SvelteFlow>
@@ -230,16 +492,35 @@
           </button>
           {#if mainMenuOpen}
             <div class="palette-menu">
-              {#each ADDABLE_KINDS as k (k)}
-                {@const m = addableMeta(k)}
-                <button class="palette-item" style="--c:{m.accent}" onclick={() => onAddMain(k)}>
-                  <span class="palette-glyph">{m.glyph}</span>{m.label}
-                </button>
-              {/each}
+              {#if mainGroups.length}
+                {#each mainGroups as grp (grp.id)}
+                  <div class="palette-group">{grp.label}</div>
+                  {#each grp.items as op (op.id)}
+                    {@const m = operationMeta(op)}
+                    <button
+                      class="palette-item"
+                      style="--c:{m.accent}"
+                      onclick={() => onAddMain(op)}
+                    >
+                      <span class="palette-glyph">{m.glyph}</span>{op.label}
+                    </button>
+                  {/each}
+                {/each}
+              {:else}
+                <div class="palette-empty">
+                  {ops.error
+                    ? 'operation catalog unavailable — reload to retry'
+                    : 'loading operations…'}
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
-        <div class="canvas-hint">drag to arrange · positions saved locally, never in source</div>
+        <div class="canvas-hint">
+          {mode.simplified
+            ? 'drag to reorder within a scope · use the ⤴ menu to move between scopes'
+            : 'power mode · raw Lashlang everywhere · edit the source pane to reshape the graph'}
+        </div>
       {/if}
     </section>
 
@@ -280,13 +561,28 @@
         </button>
         <button
           class="btn btn-save"
+          class:is-blocked={blockingDiags.length > 0}
           onclick={onSave}
-          disabled={saving || loading || !!loadError}
-          title="Send the edited graph → graph→code → new version"
+          disabled={saving || loading || !!loadError || blockingDiags.length > 0}
+          title={blockingDiags.length
+            ? `Save blocked — ${blockingDiags.length} type error${blockingDiags.length > 1 ? 's' : ''} to fix`
+            : 'Send the edited graph → graph→code → new version'}
         >
-          {saving ? 'saving…' : 'Save'}
+          {saving ? 'saving…' : blockingDiags.length ? 'Save · blocked' : 'Save'}
         </button>
         <div class="ctrl-minor">
+          <button
+            class="btn btn-ghost"
+            onclick={doUndo}
+            disabled={!history.canUndo}
+            title="Undo (Ctrl/Cmd-Z)">undo</button
+          >
+          <button
+            class="btn btn-ghost"
+            onclick={doRedo}
+            disabled={!history.canRedo}
+            title="Redo (Ctrl/Cmd-Shift-Z)">redo</button
+          >
           <button class="btn btn-ghost" onclick={onResetLayout} title="Clear saved positions"
             >reset layout</button
           >
@@ -296,6 +592,18 @@
         </div>
       </div>
 
+      {#if blockingDiags.length}
+        <div class="banner banner-err">
+          <div class="banner-title">
+            save blocked · {blockingDiags.length} type error{blockingDiags.length > 1 ? 's' : ''}
+          </div>
+          {#each blockingDiags as d (d.nodeId + d.kind + d.message)}
+            <div class="banner-msg">{d.message}</div>
+            <div class="banner-detail">node {d.nodeId} · {d.kind}</div>
+          {/each}
+          <div class="banner-foot">fix the flagged node(s), then Save</div>
+        </div>
+      {/if}
       {#if saveError}
         <div class="banner banner-err">
           <div class="banner-title">invalid edit · {saveError.code}</div>
@@ -310,13 +618,21 @@
         <div class="banner banner-ok">{saveOk}</div>
       {/if}
       {#if run.error}
-        <div class="banner banner-err"><div class="banner-title">run error</div><div class="banner-msg">{run.error}</div></div>
+        <div class="banner banner-err">
+          <div class="banner-title">run error</div>
+          <div class="banner-msg">{run.error}</div>
+        </div>
       {/if}
 
       <DisplayPanel {run} />
 
       {#if draftDoc}
-        <SourceView source={canonicalSource} version={savedVersion} {dirty} />
+        <SourceView
+          source={canonicalSource}
+          version={savedVersion}
+          {dirty}
+          onProject={projectSupported ? handleProject : undefined}
+        />
       {/if}
     </aside>
   </main>
@@ -365,6 +681,46 @@
     color: var(--text-faint);
     letter-spacing: 0.05em;
   }
+
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .mode-switch {
+    display: inline-flex;
+    padding: 3px;
+    gap: 2px;
+    background: var(--ink-2);
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+  }
+  .mode-btn {
+    font-family: var(--font-ui);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      background 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+  .mode-btn:hover {
+    color: var(--text);
+  }
+  .mode-btn.is-active {
+    color: var(--ink);
+    background: linear-gradient(180deg, var(--cyan), #1fbfae);
+    box-shadow: 0 4px 14px -6px var(--cyan);
+  }
+
   .legend {
     display: flex;
     flex-wrap: wrap;
@@ -427,6 +783,7 @@
     border-radius: 6px;
     border: 1px solid var(--line);
     pointer-events: none;
+    max-width: 60%;
   }
   .palette {
     position: absolute;
@@ -463,15 +820,33 @@
   }
   .palette-menu {
     margin-top: 6px;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 3px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
     padding: 6px;
     min-width: 210px;
+    max-height: 60vh;
+    overflow-y: auto;
     background: var(--ink-2);
     border: 1px solid var(--line-strong);
     border-radius: 11px;
     box-shadow: 0 16px 38px -14px rgba(0, 0, 0, 0.72);
+  }
+  .palette-group {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 5px 8px 2px;
+  }
+  .palette-empty {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.5;
+    color: var(--text-faint);
+    padding: 10px 8px;
+    text-align: center;
   }
   .palette-item {
     display: inline-flex;
@@ -609,6 +984,7 @@
   .ctrl-minor {
     grid-column: 1 / -1;
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
   }
   .btn {
@@ -654,8 +1030,13 @@
   .btn-save:hover:not(:disabled) {
     box-shadow: 0 8px 22px -12px rgba(120, 150, 200, 0.6);
   }
+  .btn-save.is-blocked {
+    border-color: color-mix(in srgb, var(--rose) 55%, var(--line-strong));
+    color: #ffb4c6;
+    opacity: 1;
+  }
   .btn-ghost {
-    flex: 1;
+    flex: 1 1 40%;
     font-size: 11px;
     font-weight: 500;
     padding: 8px 10px;
@@ -663,7 +1044,7 @@
     color: var(--text-dim);
     border-style: dashed;
   }
-  .btn-ghost:hover {
+  .btn-ghost:hover:not(:disabled) {
     color: var(--text);
     background: var(--ink-3);
   }

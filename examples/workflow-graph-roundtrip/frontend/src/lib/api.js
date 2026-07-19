@@ -27,8 +27,13 @@ export async function selectWorkflow(id) {
   return res.json();
 }
 
-// Returns { ok: true, document } on success, or { ok: false, status, error }
-// carrying the typed render error so the UI can show it without losing the draft.
+// Returns { ok: true, document, idMap } on success, or { ok: false, status,
+// error } carrying the typed render error so the UI can show it without losing
+// the draft. `idMap` ({ "<oldId>": "<newId>", ... }, one entry per posted node)
+// lets the caller migrate id-keyed sidecars (positions, selection) across the
+// id remint that every Save performs. It arrives either as a sibling key on the
+// document body or wrapped in an { document, idMap } envelope; both are handled.
+// Older backends omit it entirely (idMap: null → caller falls back gracefully).
 export async function saveWorkflow(document) {
   const res = await fetch('/workflow', {
     method: 'POST',
@@ -36,7 +41,17 @@ export async function saveWorkflow(document) {
     body: JSON.stringify(document),
   });
   if (res.ok) {
-    return { ok: true, document: await res.json() };
+    const body = await res.json();
+    if (body && typeof body === 'object') {
+      if (body.idMap && body.document) {
+        return { ok: true, document: body.document, idMap: body.idMap };
+      }
+      if (body.idMap) {
+        const { idMap, ...doc } = body;
+        return { ok: true, document: doc, idMap };
+      }
+    }
+    return { ok: true, document: body, idMap: null };
   }
   let body = null;
   try {
@@ -45,6 +60,74 @@ export async function saveWorkflow(document) {
     body = null;
   }
   return { ok: false, status: res.status, error: body?.error ?? null };
+}
+
+// Operation catalog — the sole data home for the "+ Add node" palette. Returns
+// an array of catalog entries `[{ id, label, nodeKind, subkind?, operation?,
+// effect?, terminalKind?, fields:[{name,type,default}] }]`, or `null` when the
+// backend does not serve `/operations` (older build). The caller surfaces a
+// "catalog unavailable" state in that case — there is no built-in fallback.
+export async function fetchOperations() {
+  try {
+    const res = await fetch('/operations', { headers: { accept: 'application/json' } });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return Array.isArray(body) ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+// Validate one editable text fragment against the lens. `kind` is
+// `expression` | `assignment_target` | `identifier`. Returns `{ ok:true }` or
+// `{ ok:false, error:{ code, message } }`. A missing endpoint (older backend)
+// or any transport failure resolves to `{ ok:true, unsupported:true }` so the
+// UI degrades to "no inline verdict" rather than showing false errors.
+export async function validateFragment(kind, text) {
+  try {
+    const res = await fetch('/validate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind, text }),
+    });
+    if (!res.ok) return { ok: true, unsupported: true };
+    const body = await res.json();
+    if (body && typeof body.ok === 'boolean') return body;
+    return { ok: true, unsupported: true };
+  } catch {
+    return { ok: true, unsupported: true };
+  }
+}
+
+// Project canonical source text into a WorkflowDocument (text→graph) for the
+// editable source pane. Returns `{ ok:true, document }`, a typed
+// `{ ok:false, status, error }` on a 4xx parse error, or
+// `{ ok:false, unsupported:true }` when the backend has no `/project` route so
+// the pane stays read-only rather than erroring.
+export async function projectSource(source) {
+  let res;
+  try {
+    res = await fetch('/project', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source }),
+    });
+  } catch (err) {
+    return { ok: false, error: { code: 'network', message: err?.message ?? String(err) } };
+  }
+  if (res.ok) {
+    const body = await res.json();
+    const document = body?.document ?? body;
+    return { ok: true, document };
+  }
+  if (res.status === 404) return { ok: false, unsupported: true };
+  let error = null;
+  try {
+    error = (await res.json())?.error ?? null;
+  } catch {
+    error = null;
+  }
+  return { ok: false, status: res.status, error };
 }
 
 // Opens POST /run and yields parsed run-event payloads as they stream in.

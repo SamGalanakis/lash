@@ -3,6 +3,7 @@ struct Scope {
     bindings: BTreeMap<String, Binding>,
     allow_unknown_globals: bool,
     process_body: bool,
+    expected_return: Option<TypeExpr>,
     span: Option<Span>,
 }
 
@@ -12,6 +13,7 @@ impl Scope {
             bindings: BTreeMap::new(),
             allow_unknown_globals,
             process_body,
+            expected_return: None,
             span,
         }
     }
@@ -39,11 +41,49 @@ impl Scope {
         self.bindings.get(name).cloned()
     }
 
-    fn merge_from(&mut self, other: Scope) {
-        for (name, binding) in other.bindings {
-            self.bindings.entry(name).or_insert(binding);
+    fn join_branches(&mut self, left: Scope, right: Scope) {
+        let names = left
+            .bindings
+            .keys()
+            .chain(right.bindings.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for name in names {
+            let binding = join_optional_bindings(
+                left.bindings.get(&name),
+                right.bindings.get(&name),
+            );
+            self.bindings.insert(name, binding);
         }
     }
+
+    fn widen_loop(&mut self, before: Scope, after_one_pass: Scope) {
+        self.join_branches(before, after_one_pass);
+    }
+
+    fn binding_type(&self, name: &AstString) -> Option<TypeExpr> {
+        self.get(name).map(|binding| binding_type(Some(&binding)))
+    }
+
+    fn update_path(
+        &mut self,
+        target: &crate::ast::AssignTarget,
+        value_ty: &TypeExpr,
+    ) -> Result<(), LinkError> {
+        let Some(binding) = self.get(&target.root) else {
+            if self.allow_unknown_globals {
+                return Ok(());
+            }
+            return Err(LinkError::UnknownName {
+                name: target.root.to_string(),
+                span: self.span,
+            });
+        };
+        let updated = update_binding_path(binding, &target.steps, value_ty, self.span)?;
+        self.bind(target.root.as_str(), updated);
+        Ok(())
+    }
+
 }
 
 struct Completion {
@@ -67,8 +107,111 @@ fn any_binding() -> Binding {
 fn binding_type(binding: Option<&Binding>) -> TypeExpr {
     match binding {
         Some(Binding::Value(ty)) => ty.clone(),
+        Some(Binding::SchemaWitness { .. }) => TypeExpr::Any,
         Some(Binding::Resource { resource_type }) => TypeExpr::Ref(resource_type.as_str().into()),
         None => TypeExpr::Any,
+    }
+}
+
+fn join_optional_bindings(left: Option<&Binding>, right: Option<&Binding>) -> Binding {
+    match (left, right) {
+        (Some(left), Some(right)) if left == right => left.clone(),
+        (Some(left), Some(right)) => Binding::Value(union_type(vec![
+            binding_type(Some(left)),
+            binding_type(Some(right)),
+        ])),
+        // A binding created on only one path is not definitely initialized.
+        (Some(_), None) | (None, Some(_)) | (None, None) => any_binding(),
+    }
+}
+
+fn update_binding_path(
+    binding: Binding,
+    steps: &[AssignPathStep],
+    value_ty: &TypeExpr,
+    span: Option<Span>,
+) -> Result<Binding, LinkError> {
+    let Binding::Value(ty) = binding else {
+        return Ok(binding);
+    };
+    Ok(Binding::Value(update_type_path(
+        ty, steps, value_ty, span,
+    )?))
+}
+
+fn update_type_path(
+    ty: TypeExpr,
+    steps: &[AssignPathStep],
+    value_ty: &TypeExpr,
+    span: Option<Span>,
+) -> Result<TypeExpr, LinkError> {
+    let Some((step, rest)) = steps.split_first() else {
+        return Ok(value_ty.clone());
+    };
+    match (ty, step) {
+        (TypeExpr::Object(mut fields), AssignPathStep::Field(field)) => {
+            let Some(existing) = fields.iter_mut().find(|candidate| candidate.name == *field)
+            else {
+                return Err(LinkError::UnknownObjectField {
+                    field: field.to_string(),
+                    span,
+                });
+            };
+            existing.ty = update_type_path(existing.ty.clone(), rest, value_ty, span)?;
+            Ok(TypeExpr::Object(fields))
+        }
+        (TypeExpr::List(item), AssignPathStep::Index(_)) => Ok(TypeExpr::List(Box::new(
+            update_type_path(*item, rest, value_ty, span)?,
+        ))),
+        (TypeExpr::Union(items), AssignPathStep::Field(field)) => {
+            let mut updated = false;
+            let mut missing_error = None;
+            let items = items
+                .into_iter()
+                .map(|item| {
+                    if !type_has_field(&item, field) {
+                        return Ok(item);
+                    }
+                    match update_type_path(item.clone(), steps, value_ty, span) {
+                        Ok(item) => {
+                            updated = true;
+                            Ok(item)
+                        }
+                        Err(error @ LinkError::UnknownObjectField { .. }) => {
+                            missing_error = Some(error);
+                            Ok(item)
+                        }
+                        Err(error) => Err(error),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if updated {
+                Ok(union_type(items))
+            } else {
+                Err(missing_error.unwrap_or_else(|| LinkError::UnknownObjectField {
+                    field: field.to_string(),
+                    span,
+                }))
+            }
+        }
+        (TypeExpr::Union(items), _) => Ok(union_type(
+            items
+                .into_iter()
+                .map(|item| update_type_path(item, steps, value_ty, span))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        (TypeExpr::Any, _) => Ok(TypeExpr::Any),
+        (TypeExpr::Dict, _) => Ok(TypeExpr::Dict),
+        (other, _) => Ok(other),
+    }
+}
+
+fn type_has_field(ty: &TypeExpr, field: &str) -> bool {
+    match ty {
+        TypeExpr::Any | TypeExpr::Dict => true,
+        TypeExpr::Object(fields) => fields.iter().any(|candidate| candidate.name == field),
+        TypeExpr::Union(items) => items.iter().any(|item| type_has_field(item, field)),
+        _ => false,
     }
 }
 
@@ -76,6 +219,7 @@ fn literal_type(expr: &Expr) -> TypeExpr {
     match expr {
         Expr::Null => TypeExpr::Null,
         Expr::Bool(_) => TypeExpr::Bool,
+        Expr::Number(value) if value.is_finite() && value.fract() == 0.0 => TypeExpr::Int,
         Expr::Number(_) => TypeExpr::Float,
         Expr::String(_) => TypeExpr::Str,
         Expr::TypeLiteral(_) => TypeExpr::Any,
@@ -83,6 +227,25 @@ fn literal_type(expr: &Expr) -> TypeExpr {
         Expr::LabelAnnotated { expr, .. } => literal_type(expr),
         _ => TypeExpr::Any,
     }
+}
+
+fn strip_label_annotation(mut expr: &Expr) -> &Expr {
+    while let Expr::LabelAnnotated { expr: inner, .. } = expr {
+        expr = inner;
+    }
+    expr
+}
+
+fn direct_call_input_field<'a>(args: &'a [Expr], input_field: &str) -> Option<&'a Expr> {
+    let [argument] = args else {
+        return None;
+    };
+    let Expr::Record(entries) = strip_label_annotation(argument) else {
+        return None;
+    };
+    entries
+        .iter()
+        .find_map(|(name, value)| (name == input_field).then_some(value))
 }
 
 fn union_type(items: Vec<TypeExpr>) -> TypeExpr {
@@ -130,17 +293,34 @@ fn field_type(
             })
         }
         TypeExpr::Ref(_) => Ok(TypeExpr::Any),
-        TypeExpr::Object(fields) => Ok(fields
+        TypeExpr::Object(fields) => fields
             .iter()
             .find(|candidate| candidate.name.as_str() == field)
             .map(|field| field.ty.clone())
-            .unwrap_or(TypeExpr::Any)),
+            .ok_or_else(|| LinkError::UnknownObjectField {
+                field: field.to_string(),
+                span,
+            }),
         TypeExpr::Union(items) => {
-            let fields = items
-                .iter()
-                .map(|item| field_type(item, field, span, is_opaque))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(union_type(fields))
+            let mut fields = Vec::new();
+            let mut missing = false;
+            for item in items {
+                match field_type(item, field, span, is_opaque) {
+                    Ok(ty) => fields.push(ty),
+                    Err(LinkError::UnknownObjectField { .. }) => missing = true,
+                    Err(error) => return Err(error),
+                }
+            }
+            if fields.is_empty() {
+                Err(LinkError::UnknownObjectField {
+                    field: field.to_string(),
+                    span,
+                })
+            } else if missing {
+                Ok(TypeExpr::Any)
+            } else {
+                Ok(union_type(fields))
+            }
         }
         _ => Ok(TypeExpr::Any),
     }
@@ -169,6 +349,38 @@ fn index_type(
             Ok(union_type(items))
         }
         _ => Ok(TypeExpr::Any),
+    }
+}
+
+fn iterable_item_type(target: &TypeExpr, span: Option<Span>) -> Result<TypeExpr, LinkError> {
+    match target {
+        TypeExpr::List(item) => Ok(*item.clone()),
+        TypeExpr::Any | TypeExpr::Dict | TypeExpr::Ref(_) => Ok(TypeExpr::Any),
+        TypeExpr::Union(items) => {
+            let mut item_types = Vec::new();
+            let mut has_non_list = false;
+            for item in items {
+                match iterable_item_type(item, span) {
+                    Ok(item) => item_types.push(item),
+                    Err(LinkError::IncompatibleIterationTarget { .. }) => has_non_list = true,
+                    Err(error) => return Err(error),
+                }
+            }
+            if item_types.is_empty() {
+                Err(LinkError::IncompatibleIterationTarget {
+                    actual: format_type_expr(target),
+                    span,
+                })
+            } else if has_non_list {
+                Ok(TypeExpr::Any)
+            } else {
+                Ok(union_type(item_types))
+            }
+        }
+        _ => Err(LinkError::IncompatibleIterationTarget {
+            actual: format_type_expr(target),
+            span,
+        }),
     }
 }
 
@@ -201,6 +413,112 @@ fn binary_return_type(op: crate::ast::BinaryOp) -> TypeExpr {
         | crate::ast::BinaryOp::Multiply
         | crate::ast::BinaryOp::Divide
         | crate::ast::BinaryOp::Modulo => TypeExpr::Float,
+    }
+}
+
+fn binary_op_source(op: crate::ast::BinaryOp) -> &'static str {
+    match op {
+        crate::ast::BinaryOp::Add => "+",
+        crate::ast::BinaryOp::Subtract => "-",
+        crate::ast::BinaryOp::Multiply => "*",
+        crate::ast::BinaryOp::Divide => "/",
+        crate::ast::BinaryOp::Modulo => "%",
+        crate::ast::BinaryOp::Equal => "==",
+        crate::ast::BinaryOp::NotEqual => "!=",
+        crate::ast::BinaryOp::Less => "<",
+        crate::ast::BinaryOp::LessEqual => "<=",
+        crate::ast::BinaryOp::Greater => ">",
+        crate::ast::BinaryOp::GreaterEqual => ">=",
+        crate::ast::BinaryOp::And => "and",
+        crate::ast::BinaryOp::Or => "or",
+    }
+}
+
+fn binary_operands_compatible(
+    op: crate::ast::BinaryOp,
+    left: &TypeExpr,
+    right: &TypeExpr,
+) -> bool {
+    if type_is_gradual(left) || type_is_gradual(right) {
+        return true;
+    }
+    match op {
+        crate::ast::BinaryOp::And | crate::ast::BinaryOp::Or => {
+            matches!(left, TypeExpr::Bool) && matches!(right, TypeExpr::Bool)
+        }
+        crate::ast::BinaryOp::Subtract
+        | crate::ast::BinaryOp::Multiply
+        | crate::ast::BinaryOp::Divide
+        | crate::ast::BinaryOp::Modulo => {
+            type_is_scalar(left) && type_is_scalar(right)
+        }
+        crate::ast::BinaryOp::Add => {
+            (type_is_scalar(left) && type_is_scalar(right))
+                || matches!((left, right), (TypeExpr::List(_), TypeExpr::List(_)))
+        }
+        crate::ast::BinaryOp::Equal | crate::ast::BinaryOp::NotEqual => {
+            equality_operands_compatible(left, right)
+        }
+        crate::ast::BinaryOp::Less
+        | crate::ast::BinaryOp::LessEqual
+        | crate::ast::BinaryOp::Greater
+        | crate::ast::BinaryOp::GreaterEqual => {
+            type_is_scalar(left) && type_is_scalar(right)
+        }
+    }
+}
+
+fn equality_operands_compatible(left: &TypeExpr, right: &TypeExpr) -> bool {
+    match (left, right) {
+        (TypeExpr::Union(items), other) | (other, TypeExpr::Union(items)) => items
+            .iter()
+            .any(|item| equality_operands_compatible(item, other)),
+        _ => type_is_gradual(left) || type_is_gradual(right) || type_category(left) == type_category(right),
+    }
+}
+
+fn type_is_gradual(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Any | TypeExpr::Dict | TypeExpr::Ref(_) => true,
+        TypeExpr::Union(items) => items.iter().any(type_is_gradual),
+        _ => false,
+    }
+}
+
+fn type_is_scalar(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Str
+        | TypeExpr::Int
+        | TypeExpr::Float
+        | TypeExpr::Bool
+        | TypeExpr::Null
+        | TypeExpr::Enum(_) => true,
+        TypeExpr::Union(items) => items.iter().all(type_is_scalar),
+        _ => false,
+    }
+}
+
+fn type_category(ty: &TypeExpr) -> u8 {
+    match ty {
+        TypeExpr::Str
+        | TypeExpr::Int
+        | TypeExpr::Float
+        | TypeExpr::Bool
+        | TypeExpr::Null
+        | TypeExpr::Enum(_) => 1,
+        TypeExpr::List(_) => 2,
+        TypeExpr::Object(_) => 3,
+        TypeExpr::Process { .. } => 4,
+        TypeExpr::TriggerHandle(_) => 5,
+        TypeExpr::Any | TypeExpr::Dict | TypeExpr::Ref(_) | TypeExpr::Union(_) => 0,
+    }
+}
+
+fn expected_call_arg_type(input: &TypeExpr, arg_count: usize) -> Option<&TypeExpr> {
+    match (arg_count, input) {
+        (1, input) => Some(input),
+        (_, TypeExpr::List(item)) => Some(item),
+        _ => None,
     }
 }
 

@@ -1,19 +1,150 @@
 use std::collections::BTreeMap;
 
 use axum::http::StatusCode;
-use lashlang::GraphRenderError;
-use serde::{Deserialize, Serialize};
+use lashlang::{GraphRenderError, Span};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowDocument {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet_schema_version: Option<u32>,
     pub version: u64,
     pub source: String,
     pub nodes: Vec<FlowNode>,
     pub edges: Vec<FlowEdge>,
     pub roots: GraphRoots,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveWorkflowResponse {
+    #[serde(flatten)]
+    pub document: WorkflowDocument,
+    pub id_map: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProjectWorkflowRequest {
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProjectWorkflowResponse {
+    pub document: WorkflowDocument,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SourceProjectionErrorBody {
+    pub error: SourceProjectionError,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SourceProjectionError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceProjectionErrorResponse {
+    pub(crate) body: SourceProjectionErrorBody,
+}
+
+impl SourceProjectionErrorResponse {
+    pub(crate) fn invalid_source(message: impl Into<String>) -> Self {
+        Self {
+            body: SourceProjectionErrorBody {
+                error: SourceProjectionError {
+                    code: "invalid_source".to_string(),
+                    message: message.into(),
+                },
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationCatalogEntry {
+    pub id: String,
+    pub label: String,
+    pub node_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subkind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_kind: Option<String>,
+    pub fields: Vec<OperationField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct OperationField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
+    pub default: Value,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationKind {
+    Expression,
+    AssignmentTarget,
+    Identifier,
+}
+
+impl ValidationKind {
+    pub(crate) fn error_code(self) -> &'static str {
+        match self {
+            Self::Expression => "invalid_expression",
+            Self::AssignmentTarget => "invalid_assignment_target",
+            Self::Identifier => "invalid_identifier",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ValidateRequest {
+    pub kind: ValidationKind,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ValidateResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ValidationError>,
+}
+
+impl ValidateResponse {
+    pub(crate) fn valid() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+
+    pub(crate) fn invalid(kind: ValidationKind, message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(ValidationError {
+                code: kind.error_code().to_string(),
+                message: message.into(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ValidationError {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -43,6 +174,12 @@ pub struct NodeData {
     pub subkind: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<EditableProcessField>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<EditableProcessField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default = "derived_name_source")]
     pub name_source: String,
@@ -50,6 +187,8 @@ pub struct NodeData {
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_kind: Option<String>,
     #[serde(default)]
     pub fields: BTreeMap<String, EditableValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +207,49 @@ pub struct NodeData {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChildGroup>,
+    #[serde(default)]
+    pub available_vars: Vec<TypedVariable>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_arg_types: Vec<ExpectedArgumentType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<TypeDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedVariable {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub variable_type: String,
+}
+
+impl PartialEq<&str> for TypedVariable {
+    fn eq(&self, other: &&str) -> bool {
+        self.name == *other
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpectedArgumentType {
+    pub slot: String,
+    #[serde(rename = "type")]
+    pub expected_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeDiagnostic {
+    pub node_id: String,
+    pub kind: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<Span>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditableProcessField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
 }
 
 fn derived_name_source() -> String {
@@ -89,15 +271,111 @@ pub struct ChildGroup {
     pub node_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EditableValue {
     Null,
     Bool(bool),
     Number(f64),
     String(String),
     List(Vec<EditableValue>),
+    Expr(String),
     Object(BTreeMap<String, EditableValue>),
+}
+
+impl Serialize for EditableValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Null => serializer.serialize_none(),
+            Self::Bool(value) => serializer.serialize_bool(*value),
+            Self::Number(value) => serializer.serialize_f64(*value),
+            Self::String(value) => serializer.serialize_str(value),
+            Self::List(values) => values.serialize(serializer),
+            Self::Expr(source) => BTreeMap::from([("$expr", source)]).serialize(serializer),
+            Self::Object(entries) => entries.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EditableValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::from_json(Value::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+impl EditableValue {
+    fn from_json(value: Value) -> Result<Self, String> {
+        match value {
+            Value::Null => Ok(Self::Null),
+            Value::Bool(value) => Ok(Self::Bool(value)),
+            Value::Number(value) => value
+                .as_f64()
+                .map(Self::Number)
+                .ok_or_else(|| format!("editable number `{value}` is outside the f64 range")),
+            Value::String(value) => Ok(Self::String(value)),
+            Value::Array(values) => values
+                .into_iter()
+                .map(Self::from_json)
+                .collect::<Result<_, _>>()
+                .map(Self::List),
+            Value::Object(mut entries)
+                if entries.len() == 1 && entries.get("$expr").is_some_and(Value::is_string) =>
+            {
+                let Value::String(source) = entries.remove("$expr").expect("checked expression")
+                else {
+                    unreachable!("checked expression value is a string")
+                };
+                Ok(Self::Expr(source))
+            }
+            Value::Object(entries) => entries
+                .into_iter()
+                .map(|(key, value)| Ok((key, Self::from_json(value)?)))
+                .collect::<Result<_, String>>()
+                .map(Self::Object),
+        }
+    }
+}
+
+#[cfg(test)]
+mod editable_value_tests {
+    use super::*;
+
+    #[test]
+    fn expression_sentinel_round_trips_without_changing_literal_shapes() {
+        let expression = EditableValue::Expr("(state.count + 1)".to_string());
+        let encoded = serde_json::to_value(&expression).expect("serialize expression value");
+        assert_eq!(encoded, json!({ "$expr": "(state.count + 1)" }));
+        assert_eq!(
+            serde_json::from_value::<EditableValue>(encoded).expect("deserialize expression value"),
+            expression
+        );
+
+        for (editable, encoded) in [
+            (EditableValue::Null, json!(null)),
+            (EditableValue::Bool(true), json!(true)),
+            (EditableValue::Number(5.0), json!(5.0)),
+            (EditableValue::String("s".to_string()), json!("s")),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&editable).expect("serialize literal value"),
+                encoded
+            );
+        }
+
+        let object = json!({ "$expr": "literal member", "other": true });
+        assert!(matches!(
+            serde_json::from_value::<EditableValue>(object).expect("deserialize object value"),
+            EditableValue::Object(entries)
+                if entries.len() == 2
+                    && entries.get("$expr")
+                        == Some(&EditableValue::String("literal member".to_string()))
+        ));
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -289,7 +567,7 @@ impl RenderErrorResponse {
 
     pub(crate) fn invalid_expression(
         node_id: &str,
-        field: &'static str,
+        field: &str,
         message: impl Into<String>,
     ) -> Self {
         let message = message.into();

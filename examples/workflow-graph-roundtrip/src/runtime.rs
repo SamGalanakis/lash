@@ -7,8 +7,8 @@ use lashlang::{
     AbilityOp, AbilityResult, ExecutionEnvironment, ExecutionHost, ExecutionHostError,
     LashlangAbilities, LashlangExecutionObservation, LashlangHostCatalog, LashlangHostEnvironment,
     LashlangLanguageFeatures, LinkedModule, ResourceOperation, ResourceOperationBatchResult,
-    ResourceOperationResult, Sleep, State, TypeExpr, Value, WorkflowGraph, compile_linked_process,
-    from_json, node_id_for_execution_site, parse,
+    ResourceOperationResult, Sleep, State, Value, WorkflowGraph, compile_linked_process, from_json,
+    node_id_for_execution_site, parse,
 };
 use tokio::sync::mpsc;
 
@@ -75,23 +75,42 @@ impl PreparedRun {
     }
 }
 
-fn host_environment() -> LashlangHostEnvironment {
+pub(crate) fn host_environment() -> LashlangHostEnvironment {
     let mut catalog = LashlangHostCatalog::new();
-    for operation in [
-        "show_message",
-        "set_status",
-        "add_item",
-        "set_light",
-        "set_progress",
-        "highlight",
-    ] {
+    for operation in crate::display::OPERATIONS {
+        let properties = operation
+            .fields
+            .iter()
+            .map(|field| {
+                let schema = match (operation.operation, field.name, field.field_type) {
+                    ("add_item", "item", _) | ("set_light", "state", _) => {
+                        serde_json::json!({ "type": ["string", "number", "boolean"] })
+                    }
+                    (_, _, "number") => serde_json::json!({ "type": "number" }),
+                    _ => serde_json::json!({ "type": "string" }),
+                };
+                (field.name.to_string(), schema)
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let required = operation
+            .fields
+            .iter()
+            .map(|field| field.name)
+            .collect::<Vec<_>>();
+        let input_ty = lashlang::json_schema_to_type_expr(&serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false
+        }));
+        let output_ty = lashlang::json_schema_to_type_expr(&serde_json::json!({ "type": "null" }));
         catalog.add_module_operation(
             ["display"],
             "ToyDisplay",
-            operation,
-            operation,
-            TypeExpr::Any,
-            TypeExpr::Any,
+            operation.operation,
+            operation.operation,
+            input_ty,
+            output_ty,
         );
     }
     LashlangHostEnvironment::new(catalog, LashlangAbilities::all())

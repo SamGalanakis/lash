@@ -583,8 +583,8 @@ fn promoted_invalid_graph_is_typed(graph: &lashlang::WorkflowGraph, variant: &st
             let lashlang::WorkflowNodeKind::Computation { expression, .. } = &mut node.kind else {
                 return false;
             };
-            *expression = "null".to_string();
-            expected = "invalid_payload";
+            *expression = "{".to_string();
+            expected = "invalid_expression";
         }
         "process" => {
             let Some(process) =

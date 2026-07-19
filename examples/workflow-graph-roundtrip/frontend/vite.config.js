@@ -19,6 +19,9 @@ export default defineConfig({
     // Proxy API calls to the backend so dev and prod use the same relative URLs.
     proxy: {
       '/workflow': { target: BACKEND, changeOrigin: true },
+      '/operations': { target: BACKEND, changeOrigin: true },
+      '/validate': { target: BACKEND, changeOrigin: true },
+      '/project': { target: BACKEND, changeOrigin: true },
       '/run': { target: BACKEND, changeOrigin: true },
       '/healthz': { target: BACKEND, changeOrigin: true },
     },

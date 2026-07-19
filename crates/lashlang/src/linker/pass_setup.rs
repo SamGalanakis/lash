@@ -1,6 +1,9 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Binding {
     Value(TypeExpr),
+    /// A compile-time schema descriptor. This metatype is linker-only: its
+    /// described shape cannot be written in Lashlang's surface type grammar.
+    SchemaWitness { described_ty: TypeExpr },
     Resource { resource_type: String },
 }
 
@@ -11,6 +14,7 @@ struct Linker<'module> {
     process_types: BTreeMap<String, TypeExpr>,
     type_names: BTreeSet<String>,
     type_defs: BTreeMap<String, TypeExpr>,
+    expected_type_facts: Option<RefCell<ExpectedTypeFacts>>,
 }
 
 impl<'module> Linker<'module> {
@@ -22,7 +26,13 @@ impl<'module> Linker<'module> {
             process_types: BTreeMap::new(),
             type_names: BTreeSet::new(),
             type_defs: BTreeMap::new(),
+            expected_type_facts: None,
         }
+    }
+
+    fn with_expected_type_facts(mut self) -> Self {
+        self.expected_type_facts = Some(RefCell::new(ExpectedTypeFacts::default()));
+        self
     }
 
     fn link_program(&mut self) -> Result<Program, LinkError> {
@@ -178,6 +188,112 @@ impl<'module> Linker<'module> {
         self.resolve_type_aliases_inner(ty, &mut BTreeSet::new())
     }
 
+    fn closed_schema_witness_binding(&self, expr: &Expr) -> Option<Binding> {
+        let described_ty = match strip_label_annotation(expr) {
+            Expr::TypeLiteral(ty) => {
+                self.close_schema_type_expr(ty, &mut BTreeSet::new())?
+            }
+            Expr::Record(entries) => {
+                let mut shorthand = serde_json::Map::new();
+                for (name, descriptor) in entries {
+                    let Expr::String(descriptor) = strip_label_annotation(descriptor) else {
+                        return None;
+                    };
+                    shorthand.insert(
+                        name.to_string(),
+                        serde_json::Value::String(descriptor.to_string()),
+                    );
+                }
+                let schema = crate::parse_output_schema(Some(&serde_json::Value::Object(
+                    shorthand,
+                )))
+                .ok()??;
+                crate::json_schema_to_type_expr(&schema)
+            }
+            _ => return None,
+        };
+        Some(Binding::SchemaWitness { described_ty })
+    }
+
+    fn close_schema_type_expr(
+        &self,
+        ty: &TypeExpr,
+        resolving: &mut BTreeSet<String>,
+    ) -> Option<TypeExpr> {
+        Some(match ty {
+            TypeExpr::Ref(name) => {
+                if !resolving.insert(name.to_string()) {
+                    return None;
+                }
+                let closed = self.close_schema_type_expr(
+                    self.type_defs.get(name.as_str())?,
+                    resolving,
+                );
+                resolving.remove(name.as_str());
+                closed?
+            }
+            TypeExpr::List(item) => {
+                TypeExpr::List(Box::new(self.close_schema_type_expr(item, resolving)?))
+            }
+            TypeExpr::Object(fields) => TypeExpr::Object(
+                fields
+                    .iter()
+                    .map(|field| {
+                        Some(TypeField {
+                            name: field.name.clone(),
+                            ty: self.close_schema_type_expr(&field.ty, resolving)?,
+                            optional: field.optional,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            TypeExpr::Union(items) => TypeExpr::Union(
+                items
+                    .iter()
+                    .map(|item| self.close_schema_type_expr(item, resolving))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            TypeExpr::Process {
+                input,
+                output,
+                input_count,
+            } => TypeExpr::Process {
+                input: Box::new(self.close_schema_type_expr(input, resolving)?),
+                output: Box::new(self.close_schema_type_expr(output, resolving)?),
+                input_count: *input_count,
+            },
+            TypeExpr::TriggerHandle(event) => TypeExpr::TriggerHandle(Box::new(
+                self.close_schema_type_expr(event, resolving)?,
+            )),
+            TypeExpr::Any
+            | TypeExpr::Str
+            | TypeExpr::Int
+            | TypeExpr::Float
+            | TypeExpr::Bool
+            | TypeExpr::Dict
+            | TypeExpr::Null
+            | TypeExpr::Enum(_) => ty.clone(),
+        })
+    }
+
+    fn operation_call_output_type(
+        &self,
+        operation: &ResourceOperationBinding,
+        args: &[Expr],
+    ) -> TypeExpr {
+        let Some(output_from_input) = &operation.output_from_input else {
+            return operation.output_ty.clone();
+        };
+        direct_call_input_field(args, &output_from_input.input_field)
+            .and_then(|witness| self.closed_schema_witness_binding(witness))
+            .and_then(|binding| match binding {
+                Binding::SchemaWitness { described_ty } => Some(described_ty),
+                Binding::Value(_) | Binding::Resource { .. } => None,
+            })
+            .or_else(|| output_from_input.default_schema.clone())
+            .unwrap_or(TypeExpr::Any)
+    }
+
     fn resolve_type_aliases_inner(&self, ty: &TypeExpr, seen: &mut BTreeSet<String>) -> TypeExpr {
         match ty {
             TypeExpr::Ref(name) => {
@@ -244,6 +360,111 @@ impl<'module> Linker<'module> {
         let source = self.resolve_type_aliases(source);
         let target = self.resolve_type_aliases(target);
         crate::trigger::is_resolved_type_assignable(&source, &target)
+    }
+
+    fn validate_expected_literals(
+        &self,
+        expr: &Expr,
+        expected: Option<&TypeExpr>,
+        span: Option<Span>,
+    ) -> Result<(), LinkError> {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        let expected = self.resolve_type_aliases(expected);
+        match (expr, &expected) {
+            (Expr::LabelAnnotated { expr, .. }, _) => {
+                self.validate_expected_literals(expr, Some(&expected), span)
+            }
+            (Expr::String(value), TypeExpr::Enum(members)) if !members.contains(value) => {
+                Err(LinkError::IncompatibleExpectedLiteral {
+                    expected: format_type_expr(&expected),
+                    actual: format!("\"{value}\""),
+                    span,
+                })
+            }
+            (Expr::String(value), TypeExpr::Union(items)) => {
+                let accepts = items.iter().any(|item| match item {
+                    TypeExpr::Any | TypeExpr::Str => true,
+                    TypeExpr::Enum(members) => members.contains(value),
+                    _ => false,
+                });
+                if accepts {
+                    Ok(())
+                } else {
+                    Err(LinkError::IncompatibleExpectedLiteral {
+                        expected: format_type_expr(&expected),
+                        actual: format!("\"{value}\""),
+                        span,
+                    })
+                }
+            }
+            (Expr::Record(entries), TypeExpr::Object(fields)) => {
+                for (name, value) in entries {
+                    if let Some(field) = fields.iter().find(|field| field.name == *name) {
+                        self.validate_expected_literals(value, Some(&field.ty), span)?;
+                    }
+                }
+                Ok(())
+            }
+            (Expr::List(items) | Expr::Tuple(items), TypeExpr::List(item)) => {
+                for value in items {
+                    self.validate_expected_literals(value, Some(item), span)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn assignment_target_type(
+        &self,
+        target: &crate::ast::AssignTarget,
+        scope: &Scope,
+    ) -> Result<Option<TypeExpr>, LinkError> {
+        let Some(mut ty) = scope.binding_type(&target.root) else {
+            return Ok(None);
+        };
+        for step in &target.steps {
+            ty = match step {
+                AssignPathStep::Field(field) => self.field_type(&ty, field, scope.span)?,
+                AssignPathStep::Index(_) => self.index_type(&ty, scope.span)?,
+            };
+        }
+        Ok(Some(ty))
+    }
+
+    fn validate_binary_operands(
+        &self,
+        op: crate::ast::BinaryOp,
+        left: &TypeExpr,
+        right: &TypeExpr,
+        span: Option<Span>,
+    ) -> Result<(), LinkError> {
+        let left = self.resolve_type_aliases(left);
+        let right = self.resolve_type_aliases(right);
+        if binary_operands_compatible(op, &left, &right) {
+            Ok(())
+        } else {
+            Err(LinkError::IncompatibleBinaryOperands {
+                operator: binary_op_source(op),
+                left: format_type_expr(&left),
+                right: format_type_expr(&right),
+                span,
+            })
+        }
+    }
+
+    fn process_output_type(&self, process: &str) -> TypeExpr {
+        match self.process_types.get(process) {
+            // Awaited process handles are runtime result envelopes. Preserve
+            // the inferred payload as the known branch while keeping the
+            // envelope gradual; `?` does not narrow gradual information.
+            Some(TypeExpr::Process { output, .. }) => {
+                union_type(vec![*output.clone(), TypeExpr::Any])
+            }
+            _ => TypeExpr::Any,
+        }
     }
 
     fn validate_type_refs(&self, ty: &TypeExpr, span: Option<Span>) -> Result<(), LinkError> {
@@ -313,6 +534,14 @@ impl<'module> Linker<'module> {
         })
     }
 
+    fn iterable_item_type(
+        &self,
+        target: &TypeExpr,
+        span: Option<Span>,
+    ) -> Result<TypeExpr, LinkError> {
+        iterable_item_type(&self.resolve_type_aliases(target), span)
+    }
+
     fn ensure_feature(
         &self,
         enabled: bool,
@@ -368,6 +597,7 @@ impl<'module> Linker<'module> {
                     )?;
                 }
                 let mut scope = Scope::new(false, true, span);
+                scope.expected_return = process.return_ty.clone();
                 let mut seen = BTreeSet::new();
                 for param in &process.params {
                     if !seen.insert(param.name.to_string()) {

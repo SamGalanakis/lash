@@ -15,6 +15,7 @@ use crate::ast::{
     AssignTarget, Declaration, Expr, LabelMetadata, ListComprehensionClause, ProcessDecl,
     ProcessParam, ProcessSignalDecl, Program, TypeDecl, TypeExpr,
 };
+use crate::linker::WorkflowLinkAnalysis;
 use crate::runtime::is_pure_expr;
 use crate::source::{CanonicalSourceError, canonical_program_source};
 use crate::tracking::WorkflowExecutionSite;
@@ -22,6 +23,7 @@ use crate::{LashlangExecutionSite, ParseError, Span, parse};
 
 mod editable_text;
 mod execution_sites;
+mod facets;
 
 use editable_text::{
     assign_target_text, expression_text, parse_assignment_target_field,
@@ -30,6 +32,7 @@ use editable_text::{
 };
 use execution_sites::execution_sites;
 pub use execution_sites::runtime_execution_site_for_workflow_site;
+pub use facets::*;
 
 /// Version of the serialized workflow graph contract.
 pub const WORKFLOW_GRAPH_SCHEMA_VERSION: u32 = 3;
@@ -55,6 +58,8 @@ impl std::fmt::Display for WorkflowNodeId {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowGraph {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet_schema_version: Option<u32>,
     #[serde(default)]
     pub declarations: Vec<WorkflowDeclaration>,
     pub main: WorkflowSubgraph,
@@ -133,6 +138,12 @@ pub struct WorkflowNode {
     pub description: Option<String>,
     pub name_source: WorkflowNodeNameSource,
     pub kind: WorkflowNodeKind,
+    /// Identifiers visible before this node executes, in stable lexical order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_variables: Vec<String>,
+    /// Optional host-derived type information. It is never used to render source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_facets: Option<WorkflowNodeTypeFacets>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<VariableVersion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -319,10 +330,7 @@ pub enum GraphRenderError {
 
 /// Parse source, canonicalize it, and project it into a deterministic graph.
 pub fn workflow_graph_from_source(src: &str) -> Result<WorkflowGraph, WorkflowGraphBuildError> {
-    let parsed = parse(src)?;
-    let canonical = canonical_program_source(&parsed)?;
-    let canonical_program = parse(&canonical)?;
-    Ok(GraphProjector::new(&canonical, &canonical_program).project())
+    workflow_graph_from_source_with_facets(src, None)
 }
 
 /// Validate and render a graph through the canonical Lashlang source printer.
@@ -358,10 +366,15 @@ struct GraphProjector<'a> {
     program: &'a Program,
     source_hash: String,
     spans: BTreeMap<Vec<u32>, Span>,
+    analysis: Option<&'a WorkflowLinkAnalysis>,
 }
 
 impl<'a> GraphProjector<'a> {
-    fn new(canonical: &'a str, program: &'a Program) -> Self {
+    fn new(
+        canonical: &'a str,
+        program: &'a Program,
+        analysis: Option<&'a WorkflowLinkAnalysis>,
+    ) -> Self {
         Self {
             program,
             source_hash: hex_digest(canonical.as_bytes()),
@@ -370,6 +383,7 @@ impl<'a> GraphProjector<'a> {
                 .iter()
                 .map(|source_span| (source_span.path.clone(), source_span.span))
                 .collect(),
+            analysis,
         }
     }
 
@@ -387,6 +401,7 @@ impl<'a> GraphProjector<'a> {
         let main = self.project_block(&self.program.main, "main", &[], &mut versions);
         WorkflowGraph {
             schema_version: WORKFLOW_GRAPH_SCHEMA_VERSION,
+            facet_schema_version: self.analysis.map(|_| WORKFLOW_TYPE_FACET_SCHEMA_VERSION),
             declarations,
             main,
         }
@@ -472,7 +487,9 @@ impl<'a> GraphProjector<'a> {
         } else {
             None
         };
+        let available_variables: Vec<String> = versions.known.iter().cloned().collect();
         let (kind, derived_name, outputs) = self.project_kind(expression, owner, path, versions);
+        let id = self.node_id(owner, path, kind_tag(&kind));
         let (name, description, name_source) = match label {
             Some(label) => (
                 label.title.to_string(),
@@ -482,12 +499,16 @@ impl<'a> GraphProjector<'a> {
             None => (derived_name, None, WorkflowNodeNameSource::Derived),
         };
         let execution_sites = execution_sites(expression, owner, path, label);
+        let type_facets =
+            projected_node_type_facets(self.analysis, expression, &available_variables, &id);
         WorkflowNode {
-            id: self.node_id(owner, path, kind_tag(&kind)),
+            id,
             name,
             description,
             name_source,
             kind,
+            available_variables,
+            type_facets,
             outputs,
             execution_sites,
             source_span,
@@ -631,7 +652,9 @@ impl<'a> GraphProjector<'a> {
                 "fail".to_string(),
                 Vec::new(),
             ),
-            _ if is_pure_expr(value) || matches!(value, Expr::TypeLiteral(_)) => {
+            _ if (is_pure_expr(value) || matches!(value, Expr::TypeLiteral(_)))
+                && binding.is_some() =>
+            {
                 let outputs = assignment_output(binding.as_ref(), versions);
                 (
                     WorkflowNodeKind::Data {
@@ -1039,9 +1062,6 @@ fn node_to_expr(node: &WorkflowNode, context: RenderContext) -> Result<Expr, Gra
             expression,
         } => {
             let expression = parse_expression_field(node, "expression", expression)?;
-            if is_pure_expr(&expression) {
-                return invalid_payload(node, "computation expression must be effectful");
-            }
             with_assignment(node, binding, expression, true)?
         }
         WorkflowNodeKind::StateUpdate { target, expression } => {
