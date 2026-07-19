@@ -625,7 +625,14 @@ async fn run_user_turn(
         .stream_to(&ui_events)
         .await
         .map_err(AppError::runtime)?;
-    record_turn_output(&state, output, turn_state, "restate_user_turn.completed");
+    record_turn_output(
+        &state,
+        &session,
+        output,
+        turn_state,
+        "restate_user_turn.completed",
+    )
+    .await?;
     Ok(())
 }
 
@@ -820,7 +827,14 @@ async fn run_queued_turn(
         state.publish(crate::StreamItem::Done);
         return Ok(());
     };
-    record_turn_output(&state, output, turn_state, "restate_queued_turn.completed");
+    record_turn_output(
+        &state,
+        &session,
+        output,
+        turn_state,
+        "restate_queued_turn.completed",
+    )
+    .await?;
     Ok(())
 }
 
@@ -932,12 +946,13 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn record_turn_output(
+async fn record_turn_output(
     state: &AppState,
+    session: &lash::LashSession,
     output: lash::TurnResult,
     turn_state: Arc<Mutex<TurnStreamState>>,
     trace_name: &str,
-) {
+) -> Result<(), AppError> {
     let streamed_prose = turn_state
         .lock()
         .expect("turn state lock")
@@ -964,9 +979,37 @@ fn record_turn_output(
     ) {
         state.push_message("event", "turn cancelled");
     } else {
+        commit_assistant_transcript(session, assistant_text.clone()).await?;
         state.push_message("assistant", assistant_text);
     }
     state.publish(crate::StreamItem::Done);
+    Ok(())
+}
+
+pub(crate) async fn commit_assistant_transcript(
+    session: &lash::LashSession,
+    assistant_text: String,
+) -> Result<(), AppError> {
+    let already_committed = session
+        .read_view()
+        .messages()
+        .last()
+        .is_some_and(|message| {
+            lash::message_role(message) == "assistant"
+                && lash::message_text(message) == assistant_text
+        });
+    if already_committed {
+        return Ok(());
+    }
+    session
+        .admin()
+        .state()
+        .append_messages(vec![lash::plugins::PluginMessage::text(
+            lash::messages::MessageRole::Assistant,
+            assistant_text,
+        )])
+        .await
+        .map_err(AppError::runtime)
 }
 
 fn record_turn_failure(

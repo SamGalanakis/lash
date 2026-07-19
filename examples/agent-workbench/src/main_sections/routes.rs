@@ -13,6 +13,12 @@ async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>,
         .open()
         .await
         .map_err(AppError::internal)?;
+    let messages = session
+        .read_view()
+        .messages()
+        .iter()
+        .map(chat_message_from_committed)
+        .collect();
     let pending_turn_inputs = session
         .pending_turn_inputs()
         .await
@@ -20,10 +26,22 @@ async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>,
     session.close().await.map_err(AppError::internal)?;
     Ok(Json(StateSnapshot {
         settings: state.settings(),
-        messages: state.messages_snapshot(),
+        messages,
         active_turns: state.active_turns.for_session(&state.current_session_id()),
         pending_turn_inputs,
     }))
+}
+
+fn chat_message_from_committed(message: &lash::messages::Message) -> ChatMessage {
+    ChatMessage {
+        id: message.id.clone(),
+        role: lash::message_role(message).to_string(),
+        text: lash::message_text(message),
+        // The durable session graph records ordering but not a presentation
+        // timestamp. The workbench does not render this field, so keep the
+        // established wire shape without fabricating a time during resume.
+        at: String::new(),
+    }
 }
 
 async fn session_events(

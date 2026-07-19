@@ -199,6 +199,7 @@ mod tests {
         );
     }
 
+    include!("tests/session_resume.rs");
     #[test]
     fn assistant_display_keeps_streamed_prose_with_terminal_value() {
         assert_eq!(
