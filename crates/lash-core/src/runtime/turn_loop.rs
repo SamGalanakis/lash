@@ -1887,7 +1887,22 @@ impl LashRuntime {
             })?;
         let cancel_state = cancel.clone();
         let finish_scoped_effect_controller = scoped_effect_controller.clone();
-        let shared_cancel_controller = scoped_effect_controller.shared_controller();
+        let shared_cancel_controller = match scoped_effect_controller.shared_controller() {
+            Some(controller) => Some(controller),
+            None if scoped_effect_controller.controller().durability_tier()
+                == crate::DurabilityTier::Durable
+                && self.host.core.control.effect_host.durability_tier()
+                    == crate::DurabilityTier::Durable =>
+            {
+                self.host
+                    .core
+                    .control
+                    .effect_host
+                    .scoped_static(scoped_effect_controller.execution_scope().clone())?
+                    .and_then(|scoped| scoped.shared_controller())
+            }
+            None => None,
+        };
         let session = self
             .session
             .take()
@@ -2098,9 +2113,7 @@ async fn run_turn_effect_loop(
         )
         .await
     };
-    if result.is_err()
-        && let Some(watcher) = cancel_watcher
-    {
+    if let Some(watcher) = cancel_watcher {
         watcher.abort();
     }
     result

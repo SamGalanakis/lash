@@ -3,7 +3,8 @@ use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use lash_core::AwaitEventResolver as _;
 use lash_core::{
     AwaitEventKey, ExecutionScope, InlineRuntimeEffectController, ScopedEffectController,
-    SessionCommitStore,
+    SessionCommitStore, TurnAddress, TurnCancelOutcome, TurnCancelRequest, TurnCancelSource,
+    TurnWorkDriver,
 };
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{
@@ -302,7 +303,7 @@ async fn async_main() -> Result<()> {
 
     drive_durable_wait_index_scenarios(&storage, &ingress_url, &admin_url).await?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 22).await?;
+    let responses = wait_for_terminal_results(storage.pool(), 20).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -1166,8 +1167,8 @@ async fn wait_for_durable_input_key(
     anyhow::bail!("timed out waiting for durable input key for `{workflow_id}`")
 }
 
-/// Drive PENDING foreground durable waits through the real Restate
-/// session-wait-index cancel / re-register / revoke handlers.
+/// Drive pending foreground durable waits and turn control through the real
+/// Restate session-wait-index cancel / re-register / revoke handlers.
 ///
 /// The `durable_wait_probe` scenario parks a session-scoped durable wait in the
 /// `LashDurableWaitIndex` virtual object (unlike the in-process wait scenarios,
@@ -1203,7 +1204,6 @@ async fn drive_durable_wait_index_scenarios(
         &host,
         &cancel_session_id,
         cancel_workflow_id,
-        SessionWaitUpdate::Cancel,
     )
     .await?;
     assert_durable_wait_cancelled(&cancel_response)?;
@@ -1229,38 +1229,44 @@ async fn drive_durable_wait_index_scenarios(
         wait_for_terminal_result(storage.pool(), reregister_workflow_id).await?;
     assert_durable_wait_resolved(&reregister_response, "post-cancel-approved")?;
 
-    // 3) Revoke (the session-deletion path): the pending wait must cancel...
-    let revoke_workflow_id = "e2e-wait-revoke";
-    submit_durable_wait_probe(ingress_url, revoke_workflow_id).await?;
-    let revoke_key = wait_for_durable_wait_key(storage.pool(), revoke_workflow_id).await?;
-    let revoke_session_id = durable_wait_session_id(&revoke_key)?;
-    let revoke_response = drive_session_wait_update(
-        storage.pool(),
-        &host,
-        &revoke_session_id,
-        revoke_workflow_id,
-        SessionWaitUpdate::Revoke,
-    )
-    .await?;
-    assert_durable_wait_cancelled(&revoke_response)?;
-
-    // ...and a subsequent registration on that session must be rejected as
-    // Revoked. Production surfaces that rejection to the turn as a Cancelled
-    // resolution, so this turn completes cancelled WITHOUT the runner invoking
-    // any resolver; if revoke had not stuck, the wait would park forever.
-    let post_revoke_workflow_id = "e2e-wait-post-revoke";
-    submit_durable_wait_probe(ingress_url, post_revoke_workflow_id).await?;
-    let post_revoke_response =
-        wait_for_terminal_result(storage.pool(), post_revoke_workflow_id).await?;
-    assert_durable_wait_cancelled(&post_revoke_response)?;
+    // 3) Revoke (the session-deletion path) now includes reserved turn
+    // control promises. Validate that contract directly: after revocation,
+    // even a duplicate request for an already-created exact turn gate must be
+    // rejected by the session index rather than reaching cached workflow
+    // state. A containing turn cannot honestly commit after its session has
+    // been deleted, so the old post-revoke turn-result assertion no longer
+    // applies.
+    let control_driver = TurnWorkDriver::new(Arc::new(host.clone()));
+    let control_address = TurnAddress::new(DEFAULT_SESSION_ID, "e2e-control-revoke");
+    let initial = control_driver
+        .request_cancel(TurnCancelRequest::new(
+            control_address.clone(),
+            "e2e-control-before-revoke",
+            TurnCancelSource::Host,
+        ))
+        .await
+        .context("create turn control gate before revoke")?;
+    anyhow::ensure!(
+        matches!(initial, TurnCancelOutcome::Requested(_)),
+        "initial turn cancellation was not accepted: {initial:?}"
+    );
+    host.revoke_await_events_for_session(DEFAULT_SESSION_ID)
+        .await
+        .context("revoke session turn control promises")?;
+    let revoked = control_driver
+        .request_cancel(TurnCancelRequest::new(
+            control_address,
+            "e2e-control-after-revoke",
+            TurnCancelSource::Host,
+        ))
+        .await
+        .context("request cancellation after revoke")?;
+    anyhow::ensure!(
+        matches!(revoked, TurnCancelOutcome::UnknownOrRevoked),
+        "revoked turn control gate remained addressable: {revoked:?}"
+    );
     assert_no_problem_lash_restate_invocations(admin_url).await?;
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum SessionWaitUpdate {
-    Cancel,
-    Revoke,
 }
 
 async fn submit_durable_wait_probe(ingress_url: &str, workflow_id: &str) -> Result<()> {
@@ -1293,24 +1299,19 @@ async fn drive_session_wait_update(
     host: &RestateEffectHost,
     session_id: &str,
     workflow_id: &str,
-    update: SessionWaitUpdate,
 ) -> Result<TurnResponse> {
-    let handler = match update {
-        SessionWaitUpdate::Cancel => "cancel_all",
-        SessionWaitUpdate::Revoke => "revoke_all",
-    };
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        match update {
-            SessionWaitUpdate::Cancel => host.cancel_await_events_for_session(session_id).await,
-            SessionWaitUpdate::Revoke => host.revoke_await_events_for_session(session_id).await,
-        }
-        .map_err(|err| anyhow::anyhow!("`{handler}` for `{session_id}` via controller: {err}"))?;
+        host.cancel_await_events_for_session(session_id)
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("`cancel_all` for `{session_id}` via controller: {err}")
+            })?;
         if let Some(response) = load_terminal_result(pool, workflow_id).await? {
             return Ok(response);
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for `{workflow_id}` to resolve after `{handler}`");
+            anyhow::bail!("timed out waiting for `{workflow_id}` to resolve after `cancel_all`");
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

@@ -1046,14 +1046,13 @@ impl AwaitEventResolver for RestateEffectHost {
 
     async fn await_await_event(
         &self,
-        _key: &AwaitEventKey,
-        _cancel: tokio_util::sync::CancellationToken,
-        _deadline: Option<std::time::Instant>,
+        key: &AwaitEventKey,
+        cancel: tokio_util::sync::CancellationToken,
+        deadline: Option<std::time::Instant>,
     ) -> Result<Resolution, RuntimeError> {
-        Err(RuntimeError::new(
-            "restate_await_event_requires_handler",
-            "Restate await events require a workflow handler context",
-        ))
+        self.controller
+            .await_await_event(key, cancel, deadline)
+            .await
     }
 
     async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
@@ -1178,6 +1177,33 @@ impl AwaitEventResolver for RestateEffectHostController {
                 resolve_restate_await_event_via_ingress(ingress, key, resolution).await
             }
             None => Ok(ResolveOutcome::UnknownOrRevoked),
+        }
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: tokio_util::sync::CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        let Some(ingress) = &self.await_event_ingress else {
+            return Err(restate_await_event_ingress_required());
+        };
+        let request = restate_durable_wait_request(key, deadline, &lash_core::SystemClock);
+        let workflow_key = request.address.workflow_key.clone();
+        tokio::select! {
+            result = ingress.ingress.call_workflow_json::<_, Resolution>(
+                "LashDurableWaitWorkflow",
+                &workflow_key,
+                "await_resolution",
+                &request,
+            ) => result.map_err(|err| {
+                RuntimeError::new("restate_await_event_await", err.to_string())
+            }),
+            _ = cancel.cancelled() => Err(RuntimeError::new(
+                "restate_await_event_cancelled",
+                "Restate await-event ingress observation was cancelled locally",
+            )),
         }
     }
 
