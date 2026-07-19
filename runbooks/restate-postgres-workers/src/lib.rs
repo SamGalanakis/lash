@@ -149,6 +149,8 @@ pub enum TurnScenario {
     FrameSwitchQueued,
     FrameSwitchPrepared,
     FrameSwitchCancel,
+    TurnControlHold,
+    TurnControlComplete,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

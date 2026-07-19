@@ -228,10 +228,28 @@ impl AppState {
             .stream_to(&sink)
             .await
             .map_err(terminal_error)?;
-        let final_value = turn
-            .final_value()
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
+        let final_value = if matches!(
+            request.scenario,
+            TurnScenario::TurnControlHold | TurnScenario::TurnControlComplete
+        ) {
+            json!({
+                "final": if matches!(
+                    turn.outcome,
+                    TurnOutcome::Stopped(TurnStop::Cancelled)
+                ) {
+                    "turn-control-cancelled"
+                } else {
+                    "turn-control-completed"
+                },
+                "outcome": turn.outcome,
+                "cancellation": turn.cancellation,
+                "turn_index": turn.state.turn_index,
+            })
+        } else {
+            turn.final_value()
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        };
         let submitted_events = sink.final_values().await;
         self.record(
             &request.workflow_id,
@@ -490,6 +508,8 @@ impl AppState {
                     EXPECTED_FRAME_SWITCH_TEXT
                 }
                 TurnScenario::FrameSwitchCancel => EXPECTED_FRAME_SWITCH_CANCEL_TEXT,
+                TurnScenario::TurnControlHold => "turn-control-cancelled",
+                TurnScenario::TurnControlComplete => "turn-control-completed",
             })
             .to_string();
         let response = TurnResponse {
@@ -660,6 +680,14 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         ),
         TurnScenario::FrameSwitchCancel => format!(
             "Run the cancellation frame-switch scenario. workflow_id={} frame_switch_cancel_start=true",
+            request.workflow_id
+        ),
+        TurnScenario::TurnControlHold => format!(
+            "Run the exact-turn cancellation hold. workflow_id={} turn_control_hold=true fail_once={}",
+            request.workflow_id, request.fail_once
+        ),
+        TurnScenario::TurnControlComplete => format!(
+            "Run the exact-turn completion race. workflow_id={} turn_control_complete=true",
             request.workflow_id
         ),
     }
