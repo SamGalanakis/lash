@@ -1,11 +1,11 @@
 # E2E Runbook Rules
 
-Read this before running any scenario in `e2e/`. Each runbook links here and does
+Read this before running any scenario in `runbooks/`. Each runbook links here and does
 **not** repeat these rules — it only adds its scenario-specific purpose, golden rules,
 phases, and scorecard.
 
-`e2e/` has **two layers**. Scripted deterministic harnesses
-(`e2e/restate-postgres-workers/`, driven by `just restate-postgres-workers-e2e` and the
+`runbooks/` has **two layers**. Scripted deterministic harnesses
+(`runbooks/restate-postgres-workers/`, driven by `just restate-postgres-workers-e2e` and the
 `scripts/*-e2e.sh` runners) are gate **evidence**: they boot real infrastructure and
 assert exact outcomes, and they stay scripts. Runbooks are the **agent-judged semantic
 layer** on top: you (the agent) drive the real `lash` binary through the PTY operator and

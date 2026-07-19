@@ -4,7 +4,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
 
-compose=(docker compose -f "$repo/e2e/restate-postgres-workers/docker-compose.yml")
+compose=(docker compose -f "$repo/runbooks/restate-postgres-workers/docker-compose.yml")
 minio_port="${LASH_E2E_MINIO_PORT:-19000}"
 
 # Binaries are built on the host (sharing the normal cargo cache) and
