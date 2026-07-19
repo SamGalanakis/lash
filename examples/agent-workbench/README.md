@@ -93,10 +93,19 @@ center pane opens a dedicated mock-email view (see below). The buttons emit
 backed by Restate: ask the agent to schedule something and it can construct a
 typed `cron.Schedule` source whose registrations sync to Restate virtual
 objects. Started Lashlang background processes appear in the right rail.
-The **stop turn** button (or **Esc**) cancels the running turn for real:
-`POST /api/turn/cancel` cancels the active Restate invocation through the
-Restate Admin API, and the UI clears once cancellation is requested or the
-workflow emits its terminal result.
+The **stop turn** button (or **Esc**) cooperatively cancels the exact running
+turn: `POST /api/turn/cancel` sends its stable session and turn address through
+`TurnWorkDriver::request_cancel`. The request lives on Lash's durable
+keyed-promise seam, so it survives a workbench web-process restart and is
+observed by the current or replayed Restate owner. The authoritative terminal
+result is `TurnStop::Cancelled` with the original request id, source, and
+optional reason; the UI clears only after the request is accepted or the turn
+has already won the completion race.
+
+Cancellation is cooperative: detached effects and non-cooperative external
+work are not guaranteed to stop. Session and turn ids are routing identity,
+not authorization; a production host must authorize the caller before
+forwarding a stop request.
 The Lashlang graph panel is backed by `TraceLashlangGraphStore`, a public
 trace-derived observation store for foreground blocks, durable process runs,
 and child execution links; command operations still go through the session's
@@ -236,8 +245,8 @@ finish format("Registered daily digest `{}`. Active matching registrations: {}."
 
 After a Restate-backed turn registers an enabled `cron.Schedule`, the workbench
 syncs that source key to `WorkbenchCronJob/{session_id}:{source_key}`. The
-virtual object stores the source request, the next execution timestamp, and the
-Restate invocation id in Restate K/V state. Its `run` handler emits a validated
+virtual object stores the source request and next execution timestamp in
+Restate K/V state. Its `run` handler emits a validated
 `cron.Tick` trigger occurrence for that stored source key:
 
 ```json

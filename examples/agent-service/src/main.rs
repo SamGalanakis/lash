@@ -50,7 +50,7 @@ use crate::demo_plugin::{DemoPlugin, DemoPluginConfig};
 #[cfg(feature = "restate")]
 use crate::restate::{AgentServiceTurnWorkflow, AgentServiceTurnWorkflowImpl};
 use crate::routes::{
-    chat_board, create_chat, index, list_chats, list_messages, send_message, settings,
+    cancel_turn, chat_board, create_chat, index, list_chats, list_messages, send_message, settings,
     update_chat_model,
 };
 use crate::state::{AgentServiceDurability, AppStateData, anyhow_like};
@@ -59,7 +59,8 @@ use lash::durability::DurableProcessWorker;
 #[cfg(feature = "restate")]
 use lash_restate::{
     LashDurableWaitIndex, LashDurableWaitIndexImpl, LashDurableWaitWorkflow,
-    LashDurableWaitWorkflowImpl, LashProcessWorkflow, RestateEffectHost, RestateProcessDeployment,
+    LashDurableWaitWorkflowImpl, LashProcessWorkflow, RestateProcessDeployment,
+    RestateTurnDeployment,
 };
 
 const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
@@ -209,6 +210,9 @@ async fn async_main() -> anyhow_like::Result<()> {
     let process_deployment = (durability == AgentServiceDurability::Restate).then(|| {
         RestateProcessDeployment::new(restate_ingress_url.clone(), Arc::clone(&process_registry))
     });
+    #[cfg(feature = "restate")]
+    let turn_deployment = (durability == AgentServiceDurability::Restate)
+        .then(|| RestateTurnDeployment::new(restate_ingress_url.clone()));
     let core = match durability {
         AgentServiceDurability::Local => core_builder
             .effect_host(Arc::new(InlineEffectHost::default()))
@@ -225,9 +229,12 @@ async fn async_main() -> anyhow_like::Result<()> {
                 // Restate ingress runner is the sole executor of
                 // out-of-turn/background processes.
                 core_builder
-                    .effect_host(Arc::new(RestateEffectHost::with_ingress_url(
-                        restate_ingress_url.clone(),
-                    )))
+                    .effect_host(
+                        turn_deployment
+                            .as_ref()
+                            .expect("turn deployment configured for Restate")
+                            .effect_host(),
+                    )
                     .process_work_driver(
                         process_deployment
                             .as_ref()
@@ -241,6 +248,16 @@ async fn async_main() -> anyhow_like::Result<()> {
             unreachable!("restate mode is rejected before core construction");
         }
     };
+    #[cfg(feature = "restate")]
+    let turn_work_driver = match durability {
+        AgentServiceDurability::Local => core.turn_work_driver(),
+        AgentServiceDurability::Restate => turn_deployment
+            .as_ref()
+            .expect("turn deployment configured for Restate")
+            .turn_work_driver(),
+    };
+    #[cfg(not(feature = "restate"))]
+    let turn_work_driver = core.turn_work_driver();
 
     #[cfg(feature = "restate")]
     let process_worker = if durability == AgentServiceDurability::Restate {
@@ -264,6 +281,7 @@ async fn async_main() -> anyhow_like::Result<()> {
     #[cfg(feature = "restate")]
     let state = AppStateData::from_shared_db(
         core,
+        turn_work_driver,
         Arc::clone(&shared_db),
         session_owner,
         model,
@@ -274,6 +292,7 @@ async fn async_main() -> anyhow_like::Result<()> {
     #[cfg(not(feature = "restate"))]
     let state = AppStateData::new(
         core,
+        turn_work_driver,
         app_db,
         session_owner,
         model,
@@ -327,6 +346,10 @@ async fn async_main() -> anyhow_like::Result<()> {
             get(list_messages).post(send_message),
         )
         .route("/api/chats/{chat_id}/board", get(chat_board))
+        .route(
+            "/api/chats/{chat_id}/turns/{turn_id}/cancel",
+            axum::routing::post(cancel_turn),
+        )
         .with_state(state);
 
     println!(

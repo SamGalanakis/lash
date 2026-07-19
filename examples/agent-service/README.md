@@ -84,6 +84,28 @@ workflow creates a `RestateRuntimeEffectController` and calls
 `session.turn(...).turn_id(...).effects(&controller).stream_to(...)`.
 The stable chat/session id and turn id keep Restate replay and Lash final
 commit addressed to the same operation.
+Every message response includes that stable id in the `x-lash-turn-id` header.
+An authenticated host can request cooperative cancellation from any process,
+without retaining the session handle that submitted the turn:
+
+```http
+POST /api/chats/{chat_id}/turns/{turn_id}/cancel
+Content-Type: application/json
+
+{
+  "request_id": "browser-stop-1",
+  "reason": "user pressed Stop"
+}
+```
+
+The response reports `requested`, `already_requested`,
+`completion_won_race`, or `unknown_or_revoked`. In Restate mode the cancel
+request and terminal attachment use `RestateTurnDeployment` and
+`LashDurableWaitWorkflow`, so the request survives an Axum/web-process restart
+and is observed by a replayed turn owner. Cancellation is cooperative and does
+not guarantee detached effects have stopped. Chat and turn ids are routing
+identity, not authorization; this localhost example verifies that the chat
+exists, while a production service must authenticate and authorize callers.
 Turn progress is written to an app-owned
 SQLite outbox keyed by `turn_id`, so the NDJSON route can stream progress after
 route restart or while the workflow is running in the Restate handler.

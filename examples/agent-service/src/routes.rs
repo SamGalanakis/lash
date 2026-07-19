@@ -12,7 +12,10 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use lash::observe::{RemoteSessionObservationStreamItem, SessionCursor};
 use lash::rlm::RlmTurnBuilderExt as _;
-use lash::{LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput, TurnOutput};
+use lash::{
+    LashSession, TurnActivity, TurnActivitySink, TurnCancelOutcome, TurnCancelRequest,
+    TurnCancelSource, TurnEvent, TurnInput, TurnOutput,
+};
 use lash_remote_protocol::{
     RemoteLiveReplayGap, RemoteSessionCursor, RemoteSessionObservation,
     RemoteSessionObservationEvent, RemoteSessionObservationEventPayload,
@@ -53,6 +56,19 @@ pub(crate) struct SendMessageRequest {
     board: BoardState,
     model: Option<String>,
     model_variant: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CancelTurnRequest {
+    request_id: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CancelTurnResponse {
+    session_id: String,
+    turn_id: String,
+    outcome: TurnCancelOutcome,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -236,9 +252,11 @@ pub(crate) async fn send_message(
     let turn_model = model_spec_for_chat_selection(&model_selection)?;
     let session = state.open_session(&chat_id, turn_model).await?;
     let replay_cursor = session.observe().current_observation().cursor;
+    let turn_id = format!("agent-service-local-turn:{}", uuid::Uuid::new_v4());
     let (tx, rx) = mpsc::channel::<StreamItem>(64);
     let mut replay = spawn_live_replay_forwarder(session.clone(), replay_cursor, tx.clone());
     let run_state = state.clone();
+    let task_turn_id = turn_id.clone();
     tokio::spawn(async move {
         let _ = tx
             .send(StreamItem::Message {
@@ -253,7 +271,7 @@ pub(crate) async fn send_message(
         );
         let turn = session
             .turn(TurnInput::text(text))
-            .turn_id(format!("agent-service-local-turn:{}", uuid::Uuid::new_v4()))
+            .turn_id(task_turn_id)
             .require_finish();
         let turn = match turn {
             Ok(turn) => turn.stream_to(&ui_events).await.map(|result| TurnOutput {
@@ -319,8 +337,46 @@ pub(crate) async fn send_message(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
+        .header("x-lash-turn-id", turn_id)
         .body(Body::from_stream(stream))
         .expect("valid streaming response"))
+}
+
+/// Request cooperative cancellation of one exact foreground turn.
+///
+/// The ids route the request; deployments exposing this endpoint beyond the
+/// local demo must authenticate the caller and authorize access to the chat.
+pub(crate) async fn cancel_turn(
+    State(state): State<AppStateData>,
+    AxumPath((chat_id, turn_id)): AxumPath<(String, String)>,
+    Json(request): Json<CancelTurnRequest>,
+) -> AppResult<Json<CancelTurnResponse>> {
+    state
+        .with_db({
+            let chat_id = chat_id.clone();
+            move |db| db.require_chat(&chat_id).map(|_| ())
+        })
+        .await?;
+    let request_id = request
+        .request_id
+        .filter(|request_id| !request_id.trim().is_empty())
+        .unwrap_or_else(|| format!("agent-service-cancel:{}", uuid::Uuid::new_v4()));
+    let mut cancel = TurnCancelRequest::new(
+        lash::TurnAddress::new(&chat_id, &turn_id),
+        request_id,
+        TurnCancelSource::UserInterrupt,
+    );
+    cancel.reason = request.reason;
+    let outcome = state
+        .turn_work_driver()
+        .request_cancel(cancel)
+        .await
+        .map_err(|err| AppError::internal(err.to_string()))?;
+    Ok(Json(CancelTurnResponse {
+        session_id: chat_id,
+        turn_id,
+        outcome,
+    }))
 }
 
 pub(crate) struct ChannelTurnEvents {
@@ -788,11 +844,13 @@ finish "done through route"
             )))
             .build()
             .expect("core");
+        let turn_work_driver = core.turn_work_driver();
         let db = Arc::new(Mutex::new(
             AppDb::open(&data_dir.join("app.db")).expect("app db"),
         ));
         let state = AppStateData::from_shared_db(
             core,
+            turn_work_driver,
             Arc::clone(&db),
             lash::persistence::LeaseOwnerIdentity::opaque("agent-service-test", "test"),
             "mock-model".to_string(),
@@ -816,6 +874,13 @@ finish "done through route"
         )
         .await
         .expect("send message");
+        let turn_id = response
+            .headers()
+            .get("x-lash-turn-id")
+            .expect("turn id response header")
+            .to_str()
+            .expect("turn id header text")
+            .to_string();
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
@@ -867,6 +932,20 @@ finish "done through route"
             }),
             "stream should include the persisted assistant message: {lines:#?}"
         );
+        let cancelled = cancel_turn(
+            State(state),
+            AxumPath((chat.id, turn_id)),
+            Json(CancelTurnRequest {
+                request_id: Some("route-test-stop".to_string()),
+                reason: Some("test completed turn".to_string()),
+            }),
+        )
+        .await
+        .expect("cancel endpoint");
+        assert!(matches!(
+            cancelled.0.outcome,
+            TurnCancelOutcome::CompletionWonRace
+        ));
     }
 
     #[test]

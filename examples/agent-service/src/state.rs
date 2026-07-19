@@ -4,7 +4,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use lash::persistence::LeaseOwnerIdentity;
-use lash::{LashCore, LashSession, ModelSpec};
+use lash::{LashCore, LashSession, ModelSpec, TurnWorkDriver};
 use serde_json::json;
 
 use crate::db::AppDb;
@@ -15,6 +15,7 @@ pub(crate) type AppResult<T> = Result<T, AppError>;
 #[derive(Clone)]
 pub(crate) struct AppStateData {
     core: LashCore,
+    turn_work_driver: TurnWorkDriver,
     db: Arc<Mutex<AppDb>>,
     // Stable owner id + per-boot incarnation for durable session-execution
     // leases. Attached to every session open so a crashed boot's leases are
@@ -34,6 +35,7 @@ impl AppStateData {
     #[cfg(feature = "restate")]
     pub(crate) fn from_shared_db(
         core: LashCore,
+        turn_work_driver: TurnWorkDriver,
         db: Arc<Mutex<AppDb>>,
         session_owner: LeaseOwnerIdentity,
         default_model: String,
@@ -43,6 +45,7 @@ impl AppStateData {
     ) -> Self {
         Self {
             core,
+            turn_work_driver,
             db,
             session_owner,
             default_model,
@@ -56,6 +59,7 @@ impl AppStateData {
     #[cfg(not(feature = "restate"))]
     pub(crate) fn new(
         core: LashCore,
+        turn_work_driver: TurnWorkDriver,
         db: AppDb,
         session_owner: LeaseOwnerIdentity,
         default_model: String,
@@ -64,6 +68,7 @@ impl AppStateData {
     ) -> Self {
         Self {
             core,
+            turn_work_driver,
             db: Arc::new(Mutex::new(db)),
             session_owner,
             default_model,
@@ -75,6 +80,10 @@ impl AppStateData {
     /// The core, retained for the shutdown drain (trace flush).
     pub(crate) fn core(&self) -> &LashCore {
         &self.core
+    }
+
+    pub(crate) fn turn_work_driver(&self) -> &TurnWorkDriver {
+        &self.turn_work_driver
     }
 
     pub(crate) fn default_model(&self) -> &str {

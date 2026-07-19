@@ -124,7 +124,7 @@ pub(crate) async fn send_message_restate(
         model_selection.model_variant,
     );
     // The workflow id is the stable turn id. The app does not persist a
-    // finishted/running work-item row; Restate owns in-flight replay and the
+    // finished/running work-item row; Restate owns in-flight replay and the
     // app outbox stores only product-visible rows keyed by turn_id.
     let ingress = state
         .restate_ingress_url()
@@ -164,6 +164,7 @@ async fn stream_turn_outbox(
     let (item_tx, mut item_rx) = mpsc::channel::<StreamItem>(64);
     let replay_session = state.open_session(&chat_id, model).await?;
     let mut replay = spawn_live_replay_forwarder(replay_session, replay_cursor, item_tx.clone());
+    let stream_turn_id = turn_id.clone();
     tokio::spawn(async move {
         let tx_for_replay = tx.clone();
         tokio::spawn(async move {
@@ -177,7 +178,7 @@ async fn stream_turn_outbox(
         loop {
             match state
                 .with_db({
-                    let turn_id = turn_id.clone();
+                    let turn_id = stream_turn_id.clone();
                     move |db| db.list_turn_events_after(&turn_id, last_id)
                 })
                 .await
@@ -219,6 +220,7 @@ async fn stream_turn_outbox(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
+        .header("x-lash-turn-id", &turn_id)
         .body(Body::from_stream(ReceiverStream::new(rx)))
         .expect("valid streaming response"))
 }
@@ -558,8 +560,11 @@ finish "done via Restate E2E"
                 .await
                 .expect("open trigger store"),
         );
-        let process_deployment =
-            lash_restate::RestateProcessDeployment::new(ingress_url, Arc::clone(&process_registry));
+        let process_deployment = lash_restate::RestateProcessDeployment::new(
+            ingress_url.clone(),
+            Arc::clone(&process_registry),
+        );
+        let turn_deployment = lash_restate::RestateTurnDeployment::new(ingress_url);
         let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
             lash_protocol_rlm::RlmProtocolPluginConfig::default(),
             artifact_store,
@@ -576,7 +581,7 @@ finish "done via Restate E2E"
             )))
             .process_env_store(process_env_store)
             .trigger_store(trigger_store)
-            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .effect_host(turn_deployment.effect_host())
             .process_work_driver(process_deployment.process_work_driver())
             .build()
             .expect("build test core");
@@ -589,6 +594,7 @@ finish "done via Restate E2E"
         );
         let state = AppStateData::from_shared_db(
             core,
+            turn_deployment.turn_work_driver(),
             app_db,
             lash::persistence::LeaseOwnerIdentity::opaque("agent-service-test", "test"),
             "mock-model".to_string(),

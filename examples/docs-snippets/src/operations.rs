@@ -87,8 +87,9 @@ async fn graceful_drain(
     // 1. Stop admitting new turns. A host-layer decision — flip a readiness
     //    flag, drain the load balancer. lash cannot see your ingress.
 
-    // 2. Finish or cancel in-flight turns. A live turn shares the session and
-    //    makes park/close fail with `SessionStillInUse` until it ends.
+    // 2. Finish or cancel in-flight turns. Exact retained turn addresses should
+    //    normally go through `core.turn_work_driver().request_cancel(...)`.
+    //    This process-local cancel-all remains a shutdown compatibility lever.
     for session in &idle_sessions {
         session.cancel_running_turns();
     }
