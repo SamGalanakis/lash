@@ -1,35 +1,13 @@
-impl From<lash_core::TurnCancelSource> for RemoteTurnCancelSource {
-    fn from(value: lash_core::TurnCancelSource) -> Self {
-        match value {
-            lash_core::TurnCancelSource::UserInterrupt => Self::UserInterrupt,
-            lash_core::TurnCancelSource::Host => Self::Host,
-            lash_core::TurnCancelSource::Shutdown => Self::Shutdown,
-            lash_core::TurnCancelSource::Superseded => Self::Superseded,
-        }
-    }
-}
-
-impl From<RemoteTurnCancelSource> for lash_core::TurnCancelSource {
-    fn from(value: RemoteTurnCancelSource) -> Self {
-        match value {
-            RemoteTurnCancelSource::UserInterrupt => Self::UserInterrupt,
-            RemoteTurnCancelSource::Host => Self::Host,
-            RemoteTurnCancelSource::Shutdown => Self::Shutdown,
-            RemoteTurnCancelSource::Superseded => Self::Superseded,
-        }
-    }
-}
-
 impl From<lash_core::TurnCancellationEvidence> for RemoteTurnCancellationEvidence {
     fn from(value: lash_core::TurnCancellationEvidence) -> Self {
         let lash_core::TurnCancellationEvidence {
             request_id,
-            source,
+            origin,
             reason,
         } = value;
         Self {
             request_id,
-            source: source.into(),
+            origin,
             reason,
         }
     }
@@ -39,12 +17,12 @@ impl From<RemoteTurnCancellationEvidence> for lash_core::TurnCancellationEvidenc
     fn from(value: RemoteTurnCancellationEvidence) -> Self {
         let RemoteTurnCancellationEvidence {
             request_id,
-            source,
+            origin,
             reason,
         } = value;
         Self {
             request_id,
-            source: source.into(),
+            origin,
             reason,
         }
     }
@@ -60,13 +38,13 @@ impl TryFrom<RemoteTurnCancelRequest> for lash_core::TurnCancelRequest {
             session_id,
             turn_id,
             request_id,
-            source,
+            origin,
             reason,
         } = value;
         Ok(Self {
             address: lash_core::TurnAddress::new(session_id, turn_id),
             request_id,
-            source: source.into(),
+            origin,
             reason,
         })
     }
@@ -77,7 +55,7 @@ impl From<lash_core::TurnCancelRequest> for RemoteTurnCancelRequest {
         let lash_core::TurnCancelRequest {
             address,
             request_id,
-            source,
+            origin,
             reason,
         } = value;
         Self {
@@ -85,7 +63,7 @@ impl From<lash_core::TurnCancelRequest> for RemoteTurnCancelRequest {
             session_id: address.session_id,
             turn_id: address.turn_id,
             request_id,
-            source: source.into(),
+            origin,
             reason,
         }
     }

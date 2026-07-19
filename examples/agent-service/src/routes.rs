@@ -14,7 +14,7 @@ use lash::observe::{RemoteSessionObservationStreamItem, SessionCursor};
 use lash::rlm::RlmTurnBuilderExt as _;
 use lash::{
     DurabilityTier, LashSession, TurnActivity, TurnActivitySink, TurnCancelOutcome,
-    TurnCancelRequest, TurnCancelSource, TurnEvent, TurnInput, TurnOutput,
+    TurnCancelRequest, TurnEvent, TurnInput, TurnOutput,
 };
 use lash_remote_protocol::{
     RemoteLiveReplayGap, RemoteSessionCursor, RemoteSessionObservation,
@@ -365,7 +365,7 @@ pub(crate) async fn cancel_turn(
     let mut cancel = TurnCancelRequest::new(
         lash::TurnAddress::new(&chat_id, &turn_id),
         request_id,
-        TurnCancelSource::UserInterrupt,
+        Some("user".to_string()),
     );
     cancel.reason = request.reason;
     let receipt = state

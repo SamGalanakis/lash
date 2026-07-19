@@ -307,7 +307,7 @@ impl QueuedWorkRunHandle for InlineQueuedWorkRunHandle {
             crate::turn::TurnSinks::default(),
             scoped,
             CancellationToken::new(),
-            lash_core::TurnCancelSourceHint::default(),
+            lash_core::TurnCancelOriginHint::default(),
             &[],
         )
         .await

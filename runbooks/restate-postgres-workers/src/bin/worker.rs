@@ -413,7 +413,10 @@ impl AppState {
         let cancel_workflow_id = request.workflow_id.clone();
         let canceller = tokio::spawn(async move {
             wait_for_cancel_gate(&cancel_pool, &cancel_workflow_id).await?;
-            Ok::<usize, anyhow::Error>(cancel_session.cancel_running_turns())
+            Ok::<usize, anyhow::Error>(
+                cancel_session
+                    .cancel_running_turns_with_origin(Some("scripted-e2e-worker".to_string())),
+            )
         });
         let cancelled = session
             .queued_turn()

@@ -59,7 +59,7 @@ struct TurnCancelRegistryInner {
 
 struct RegisteredTurnCancel {
     token: CancellationToken,
-    source_hint: TurnCancelSourceHint,
+    origin_hint: TurnCancelOriginHint,
 }
 
 impl TurnCancelRegistry {
@@ -68,24 +68,24 @@ impl TurnCancelRegistry {
     fn register(
         &self,
         token: CancellationToken,
-        source_hint: TurnCancelSourceHint,
+        origin_hint: TurnCancelOriginHint,
     ) -> TurnCancelGuard {
         let mut inner = self.inner.lock().expect("turn cancel registry");
         let id = inner.next_id;
         inner.next_id += 1;
         inner
             .active
-            .insert(id, RegisteredTurnCancel { token, source_hint });
+            .insert(id, RegisteredTurnCancel { token, origin_hint });
         TurnCancelGuard {
             registry: Arc::clone(&self.inner),
             id,
         }
     }
 
-    pub(crate) fn cancel_all(&self, source: TurnCancelSource) -> usize {
+    pub(crate) fn cancel_all(&self, origin: Option<String>) -> usize {
         let inner = self.inner.lock().expect("turn cancel registry");
         for registered in inner.active.values() {
-            registered.source_hint.set(source);
+            registered.origin_hint.set(origin.clone());
             registered.token.cancel();
         }
         inner.active.len()
@@ -117,7 +117,7 @@ pub struct TurnBuilder {
     pub(crate) protocol_turn_options: Option<ProtocolTurnOptions>,
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) turn_id: Option<String>,
-    pub(crate) cancel_source_hint: TurnCancelSourceHint,
+    pub(crate) cancel_origin_hint: TurnCancelOriginHint,
 }
 
 impl TurnBuilder {
@@ -126,24 +126,22 @@ impl TurnBuilder {
     /// This low-level hook remains for provider plumbing, shutdown, and tests.
     /// Host-facing stop controls should use `TurnWorkDriver::request_cancel`
     /// with an exact session/turn address. If this token fires, cancellation
-    /// evidence uses `Host` with an explicit “origin unknown” reason; call
-    /// [`cancel_with_source`](Self::cancel_with_source) when the origin is
+    /// evidence records no origin; call
+    /// [`cancel_with_origin`](Self::cancel_with_origin) when the origin is
     /// known.
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
-        self.cancel_source_hint = TurnCancelSourceHint::default();
+        self.cancel_origin_hint = TurnCancelOriginHint::default();
         self
     }
 
-    /// Install a process-local token with an explicit evidence source.
-    pub fn cancel_with_source(
-        mut self,
-        cancel: CancellationToken,
-        source: TurnCancelSource,
-    ) -> Self {
+    /// Install a process-local token with an opaque host-defined origin.
+    ///
+    /// Lash records the value without interpreting it.
+    pub fn cancel_with_origin(mut self, cancel: CancellationToken, origin: Option<String>) -> Self {
         self.cancel = cancel;
-        self.cancel_source_hint = TurnCancelSourceHint::default();
-        self.cancel_source_hint.set(source);
+        self.cancel_origin_hint = TurnCancelOriginHint::default();
+        self.cancel_origin_hint.set(origin);
         self
     }
 
@@ -267,10 +265,10 @@ impl TurnBuilder {
         validate_required_plugin_inputs(&self.active_plugins, &self.input)?;
         self.input
             .turn_context
-            .set_local_cancel_source_hint(self.cancel_source_hint.clone());
+            .set_local_cancel_origin_hint(self.cancel_origin_hint.clone());
         let cancel_guard = self
             .cancels
-            .register(self.cancel.clone(), self.cancel_source_hint);
+            .register(self.cancel.clone(), self.cancel_origin_hint);
         Ok((self.runtime, self.input, self.cancel, cancel_guard))
     }
 
@@ -360,12 +358,8 @@ impl<'run> ScopedTurnBuilder<'run> {
         self
     }
 
-    pub fn cancel_with_source(
-        mut self,
-        cancel: CancellationToken,
-        source: TurnCancelSource,
-    ) -> Self {
-        self.builder = self.builder.cancel_with_source(cancel, source);
+    pub fn cancel_with_origin(mut self, cancel: CancellationToken, origin: Option<String>) -> Self {
+        self.builder = self.builder.cancel_with_origin(cancel, origin);
         self
     }
 
@@ -549,7 +543,7 @@ pub struct QueuedTurnBuilder {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) effect_host: Arc<dyn EffectHost>,
     pub(crate) cancel: CancellationToken,
-    pub(crate) cancel_source_hint: TurnCancelSourceHint,
+    pub(crate) cancel_origin_hint: TurnCancelOriginHint,
     pub(crate) cancels: TurnCancelRegistry,
     pub(crate) batch_ids: Vec<String>,
     pub(crate) drain_id: Option<String>,
@@ -559,19 +553,17 @@ impl QueuedTurnBuilder {
     /// Install a process-local token whose origin is unknown.
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
-        self.cancel_source_hint = TurnCancelSourceHint::default();
+        self.cancel_origin_hint = TurnCancelOriginHint::default();
         self
     }
 
-    /// Install a process-local token with an explicit evidence source.
-    pub fn cancel_with_source(
-        mut self,
-        cancel: CancellationToken,
-        source: TurnCancelSource,
-    ) -> Self {
+    /// Install a process-local token with an opaque host-defined origin.
+    ///
+    /// Lash records the value without interpreting it.
+    pub fn cancel_with_origin(mut self, cancel: CancellationToken, origin: Option<String>) -> Self {
         self.cancel = cancel;
-        self.cancel_source_hint = TurnCancelSourceHint::default();
-        self.cancel_source_hint.set(source);
+        self.cancel_origin_hint = TurnCancelOriginHint::default();
+        self.cancel_origin_hint.set(origin);
         self
     }
 
@@ -656,18 +648,18 @@ impl QueuedTurnBuilder {
             runtime,
             effect_host: _,
             cancel,
-            cancel_source_hint,
+            cancel_origin_hint,
             cancels,
             batch_ids,
             drain_id: _,
         } = self;
-        let _cancel_guard = cancels.register(cancel.clone(), cancel_source_hint.clone());
+        let _cancel_guard = cancels.register(cancel.clone(), cancel_origin_hint.clone());
         stream_next_queued_prepared_turn(
             &runtime,
             TurnSinks::turn(events),
             scoped_effect_controller,
             cancel,
-            cancel_source_hint,
+            cancel_origin_hint,
             &batch_ids,
         )
         .await
@@ -685,12 +677,8 @@ impl<'run> ScopedQueuedTurnBuilder<'run> {
         self
     }
 
-    pub fn cancel_with_source(
-        mut self,
-        cancel: CancellationToken,
-        source: TurnCancelSource,
-    ) -> Self {
-        self.builder = self.builder.cancel_with_source(cancel, source);
+    pub fn cancel_with_origin(mut self, cancel: CancellationToken, origin: Option<String>) -> Self {
+        self.builder = self.builder.cancel_with_origin(cancel, origin);
         self
     }
 
@@ -783,7 +771,7 @@ pub(crate) async fn stream_next_queued_prepared_turn(
     sinks: TurnSinks<'_>,
     scoped_effect_controller: ScopedEffectController<'_>,
     cancel: CancellationToken,
-    cancel_source_hint: TurnCancelSourceHint,
+    cancel_origin_hint: TurnCancelOriginHint,
     batch_ids: &[String],
 ) -> Result<Option<TurnResult>> {
     let turn = Box::pin(stream_next_queued_prepared_assembled(
@@ -791,7 +779,7 @@ pub(crate) async fn stream_next_queued_prepared_turn(
         sinks,
         scoped_effect_controller,
         cancel,
-        cancel_source_hint,
+        cancel_origin_hint,
         batch_ids,
     ))
     .await?;
@@ -803,7 +791,7 @@ pub(crate) async fn stream_next_queued_prepared_assembled(
     sinks: TurnSinks<'_>,
     scoped_effect_controller: ScopedEffectController<'_>,
     cancel: CancellationToken,
-    cancel_source_hint: TurnCancelSourceHint,
+    cancel_origin_hint: TurnCancelOriginHint,
     batch_ids: &[String],
 ) -> Result<Option<AssembledTurn>> {
     let writer_handle = runtime.writer();
@@ -818,7 +806,7 @@ pub(crate) async fn stream_next_queued_prepared_assembled(
         scoped_effect_controller,
         cancel,
     )
-    .with_local_cancel_source_hint(cancel_source_hint);
+    .with_local_cancel_origin_hint(cancel_origin_hint);
     let turn = if batch_ids.is_empty() {
         writer.stream_next_queued_work(opts).await?
     } else {

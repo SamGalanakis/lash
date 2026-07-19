@@ -65,7 +65,7 @@ impl AppState {
                 .request_cancel(lash::TurnCancelRequest::new(
                     address.clone(),
                     request_id.clone(),
-                    lash::TurnCancelSource::UserInterrupt,
+                    Some("user".to_string()),
                 ).with_reason("workbench Stop control"))
                 .await
                 .map_err(|err| AppError::internal(err.to_string()))?;

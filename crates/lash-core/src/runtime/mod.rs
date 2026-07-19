@@ -165,8 +165,8 @@ use state::{
     apply_session_head, normalize_session_graph, open_agent_frame_in_state_with_clock,
 };
 pub use turn_control::{
-    TurnAddress, TurnAttach, TurnCancelOutcome, TurnCancelReceipt, TurnCancelRequest,
-    TurnCancelSource, TurnCancelSourceHint, TurnCancellationEvidence, TurnTerminal, TurnWorkDriver,
+    TurnAddress, TurnAttach, TurnCancelOriginHint, TurnCancelOutcome, TurnCancelReceipt,
+    TurnCancelRequest, TurnCancellationEvidence, TurnTerminal, TurnWorkDriver,
 };
 pub use turn_input_ingress::{
     PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
@@ -423,7 +423,7 @@ pub struct TurnContext {
     plugin_inputs: LiveTurnInputs,
     provider: Option<crate::ProviderHandle>,
     prompt: crate::PromptLayer,
-    local_cancel_source: TurnCancelSourceHint,
+    local_cancel_origin: TurnCancelOriginHint,
 }
 
 impl TurnContext {
@@ -447,12 +447,12 @@ impl TurnContext {
     }
 
     #[doc(hidden)]
-    pub fn set_local_cancel_source_hint(&mut self, hint: TurnCancelSourceHint) {
-        self.local_cancel_source = hint;
+    pub fn set_local_cancel_origin_hint(&mut self, hint: TurnCancelOriginHint) {
+        self.local_cancel_origin = hint;
     }
 
-    pub(crate) fn local_cancel_source_hint(&self) -> TurnCancelSourceHint {
-        self.local_cancel_source.clone()
+    pub(crate) fn local_cancel_origin_hint(&self) -> TurnCancelOriginHint {
+        self.local_cancel_origin.clone()
     }
 
     pub fn plugin_input<T>(&self, plugin_id: &'static str) -> Option<&T>
@@ -936,7 +936,7 @@ pub struct TurnOptions<'a> {
     turn_events: Option<&'a dyn TurnActivitySink>,
     scoped_effect_controller: ScopedEffectController<'a>,
     cancel: CancellationToken,
-    local_cancel_source: Option<TurnCancelSourceHint>,
+    local_cancel_origin: Option<TurnCancelOriginHint>,
 }
 
 impl<'a> TurnOptions<'a> {
@@ -949,7 +949,7 @@ impl<'a> TurnOptions<'a> {
             turn_events: None,
             scoped_effect_controller,
             cancel,
-            local_cancel_source: None,
+            local_cancel_origin: None,
         }
     }
 
@@ -964,13 +964,13 @@ impl<'a> TurnOptions<'a> {
     }
 
     #[doc(hidden)]
-    pub fn with_local_cancel_source_hint(mut self, hint: TurnCancelSourceHint) -> Self {
-        self.local_cancel_source = Some(hint);
+    pub fn with_local_cancel_origin_hint(mut self, hint: TurnCancelOriginHint) -> Self {
+        self.local_cancel_origin = Some(hint);
         self
     }
 
-    pub(crate) fn local_cancel_source_hint(&self) -> Option<TurnCancelSourceHint> {
-        self.local_cancel_source.clone()
+    pub(crate) fn local_cancel_origin_hint(&self) -> Option<TurnCancelOriginHint> {
+        self.local_cancel_origin.clone()
     }
 
     pub(crate) fn events_or_noop(&self) -> &'a dyn EventSink {

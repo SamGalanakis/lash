@@ -10,7 +10,7 @@ fn turn_cancel_core_conversions_round_trip_every_envelope() {
     let core_request = lash_core::TurnCancelRequest::new(
         lash_core::TurnAddress::new("session", "turn"),
         "cancel-request",
-        lash_core::TurnCancelSource::Superseded,
+        Some("queue-superseder".to_string()),
     )
     .with_reason("newer input arrived");
     let remote_request = RemoteTurnCancelRequest::from(core_request.clone());
@@ -23,13 +23,23 @@ fn turn_cancel_core_conversions_round_trip_every_envelope() {
 
     let evidence = lash_core::TurnCancellationEvidence {
         request_id: "cancel-request".to_string(),
-        source: lash_core::TurnCancelSource::UserInterrupt,
+        origin: Some("workbench-user".to_string()),
         reason: Some("stop button".to_string()),
     };
     let remote_evidence = RemoteTurnCancellationEvidence::from(evidence.clone());
     assert_eq!(
         lash_core::TurnCancellationEvidence::from(remote_evidence),
         evidence
+    );
+    let evidence_without_origin = lash_core::TurnCancellationEvidence {
+        request_id: "cancel-without-origin".to_string(),
+        origin: None,
+        reason: None,
+    };
+    let remote_evidence = RemoteTurnCancellationEvidence::from(evidence_without_origin.clone());
+    assert_eq!(
+        lash_core::TurnCancellationEvidence::from(remote_evidence),
+        evidence_without_origin
     );
 
     for core_outcome in [

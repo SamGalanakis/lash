@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 use crate::runtime::turn_control::ActiveTurnControl;
 use crate::{
     AwaitEventWaitIdentity, EffectHost, ExecutionScope, Resolution, TurnAddress, TurnCancelOutcome,
-    TurnCancelRequest, TurnCancelSource, TurnCancellationEvidence, TurnFinish, TurnOutcome,
-    TurnStop, TurnTerminal, TurnWorkDriver,
+    TurnCancelRequest, TurnCancellationEvidence, TurnFinish, TurnOutcome, TurnStop, TurnTerminal,
+    TurnWorkDriver,
 };
 
 fn address(label: &str) -> TurnAddress {
@@ -19,7 +19,7 @@ fn address(label: &str) -> TurnAddress {
 }
 
 fn request(address: TurnAddress, request_id: &str) -> TurnCancelRequest {
-    TurnCancelRequest::new(address, request_id, TurnCancelSource::UserInterrupt)
+    TurnCancelRequest::new(address, request_id, Some("conformance-user".to_string()))
         .with_reason("stop button")
 }
 
@@ -50,8 +50,11 @@ async fn cancel_before_start_duplicate_replay_and_terminal_attach(host: Arc<dyn 
         .expect("duplicate cancellation");
     assert!(matches!(
         duplicate.outcome,
-        TurnCancelOutcome::AlreadyRequested(TurnCancellationEvidence { ref request_id, .. })
-            if request_id == "request-1"
+        TurnCancelOutcome::AlreadyRequested(TurnCancellationEvidence {
+            ref request_id,
+            origin: Some(ref origin),
+            ..
+        }) if request_id == "request-1" && origin == "conformance-user"
     ));
 
     // Recreating this bridge models a new lease generation after owner loss;
@@ -84,9 +87,13 @@ async fn cancel_before_start_duplicate_replay_and_terminal_attach(host: Arc<dyn 
         attached,
         TurnTerminal::Committed {
             outcome: crate::TurnOutcome::Stopped(TurnStop::Cancelled),
-            cancellation: Some(TurnCancellationEvidence { ref request_id, .. }),
+            cancellation: Some(TurnCancellationEvidence {
+                ref request_id,
+                origin: Some(ref origin),
+                ..
+            }),
             session_revision: Some(7),
-        } if request_id == "request-1"
+        } if request_id == "request-1" && origin == "conformance-user"
     ));
 
     // Terminal publication is idempotent and first-writer-wins too. A stale
@@ -112,9 +119,13 @@ async fn cancel_before_start_duplicate_replay_and_terminal_attach(host: Arc<dyn 
         attached_again,
         TurnTerminal::Committed {
             outcome: TurnOutcome::Stopped(TurnStop::Cancelled),
-            cancellation: Some(TurnCancellationEvidence { ref request_id, .. }),
+            cancellation: Some(TurnCancellationEvidence {
+                ref request_id,
+                origin: Some(ref origin),
+                ..
+            }),
             session_revision: Some(7),
-        } if request_id == "request-1"
+        } if request_id == "request-1" && origin == "conformance-user"
     ));
 }
 

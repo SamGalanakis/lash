@@ -353,6 +353,7 @@ async fn cross_backend_active_turn_cancel_then_turn_agrees() {
 struct FirstPartyCancelObs {
     cancelled: bool,
     request_id: Option<String>,
+    origin: Option<String>,
     duplicate_preserved_original: bool,
     next_turn_succeeded: bool,
 }
@@ -368,7 +369,7 @@ async fn drive_first_party_cancel_before_start(
         .request_cancel(lash::TurnCancelRequest::new(
             address.clone(),
             "cross-backend-cancel",
-            lash::TurnCancelSource::UserInterrupt,
+            Some("sim-user".to_string()),
         ))
         .await
         .expect("cancel before start");
@@ -381,7 +382,7 @@ async fn drive_first_party_cancel_before_start(
         .request_cancel(lash::TurnCancelRequest::new(
             address,
             "cross-backend-duplicate",
-            lash::TurnCancelSource::Host,
+            Some("sim-duplicate".to_string()),
         ))
         .await
         .expect("duplicate cancel");
@@ -389,8 +390,9 @@ async fn drive_first_party_cancel_before_start(
         duplicate.outcome,
         lash::TurnCancelOutcome::AlreadyRequested(lash::TurnCancellationEvidence {
             ref request_id,
+            origin: Some(ref origin),
             ..
-        }) if request_id == "cross-backend-cancel"
+        }) if request_id == "cross-backend-cancel" && origin == "sim-user"
     );
 
     let session = core
@@ -411,15 +413,16 @@ async fn drive_first_party_cancel_before_start(
         .await
         .expect("future turn");
 
+    let cancellation = cancelled.result.cancellation;
     FirstPartyCancelObs {
         cancelled: matches!(
             cancelled.result.outcome,
             lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
         ),
-        request_id: cancelled
-            .result
-            .cancellation
-            .map(|evidence| evidence.request_id),
+        request_id: cancellation
+            .as_ref()
+            .map(|evidence| evidence.request_id.clone()),
+        origin: cancellation.and_then(|evidence| evidence.origin),
         duplicate_preserved_original,
         next_turn_succeeded: next.result.is_success(),
     }
@@ -435,6 +438,7 @@ async fn cross_backend_first_party_turn_cancel_agrees() {
 
     assert_eq!(memory, sqlite, "first-party turn cancellation diverged");
     assert_eq!(memory.request_id.as_deref(), Some("cross-backend-cancel"));
+    assert_eq!(memory.origin.as_deref(), Some("sim-user"));
     assert!(memory.cancelled);
     assert!(memory.duplicate_preserved_original);
     assert!(memory.next_turn_succeeded);
@@ -453,7 +457,7 @@ async fn sqlite_reopen_preserves_cancelled_turn_commit_and_allows_next_turn() {
         .request_cancel(lash::TurnCancelRequest::new(
             lash::TurnAddress::new(session_id, turn_id),
             "sqlite-replay-cancel",
-            lash::TurnCancelSource::Host,
+            Some("sqlite-replay".to_string()),
         ))
         .await
         .expect("request cancellation before SQLite turn");
@@ -483,6 +487,14 @@ async fn sqlite_reopen_preserves_cancelled_turn_commit_and_allows_next_turn() {
             .as_ref()
             .map(|evidence| evidence.request_id.as_str()),
         Some("sqlite-replay-cancel")
+    );
+    assert_eq!(
+        cancelled
+            .result
+            .cancellation
+            .as_ref()
+            .and_then(|evidence| evidence.origin.as_deref()),
+        Some("sqlite-replay")
     );
     assert_eq!(
         first_transport.exchanges().expect("first exchanges").len(),

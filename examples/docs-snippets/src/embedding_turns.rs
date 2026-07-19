@@ -217,7 +217,7 @@ async fn rlm_terminal_contracts(
 
 async fn cancel_turn(core: &LashCore, session: &LashSession) -> anyhow::Result<()> {
     // docs:start:cancel-turn
-    use lash::{DurabilityTier, TurnAddress, TurnCancelSource, TurnOutcome, TurnStop};
+    use lash::{DurabilityTier, TurnAddress, TurnOutcome, TurnStop};
 
     let turn_id = "incident-summary-42";
     let stream = session
@@ -233,7 +233,7 @@ async fn cancel_turn(core: &LashCore, session: &LashSession) -> anyhow::Result<(
         .request_turn_cancel(
             turn_id,
             "stop-button-7",
-            TurnCancelSource::UserInterrupt,
+            Some("user".to_string()),
             Some("operator pressed Stop".to_string()),
         )
         .await?;

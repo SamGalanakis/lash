@@ -202,7 +202,7 @@ fn remote_turn_result_requires_cancellation_evidence_iff_cancelled() {
 
     result.cancellation = Some(RemoteTurnCancellationEvidence {
         request_id: "request-1".to_string(),
-        source: RemoteTurnCancelSource::UserInterrupt,
+        origin: Some("workbench-user".to_string()),
         reason: Some("stop".to_string()),
     });
     result.validate().expect("cancelled result with evidence");
@@ -218,7 +218,7 @@ fn remote_turn_cancel_envelopes_round_trip() {
         session_id: "session".to_string(),
         turn_id: "turn".to_string(),
         request_id: "request-1".to_string(),
-        source: RemoteTurnCancelSource::Host,
+        origin: Some("test-host".to_string()),
         reason: Some("superseded by newer input".to_string()),
     };
     request.validate().expect("valid cancellation request");
@@ -228,9 +228,20 @@ fn remote_turn_cancel_envelopes_round_trip() {
     .expect("deserialize cancellation request");
     assert_eq!(decoded, request);
 
+    let mut request_without_origin = request.clone();
+    request_without_origin.origin = None;
+    let encoded = serde_json::to_value(&request_without_origin)
+        .expect("serialize cancellation request without origin");
+    assert!(encoded.get("origin").is_none());
+    assert_eq!(
+        serde_json::from_value::<RemoteTurnCancelRequest>(encoded)
+            .expect("deserialize cancellation request without origin"),
+        request_without_origin
+    );
+
     let evidence = RemoteTurnCancellationEvidence {
         request_id: "request-1".to_string(),
-        source: RemoteTurnCancelSource::Host,
+        origin: Some("test-host".to_string()),
         reason: None,
     };
     for outcome in [

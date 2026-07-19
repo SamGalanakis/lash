@@ -39,42 +39,41 @@ impl TurnAddress {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnCancelSource {
-    UserInterrupt,
-    Host,
-    Shutdown,
-    Superseded,
-}
-
-/// Shared source hint for a process-local cancellation token.
+/// Shared origin hint for a process-local cancellation token.
 ///
-/// The hint is set by the local entry point that fires the token. It is not a
-/// durable cancellation request and must not be used as authorization.
+/// The outer option records whether a local entry point supplied a hint; the
+/// inner option is the opaque host origin, which may intentionally be absent.
+/// It is not a durable cancellation request and must not be used as
+/// authorization.
 #[doc(hidden)]
 #[derive(Clone, Default)]
-pub struct TurnCancelSourceHint {
-    source: Arc<Mutex<Option<TurnCancelSource>>>,
+pub struct TurnCancelOriginHint {
+    origin: Arc<Mutex<Option<Option<String>>>>,
 }
 
-impl TurnCancelSourceHint {
-    pub fn set(&self, source: TurnCancelSource) {
-        let mut hint = self.source.lock().expect("turn cancel source hint lock");
+impl TurnCancelOriginHint {
+    pub fn set(&self, origin: Option<String>) {
+        let mut hint = self.origin.lock().expect("turn cancel origin hint lock");
         if hint.is_none() {
-            *hint = Some(source);
+            *hint = Some(origin);
         }
     }
 
-    pub(crate) fn get(&self) -> Option<TurnCancelSource> {
-        *self.source.lock().expect("turn cancel source hint lock")
+    pub(crate) fn get(&self) -> Option<String> {
+        self.origin
+            .lock()
+            .expect("turn cancel origin hint lock")
+            .clone()
+            .flatten()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnCancellationEvidence {
     pub request_id: String,
-    pub source: TurnCancelSource,
+    /// Opaque host-domain data. Lash records and returns it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -83,7 +82,9 @@ pub struct TurnCancellationEvidence {
 pub struct TurnCancelRequest {
     pub address: TurnAddress,
     pub request_id: String,
-    pub source: TurnCancelSource,
+    /// Opaque host-domain data. Lash never interprets this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -92,12 +93,12 @@ impl TurnCancelRequest {
     pub fn new(
         address: TurnAddress,
         request_id: impl Into<String>,
-        source: TurnCancelSource,
+        origin: Option<String>,
     ) -> Self {
         Self {
             address,
             request_id: request_id.into(),
-            source,
+            origin,
             reason: None,
         }
     }
@@ -121,7 +122,7 @@ impl TurnCancelRequest {
     fn evidence(&self) -> TurnCancellationEvidence {
         TurnCancellationEvidence {
             request_id: self.request_id.clone(),
-            source: self.source,
+            origin: self.origin.clone(),
             reason: self.reason.clone(),
         }
     }
@@ -359,7 +360,7 @@ pub(crate) struct ActiveTurnControl {
     cancel_key: AwaitEventKey,
     terminal_key: AwaitEventKey,
     evidence: Mutex<Option<TurnCancellationEvidence>>,
-    local_cancel_source: TurnCancelSourceHint,
+    local_cancel_origin: TurnCancelOriginHint,
 }
 
 impl ActiveTurnControl {
@@ -373,12 +374,12 @@ impl ActiveTurnControl {
             terminal_key: terminal_key(resolver, &address).await?,
             address,
             evidence: Mutex::new(None),
-            local_cancel_source: TurnCancelSourceHint::default(),
+            local_cancel_origin: TurnCancelOriginHint::default(),
         })
     }
 
-    pub(crate) fn with_local_cancel_source(mut self, source: TurnCancelSourceHint) -> Self {
-        self.local_cancel_source = source;
+    pub(crate) fn with_local_cancel_origin(mut self, origin: TurnCancelOriginHint) -> Self {
+        self.local_cancel_origin = origin;
         self
     }
 
@@ -472,17 +473,10 @@ impl ActiveTurnControl {
     }
 
     fn internal_evidence(&self) -> TurnCancellationEvidence {
-        let source = self.local_cancel_source.get();
         TurnCancellationEvidence {
             request_id: format!("internal:{}", self.address.turn_id),
-            source: source.unwrap_or(TurnCancelSource::Host),
-            reason: Some(match source {
-                Some(TurnCancelSource::UserInterrupt) => {
-                    "process-local user interrupt token fired".to_string()
-                }
-                Some(source) => format!("process-local {source:?} cancellation token fired"),
-                None => "process-local cancellation token fired; origin is unknown".to_string(),
-            }),
+            origin: self.local_cancel_origin.get(),
+            reason: None,
         }
     }
 }
@@ -500,7 +494,7 @@ mod tests {
     }
 
     fn request(address: TurnAddress, request_id: &str) -> TurnCancelRequest {
-        TurnCancelRequest::new(address, request_id, TurnCancelSource::UserInterrupt)
+        TurnCancelRequest::new(address, request_id, Some("user".to_string()))
             .with_reason("stop button")
     }
 
@@ -734,12 +728,21 @@ mod tests {
     }
 
     #[test]
-    fn local_cancel_source_hint_preserves_first_origin() {
-        let hint = TurnCancelSourceHint::default();
-        hint.set(TurnCancelSource::Shutdown);
-        hint.set(TurnCancelSource::UserInterrupt);
+    fn local_cancel_origin_hint_preserves_first_origin() {
+        let hint = TurnCancelOriginHint::default();
+        hint.set(Some("shutdown".to_string()));
+        hint.set(Some("user".to_string()));
 
-        assert_eq!(hint.get(), Some(TurnCancelSource::Shutdown));
+        assert_eq!(hint.get().as_deref(), Some("shutdown"));
+    }
+
+    #[test]
+    fn local_cancel_origin_hint_preserves_explicit_absence() {
+        let hint = TurnCancelOriginHint::default();
+        hint.set(None);
+        hint.set(Some("user".to_string()));
+
+        assert_eq!(hint.get(), None);
     }
 
     #[test]

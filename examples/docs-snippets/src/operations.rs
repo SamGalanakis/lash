@@ -91,7 +91,7 @@ async fn graceful_drain(
     //    normally go through `core.turn_work_driver().request_cancel(...)`.
     //    This process-local cancel-all remains a shutdown compatibility lever.
     for session in &idle_sessions {
-        session.cancel_running_turns_with_source(lash::TurnCancelSource::Shutdown);
+        session.cancel_running_turns_with_origin(Some("shutdown".to_string()));
     }
 
     // 3. Park resumable sessions (flush dirty state through a fresh-lease commit,

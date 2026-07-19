@@ -1089,35 +1089,30 @@ async fn pre_cancelled_token_yields_cancelled_outcome() -> Result<()> {
         .result
         .cancellation
         .expect("local token cancellation evidence");
-    assert_eq!(evidence.source, lash_core::TurnCancelSource::Host);
-    assert!(
-        evidence
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("origin is unknown"))
-    );
+    assert_eq!(evidence.origin, None);
+    assert_eq!(evidence.reason, None);
     Ok(())
 }
 
 #[tokio::test]
-async fn local_cancel_token_preserves_explicit_source_hint() -> Result<()> {
+async fn local_cancel_token_preserves_explicit_origin_hint() -> Result<()> {
     let core = standard_core();
-    let session = core.session("pre-cancelled-with-source").open().await?;
+    let session = core.session("pre-cancelled-with-origin").open().await?;
     let cancel = CancellationToken::new();
     cancel.cancel();
 
     let output = session
         .turn(TurnInput::text("never runs"))
-        .cancel_with_source(cancel, lash_core::TurnCancelSource::Shutdown)
+        .cancel_with_origin(cancel, Some("shutdown".to_string()))
         .run()
         .await?;
 
     assert!(matches!(
         output.result.cancellation,
         Some(lash_core::TurnCancellationEvidence {
-            source: lash_core::TurnCancelSource::Shutdown,
+            origin: Some(ref origin),
             ..
-        })
+        }) if origin == "shutdown"
     ));
     Ok(())
 }
@@ -1151,7 +1146,10 @@ async fn cancel_running_turns_stops_inflight_turn() -> Result<()> {
 
     let stream = session.turn(TurnInput::text("hang forever")).stream()?;
     started_rx.await.expect("provider reached");
-    assert_eq!(stopper.cancel_running_turns(), 1);
+    assert_eq!(
+        stopper.cancel_running_turns_with_origin(Some("user".to_string())),
+        1
+    );
 
     let result = stream.finish().await?;
     assert!(matches!(
@@ -1161,9 +1159,9 @@ async fn cancel_running_turns_stops_inflight_turn() -> Result<()> {
     assert!(matches!(
         result.cancellation,
         Some(lash_core::TurnCancellationEvidence {
-            source: lash_core::TurnCancelSource::UserInterrupt,
+            origin: Some(ref origin),
             ..
-        })
+        }) if origin == "user"
     ));
     // The registry entry is gone once the turn finished.
     assert_eq!(stopper.cancel_running_turns(), 0);
@@ -1283,7 +1281,10 @@ async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
     let drainer = session.clone();
     let drain = tokio::spawn(async move { drainer.queued_turn().run().await });
     started_rx.await.expect("queued drain reached the provider");
-    assert_eq!(session.cancel_running_turns(), 1);
+    assert_eq!(
+        session.cancel_running_turns_with_origin(Some("user".to_string())),
+        1
+    );
 
     let output = drain
         .await
@@ -1296,9 +1297,9 @@ async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
     assert!(matches!(
         output.result.cancellation,
         Some(lash_core::TurnCancellationEvidence {
-            source: lash_core::TurnCancelSource::UserInterrupt,
+            origin: Some(ref origin),
             ..
-        })
+        }) if origin == "user"
     ));
     Ok(())
 }

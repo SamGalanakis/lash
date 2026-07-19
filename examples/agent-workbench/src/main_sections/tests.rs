@@ -691,7 +691,7 @@ finish "gap source"
             .request_cancel(lash::TurnCancelRequest::new(
                 lash::TurnAddress::new(&session_id, "turn-cancel"),
                 "original-stop",
-                lash::TurnCancelSource::UserInterrupt,
+                Some("user".to_string()),
             ))
             .await
             .expect("seed cancellation request");
@@ -710,7 +710,6 @@ finish "gap source"
         );
         let Json(accepted) = cancelled.expect("cancel turn");
         let turn = turn.expect("cancelled turn commits");
-
         assert!(accepted.accepted);
         assert!(matches!(
             turn.result.outcome,
@@ -721,11 +720,12 @@ finish "gap source"
             [TurnCancelReceipt {
                 outcome: lash::TurnCancelOutcome::AlreadyRequested(_),
                 terminal: Some(lash::TurnTerminal::Committed {
-                    cancellation: Some(lash::TurnCancellationEvidence { request_id, .. }),
+                    cancellation: Some(evidence),
                     ..
                 }),
                 ..
-            }] if request_id == "original-stop"
+            }] if evidence.request_id == "original-stop"
+                && evidence.origin.as_deref() == Some("user")
         ));
         assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
         let duplicate = state
@@ -734,7 +734,7 @@ finish "gap source"
             .request_cancel(lash::TurnCancelRequest::new(
                 lash::TurnAddress::new(session_id, "turn-cancel"),
                 "duplicate",
-                lash::TurnCancelSource::Host,
+                Some("test-host".to_string()),
             ))
             .await
             .expect("read cancellation gate");

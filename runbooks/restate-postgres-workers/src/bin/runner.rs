@@ -3,8 +3,8 @@ use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use lash_core::AwaitEventResolver as _;
 use lash_core::{
     AwaitEventKey, ExecutionScope, InlineRuntimeEffectController, ScopedEffectController,
-    SessionCommitStore, TurnAddress, TurnCancelOutcome, TurnCancelRequest, TurnCancelSource,
-    TurnOutcome, TurnStop, TurnTerminal, TurnWorkDriver,
+    SessionCommitStore, TurnAddress, TurnCancelOutcome, TurnCancelRequest, TurnOutcome, TurnStop,
+    TurnTerminal, TurnWorkDriver,
 };
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{
@@ -1341,8 +1341,12 @@ fn turn_address(request: &TurnRequest) -> TurnAddress {
 }
 
 fn cancel_request(request: &TurnRequest, request_id: &str) -> TurnCancelRequest {
-    TurnCancelRequest::new(turn_address(request), request_id, TurnCancelSource::Host)
-        .with_reason("deterministic Restate/Postgres workers E2E gate")
+    TurnCancelRequest::new(
+        turn_address(request),
+        request_id,
+        Some("scripted-e2e-runner".to_string()),
+    )
+    .with_reason("deterministic Restate/Postgres workers E2E gate")
 }
 
 fn assert_requested(outcome: &TurnCancelOutcome, request_id: &str) -> Result<()> {
@@ -1353,6 +1357,10 @@ fn assert_requested(outcome: &TurnCancelOutcome, request_id: &str) -> Result<()>
     anyhow::ensure!(
         evidence.request_id == request_id,
         "cancellation receipt lost request evidence: {evidence:?}"
+    );
+    anyhow::ensure!(
+        evidence.origin.as_deref() == Some("scripted-e2e-runner"),
+        "cancellation receipt changed opaque host origin: {evidence:?}"
     );
     Ok(())
 }
@@ -1376,6 +1384,10 @@ fn assert_cancelled_terminal(terminal: &TurnTerminal, request_id: &str) -> Resul
     anyhow::ensure!(
         evidence.request_id == request_id,
         "terminal evidence mismatch: {evidence:?}"
+    );
+    anyhow::ensure!(
+        evidence.origin.as_deref() == Some("scripted-e2e-runner"),
+        "terminal changed opaque host origin: {evidence:?}"
     );
     Ok(())
 }
@@ -1408,6 +1420,10 @@ fn assert_cancelled_response(response: &TurnResponse, request_id: &str) -> Resul
     anyhow::ensure!(
         response.final_value["cancellation"]["request_id"] == request_id,
         "recorded terminal lost cancellation evidence: {response:#?}"
+    );
+    anyhow::ensure!(
+        response.final_value["cancellation"]["origin"] == "scripted-e2e-runner",
+        "recorded terminal changed opaque host origin: {response:#?}"
     );
     Ok(())
 }
@@ -1533,7 +1549,7 @@ async fn drive_durable_wait_index_scenarios(
         .request_cancel(TurnCancelRequest::new(
             control_address.clone(),
             "e2e-control-before-revoke",
-            TurnCancelSource::Host,
+            Some("scripted-e2e-runner".to_string()),
         ))
         .await
         .context("create turn control gate before revoke")?;
@@ -1548,7 +1564,7 @@ async fn drive_durable_wait_index_scenarios(
         .request_cancel(TurnCancelRequest::new(
             control_address,
             "e2e-control-after-revoke",
-            TurnCancelSource::Host,
+            Some("scripted-e2e-runner".to_string()),
         ))
         .await
         .context("request cancellation after revoke")?;

@@ -878,8 +878,8 @@ impl LashRuntime {
         mut input: TurnInput,
         opts: TurnOptions<'_>,
     ) -> Result<AssembledTurn, RuntimeError> {
-        if let Some(hint) = opts.local_cancel_source_hint() {
-            input.turn_context.set_local_cancel_source_hint(hint);
+        if let Some(hint) = opts.local_cancel_origin_hint() {
+            input.turn_context.set_local_cancel_origin_hint(hint);
         }
         let stopwatch = TurnStopwatch::start(self.host.core.clock.as_ref());
         let cancel = opts.cancel.clone();
@@ -981,8 +981,8 @@ impl LashRuntime {
                 .map_err(super::runtime_error_from_store_commit)?;
             if let Some(input_claim) = input_claim {
                 let mut input = input_claim.materialize_for_turn();
-                if let Some(hint) = opts.local_cancel_source_hint() {
-                    input.turn_context.set_local_cancel_source_hint(hint);
+                if let Some(hint) = opts.local_cancel_origin_hint() {
+                    input.turn_context.set_local_cancel_origin_hint(hint);
                 }
                 let turn_id = input
                     .trace_turn_id
@@ -1064,8 +1064,8 @@ impl LashRuntime {
             return Ok(None);
         };
         let mut work = claim.materialize_for_turn();
-        if let Some(hint) = opts.local_cancel_source_hint() {
-            work.input.turn_context.set_local_cancel_source_hint(hint);
+        if let Some(hint) = opts.local_cancel_origin_hint() {
+            work.input.turn_context.set_local_cancel_origin_hint(hint);
         }
         let turn_id = work
             .input
@@ -1290,8 +1290,8 @@ impl LashRuntime {
         mut input: TurnInput,
         opts: TurnOptions<'_>,
     ) -> Result<AgentFrameRun, RuntimeError> {
-        if let Some(hint) = opts.local_cancel_source_hint() {
-            input.turn_context.set_local_cancel_source_hint(hint);
+        if let Some(hint) = opts.local_cancel_origin_hint() {
+            input.turn_context.set_local_cancel_origin_hint(hint);
         }
         let stopwatch = TurnStopwatch::start(self.host.core.clock.as_ref());
         let cancel = opts.cancel.clone();
@@ -1422,7 +1422,7 @@ impl LashRuntime {
                     TurnAddress::new(&self.state.session_id, &trace_turn_id),
                 )
                 .await?
-                .with_local_cancel_source(input.turn_context.local_cancel_source_hint());
+                .with_local_cancel_origin(input.turn_context.local_cancel_origin_hint());
                 let messages = crate::MessageSequence::from_base(self.state.read_model().messages);
                 let mut turn_pipeline = TurnBoundary::from_state_with_clock(
                     self.state.clone(),
@@ -1747,7 +1747,7 @@ impl LashRuntime {
                 TurnAddress::new(&self.state.session_id, &trace_turn_id),
             )
             .await?
-            .with_local_cancel_source(turn_context.local_cancel_source_hint()),
+            .with_local_cancel_origin(turn_context.local_cancel_origin_hint()),
         );
         if session_execution_lease.is_none()
             && self
@@ -2387,7 +2387,7 @@ mod tests {
     };
     use crate::{
         AwaitEventKey, AwaitEventResolver, Resolution, ResolveOutcome, RuntimeError, TurnAddress,
-        TurnCancelSource, TurnCancellationEvidence, TurnFinish, TurnOutcome, TurnTerminal,
+        TurnCancellationEvidence, TurnFinish, TurnOutcome, TurnTerminal,
     };
 
     #[derive(Default)]
@@ -2438,7 +2438,7 @@ mod tests {
                 } else {
                     Ok(Some(TurnCancellationEvidence {
                         request_id: "retry-request".to_string(),
-                        source: TurnCancelSource::UserInterrupt,
+                        origin: Some("test-user".to_string()),
                         reason: None,
                     }))
                 }

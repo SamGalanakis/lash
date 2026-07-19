@@ -13,19 +13,12 @@ pub enum RemoteTurnControlDurabilityTier {
     Durable,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteTurnCancelSource {
-    UserInterrupt,
-    Host,
-    Shutdown,
-    Superseded,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteTurnCancellationEvidence {
     pub request_id: String,
-    pub source: RemoteTurnCancelSource,
+    /// Opaque host-domain data; Lash records and returns it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -46,7 +39,9 @@ pub struct RemoteTurnCancelRequest {
     pub session_id: String,
     pub turn_id: String,
     pub request_id: String,
-    pub source: RemoteTurnCancelSource,
+    /// Opaque host-domain data; Lash never interprets this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

@@ -510,7 +510,7 @@ impl LashSession {
             active_plugins: self.active_plugins.clone(),
             input,
             cancel: CancellationToken::new(),
-            cancel_source_hint: lash_core::TurnCancelSourceHint::default(),
+            cancel_origin_hint: lash_core::TurnCancelOriginHint::default(),
             cancels: self.turn_cancels.clone(),
             protocol_turn_options: None,
             provider: None,
@@ -523,7 +523,7 @@ impl LashSession {
             runtime: self.runtime.clone(),
             effect_host: Arc::clone(&self.effect_host),
             cancel: CancellationToken::new(),
-            cancel_source_hint: lash_core::TurnCancelSourceHint::default(),
+            cancel_origin_hint: lash_core::TurnCancelOriginHint::default(),
             cancels: self.turn_cancels.clone(),
             batch_ids: Vec::new(),
             drain_id: None,
@@ -536,20 +536,21 @@ impl LashSession {
     /// seam. An inline effect host is process-local; another process or a
     /// replayed owner can observe the request only with a durable engine
     /// deployment. The returned receipt exposes that durability tier so hosts
-    /// can gate their UX. Detached effects are not guaranteed to stop.
+    /// can gate their UX. `origin` is opaque host-domain data that Lash records
+    /// without interpretation. Detached effects are not guaranteed to stop.
     /// `turn_id` is routing identity, not authorization; hosts must authorize
     /// callers before invoking this API.
     pub async fn request_turn_cancel(
         &self,
         turn_id: &str,
         request_id: impl Into<String>,
-        source: lash_core::TurnCancelSource,
+        origin: Option<String>,
         reason: Option<String>,
     ) -> Result<lash_core::TurnCancelReceipt> {
         let mut request = lash_core::TurnCancelRequest::new(
             lash_core::TurnAddress::new(self.session_id(), turn_id),
             request_id,
-            source,
+            origin,
         );
         request.reason = reason;
         lash_core::TurnWorkDriver::new(self.effect_host())
@@ -561,10 +562,9 @@ impl LashSession {
     /// Cancel every turn currently executing through this opened session
     /// (including its clones) and report how many were signalled.
     ///
-    /// This process-local compatibility lever records `UserInterrupt` evidence
-    /// and is intended for local Esc-style controls and tests. Shutdown and
-    /// provider plumbing should call
-    /// [`cancel_running_turns_with_source`](Self::cancel_running_turns_with_source).
+    /// This raw process-local compatibility lever records no origin. User
+    /// controls, shutdown, and provider plumbing should call
+    /// [`cancel_running_turns_with_origin`](Self::cancel_running_turns_with_origin).
     /// Host-facing durable stop controls should retain an
     /// exact turn id and call [`request_turn_cancel`](Self::request_turn_cancel)
     /// so cancellation survives separately opened handles and durable replay.
@@ -576,12 +576,12 @@ impl LashSession {
     /// A handle opened separately for the same session id has its own
     /// registry and is not reached.
     pub fn cancel_running_turns(&self) -> usize {
-        self.cancel_running_turns_with_source(lash_core::TurnCancelSource::UserInterrupt)
+        self.cancel_running_turns_with_origin(None)
     }
 
-    /// Cancel this handle's active process-local turns with an explicit source.
-    pub fn cancel_running_turns_with_source(&self, source: lash_core::TurnCancelSource) -> usize {
-        self.turn_cancels.cancel_all(source)
+    /// Cancel active process-local turns with an opaque host-defined origin.
+    pub fn cancel_running_turns_with_origin(&self, origin: Option<String>) -> usize {
+        self.turn_cancels.cancel_all(origin)
     }
 
     pub fn admin(&self) -> SessionAdmin {
