@@ -510,6 +510,7 @@ impl LashSession {
             active_plugins: self.active_plugins.clone(),
             input,
             cancel: CancellationToken::new(),
+            cancel_source_hint: lash_core::TurnCancelSourceHint::default(),
             cancels: self.turn_cancels.clone(),
             protocol_turn_options: None,
             provider: None,
@@ -522,6 +523,7 @@ impl LashSession {
             runtime: self.runtime.clone(),
             effect_host: Arc::clone(&self.effect_host),
             cancel: CancellationToken::new(),
+            cancel_source_hint: lash_core::TurnCancelSourceHint::default(),
             cancels: self.turn_cancels.clone(),
             batch_ids: Vec::new(),
             drain_id: None,
@@ -559,8 +561,11 @@ impl LashSession {
     /// Cancel every turn currently executing through this opened session
     /// (including its clones) and report how many were signalled.
     ///
-    /// This process-local compatibility lever is intended for shutdown,
-    /// provider plumbing, and tests. Host-facing stop controls should retain an
+    /// This process-local compatibility lever records `UserInterrupt` evidence
+    /// and is intended for local Esc-style controls and tests. Shutdown and
+    /// provider plumbing should call
+    /// [`cancel_running_turns_with_source`](Self::cancel_running_turns_with_source).
+    /// Host-facing durable stop controls should retain an
     /// exact turn id and call [`request_turn_cancel`](Self::request_turn_cancel)
     /// so cancellation survives separately opened handles and durable replay.
     /// A cancelled turn finishes with
@@ -571,7 +576,12 @@ impl LashSession {
     /// A handle opened separately for the same session id has its own
     /// registry and is not reached.
     pub fn cancel_running_turns(&self) -> usize {
-        self.turn_cancels.cancel_all()
+        self.cancel_running_turns_with_source(lash_core::TurnCancelSource::UserInterrupt)
+    }
+
+    /// Cancel this handle's active process-local turns with an explicit source.
+    pub fn cancel_running_turns_with_source(&self, source: lash_core::TurnCancelSource) -> usize {
+        self.turn_cancels.cancel_all(source)
     }
 
     pub fn admin(&self) -> SessionAdmin {

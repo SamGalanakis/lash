@@ -1085,6 +1085,40 @@ async fn pre_cancelled_token_yields_cancelled_outcome() -> Result<()> {
         output.result.outcome,
         TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
     ));
+    let evidence = output
+        .result
+        .cancellation
+        .expect("local token cancellation evidence");
+    assert_eq!(evidence.source, lash_core::TurnCancelSource::Host);
+    assert!(
+        evidence
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("origin is unknown"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_cancel_token_preserves_explicit_source_hint() -> Result<()> {
+    let core = standard_core();
+    let session = core.session("pre-cancelled-with-source").open().await?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let output = session
+        .turn(TurnInput::text("never runs"))
+        .cancel_with_source(cancel, lash_core::TurnCancelSource::Shutdown)
+        .run()
+        .await?;
+
+    assert!(matches!(
+        output.result.cancellation,
+        Some(lash_core::TurnCancellationEvidence {
+            source: lash_core::TurnCancelSource::Shutdown,
+            ..
+        })
+    ));
     Ok(())
 }
 
@@ -1123,6 +1157,13 @@ async fn cancel_running_turns_stops_inflight_turn() -> Result<()> {
     assert!(matches!(
         result.outcome,
         TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+    assert!(matches!(
+        result.cancellation,
+        Some(lash_core::TurnCancellationEvidence {
+            source: lash_core::TurnCancelSource::UserInterrupt,
+            ..
+        })
     ));
     // The registry entry is gone once the turn finished.
     assert_eq!(stopper.cancel_running_turns(), 0);
@@ -1251,6 +1292,13 @@ async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
     assert!(matches!(
         output.result.outcome,
         TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+    assert!(matches!(
+        output.result.cancellation,
+        Some(lash_core::TurnCancellationEvidence {
+            source: lash_core::TurnCancelSource::UserInterrupt,
+            ..
+        })
     ));
     Ok(())
 }

@@ -166,7 +166,7 @@ use state::{
 };
 pub use turn_control::{
     TurnAddress, TurnAttach, TurnCancelOutcome, TurnCancelReceipt, TurnCancelRequest,
-    TurnCancelSource, TurnCancellationEvidence, TurnTerminal, TurnWorkDriver,
+    TurnCancelSource, TurnCancelSourceHint, TurnCancellationEvidence, TurnTerminal, TurnWorkDriver,
 };
 pub use turn_input_ingress::{
     PendingTurnInput, PendingTurnInputCancelOutcome, PendingTurnInputCancelResult,
@@ -423,6 +423,7 @@ pub struct TurnContext {
     plugin_inputs: LiveTurnInputs,
     provider: Option<crate::ProviderHandle>,
     prompt: crate::PromptLayer,
+    local_cancel_source: TurnCancelSourceHint,
 }
 
 impl TurnContext {
@@ -443,6 +444,15 @@ impl TurnContext {
 
     pub fn provider(&self) -> Option<&crate::ProviderHandle> {
         self.provider.as_ref()
+    }
+
+    #[doc(hidden)]
+    pub fn set_local_cancel_source_hint(&mut self, hint: TurnCancelSourceHint) {
+        self.local_cancel_source = hint;
+    }
+
+    pub(crate) fn local_cancel_source_hint(&self) -> TurnCancelSourceHint {
+        self.local_cancel_source.clone()
     }
 
     pub fn plugin_input<T>(&self, plugin_id: &'static str) -> Option<&T>
@@ -926,6 +936,7 @@ pub struct TurnOptions<'a> {
     turn_events: Option<&'a dyn TurnActivitySink>,
     scoped_effect_controller: ScopedEffectController<'a>,
     cancel: CancellationToken,
+    local_cancel_source: Option<TurnCancelSourceHint>,
 }
 
 impl<'a> TurnOptions<'a> {
@@ -938,6 +949,7 @@ impl<'a> TurnOptions<'a> {
             turn_events: None,
             scoped_effect_controller,
             cancel,
+            local_cancel_source: None,
         }
     }
 
@@ -949,6 +961,16 @@ impl<'a> TurnOptions<'a> {
     pub fn with_turn_events(mut self, turn_events: &'a dyn TurnActivitySink) -> Self {
         self.turn_events = Some(turn_events);
         self
+    }
+
+    #[doc(hidden)]
+    pub fn with_local_cancel_source_hint(mut self, hint: TurnCancelSourceHint) -> Self {
+        self.local_cancel_source = Some(hint);
+        self
+    }
+
+    pub(crate) fn local_cancel_source_hint(&self) -> Option<TurnCancelSourceHint> {
+        self.local_cancel_source.clone()
     }
 
     pub(crate) fn events_or_noop(&self) -> &'a dyn EventSink {

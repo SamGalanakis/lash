@@ -48,6 +48,26 @@ pub enum TurnCancelSource {
     Superseded,
 }
 
+/// Shared source hint for a process-local cancellation token.
+///
+/// The hint is set by the local entry point that fires the token. It is not a
+/// durable cancellation request and must not be used as authorization.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct TurnCancelSourceHint {
+    source: Arc<Mutex<Option<TurnCancelSource>>>,
+}
+
+impl TurnCancelSourceHint {
+    pub fn set(&self, source: TurnCancelSource) {
+        *self.source.lock().expect("turn cancel source hint lock") = Some(source);
+    }
+
+    pub(crate) fn get(&self) -> Option<TurnCancelSource> {
+        *self.source.lock().expect("turn cancel source hint lock")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnCancellationEvidence {
     pub request_id: String,
@@ -336,6 +356,7 @@ pub(crate) struct ActiveTurnControl {
     cancel_key: AwaitEventKey,
     terminal_key: AwaitEventKey,
     evidence: Mutex<Option<TurnCancellationEvidence>>,
+    local_cancel_source: TurnCancelSourceHint,
 }
 
 impl ActiveTurnControl {
@@ -349,7 +370,13 @@ impl ActiveTurnControl {
             terminal_key: terminal_key(resolver, &address).await?,
             address,
             evidence: Mutex::new(None),
+            local_cancel_source: TurnCancelSourceHint::default(),
         })
+    }
+
+    pub(crate) fn with_local_cancel_source(mut self, source: TurnCancelSourceHint) -> Self {
+        self.local_cancel_source = source;
+        self
     }
 
     pub(crate) async fn await_cancel(
@@ -442,10 +469,17 @@ impl ActiveTurnControl {
     }
 
     fn internal_evidence(&self) -> TurnCancellationEvidence {
+        let source = self.local_cancel_source.get();
         TurnCancellationEvidence {
             request_id: format!("internal:{}", self.address.turn_id),
-            source: TurnCancelSource::Host,
-            reason: Some("internal cooperative cancellation token fired".to_string()),
+            source: source.unwrap_or(TurnCancelSource::Host),
+            reason: Some(match source {
+                Some(TurnCancelSource::UserInterrupt) => {
+                    "process-local user interrupt token fired".to_string()
+                }
+                Some(source) => format!("process-local {source:?} cancellation token fired"),
+                None => "process-local cancellation token fired; origin is unknown".to_string(),
+            }),
         }
     }
 }
