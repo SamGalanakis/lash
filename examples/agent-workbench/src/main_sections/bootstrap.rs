@@ -111,7 +111,7 @@ async fn async_main() -> AnyhowResult<()> {
     let session_ids = WorkbenchSessionIds::fresh();
     let (event_tx, _) = broadcast::channel(1024);
     let restate_http = reqwest::Client::new();
-    let active_restate_invocations = ActiveRestateInvocations::default();
+    let active_turns = ActiveTurns::default();
     // Best-effort freshness feed for appended process events (ADR 0017). The
     // sink is a freshness overlay on the durable event log, never truth: no
     // delivery guarantee, terminal events never arrive here (they ride
@@ -144,13 +144,18 @@ async fn async_main() -> AnyhowResult<()> {
             store_factory: Arc::clone(&core_store_factory),
             restate_ingress_url: restate_ingress_url.clone(),
             restate_http: restate_http.clone(),
-            active_restate_invocations: active_restate_invocations.clone(),
+            active_turns: active_turns.clone(),
         }));
 
-    let runtime_host_config = lash::durability::RuntimeHostConfig::new(
-        Arc::new(lash_restate::RestateEffectHost::with_ingress_url(
+    let turn_deployment = lash_restate::RestateTurnDeployment::new(
+        lash_restate::RestateConnection::with_client(
             restate_ingress_url.clone(),
-        )),
+            restate_http.clone(),
+        ),
+    );
+
+    let runtime_host_config = lash::durability::RuntimeHostConfig::new(
+        turn_deployment.effect_host(),
         Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )),
@@ -218,7 +223,7 @@ async fn async_main() -> AnyhowResult<()> {
         restate_http,
         restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
         mail_world,
-        active_restate_invocations,
+        active_turns,
     };
     restate::spawn_restate_endpoint(
         restate_endpoint_addr,

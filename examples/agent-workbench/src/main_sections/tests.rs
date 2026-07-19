@@ -411,7 +411,7 @@ mod tests {
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
             mail_world: mail::MailWorld::new(),
-            active_restate_invocations: ActiveRestateInvocations::default(),
+            active_turns: ActiveTurns::default(),
         };
 
         state.publish(StreamItem::Done);
@@ -600,13 +600,13 @@ finish "gap source"
     }
 
     #[test]
-    fn turn_cancel_route_cancels_active_restate_invocation() {
+    fn turn_cancel_route_requests_first_party_turn_cancellation() {
         run_async_test_on_stack_budget("workbench-turn-cancel-test", || {
-            turn_cancel_route_cancels_active_restate_invocation_inner()
+            turn_cancel_route_requests_first_party_turn_cancellation_inner()
         });
     }
 
-    async fn turn_cancel_route_cancels_active_restate_invocation_inner() {
+    async fn turn_cancel_route_requests_first_party_turn_cancellation_inner() {
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-turn-cancel-{}",
             uuid::Uuid::new_v4()
@@ -631,7 +631,6 @@ finish "gap source"
             lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let (event_tx, _) = broadcast::channel(16);
         let mut events = event_tx.subscribe();
-        let (restate_admin_url, mut admin_requests) = spawn_restate_admin_capture().await;
         let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
@@ -659,18 +658,14 @@ finish "gap source"
             event_tx,
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
-            restate_admin_url,
+            restate_admin_url: "http://127.0.0.1:9070".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
             mail_world: mail::MailWorld::new(),
-            active_restate_invocations: ActiveRestateInvocations::default(),
+            active_turns: ActiveTurns::default(),
         };
         let session_id = state.current_session_id();
-        state.track_restate_invocation(
-            &session_id,
-            "turn-cancel",
-            lash_restate::RestateInvocationId::new("inv_cancel"),
-        );
+        state.track_turn(&session_id, "turn-cancel");
 
         let Json(accepted) = cancel_turn(State(state.clone()))
             .await
@@ -678,14 +673,20 @@ finish "gap source"
 
         assert!(accepted.accepted);
         assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
-        let request = tokio::time::timeout(Duration::from_secs(2), admin_requests.recv())
+        let duplicate = state
+            .core
+            .turn_work_driver()
+            .request_cancel(lash::TurnCancelRequest::new(
+                lash::TurnAddress::new(session_id, "turn-cancel"),
+                "duplicate",
+                lash::TurnCancelSource::Host,
+            ))
             .await
-            .expect("Restate admin request")
-            .expect("Restate admin request payload");
-        assert_eq!(
-            request.get("path").and_then(Value::as_str),
-            Some("invocations/inv_cancel/cancel")
-        );
+            .expect("read cancellation gate");
+        assert!(matches!(
+            duplicate,
+            lash::TurnCancelOutcome::AlreadyRequested(_)
+        ));
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -904,7 +905,7 @@ finish initial
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
             mail_world: mail_world.clone(),
-            active_restate_invocations: ActiveRestateInvocations::default(),
+            active_turns: ActiveTurns::default(),
         };
 
         let receipt = enqueue_tool_catalog_refresh(&state, "initial_empty")
@@ -1121,7 +1122,7 @@ finish initial
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
             mail_world: mail::MailWorld::new(),
-            active_restate_invocations: ActiveRestateInvocations::default(),
+            active_turns: ActiveTurns::default(),
         };
         let target_scope_prefix = format!("session:{}/frame:", state.current_session_id());
         let session_store =
@@ -1262,7 +1263,7 @@ finish initial
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
             mail_world: mail::MailWorld::new(),
-            active_restate_invocations: ActiveRestateInvocations::default(),
+            active_turns: ActiveTurns::default(),
         };
         let session = state
             .core
@@ -1347,26 +1348,6 @@ finish initial
         (format!("http://{addr}"), rx)
     }
 
-    async fn spawn_restate_admin_capture() -> (String, mpsc::UnboundedReceiver<Value>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind mock Restate admin");
-        let addr = listener.local_addr().expect("mock Restate admin addr");
-        let app = Router::new()
-            .route(
-                "/{*path}",
-                axum::routing::patch(capture_restate_admin_patch),
-            )
-            .with_state(tx);
-        tokio::spawn(async move {
-            if let Err(err) = axum::serve(listener, app).await {
-                eprintln!("mock Restate admin stopped: {err}");
-            }
-        });
-        (format!("http://{addr}"), rx)
-    }
-
     async fn capture_restate_send(
         AxumPath(path): AxumPath<String>,
         State(tx): State<mpsc::UnboundedSender<Value>>,
@@ -1383,14 +1364,6 @@ finish initial
                 "status": "Accepted",
             })),
         )
-    }
-
-    async fn capture_restate_admin_patch(
-        AxumPath(path): AxumPath<String>,
-        State(tx): State<mpsc::UnboundedSender<Value>>,
-    ) -> StatusCode {
-        let _ = tx.send(json!({ "path": path }));
-        StatusCode::ACCEPTED
     }
 
     #[test]
@@ -1455,7 +1428,7 @@ finish initial
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
             mail_world: mail::MailWorld::new(),
-            active_restate_invocations: ActiveRestateInvocations::default(),
+            active_turns: ActiveTurns::default(),
         };
         let old_session_id = state.current_session_id();
         let session = state
@@ -1685,11 +1658,7 @@ finish initial
         .await
         .expect("Restate-backed workbench turn timed out")
         .expect("finish Restate-backed workbench turn");
-        state.track_restate_invocation(
-            &state.current_session_id(),
-            &turn_id,
-            invocation_id.clone(),
-        );
+        state.track_turn(&state.current_session_id(), &turn_id);
         invocation_id
     }
 
@@ -1838,14 +1807,14 @@ finish initial
         );
         let session_ids = WorkbenchSessionIds::fresh();
         let restate_http = reqwest::Client::new();
-        let active_restate_invocations = ActiveRestateInvocations::default();
+        let active_turns = ActiveTurns::default();
         let queued_work_driver =
             lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkSubmitter {
                 session_ids: session_ids.clone(),
                 store_factory: Arc::clone(&core_store_factory),
                 restate_ingress_url: restate_ingress_url.clone(),
                 restate_http: restate_http.clone(),
-                active_restate_invocations: active_restate_invocations.clone(),
+                active_turns: active_turns.clone(),
             }));
         let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
             lash::rlm::RlmProtocolPluginConfig::default()
@@ -1900,7 +1869,7 @@ finish initial
             restate_http,
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
             mail_world: mail::MailWorld::new(),
-            active_restate_invocations,
+            active_turns,
         };
         LiveWorkbenchRestateHarness {
             state,

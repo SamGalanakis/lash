@@ -12,11 +12,12 @@ struct AppState {
     event_tx: broadcast::Sender<StreamItem>,
     queued_work_driver: lash::runtime::QueuedWorkDriver,
     restate_ingress_url: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     restate_admin_url: String,
     restate_http: reqwest::Client,
     restate_cron_job_keys: Arc<Mutex<BTreeSet<String>>>,
     mail_world: mail::MailWorld,
-    active_restate_invocations: ActiveRestateInvocations,
+    active_turns: ActiveTurns,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -130,56 +131,51 @@ enum StreamItem {
 }
 
 #[derive(Clone, Default)]
-struct ActiveRestateInvocations {
-    inner: Arc<Mutex<BTreeMap<(String, String), lash_restate::RestateInvocationId>>>,
+struct ActiveTurns {
+    inner: Arc<Mutex<BTreeSet<(String, String)>>>,
 }
 
-impl ActiveRestateInvocations {
-    fn insert(
-        &self,
-        session_id: impl Into<String>,
-        turn_id: impl Into<String>,
-        invocation_id: lash_restate::RestateInvocationId,
-    ) {
+impl ActiveTurns {
+    fn insert(&self, session_id: impl Into<String>, turn_id: impl Into<String>) {
         self.inner
             .lock()
-            .expect("active Restate invocation lock")
-            .insert((session_id.into(), turn_id.into()), invocation_id);
+            .expect("active turn lock")
+            .insert((session_id.into(), turn_id.into()));
     }
 
     fn remove(&self, session_id: &str, turn_id: &str) {
         self.inner
             .lock()
-            .expect("active Restate invocation lock")
+            .expect("active turn lock")
             .remove(&(session_id.to_string(), turn_id.to_string()));
     }
 
-    fn guard(&self, session_id: &str, turn_id: &str) -> ActiveRestateInvocationGuard {
-        ActiveRestateInvocationGuard {
+    fn guard(&self, session_id: &str, turn_id: &str) -> ActiveTurnGuard {
+        ActiveTurnGuard {
             active: self.clone(),
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
         }
     }
 
-    fn for_session(&self, session_id: &str) -> Vec<(String, lash_restate::RestateInvocationId)> {
+    fn for_session(&self, session_id: &str) -> Vec<lash::TurnAddress> {
         self.inner
             .lock()
-            .expect("active Restate invocation lock")
+            .expect("active turn lock")
             .iter()
-            .filter(|((active_session_id, _), _)| active_session_id == session_id)
-            .map(|((_, turn_id), invocation_id)| (turn_id.clone(), invocation_id.clone()))
+            .filter(|(active_session_id, _)| active_session_id == session_id)
+            .map(|(session_id, turn_id)| lash::TurnAddress::new(session_id, turn_id))
             .collect()
     }
 }
 
-struct ActiveRestateInvocationGuard {
-    active: ActiveRestateInvocations,
+struct ActiveTurnGuard {
+    active: ActiveTurns,
     session_id: String,
     turn_id: String,
 }
 
-impl Drop for ActiveRestateInvocationGuard {
+impl Drop for ActiveTurnGuard {
     fn drop(&mut self) {
         self.active.remove(&self.session_id, &self.turn_id);
     }
@@ -220,7 +216,7 @@ struct WorkbenchQueuedWorkSubmitter {
     store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
     restate_ingress_url: String,
     restate_http: reqwest::Client,
-    active_restate_invocations: ActiveRestateInvocations,
+    active_turns: ActiveTurns,
 }
 
 #[async_trait]
@@ -240,20 +236,19 @@ impl lash::runtime::QueuedWorkRunHandle for WorkbenchQueuedWorkSubmitter {
             session_id: session_id.clone(),
             reason: request.reason,
         };
-        restate::submit_queued_turn_request(
+        self.active_turns
+            .insert(&session_id, &workflow_request.turn_id);
+        if let Err(err) = restate::submit_queued_turn_request(
             &self.restate_http,
             &self.restate_ingress_url,
             &workflow_request,
         )
         .await
-        .map(|invocation_id| {
-            self.active_restate_invocations.insert(
-                session_id,
-                workflow_request.turn_id.clone(),
-                invocation_id,
-            );
-        })
-        .map_err(|err| PluginError::Session(err.to_string()))?;
+        {
+            self.active_turns
+                .remove(&session_id, &workflow_request.turn_id);
+            return Err(PluginError::Session(err.to_string()));
+        }
         Ok(())
     }
 }

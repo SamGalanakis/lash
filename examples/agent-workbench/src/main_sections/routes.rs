@@ -81,7 +81,8 @@ async fn send_turn(
     state.set_selected_model(ModelSelection::from_spec(&turn_model));
     let turn_id = format!("workbench-turn-{}", uuid::Uuid::new_v4());
     let session_id = state.current_session_id();
-    let invocation_id = restate::submit_user_turn(
+    state.track_turn(&session_id, &turn_id);
+    if let Err(err) = restate::submit_user_turn(
         &state,
         restate::WorkbenchTurnWorkflowRequest {
             turn_id: turn_id.clone(),
@@ -90,8 +91,11 @@ async fn send_turn(
             model: ModelSelection::from_spec(&turn_model),
         },
     )
-    .await?;
-    state.track_restate_invocation(&session_id, &turn_id, invocation_id);
+    .await
+    {
+        state.active_turns.remove(&session_id, &turn_id);
+        return Err(err);
+    }
     Ok(Json(CommandAccepted { accepted: true }))
 }
 

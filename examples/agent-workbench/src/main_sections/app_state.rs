@@ -42,52 +42,45 @@ impl AppState {
         let _ = self.event_tx.send(item);
     }
 
-    fn track_restate_invocation(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        invocation_id: lash_restate::RestateInvocationId,
-    ) {
-        // In-memory cancellation aid only. Restate owns in-flight workflow
-        // replay, and Lash owns the turn commit; the workbench does not
-        // persist a submitted/running work-item lifecycle table.
-        self.active_restate_invocations
-            .insert(session_id, turn_id, invocation_id);
+    fn track_turn(&self, session_id: &str, turn_id: &str) {
+        self.active_turns.insert(session_id, turn_id);
     }
 
-    fn clear_restate_invocation_on_drop(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-    ) -> ActiveRestateInvocationGuard {
-        self.active_restate_invocations.guard(session_id, turn_id)
+    fn clear_turn_on_drop(&self, session_id: &str, turn_id: &str) -> ActiveTurnGuard {
+        self.active_turns.guard(session_id, turn_id)
     }
 
-    /// Cancel every active Restate-backed turn invocation for `session_id`;
-    /// returns how many cancellation requests were accepted. Missing entries
-    /// mean this process has no live cancellation handle, not that the turn
-    /// lifecycle is stored somewhere else.
+    /// Fan out exact-address cooperative cancellation to the active turns the
+    /// UI submitted for `session_id`.
     async fn cancel_turns_for_session(&self, session_id: &str) -> Result<usize, AppError> {
-        let active = self.active_restate_invocations.for_session(session_id);
-        let admin = lash_restate::RestateAdminClient::new(
-            lash_restate::RestateConnection::with_client(
-            self.restate_admin_url.clone(),
-                self.restate_http.clone(),
-            ),
-        );
+        let active = self.active_turns.for_session(session_id);
         let mut cancelled = 0;
-        for (turn_id, invocation_id) in active {
-            admin
-                .cancel_invocation(&invocation_id)
+        for address in active {
+            let request_id = format!("workbench-stop-{}", uuid::Uuid::new_v4());
+            let outcome = self
+                .core
+                .turn_work_driver()
+                .request_cancel(lash::TurnCancelRequest::new(
+                    address.clone(),
+                    request_id.clone(),
+                    lash::TurnCancelSource::UserInterrupt,
+                ))
                 .await
                 .map_err(|err| AppError::internal(err.to_string()))?;
-            cancelled += 1;
+            if matches!(
+                outcome,
+                lash::TurnCancelOutcome::Requested(_)
+                    | lash::TurnCancelOutcome::AlreadyRequested(_)
+            ) {
+                cancelled += 1;
+            }
             self.trace(
-                "turn.restate.cancel_requested",
+                "turn.cancel_requested",
                 json!({
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "invocation_id": invocation_id.as_str(),
+                    "session_id": address.session_id,
+                    "turn_id": address.turn_id,
+                    "request_id": request_id,
+                    "outcome": format!("{outcome:?}"),
                 }),
             );
         }

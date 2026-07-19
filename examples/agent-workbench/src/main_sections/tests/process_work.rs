@@ -73,7 +73,7 @@ mod process_work_tests {
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
             mail_world: mail::MailWorld::new(),
-            active_restate_invocations: ActiveRestateInvocations::default(),
+            active_turns: ActiveTurns::default(),
         };
 
         // Register, append one non-terminal event, and complete — all through
