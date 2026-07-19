@@ -179,6 +179,7 @@ struct WorkbenchSessionIds {
 }
 
 impl WorkbenchSessionIds {
+    #[cfg(test)]
     fn fresh() -> Self {
         Self {
             current: Arc::new(Mutex::new(new_session_id())),

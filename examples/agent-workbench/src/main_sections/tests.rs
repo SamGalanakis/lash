@@ -183,9 +183,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let session_path = temp.path().join("session-id");
         let turns_path = temp.path().join("active-turns.json");
-        let session_ids = WorkbenchSessionIds::persistent(&session_path).expect("session ids");
+        let session_ids =
+            WorkbenchSessionIds::persistent(session_path.clone()).expect("session ids");
         let session_id = session_ids.current();
-        let turns = ActiveTurns::persistent(&turns_path).expect("active turns");
+        let turns = ActiveTurns::persistent(turns_path.clone()).expect("active turns");
         turns.insert(&session_id, "durable-stop-turn");
         drop(session_ids);
         drop(turns);
