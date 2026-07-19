@@ -1807,6 +1807,12 @@ finish initial
         );
         let session_ids = WorkbenchSessionIds::fresh();
         let restate_http = reqwest::Client::new();
+        let turn_deployment = lash_restate::RestateTurnDeployment::new(
+            lash_restate::RestateConnection::with_client(
+                restate_ingress_url.clone(),
+                restate_http.clone(),
+            ),
+        );
         let active_turns = ActiveTurns::default();
         let queued_work_driver =
             lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkSubmitter {
@@ -1834,7 +1840,7 @@ finish initial
             .trace_sink(Arc::clone(&trace_sink))
             .trace_level(TraceLevel::Extended)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
-            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .effect_host(turn_deployment.effect_host())
             .process_work_driver(process_deployment.process_work_driver())
             .queued_work_driver(queued_work_driver.clone())
             .build()

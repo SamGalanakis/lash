@@ -2130,6 +2130,15 @@ where
         let mut run_future = Box::pin(run_future);
         loop {
             tokio::select! {
+                // Some durable adapter futures are not fused. Once turn
+                // completion is ready, select it before another ready branch
+                // so the loop never polls the completed future again.
+                biased;
+
+                completed = run_future.as_mut() => {
+                    child_usage_event_relay.clear();
+                    break completed;
+                }
                 maybe_event = event_rx.recv() => {
                     if let Some(event) = maybe_event {
                         emit_runtime_stream_event_to_sinks(
@@ -2140,10 +2149,6 @@ where
                         )
                         .await;
                     }
-                }
-                completed = run_future.as_mut() => {
-                    child_usage_event_relay.clear();
-                    break completed;
                 }
             }
         }
@@ -2175,6 +2180,14 @@ where
         let mut cancellation_observed = false;
         loop {
             tokio::select! {
+                // Keep the non-fused turn future from being re-polled when
+                // cancellation or a stream event becomes ready alongside it.
+                biased;
+
+                completed = run_future.as_mut() => {
+                    child_usage_event_relay.clear();
+                    break completed;
+                }
                 maybe_event = event_rx.recv() => {
                     if let Some(event) = maybe_event {
                         emit_runtime_stream_event_to_sinks(
@@ -2185,10 +2198,6 @@ where
                         )
                         .await;
                     }
-                }
-                completed = run_future.as_mut() => {
-                    child_usage_event_relay.clear();
-                    break completed;
                 }
                 observation = cancel_future.as_mut(), if !cancellation_observed => {
                     cancellation_observed = true;
