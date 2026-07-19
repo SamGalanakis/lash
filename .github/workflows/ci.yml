@@ -41,6 +41,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Reclaim runner disk
+        run: bash scripts/ci-reclaim-disk.sh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -125,6 +128,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Reclaim runner disk
+        run: bash scripts/ci-reclaim-disk.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -222,6 +228,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Reclaim runner disk
+        run: bash scripts/ci-reclaim-disk.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -429,6 +438,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Reclaim runner disk
+        run: bash scripts/ci-reclaim-disk.sh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -515,6 +527,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Reclaim runner disk
+        run: bash scripts/ci-reclaim-disk.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
