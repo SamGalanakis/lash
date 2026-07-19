@@ -98,9 +98,9 @@ turn: `POST /api/turn/cancel` sends its stable session and turn address through
 `TurnWorkDriver::request_cancel`. The request lives on Lash's durable
 keyed-promise seam, so it survives a workbench web-process restart and is
 observed by the current or replayed Restate owner. The authoritative terminal
-result is `TurnStop::Cancelled` with the original request id, source, and
-optional reason; the UI clears only after the request is accepted or the turn
-has already won the completion race.
+result is `TurnStop::Cancelled` with the original request id, opaque
+host-defined origin, and optional reason; the UI clears only after the request
+is accepted or the turn has already won the completion race.
 
 Cancellation is cooperative: detached effects and non-cooperative external
 work are not guaranteed to stop. Session and turn ids are routing identity,

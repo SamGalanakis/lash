@@ -235,7 +235,7 @@ impl TurnActivitySink for ChannelSink {
             <p>Cancellation is cooperative and first-class: a cancelled turn finishes with <code>TurnOutcome::Stopped(TurnStop::Cancelled)</code>, commits like any other turn, and leaves the session ready for the next turn. In-flight provider streaming is aborted, not awaited.</p>
           </div>
           <p>Host-facing controls retain the stable turn id and call <code>LashSession::request_turn_cancel</code> or a deployment-level <code>TurnWorkDriver::request_cancel</code>. The keyed-promise gate is exact-scope and replay-safe, and <code>await_terminal</code> attaches idempotently to the authoritative result. Restate deployments use <code>RestateTurnDeployment</code> and <code>LashDurableWaitWorkflow</code>, not the Admin API. Cancellation is cooperative: detached effects are not guaranteed to stop. Session and turn ids are routing identity, not authorization.</p>
-          <pre data-lang="rust" data-snippet="embedding_turns#cancel-turn"><code>use lash::{DurabilityTier, TurnAddress, TurnCancelSource, TurnOutcome, TurnStop};
+          <pre data-lang="rust" data-snippet="embedding_turns#cancel-turn"><code>use lash::{DurabilityTier, TurnAddress, TurnOutcome, TurnStop};
 
 let turn_id = "incident-summary-42";
 let stream = session
@@ -246,12 +246,13 @@ let stream = session
 // An HTTP handler can retain only these routing ids. Authenticate and
 // authorize the caller before forwarding them to Lash. The default inline
 // driver is same-process; cross-process cancellation requires a durable
-// engine deployment.
+// engine deployment. "user" is this host's vocabulary; Lash carries it
+// opaquely without assigning semantics.
 let receipt = session
     .request_turn_cancel(
         turn_id,
         "stop-button-7",
-        TurnCancelSource::UserInterrupt,
+        Some("user".to_string()),
         Some("operator pressed Stop".to_string()),
     )
     .await?;

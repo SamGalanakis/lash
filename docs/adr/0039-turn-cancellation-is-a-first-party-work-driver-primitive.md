@@ -7,13 +7,14 @@ separate from) `ProcessWorkDriver`. Session and turn ids are routing identities,
 credentials; every host boundary remains responsible for authentication and authorization.
 
 The primitive is cooperative. A request races the turn's normal completion through a reserved,
-first-writer-wins keyed promise. A cancellation winner carries typed request id, source, and reason
-evidence; the running or replayed owner feeds that evidence into its internal cancellation token,
-assembles `TurnStop::Cancelled`, and commits under the live session-execution lease. A normal
-completion seals the same gate before commit, causing later requests to report
-`CompletionWonRace`. A second reserved promise publishes terminal evidence after the commit so an
-external caller can attach without polling storage. The promise key uses semantic session/turn
-identity rather than lease generation: cancellation survives owner loss, while ADR 0029's normal
+first-writer-wins keyed promise. A cancellation winner carries a request id, optional opaque
+host-supplied origin, and optional reason as evidence; the running or replayed owner feeds that
+evidence into its internal cancellation token, assembles `TurnStop::Cancelled`, and commits under
+the live session-execution lease. A normal completion seals the same gate before commit, causing
+later requests to report `CompletionWonRace`. A second reserved promise publishes terminal
+evidence after the commit so an external caller can attach without polling storage. The promise
+key uses semantic session/turn identity rather than lease generation: cancellation survives owner
+loss, while ADR 0029's normal
 generation fence prevents the stale owner from committing.
 
 The keyed-promise tier is part of the receipt. `Inline` uses a bounded process-global in-memory
@@ -22,11 +23,11 @@ gate but cannot signal the owner's gate. Cross-process cancellation and replay o
 a `Durable` engine deployment such as Restate. Hosts must use the receipt's durability tier when
 deciding whether a Stop control can honestly promise cross-process delivery.
 
-Legacy process-local token entry points synthesize `internal:<turn_id>` evidence because they do
-not traverse the addressed request gate. Entry points with a known origin provide a source hint
-(`cancel_running_turns` uses `UserInterrupt`; shutdown can specify `Shutdown`). A raw
-`TurnBuilder::cancel(CancellationToken)` has no origin information and therefore reports `Host`
-with a reason explicitly stating that the local token's origin is unknown.
+Who cancelled is host-domain data: Lash records an opaque host-supplied origin and never interprets
+it, mirroring ADR 0026's treatment of host-supplied capability data. Process-local token entry
+points synthesize `internal:<turn_id>` request evidence because they do not traverse the addressed
+request gate. A host with a known origin can supply its own vocabulary, such as `"user"` or
+`"shutdown"`; a raw `TurnBuilder::cancel(CancellationToken)` honestly records no origin.
 
 Turn cancellation has three operational layers:
 

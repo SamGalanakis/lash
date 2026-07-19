@@ -89,7 +89,8 @@ async fn graceful_drain(
 
     // 2. Finish or cancel in-flight turns. Exact retained turn addresses should
     //    normally go through `core.turn_work_driver().request_cancel(...)`.
-    //    This process-local cancel-all remains a shutdown compatibility lever.
+    //    This process-local cancel-all remains a shutdown compatibility lever;
+    //    "shutdown" is opaque host vocabulary.
     for session in &idle_sessions {
         session.cancel_running_turns_with_origin(Some("shutdown".to_string()));
     }

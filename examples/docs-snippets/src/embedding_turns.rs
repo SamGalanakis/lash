@@ -228,7 +228,8 @@ async fn cancel_turn(core: &LashCore, session: &LashSession) -> anyhow::Result<(
     // An HTTP handler can retain only these routing ids. Authenticate and
     // authorize the caller before forwarding them to Lash. The default inline
     // driver is same-process; cross-process cancellation requires a durable
-    // engine deployment.
+    // engine deployment. "user" is this host's vocabulary; Lash carries it
+    // opaquely without assigning semantics.
     let receipt = session
         .request_turn_cancel(
             turn_id,
