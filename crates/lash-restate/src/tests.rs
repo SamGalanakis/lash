@@ -1455,16 +1455,16 @@ fn runtime_invocation(kind: RuntimeEffectKind, effect_id: &str) -> RuntimeInvoca
 }
 
 #[tokio::test]
-async fn restate_controller_executes_non_sleep_effect_inside_run() {
+async fn restate_controller_executes_atomic_effect_inside_run() {
     let context = Arc::new(RecordingContext::default());
     let host = RestateRuntimeEffectController::new(context.clone());
     let err = host
         .execute_effect(
             RuntimeEffectEnvelope::new(
-                runtime_invocation(RuntimeEffectKind::ExecCode, "exec"),
-                RuntimeEffectCommand::ExecCode {
-                    language: "code".to_string(),
-                    code: "1 + 1".to_string(),
+                runtime_invocation(RuntimeEffectKind::DurableStep, "step"),
+                RuntimeEffectCommand::DurableStep {
+                    step_id: "step".to_string(),
+                    input: serde_json::json!({ "value": 2 }),
                 },
             ),
             RuntimeEffectLocalExecutor::unavailable(),
@@ -1475,7 +1475,7 @@ async fn restate_controller_executes_non_sleep_effect_inside_run() {
     assert_eq!(err.code, "runtime_effect_local_executor_unavailable");
     assert_eq!(
         context.runs.lock().expect("runs lock").as_slice(),
-        &["lash:session:turn:1:0:exec_code:exec".to_string()]
+        &["lash:session:turn:1:0:durable_step:step".to_string()]
     );
     assert!(context.sleeps.lock().expect("sleeps lock").is_empty());
 }

@@ -722,8 +722,8 @@ pub async fn effect_controller_concurrent_replay_deterministic(
     controller: &dyn RuntimeEffectController,
     start_replay: impl FnOnce(),
 ) {
-    let slow = replay_conformance_exec_envelope("effect-slow");
-    let fast = replay_conformance_exec_envelope("effect-fast");
+    let slow = replay_conformance_durable_step_envelope("effect-slow");
+    let fast = replay_conformance_durable_step_envelope("effect-fast");
     let completion_order = Arc::new(Mutex::new(Vec::new()));
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let release_slow = Arc::new(tokio::sync::Notify::new());
@@ -754,8 +754,8 @@ pub async fn effect_controller_concurrent_replay_deterministic(
     .expect("concurrent first-pass effects must both enter their local executors");
     let slow_first = first_pass.0.expect("slow first pass");
     let fast_first = first_pass.1.expect("fast first pass");
-    assert_replay_conformance_exec_marker(slow_first, "effect-slow");
-    assert_replay_conformance_exec_marker(fast_first, "effect-fast");
+    assert_replay_conformance_durable_step_marker(slow_first, "effect-slow");
+    assert_replay_conformance_durable_step_marker(fast_first, "effect-fast");
     assert_eq!(
         completion_order
             .lock()
@@ -783,8 +783,8 @@ pub async fn effect_controller_concurrent_replay_deterministic(
     .expect("concurrent replay effects must resolve from host history");
     let fast_replay = replay_pass.0.expect("fast replay");
     let slow_replay = replay_pass.1.expect("slow replay");
-    assert_replay_conformance_exec_marker(fast_replay, "effect-fast");
-    assert_replay_conformance_exec_marker(slow_replay, "effect-slow");
+    assert_replay_conformance_durable_step_marker(fast_replay, "effect-fast");
+    assert_replay_conformance_durable_step_marker(slow_replay, "effect-slow");
     assert!(
         replay_local_calls
             .lock()
@@ -1270,7 +1270,7 @@ async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingB
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn replay_conformance_exec_envelope(effect_id: &'static str) -> RuntimeEffectEnvelope {
+fn replay_conformance_durable_step_envelope(effect_id: &'static str) -> RuntimeEffectEnvelope {
     RuntimeEffectEnvelope::new(
         RuntimeInvocation::effect(
             RuntimeScope::for_turn(
@@ -1280,12 +1280,12 @@ fn replay_conformance_exec_envelope(effect_id: &'static str) -> RuntimeEffectEnv
                 0,
             ),
             effect_id,
-            RuntimeEffectKind::ExecCode,
+            RuntimeEffectKind::DurableStep,
             format!("effect-conformance:effect-conformance-turn:{effect_id}"),
         ),
-        RuntimeEffectCommand::ExecCode {
-            language: "code".to_string(),
-            code: format!("emit {effect_id}"),
+        RuntimeEffectCommand::DurableStep {
+            step_id: effect_id.to_string(),
+            input: serde_json::json!(effect_id),
         },
     )
 }
@@ -1349,7 +1349,9 @@ fn replay_conformance_recording_executor(
                 .expect("completion order")
                 .push(effect_id.to_string());
         }
-        Ok(replay_conformance_exec_outcome(effect_id))
+        Ok(RuntimeEffectOutcome::DurableStep {
+            value: serde_json::json!(effect_id),
+        })
     })
 }
 
@@ -1454,6 +1456,18 @@ fn assert_replay_conformance_exec_marker(outcome: RuntimeEffectOutcome, expected
     assert_eq!(
         response.terminal_finish,
         Some(serde_json::json!(expected)),
+        "replayed outcome must come from the matching replay key"
+    );
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn assert_replay_conformance_durable_step_marker(outcome: RuntimeEffectOutcome, expected: &str) {
+    let RuntimeEffectOutcome::DurableStep { value } = outcome else {
+        panic!("expected durable-step effect outcome");
+    };
+    assert_eq!(
+        value,
+        serde_json::json!(expected),
         "replayed outcome must come from the matching replay key"
     );
 }
