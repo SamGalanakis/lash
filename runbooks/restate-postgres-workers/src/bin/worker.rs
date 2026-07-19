@@ -879,6 +879,27 @@ async fn async_main() -> Result<()> {
     let state = AppState::connect(process_work_driver.clone()).await?;
     if state.fail_once {
         tracing::warn!(worker_id = %state.worker_id, "worker can exit once from crash_once tool");
+        let recovering_failover_owner: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM lash_e2e_failover_markers WHERE worker_id = $1
+            )",
+        )
+        .bind(&state.worker_id)
+        .fetch_one(storage.pool())
+        .await
+        .context("check whether failover owner is restarting")?;
+        if recovering_failover_owner {
+            // Keep the crashed endpoint unavailable across Restate's first
+            // retries so the proxy deterministically hands ownership to the
+            // healthy peer. This also prevents a turn and its concurrent
+            // cancellation-gate observer from locking round-robin routing to
+            // the same restarted owner.
+            tracing::warn!(
+                worker_id = %state.worker_id,
+                "delaying failover-owner endpoint restart for peer takeover"
+            );
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
     }
 
     let core = state.build_core()?;

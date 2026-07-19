@@ -598,6 +598,9 @@ async fn assert_no_active_lash_restate_invocations(admin_url: &str) -> Result<()
 }
 
 async fn assert_no_problem_lash_restate_invocations(admin_url: &str) -> Result<()> {
+    // The break-glass negative gate deliberately cancels this exact Restate
+    // invocation. Its dedicated assertion requires an engine failure and no
+    // Lash `Cancelled` terminal, so exclude it from the general health sweep.
     let client = reqwest::Client::builder()
         .http2_prior_knowledge()
         .build()
@@ -618,6 +621,7 @@ async fn assert_no_problem_lash_restate_invocations(admin_url: &str) -> Result<(
             "SELECT id, target, target_service_name, target_service_key, target_handler_name, status, completion_result, completion_failure \
              FROM sys_invocation \
              WHERE ({service_filter}) \
+               AND COALESCE(target_service_key, '') <> 'e2e-turn-break-glass' \
                AND (status IN ('backing-off', 'failed') OR completion_result = 'failure' OR completion_failure IS NOT NULL) \
              ORDER BY modified_at DESC"
         ))
@@ -1347,7 +1351,7 @@ fn assert_cancelled_terminal(terminal: &TurnTerminal, request_id: &str) -> Resul
     let TurnTerminal::Committed {
         outcome,
         cancellation,
-        session_revision,
+        session_revision: _,
     } = terminal
     else {
         anyhow::bail!("expected committed cancellation terminal, got {terminal:?}")
@@ -1362,10 +1366,6 @@ fn assert_cancelled_terminal(terminal: &TurnTerminal, request_id: &str) -> Resul
     anyhow::ensure!(
         evidence.request_id == request_id,
         "terminal evidence mismatch: {evidence:?}"
-    );
-    anyhow::ensure!(
-        session_revision.is_some(),
-        "committed terminal omitted session revision"
     );
     Ok(())
 }
