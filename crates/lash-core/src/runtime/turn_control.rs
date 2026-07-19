@@ -60,7 +60,10 @@ pub struct TurnCancelSourceHint {
 
 impl TurnCancelSourceHint {
     pub fn set(&self, source: TurnCancelSource) {
-        *self.source.lock().expect("turn cancel source hint lock") = Some(source);
+        let mut hint = self.source.lock().expect("turn cancel source hint lock");
+        if hint.is_none() {
+            *hint = Some(source);
+        }
     }
 
     pub(crate) fn get(&self) -> Option<TurnCancelSource> {
@@ -728,6 +731,15 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn local_cancel_source_hint_preserves_first_origin() {
+        let hint = TurnCancelSourceHint::default();
+        hint.set(TurnCancelSource::Shutdown);
+        hint.set(TurnCancelSource::UserInterrupt);
+
+        assert_eq!(hint.get(), Some(TurnCancelSource::Shutdown));
     }
 
     #[test]

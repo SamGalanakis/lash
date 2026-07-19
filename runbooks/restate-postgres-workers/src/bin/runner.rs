@@ -1238,9 +1238,11 @@ async fn drive_turn_control_scenarios(
         cross_evidence_id,
     )?;
 
-    // The result is valid whichever first writer wins: a requested cancel must
-    // commit Cancelled with the same evidence, while a completion seal must
-    // commit a non-cancel terminal without evidence.
+    // This live gate races workflow submission against cancellation. The
+    // tighter already-running commit-time seal window is covered by the inline
+    // unit race; either way, a requested cancel must commit Cancelled with the
+    // same evidence, while a completion seal must commit a non-cancel terminal
+    // without evidence.
     let race = TurnRequest {
         workflow_id: "e2e-turn-cancel-seal-race".to_string(),
         fail_once: false,
