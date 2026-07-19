@@ -234,6 +234,10 @@ impl RuntimeTurnDriver<'_> {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "foreground code execution carries explicit turn and replay context"
+    )]
     pub(in crate::runtime) async fn run_exec_code(
         &mut self,
         language: String,
