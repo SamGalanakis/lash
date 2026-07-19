@@ -228,18 +228,29 @@ fn remote_turn_cancel_envelopes_round_trip() {
     .expect("deserialize cancellation request");
     assert_eq!(decoded, request);
 
-    let receipt = RemoteTurnCancelReceipt::new(
-        "session",
-        "turn",
+    let evidence = RemoteTurnCancellationEvidence {
+        request_id: "request-1".to_string(),
+        source: RemoteTurnCancelSource::Host,
+        reason: None,
+    };
+    for outcome in [
         RemoteTurnCancelOutcome::Requested {
-            cancellation: RemoteTurnCancellationEvidence {
-                request_id: "request-1".to_string(),
-                source: RemoteTurnCancelSource::Host,
-                reason: None,
-            },
+            cancellation: evidence.clone(),
         },
-    );
-    receipt.validate().expect("valid cancellation receipt");
+        RemoteTurnCancelOutcome::AlreadyRequested {
+            cancellation: evidence.clone(),
+        },
+        RemoteTurnCancelOutcome::CompletionWonRace,
+        RemoteTurnCancelOutcome::UnknownOrRevoked,
+    ] {
+        let receipt = RemoteTurnCancelReceipt::new("session", "turn", outcome);
+        receipt.validate().expect("valid cancellation receipt");
+        let decoded: RemoteTurnCancelReceipt = serde_json::from_value(
+            serde_json::to_value(&receipt).expect("serialize cancellation receipt"),
+        )
+        .expect("deserialize cancellation receipt");
+        assert_eq!(decoded, receipt);
+    }
 }
 
 #[test]

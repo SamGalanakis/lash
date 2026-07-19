@@ -436,3 +436,93 @@ async fn cross_backend_first_party_turn_cancel_agrees() {
     assert!(memory.duplicate_preserved_original);
     assert!(memory.next_turn_succeeded);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sqlite_reopen_preserves_cancelled_turn_commit_and_allows_next_turn() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sqlite_dir = tmp.path().join("turn-cancel-reopen");
+    let session_id = "turn-cancel-sqlite-reopen";
+    let turn_id = "cancelled-before-reopen";
+
+    let (first_core, first_transport) = build_sqlite(&sqlite_dir, 1).await;
+    let first_driver = first_core.turn_work_driver();
+    let outcome = first_driver
+        .request_cancel(lash::TurnCancelRequest::new(
+            lash::TurnAddress::new(session_id, turn_id),
+            "sqlite-replay-cancel",
+            lash::TurnCancelSource::Host,
+        ))
+        .await
+        .expect("request cancellation before SQLite turn");
+    assert!(matches!(outcome, lash::TurnCancelOutcome::Requested(_)));
+    let first_session = first_core
+        .session(session_id)
+        .open_fresh()
+        .await
+        .expect("open first SQLite session");
+    let cancelled = first_session
+        .turn(TurnInput::text("cancel before provider work"))
+        .turn_id(turn_id)
+        .run()
+        .await
+        .expect("commit cancelled SQLite turn");
+    assert!(matches!(
+        cancelled.result.outcome,
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
+    ));
+    assert_eq!(
+        cancelled
+            .result
+            .cancellation
+            .as_ref()
+            .map(|evidence| evidence.request_id.as_str()),
+        Some("sqlite-replay-cancel")
+    );
+    assert_eq!(
+        first_transport.exchanges().expect("first exchanges").len(),
+        0,
+        "cancel-before-start reached the provider"
+    );
+    let committed_turn_index = first_session
+        .observe()
+        .current_observation()
+        .read_view
+        .turn_index();
+    drop(first_session);
+    drop(first_core);
+
+    let (reopened_core, reopened_transport) = build_sqlite(&sqlite_dir, 1).await;
+    let reopened = reopened_core
+        .session(session_id)
+        .open()
+        .await
+        .expect("reopen SQLite session after cancellation");
+    assert_eq!(
+        reopened
+            .observe()
+            .current_observation()
+            .read_view
+            .turn_index(),
+        committed_turn_index,
+        "reopen lost the cancelled turn's committed session revision"
+    );
+    let next = reopened
+        .turn(TurnInput::text("work after replayed cancellation"))
+        .turn_id("turn-after-reopen")
+        .run()
+        .await
+        .expect("run future turn after SQLite reopen");
+    assert!(next.result.is_success());
+    assert_eq!(
+        next.result.assistant_message(),
+        Some("answer 1"),
+        "future turn did not consume the first provider response"
+    );
+    assert_eq!(
+        reopened_transport
+            .exchanges()
+            .expect("reopened exchanges")
+            .len(),
+        1
+    );
+}

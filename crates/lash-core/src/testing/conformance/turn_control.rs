@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 use crate::runtime::turn_control::ActiveTurnControl;
 use crate::{
     AwaitEventWaitIdentity, EffectHost, ExecutionScope, Resolution, TurnAddress, TurnCancelOutcome,
-    TurnCancelRequest, TurnCancelSource, TurnCancellationEvidence, TurnStop, TurnTerminal,
-    TurnWorkDriver,
+    TurnCancelRequest, TurnCancelSource, TurnCancellationEvidence, TurnFinish, TurnOutcome,
+    TurnStop, TurnTerminal, TurnWorkDriver,
 };
 
 fn address(label: &str) -> TurnAddress {
@@ -83,9 +83,37 @@ async fn cancel_before_start_duplicate_replay_and_terminal_attach(host: Arc<dyn 
         attached,
         TurnTerminal::Committed {
             outcome: crate::TurnOutcome::Stopped(TurnStop::Cancelled),
-            cancellation: Some(_),
+            cancellation: Some(TurnCancellationEvidence { ref request_id, .. }),
             session_revision: Some(7),
-        }
+        } if request_id == "request-1"
+    ));
+
+    // Terminal publication is idempotent and first-writer-wins too. A stale
+    // owner cannot replace the recovered owner's authoritative cancellation.
+    recovered
+        .publish_terminal(
+            host.as_ref(),
+            &TurnTerminal::Committed {
+                outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
+                    text: "stale completion".to_string(),
+                }),
+                cancellation: None,
+                session_revision: Some(6),
+            },
+        )
+        .await
+        .expect("duplicate terminal publication is idempotent");
+    let attached_again = driver
+        .await_terminal(&address)
+        .await
+        .expect("reattach terminal");
+    assert!(matches!(
+        attached_again,
+        TurnTerminal::Committed {
+            outcome: TurnOutcome::Stopped(TurnStop::Cancelled),
+            cancellation: Some(TurnCancellationEvidence { ref request_id, .. }),
+            session_revision: Some(7),
+        } if request_id == "request-1"
     ));
 }
 
@@ -97,14 +125,46 @@ async fn completion_seal_vs_cancel_is_first_writer_wins(host: Arc<dyn EffectHost
         .expect("active control");
     let (seal, cancel) = tokio::join!(
         active.settle_before_commit(host.as_ref(), false),
-        driver.request_cancel(request(address, "race-request")),
+        driver.request_cancel(request(address.clone(), "race-request")),
     );
-    match (seal.expect("seal"), cancel.expect("cancel")) {
-        (None, TurnCancelOutcome::CompletionWonRace) => {}
+    let terminal = match (seal.expect("seal"), cancel.expect("cancel")) {
+        (None, TurnCancelOutcome::CompletionWonRace) => TurnTerminal::Committed {
+            outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
+                text: "completion won".to_string(),
+            }),
+            cancellation: None,
+            session_revision: Some(8),
+        },
         (Some(evidence), TurnCancelOutcome::Requested(requested)) => {
             assert_eq!(evidence, requested);
+            TurnTerminal::Committed {
+                outcome: TurnOutcome::Stopped(TurnStop::Cancelled),
+                cancellation: Some(evidence),
+                session_revision: Some(8),
+            }
         }
         other => panic!("inconsistent gate race result: {other:?}"),
+    };
+    active
+        .publish_terminal(host.as_ref(), &terminal)
+        .await
+        .expect("publish race terminal");
+    let attached = driver
+        .await_terminal(&address)
+        .await
+        .expect("attach race terminal");
+    match attached {
+        TurnTerminal::Committed {
+            outcome: TurnOutcome::Stopped(TurnStop::Cancelled),
+            cancellation: Some(_),
+            ..
+        }
+        | TurnTerminal::Committed {
+            outcome: TurnOutcome::Finished(_),
+            cancellation: None,
+            ..
+        } => {}
+        other => panic!("cancellation evidence invariant failed: {other:?}"),
     }
 }
 
@@ -190,6 +250,14 @@ async fn exact_scope_and_session_sweep_isolation(host: Arc<dyn EffectHost>) {
 async fn session_deletion_revokes_control_promises(host: Arc<dyn EffectHost>) {
     let driver = TurnWorkDriver::new(Arc::clone(&host));
     let address = address("revoke");
+    let active = ActiveTurnControl::new(host.as_ref(), address.clone())
+        .await
+        .expect("create reserved control promises");
+    let waiter_driver = driver.clone();
+    let waiter_address = address.clone();
+    let terminal_wait =
+        tokio::spawn(async move { waiter_driver.await_terminal(&waiter_address).await });
+    tokio::task::yield_now().await;
     host.revoke_await_events_for_session(&address.session_id)
         .await
         .expect("revoke session");
@@ -200,4 +268,15 @@ async fn session_deletion_revokes_control_promises(host: Arc<dyn EffectHost>) {
             .expect("revoked outcome"),
         TurnCancelOutcome::UnknownOrRevoked
     ));
+    assert!(
+        terminal_wait.await.expect("terminal waiter task").is_err(),
+        "session deletion did not revoke the reserved terminal promise"
+    );
+    assert!(
+        active
+            .settle_before_commit(host.as_ref(), false)
+            .await
+            .is_err(),
+        "session deletion left the reserved cancellation gate live"
+    );
 }
