@@ -28,6 +28,8 @@ Usage:
 
 Defaults:
   up is detached and idempotent.
+  restart replaces only the workbench process and preserves Restate.
+  down stops both the workbench and any Restate container it started.
   --port PORT binds 127.0.0.1:PORT.
   Without --port/--addr, AGENT_WORKBENCH_ADDR is used, then 127.0.0.1:3030.
 USAGE
@@ -564,7 +566,7 @@ case "$action" in
     run_foreground
     ;;
   restart)
-    stop_target
+    stop_pid_file "$pid_file"
     run_up
     ;;
   status)

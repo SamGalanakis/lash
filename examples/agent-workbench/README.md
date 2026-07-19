@@ -22,6 +22,10 @@ just agent-workbench-restart 3000
 just agent-workbench-down 3000
 ```
 
+`restart` replaces only the workbench web process and preserves the Restate
+container and its retained invocations. `down` stops both the workbench and any
+Restate container started by the entrypoint.
+
 Validate the example build and unit tests:
 
 ```bash
