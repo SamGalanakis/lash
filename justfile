@@ -137,7 +137,7 @@ agent-workbench-restate-e2e:
   AGENT_WORKBENCH_E2E_ENDPOINT_BIND="$endpoint_bind" \
   AGENT_WORKBENCH_E2E_ENDPOINT_URL="$endpoint_url" \
   cargo test -p agent-workbench \
-    live_restate_cron_runs_trigger_and_queued_turn_end_to_end -- --ignored --nocapture
+    live_restate_ -- --ignored --nocapture --test-threads=1
 
 restate-postgres-workers-e2e:
   bash "{{repo}}/scripts/restate-postgres-workers-e2e.sh"
