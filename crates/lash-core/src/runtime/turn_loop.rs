@@ -464,16 +464,18 @@ impl LashRuntime {
         let Some(session) = self.session.as_ref() else {
             self.state.apply_snapshot(&assembled.state);
             self.emit_completed_turn_trace(&assembled.state, &assembled.outcome, &trace_turn_id);
-            turn_control
-                .publish_terminal(
-                    scoped_effect_controller.controller(),
-                    &TurnTerminal::Committed {
-                        outcome: assembled.outcome.clone(),
-                        cancellation: assembled.cancellation.clone(),
-                        session_revision: None,
-                    },
-                )
-                .await?;
+            publish_terminal_after_commit(
+                turn_control,
+                scoped_effect_controller.controller(),
+                &TurnTerminal::Committed {
+                    outcome: assembled.outcome.clone(),
+                    cancellation: assembled.cancellation.clone(),
+                    session_revision: None,
+                },
+                &self.state.session_id,
+                &trace_turn_id,
+            )
+            .await;
             return Ok(PhysicalTurnExecution {
                 turn: assembled,
                 enqueued_queue_batches: Vec::new(),
@@ -591,16 +593,18 @@ impl LashRuntime {
 
         emit_session_events_to_sink(events, finalized.events).await;
         self.state = turn_pipeline.into_final_state();
-        turn_control
-            .publish_terminal(
-                scoped_effect_controller.controller(),
-                &TurnTerminal::Committed {
-                    outcome: returned_turn.outcome.clone(),
-                    cancellation: returned_turn.cancellation.clone(),
-                    session_revision: None,
-                },
-            )
-            .await?;
+        publish_terminal_after_commit(
+            turn_control,
+            scoped_effect_controller.controller(),
+            &TurnTerminal::Committed {
+                outcome: returned_turn.outcome.clone(),
+                cancellation: returned_turn.cancellation.clone(),
+                session_revision: None,
+            },
+            &self.state.session_id,
+            &trace_turn_id,
+        )
+        .await;
         if matches!(returned_turn.outcome, TurnOutcome::AgentFrameSwitch { .. })
             && let Some(session) = self.session.as_mut()
         {
@@ -2124,6 +2128,23 @@ async fn emit_turn_activity_to_sink(events: &dyn TurnActivitySink, activity: Tur
     }
 }
 
+async fn publish_terminal_after_commit(
+    turn_control: &ActiveTurnControl,
+    resolver: &dyn AwaitEventResolver,
+    terminal: &TurnTerminal,
+    session_id: &str,
+    turn_id: &str,
+) {
+    if let Err(err) = turn_control.publish_terminal(resolver, terminal).await {
+        tracing::warn!(
+            error = %err,
+            session_id,
+            turn_id,
+            "turn committed but terminal publication failed"
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_turn_effect_loop(
     driver: &mut RuntimeTurnDriver<'_>,
@@ -2144,12 +2165,12 @@ async fn run_turn_effect_loop(
         let turn_control = Arc::clone(&turn_control);
         let cancellation = cancellation.clone();
         tokio::spawn(async move {
-            if matches!(
-                turn_control
-                    .await_cancel(controller.as_ref(), CancellationToken::new())
-                    .await,
-                Ok(Some(_))
-            ) {
+            if await_turn_cancellation_with_retry(|| {
+                turn_control.await_cancel(controller.as_ref(), CancellationToken::new())
+            })
+            .await
+            .is_some()
+            {
                 cancellation.cancel();
             }
         })
@@ -2173,7 +2194,9 @@ async fn run_turn_effect_loop(
     } else {
         drive_turn_to_completion_with_cancel(
             run_future,
-            turn_control.await_cancel(cancel_controller, CancellationToken::new()),
+            await_turn_cancellation_with_retry(|| {
+                turn_control.await_cancel(cancel_controller, CancellationToken::new())
+            }),
             cancellation,
             event_rx,
             assembler,
@@ -2187,6 +2210,31 @@ async fn run_turn_effect_loop(
         watcher.abort();
     }
     result
+}
+
+const TURN_CANCEL_WATCH_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_millis(25);
+const TURN_CANCEL_WATCH_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn await_turn_cancellation_with_retry<F, C>(mut watch: F) -> Option<TurnCancellationEvidence>
+where
+    F: FnMut() -> C,
+    C: std::future::Future<Output = Result<Option<TurnCancellationEvidence>, RuntimeError>>,
+{
+    let mut backoff = TURN_CANCEL_WATCH_RETRY_INITIAL;
+    loop {
+        match watch().await {
+            Ok(observation) => return observation,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    retry_after_ms = backoff.as_millis(),
+                    "turn cancellation watcher failed; retrying while the turn remains active"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2).min(TURN_CANCEL_WATCH_RETRY_MAX);
+            }
+        }
+    }
 }
 
 /// Pump the turn driver's event channel into the host sinks while the run
@@ -2255,7 +2303,7 @@ async fn drive_turn_to_completion_with_cancel<F, C>(
 ) -> Result<(crate::MessageSequence, usize), RuntimeError>
 where
     F: std::future::Future<Output = Result<(crate::MessageSequence, usize), RuntimeError>>,
-    C: std::future::Future<Output = Result<Option<TurnCancellationEvidence>, RuntimeError>>,
+    C: std::future::Future<Output = Option<TurnCancellationEvidence>>,
 {
     let run_result = {
         let mut run_future = Box::pin(run_future);
@@ -2284,7 +2332,7 @@ where
                 }
                 observation = cancel_future.as_mut(), if !cancellation_observed => {
                     cancellation_observed = true;
-                    if matches!(observation, Ok(Some(_))) {
+                    if observation.is_some() {
                         cancellation.cancel();
                     }
                 }
@@ -2316,7 +2364,37 @@ async fn emit_runtime_stream_event_to_sinks(
 
 #[cfg(test)]
 mod tests {
-    use super::agent_frame_follow_turn_id;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        ActiveTurnControl, agent_frame_follow_turn_id, await_turn_cancellation_with_retry,
+        publish_terminal_after_commit,
+    };
+    use crate::{
+        AwaitEventKey, AwaitEventResolver, Resolution, ResolveOutcome, RuntimeError, TurnAddress,
+        TurnCancelSource, TurnCancellationEvidence, TurnFinish, TurnOutcome, TurnTerminal,
+    };
+
+    #[derive(Default)]
+    struct RejectTerminalPublication {
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AwaitEventResolver for RejectTerminalPublication {
+        async fn resolve_await_event(
+            &self,
+            _key: &AwaitEventKey,
+            _resolution: Resolution,
+        ) -> Result<ResolveOutcome, RuntimeError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            Err(RuntimeError::new(
+                "transient_terminal_publication",
+                "terminal backend unavailable",
+            ))
+        }
+    }
 
     #[test]
     fn agent_frame_follow_turn_ids_are_distinct_and_deterministic() {
@@ -2329,5 +2407,59 @@ mod tests {
             agent_frame_follow_turn_id("root-turn", 2),
             "root-turn:agent-frame:2"
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_watch_retries_transient_errors_until_evidence_arrives() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed_attempts = Arc::clone(&attempts);
+        let evidence = await_turn_cancellation_with_retry(move || {
+            let attempt = observed_attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt < 2 {
+                    Err(RuntimeError::new(
+                        "transient_cancel_watch",
+                        "temporary ingress failure",
+                    ))
+                } else {
+                    Ok(Some(TurnCancellationEvidence {
+                        request_id: "retry-request".to_string(),
+                        source: TurnCancelSource::UserInterrupt,
+                        reason: None,
+                    }))
+                }
+            }
+        })
+        .await
+        .expect("cancellation evidence after retries");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(evidence.request_id, "retry-request");
+    }
+
+    #[tokio::test]
+    async fn terminal_publication_failure_is_non_fatal_after_commit() {
+        let resolver = RejectTerminalPublication::default();
+        let control = ActiveTurnControl::new(
+            &resolver,
+            TurnAddress::new("committed-session", "committed-turn"),
+        )
+        .await
+        .expect("active turn control");
+        publish_terminal_after_commit(
+            &control,
+            &resolver,
+            &TurnTerminal::Committed {
+                outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
+                    text: "committed".to_string(),
+                }),
+                cancellation: None,
+                session_revision: Some(1),
+            },
+            "committed-session",
+            "committed-turn",
+        )
+        .await;
+        assert_eq!(resolver.attempts.load(Ordering::SeqCst), 1);
     }
 }
