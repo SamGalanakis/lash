@@ -48,10 +48,12 @@
 //! ```
 //!
 //! Restate's Rust SDK requires `ctx.run` closures to be awaited immediately and
-//! not to call the Restate context from inside the closure. This adapter follows
-//! that rule: every Lash effect is wrapped as one immediately awaited
-//! `ctx.run(...).name(lash:<replay_key>)` call, sleep commands
-//! map to Restate's durable timer, and process commands call Restate workflow
+//! not to call the Restate context from inside the closure. This adapter wraps
+//! atomic Lash effects in immediately awaited
+//! `ctx.run(...).name(lash:<replay_key>)` calls. Composite tool-batch and
+//! exec-code interpreters are rebuilt on every handler attempt while their
+//! nested atomic effects retain stable replay keys. Sleep commands map to
+//! Restate's durable timer, and process commands call Restate workflow
 //! scheduling directly through idempotent registry/workflow operations.
 //! Substrate-native Restate turns do not use store-side in-flight replay rows;
 //! Lash only commits final session state through turn-commit idempotency.

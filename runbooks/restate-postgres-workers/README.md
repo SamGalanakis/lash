@@ -15,7 +15,7 @@ frame-switch, and storage gates, the runner verifies first-party turn control:
 - first-writer-wins cancellation versus completion sealing;
 - cancellation replayed by a peer after the original worker exits;
 - terminal attachment returning the exact cancellation evidence; and
-- Restate Admin invocation cancellation remaining break-glass rather than
+- Restate Admin invocation hard-kill remaining break-glass rather than
   manufacturing a Lash `Cancelled` terminal.
 
 The final `turn-control gates passed:` line is the deterministic evidence for

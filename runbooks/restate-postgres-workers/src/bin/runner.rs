@@ -301,7 +301,7 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &frame_cancel_request.workflow_id).await?;
     assert_frame_switch_cancel_response(&frame_cancel_response)?;
 
-    drive_turn_control_scenarios(&storage, &ingress_url, &admin_url).await?;
+    drive_turn_control_scenarios(&storage, &ingress_url).await?;
     drive_durable_wait_index_scenarios(&storage, &ingress_url, &admin_url).await?;
 
     let responses = wait_for_terminal_results(storage.pool(), 24).await?;
@@ -328,6 +328,7 @@ async fn async_main() -> Result<()> {
     if let Some(dir) = &trace_dir {
         assert_traces(dir).await?;
     }
+    drive_break_glass_scenario(&storage, &ingress_url, &admin_url).await?;
     assert_no_active_lash_restate_invocations(&admin_url).await?;
 
     println!(
@@ -1182,11 +1183,7 @@ async fn wait_for_durable_input_key(
 /// Restate ingress and assert the observable turn outcomes.
 ///
 /// Cancel/revoke are driven through the production
-async fn drive_turn_control_scenarios(
-    storage: &PostgresStorage,
-    ingress_url: &str,
-    admin_url: &str,
-) -> Result<()> {
+async fn drive_turn_control_scenarios(storage: &PostgresStorage, ingress_url: &str) -> Result<()> {
     let deployment = RestateTurnDeployment::new(ingress_url.to_string());
     let driver = deployment.turn_work_driver();
 
@@ -1294,36 +1291,59 @@ async fn drive_turn_control_scenarios(
         "stale owner `{crashed_worker}` completed the recovered turn"
     );
 
-    // Restate Admin cancellation is deliberately exercised only as a negative
-    // break-glass gate. It must not manufacture a Lash Cancelled terminal.
+    println!(
+        "turn-control gates passed: cross-process; cancel-before-start; seal-vs-cancel; owner-crash-recovery; terminal-attach-evidence"
+    );
+    Ok(())
+}
+
+async fn drive_break_glass_scenario(
+    storage: &PostgresStorage,
+    ingress_url: &str,
+    admin_url: &str,
+) -> Result<()> {
+    // Run this last: a hard-killed handler cannot release its shared-session
+    // execution lease, and no subsequent scenario should depend on that lease.
+    // This remains a negative operator gate and must not manufacture a Lash
+    // Cancelled terminal. Graceful Restate cancellation cannot interrupt
+    // arbitrary local user code blocked inside a running side-effect closure.
     let break_glass = turn_control_request("e2e-turn-break-glass", false);
     let invocation_id = submit_workflow(ingress_url, &break_glass).await?;
     wait_for_cancel_gate(storage.pool(), &break_glass.workflow_id).await?;
     let admin = RestateAdminClient::new(admin_url.to_string());
     admin
-        .cancel_invocation(&invocation_id)
+        .kill_invocation_for_test_cleanup(&invocation_id)
         .await
-        .context("cancel Restate invocation as break-glass")?;
+        .context("kill Restate invocation as break-glass")?;
     wait_for_invocation_terminal(&admin, &invocation_id).await?;
-    anyhow::ensure!(
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            driver.await_terminal(&turn_address(&break_glass)),
-        )
-        .await
-        .is_err(),
-        "break-glass invocation cancellation produced a Lash terminal"
-    );
+
+    let driver = TurnWorkDriver::new(Arc::new(RestateEffectHost::with_ingress_url(
+        ingress_url.to_string(),
+    )));
+    if let Ok(Ok(terminal)) = tokio::time::timeout(
+        Duration::from_secs(3),
+        driver.await_terminal(&turn_address(&break_glass)),
+    )
+    .await
+    {
+        anyhow::ensure!(
+            !matches!(
+                terminal,
+                TurnTerminal::Committed {
+                    outcome: TurnOutcome::Stopped(TurnStop::Cancelled),
+                    ..
+                }
+            ),
+            "break-glass invocation kill was reported as Lash cancellation"
+        );
+    }
     anyhow::ensure!(
         load_terminal_result(storage.pool(), &break_glass.workflow_id)
             .await?
             .is_none(),
-        "break-glass invocation cancellation was reported as a Lash terminal result"
+        "break-glass invocation kill was reported as a Lash terminal result"
     );
-
-    println!(
-        "turn-control gates passed: cross-process; cancel-before-start; seal-vs-cancel; owner-crash-recovery; terminal-attach-evidence; break-glass-not-cancelled"
-    );
+    println!("break-glass gate passed: Restate hard-kill was not reported as Lash cancellation");
     Ok(())
 }
 

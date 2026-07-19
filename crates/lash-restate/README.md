@@ -36,10 +36,11 @@ request data and call
 for the Restate-backed turn. Restate recovery is handler replay with the same turn id
 and request data, not a Lash-owned in-flight checkpoint reload.
 
-The adapter records Lash LLM calls, tool calls, direct completions,
-checkpoints, execution-surface syncs, and exec effects with Restate
-`ctx.run(...).name(lash:<replay_key>)`, then runs the normal Lash local
-executor inside that recorded block. Runtime sleeps use Restate durable timers.
+The adapter records atomic Lash LLM calls, tool attempts, direct completions,
+checkpoints, execution-surface syncs, and durable steps with Restate
+`ctx.run(...).name(lash:<replay_key>)`. Composite tool-batch and exec-code
+interpreters are rebuilt for every handler attempt; their nested atomic effects
+retain stable replay keys. Runtime sleeps use Restate durable timers.
 Substrate-native Restate turns do not use store-side in-flight replay rows; Lash
 only commits final session state through its turn-commit idempotency contract.
 Replaying a handler with the same turn id returns Restate-recorded effect
