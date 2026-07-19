@@ -2074,26 +2074,25 @@ impl LashRuntime {
         self.session = Some(session);
         let pending_queue_claims_for_abandon = pending_queue_claims.clone();
         let pending_turn_input_claims_for_abandon = pending_turn_input_claims.clone();
-        let finish_result = self
-            .finish_turn(
-                TurnFinishInput {
-                    turn_pipeline,
-                    assembler: assembler.with_llm_calls(llm_calls),
-                    new_messages,
-                    policy,
-                    turn_index,
-                    queued_work_claims: pending_queue_claims,
-                    turn_input_claims: pending_turn_input_claims,
-                    trace_turn_id,
-                },
-                events,
-                &finish_scoped_effect_controller,
-                &cancel_state,
-                session_execution_lease,
-                session_execution_lease_release_policy,
-                turn_control.as_ref(),
-            )
-            .await;
+        let finish_result = Box::pin(self.finish_turn(
+            TurnFinishInput {
+                turn_pipeline,
+                assembler: assembler.with_llm_calls(llm_calls),
+                new_messages,
+                policy,
+                turn_index,
+                queued_work_claims: pending_queue_claims,
+                turn_input_claims: pending_turn_input_claims,
+                trace_turn_id,
+            },
+            events,
+            &finish_scoped_effect_controller,
+            &cancel_state,
+            session_execution_lease,
+            session_execution_lease_release_policy,
+            turn_control.as_ref(),
+        ))
+        .await;
         if let Err(err) = &finish_result {
             self.abandon_queued_work_claims_after_lease_loss(
                 err,
