@@ -1593,6 +1593,8 @@ finish initial
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    include!("tests/restate_recovery.rs");
+
     #[test]
     #[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
     fn live_restate_cron_runs_trigger_and_queued_turn_end_to_end() {
@@ -1787,9 +1789,12 @@ finish initial
         trace_path: PathBuf,
     }
 
-    async fn live_workbench_restate_state(
+    async fn live_workbench_restate_state_with_provider(
         data_dir: &std::path::Path,
         restate_ingress_url: String,
+        provider: ProviderHandle,
+        session_ids: WorkbenchSessionIds,
+        active_turns: ActiveTurns,
     ) -> LiveWorkbenchRestateHarness {
         let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
@@ -1824,27 +1829,6 @@ finish initial
             Arc::clone(&lashlang_execution) as Arc<dyn TraceSink>,
             Arc::new(JsonlTraceSink::new(lashlang_execution_path)) as Arc<dyn TraceSink>,
         ])) as Arc<dyn TraceSink>;
-        let response_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let response_index_for_provider = Arc::clone(&response_index);
-        let provider = lash::testing::TestProvider::builder()
-            .kind("workbench-restate-e2e")
-            .complete(move |_| {
-                let response_index = Arc::clone(&response_index_for_provider);
-                async move {
-                    if response_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                        Ok(text_response(&format!(
-                            "<lashlang>\n{}\n</lashlang>",
-                            test_cron_trigger_source().trim()
-                        )))
-                    } else {
-                        Ok(text_response(
-                            "<lashlang>\nfinish \"cron tick observed\"\n</lashlang>",
-                        ))
-                    }
-                }
-            })
-            .build()
-            .into_handle();
         let model =
             lash::ModelSpec::from_token_limits(
                 "mock-model",
@@ -1858,7 +1842,6 @@ finish initial
             restate_ingress_url.clone(),
             Arc::clone(&process_registry),
         );
-        let session_ids = WorkbenchSessionIds::fresh();
         let restate_http = reqwest::Client::new();
         let turn_deployment = lash_restate::RestateTurnDeployment::new(
             lash_restate::RestateConnection::with_client(
@@ -1866,7 +1849,6 @@ finish initial
                 restate_http.clone(),
             ),
         );
-        let active_turns = ActiveTurns::default();
         let queued_work_driver =
             lash::runtime::QueuedWorkDriver::new(Arc::new(WorkbenchQueuedWorkSubmitter {
                 session_ids: session_ids.clone(),

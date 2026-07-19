@@ -168,14 +168,6 @@ impl ActiveTurns {
         self.persist_snapshot(&active);
     }
 
-    fn guard(&self, session_id: &str, turn_id: &str) -> ActiveTurnGuard {
-        ActiveTurnGuard {
-            active: self.clone(),
-            session_id: session_id.to_string(),
-            turn_id: turn_id.to_string(),
-        }
-    }
-
     fn for_session(&self, session_id: &str) -> Vec<lash::TurnAddress> {
         self.inner
             .lock()
@@ -209,18 +201,6 @@ impl ActiveTurns {
     }
 }
 
-struct ActiveTurnGuard {
-    active: ActiveTurns,
-    session_id: String,
-    turn_id: String,
-}
-
-impl Drop for ActiveTurnGuard {
-    fn drop(&mut self) {
-        self.active.remove(&self.session_id, &self.turn_id);
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct CommandAccepted {
     accepted: bool,
@@ -232,6 +212,8 @@ struct TurnCancelReceipt {
     durability_tier: lash::DurabilityTier,
     outcome: lash::TurnCancelOutcome,
     terminal: Option<lash::TurnTerminal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_error: Option<lash::runtime::RuntimeError>,
 }
 
 #[derive(Clone, Debug, Serialize)]

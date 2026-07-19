@@ -597,11 +597,14 @@ async fn run_user_turn(
     request: WorkbenchTurnWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
-    let _active_turn_guard = state.clear_turn_on_drop(&request.session_id, &request.turn_id);
     let turn_model = model_spec_from_selection(request.model);
     let session = state
         .core
         .session(request.session_id.clone())
+        .session_execution_owner(workbench_turn_session_execution_owner(
+            "WorkbenchTurnWorkflow",
+            &request.turn_id,
+        ))
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -621,7 +624,7 @@ async fn run_user_turn(
         .effects(controller)
         .stream_to(&ui_events)
         .await
-        .map_err(AppError::internal)?;
+        .map_err(AppError::runtime)?;
     record_turn_output(&state, output, turn_state, "restate_user_turn.completed");
     Ok(())
 }
@@ -767,10 +770,13 @@ async fn run_queued_turn(
     request: WorkbenchQueuedTurnWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
-    let _active_turn_guard = state.clear_turn_on_drop(&request.session_id, &request.turn_id);
     let session = state
         .core
         .session(request.session_id.clone())
+        .session_execution_owner(workbench_turn_session_execution_owner(
+            "WorkbenchQueuedTurnWorkflow",
+            &request.turn_id,
+        ))
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -801,7 +807,7 @@ async fn run_queued_turn(
         .effects(controller)
         .stream_to(&ui_events)
         .await
-        .map_err(AppError::internal)?
+        .map_err(AppError::runtime)?
     else {
         state.trace(
             "queued_work.restate.empty",
@@ -844,19 +850,76 @@ fn terminalize_turn_execution(
     result: Result<Result<(), AppError>, Box<dyn std::any::Any + Send>>,
 ) -> HandlerResult<()> {
     match result {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(())) => {
+            state.active_turns.remove(session_id, turn_id);
+            Ok(())
+        }
+        Ok(Err(err)) if err.retryable => {
+            state.trace(
+                "turn.restate.retrying",
+                json!({
+                    "operation": trace_name,
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "error": err.message,
+                }),
+            );
+            Err(HandlerError::from(err))
+        }
         Ok(Err(err)) => {
             let message = err.message.clone();
+            state.active_turns.remove(session_id, turn_id);
             record_turn_failure(state, session_id, turn_id, trace_name, &message);
             Err(terminal_handler_error(err))
         }
         Err(payload) => {
             let message = panic_payload_message(payload);
             let message = format!("Restate-backed turn panicked: {message}");
+            state.active_turns.remove(session_id, turn_id);
             record_turn_failure(state, session_id, turn_id, trace_name, &message);
             Err(TerminalError::new(message).into())
         }
     }
+}
+
+fn workbench_turn_session_execution_owner(
+    workflow_name: &str,
+    turn_id: &str,
+) -> lash::persistence::LeaseOwnerIdentity {
+    let owner_id = format!("{workflow_name}/{turn_id}/run");
+    lash::persistence::LeaseOwnerIdentity::local_process(
+        owner_id.clone(),
+        format!("{owner_id}/{}", process_incarnation_id()),
+        local_host_id(),
+    )
+}
+
+fn process_incarnation_id() -> &'static str {
+    static PROCESS_INCARNATION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROCESS_INCARNATION
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
+}
+
+/// Select a host id that must be unique to this process's PID namespace among
+/// all workbench instances sharing the session store. Container deployments
+/// should set `AGENT_WORKBENCH_LEASE_HOST_ID` to a pod/container identity when
+/// `/etc/machine-id` may be image-baked; hostname is the next fallback when no
+/// machine id is present.
+fn local_host_id() -> String {
+    std::env::var("AGENT_WORKBENCH_LEASE_HOST_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| read_nonempty("/etc/machine-id"))
+        .or_else(|| read_nonempty("/etc/hostname"))
+        .unwrap_or_else(|| "agent-workbench-local-host".to_string())
+}
+
+fn read_nonempty(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {

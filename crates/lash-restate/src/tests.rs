@@ -759,7 +759,10 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
                 language: "code".to_string(),
                 code: "1 + 1".to_string(),
             },
-            RestateEffectExecution::JournaledRun,
+            // The interpreter is composite: it can issue nested timers,
+            // waits, tools, and model calls. Rebuild it on handler replay and
+            // let those child effects use their own stable journal keys.
+            RestateEffectExecution::DirectLocal,
         ),
         (
             RuntimeEffectCommand::Checkpoint {
@@ -790,6 +793,7 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
 #[derive(Default)]
 struct RecordingContext {
     endpoint: Option<Endpoint>,
+    block_sleeps: AtomicBool,
     sleeps: Mutex<Vec<u64>>,
     runs: Mutex<Vec<String>>,
     started: Mutex<Vec<ProcessRegistration>>,
@@ -899,7 +903,13 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
             .lock()
             .expect("sleeps lock")
             .push(duration.as_millis() as u64);
-        Box::pin(async { Ok(()) })
+        let block = self.block_sleeps.load(Ordering::SeqCst);
+        Box::pin(async move {
+            if block {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        })
     }
 
     fn run_json_send<'run, T, Fut>(
@@ -1445,16 +1455,16 @@ fn runtime_invocation(kind: RuntimeEffectKind, effect_id: &str) -> RuntimeInvoca
 }
 
 #[tokio::test]
-async fn restate_controller_executes_non_sleep_effect_inside_run() {
+async fn restate_controller_executes_atomic_effect_inside_run() {
     let context = Arc::new(RecordingContext::default());
     let host = RestateRuntimeEffectController::new(context.clone());
     let err = host
         .execute_effect(
             RuntimeEffectEnvelope::new(
-                runtime_invocation(RuntimeEffectKind::ExecCode, "exec"),
-                RuntimeEffectCommand::ExecCode {
-                    language: "code".to_string(),
-                    code: "1 + 1".to_string(),
+                runtime_invocation(RuntimeEffectKind::DurableStep, "step"),
+                RuntimeEffectCommand::DurableStep {
+                    step_id: "step".to_string(),
+                    input: serde_json::json!({ "value": 2 }),
                 },
             ),
             RuntimeEffectLocalExecutor::unavailable(),
@@ -1465,7 +1475,7 @@ async fn restate_controller_executes_non_sleep_effect_inside_run() {
     assert_eq!(err.code, "runtime_effect_local_executor_unavailable");
     assert_eq!(
         context.runs.lock().expect("runs lock").as_slice(),
-        &["lash:session:turn:1:0:exec_code:exec".to_string()]
+        &["lash:session:turn:1:0:durable_step:step".to_string()]
     );
     assert!(context.sleeps.lock().expect("sleeps lock").is_empty());
 }
@@ -1560,6 +1570,34 @@ async fn restate_controller_routes_sleep_only_through_timer() {
         &[42]
     );
     assert!(context.runs.lock().expect("runs lock").is_empty());
+}
+
+#[tokio::test]
+async fn restate_timer_stops_when_its_fresh_attempt_is_cancelled() {
+    let context = Arc::new(RecordingContext::default());
+    context.block_sleeps.store(true, Ordering::SeqCst);
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+
+    let error = host
+        .execute_effect(
+            RuntimeEffectEnvelope::new(
+                runtime_invocation(RuntimeEffectKind::Sleep, "cancelled-sleep"),
+                RuntimeEffectCommand::Sleep {
+                    duration_ms: 60_000,
+                },
+            ),
+            RuntimeEffectLocalExecutor::sleep(cancellation),
+        )
+        .await
+        .expect_err("cancelled Restate timer must stop the interpreter attempt");
+
+    assert_eq!(error.code, "runtime_effect_sleep_cancelled");
+    assert_eq!(
+        context.sleeps.lock().expect("sleeps lock").as_slice(),
+        &[60_000]
+    );
 }
 
 #[tokio::test]

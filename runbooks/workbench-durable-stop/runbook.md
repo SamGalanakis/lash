@@ -27,7 +27,7 @@ quality. This runbook is authored for a deliberate token-spending browser run.
    is a retry of that phase, not cancellation evidence.
 2. **HTTP terminal is authoritative.** `POST /api/turn/cancel` must return a cancellation
    receipt whose terminal is committed as stopped/cancelled and whose `cancellation`
-   contains a non-empty `request_id`, `source: user_interrupt`, and the workbench reason.
+   contains a non-empty `request_id`, `origin: "user"`, and the workbench `reason`.
 3. **UI and receipt agree.** The UI renders `turn stopped · request <id>` using the same
    request id returned in `terminal.cancellation`; the transcript/API converges on the
    interrupted terminal. Any disagreement is a contract violation → Abort/RCA.

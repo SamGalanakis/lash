@@ -953,6 +953,13 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
             }),
         }
     }
+
+    pub fn into_sleep_cancellation(self) -> CancellationToken {
+        match self.state {
+            RuntimeEffectLocalExecutorState::SleepOnly { cancellation, .. } => cancellation,
+            _ => CancellationToken::new(),
+        }
+    }
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -1097,6 +1104,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                             protocol_iteration,
                             envelope.invocation,
                             &runner.event_tx,
+                            &runner.cancellation,
                         )
                         .await,
                 })

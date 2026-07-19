@@ -8,7 +8,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-#[cfg(test)]
 use std::time::Duration;
 
 use anyhow::{Context, Result as AnyhowResult, anyhow};
@@ -58,6 +57,10 @@ pub(crate) const MAIL_EVENT_ALIAS: &str = "mail";
 pub(crate) const MAIL_EVENT_EVENT: &str = "received";
 pub(crate) const MAIL_RECEIVED_SOURCE_TYPE: &str = "mail.received";
 const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(not(test))]
+const TURN_TERMINAL_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const TURN_TERMINAL_ATTACH_TIMEOUT: Duration = Duration::from_millis(250);
 
 include!("main_sections/bootstrap.rs");
 include!("main_sections/state.rs");
@@ -67,3 +70,4 @@ include!("main_sections/plugins.rs");
 include!("main_sections/prompt.rs");
 include!("main_sections/tests.rs");
 include!("main_sections/tests/process_work.rs");
+include!("main_sections/tests/turn_control.rs");

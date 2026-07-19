@@ -48,10 +48,12 @@
 //! ```
 //!
 //! Restate's Rust SDK requires `ctx.run` closures to be awaited immediately and
-//! not to call the Restate context from inside the closure. This adapter follows
-//! that rule: every Lash effect is wrapped as one immediately awaited
-//! `ctx.run(...).name(lash:<replay_key>)` call, sleep commands
-//! map to Restate's durable timer, and process commands call Restate workflow
+//! not to call the Restate context from inside the closure. This adapter wraps
+//! atomic Lash effects in immediately awaited
+//! `ctx.run(...).name(lash:<replay_key>)` calls. Composite tool-batch and
+//! exec-code interpreters are rebuilt on every handler attempt while their
+//! nested atomic effects retain stable replay keys. Sleep commands map to
+//! Restate's durable timer, and process commands call Restate workflow
 //! scheduling directly through idempotent registry/workflow operations.
 //! Substrate-native Restate turns do not use store-side in-flight replay rows;
 //! Lash only commits final session state through turn-commit idempotency.
@@ -3039,12 +3041,23 @@ where
                     unreachable!("timer execution is only selected for sleep effects");
                 };
                 let duration = Duration::from_millis(*duration_ms);
-                if let Err(err) = self.context.sleep_send(duration).await {
-                    tracing_sleep_error(&envelope.invocation, &err);
-                    return Err(RuntimeEffectControllerError::new(
-                        "restate_effect_controller",
-                        err.to_string(),
-                    ));
+                let cancellation = local_executor.into_sleep_cancellation();
+                tokio::select! {
+                    result = self.context.sleep_send(duration) => {
+                        if let Err(err) = result {
+                            tracing_sleep_error(&envelope.invocation, &err);
+                            return Err(RuntimeEffectControllerError::new(
+                                "restate_effect_controller",
+                                err.to_string(),
+                            ));
+                        }
+                    }
+                    _ = cancellation.cancelled() => {
+                        return Err(RuntimeEffectControllerError::new(
+                            "runtime_effect_sleep_cancelled",
+                            "runtime effect sleep was cancelled",
+                        ));
+                    }
                 }
                 Ok(RuntimeEffectOutcome::Sleep)
             }
@@ -3283,13 +3296,14 @@ enum RestateEffectExecution {
 fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExecution {
     match command {
         RuntimeEffectCommand::Process { .. } => RestateEffectExecution::DirectProcess,
-        RuntimeEffectCommand::ToolBatch { .. } => RestateEffectExecution::DirectLocal,
+        RuntimeEffectCommand::ToolBatch { .. } | RuntimeEffectCommand::ExecCode { .. } => {
+            RestateEffectExecution::DirectLocal
+        }
         RuntimeEffectCommand::Sleep { .. } => RestateEffectExecution::Timer,
         RuntimeEffectCommand::AwaitEvent { .. } => RestateEffectExecution::AwaitEvent,
         RuntimeEffectCommand::LlmCall { .. }
         | RuntimeEffectCommand::Direct { .. }
         | RuntimeEffectCommand::ToolAttempt { .. }
-        | RuntimeEffectCommand::ExecCode { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
         | RuntimeEffectCommand::SyncExecutionEnvironment { .. }
         | RuntimeEffectCommand::DurableStep { .. } => RestateEffectExecution::JournaledRun,

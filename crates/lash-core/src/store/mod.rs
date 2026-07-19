@@ -449,6 +449,12 @@ pub struct RuntimeCommitResult {
     pub enqueued_queue_batches: Vec<crate::QueuedWorkBatch>,
 }
 
+/// Stable identity for the holder of a session-execution lease.
+///
+/// Callers using [`Self::local_process`] must choose a `host_id` that uniquely
+/// identifies one PID namespace among all lease contenders sharing a store.
+/// Reusing an image-baked machine id across containers can make a peer inspect
+/// its own PID namespace and falsely fence a live owner as definitely dead.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LeaseOwnerIdentity {
     pub owner_id: String,
