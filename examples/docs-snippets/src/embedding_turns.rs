@@ -217,7 +217,7 @@ async fn rlm_terminal_contracts(
 
 async fn cancel_turn(core: &LashCore, session: &LashSession) -> anyhow::Result<()> {
     // docs:start:cancel-turn
-    use lash::{TurnAddress, TurnCancelSource, TurnOutcome, TurnStop};
+    use lash::{DurabilityTier, TurnAddress, TurnCancelSource, TurnOutcome, TurnStop};
 
     let turn_id = "incident-summary-42";
     let stream = session
@@ -225,8 +225,10 @@ async fn cancel_turn(core: &LashCore, session: &LashSession) -> anyhow::Result<(
         .turn_id(turn_id)
         .stream()?;
 
-    // An HTTP handler or another process can retain only these routing ids.
-    // Authenticate and authorize the caller before forwarding them to Lash.
+    // An HTTP handler can retain only these routing ids. Authenticate and
+    // authorize the caller before forwarding them to Lash. The default inline
+    // driver is same-process; cross-process cancellation requires a durable
+    // engine deployment.
     let receipt = session
         .request_turn_cancel(
             turn_id,
@@ -235,6 +237,9 @@ async fn cancel_turn(core: &LashCore, session: &LashSession) -> anyhow::Result<(
             Some("operator pressed Stop".to_string()),
         )
         .await?;
+    if receipt.durability_tier == DurabilityTier::Inline {
+        // Do not present this receipt as cross-process delivery proof.
+    }
 
     let result = stream.finish().await?;
     if matches!(result.outcome, TurnOutcome::Stopped(TurnStop::Cancelled)) {
@@ -244,7 +249,10 @@ async fn cancel_turn(core: &LashCore, session: &LashSession) -> anyhow::Result<(
     // Attachment is idempotent and returns immediately after publication.
     let terminal = core
         .turn_work_driver()
-        .await_terminal(&TurnAddress::new(session.session_id(), turn_id))
+        .await_terminal_with_timeout(
+            &TurnAddress::new(session.session_id(), turn_id),
+            std::time::Duration::from_secs(30),
+        )
         .await?;
     // docs:end:cancel-turn
     Ok(())
@@ -258,9 +266,9 @@ fn restate_turn_control(ingress_url: &str) {
     // LashDurableWaitIndexImpl on the Restate endpoint alongside turn handlers.
     let effect_host = deployment.effect_host();
 
-    // This driver can live in a different web process from the turn owner.
-    // It uses LashDurableWaitWorkflow—not the Restate Admin API—and survives
-    // web-process restarts.
+    // This durable driver can live in a different web process from the turn
+    // owner. It uses LashDurableWaitWorkflow—not the Restate Admin API—and
+    // survives web-process restarts. Inline TurnWorkDriver is same-process.
     let driver = deployment.turn_work_driver();
     let terminal_attach = deployment.turn_attach();
     // docs:end:restate-turn-control

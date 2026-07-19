@@ -167,7 +167,7 @@ let core = LashCore::rlm_builder(factory)
 //    normally go through `core.turn_work_driver().request_cancel(...)`.
 //    This process-local cancel-all remains a shutdown compatibility lever.
 for session in &amp;idle_sessions {
-    session.cancel_running_turns();
+    session.cancel_running_turns_with_source(lash::TurnCancelSource::Shutdown);
 }
 
 // 3. Park resumable sessions (flush dirty state through a fresh-lease commit,
