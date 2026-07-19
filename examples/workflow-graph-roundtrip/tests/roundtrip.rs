@@ -29,7 +29,7 @@ async fn operation_catalog_and_fragment_validation_match_the_editor_contract() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let entries: Value = response.json().await.expect("operation catalog JSON");
     let entries = entries.as_array().expect("operation catalog array");
-    assert_eq!(entries.len(), 19);
+    assert_eq!(entries.len(), 25);
     assert_eq!(
         entries[0],
         serde_json::json!({
@@ -1000,6 +1000,9 @@ async fn lists_selects_projects_and_runs_built_in_workflows() {
         vec![
             ("blank", "Blank workflow"),
             ("onboarding", "Onboarding"),
+            ("summarize-emails", "Summarize my top 5 emails"),
+            ("research-nvidia-stock", "Research NVIDIA stock"),
+            ("team-standup-digest", "Team standup digest"),
             ("traffic-lights", "Traffic Lights"),
             ("branching-approval", "Branching Approval"),
             ("counter-loop", "Counter Loop"),
@@ -1037,6 +1040,19 @@ async fn lists_selects_projects_and_runs_built_in_workflows() {
             lashlang::workflow_graph_from_source(&rendered).expect("reproject catalog source"),
             projected
         );
+
+        if matches!(
+            entry.id.as_str(),
+            "summarize-emails" | "research-nvidia-stock" | "team-standup-digest"
+        ) {
+            assert!(!document.source.contains("display.set_status"));
+            assert!(!document.source.contains("display.set_progress"));
+            assert!(!document.source.contains("gmail.summarize"));
+            assert!(!document.source.contains("research.deep"));
+        }
+        if entry.id == "summarize-emails" {
+            assert_eq!(document.source.matches("llm.query").count(), 2);
+        }
 
         if entry.id == "counter-loop" {
             assert!(!document.nodes.iter().any(|node| node.node_type == "opaque"));
@@ -1078,7 +1094,15 @@ async fn lists_selects_projects_and_runs_built_in_workflows() {
                 .iter()
                 .all(|event| { document.nodes.iter().any(|node| node.id == event.node_id) })
         );
-        assert!(!events.iter().any(|event| event.status == RunStatus::Failed));
+        assert!(
+            !events.iter().any(|event| event.status == RunStatus::Failed),
+            "{} failed: {:?}",
+            entry.id,
+            events
+                .iter()
+                .filter_map(|event| event.error.as_deref())
+                .collect::<Vec<_>>()
+        );
         assert!(
             events
                 .windows(2)

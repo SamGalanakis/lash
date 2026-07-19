@@ -6,6 +6,7 @@
   import OpaqueNode from './components/nodes/OpaqueNode.svelte';
   import DisplayPanel from './components/DisplayPanel.svelte';
   import SourceView from './components/SourceView.svelte';
+  import StepsView from './components/steps/StepsView.svelte';
   import {
     fetchWorkflow,
     fetchWorkflows,
@@ -32,6 +33,7 @@
   } from './lib/positions.js';
   import { RunController } from './lib/runStore.svelte.js';
   import { ModeController } from './lib/mode.svelte.js';
+  import { ViewController } from './lib/view.svelte.js';
   import { History } from './lib/history.svelte.js';
   import { groupOperations, operationMeta } from './lib/operations.js';
   import { NODE_KINDS } from './lib/nodeKinds.js';
@@ -42,6 +44,9 @@
 
   const mode = new ModeController();
   setContext('mode', mode);
+
+  const view = new ViewController();
+  setContext('view', view);
 
   // Operation catalog store — host-owned data from GET /operations, the single
   // source of truth for the palette. `entries` is null until it resolves;
@@ -132,6 +137,20 @@
     clearFacetDiagnostics(draftDoc);
     history.commit(draftDoc);
     rebuild();
+  }
+
+  // Insert a node at a specific position in a scope — the Steps view's rail "+".
+  // Reuses the existing add flow (append into the target group, honouring the
+  // trailing-terminal barrier), then reorders the new node to `index` so it
+  // lands exactly where the "+" sat between two cards.
+  function onInsert(target, index, operation) {
+    const id = addNodeToDoc(draftDoc, target, operation, ops.entries ?? []);
+    if (id && Number.isFinite(index)) reorderNodeInDoc(draftDoc, id, index);
+    dirty = true;
+    saveOk = null;
+    clearFacetDiagnostics(draftDoc);
+    history.commit(draftDoc);
+    rebuild(id ? new Set([id]) : null);
   }
 
   let mainMenuOpen = $state(false);
@@ -417,25 +436,45 @@
     </div>
 
     <div class="topbar-right">
-      <div class="mode-switch" role="group" aria-label="Editor mode">
+      <div class="mode-switch" role="group" aria-label="View">
         <button
           class="mode-btn"
-          class:is-active={mode.simplified}
-          onclick={() => mode.set('simplified')}
-          title="Guided editing for building workflows visually"
+          class:is-active={view.steps}
+          onclick={() => view.set('steps')}
+          title="Read the workflow as a plain-language checklist"
         >
-          Simplified
+          Steps
         </button>
         <button
           class="mode-btn"
-          class:is-active={mode.power}
-          onclick={() => mode.set('power')}
-          title="Raw Lashlang inputs, any node kind, and a live editable source pane"
+          class:is-active={view.canvas}
+          onclick={() => view.set('canvas')}
+          title="The node/graph canvas editor"
         >
-          Power
+          Canvas
         </button>
       </div>
-      <nav class="legend">
+      {#if view.canvas}
+        <div class="mode-switch" role="group" aria-label="Editor mode">
+          <button
+            class="mode-btn"
+            class:is-active={mode.simplified}
+            onclick={() => mode.set('simplified')}
+            title="Guided editing for building workflows visually"
+          >
+            Simplified
+          </button>
+          <button
+            class="mode-btn"
+            class:is-active={mode.power}
+            onclick={() => mode.set('power')}
+            title="Raw Lashlang inputs, any node kind, and a live editable source pane"
+          >
+            Power
+          </button>
+        </div>
+      {/if}
+      <nav class="legend" class:is-hidden={view.steps}>
         {#each legend as [kind, meta] (kind)}
           <span class="legend-item" style="--c:{meta.accent}">
             <span class="legend-dot"></span>{meta.label}
@@ -455,9 +494,14 @@
       {:else if loadError}
         {@const netFail = /fetch|network|failed to fetch|load failed/i.test(loadError)}
         <div class="overlay-msg error">
-          {netFail ? 'backend unreachable' : "couldn't load the editor"}<br /><span class="mono">{loadError}</span>
+          {netFail ? 'backend unreachable' : "couldn't load the editor"}<br />
+          <span class="mono">{loadError}</span>
           <button class="btn" onclick={onReload}>retry</button>
         </div>
+      {:else if view.steps}
+        {#if draftDoc}
+          <StepsView doc={draftDoc} {onCommit} {onDelete} {onInsert} />
+        {/if}
       {:else}
         {#key flowKey}
           <SvelteFlow
@@ -726,6 +770,9 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 12px;
+  }
+  .legend.is-hidden {
+    display: none;
   }
   .legend-item {
     display: inline-flex;

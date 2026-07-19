@@ -6,13 +6,12 @@ use anyhow::{Context, Result, anyhow};
 use lashlang::{
     AbilityOp, AbilityResult, ExecutionEnvironment, ExecutionHost, ExecutionHostError,
     LashlangAbilities, LashlangExecutionObservation, LashlangHostCatalog, LashlangHostEnvironment,
-    LashlangLanguageFeatures, LinkedModule, ResourceOperation, ResourceOperationBatchResult,
-    ResourceOperationResult, Sleep, State, Value, WorkflowGraph, compile_linked_process, from_json,
-    node_id_for_execution_site, parse,
+    LashlangLanguageFeatures, LinkedModule, OutputFromInputBinding, ResourceOperation,
+    ResourceOperationBatchResult, ResourceOperationBinding, ResourceOperationResult, Sleep, State,
+    Value, WorkflowGraph, compile_linked_process, from_json, node_id_for_execution_site, parse,
 };
 use tokio::sync::mpsc;
 
-use crate::display::apply_tool;
 use crate::{DisplayDelta, DisplayState, RunEvent, RunStatus};
 
 #[derive(Clone, Copy, Debug)]
@@ -113,6 +112,30 @@ pub(crate) fn host_environment() -> LashlangHostEnvironment {
             output_ty,
         );
     }
+    for operation in crate::mock_tools::OPERATIONS {
+        let input_ty = lashlang::json_schema_to_type_expr(&operation.input_schema());
+        let output_ty = lashlang::json_schema_to_type_expr(&operation.output_schema());
+        let output_from_input =
+            operation
+                .output_from_input()
+                .map(|(input_field, default_schema)| OutputFromInputBinding {
+                    input_field: input_field.to_string(),
+                    default_schema: default_schema
+                        .as_ref()
+                        .map(lashlang::json_schema_to_type_expr),
+                });
+        catalog.add_module_operation_binding(
+            [operation.module],
+            operation.resource_type,
+            operation.operation,
+            operation.host_operation,
+            ResourceOperationBinding {
+                input_ty,
+                output_ty,
+                output_from_input,
+            },
+        );
+    }
     LashlangHostEnvironment::new(catalog, LashlangAbilities::all())
         .with_language_features(LashlangLanguageFeatures::default().with_label_annotations())
 }
@@ -184,8 +207,16 @@ impl RunHost {
     }
 
     fn apply_operation(&self, operation: ResourceOperation) -> Result<Value, ExecutionHostError> {
+        if crate::mock_tools::is_operation(&operation.receiver, &operation.operation) {
+            return crate::mock_tools::apply_tool(
+                &operation.receiver,
+                &operation.operation,
+                &operation.args,
+            );
+        }
         let mut display = self.display.lock().expect("display lock");
-        let (value, delta) = apply_tool(&mut display, &operation.operation, &operation.args)?;
+        let (value, delta) =
+            crate::display::apply_tool(&mut display, &operation.operation, &operation.args)?;
         self.pending_delta
             .lock()
             .expect("pending delta lock")

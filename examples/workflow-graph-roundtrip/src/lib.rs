@@ -4,6 +4,7 @@ mod catalog;
 mod contract;
 mod display;
 mod graph;
+mod mock_tools;
 mod operations;
 mod runtime;
 
