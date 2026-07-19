@@ -4523,6 +4523,10 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
             && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("WORKFLOW")
     }));
     assert!(wait_workflow_discovery.handlers.iter().any(|handler| {
+        handler.name.to_string() == "observe"
+            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
+    }));
+    assert!(wait_workflow_discovery.handlers.iter().any(|handler| {
         handler.name.to_string() == "resolve"
             && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
     }));

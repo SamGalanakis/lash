@@ -582,6 +582,31 @@ impl RestateIngressClient {
         decode_response("Restate workflow call", &url, response).await
     }
 
+    /// Invoke a no-argument workflow handler and decode its JSON response.
+    pub async fn call_workflow_empty<R>(
+        &self,
+        workflow: &str,
+        workflow_key: &str,
+        handler: &str,
+    ) -> Result<R, RestateHttpError>
+    where
+        R: DeserializeOwned,
+    {
+        let workflow_key = restate_path_component(workflow_key);
+        let path = format!("{workflow}/{workflow_key}/{handler}");
+        let url = format_restate_url(self.connection.ingress_url(), &path);
+        let response = send_request(
+            &self.connection,
+            "Restate workflow call",
+            HttpRequest::post(&url, ""),
+        )
+        .await?;
+        if !response.is_success() {
+            return Err(status_error("Restate workflow call", url, response).await);
+        }
+        decode_response("Restate workflow call", &url, response).await
+    }
+
     pub async fn call_object_json<T, R>(
         &self,
         object: &str,
@@ -1191,12 +1216,21 @@ impl AwaitEventResolver for RestateEffectHostController {
         };
         let request = restate_durable_wait_request(key, deadline, &lash_core::SystemClock);
         let workflow_key = request.address.workflow_key.clone();
-        tokio::select! {
-            result = ingress.ingress.call_workflow_json::<_, Resolution>(
+        ingress
+            .ingress
+            .send_workflow_json(
                 "LashDurableWaitWorkflow",
                 &workflow_key,
                 "await_resolution",
                 &request,
+            )
+            .await
+            .map_err(|err| RuntimeError::new("restate_await_event_start", err.to_string()))?;
+        tokio::select! {
+            result = ingress.ingress.call_workflow_empty::<Resolution>(
+                "LashDurableWaitWorkflow",
+                &workflow_key,
+                "observe",
             ) => result.map_err(|err| {
                 RuntimeError::new("restate_await_event_await", err.to_string())
             }),
@@ -2030,6 +2064,9 @@ pub trait LashDurableWaitWorkflow {
     ) -> HandlerResult<Json<Resolution>>;
 
     #[shared]
+    async fn observe() -> HandlerResult<Json<Resolution>>;
+
+    #[shared]
     async fn resolve(
         request: Json<RestateDurableWaitResolveRequest>,
     ) -> HandlerResult<Json<ResolveOutcome>>;
@@ -2110,6 +2147,12 @@ impl LashDurableWaitWorkflow for LashDurableWaitWorkflowImpl {
             );
             let Json(()) = settle.call().await?;
         }
+        Ok(Json(resolution))
+    }
+
+    async fn observe(&self, ctx: SharedWorkflowContext<'_>) -> HandlerResult<Json<Resolution>> {
+        let payload = ctx.promise::<String>(DURABLE_WAIT_PROMISE_KEY).await?;
+        let resolution = serde_json::from_str(&payload).map_err(TerminalError::from_error)?;
         Ok(Json(resolution))
     }
 
@@ -2325,17 +2368,21 @@ impl TurnAttach for RestateTurnAttach {
                 ),
             ));
         }
-        let resolution = self
-            .ingress
-            .call_workflow_json::<_, Resolution>(
+        self.ingress
+            .send_workflow_json(
                 "LashDurableWaitWorkflow",
                 &workflow_key,
                 "await_resolution",
                 &RestateDurableWaitAwaitRequest {
-                    address: durable_address,
+                    address: durable_address.clone(),
                     timeout_ms: None,
                 },
             )
+            .await
+            .map_err(|err| RuntimeError::new("restate_turn_terminal_attach", err.to_string()))?;
+        let resolution = self
+            .ingress
+            .call_workflow_empty::<Resolution>("LashDurableWaitWorkflow", &workflow_key, "observe")
             .await
             .map_err(|err| RuntimeError::new("restate_turn_terminal_attach", err.to_string()))?;
         match resolution {
@@ -2624,7 +2671,7 @@ macro_rules! impl_restate_controller_context {
                 {
                     Box::pin(async move {
                         let workflow_key = request.address.workflow_key.clone();
-                        let await_request: restate_sdk::context::Request<
+                        let start: restate_sdk::context::Request<
                             '_,
                             Json<RestateDurableWaitAwaitRequest>,
                             Json<Resolution>,
@@ -2637,8 +2684,19 @@ macro_rules! impl_restate_controller_context {
                             ),
                             Json(request.clone()),
                         );
+                        let _ = start.send().invocation_id().await?;
+                        let observe: restate_sdk::context::Request<'_, (), Json<Resolution>> =
+                            ContextClient::request(
+                                self,
+                                RequestTarget::workflow(
+                                    "LashDurableWaitWorkflow",
+                                    workflow_key.clone(),
+                                    "observe",
+                                ),
+                                (),
+                            );
                         tokio::select! {
-                            result = await_request.call() => {
+                            result = observe.call() => {
                                 let Json(resolution) = result?;
                                 Ok(resolution)
                             }

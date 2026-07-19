@@ -1932,6 +1932,7 @@ impl LashRuntime {
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let protocol_run_offset = 0;
+        let cancellation_messages = prepared.messages.clone();
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
         let run_result = Box::pin(run_turn_effect_loop(
             &mut driver,
@@ -1951,6 +1952,45 @@ impl LashRuntime {
         .await;
         let (new_messages, _new_protocol_iteration) = match run_result {
             Ok(result) => result,
+            Err(_err) if cancel.is_cancelled() && turn_control.evidence().is_some() => {
+                self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
+                let RuntimeTurnDriver {
+                    session,
+                    policy,
+                    turn_pipeline,
+                    pending_queue_claims,
+                    pending_turn_input_claims,
+                    ..
+                } = driver;
+                self.session = Some(session);
+                let outcome_event = SessionStreamEvent::TurnOutcome {
+                    outcome: TurnOutcome::Stopped(TurnStop::Cancelled),
+                };
+                assembler.push(&outcome_event);
+                emit_session_event_to_sink(events, outcome_event).await;
+                assembler.push(&SessionStreamEvent::Done);
+                emit_session_event_to_sink(events, SessionStreamEvent::Done).await;
+                return self
+                    .finish_turn(
+                        TurnFinishInput {
+                            turn_pipeline,
+                            assembler,
+                            new_messages: cancellation_messages,
+                            policy,
+                            turn_index,
+                            queued_work_claims: pending_queue_claims,
+                            turn_input_claims: pending_turn_input_claims,
+                            trace_turn_id,
+                        },
+                        events,
+                        &finish_scoped_effect_controller,
+                        &cancel,
+                        session_execution_lease,
+                        session_execution_lease_release_policy,
+                        turn_control.as_ref(),
+                    )
+                    .await;
+            }
             Err(err) => {
                 self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
                 let RuntimeTurnDriver {
