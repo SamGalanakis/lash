@@ -387,6 +387,7 @@ impl LashRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn finish_turn(
         &mut self,
         finish: TurnFinishInput,
@@ -2153,6 +2154,7 @@ where
     run_result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_turn_to_completion_with_cancel<F, C>(
     run_future: F,
     cancel_future: C,
