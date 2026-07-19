@@ -348,3 +348,91 @@ async fn cross_backend_active_turn_cancel_then_turn_agrees() {
     );
     assert_eq!(d_mem, d_sq, "variant D per-turn output diverged");
 }
+
+#[derive(Debug, PartialEq, Eq)]
+struct FirstPartyCancelObs {
+    cancelled: bool,
+    request_id: Option<String>,
+    duplicate_preserved_original: bool,
+    next_turn_succeeded: bool,
+}
+
+async fn drive_first_party_cancel_before_start(
+    core: &LashCore,
+    session_id: &str,
+) -> FirstPartyCancelObs {
+    let turn_id = "cancelled-turn";
+    let address = lash::TurnAddress::new(session_id, turn_id);
+    let driver = core.turn_work_driver();
+    let first = driver
+        .request_cancel(lash::TurnCancelRequest::new(
+            address.clone(),
+            "cross-backend-cancel",
+            lash::TurnCancelSource::UserInterrupt,
+        ))
+        .await
+        .expect("cancel before start");
+    assert!(matches!(first, lash::TurnCancelOutcome::Requested(_)));
+
+    let duplicate = driver
+        .request_cancel(lash::TurnCancelRequest::new(
+            address,
+            "cross-backend-duplicate",
+            lash::TurnCancelSource::Host,
+        ))
+        .await
+        .expect("duplicate cancel");
+    let duplicate_preserved_original = matches!(
+        duplicate,
+        lash::TurnCancelOutcome::AlreadyRequested(lash::TurnCancellationEvidence {
+            ref request_id,
+            ..
+        }) if request_id == "cross-backend-cancel"
+    );
+
+    let session = core
+        .session(session_id)
+        .open_fresh()
+        .await
+        .expect("open session");
+    let cancelled = session
+        .turn(TurnInput::text("this turn is already cancelled"))
+        .turn_id(turn_id)
+        .run()
+        .await
+        .expect("cancelled turn commits");
+    let next = session
+        .turn(TurnInput::text("future turn remains isolated"))
+        .turn_id("future-turn")
+        .run()
+        .await
+        .expect("future turn");
+
+    FirstPartyCancelObs {
+        cancelled: matches!(
+            cancelled.result.outcome,
+            lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
+        ),
+        request_id: cancelled
+            .result
+            .cancellation
+            .map(|evidence| evidence.request_id),
+        duplicate_preserved_original,
+        next_turn_succeeded: next.result.is_success(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cross_backend_first_party_turn_cancel_agrees() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (mem_core, _) = build_in_memory(2).await;
+    let memory = drive_first_party_cancel_before_start(&mem_core, "turn-cancel-memory").await;
+    let (sqlite_core, _) = build_sqlite(&tmp.path().join("turn-cancel-sqlite"), 2).await;
+    let sqlite = drive_first_party_cancel_before_start(&sqlite_core, "turn-cancel-sqlite").await;
+
+    assert_eq!(memory, sqlite, "first-party turn cancellation diverged");
+    assert_eq!(memory.request_id.as_deref(), Some("cross-backend-cancel"));
+    assert!(memory.cancelled);
+    assert!(memory.duplicate_preserved_original);
+    assert!(memory.next_turn_succeeded);
+}
