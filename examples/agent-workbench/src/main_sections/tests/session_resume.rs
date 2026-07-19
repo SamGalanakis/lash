@@ -205,24 +205,25 @@
         .expect("commit resumed assistant transcript");
         resumed_session.close().await.expect("close resumed session");
 
-        let requests = resumed_requests
-            .lock()
-            .expect("resumed provider request lock");
-        assert_eq!(requests.len(), 1);
-        for marker in [
-            "resume question one",
-            "resume answer one",
-            "resume question two",
-            "resume answer two",
-            "resume question three",
-        ] {
-            assert!(
-                requests[0].contains(marker),
-                "resumed provider request omitted committed history marker {marker:?}: {}",
-                requests[0]
-            );
+        {
+            let requests = resumed_requests
+                .lock()
+                .expect("resumed provider request lock");
+            assert_eq!(requests.len(), 1);
+            for marker in [
+                "resume question one",
+                "resume answer one",
+                "resume question two",
+                "resume answer two",
+                "resume question three",
+            ] {
+                assert!(
+                    requests[0].contains(marker),
+                    "resumed provider request omitted committed history marker {marker:?}: {}",
+                    requests[0]
+                );
+            }
         }
-        drop(requests);
 
         let Json(after) = app_state(State(state.clone()))
             .await

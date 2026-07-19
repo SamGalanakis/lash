@@ -25,6 +25,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     fn messages_snapshot(&self) -> Vec<ChatMessage> {
         self.messages.lock().expect("messages lock").clone()
     }

@@ -20,6 +20,233 @@ fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle() {
     });
 }
 
+#[test]
+#[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
+fn live_restate_processes_outlive_session_delete_and_cancel_globally() {
+    run_async_test_on_stack_budget_multi_thread("workbench-process-lifecycle-e2e", 4, || {
+        live_restate_processes_outlive_session_delete_and_cancel_globally_inner()
+    });
+}
+
+async fn live_restate_processes_outlive_session_delete_and_cancel_globally_inner() {
+    let ingress_url = std::env::var("RESTATE_INGRESS_URL")
+        .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");
+    let admin_url = std::env::var("RESTATE_ADMIN_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
+    let endpoint_bind: SocketAddr = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:19081".to_string())
+        .parse()
+        .expect("valid workbench E2E endpoint bind");
+    let endpoint_url = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_URL")
+        .unwrap_or_else(|_| format!("http://{endpoint_bind}"));
+    let data_dir = std::env::temp_dir().join(format!(
+        "agent-workbench-process-lifecycle-e2e-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&data_dir).expect("create process lifecycle E2E data dir");
+
+    let provider = lash::testing::TestProvider::builder()
+        .kind("workbench-process-lifecycle-e2e")
+        .complete(|_| async {
+            Ok(text_response(
+                r#"<lashlang>
+process survivor() {
+  sleep for "8s"
+  finish "survived session deletion"
+}
+process cancellable() {
+  sleep for "60s"
+  finish "cancellation failed"
+}
+survivor_handle = start survivor()
+cancellable_handle = start cancellable()
+finish "started lifecycle gates"
+</lashlang>"#,
+            ))
+        })
+        .build()
+        .into_handle();
+    let harness = live_workbench_restate_state_with_provider(
+        &data_dir,
+        ingress_url,
+        provider,
+        WorkbenchSessionIds::fresh(),
+        ActiveTurns::default(),
+    )
+    .await;
+    restate::spawn_restate_endpoint(
+        endpoint_bind,
+        harness.state.clone(),
+        harness.process_deployment,
+        harness.process_worker,
+    );
+    wait_for_endpoint_socket(endpoint_bind).await;
+    register_restate_deployment(&admin_url, &endpoint_url).await;
+
+    let deleted_session_id = harness.state.current_session_id();
+    let turn_invocation_id =
+        run_workbench_turn_via_restate(&harness.state, "start process lifecycle gates").await;
+    wait_for_restate_invocation_success(
+        &harness.state,
+        &turn_invocation_id,
+        Duration::from_secs(30),
+    )
+    .await;
+    let (survivor_id, cancellable_id) = wait_for_named_running_processes(
+        &harness.state,
+        &["survivor", "cancellable"],
+        Duration::from_secs(20),
+    )
+    .await;
+
+    let delete_invocation_id = restate::submit_session_delete(
+        &harness.state,
+        restate::WorkbenchSessionDeleteWorkflowRequest {
+            operation_id: format!("workbench-delete-{}", uuid::Uuid::new_v4()),
+            session_id: deleted_session_id.clone(),
+        },
+    )
+    .await
+    .expect("submit session deletion while processes run");
+    wait_for_restate_invocation_success(
+        &harness.state,
+        &delete_invocation_id,
+        Duration::from_secs(20),
+    )
+    .await;
+
+    let Json(work_after_delete) = list_work(State(harness.state.clone()))
+        .await
+        .expect("list runtime work after session deletion");
+    for process_id in [&survivor_id, &cancellable_id] {
+        assert!(
+            work_after_delete
+                .iter()
+                .any(|item| item.process.process_id == *process_id && !item.process.terminal),
+            "work rail lost live process {process_id} after deleting {deleted_session_id}: {work_after_delete:#?}"
+        );
+    }
+
+    let Json(cancel_receipt) = cancel_work(
+        AxumPath(cancellable_id.clone()),
+        State(harness.state.clone()),
+    )
+    .await
+    .expect("cancel orphaned process through work API");
+    assert!(cancel_receipt.accepted);
+    wait_for_process_event(
+        &harness.state,
+        &cancellable_id,
+        "process.cancel_requested",
+        Duration::from_secs(20),
+    )
+    .await;
+    let cancelled = tokio::time::timeout(
+        Duration::from_secs(20),
+        harness.state.process_work_driver.await_terminal(&cancellable_id),
+    )
+    .await
+    .expect("cancelled process terminal timeout")
+    .expect("await cancelled process");
+    assert!(
+        matches!(cancelled, lash::process::ProcessAwaitOutput::Cancelled { .. }),
+        "process cancellation settled with the wrong outcome: {cancelled:#?}"
+    );
+
+    let survived = tokio::time::timeout(
+        Duration::from_secs(20),
+        harness.state.process_work_driver.await_terminal(&survivor_id),
+    )
+    .await
+    .expect("surviving process terminal timeout")
+    .expect("await surviving process");
+    assert!(
+        matches!(
+            &survived,
+            lash::process::ProcessAwaitOutput::Success { value, .. }
+                if value == &json!("survived session deletion")
+        ),
+        "session-independent process did not complete successfully: {survived:#?}"
+    );
+    let Json(terminal_work) = list_work(State(harness.state.clone()))
+        .await
+        .expect("list terminal runtime work");
+    assert!(terminal_work.iter().any(|item| {
+        item.process.process_id == survivor_id
+            && item.process.terminal
+            && item.process.lifecycle == lash::process::ProcessLifecycleStatus::Completed
+    }));
+    assert!(terminal_work.iter().any(|item| {
+        item.process.process_id == cancellable_id
+            && item.process.terminal
+            && item.process.lifecycle == lash::process::ProcessLifecycleStatus::Cancelled
+            && item
+                .events
+                .iter()
+                .any(|event| event.event_type == "process.cancel_requested")
+    }));
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+async fn wait_for_named_running_processes(
+    state: &AppState,
+    labels: &[&str],
+    timeout: Duration,
+) -> (String, String) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let processes = state
+            .process_observer
+            .list(&lash::process::ProcessListFilter {
+                status: lash::process::ProcessStatusFilter::Running,
+                ..lash::process::ProcessListFilter::default()
+            })
+            .await
+            .expect("list running processes");
+        let named = labels
+            .iter()
+            .filter_map(|label| {
+                processes
+                    .iter()
+                    .find(|process| process.identity.label.as_deref() == Some(*label))
+                    .map(|process| process.process_id.clone())
+            })
+            .collect::<Vec<_>>();
+        if named.len() == labels.len() {
+            return (named[0].clone(), named[1].clone());
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for named running processes {labels:?}; observed={processes:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_process_event(
+    state: &AppState,
+    process_id: &str,
+    event_type: &str,
+    timeout: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let events = state
+            .process_observer
+            .events_after(process_id, 0)
+            .await
+            .expect("read process events");
+        if events.iter().any(|event| event.event_type == event_type) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {event_type} on {process_id}; events={events:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_inner() {
     let ingress_url = std::env::var("RESTATE_INGRESS_URL")
         .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");
@@ -40,6 +267,8 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
     let requests = Arc::new(Mutex::new(Vec::<String>::new()));
     let requests_for_provider = Arc::clone(&requests);
     let (provider_call_tx, mut provider_call_rx) = mpsc::unbounded_channel::<usize>();
+    let release_first_provider_call = Arc::new(tokio::sync::Notify::new());
+    let release_first_provider_call_for_provider = Arc::clone(&release_first_provider_call);
     let response_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let response_index_for_provider = Arc::clone(&response_index);
     let provider = lash::testing::TestProvider::builder()
@@ -47,6 +276,7 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
         .complete(move |request| {
             let requests = Arc::clone(&requests_for_provider);
             let provider_call_tx = provider_call_tx.clone();
+            let release_first_provider_call = Arc::clone(&release_first_provider_call_for_provider);
             let response_index = Arc::clone(&response_index_for_provider);
             async move {
                 let serialized = serde_json::to_string(&request).expect("serialize provider request");
@@ -56,6 +286,9 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
                     .push(serialized);
                 let call_index = response_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let _ = provider_call_tx.send(call_index);
+                if call_index == 0 {
+                    release_first_provider_call.notified().await;
+                }
                 Ok(match call_index {
                     0 => text_response("<lashlang>\nsleep for \"2s\"\n</lashlang>"),
                     1 => text_response("<lashlang>\nfinish \"current turn settled\"\n</lashlang>"),
@@ -121,6 +354,7 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
         queued.ingress,
         lash::persistence::TurnInputIngress::NextTurn
     ));
+    release_first_provider_call.notify_one();
 
     for expected in [1, 2] {
         assert_eq!(
@@ -145,13 +379,37 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
 
     let captured = requests.lock().expect("provider request lock").clone();
     assert_eq!(captured.len(), 3, "unexpected provider request sequence");
+    let completed_in_running_turn = std::fs::read_to_string(&harness.trace_path)
+        .expect("read turn ingress trace")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| {
+            record.get("name").and_then(Value::as_str) == Some("turn_input.completed")
+                && record.pointer("/context/turn_id").and_then(Value::as_str)
+                    == injected.ingress.active_turn_id()
+                && record
+                    .pointer("/payload/claims")
+                    .and_then(Value::as_array)
+                    .is_some_and(|claims| {
+                        claims.iter().any(|claim| {
+                            claim
+                                .get("input_ids")
+                                .and_then(Value::as_array)
+                                .is_some_and(|ids| {
+                                    ids.iter().any(|id| id.as_str() == Some(&injected.input_id))
+                                })
+                        })
+                    })
+        })
+        .count();
     assert_eq!(
-        captured
-            .iter()
-            .map(|request| request.matches("active injection marker").count())
-            .sum::<usize>(),
-        1,
-        "active-turn injection must reach provider context exactly once: {captured:#?}"
+        completed_in_running_turn, 1,
+        "active-turn input must complete exactly once under the in-flight turn id; trace={} ",
+        trace_tail(&harness.trace_path)
+    );
+    assert!(
+        !captured[2].contains("active injection marker"),
+        "transient active-turn input leaked into the queued full turn"
     );
     assert!(!captured[0].contains("queued next marker"));
     assert!(!captured[1].contains("queued next marker"));

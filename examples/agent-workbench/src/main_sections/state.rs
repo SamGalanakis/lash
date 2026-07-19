@@ -230,6 +230,13 @@ struct CommandAccepted {
     accepted: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct ProcessCancelAccepted {
+    accepted: bool,
+    operation_id: String,
+    process_id: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct TurnCancelReceipt {
     address: lash::TurnAddress,
@@ -288,6 +295,9 @@ impl lash::runtime::QueuedWorkRunHandle for WorkbenchQueuedWorkSubmitter {
         let session_id = request
             .session_id
             .unwrap_or_else(|| self.session_ids.current());
+        if !self.active_turns.for_session(&session_id).is_empty() {
+            return Ok(());
+        }
         if !self.has_queued_work(&session_id).await? {
             return Ok(());
         }
@@ -328,7 +338,18 @@ impl WorkbenchQueuedWorkSubmitter {
             .list_queued_work(session_id)
             .await
             .map_err(|err| PluginError::Session(err.to_string()))?;
-        Ok(!queued.is_empty())
+        let next_turn_inputs = store
+            .list_pending_turn_inputs(session_id)
+            .await
+            .map_err(|err| PluginError::Session(err.to_string()))?
+            .into_iter()
+            .any(|input| {
+                matches!(
+                    input.ingress,
+                    lash::persistence::TurnInputIngress::NextTurn
+                )
+            });
+        Ok(!queued.is_empty() || next_turn_inputs)
     }
 }
 

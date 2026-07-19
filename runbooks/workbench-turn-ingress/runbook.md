@@ -27,9 +27,10 @@ structure rather than exact assistant wording.
    `/api/state.pending_turn_inputs` and the session SQLite `lash_pending_turn_inputs` row.
    A claim may make a row disappear from the pending API quickly; in that case use the
    SQLite row plus trace, never timing alone.
-4. **Injection is transient and exactly once.** Provider-request evidence or trace must
-   contain the injected marker exactly once in the running turn and never in committed
-   transcript history.
+4. **Injection is transient and exactly once.** Provider-request evidence may show the
+   injected marker directly. Otherwise require exactly one `turn_input.completed` trace
+   claim for the receipt's input id under the original in-flight turn id. It must never
+   appear in committed transcript history or the later queued turn.
 5. **Queued means a full committed turn.** The queued marker must be absent from provider
    requests until the first turn settles, then appear in its own provider request and in
    committed session history. `/api/state` and the rendered transcript must show that
@@ -46,11 +47,13 @@ structure rather than exact assistant wording.
   pill, and Stop control.
 - HTTP truth: `GET /api/state`, `POST /api/turn`, and `POST /api/turn/input` with
   `{ "text": "...", "ingress": "active_turn" | "next_turn" }`.
-- Disk truth: `<data-dir>/lash-sessions/*.db`, table `lash_pending_turn_inputs`, and
-  `<data-dir>/trace.jsonl` events named `agent_workbench.turn_input.enqueued`.
+- Disk truth: `<data-dir>/lash-sessions/*.db`, table `pending_turn_inputs`, and
+  `<data-dir>/trace.jsonl` events named `agent_workbench.turn_input.enqueued` and
+  `turn_input.completed`.
 - The deterministic companion gate is `just agent-workbench-restate-e2e`. It proves the
-  injection reaches provider context once, the queued draft dispatches only after settle,
-  and runs Lash core's ADR 0029 session-lease-generation fencing test.
+  active input id completes exactly once under the in-flight turn, the queued draft
+  dispatches only after settle, and runs Lash core's ADR 0029 session-lease-generation
+  fencing test.
 
 ## Phase 0 — Boot and pre-flight
 
@@ -103,8 +106,8 @@ Save `03-queue-receipt.json`, `03-queue-store.json`, and screenshot `03-queued.p
 Poll until the initial turn completes and the queued turn starts and completes; never use
 a fixed delay. Gate in this order:
 
-1. provider-request evidence or trace places the injected marker in the initial turn
-   exactly once;
+1. provider-request evidence places the injected marker in the initial turn, or exactly
+   one `turn_input.completed` trace claim places its input id under the initial turn id;
 2. that marker is absent from the committed transcript in `/api/state` and the session
    store;
 3. the queued marker is absent from every provider request before the initial terminal;
@@ -129,7 +132,7 @@ container are gone.
 | Running window | one active address; both ingress controls visible | | `01-running.png`, `/api/state` |
 | Inject intent | UI label and receipt agree on exact active turn + `after_work` | | `02-injected.png`, receipt/store JSON |
 | Queue intent | UI label and receipt agree on `next_turn` | | `03-queued.png`, receipt/store JSON |
-| Exactly-once injection | marker occurs once in initial provider context and never committed history | | `04-provider-order.json`, session store |
+| Exactly-once injection | one initial-turn provider delivery or one matching completion claim; never committed/later | | `04-provider-order.json`, session store |
 | Post-settle dispatch | queue marker first appears after initial terminal in its own turn | | provider/trace ordering |
 | Transcript fidelity | queued user/assistant turn agrees across UI, `/api/state`, and store | | `04-two-turns-settled.png`, history JSON |
 | Claim settlement | both durable input ids settle with no duplicate or stranded row | | SQLite evidence |

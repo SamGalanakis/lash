@@ -64,6 +64,12 @@ pub(crate) struct WorkbenchSessionDeleteWorkflowRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct WorkbenchProcessCancelWorkflowRequest {
+    pub operation_id: String,
+    pub process_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct WorkbenchMailReceivedWorkflowRequest {
     pub operation_id: String,
     pub session_id: String,
@@ -299,6 +305,35 @@ impl WorkbenchSessionDeleteWorkflow for WorkbenchSessionDeleteWorkflowImpl {
     }
 }
 
+#[restate_sdk::workflow]
+pub(crate) trait WorkbenchProcessCancelWorkflow {
+    async fn run(request: Json<WorkbenchProcessCancelWorkflowRequest>) -> HandlerResult<Json<()>>;
+}
+
+pub(crate) struct WorkbenchProcessCancelWorkflowImpl {
+    state: AppState,
+}
+
+impl WorkbenchProcessCancelWorkflowImpl {
+    pub(crate) fn new(state: AppState) -> Self {
+        Self { state }
+    }
+}
+
+impl WorkbenchProcessCancelWorkflow for WorkbenchProcessCancelWorkflowImpl {
+    async fn run(
+        &self,
+        ctx: WorkflowContext<'_>,
+        Json(request): Json<WorkbenchProcessCancelWorkflowRequest>,
+    ) -> HandlerResult<Json<()>> {
+        let controller = lash_restate::RestateRuntimeEffectController::new(ctx);
+        run_process_cancel(self.state.clone(), request, &controller)
+            .await
+            .map_err(terminal_handler_error)?;
+        Ok(Json(()))
+    }
+}
+
 #[restate_sdk::object]
 trait WorkbenchCronJob {
     async fn upsert(request: Json<WorkbenchCronRequest>) -> HandlerResult<Json<WorkbenchCronInfo>>;
@@ -449,6 +484,7 @@ pub(crate) fn spawn_restate_endpoint(
         .bind(WorkbenchButtonTriggerWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchMailReceivedWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchSessionDeleteWorkflowImpl::new(state.clone()).serve())
+        .bind(WorkbenchProcessCancelWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchCronJobImpl::new(state).serve())
         .bind(process_deployment.workflow(process_worker).serve())
         .bind(LashDurableWaitWorkflowImpl.serve())
@@ -534,6 +570,20 @@ pub(crate) async fn submit_session_delete(
         &state.restate_http,
         &state.restate_ingress_url,
         "WorkbenchSessionDeleteWorkflow",
+        &request.operation_id,
+        &request,
+    )
+    .await
+}
+
+pub(crate) async fn submit_process_cancel(
+    state: &AppState,
+    request: WorkbenchProcessCancelWorkflowRequest,
+) -> Result<lash_restate::RestateInvocationId, AppError> {
+    submit_restate_workflow_json(
+        &state.restate_http,
+        &state.restate_ingress_url,
+        "WorkbenchProcessCancelWorkflow",
         &request.operation_id,
         &request,
     )
@@ -758,7 +808,7 @@ async fn run_session_delete(
             &request.session_id,
         ))
         .map_err(AppError::internal)?;
-    state
+    let report = state
         .core
         .delete_session(&request.session_id, scoped_effect_controller)
         .await
@@ -767,6 +817,34 @@ async fn run_session_delete(
         "reset.restate.session_deleted",
         json!({
             "session_id": request.session_id,
+            "report": report,
+        }),
+    );
+    Ok(())
+}
+
+async fn run_process_cancel(
+    state: AppState,
+    request: WorkbenchProcessCancelWorkflowRequest,
+    controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+) -> Result<(), AppError> {
+    let scoped_effect_controller = controller
+        .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
+            "workbench-process-cancel:{}",
+            request.process_id
+        )))
+        .map_err(AppError::internal)?;
+    let summary = state
+        .core
+        .processes()
+        .cancel(&request.process_id, scoped_effect_controller)
+        .await
+        .map_err(AppError::internal)?;
+    state.trace(
+        "process.restate.cancel_requested",
+        json!({
+            "process_id": request.process_id,
+            "summary": summary,
         }),
     );
     Ok(())

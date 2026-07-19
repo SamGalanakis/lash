@@ -1396,7 +1396,7 @@ finish initial
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
-    async fn spawn_restate_ingress_capture() -> (String, mpsc::UnboundedReceiver<Value>) {
+    pub(super) async fn spawn_restate_ingress_capture() -> (String, mpsc::UnboundedReceiver<Value>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

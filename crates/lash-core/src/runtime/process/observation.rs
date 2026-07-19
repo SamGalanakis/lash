@@ -149,6 +149,32 @@ impl ProcessWorkObserver {
         })
     }
 
+    /// Snapshot every process matching `filter`, including the bounded event
+    /// tail used by host work rails. Unlike [`Self::snapshot_for_session`],
+    /// this is the runtime-wide observation surface: it does not depend on a
+    /// session handle grant and therefore continues to expose processes whose
+    /// originating session has been deleted.
+    pub async fn snapshot_all(
+        &self,
+        filter: &ProcessListFilter,
+    ) -> Result<Vec<ObservedWorkItem>, PluginError> {
+        let records = self.registry.list_processes(filter).await?;
+        let mut items = Vec::with_capacity(records.len());
+        for record in records {
+            let descriptor = descriptor_from_process_identity(&record.identity);
+            items.push(self.work_item_from_record(record, descriptor).await?);
+        }
+        items.sort_by(|left, right| {
+            right
+                .process
+                .updated_at_ms
+                .cmp(&left.process.updated_at_ms)
+                .then_with(|| right.process.created_at_ms.cmp(&left.process.created_at_ms))
+                .then_with(|| left.process.process_id.cmp(&right.process.process_id))
+        });
+        Ok(items)
+    }
+
     async fn work_item_from_record(
         &self,
         record: ProcessRecord,
@@ -454,6 +480,43 @@ mod tests {
             "process.cancel_requested"
         );
         assert!(snapshot.items[0].events[0].occurred_at_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_snapshot_keeps_orphaned_processes_after_session_deletion() {
+        let registry =
+            Arc::new(super::super::TestLocalProcessRegistry::default()) as Arc<dyn ProcessRegistry>;
+        register_visible(
+            &registry,
+            &SessionScope::new("deleted-session"),
+            external_registration("surviving-process", "Survivor"),
+            ProcessHandleDescriptor::new(Some("test"), Some("Survivor")),
+        )
+        .await;
+
+        let report = registry
+            .delete_session_process_state("deleted-session")
+            .await
+            .expect("delete session process edges");
+        assert_eq!(report.orphaned_process_ids, vec!["surviving-process"]);
+        assert!(
+            observer(Arc::clone(&registry))
+                .snapshot_for_session("deleted-session")
+                .await
+                .expect("deleted session snapshot")
+                .items
+                .is_empty()
+        );
+
+        let runtime_items = observer(registry)
+            .snapshot_all(&ProcessListFilter {
+                status: super::super::ProcessStatusFilter::Any,
+                ..ProcessListFilter::default()
+            })
+            .await
+            .expect("runtime process snapshot");
+        assert_eq!(runtime_items.len(), 1);
+        assert_eq!(runtime_items[0].process.process_id, "surviving-process");
     }
 
     #[tokio::test]

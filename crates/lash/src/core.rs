@@ -453,6 +453,63 @@ impl LashCore {
         lash_core::TurnWorkDriver::new(self.effect_host())
     }
 
+    /// Persist host input without opening a competing session writer.
+    ///
+    /// This is the downstream-host ingress seam for input submitted while a
+    /// durable turn may already own the session execution lease. Active-turn
+    /// input is claimed by that exact turn at a checkpoint; next-turn input is
+    /// handed to the configured queued-work driver after it is durably stored.
+    pub async fn enqueue_turn_input(
+        &self,
+        session_id: impl Into<String>,
+        input: lash_core::TurnInput,
+        ingress: lash_core::TurnInputIngress,
+        id: Option<String>,
+    ) -> Result<lash_core::PendingTurnInput> {
+        lash_core::ensure_durable_effect_input(&input).map_err(EmbedError::Runtime)?;
+        let session_id = session_id.into();
+        let Some(store_factory) = self.store_factory.as_ref() else {
+            return Err(EmbedError::MissingSessionStoreFactory);
+        };
+        let mut policy = self.policy.clone();
+        policy.session_id = Some(session_id.clone());
+        let store = store_factory
+            .create_store(&SessionStoreCreateRequest {
+                session_id: session_id.clone(),
+                relation: SessionRelation::default(),
+                policy,
+            })
+            .await
+            .map_err(|message| EmbedError::StoreFactory {
+                session_id: session_id.clone(),
+                message,
+            })?;
+        let is_next_turn = matches!(ingress, lash_core::TurnInputIngress::NextTurn);
+        let mut draft = lash_core::PendingTurnInputDraft::new(session_id, ingress, input);
+        draft.source_key = id.map(|id| format!("host:{id}"));
+        let enqueued = store
+            .enqueue_pending_turn_input(draft)
+            .await
+            .map_err(|err| {
+                EmbedError::Runtime(lash_core::RuntimeError::new(
+                    lash_core::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                ))
+            })?;
+        if is_next_turn && let Some(driver) = self.work_driver.drivers().await.queued.as_ref() {
+            driver
+                .claim_and_run_pending(Some(&enqueued.session_id), "queued_turn_input")
+                .await
+                .map_err(|err| {
+                    EmbedError::Runtime(lash_core::RuntimeError::new(
+                        lash_core::RuntimeErrorCode::Other("queued_work".to_string()),
+                        err.to_string(),
+                    ))
+                })?;
+        }
+        Ok(enqueued)
+    }
+
     pub async fn delete_session(
         &self,
         session_id: impl AsRef<str>,

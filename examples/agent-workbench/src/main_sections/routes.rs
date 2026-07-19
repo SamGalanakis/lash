@@ -155,20 +155,16 @@ async fn enqueue_turn_input(
         TurnInputIngressRequest::NextTurn => lash::persistence::TurnInputIngress::next_turn(),
     };
     let source_id = format!("workbench-turn-input-{}", uuid::Uuid::new_v4());
-    let session = state
+    let pending = state
         .core
-        .session(session_id.clone())
-        .open()
+        .enqueue_turn_input(
+            session_id,
+            lash::TurnInput::text(text.clone()),
+            ingress,
+            Some(source_id),
+        )
         .await
         .map_err(AppError::internal)?;
-    let pending = session
-        .enqueue(lash::TurnInput::text(text.clone()))
-        .id(source_id)
-        .ingress(ingress)
-        .send()
-        .await
-        .map_err(AppError::internal)?;
-    session.close().await.map_err(AppError::internal)?;
     let receipt = TurnInputReceipt {
         accepted: true,
         input_id: pending.input_id.clone(),
@@ -435,14 +431,14 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
 }
 
 async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>, AppError> {
-    let session_id = state.current_session_id();
-    let snapshot = state
+    let work = state
         .process_observer
-        .snapshot_for_session(session_id)
+        .snapshot_all(&lash::process::ProcessListFilter {
+            status: lash::process::ProcessStatusFilter::Any,
+            ..lash::process::ProcessListFilter::default()
+        })
         .await
-        .map_err(AppError::internal)?;
-    let work = snapshot
-        .items
+        .map_err(AppError::internal)?
         .into_iter()
         .map(work_item_from_observed)
         .collect::<Vec<_>>();
@@ -454,6 +450,43 @@ async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>,
         }),
     );
     Ok(Json(work))
+}
+
+async fn cancel_work(
+    AxumPath(process_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<ProcessCancelAccepted>, AppError> {
+    let process = state
+        .process_observer
+        .process(&process_id)
+        .await
+        .ok_or_else(|| AppError::not_found(format!("unknown process `{process_id}`")))?;
+    if process.terminal {
+        return Err(AppError::conflict(format!(
+            "process `{process_id}` is already terminal"
+        )));
+    }
+    let operation_id = format!("workbench-process-cancel-{}", uuid::Uuid::new_v4());
+    restate::submit_process_cancel(
+        &state,
+        restate::WorkbenchProcessCancelWorkflowRequest {
+            operation_id: operation_id.clone(),
+            process_id: process_id.clone(),
+        },
+    )
+    .await?;
+    state.trace(
+        "api.work.cancel_submitted",
+        json!({
+            "operation_id": operation_id,
+            "process_id": process_id,
+        }),
+    );
+    Ok(Json(ProcessCancelAccepted {
+        accepted: true,
+        operation_id,
+        process_id,
+    }))
 }
 
 /// Wait for one durable work item to reach a terminal state, then return its

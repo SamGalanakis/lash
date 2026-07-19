@@ -100,7 +100,13 @@ center pane opens a dedicated mock-email view (see below). The buttons emit
 `ui.button.pressed` trigger occurrences. The cron card is
 backed by Restate: ask the agent to schedule something and it can construct a
 typed `cron.Schedule` source whose registrations sync to Restate virtual
-objects. Started Lashlang background processes appear in the right rail.
+objects. Started Lashlang background processes appear in the right rail. The rail is a
+runtime-wide view, so a process remains visible after the session that started it is
+deleted or reset. Non-terminal cards expose **cancel**, which submits cooperative
+cancellation through `POST /api/work/{process_id}/cancel`; the resulting
+`process.cancel_requested` and terminal status come back through the durable process
+registry. Hosts can delete and rotate the current session with `DELETE /api/session`
+(`POST /api/reset` remains the UI-compatible alias) without deleting Runtime Processes.
 The **stop turn** button (or **Esc**) cooperatively cancels the exact running
 turn: `POST /api/turn/cancel` sends its stable session and turn address through
 `TurnWorkDriver::request_cancel`. The request lives on Lash's durable

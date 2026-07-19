@@ -1089,7 +1089,7 @@
 
     .work-top {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      grid-template-columns: auto minmax(0, 1fr) auto auto auto;
       align-items: center;
       gap: var(--space-xs);
       min-width: 0;
@@ -1121,6 +1121,22 @@
       color: var(--ash-text);
       white-space: nowrap;
     }
+
+    .work-cancel {
+      min-height: 2rem;
+      padding: 0 var(--space-xs);
+      border: 1px solid var(--line-danger);
+      border-radius: 4px;
+      background: transparent;
+      color: var(--error);
+      font-family: var(--font-ui);
+      font-size: 0.68rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .work-cancel:hover { background: var(--error-tint); }
+    .work-cancel:disabled { opacity: 0.5; cursor: wait; }
 
     .work-diagram-button {
       width: 2rem;
@@ -3274,7 +3290,35 @@
           renderWork(items);
           if (row.graph_key) openExecutionGraph(row.graph_key);
         });
-        top.append(dot, label, state, graphButton);
+        top.append(dot, label, state);
+        if (row.process_id && !row.terminal) {
+          const cancelButton = document.createElement("button");
+          cancelButton.className = "work-cancel";
+          cancelButton.type = "button";
+          cancelButton.textContent = "cancel";
+          cancelButton.title = "Request cooperative process cancellation";
+          cancelButton.setAttribute("aria-label", "Cancel process " + row.title);
+          cancelButton.addEventListener("click", async event => {
+            event.stopPropagation();
+            cancelButton.disabled = true;
+            cancelButton.textContent = "requested";
+            try {
+              const response = await fetch("/api/work/" + encodeURIComponent(row.process_id) + "/cancel", {
+                method: "POST"
+              });
+              if (!response.ok) throw new Error(await response.text());
+              await refreshWork();
+            } catch (error) {
+              cancelButton.disabled = false;
+              cancelButton.textContent = "retry cancel";
+              workCount.textContent = "cancel failed — retry";
+              workCount.title = cleanErrorText(error.message || error);
+              workCount.classList.add("stale");
+            }
+          });
+          top.appendChild(cancelButton);
+        }
+        top.appendChild(graphButton);
 
         const meta = document.createElement("div");
         meta.className = "work-meta";
@@ -3322,6 +3366,8 @@
           key: graphKey,
           graph_key: graphKey,
           category: "process",
+          process_id: process.process_id,
+          terminal: Boolean(process.terminal),
           title: item.label || process.label || shortId(process.process_id),
           status: process.status_label || process.lifecycle,
           meta: [
