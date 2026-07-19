@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod registry_errors;
 pub mod tools;
 pub mod triggers;
+pub mod turn_control;
 pub mod turn_input;
 pub mod turn_result;
 pub mod usage_activity;
@@ -26,12 +27,13 @@ pub use prompt::*;
 pub use registry_errors::*;
 pub use tools::*;
 pub use triggers::*;
+pub use turn_control::*;
 pub use turn_input::*;
 pub use turn_result::*;
 pub use usage_activity::*;
 
-// Bumped to 10: LLM responses can carry provider-reported execution evidence.
-pub const REMOTE_PROTOCOL_VERSION: u32 = 10;
+// Bumped to 11: foreground turns carry durable cancellation control/evidence.
+pub const REMOTE_PROTOCOL_VERSION: u32 = 11;
 
 pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
     if actual == REMOTE_PROTOCOL_VERSION {

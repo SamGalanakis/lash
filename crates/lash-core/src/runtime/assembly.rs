@@ -734,6 +734,7 @@ impl TurnAssembler {
             },
             state,
             outcome,
+            cancellation: None,
             assistant_output: AssistantOutput {
                 safe_text: safe_output,
                 raw_text: raw_output,

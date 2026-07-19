@@ -127,7 +127,7 @@ impl ExecutionScope {
         matches!(self, Self::Turn { .. })
     }
 
-    pub(super) fn validate(&self) -> Result<(), RuntimeError> {
+    pub(crate) fn validate(&self) -> Result<(), RuntimeError> {
         let missing = match self {
             Self::Turn {
                 session_id,
@@ -162,6 +162,11 @@ pub enum AwaitEventWaitIdentity {
         signal_name: String,
         ordinal: u64,
     },
+    /// Reserved first-writer-wins cancellation-versus-completion gate for a
+    /// foreground turn.
+    TurnCancelGate,
+    /// Reserved terminal publication promise for a foreground turn.
+    TurnTerminal,
     Custom {
         key: String,
     },
@@ -194,6 +199,7 @@ impl AwaitEventWaitIdentity {
                 signal_name,
                 ordinal,
             } => process_id.trim().is_empty() || signal_name.trim().is_empty() || *ordinal == 0,
+            Self::TurnCancelGate | Self::TurnTerminal => false,
             Self::Custom { key } => key.trim().is_empty(),
         };
         if invalid {
@@ -203,6 +209,10 @@ impl AwaitEventWaitIdentity {
             ));
         }
         Ok(())
+    }
+
+    pub fn is_turn_control(&self) -> bool {
+        matches!(self, Self::TurnCancelGate | Self::TurnTerminal)
     }
 }
 
@@ -306,6 +316,13 @@ impl<'run> ScopedEffectController<'run> {
         }
     }
 
+    pub(crate) fn shared_controller(&self) -> Option<Arc<dyn RuntimeEffectController>> {
+        match &self.controller {
+            ScopedEffectControllerInner::Borrowed(_) => None,
+            ScopedEffectControllerInner::Shared(controller) => Some(Arc::clone(controller)),
+        }
+    }
+
     pub fn execution_scope(&self) -> &ExecutionScope {
         &self.scope
     }
@@ -336,9 +353,12 @@ pub trait AwaitEventResolver: Send + Sync {
 
     async fn await_event_key(
         &self,
-        _scope: &ExecutionScope,
-        _wait: AwaitEventWaitIdentity,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
     ) -> Result<AwaitEventKey, RuntimeError> {
+        if wait.is_turn_control() {
+            return super::await_events::inline_await_events().key_for(scope, wait);
+        }
         Err(RuntimeError::new(
             "await_event_unsupported",
             "this effect boundary does not support await-event keys",
@@ -347,26 +367,34 @@ pub trait AwaitEventResolver: Send + Sync {
 
     async fn resolve_await_event(
         &self,
-        _key: &AwaitEventKey,
-        _resolution: Resolution,
+        key: &AwaitEventKey,
+        resolution: Resolution,
     ) -> Result<ResolveOutcome, RuntimeError> {
+        if key.wait.is_turn_control() {
+            return super::await_events::inline_await_events().resolve(key, resolution);
+        }
         Ok(ResolveOutcome::UnknownOrRevoked)
     }
 
     async fn await_await_event(
         &self,
-        _key: &AwaitEventKey,
-        _cancel: CancellationToken,
-        _deadline: Option<Instant>,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<Instant>,
     ) -> Result<Resolution, RuntimeError> {
+        if key.wait.is_turn_control() {
+            return super::await_events::inline_await_events()
+                .await_resolution(key, cancel, deadline, &crate::SystemClock)
+                .await;
+        }
         Err(RuntimeError::new(
             "await_event_unsupported",
             "this effect boundary does not support await-event waits",
         ))
     }
 
-    async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
-        Ok(())
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        super::await_events::inline_await_events().revoke_session(session_id)
     }
 
     /// Cancel every *outstanding* durable wait for `session_id` without

@@ -4,7 +4,8 @@
 > triggers, and reporting/RCA conventions. This runbook only adds the scenario-specific
 > parts.
 
-**Purpose.** Prove `Ctrl+C` walks its documented ladder, one rung per press, in order:
+**Purpose.** Prove the inline operator's cooperative cancel surface walks its documented
+`Ctrl+C` ladder, one rung per press, in order:
 **close a suggestion/overlay → cancel the active turn → clear a non-empty draft → quit only
 from an idle empty prompt.** Each rung is gated objectively, and a single escalating
 sequence of four presses peels all four layers so the *ordering* — not just each behavior in
@@ -25,6 +26,11 @@ precisely so `Ctrl+C` can own this ladder.
    is the turn committing to `Manually interrupted.` and the footer returning to `Idle`.
 3. **Quit only from idle + empty.** The final press exits the process (clean status 0) only
    because the prompt is idle and empty; any earlier press that exits is a violation.
+4. **Interrupted means a committed Lash terminal.** The rendered interruption is never
+   inferred from killing an engine invocation. Engine break-glass cancellation is an
+   operational failure and must not be presented as `Cancelled`. Exact-address durable
+   request and evidence gates live in the scripted Restate harness and the companion
+   [Workbench durable Stop runbook](../workbench-durable-stop/runbook.md).
 
 ## Working material
 
@@ -116,9 +122,16 @@ gate. A *clean* exit here is the expected outcome of this rung, not an Abort tri
 | Rung 3: draft clears | `❯ Message · / for commands` returns; process still alive |  |  |
 | Rung 4: quit from idle empty | child exits `0` |  |  |
 | Order held | exactly four presses, one rung each, none out of order |  |  |
+| Semantic layer | interruption is a committed cooperative turn result, not engine break-glass |  | rendered terminal + companion gate references |
 
 **Aggregate:** did four presses peel four layers in the documented order, with the turn
 reaching a real interrupted terminal state and the quit firing only from idle + empty.
+
+This CLI scenario deliberately does not invent an external cancellation API. The
+repository-wide first-party primitive is additionally gated by
+`just restate-postgres-workers-e2e` (exact request, replay, race, terminal evidence, and
+break-glass distinction) and `runbooks/workbench-durable-stop/runbook.md` (browser/API
+agreement across web-process restart).
 
 ---
 

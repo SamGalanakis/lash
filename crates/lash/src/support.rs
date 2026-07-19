@@ -28,7 +28,8 @@ pub(crate) use lash_core::{
     SessionCursor, SessionError, SessionHandle, SessionObservation, SessionObservationSubscription,
     SessionProcessEventKind, SessionReadView, SessionResume, SessionScope, SessionSnapshot,
     SessionStoreFactory, SessionUsageReport, TerminationPolicy, ToolCallRecord, ToolManifest,
-    ToolProvider, ToolRestoreReport, ToolSourceHandle, ToolState, TurnActivitySink, TurnOutcome,
+    ToolProvider, ToolRestoreReport, ToolSourceHandle, ToolState, TurnActivitySink,
+    TurnCancelOriginHint, TurnOutcome,
 };
 pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};
 pub(crate) use lash_core::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};

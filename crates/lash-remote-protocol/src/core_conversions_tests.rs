@@ -6,6 +6,63 @@ use super::*;
 const EXAMPLE_BINDING_KEY: &str = "example.call_path";
 
 #[test]
+fn turn_cancel_core_conversions_round_trip_every_envelope() {
+    let core_request = lash_core::TurnCancelRequest::new(
+        lash_core::TurnAddress::new("session", "turn"),
+        "cancel-request",
+        Some("queue-superseder".to_string()),
+    )
+    .with_reason("newer input arrived");
+    let remote_request = RemoteTurnCancelRequest::from(core_request.clone());
+    remote_request
+        .validate()
+        .expect("valid remote cancel request");
+    let round_trip =
+        lash_core::TurnCancelRequest::try_from(remote_request).expect("core cancel request");
+    assert_eq!(round_trip, core_request);
+
+    let evidence = lash_core::TurnCancellationEvidence {
+        request_id: "cancel-request".to_string(),
+        origin: Some("workbench-user".to_string()),
+        reason: Some("stop button".to_string()),
+    };
+    let remote_evidence = RemoteTurnCancellationEvidence::from(evidence.clone());
+    assert_eq!(
+        lash_core::TurnCancellationEvidence::from(remote_evidence),
+        evidence
+    );
+    let evidence_without_origin = lash_core::TurnCancellationEvidence {
+        request_id: "cancel-without-origin".to_string(),
+        origin: None,
+        reason: None,
+    };
+    let remote_evidence = RemoteTurnCancellationEvidence::from(evidence_without_origin.clone());
+    assert_eq!(
+        lash_core::TurnCancellationEvidence::from(remote_evidence),
+        evidence_without_origin
+    );
+
+    for core_outcome in [
+        lash_core::TurnCancelOutcome::Requested(evidence.clone()),
+        lash_core::TurnCancelOutcome::AlreadyRequested(evidence.clone()),
+        lash_core::TurnCancelOutcome::CompletionWonRace,
+        lash_core::TurnCancelOutcome::UnknownOrRevoked,
+    ] {
+        let remote = RemoteTurnCancelOutcome::from(core_outcome.clone());
+        let round_trip = lash_core::TurnCancelOutcome::from(remote);
+        assert_eq!(round_trip, core_outcome);
+    }
+
+    for tier in [
+        lash_core::DurabilityTier::Inline,
+        lash_core::DurabilityTier::Durable,
+    ] {
+        let remote = RemoteTurnControlDurabilityTier::from(tier);
+        assert_eq!(lash_core::DurabilityTier::from(remote), tier);
+    }
+}
+
+#[test]
 fn turn_input_round_trips_remote_safe_fields() {
     let mut prompt = lash_core::PromptLayer::new();
     prompt.add_contribution(lash_core::PromptContribution::guidance("Guide", "remote"));
@@ -702,6 +759,7 @@ fn remote_turn_result_maps_core_semantics() {
         outcome: lash_core::TurnOutcome::Finished(lash_core::TurnFinish::AssistantMessage {
             text: "done".to_string(),
         }),
+        cancellation: None,
         assistant_output: lash_core::AssistantOutput {
             safe_text: "done".to_string(),
             raw_text: "done".to_string(),

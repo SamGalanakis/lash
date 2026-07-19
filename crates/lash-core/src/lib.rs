@@ -39,7 +39,8 @@ pub use lash_sansio::sansio;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DurabilityTier {
     Inline,
     Durable,
@@ -407,15 +408,16 @@ pub use runtime::{
     SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision, SessionScope,
     SessionScopeId, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
     SystemClock, TerminationPolicy, TokenLedgerEntry, ToolCallLaunch, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnInputCheckpointBoundary,
-    TurnInputClaim, TurnInputClaimMode, TurnInputCompletion, TurnInputIngress, TurnInputState,
-    TurnIssue, TurnOptions, UnavailableProcessService, UsageReportRow, UsageTotals, WaitKind,
-    WaitState, apply_process_status_projection, current_epoch_ms, diff_token_ledger,
-    diff_usage_reports, ensure_durable_effect_input, epoch_ms_from_system_time,
-    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
-    process_wake_delivery, system_time_from_epoch_ms, terminal_append_request,
-    terminal_event_type_name, validate_process_signal_name, watch_process_registry,
-    watch_process_registry_with_sink,
+    TurnActivitySink, TurnAddress, TurnAttach, TurnCancelOriginHint, TurnCancelOutcome,
+    TurnCancelReceipt, TurnCancelRequest, TurnCancellationEvidence, TurnContext, TurnEvent,
+    TurnInput, TurnInputCheckpointBoundary, TurnInputClaim, TurnInputClaimMode,
+    TurnInputCompletion, TurnInputIngress, TurnInputState, TurnIssue, TurnOptions, TurnTerminal,
+    TurnWorkDriver, UnavailableProcessService, UsageReportRow, UsageTotals, WaitKind, WaitState,
+    apply_process_status_projection, current_epoch_ms, diff_token_ledger, diff_usage_reports,
+    ensure_durable_effect_input, epoch_ms_from_system_time, process_signal_event_type,
+    process_signal_name_from_event_type, process_signal_wait_key, process_wake_delivery,
+    system_time_from_epoch_ms, terminal_append_request, terminal_event_type_name,
+    validate_process_signal_name, watch_process_registry, watch_process_registry_with_sink,
 };
 #[allow(unused_imports)]
 pub(crate) use runtime::{

@@ -3,12 +3,13 @@ use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use lash_core::AwaitEventResolver as _;
 use lash_core::{
     AwaitEventKey, ExecutionScope, InlineRuntimeEffectController, ScopedEffectController,
-    SessionCommitStore,
+    SessionCommitStore, TurnAddress, TurnCancelOutcome, TurnCancelRequest, TurnOutcome, TurnStop,
+    TurnTerminal, TurnWorkDriver,
 };
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{
     RestateAdminClient, RestateConnection, RestateEffectHost, RestateIngressClient,
-    RestateInvocationId, RestateInvocationStatus, RestateProcessDeployment,
+    RestateInvocationId, RestateInvocationStatus, RestateProcessDeployment, RestateTurnDeployment,
 };
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
@@ -300,9 +301,10 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &frame_cancel_request.workflow_id).await?;
     assert_frame_switch_cancel_response(&frame_cancel_response)?;
 
+    drive_turn_control_scenarios(&storage, &ingress_url, &admin_url).await?;
     drive_durable_wait_index_scenarios(&storage, &ingress_url, &admin_url).await?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 22).await?;
+    let responses = wait_for_terminal_results(storage.pool(), 24).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -329,7 +331,7 @@ async fn async_main() -> Result<()> {
     assert_no_active_lash_restate_invocations(&admin_url).await?;
 
     println!(
-        "restate-postgres-workers e2e passed: {} workflows, trigger process {}, signal process {}, traces {}",
+        "restate-postgres-workers e2e passed: {} workflows; turn-control gates: cross-process, before-start, seal-race, crash-recovery, terminal-attach, break-glass-negative; trigger process {}; signal process {}; traces {}",
         responses.len(),
         trigger_process_id,
         signal_process_id,
@@ -596,6 +598,9 @@ async fn assert_no_active_lash_restate_invocations(admin_url: &str) -> Result<()
 }
 
 async fn assert_no_problem_lash_restate_invocations(admin_url: &str) -> Result<()> {
+    // The break-glass negative gate deliberately cancels this exact Restate
+    // invocation. Its dedicated assertion requires an engine failure and no
+    // Lash `Cancelled` terminal, so exclude it from the general health sweep.
     let client = reqwest::Client::builder()
         .http2_prior_knowledge()
         .build()
@@ -616,6 +621,7 @@ async fn assert_no_problem_lash_restate_invocations(admin_url: &str) -> Result<(
             "SELECT id, target, target_service_name, target_service_key, target_handler_name, status, completion_result, completion_failure \
              FROM sys_invocation \
              WHERE ({service_filter}) \
+               AND COALESCE(target_service_key, '') <> 'e2e-turn-break-glass' \
                AND (status IN ('backing-off', 'failed') OR completion_result = 'failure' OR completion_failure IS NOT NULL) \
              ORDER BY modified_at DESC"
         ))
@@ -1166,8 +1172,8 @@ async fn wait_for_durable_input_key(
     anyhow::bail!("timed out waiting for durable input key for `{workflow_id}`")
 }
 
-/// Drive PENDING foreground durable waits through the real Restate
-/// session-wait-index cancel / re-register / revoke handlers.
+/// Drive pending foreground durable waits and turn control through the real
+/// Restate session-wait-index cancel / re-register / revoke handlers.
 ///
 /// The `durable_wait_probe` scenario parks a session-scoped durable wait in the
 /// `LashDurableWaitIndex` virtual object (unlike the in-process wait scenarios,
@@ -1176,6 +1182,308 @@ async fn wait_for_durable_input_key(
 /// Restate ingress and assert the observable turn outcomes.
 ///
 /// Cancel/revoke are driven through the production
+async fn drive_turn_control_scenarios(
+    storage: &PostgresStorage,
+    ingress_url: &str,
+    admin_url: &str,
+) -> Result<()> {
+    let deployment = RestateTurnDeployment::new(ingress_url.to_string());
+    let driver = deployment.turn_work_driver();
+
+    // A remote host can durably win the gate before any worker owns the turn.
+    let before = turn_control_request("e2e-turn-cancel-before-start", false);
+    let before_evidence_id = "e2e-cancel-before-start";
+    let before_outcome = driver
+        .request_cancel(cancel_request(&before, before_evidence_id))
+        .await
+        .context("request cancellation before turn start")?;
+    anyhow::ensure!(
+        before_outcome.durability_tier == lash::DurabilityTier::Durable,
+        "before-start cancel used non-durable control: {before_outcome:?}"
+    );
+    assert_requested(&before_outcome.outcome, before_evidence_id)?;
+    submit_workflow(ingress_url, &before).await?;
+    let before_terminal = driver
+        .await_terminal(&turn_address(&before))
+        .await
+        .context("attach to cancel-before-start terminal")?;
+    assert_cancelled_terminal(&before_terminal, before_evidence_id)?;
+    assert_cancelled_response(
+        &wait_for_terminal_result(storage.pool(), &before.workflow_id).await?,
+        before_evidence_id,
+    )?;
+
+    // The runner owns no Lash session handle. It waits for the peer worker's
+    // tool boundary, then addresses the durable gate directly.
+    let cross = turn_control_request("e2e-turn-cancel-cross-process", false);
+    submit_workflow(ingress_url, &cross).await?;
+    wait_for_cancel_gate(storage.pool(), &cross.workflow_id).await?;
+    let cross_evidence_id = "e2e-cancel-cross-process";
+    let cross_outcome = driver
+        .request_cancel(cancel_request(&cross, cross_evidence_id))
+        .await
+        .context("request cross-process cancellation")?;
+    anyhow::ensure!(
+        cross_outcome.durability_tier == lash::DurabilityTier::Durable,
+        "cross-process cancel used non-durable control: {cross_outcome:?}"
+    );
+    assert_requested(&cross_outcome.outcome, cross_evidence_id)?;
+    let cross_terminal = driver
+        .await_terminal(&turn_address(&cross))
+        .await
+        .context("attach to cross-process terminal")?;
+    assert_cancelled_terminal(&cross_terminal, cross_evidence_id)?;
+    assert_cancelled_response(
+        &wait_for_terminal_result(storage.pool(), &cross.workflow_id).await?,
+        cross_evidence_id,
+    )?;
+
+    // This live gate races workflow submission against cancellation. The
+    // tighter already-running commit-time seal window is covered by the inline
+    // unit race; either way, a requested cancel must commit Cancelled with the
+    // same evidence, while a completion seal must commit a non-cancel terminal
+    // without evidence.
+    let race = TurnRequest {
+        workflow_id: "e2e-turn-cancel-seal-race".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::TurnControlComplete,
+        signal: None,
+    };
+    let race_evidence_id = "e2e-cancel-seal-race";
+    let (submitted, race_outcome) = tokio::join!(
+        submit_workflow(ingress_url, &race),
+        driver.request_cancel(cancel_request(&race, race_evidence_id)),
+    );
+    submitted.context("submit completion/cancel race")?;
+    let race_outcome = race_outcome.context("request completion/cancel race")?;
+    let race_terminal = driver
+        .await_terminal(&turn_address(&race))
+        .await
+        .context("attach to completion/cancel race terminal")?;
+    match race_outcome.outcome {
+        TurnCancelOutcome::Requested(_) | TurnCancelOutcome::AlreadyRequested(_) => {
+            assert_cancelled_terminal(&race_terminal, race_evidence_id)?;
+        }
+        TurnCancelOutcome::CompletionWonRace => assert_non_cancel_terminal(&race_terminal)?,
+        TurnCancelOutcome::UnknownOrRevoked => {
+            anyhow::bail!("completion/cancel race unexpectedly targeted a revoked gate")
+        }
+    }
+    let _ = wait_for_terminal_result(storage.pool(), &race.workflow_id).await?;
+
+    // The first owner exits from crash_once. Cancellation lands while Restate
+    // is recovering the invocation; the peer owner must replay the keyed gate.
+    let recovery = turn_control_request("e2e-turn-cancel-crash-recovery", true);
+    submit_workflow(ingress_url, &recovery).await?;
+    let crashed_worker = wait_for_failover_marker(storage.pool(), &recovery.workflow_id).await?;
+    let recovery_evidence_id = "e2e-cancel-crash-recovery";
+    let recovery_outcome = driver
+        .request_cancel(cancel_request(&recovery, recovery_evidence_id))
+        .await
+        .context("request cancellation during owner recovery")?;
+    assert_requested(&recovery_outcome.outcome, recovery_evidence_id)?;
+    let recovery_terminal = driver
+        .await_terminal(&turn_address(&recovery))
+        .await
+        .context("attach to recovered cancellation terminal")?;
+    assert_cancelled_terminal(&recovery_terminal, recovery_evidence_id)?;
+    let recovery_response = wait_for_terminal_result(storage.pool(), &recovery.workflow_id).await?;
+    assert_cancelled_response(&recovery_response, recovery_evidence_id)?;
+    anyhow::ensure!(
+        recovery_response.worker_id != crashed_worker,
+        "stale owner `{crashed_worker}` completed the recovered turn"
+    );
+
+    // Restate Admin cancellation is deliberately exercised only as a negative
+    // break-glass gate. It must not manufacture a Lash Cancelled terminal.
+    let break_glass = turn_control_request("e2e-turn-break-glass", false);
+    let invocation_id = submit_workflow(ingress_url, &break_glass).await?;
+    wait_for_cancel_gate(storage.pool(), &break_glass.workflow_id).await?;
+    let admin = RestateAdminClient::new(admin_url.to_string());
+    admin
+        .cancel_invocation(&invocation_id)
+        .await
+        .context("cancel Restate invocation as break-glass")?;
+    wait_for_invocation_terminal(&admin, &invocation_id).await?;
+    anyhow::ensure!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            driver.await_terminal(&turn_address(&break_glass)),
+        )
+        .await
+        .is_err(),
+        "break-glass invocation cancellation produced a Lash terminal"
+    );
+    anyhow::ensure!(
+        load_terminal_result(storage.pool(), &break_glass.workflow_id)
+            .await?
+            .is_none(),
+        "break-glass invocation cancellation was reported as a Lash terminal result"
+    );
+
+    println!(
+        "turn-control gates passed: cross-process; cancel-before-start; seal-vs-cancel; owner-crash-recovery; terminal-attach-evidence; break-glass-not-cancelled"
+    );
+    Ok(())
+}
+
+fn turn_control_request(workflow_id: &str, fail_once: bool) -> TurnRequest {
+    TurnRequest {
+        workflow_id: workflow_id.to_string(),
+        fail_once,
+        scenario: TurnScenario::TurnControlHold,
+        signal: None,
+    }
+}
+
+fn turn_address(request: &TurnRequest) -> TurnAddress {
+    TurnAddress::new(DEFAULT_SESSION_ID, request.workflow_id.clone())
+}
+
+fn cancel_request(request: &TurnRequest, request_id: &str) -> TurnCancelRequest {
+    TurnCancelRequest::new(
+        turn_address(request),
+        request_id,
+        Some("scripted-e2e-runner".to_string()),
+    )
+    .with_reason("deterministic Restate/Postgres workers E2E gate")
+}
+
+fn assert_requested(outcome: &TurnCancelOutcome, request_id: &str) -> Result<()> {
+    let evidence = match outcome {
+        TurnCancelOutcome::Requested(evidence) => evidence,
+        other => anyhow::bail!("expected cancellation request `{request_id}` to win: {other:?}"),
+    };
+    anyhow::ensure!(
+        evidence.request_id == request_id,
+        "cancellation receipt lost request evidence: {evidence:?}"
+    );
+    anyhow::ensure!(
+        evidence.origin.as_deref() == Some("scripted-e2e-runner"),
+        "cancellation receipt changed opaque host origin: {evidence:?}"
+    );
+    Ok(())
+}
+
+fn assert_cancelled_terminal(terminal: &TurnTerminal, request_id: &str) -> Result<()> {
+    let TurnTerminal::Committed {
+        outcome,
+        cancellation,
+        session_revision: _,
+    } = terminal
+    else {
+        anyhow::bail!("expected committed cancellation terminal, got {terminal:?}")
+    };
+    anyhow::ensure!(
+        matches!(outcome, TurnOutcome::Stopped(TurnStop::Cancelled)),
+        "terminal was not Cancelled: {terminal:?}"
+    );
+    let evidence = cancellation
+        .as_ref()
+        .context("Cancelled terminal omitted cancellation evidence")?;
+    anyhow::ensure!(
+        evidence.request_id == request_id,
+        "terminal evidence mismatch: {evidence:?}"
+    );
+    anyhow::ensure!(
+        evidence.origin.as_deref() == Some("scripted-e2e-runner"),
+        "terminal changed opaque host origin: {evidence:?}"
+    );
+    Ok(())
+}
+
+fn assert_non_cancel_terminal(terminal: &TurnTerminal) -> Result<()> {
+    let TurnTerminal::Committed {
+        outcome,
+        cancellation,
+        ..
+    } = terminal
+    else {
+        anyhow::bail!("expected committed completion terminal, got {terminal:?}")
+    };
+    anyhow::ensure!(
+        !matches!(outcome, TurnOutcome::Stopped(TurnStop::Cancelled)),
+        "completion-sealed terminal reported Cancelled"
+    );
+    anyhow::ensure!(
+        cancellation.is_none(),
+        "non-cancel terminal carried cancellation evidence"
+    );
+    Ok(())
+}
+
+fn assert_cancelled_response(response: &TurnResponse, request_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == "turn-control-cancelled",
+        "worker did not record authoritative cancellation: {response:#?}"
+    );
+    anyhow::ensure!(
+        response.final_value["cancellation"]["request_id"] == request_id,
+        "recorded terminal lost cancellation evidence: {response:#?}"
+    );
+    anyhow::ensure!(
+        response.final_value["cancellation"]["origin"] == "scripted-e2e-runner",
+        "recorded terminal changed opaque host origin: {response:#?}"
+    );
+    Ok(())
+}
+
+async fn wait_for_cancel_gate(pool: &sqlx::PgPool, workflow_id: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lash_e2e_tool_events
+             WHERE workflow_id = $1 AND tool_name = 'cancel_gate'",
+        )
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await
+        .context("poll cancellation tool gate")?;
+        if count > 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("timed out waiting for cancellation gate in `{workflow_id}`")
+}
+
+async fn wait_for_failover_marker(pool: &sqlx::PgPool, workflow_id: &str) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let worker = sqlx::query_scalar::<_, String>(
+            "SELECT worker_id FROM lash_e2e_failover_markers WHERE workflow_id = $1",
+        )
+        .bind(workflow_id)
+        .fetch_optional(pool)
+        .await
+        .context("poll turn-control failover marker")?;
+        if let Some(worker) = worker {
+            return Ok(worker);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("timed out waiting for owner crash in `{workflow_id}`")
+}
+
+async fn wait_for_invocation_terminal(
+    admin: &RestateAdminClient,
+    invocation_id: &RestateInvocationId,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while Instant::now() < deadline {
+        if admin
+            .invocation_status(invocation_id)
+            .await
+            .context("read break-glass invocation status")?
+            .is_some_and(|status| !status.is_still_active())
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("break-glass invocation `{invocation_id}` did not terminate")
+}
+
 /// `RestateEffectHost::{cancel,revoke}_await_events_for_session` controller
 /// route. Restate rejects no-input handler invocations that carry a body or
 /// content-type, so this doubles as live regression coverage for the
@@ -1203,7 +1511,6 @@ async fn drive_durable_wait_index_scenarios(
         &host,
         &cancel_session_id,
         cancel_workflow_id,
-        SessionWaitUpdate::Cancel,
     )
     .await?;
     assert_durable_wait_cancelled(&cancel_response)?;
@@ -1229,38 +1536,44 @@ async fn drive_durable_wait_index_scenarios(
         wait_for_terminal_result(storage.pool(), reregister_workflow_id).await?;
     assert_durable_wait_resolved(&reregister_response, "post-cancel-approved")?;
 
-    // 3) Revoke (the session-deletion path): the pending wait must cancel...
-    let revoke_workflow_id = "e2e-wait-revoke";
-    submit_durable_wait_probe(ingress_url, revoke_workflow_id).await?;
-    let revoke_key = wait_for_durable_wait_key(storage.pool(), revoke_workflow_id).await?;
-    let revoke_session_id = durable_wait_session_id(&revoke_key)?;
-    let revoke_response = drive_session_wait_update(
-        storage.pool(),
-        &host,
-        &revoke_session_id,
-        revoke_workflow_id,
-        SessionWaitUpdate::Revoke,
-    )
-    .await?;
-    assert_durable_wait_cancelled(&revoke_response)?;
-
-    // ...and a subsequent registration on that session must be rejected as
-    // Revoked. Production surfaces that rejection to the turn as a Cancelled
-    // resolution, so this turn completes cancelled WITHOUT the runner invoking
-    // any resolver; if revoke had not stuck, the wait would park forever.
-    let post_revoke_workflow_id = "e2e-wait-post-revoke";
-    submit_durable_wait_probe(ingress_url, post_revoke_workflow_id).await?;
-    let post_revoke_response =
-        wait_for_terminal_result(storage.pool(), post_revoke_workflow_id).await?;
-    assert_durable_wait_cancelled(&post_revoke_response)?;
+    // 3) Revoke (the session-deletion path) now includes reserved turn
+    // control promises. Validate that contract directly: after revocation,
+    // even a duplicate request for an already-created exact turn gate must be
+    // rejected by the session index rather than reaching cached workflow
+    // state. A containing turn cannot honestly commit after its session has
+    // been deleted, so the old post-revoke turn-result assertion no longer
+    // applies.
+    let control_driver = TurnWorkDriver::new(Arc::new(host.clone()));
+    let control_address = TurnAddress::new(DEFAULT_SESSION_ID, "e2e-control-revoke");
+    let initial = control_driver
+        .request_cancel(TurnCancelRequest::new(
+            control_address.clone(),
+            "e2e-control-before-revoke",
+            Some("scripted-e2e-runner".to_string()),
+        ))
+        .await
+        .context("create turn control gate before revoke")?;
+    anyhow::ensure!(
+        matches!(initial.outcome, TurnCancelOutcome::Requested(_)),
+        "initial turn cancellation was not accepted: {initial:?}"
+    );
+    host.revoke_await_events_for_session(DEFAULT_SESSION_ID)
+        .await
+        .context("revoke session turn control promises")?;
+    let revoked = control_driver
+        .request_cancel(TurnCancelRequest::new(
+            control_address,
+            "e2e-control-after-revoke",
+            Some("scripted-e2e-runner".to_string()),
+        ))
+        .await
+        .context("request cancellation after revoke")?;
+    anyhow::ensure!(
+        matches!(revoked.outcome, TurnCancelOutcome::UnknownOrRevoked),
+        "revoked turn control gate remained addressable: {revoked:?}"
+    );
     assert_no_problem_lash_restate_invocations(admin_url).await?;
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum SessionWaitUpdate {
-    Cancel,
-    Revoke,
 }
 
 async fn submit_durable_wait_probe(ingress_url: &str, workflow_id: &str) -> Result<()> {
@@ -1293,24 +1606,19 @@ async fn drive_session_wait_update(
     host: &RestateEffectHost,
     session_id: &str,
     workflow_id: &str,
-    update: SessionWaitUpdate,
 ) -> Result<TurnResponse> {
-    let handler = match update {
-        SessionWaitUpdate::Cancel => "cancel_all",
-        SessionWaitUpdate::Revoke => "revoke_all",
-    };
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        match update {
-            SessionWaitUpdate::Cancel => host.cancel_await_events_for_session(session_id).await,
-            SessionWaitUpdate::Revoke => host.revoke_await_events_for_session(session_id).await,
-        }
-        .map_err(|err| anyhow::anyhow!("`{handler}` for `{session_id}` via controller: {err}"))?;
+        host.cancel_await_events_for_session(session_id)
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("`cancel_all` for `{session_id}` via controller: {err}")
+            })?;
         if let Some(response) = load_terminal_result(pool, workflow_id).await? {
             return Ok(response);
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for `{workflow_id}` to resolve after `{handler}`");
+            anyhow::bail!("timed out waiting for `{workflow_id}` to resolve after `cancel_all`");
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

@@ -121,6 +121,14 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
             "frame_switch_post_cancel",
             frame_switch_post_cancel_script(&workflow_id),
         ),
+        MockScenario::TurnControlHold => (
+            "turn_control_hold",
+            turn_control_hold_script(&workflow_id, fail_once),
+        ),
+        MockScenario::TurnControlComplete => (
+            "turn_control_complete",
+            turn_control_complete_script(&workflow_id),
+        ),
         MockScenario::KitchenSink => ("kitchen_sink", kitchen_sink_script(&workflow_id, fail_once)),
     };
     let response = json!({
@@ -240,6 +248,8 @@ enum MockScenario {
     FrameSwitchCancelFollow,
     FrameSwitchPending,
     FrameSwitchPostCancel,
+    TurnControlHold,
+    TurnControlComplete,
 }
 
 fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
@@ -284,6 +294,11 @@ fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
             "frame_switch_post_cancel=true",
             MockScenario::FrameSwitchPostCancel,
         ),
+        ("turn_control_hold=true", MockScenario::TurnControlHold),
+        (
+            "turn_control_complete=true",
+            MockScenario::TurnControlComplete,
+        ),
         ("segment_loop=true", MockScenario::SegmentLoop),
         ("durable_wait_probe=true", MockScenario::DurableWaitProbe),
         ("tool_batch=true", MockScenario::ToolBatch),
@@ -305,6 +320,40 @@ fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
     .filter_map(|(marker, scenario)| text.rfind(marker).map(|idx| (idx, scenario)))
     .max_by_key(|(idx, _)| *idx)
     .map(|(_, scenario)| scenario)
+}
+
+fn turn_control_hold_script(workflow_id: &str, fail_once: bool) -> String {
+    let crash = if fail_once {
+        format!(
+            r#"
+crash = await tools.crash_once({{ workflow_id: "{workflow_id}" }})?
+"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"
+Wait for the exact-turn cooperative cancellation gate.
+
+<lashlang>
+{crash}gate = await tools.cancel_gate({{ workflow_id: "{workflow_id}" }})?
+finish {{ gate: gate, final: "unreachable" }}
+</lashlang>
+"#
+    )
+}
+
+fn turn_control_complete_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Complete immediately so the terminal seal can race cancellation.
+
+<lashlang>
+finish {{ workflow_id: "{workflow_id}", final: "turn-control-completed" }}
+</lashlang>
+"#
+    )
 }
 
 fn frame_switch_start_script(workflow_id: &str, follow_marker: &str) -> String {

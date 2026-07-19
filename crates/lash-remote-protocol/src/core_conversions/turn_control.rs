@@ -1,0 +1,120 @@
+impl From<lash_core::TurnCancellationEvidence> for RemoteTurnCancellationEvidence {
+    fn from(value: lash_core::TurnCancellationEvidence) -> Self {
+        let lash_core::TurnCancellationEvidence {
+            request_id,
+            origin,
+            reason,
+        } = value;
+        Self {
+            request_id,
+            origin,
+            reason,
+        }
+    }
+}
+
+impl From<RemoteTurnCancellationEvidence> for lash_core::TurnCancellationEvidence {
+    fn from(value: RemoteTurnCancellationEvidence) -> Self {
+        let RemoteTurnCancellationEvidence {
+            request_id,
+            origin,
+            reason,
+        } = value;
+        Self {
+            request_id,
+            origin,
+            reason,
+        }
+    }
+}
+
+impl TryFrom<RemoteTurnCancelRequest> for lash_core::TurnCancelRequest {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteTurnCancelRequest) -> Result<Self, Self::Error> {
+        value.validate()?;
+        let RemoteTurnCancelRequest {
+            protocol_version: _,
+            session_id,
+            turn_id,
+            request_id,
+            origin,
+            reason,
+        } = value;
+        Ok(Self {
+            address: lash_core::TurnAddress::new(session_id, turn_id),
+            request_id,
+            origin,
+            reason,
+        })
+    }
+}
+
+impl From<lash_core::TurnCancelRequest> for RemoteTurnCancelRequest {
+    fn from(value: lash_core::TurnCancelRequest) -> Self {
+        let lash_core::TurnCancelRequest {
+            address,
+            request_id,
+            origin,
+            reason,
+        } = value;
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            session_id: address.session_id,
+            turn_id: address.turn_id,
+            request_id,
+            origin,
+            reason,
+        }
+    }
+}
+
+impl From<lash_core::TurnCancelOutcome> for RemoteTurnCancelOutcome {
+    fn from(value: lash_core::TurnCancelOutcome) -> Self {
+        match value {
+            lash_core::TurnCancelOutcome::Requested(cancellation) => Self::Requested {
+                cancellation: cancellation.into(),
+            },
+            lash_core::TurnCancelOutcome::AlreadyRequested(cancellation) => {
+                Self::AlreadyRequested {
+                    cancellation: cancellation.into(),
+                }
+            }
+            lash_core::TurnCancelOutcome::CompletionWonRace => Self::CompletionWonRace,
+            lash_core::TurnCancelOutcome::UnknownOrRevoked => Self::UnknownOrRevoked,
+        }
+    }
+}
+
+impl From<RemoteTurnCancelOutcome> for lash_core::TurnCancelOutcome {
+    fn from(value: RemoteTurnCancelOutcome) -> Self {
+        match value {
+            RemoteTurnCancelOutcome::Requested { cancellation } => {
+                Self::Requested(cancellation.into())
+            }
+            RemoteTurnCancelOutcome::AlreadyRequested { cancellation } => {
+                Self::AlreadyRequested(cancellation.into())
+            }
+            RemoteTurnCancelOutcome::CompletionWonRace => Self::CompletionWonRace,
+            RemoteTurnCancelOutcome::UnknownOrRevoked => Self::UnknownOrRevoked,
+        }
+    }
+}
+
+impl From<lash_core::DurabilityTier> for RemoteTurnControlDurabilityTier {
+    fn from(value: lash_core::DurabilityTier) -> Self {
+        match value {
+            lash_core::DurabilityTier::Inline => Self::Inline,
+            lash_core::DurabilityTier::Durable => Self::Durable,
+        }
+    }
+}
+
+impl From<RemoteTurnControlDurabilityTier> for lash_core::DurabilityTier {
+    fn from(value: RemoteTurnControlDurabilityTier) -> Self {
+        match value {
+            RemoteTurnControlDurabilityTier::Inline => Self::Inline,
+            RemoteTurnControlDurabilityTier::Durable => Self::Durable,
+        }
+    }
+}

@@ -63,7 +63,7 @@
         <article class="panel"><h3>Background work</h3><p>The model starts named Lashlang <code>process</code>es and spawns subagents; the right rail polls the process registry for live runs.</p></article>
         <article class="panel"><h3>Trigger buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> trigger occurrences that start processes for matching trigger registrations.</p></article>
         <article class="panel"><h3>Session replay stream</h3><p>The browser's <code>/api/events</code> stream merges host product rows with Lash session observation rows; reconnect passes the latest cursor and gap recovery reloads <code>/api/state</code>.</p></article>
-        <article class="panel"><h3>Restate control</h3><p>User turns, queued refreshes, trigger deliveries, cron jobs, and session deletion submit through Restate ingress; the stop button cancels the tracked invocation through Restate Admin.</p></article>
+        <article class="panel"><h3>Restate control</h3><p>User turns, queued refreshes, trigger deliveries, cron jobs, and session deletion submit through Restate ingress; the stop button sends an exact, replay-safe request through <code>TurnWorkDriver</code>.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel reads <code>TraceLashlangGraphStore</code>, a trace-derived view of foreground blocks, durable runs, and child links.</p></article>
       </div>
       <pre data-lang="console"><code>OPENROUTER_API_KEY=... just agent-workbench

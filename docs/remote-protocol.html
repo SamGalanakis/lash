@@ -48,7 +48,7 @@
       </div>
       <div class="listing__row">
         <div class="listing__label">workflow host</div>
-        <div class="listing__body"><p>For Restate, Temporal, or another workflow runtime, key the handler by the stable <code>turn_id</code> or operation id and run the turn with <code>.turn_id(...).effects(&amp;controller)</code>. Do not add a second durable submitted/running work-item lifecycle around the turn; the workflow runtime owns in-flight replay/cancellation, Lash owns the session execution lease and final turn commit, and product storage owns user-visible rows.</p></div>
+        <div class="listing__body"><p>For Restate, Temporal, or another workflow runtime, key the handler by the stable <code>turn_id</code> or operation id and run the turn with <code>.turn_id(...).effects(&amp;controller)</code>. Do not add a second durable submitted/running work-item lifecycle around the turn; the workflow runtime owns in-flight replay, Lash's <code>TurnWorkDriver</code> owns exact cooperative cancellation/terminal attachment plus the session execution lease and final turn commit, and product storage owns user-visible rows.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">local call</div>

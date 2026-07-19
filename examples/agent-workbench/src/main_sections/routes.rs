@@ -10,6 +10,7 @@ async fn app_state(State(state): State<AppState>) -> Json<StateSnapshot> {
     Json(StateSnapshot {
         settings: state.settings(),
         messages: state.messages_snapshot(),
+        active_turns: state.active_turns.for_session(&state.current_session_id()),
     })
 }
 
@@ -81,7 +82,8 @@ async fn send_turn(
     state.set_selected_model(ModelSelection::from_spec(&turn_model));
     let turn_id = format!("workbench-turn-{}", uuid::Uuid::new_v4());
     let session_id = state.current_session_id();
-    let invocation_id = restate::submit_user_turn(
+    state.track_turn(&session_id, &turn_id);
+    if let Err(err) = restate::submit_user_turn(
         &state,
         restate::WorkbenchTurnWorkflowRequest {
             turn_id: turn_id.clone(),
@@ -90,8 +92,11 @@ async fn send_turn(
             model: ModelSelection::from_spec(&turn_model),
         },
     )
-    .await?;
-    state.track_restate_invocation(&session_id, &turn_id, invocation_id);
+    .await
+    {
+        state.active_turns.remove(&session_id, &turn_id);
+        return Err(err);
+    }
     Ok(Json(CommandAccepted { accepted: true }))
 }
 
@@ -280,15 +285,16 @@ async fn inject_message(
     Ok(Json(CommandAccepted { accepted: true }))
 }
 
-async fn cancel_turn(State(state): State<AppState>) -> Result<Json<CommandAccepted>, AppError> {
+async fn cancel_turn(State(state): State<AppState>) -> Result<Json<TurnCancelResponse>, AppError> {
     let session_id = state.current_session_id();
-    let cancelled = state.cancel_turns_for_session(&session_id).await?;
+    let cancellations = state.cancel_turns_for_session(&session_id).await?;
     state.trace(
         "api.turn.cancel",
-        json!({ "session_id": session_id, "cancelled": cancelled }),
+        json!({ "session_id": session_id, "cancellations": cancellations }),
     );
-    Ok(Json(CommandAccepted {
-        accepted: cancelled > 0,
+    Ok(Json(TurnCancelResponse {
+        accepted: !cancellations.is_empty(),
+        cancellations,
     }))
 }
 
@@ -337,6 +343,7 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
     Ok(Json(StateSnapshot {
         settings: state.settings(),
         messages: Vec::new(),
+        active_turns: Vec::new(),
     }))
 }
 

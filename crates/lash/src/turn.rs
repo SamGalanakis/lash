@@ -54,27 +54,39 @@ pub(crate) struct TurnCancelRegistry {
 #[derive(Default)]
 struct TurnCancelRegistryInner {
     next_id: u64,
-    active: BTreeMap<u64, CancellationToken>,
+    active: BTreeMap<u64, RegisteredTurnCancel>,
+}
+
+struct RegisteredTurnCancel {
+    token: CancellationToken,
+    origin_hint: TurnCancelOriginHint,
 }
 
 impl TurnCancelRegistry {
     /// Register the token of a turn that is about to execute. The guard
     /// removes the entry when the turn finishes, however it finishes.
-    fn register(&self, token: CancellationToken) -> TurnCancelGuard {
+    fn register(
+        &self,
+        token: CancellationToken,
+        origin_hint: TurnCancelOriginHint,
+    ) -> TurnCancelGuard {
         let mut inner = self.inner.lock().expect("turn cancel registry");
         let id = inner.next_id;
         inner.next_id += 1;
-        inner.active.insert(id, token);
+        inner
+            .active
+            .insert(id, RegisteredTurnCancel { token, origin_hint });
         TurnCancelGuard {
             registry: Arc::clone(&self.inner),
             id,
         }
     }
 
-    pub(crate) fn cancel_all(&self) -> usize {
+    pub(crate) fn cancel_all(&self, origin: Option<String>) -> usize {
         let inner = self.inner.lock().expect("turn cancel registry");
-        for token in inner.active.values() {
-            token.cancel();
+        for registered in inner.active.values() {
+            registered.origin_hint.set(origin.clone());
+            registered.token.cancel();
         }
         inner.active.len()
     }
@@ -105,11 +117,31 @@ pub struct TurnBuilder {
     pub(crate) protocol_turn_options: Option<ProtocolTurnOptions>,
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) turn_id: Option<String>,
+    pub(crate) cancel_origin_hint: TurnCancelOriginHint,
 }
 
 impl TurnBuilder {
+    /// Install a process-local cooperative token.
+    ///
+    /// This low-level hook remains for provider plumbing, shutdown, and tests.
+    /// Host-facing stop controls should use `TurnWorkDriver::request_cancel`
+    /// with an exact session/turn address. If this token fires, cancellation
+    /// evidence records no origin; call
+    /// [`cancel_with_origin`](Self::cancel_with_origin) when the origin is
+    /// known.
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
+        self.cancel_origin_hint = TurnCancelOriginHint::default();
+        self
+    }
+
+    /// Install a process-local token with an opaque host-defined origin.
+    ///
+    /// Lash records the value without interpreting it.
+    pub fn cancel_with_origin(mut self, cancel: CancellationToken, origin: Option<String>) -> Self {
+        self.cancel = cancel;
+        self.cancel_origin_hint = TurnCancelOriginHint::default();
+        self.cancel_origin_hint.set(origin);
         self
     }
 
@@ -231,7 +263,12 @@ impl TurnBuilder {
             self.input.trace_turn_id = Some(trace_turn_id);
         }
         validate_required_plugin_inputs(&self.active_plugins, &self.input)?;
-        let cancel_guard = self.cancels.register(self.cancel.clone());
+        self.input
+            .turn_context
+            .set_local_cancel_origin_hint(self.cancel_origin_hint.clone());
+        let cancel_guard = self
+            .cancels
+            .register(self.cancel.clone(), self.cancel_origin_hint);
         Ok((self.runtime, self.input, self.cancel, cancel_guard))
     }
 
@@ -315,8 +352,14 @@ pub struct ScopedTurnBuilder<'run> {
 }
 
 impl<'run> ScopedTurnBuilder<'run> {
+    /// Install a low-level process-local cancellation token.
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.builder = self.builder.cancel(cancel);
+        self
+    }
+
+    pub fn cancel_with_origin(mut self, cancel: CancellationToken, origin: Option<String>) -> Self {
+        self.builder = self.builder.cancel_with_origin(cancel, origin);
         self
     }
 
@@ -500,14 +543,27 @@ pub struct QueuedTurnBuilder {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) effect_host: Arc<dyn EffectHost>,
     pub(crate) cancel: CancellationToken,
+    pub(crate) cancel_origin_hint: TurnCancelOriginHint,
     pub(crate) cancels: TurnCancelRegistry,
     pub(crate) batch_ids: Vec<String>,
     pub(crate) drain_id: Option<String>,
 }
 
 impl QueuedTurnBuilder {
+    /// Install a process-local token whose origin is unknown.
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
+        self.cancel_origin_hint = TurnCancelOriginHint::default();
+        self
+    }
+
+    /// Install a process-local token with an opaque host-defined origin.
+    ///
+    /// Lash records the value without interpreting it.
+    pub fn cancel_with_origin(mut self, cancel: CancellationToken, origin: Option<String>) -> Self {
+        self.cancel = cancel;
+        self.cancel_origin_hint = TurnCancelOriginHint::default();
+        self.cancel_origin_hint.set(origin);
         self
     }
 
@@ -592,16 +648,18 @@ impl QueuedTurnBuilder {
             runtime,
             effect_host: _,
             cancel,
+            cancel_origin_hint,
             cancels,
             batch_ids,
             drain_id: _,
         } = self;
-        let _cancel_guard = cancels.register(cancel.clone());
+        let _cancel_guard = cancels.register(cancel.clone(), cancel_origin_hint.clone());
         stream_next_queued_prepared_turn(
             &runtime,
             TurnSinks::turn(events),
             scoped_effect_controller,
             cancel,
+            cancel_origin_hint,
             &batch_ids,
         )
         .await
@@ -616,6 +674,11 @@ pub struct ScopedQueuedTurnBuilder<'run> {
 impl<'run> ScopedQueuedTurnBuilder<'run> {
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.builder = self.builder.cancel(cancel);
+        self
+    }
+
+    pub fn cancel_with_origin(mut self, cancel: CancellationToken, origin: Option<String>) -> Self {
+        self.builder = self.builder.cancel_with_origin(cancel, origin);
         self
     }
 
@@ -708,6 +771,7 @@ pub(crate) async fn stream_next_queued_prepared_turn(
     sinks: TurnSinks<'_>,
     scoped_effect_controller: ScopedEffectController<'_>,
     cancel: CancellationToken,
+    cancel_origin_hint: TurnCancelOriginHint,
     batch_ids: &[String],
 ) -> Result<Option<TurnResult>> {
     let turn = Box::pin(stream_next_queued_prepared_assembled(
@@ -715,6 +779,7 @@ pub(crate) async fn stream_next_queued_prepared_turn(
         sinks,
         scoped_effect_controller,
         cancel,
+        cancel_origin_hint,
         batch_ids,
     ))
     .await?;
@@ -726,6 +791,7 @@ pub(crate) async fn stream_next_queued_prepared_assembled(
     sinks: TurnSinks<'_>,
     scoped_effect_controller: ScopedEffectController<'_>,
     cancel: CancellationToken,
+    cancel_origin_hint: TurnCancelOriginHint,
     batch_ids: &[String],
 ) -> Result<Option<AssembledTurn>> {
     let writer_handle = runtime.writer();
@@ -739,7 +805,8 @@ pub(crate) async fn stream_next_queued_prepared_assembled(
         &observation_sink,
         scoped_effect_controller,
         cancel,
-    );
+    )
+    .with_local_cancel_origin_hint(cancel_origin_hint);
     let turn = if batch_ids.is_empty() {
         writer.stream_next_queued_work(opts).await?
     } else {
@@ -883,6 +950,9 @@ pub(crate) async fn stream_prepared_agent_frame_run(
 pub struct TurnResult {
     pub state: SessionSnapshot,
     pub outcome: TurnOutcome,
+    /// Durable request evidence, present exactly when `outcome` is cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<lash_core::TurnCancellationEvidence>,
     pub assistant_output: AssistantOutput,
     /// Parent's own LLM tokens for this turn. Does **not** include child
     /// sessions; see [`children_usage`](Self::children_usage) and
@@ -910,6 +980,7 @@ impl TurnResult {
         Self {
             state: turn.state,
             outcome: turn.outcome,
+            cancellation: turn.cancellation,
             assistant_output: turn.assistant_output,
             usage: turn.token_usage,
             children_usage: turn.children_usage,

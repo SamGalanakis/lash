@@ -12,11 +12,12 @@ struct AppState {
     event_tx: broadcast::Sender<StreamItem>,
     queued_work_driver: lash::runtime::QueuedWorkDriver,
     restate_ingress_url: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     restate_admin_url: String,
     restate_http: reqwest::Client,
     restate_cron_job_keys: Arc<Mutex<BTreeSet<String>>>,
     mail_world: mail::MailWorld,
-    active_restate_invocations: ActiveRestateInvocations,
+    active_turns: ActiveTurns,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -47,6 +48,7 @@ impl ModelSelection {
 struct StateSnapshot {
     settings: Settings,
     messages: Vec<ChatMessage>,
+    active_turns: Vec<lash::TurnAddress>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -130,56 +132,90 @@ enum StreamItem {
 }
 
 #[derive(Clone, Default)]
-struct ActiveRestateInvocations {
-    inner: Arc<Mutex<BTreeMap<(String, String), lash_restate::RestateInvocationId>>>,
+struct ActiveTurns {
+    inner: Arc<Mutex<BTreeSet<(String, String)>>>,
+    path: Option<Arc<PathBuf>>,
 }
 
-impl ActiveRestateInvocations {
-    fn insert(
-        &self,
-        session_id: impl Into<String>,
-        turn_id: impl Into<String>,
-        invocation_id: lash_restate::RestateInvocationId,
-    ) {
-        self.inner
-            .lock()
-            .expect("active Restate invocation lock")
-            .insert((session_id.into(), turn_id.into()), invocation_id);
+impl ActiveTurns {
+    fn persistent(path: PathBuf) -> AnyhowResult<Self> {
+        let turns = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("decode active turns `{}`", path.display()))?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read active turns `{}`", path.display()));
+            }
+        };
+        let active = Self {
+            inner: Arc::new(Mutex::new(turns)),
+            path: Some(Arc::new(path)),
+        };
+        active.persist();
+        Ok(active)
+    }
+
+    fn insert(&self, session_id: impl Into<String>, turn_id: impl Into<String>) {
+        let mut active = self.inner.lock().expect("active turn lock");
+        active.insert((session_id.into(), turn_id.into()));
+        self.persist_snapshot(&active);
     }
 
     fn remove(&self, session_id: &str, turn_id: &str) {
-        self.inner
-            .lock()
-            .expect("active Restate invocation lock")
-            .remove(&(session_id.to_string(), turn_id.to_string()));
+        let mut active = self.inner.lock().expect("active turn lock");
+        active.remove(&(session_id.to_string(), turn_id.to_string()));
+        self.persist_snapshot(&active);
     }
 
-    fn guard(&self, session_id: &str, turn_id: &str) -> ActiveRestateInvocationGuard {
-        ActiveRestateInvocationGuard {
+    fn guard(&self, session_id: &str, turn_id: &str) -> ActiveTurnGuard {
+        ActiveTurnGuard {
             active: self.clone(),
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
         }
     }
 
-    fn for_session(&self, session_id: &str) -> Vec<(String, lash_restate::RestateInvocationId)> {
+    fn for_session(&self, session_id: &str) -> Vec<lash::TurnAddress> {
         self.inner
             .lock()
-            .expect("active Restate invocation lock")
+            .expect("active turn lock")
             .iter()
-            .filter(|((active_session_id, _), _)| active_session_id == session_id)
-            .map(|((_, turn_id), invocation_id)| (turn_id.clone(), invocation_id.clone()))
+            .filter(|(active_session_id, _)| active_session_id == session_id)
+            .map(|(session_id, turn_id)| lash::TurnAddress::new(session_id, turn_id))
             .collect()
+    }
+
+    fn persist(&self) {
+        let active = self.inner.lock().expect("active turn lock");
+        self.persist_snapshot(&active);
+    }
+
+    fn persist_snapshot(&self, active: &BTreeSet<(String, String)>) {
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        let bytes = serde_json::to_vec(active).expect("serialize active turns");
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes)
+            .unwrap_or_else(|err| panic!("write active turns `{}`: {err}", temporary.display()));
+        std::fs::rename(&temporary, path).unwrap_or_else(|err| {
+            panic!(
+                "replace active turns `{}` from `{}`: {err}",
+                path.display(),
+                temporary.display()
+            )
+        });
     }
 }
 
-struct ActiveRestateInvocationGuard {
-    active: ActiveRestateInvocations,
+struct ActiveTurnGuard {
+    active: ActiveTurns,
     session_id: String,
     turn_id: String,
 }
 
-impl Drop for ActiveRestateInvocationGuard {
+impl Drop for ActiveTurnGuard {
     fn drop(&mut self) {
         self.active.remove(&self.session_id, &self.turn_id);
     }
@@ -188,6 +224,20 @@ impl Drop for ActiveRestateInvocationGuard {
 #[derive(Debug, Serialize)]
 struct CommandAccepted {
     accepted: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TurnCancelReceipt {
+    address: lash::TurnAddress,
+    durability_tier: lash::DurabilityTier,
+    outcome: lash::TurnCancelOutcome,
+    terminal: Option<lash::TurnTerminal>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TurnCancelResponse {
+    accepted: bool,
+    cancellations: Vec<TurnCancelReceipt>,
 }
 
 /// Best-effort [`ProcessEventSink`](lash::process::ProcessEventSink) that hands
@@ -220,7 +270,7 @@ struct WorkbenchQueuedWorkSubmitter {
     store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
     restate_ingress_url: String,
     restate_http: reqwest::Client,
-    active_restate_invocations: ActiveRestateInvocations,
+    active_turns: ActiveTurns,
 }
 
 #[async_trait]
@@ -240,20 +290,19 @@ impl lash::runtime::QueuedWorkRunHandle for WorkbenchQueuedWorkSubmitter {
             session_id: session_id.clone(),
             reason: request.reason,
         };
-        restate::submit_queued_turn_request(
+        self.active_turns
+            .insert(&session_id, &workflow_request.turn_id);
+        if let Err(err) = restate::submit_queued_turn_request(
             &self.restate_http,
             &self.restate_ingress_url,
             &workflow_request,
         )
         .await
-        .map(|invocation_id| {
-            self.active_restate_invocations.insert(
-                session_id,
-                workflow_request.turn_id.clone(),
-                invocation_id,
-            );
-        })
-        .map_err(|err| PluginError::Session(err.to_string()))?;
+        {
+            self.active_turns
+                .remove(&session_id, &workflow_request.turn_id);
+            return Err(PluginError::Session(err.to_string()));
+        }
         Ok(())
     }
 }

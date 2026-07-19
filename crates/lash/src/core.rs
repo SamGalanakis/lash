@@ -307,6 +307,7 @@ impl QueuedWorkRunHandle for InlineQueuedWorkRunHandle {
             crate::turn::TurnSinks::default(),
             scoped,
             CancellationToken::new(),
+            lash_core::TurnCancelOriginHint::default(),
             &[],
         )
         .await
@@ -441,6 +442,15 @@ impl LashCore {
 
     pub fn effect_host(&self) -> Arc<dyn EffectHost> {
         Arc::clone(&self.env.core.control.effect_host)
+    }
+
+    /// Exact-turn cooperative control for this deployment's effect host.
+    ///
+    /// The returned driver is independently usable from any session handle.
+    /// Session and turn ids are routing identity, not authorization; authorize
+    /// requests in the host API before forwarding them to Lash.
+    pub fn turn_work_driver(&self) -> lash_core::TurnWorkDriver {
+        lash_core::TurnWorkDriver::new(self.effect_host())
     }
 
     pub async fn delete_session(

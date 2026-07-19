@@ -597,8 +597,7 @@ async fn run_user_turn(
     request: WorkbenchTurnWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
-    let _active_invocation_guard =
-        state.clear_restate_invocation_on_drop(&request.session_id, &request.turn_id);
+    let _active_turn_guard = state.clear_turn_on_drop(&request.session_id, &request.turn_id);
     let turn_model = model_spec_from_selection(request.model);
     let session = state
         .core
@@ -768,8 +767,7 @@ async fn run_queued_turn(
     request: WorkbenchQueuedTurnWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
-    let _active_invocation_guard =
-        state.clear_restate_invocation_on_drop(&request.session_id, &request.turn_id);
+    let _active_turn_guard = state.clear_turn_on_drop(&request.session_id, &request.turn_id);
     let session = state
         .core
         .session(request.session_id.clone())
