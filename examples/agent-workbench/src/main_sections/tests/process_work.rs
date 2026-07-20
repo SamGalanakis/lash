@@ -48,7 +48,7 @@ mod process_work_tests {
             .into_handle();
         let model =
             lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
-        let (event_tx, _) = broadcast::channel(16);
+        let event_tx = SessionEventRegistry::new(16);
         // The app sink, wired exactly as bootstrap wires it — through the
         // driver's watched decorator, feeding an mpsc channel.
         let (sink_tx, mut sink_rx) = mpsc::channel::<lash::process::ProcessEvent>(16);
@@ -276,7 +276,7 @@ mod process_work_tests {
             web_configured: false,
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
-            event_tx: broadcast::channel(16).0,
+            event_tx: SessionEventRegistry::new(16),
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url,
             restate_admin_url: "http://127.0.0.1:9070".to_string(),

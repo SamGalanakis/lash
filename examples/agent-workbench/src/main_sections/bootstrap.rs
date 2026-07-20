@@ -107,7 +107,7 @@ async fn async_main() -> AnyhowResult<()> {
     let subagent_registry = Arc::new(lash_subagents::default_registry(&BTreeMap::new()));
     let mail_world = mail::MailWorld::new();
     let session_ids = WorkbenchSessionIds::persistent(data_dir.join("session-id"))?;
-    let (event_tx, _) = broadcast::channel(1024);
+    let event_tx = SessionEventRegistry::new(1024);
     let restate_http = reqwest::Client::new();
     let active_turns = ActiveTurns::persistent(data_dir.join("active-turns.json"))?;
     // Best-effort freshness feed for appended process events (ADR 0017). The

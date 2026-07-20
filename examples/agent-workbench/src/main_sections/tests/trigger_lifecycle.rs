@@ -181,7 +181,7 @@
             web_configured: false,
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
-            event_tx: broadcast::channel(1024).0,
+            event_tx: SessionEventRegistry::new(1024),
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_admin_url: "http://127.0.0.1:9070".to_string(),

@@ -34,7 +34,7 @@ mod turn_control_timeout_tests {
         let model =
             lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None)
                 .expect("model spec");
-        let (event_tx, _) = broadcast::channel(16);
+        let event_tx = SessionEventRegistry::new(16);
         let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
@@ -266,7 +266,7 @@ mod turn_control_timeout_tests {
         let model =
             lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None)
                 .expect("model spec");
-        let (event_tx, _) = broadcast::channel(16);
+        let event_tx = SessionEventRegistry::new(16);
         let core = explicit_durable_test_facets(data_dir)
             .provider(provider)
             .model(model)
