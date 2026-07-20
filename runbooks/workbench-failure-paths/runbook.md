@@ -1,0 +1,121 @@
+# E2E Scenario: Workbench Failure Paths
+
+> **Read [../RULES.md](../RULES.md) first.** Its browser, polling, screenshot,
+> Abort/RCA, and teardown rules apply. This runbook names a deliberate exception to the
+> real-token rule: the Workbench's opt-in development failure provider.
+
+**Purpose.** Judge what a user sees when provider authentication fails mid-turn, a
+retryable rate limit causes an attempt reset, and a durable Runtime Process fails. Each
+fault is deterministic so the visible wording and final state are objective gates.
+
+**Deterministic companion.** `just agent-workbench-restate-e2e` asserts the auth terminal,
+same-session recovery, retry attempt reset, and single-copy live/replay observations.
+`cargo test -p agent-workbench process_work_tests` asserts the failed-process `/api/work`
+projection and UI error rendering. The browser run judges the actual transcript and work
+rail; it does not reproduce those internal assertions.
+
+## Scenario-specific golden rules
+
+1. Set `AGENT_WORKBENCH_DEV_PROVIDER_SCENARIO` to exactly the phase's documented value.
+   Require the startup warning and rendered model id `dev/failure-paths`; an OpenRouter
+   request or missing warning invalidates the run.
+2. Use a fresh data directory and a fresh port-derived stack for each scenario. Never
+   carry provider call counts, sessions, or processes between phases.
+3. A provider error is a stopped `ProviderError`, never `Cancelled`. It must settle,
+   render its real error, clear the active route, and leave the same session usable.
+4. Retry output is replace-not-append. The final rendered assistant response and
+   `/api/state.messages` contain `retry observer single-copy marker` exactly once.
+5. Process failure remains process failure. The work rail must show `failed` plus the
+   durable error; a successful parent turn must not make the process look successful.
+
+## Working material
+
+- For each phase choose `<port>` and `<fresh-data-dir>`, then boot:
+  `AGENT_WORKBENCH_DEV_PROVIDER_SCENARIO=<scenario> AGENT_WORKBENCH_DATA_DIR=<fresh-data-dir> AGENT_WORKBENCH_OPEN=0 just agent-workbench <port>`.
+  No provider key is required. Gate `GET /healthz` → 200 and retain the startup log.
+- Browser affordances: model selector, session id, composer, running/idle pill,
+  transcript, and **work** rail.
+- Backend truth: `GET /api/state`, `POST /api/turn`, `GET /api/work`, and the observation
+  stream used by the page. Disk truth: `<fresh-data-dir>/trace.jsonl` and
+  `active-turns.json`.
+- End every phase with `just agent-workbench-down <port>` and confirm its managed Restate
+  container is gone before reusing the port.
+
+## Phase 0 — Common pre-flight
+
+For the selected scenario, poll `/healthz`, open the page, and require the rendered model
+id to be `dev/failure-paths`. Require the startup log to name
+`AGENT_WORKBENCH_DEV_PROVIDER_SCENARIO` and the exact scenario. Require a fresh transcript,
+no active turn, and the idle pill. Screenshot `00-<scenario>-ready.png`.
+
+## Phase 1 — Authentication failure, honest terminal, recovery
+
+Boot with `auth-failure-once`. Submit `trigger deterministic auth failure`. Poll until the
+page is idle and Stop is hidden, then gate all of:
+
+- the transcript visibly renders `development provider rejected credentials mid-turn`
+  as an error/event, with no assistant success bubble for that turn;
+- `/api/state.active_turns` is empty and `active-turns.json` contains no route;
+- the trace's completed turn has `outcome` stopped with `provider_error`, contains issue
+  code `dev_auth_rejected`, and has no cancellation evidence or cancelled outcome.
+
+Save state and matching trace rows as `01-auth-failed-state.json` and
+`01-auth-failed-trace.json`; screenshot `01-auth-failed.png`.
+
+Without resetting or restarting, record the session id, submit `prove recovery`, and poll
+for the exact assistant text `session recovered after provider auth failure`. Require the
+session id to be unchanged, the page idle, and no active route. Screenshot
+`02-auth-session-recovered.png` and save `/api/state` as
+`02-auth-session-recovered-state.json`.
+
+Teardown this stack before Phase 2.
+
+## Phase 2 — Retryable rate limit, one-copy convergence
+
+Boot fresh with `rate-limit-once`. Start browser network/event capture before submitting
+`trigger deterministic rate limit retry`; this captures transient observations without
+using a fixed sleep. Poll until the exact terminal assistant text
+`provider retry succeeded` is rendered and the page is idle.
+
+Require the final rendered assistant response and `/api/state.messages` each contain
+`retry observer single-copy marker` exactly once. In captured observations or trace
+evidence require one retry caused by `dev_rate_limited` and one
+`model_attempt_reset`; after applying that reset by its correlation ids, one marker
+remains. Require no error terminal, no cancellation evidence, and no active route.
+
+Screenshot `03-rate-limit-recovered.png`; save state, observations, and trace rows as
+`03-rate-limit-state.json`, `03-rate-limit-observations.jsonl`, and
+`03-rate-limit-trace.json`. Teardown before Phase 3.
+
+## Phase 3 — Failed durable process in the work rail
+
+Boot fresh with `failed-process`. Submit `start deterministic failing process`; the parent
+turn may finish successfully. Poll `GET /api/work` until the row labelled
+`FIG425_deterministic_failure` is terminal with status `failed` and error exactly
+`deterministic durable process failure`.
+
+Open the **work** rail and poll until that same row visibly shows both `failed` and
+`error: deterministic durable process failure`. The UI and `/api/work` must identify the
+same process id. Screenshot `04-failed-process-work-rail.png`; save the API row as
+`04-failed-process.json`.
+
+## Phase 4 — Teardown and score
+
+Tear down the final stack and confirm all three managed Restate containers were removed.
+
+| Item | Objective gate | Verdict | Evidence |
+|------|----------------|---------|----------|
+| Dev-only fixture | exact scenario warning + `dev/failure-paths`; no network provider | | `00-*-ready.png`, startup logs |
+| Auth failure | rendered exact error; ProviderError trace; no Cancelled evidence | | `01-auth-failed.*` |
+| Session recovery | same session commits the exact recovery response | | `02-auth-session-recovered.*` |
+| Retry convergence | one reset and one surviving marker in UI/API/observations | | `03-rate-limit-*` |
+| Durable failure | work rail and `/api/work` agree on failed + exact error | | `04-failed-process-*` |
+| Route hygiene | every settled phase has no active route | | saved state and `active-turns.json` |
+| Teardown | each port-derived stack is gone | | command log |
+
+**Aggregate:** did every failure class settle honestly, stay observable at the user
+surface, avoid duplicate retry output, and preserve a usable session?
+
+---
+
+_Stop triggers and the Abort/RCA + reporting protocol are in [../RULES.md](../RULES.md)._
