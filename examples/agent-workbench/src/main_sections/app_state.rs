@@ -43,6 +43,7 @@ impl AppState {
         let _ = self.event_tx.send(item);
     }
 
+    #[cfg(test)]
     fn track_turn(&self, session_id: &str, turn_id: &str) {
         self.active_turns.insert(session_id, turn_id);
     }
