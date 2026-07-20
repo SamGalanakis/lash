@@ -66,6 +66,8 @@ pub(super) struct LlmStreamState<'a> {
     pub(super) protocol_iteration: usize,
     pub(super) assistant_prose_correlation: &'a mut Option<crate::TurnActivityId>,
     pub(super) reasoning_correlation: &'a mut Option<crate::TurnActivityId>,
+    pub(super) assistant_prose_attempt_correlations: &'a mut Vec<crate::TurnActivityId>,
+    pub(super) reasoning_attempt_correlations: &'a mut Vec<crate::TurnActivityId>,
     /// Set to `true` by `forward_provider_stream_event` when a plugin
     /// stream hook has raised `AssistantStreamTransform.abort_stream`.
     /// The LLM runner checks this after each stream event and

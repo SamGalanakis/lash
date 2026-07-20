@@ -2000,7 +2000,9 @@
     const renderedIngressInputs = new Set();
     let assistantDraft = null;
     let assistantDraftText = "";
+    let assistantDraftChunks = [];
     let reasoning = null;
+    let reasoningChunks = [];
     let pendingCodeBlock = null;
     let pendingTools = [];
     let busy = false;
@@ -2186,6 +2188,7 @@
         if (parent) parent.remove();
         assistantDraft = null;
         assistantDraftText = "";
+        assistantDraftChunks = [];
       }
       const node = document.createElement("div");
       node.className = "message " + message.role;
@@ -2273,6 +2276,7 @@
       assistantDraft = document.createElement("div");
       assistantDraft.className = "msg-body";
       assistantDraftText = "";
+      assistantDraftChunks = [];
       node.append(role, assistantDraft);
       timeline.appendChild(node);
       return assistantDraft;
@@ -2356,12 +2360,28 @@
       return "```json\n" + JSON.stringify(value, null, 2) + "\n```";
     }
 
-    function appendAssistantText(delta) {
+    function appendAssistantText(delta, correlationId = null) {
       if (!delta) return;
       const draft = ensureAssistantDraft();
-      assistantDraftText += delta;
+      assistantDraftChunks.push({ correlationId, text: delta });
+      assistantDraftText = assistantDraftChunks.map(chunk => chunk.text).join("");
       draft.innerHTML = renderMarkdownBlocks(assistantDraftText);
       scrollToEnd();
+    }
+
+    function retractAssistantText(correlationIds) {
+      const targets = new Set(correlationIds || []);
+      if (!targets.size) return;
+      assistantDraftChunks = assistantDraftChunks.filter(
+        chunk => !targets.has(chunk.correlationId)
+      );
+      assistantDraftText = assistantDraftChunks.map(chunk => chunk.text).join("");
+      if (!assistantDraftText && assistantDraft) {
+        assistantDraft.closest(".message")?.remove();
+        assistantDraft = null;
+      } else if (assistantDraft) {
+        assistantDraft.innerHTML = renderMarkdownBlocks(assistantDraftText);
+      }
     }
 
     function toolOutcome(event) {
@@ -2533,13 +2553,40 @@
       return node && node.parentNode === timeline && timeline.lastElementChild === node;
     }
 
-    function appendReasoning(delta) {
+    function appendReasoning(delta, correlationId = null) {
       if (!isCurrentTimelineHead(reasoning)) {
         clearEmpty();
         reasoning = thinkingPanel("thinking");
         timeline.appendChild(reasoning);
       }
+      reasoningChunks.push({ correlationId, text: delta, node: reasoning });
       reasoning.querySelector("pre").textContent += delta;
+      scrollToEnd();
+    }
+
+    function retractReasoning(correlationIds) {
+      const targets = new Set(correlationIds || []);
+      if (!targets.size) return;
+      const affected = new Set(
+        reasoningChunks
+          .filter(chunk => targets.has(chunk.correlationId))
+          .map(chunk => chunk.node)
+      );
+      reasoningChunks = reasoningChunks.filter(chunk => !targets.has(chunk.correlationId));
+      for (const node of affected) {
+        const text = reasoningChunks
+          .filter(chunk => chunk.node === node)
+          .map(chunk => chunk.text)
+          .join("");
+        if (text) node.querySelector("pre").textContent = text;
+        else node.remove();
+      }
+      if (!reasoning?.isConnected) reasoning = null;
+    }
+
+    function resetModelAttempt(event) {
+      retractAssistantText(event.assistant_prose_correlation_ids);
+      retractReasoning(event.reasoning_correlation_ids);
       scrollToEnd();
     }
 
@@ -2575,12 +2622,14 @@
       pendingCodeBlock = null;
       pendingTools = [];
       reasoning = null;
+      reasoningChunks = [];
     }
 
     function handleTurnEvent(event) {
       if (event.type === "queued_work_started") renderQueuedWorkStarted(event);
-      if (event.type === "assistant_prose_delta") appendAssistantText(event.text);
-      if (event.type === "reasoning_delta") appendReasoning(event.text);
+      if (event.type === "assistant_prose_delta") appendAssistantText(event.text, event.correlation_id);
+      if (event.type === "reasoning_delta") appendReasoning(event.text, event.correlation_id);
+      if (event.type === "model_attempt_reset") resetModelAttempt(event);
       if (event.type === "code_block_started") startCodeBlock(event);
       if (event.type === "code_block_completed") completeCodeBlock(event);
       if (event.type === "tool_call_completed") appendCompletedTool(event);
@@ -2599,7 +2648,9 @@
       controller = commandController;
       assistantDraft = null;
       assistantDraftText = "";
+      assistantDraftChunks = [];
       reasoning = null;
+      reasoningChunks = [];
       pendingCodeBlock = null;
       pendingTools = [];
       setBusy(true, "starting turn");
@@ -2741,7 +2792,9 @@
       renderedMessages.clear();
       assistantDraft = null;
       assistantDraftText = "";
+      assistantDraftChunks = [];
       reasoning = null;
+      reasoningChunks = [];
       pendingCodeBlock = null;
       pendingTools = [];
       lastUserText = "";

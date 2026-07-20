@@ -68,6 +68,10 @@ pub enum RemoteTurnEvent {
     ReasoningDelta {
         text: String,
     },
+    ModelAttemptReset {
+        assistant_prose_correlation_ids: Vec<String>,
+        reasoning_correlation_ids: Vec<String>,
+    },
     CodeBlockStarted {
         language: String,
         code: String,

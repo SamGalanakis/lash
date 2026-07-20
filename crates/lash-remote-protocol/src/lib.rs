@@ -32,8 +32,8 @@ pub use turn_input::*;
 pub use turn_result::*;
 pub use usage_activity::*;
 
-// Bumped to 11: foreground turns carry durable cancellation control/evidence.
-pub const REMOTE_PROTOCOL_VERSION: u32 = 11;
+// Bumped to 12: retried model attempts retract superseded prose and reasoning.
+pub const REMOTE_PROTOCOL_VERSION: u32 = 12;
 
 pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
     if actual == REMOTE_PROTOCOL_VERSION {

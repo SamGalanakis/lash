@@ -180,6 +180,33 @@ fn remote_turn_result_json_round_trips() {
 }
 
 #[test]
+fn model_attempt_reset_has_pinned_wire_shape() {
+    let activity = RemoteTurnActivity {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        sequence: 3,
+        id: "reset-event".to_string(),
+        correlation_id: "reset-correlation".to_string(),
+        event: RemoteTurnEvent::ModelAttemptReset {
+            assistant_prose_correlation_ids: vec!["prose-correlation".to_string()],
+            reasoning_correlation_ids: vec!["reasoning-correlation".to_string()],
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(activity).expect("serialize model attempt reset"),
+        serde_json::json!({
+            "protocol_version": REMOTE_PROTOCOL_VERSION,
+            "sequence": 3,
+            "id": "reset-event",
+            "correlation_id": "reset-correlation",
+            "type": "model_attempt_reset",
+            "assistant_prose_correlation_ids": ["prose-correlation"],
+            "reasoning_correlation_ids": ["reasoning-correlation"],
+        })
+    );
+}
+
+#[test]
 fn remote_turn_result_requires_cancellation_evidence_iff_cancelled() {
     let mut result = RemoteTurnResult {
         protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -749,8 +776,8 @@ fn wrong_protocol_versions_are_rejected() {
     assert!(matches!(
         request.validate(),
         Err(RemoteProtocolError::UnsupportedProtocolVersion {
-            actual: 10,
-            expected: 11,
+            actual: 11,
+            expected: 12,
         })
     ));
 
@@ -832,7 +859,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 11);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 12);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());

@@ -695,7 +695,21 @@ async fn forward_session_observations(
 
 #[derive(Default)]
 struct TurnStreamState {
-    assistant_prose: String,
+    assistant_prose: Vec<TurnStreamProseChunk>,
+}
+
+struct TurnStreamProseChunk {
+    correlation_id: lash::TurnActivityId,
+    text: String,
+}
+
+impl TurnStreamState {
+    fn assistant_prose(&self) -> String {
+        self.assistant_prose
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect()
+    }
 }
 
 struct ChannelTurnEvents {
@@ -705,13 +719,73 @@ struct ChannelTurnEvents {
 #[async_trait]
 impl TurnActivitySink for ChannelTurnEvents {
     async fn emit(&self, activity: TurnActivity) {
-        if let TurnEvent::AssistantProseDelta { text } = &activity.event {
-            self.turn_state
+        let mut turn_state = self.turn_state.lock().expect("turn state lock");
+        match activity.event {
+            TurnEvent::AssistantProseDelta { text } => {
+                turn_state.assistant_prose.push(TurnStreamProseChunk {
+                    correlation_id: activity.correlation_id,
+                    text,
+                });
+            }
+            TurnEvent::ModelAttemptReset {
+                assistant_prose_correlation_ids,
+                ..
+            } => {
+                turn_state.assistant_prose.retain(|chunk| {
+                    !assistant_prose_correlation_ids.contains(&chunk.correlation_id)
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod turn_stream_state_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn workbench_turn_stream_state_retracts_only_superseded_prose() {
+        let turn_state = Arc::new(Mutex::new(TurnStreamState::default()));
+        let sink = ChannelTurnEvents {
+            turn_state: Arc::clone(&turn_state),
+        };
+        sink.emit(TurnActivity::new(
+            lash::TurnActivityId::new("prior"),
+            TurnEvent::AssistantProseDelta {
+                text: "kept ".to_string(),
+            },
+        ))
+        .await;
+        sink.emit(TurnActivity::new(
+            lash::TurnActivityId::new("failed"),
+            TurnEvent::AssistantProseDelta {
+                text: "discarded ".to_string(),
+            },
+        ))
+        .await;
+        sink.emit(TurnActivity::independent(
+            TurnEvent::ModelAttemptReset {
+                assistant_prose_correlation_ids: vec![lash::TurnActivityId::new("failed")],
+                reasoning_correlation_ids: Vec::new(),
+            },
+        ))
+        .await;
+        sink.emit(TurnActivity::new(
+            lash::TurnActivityId::new("successful"),
+            TurnEvent::AssistantProseDelta {
+                text: "answer".to_string(),
+            },
+        ))
+        .await;
+
+        assert_eq!(
+            turn_state
                 .lock()
                 .expect("turn state lock")
-                .assistant_prose
-                .push_str(text);
-        }
+                .assistant_prose(),
+            "kept answer"
+        );
     }
 }
 

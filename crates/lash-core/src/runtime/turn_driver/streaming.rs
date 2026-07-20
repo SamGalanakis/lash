@@ -250,6 +250,8 @@ impl RuntimeTurnDriver<'_> {
         let mut abort_requested = false;
         let mut assistant_prose_correlation = None;
         let mut reasoning_correlation = None;
+        let mut assistant_prose_attempt_correlations = Vec::new();
+        let mut reasoning_attempt_correlations = Vec::new();
         let mut stream_state = LlmStreamState {
             text_streamed: &mut text_streamed,
             streamed_usage: &mut streamed_usage,
@@ -258,6 +260,8 @@ impl RuntimeTurnDriver<'_> {
             protocol_iteration,
             assistant_prose_correlation: &mut assistant_prose_correlation,
             reasoning_correlation: &mut reasoning_correlation,
+            assistant_prose_attempt_correlations: &mut assistant_prose_attempt_correlations,
+            reasoning_attempt_correlations: &mut reasoning_attempt_correlations,
             abort_requested: &mut abort_requested,
         };
         let mut call_record = None;
@@ -701,6 +705,7 @@ impl RuntimeTurnDriver<'_> {
             )
             .await;
             let correlation_id = stream_correlation_id(state.reasoning_correlation, None);
+            remember_attempt_correlation(state.reasoning_attempt_correlations, &correlation_id);
             send_turn_activity(
                 event_tx,
                 correlation_id,
@@ -735,6 +740,10 @@ impl RuntimeTurnDriver<'_> {
             )
             .await;
             let correlation_id = stream_correlation_id(state.assistant_prose_correlation, item_id);
+            remember_attempt_correlation(
+                state.assistant_prose_attempt_correlations,
+                &correlation_id,
+            );
             send_turn_activity(
                 event_tx,
                 correlation_id,
@@ -753,8 +762,26 @@ impl RuntimeTurnDriver<'_> {
     ) -> Result<(), LlmCallError> {
         match stream_event {
             LlmStreamEvent::AttemptReset => {
+                let assistant_prose_correlation_ids =
+                    std::mem::take(state.assistant_prose_attempt_correlations);
+                let reasoning_correlation_ids =
+                    std::mem::take(state.reasoning_attempt_correlations);
+                if !assistant_prose_correlation_ids.is_empty()
+                    || !reasoning_correlation_ids.is_empty()
+                {
+                    send_turn_activity(
+                        event_tx,
+                        TurnActivityId::fresh(),
+                        TurnEvent::ModelAttemptReset {
+                            assistant_prose_correlation_ids,
+                            reasoning_correlation_ids,
+                        },
+                    )
+                    .await;
+                }
                 *state.stream_accumulator = LlmStreamAccumulator::default();
                 *state.streamed_usage = LlmUsage::default();
+                *state.text_streamed = false;
                 *state.assistant_prose_correlation = None;
                 *state.reasoning_correlation = None;
             }
@@ -792,6 +819,10 @@ impl RuntimeTurnDriver<'_> {
                     )
                     .await;
                     let correlation_id = stream_correlation_id(state.reasoning_correlation, None);
+                    remember_attempt_correlation(
+                        state.reasoning_attempt_correlations,
+                        &correlation_id,
+                    );
                     send_turn_activity(
                         event_tx,
                         correlation_id,
@@ -876,6 +907,10 @@ impl RuntimeTurnDriver<'_> {
                     .await;
                     let correlation_id =
                         stream_correlation_id(state.reasoning_correlation, item_id);
+                    remember_attempt_correlation(
+                        state.reasoning_attempt_correlations,
+                        &correlation_id,
+                    );
                     send_turn_activity(
                         event_tx,
                         correlation_id,
@@ -1023,6 +1058,15 @@ fn stream_correlation_id(
     fallback_slot
         .get_or_insert_with(TurnActivityId::fresh)
         .clone()
+}
+
+fn remember_attempt_correlation(
+    correlations: &mut Vec<TurnActivityId>,
+    correlation_id: &TurnActivityId,
+) {
+    if !correlations.contains(correlation_id) {
+        correlations.push(correlation_id.clone());
+    }
 }
 
 /// Wait up to 2s for a late `Usage` event from the provider after an
