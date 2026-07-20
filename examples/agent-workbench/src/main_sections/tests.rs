@@ -509,8 +509,7 @@ mod tests {
         let model =
             lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None)
                 .expect("model spec");
-        let (event_tx, _) = broadcast::channel(16);
-        let mut events = event_tx.subscribe();
+        let event_tx = SessionEventRegistry::new(16);
         let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
@@ -547,6 +546,7 @@ mod tests {
             active_turns: ActiveTurns::default(),
         };
         let session_id = state.current_session_id();
+        let mut events = state.event_tx.subscribe(&session_id);
 
         state.track_turn(&session_id, "foreground-turn");
         state.publish_trigger_dispatch_done(&session_id);
@@ -557,13 +557,7 @@ mod tests {
 
         state.active_turns.remove(&session_id, "foreground-turn");
         state.publish_trigger_dispatch_done(&session_id);
-        assert!(matches!(
-            events.try_recv(),
-            Ok(SessionStreamItem {
-                item: StreamItem::Done,
-                ..
-            })
-        ));
+        assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
