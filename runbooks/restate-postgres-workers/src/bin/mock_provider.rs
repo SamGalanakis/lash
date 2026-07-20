@@ -90,7 +90,9 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
             MockScenario::ToolBatch => ("tool_batch", tool_batch_script(&workflow_id, fail_once)),
             MockScenario::DurableWaitProbe => (
                 "durable_wait_probe",
-                if full_text.contains("res = await tools.durable_wait_probe(") {
+                if full_text.contains(&format!(
+                    "res = await tools.durable_wait_probe({{ workflow_id: \"{workflow_id}\" }})"
+                )) {
                     durable_wait_cancelled_script(&workflow_id)
                 } else {
                     durable_wait_probe_script(&workflow_id)
