@@ -773,9 +773,9 @@ async fn run_button_trigger(
         "button trigger occurrence emitted",
     );
     // Trigger occurrence dispatch is the end of this client-initiated request.
-    // Emit a terminal Done so the UI clears its busy state even when no trigger
-    // matched (any process the occurrence started streams its own turn separately).
-    state.publish_for_session(&request.session_id, crate::StreamItem::Done);
+    // Clear the UI's busy state when this request owns it, but do not clear a
+    // foreground turn's busy state during a mid-turn occurrence.
+    state.publish_trigger_dispatch_done(&request.session_id);
     Ok(())
 }
 
@@ -816,9 +816,9 @@ async fn run_mail_received(
         "mail received trigger occurrence queued",
     );
     // Trigger occurrence dispatch is the end of this client-initiated request.
-    // Emit a terminal Done so the UI clears its busy state even when no trigger
-    // matched (any process the occurrence started streams its own turn separately).
-    state.publish_for_session(&request.session_id, crate::StreamItem::Done);
+    // Clear the UI's busy state when this request owns it, but do not clear a
+    // foreground turn's busy state during a mid-turn occurrence.
+    state.publish_trigger_dispatch_done(&request.session_id);
     Ok(())
 }
 

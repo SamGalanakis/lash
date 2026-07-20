@@ -65,8 +65,9 @@ request must target A or B explicitly.
 ## Phase 1 — Register confusable triggers independently
 
 In each tab, ask for the same outcome: register a trigger named `shared-blue-watch` for
-the Blue host button that starts a durable process labeled `mirror-job` and records the
-button occurrence. Submit the two registration turns concurrently.
+the Blue host button that starts a durable process labeled `mirror_job` and records the
+button occurrence (Lashlang process identifiers cannot contain hyphens, so the rendered
+process label is `mirror_job`). Submit the two registration turns concurrently.
 
 Poll both tabs until idle. Save `GET /api/triggers?session_id=A` and the B equivalent as
 `01-triggers-a.json` and `01-triggers-b.json`. Require exactly one enabled registration
@@ -103,7 +104,7 @@ Scroll each transcript to its newest row and capture `02-transcript-a.png` and
 
 Record the scoped process-id sets (normally empty). Activate the Blue trigger button in
 both tabs concurrently. Poll each scoped `/api/work` until it gains exactly one new
-`mirror-job` process. Save `03-work-a.json` and `03-work-b.json`; require the new process
+`mirror_job` process. Save `03-work-a.json` and `03-work-b.json`; require the new process
 ids to be distinct.
 
 Await both ids with `/api/work/{process_id}/await` and require terminal success. Refresh
@@ -112,7 +113,7 @@ the scoped work responses and require:
 - A contains A's process id and not B's;
 - B contains B's process id and not A's;
 - each rail renders the same sole new process as its scoped API;
-- both process labels are `mirror-job`; and
+- both process labels are `mirror_job`; and
 - both trigger registrations remain present and owned by their original session.
 
 The same source/configuration and same label are deliberate: matching by either must not

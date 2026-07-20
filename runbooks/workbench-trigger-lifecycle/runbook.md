@@ -130,9 +130,11 @@ the inbox and work responses; screenshot `07-reenabled-fired.png`.
 Record the process-id set. Submit a foreground prompt containing
 `FIG425-LIFE-MIDTURN-CHAT-<run-id>` that requires `web.search`, making the overlap
 observable. Poll until `/api/state.active_turns` contains exactly one address and save it
-as `08-active-before-trigger.json`.
+as `08-active-before-trigger.json`. The busy pill should remain running because trigger
+dispatch no longer emits a session `Done` while a foreground turn is active, but it is
+corroborating UI only: `active_turns` and `/api/work` are the authoritative overlap gate.
 
-While the UI still renders the running state, deliver
+While `/api/state.active_turns` still contains that exact address, deliver
 `FIG425-LIFE-MIDTURN-MAIL-<run-id>` into `work`. Poll until `/api/work` gains the
 concierge process **while** `/api/state.active_turns` still contains exactly the original
 address. Save both responses at that instant. Require no second active address. This is

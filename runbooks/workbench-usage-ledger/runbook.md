@@ -20,7 +20,9 @@ provider-reported counters, canonical arithmetic, and equality between surfaces.
    Never add `reasoning_output_tokens` again.
 3. **Reconcile only this turn's trace window.** Record the trace byte offset or record
    count immediately before send. Sum `usage` from every later `llm_call_completed` record
-   belonging to the chosen turn, including multiple RLM iterations.
+   belonging to the chosen turn, including multiple RLM iterations. Treat the recorded
+   boundary as a scan start and apply the turn id as the decisive filter, because idle
+   polling can advance the trace file.
 4. **Totals dominate rows/calls.** API session totals must equal the sum of
    `by_source_model` rows and be greater than or equal to this turn's completed-call sum.
    Input and output must be non-zero when the trace reports calls.

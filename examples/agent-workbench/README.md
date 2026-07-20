@@ -162,6 +162,9 @@ the last cursor as `?cursor=...`, emits `replay_cursor`, forwards
 bounded-replay windows as `replay_gap` with `RemoteLiveReplayGap` plus a fresh
 remote observation snapshot. Resetting the workbench rotates the session id and
 restarts the browser stream from a fresh cursor.
+On an ingress re-run, one single-shot answer may render as both a live app-stream assistant
+row and the canonical committed assistant row from `/api/state.messages`; this
+stream-plus-canonical pair is benign by design and is not retry duplication.
 
 The chat composer can upload one PNG (up to 1 MiB) through
 `POST /api/attachments`, then includes the returned content-addressed id as

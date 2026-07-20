@@ -379,6 +379,7 @@ start_detached() {
       AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
       AGENT_WORKBENCH_DATABASE_URL="$agent_workbench_database_url" \
       RESTATE_INGRESS_URL="$restate_ingress_url" \
+      RESTATE_ADMIN_URL="$restate_admin_url" \
       "$workbench_bin" >> "$log_file" 2>&1 < /dev/null &
   else
     nohup env \
@@ -386,6 +387,7 @@ start_detached() {
       AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
       AGENT_WORKBENCH_DATABASE_URL="$agent_workbench_database_url" \
       RESTATE_INGRESS_URL="$restate_ingress_url" \
+      RESTATE_ADMIN_URL="$restate_admin_url" \
       "$workbench_bin" >> "$log_file" 2>&1 < /dev/null &
   fi
   local pid="$!"
@@ -461,6 +463,7 @@ run_foreground() {
   AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
   AGENT_WORKBENCH_DATABASE_URL="$agent_workbench_database_url" \
   RESTATE_INGRESS_URL="$restate_ingress_url" \
+  RESTATE_ADMIN_URL="$restate_admin_url" \
   cargo run -p agent-workbench &
   started_pid="$!"
   printf '%s\n' "$started_pid" > "$pid_file"

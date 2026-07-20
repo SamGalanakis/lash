@@ -55,6 +55,12 @@ impl AppState {
         });
     }
 
+    fn publish_trigger_dispatch_done(&self, session_id: &str) {
+        if self.active_turns.for_session(session_id).is_empty() {
+            self.publish_for_session(session_id, StreamItem::Done);
+        }
+    }
+
     #[cfg(test)]
     fn track_turn(&self, session_id: &str, turn_id: &str) {
         self.active_turns.insert(session_id, turn_id);

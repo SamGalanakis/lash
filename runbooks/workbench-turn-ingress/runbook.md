@@ -29,10 +29,11 @@ structure rather than exact assistant wording.
    SQLite row plus trace, never timing alone.
 4. **Injection is transient, model-visible, and exactly once.** When the turn crosses an
    admitted checkpoint and starts another provider iteration, that next request must contain
-   the injected marker. A `turn_input.completed` trace claim is only a settlement fallback
+   the injected input. A `turn_input.completed` trace claim is only a settlement fallback
    when the turn commits before another provider iteration can start; it is not proof of
-   model delivery. The marker must never appear in committed transcript history or the later
-   queued turn.
+   model delivery. The injected input must not create a phantom committed user message or be
+   delivered again into the later queued turn. Its marker may legitimately appear in the
+   assistant answer that acknowledges it.
 5. **Queued means a full committed turn.** The queued marker must be absent from provider
    requests until the first turn settles, then appear in its own provider request and in
    committed session history. `/api/state` and the rendered transcript must show that
@@ -69,7 +70,9 @@ readiness, open the browser, and confirm the rendered session id equals
 running-turn actions. Screenshot `00-idle.png`.
 
 Choose unique literal markers for this run, for example
-`FIG425-INJECT-<nonce>` and `FIG425-QUEUE-<nonce>`, and record them in the scorecard.
+`FIG425-NOW-<nonce>` and `FIG425-LATER-<nonce>`, and record them in the scorecard. Avoid
+attack-flavored substrings: the FIG-425 judged-fleet finding observed models refusing to echo
+tokens containing `INJECT`.
 
 ## Phase 1 — Establish an in-flight turn
 
@@ -119,8 +122,9 @@ a fixed delay. Gate in this order:
 1. the first provider request after the admitted checkpoint contains the injected marker,
    proving the model received it during the initial turn; exactly one
    `turn_input.completed` trace claim also places its input id under that turn id;
-2. that marker is absent from the committed transcript in `/api/state` and the session
-   store;
+2. the injected input creates no committed user message in `/api/state` or the session store
+   and is not delivered again in the later queued turn; the acknowledging assistant answer
+   may legitimately contain its marker;
 3. the queued marker is absent from every provider request before the initial terminal;
 4. a later provider request contains the queued marker and begins only after that terminal;
 5. the queued marker is a committed user message in the durable session read model, the
@@ -143,7 +147,7 @@ container are gone.
 | Running window | one active address; both ingress controls visible | | `01-running.png`, `/api/state` |
 | Inject intent | UI label and receipt agree on exact active turn + `after_work` | | `02-injected.png`, receipt/store JSON |
 | Queue intent | UI label and receipt agree on `next_turn` | | `03-queued.png`, receipt/store JSON |
-| Exactly-once injection | marker reaches the next initial-turn provider iteration plus one matching completion claim; never committed/later | | `04-provider-order.json`, session store |
+| Exactly-once injection | input reaches the next initial-turn provider iteration plus one matching completion claim; no phantom user message or later re-delivery | | `04-provider-order.json`, session store |
 | Post-settle dispatch | queue marker first appears after initial terminal in its own turn | | provider/trace ordering |
 | Transcript fidelity | queued user/assistant turn agrees across UI, `/api/state`, and store | | `04-two-turns-settled.png`, history JSON |
 | Claim settlement | both durable input ids settle with no duplicate or stranded row | | SQLite evidence |
