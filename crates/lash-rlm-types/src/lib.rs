@@ -1,5 +1,18 @@
 use lash_sansio::{AttachmentRef, TurnProtocol};
 
+/// Protocol-owned assistant context paired with an RLM trajectory entry.
+///
+/// This remains durable for later RLM prompts without entering the host-owned
+/// conversation message projection. Hosts commit their final transcript once.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RlmAssistantContent {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prose: String,
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct RlmTrajectoryEntry {
     pub id: String,
@@ -106,6 +119,7 @@ pub fn apply_globals_patch(
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum RlmProtocolEvent {
+    RlmAssistantContent(RlmAssistantContent),
     RlmTrajectoryEntry(RlmTrajectoryEntry),
     RlmGlobalsPatch(RlmGlobalsPatchPluginBody),
     RlmSeed(RlmSeedPluginBody),
@@ -136,6 +150,7 @@ impl RlmProjection {
 
     pub fn apply_event(&mut self, event: RlmProtocolEvent) {
         match event {
+            RlmProtocolEvent::RlmAssistantContent(_) => {}
             RlmProtocolEvent::RlmTrajectoryEntry(entry) => {
                 self.trajectory.push(entry);
             }

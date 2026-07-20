@@ -258,6 +258,9 @@ pub struct AssistantResponseTransform {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssistantStreamFinishReason {
+    /// The provider abandoned one streaming attempt and will retry the same
+    /// logical request from an empty response state.
+    AttemptReset,
     Complete,
     Aborted,
     Cancelled,

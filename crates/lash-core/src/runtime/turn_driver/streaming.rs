@@ -762,6 +762,10 @@ impl RuntimeTurnDriver<'_> {
     ) -> Result<(), LlmCallError> {
         match stream_event {
             LlmStreamEvent::AttemptReset => {
+                self.finish_assistant_stream_hooks(
+                    crate::plugin::AssistantStreamFinishReason::AttemptReset,
+                )
+                .await;
                 let assistant_prose_correlation_ids =
                     std::mem::take(state.assistant_prose_attempt_correlations);
                 let reasoning_correlation_ids =

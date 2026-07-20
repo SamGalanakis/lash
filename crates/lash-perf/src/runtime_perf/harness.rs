@@ -365,7 +365,8 @@ fn rlm_trajectory_entries(turn: &lash::TurnResult) -> Vec<RlmTrajectoryEntry> {
             match event.decode::<RlmProtocolEvent>(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID) {
                 Ok(Some(RlmProtocolEvent::RlmTrajectoryEntry(entry))) => Some(entry),
                 Ok(Some(
-                    RlmProtocolEvent::RlmDiagnostic(_)
+                    RlmProtocolEvent::RlmAssistantContent(_)
+                    | RlmProtocolEvent::RlmDiagnostic(_)
                     | RlmProtocolEvent::RlmGlobalsPatch(_)
                     | RlmProtocolEvent::RlmSeed(_),
                 ))

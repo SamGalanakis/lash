@@ -224,7 +224,7 @@ pub(crate) fn assistant_messages(machine: &TurnMachine) -> Vec<Message> {
 }
 
 pub(crate) fn assistant_reasoning_texts(machine: &TurnMachine) -> Vec<String> {
-    assistant_messages(machine)
+    let mut texts = assistant_messages(machine)
         .into_iter()
         .flat_map(|message| {
             message
@@ -234,11 +234,25 @@ pub(crate) fn assistant_reasoning_texts(machine: &TurnMachine) -> Vec<String> {
                 .map(|part| part.content.clone())
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect::<Vec<_>>();
+    texts.extend(machine.events().iter().filter_map(|event| {
+        let lash_core::SessionHistoryRecord::Protocol(event) = event else {
+            return None;
+        };
+        match lash_protocol_rlm::decode_rlm_protocol_event(event) {
+            Some(RlmProtocolEvent::RlmAssistantContent(content))
+                if !content.reasoning.is_empty() =>
+            {
+                Some(content.reasoning)
+            }
+            _ => None,
+        }
+    }));
+    texts
 }
 
 pub(crate) fn assistant_visible_texts(machine: &TurnMachine) -> Vec<String> {
-    assistant_messages(machine)
+    let mut texts = assistant_messages(machine)
         .into_iter()
         .flat_map(|message| {
             message
@@ -248,7 +262,19 @@ pub(crate) fn assistant_visible_texts(machine: &TurnMachine) -> Vec<String> {
                 .map(|part| part.content.clone())
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect::<Vec<_>>();
+    texts.extend(machine.events().iter().filter_map(|event| {
+        let lash_core::SessionHistoryRecord::Protocol(event) = event else {
+            return None;
+        };
+        match lash_protocol_rlm::decode_rlm_protocol_event(event) {
+            Some(RlmProtocolEvent::RlmAssistantContent(content)) if !content.prose.is_empty() => {
+                Some(content.prose)
+            }
+            _ => None,
+        }
+    }));
+    texts
 }
 
 pub(crate) fn text_part(text: &str) -> LlmOutputPart {
