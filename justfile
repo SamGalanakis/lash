@@ -99,9 +99,11 @@ agent-workbench-restate-e2e:
   endpoint_url="${AGENT_WORKBENCH_E2E_ENDPOINT_URL:-http://127.0.0.1:19081}"
   admin_url="${RESTATE_ADMIN_URL:-http://127.0.0.1:$admin_port}"
   ingress_url="${RESTATE_INGRESS_URL:-http://127.0.0.1:$ingress_port}"
+  test_output="$(mktemp "${TMPDIR:-/tmp}/lash-agent-workbench-restate-e2e.XXXXXX")"
 
   cleanup() {
     docker rm -f "$container" >/dev/null 2>&1 || true
+    rm -f "$test_output"
   }
   trap cleanup EXIT
   cleanup
@@ -137,9 +139,16 @@ agent-workbench-restate-e2e:
   AGENT_WORKBENCH_E2E_ENDPOINT_BIND="$endpoint_bind" \
   AGENT_WORKBENCH_E2E_ENDPOINT_URL="$endpoint_url" \
   cargo test -p agent-workbench \
-    live_restate_ -- --ignored --nocapture --test-threads=1
+    live_restate_ -- --ignored --nocapture --test-threads=1 \
+    2>&1 | tee "$test_output"
   cargo test -p lash-core \
-    turn_input_claims_supersede_across_session_lease_generations
+    turn_input_claims_supersede_across_session_lease_generations \
+    2>&1 | tee -a "$test_output"
+  if grep -Fn 'panicked at' "$test_output" >&2; then
+    echo "panic gate: FAILED ('panicked at' found in agent-workbench Restate E2E output)" >&2
+    exit 1
+  fi
+  echo "panic gate: clean (no 'panicked at' lines in agent-workbench Restate E2E output)"
 
 restate-postgres-workers-e2e:
   bash "{{repo}}/scripts/restate-postgres-workers-e2e.sh"

@@ -6,6 +6,7 @@ cd "$repo"
 
 compose=(docker compose -f "$repo/runbooks/restate-postgres-workers/docker-compose.yml")
 minio_port="${LASH_E2E_MINIO_PORT:-19000}"
+test_output="$(mktemp "${TMPDIR:-/tmp}/lash-restate-postgres-workers-e2e.XXXXXX")"
 
 # Binaries are built on the host (sharing the normal cargo cache) and
 # bind-mounted into the compose services; see docker-compose.yml for the
@@ -21,6 +22,7 @@ cleanup() {
   if [ "${LASH_E2E_KEEP:-0}" != "1" ]; then
     "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   fi
+  rm -f "$test_output"
   exit "$status"
 }
 trap cleanup EXIT
@@ -57,6 +59,13 @@ LASH_MINIO_REGION="us-east-1" \
 LASH_MINIO_ACCESS_KEY="minioadmin" \
 LASH_MINIO_SECRET_KEY="minioadmin" \
 LASH_MINIO_PREFIX="conformance/restate-postgres-workers-$$" \
-  cargo test --locked -p lash-s3-store -- --nocapture
+  cargo test --locked -p lash-s3-store -- --nocapture \
+  2>&1 | tee "$test_output"
 
-"${compose[@]}" --profile runner run --rm runner
+"${compose[@]}" --profile runner run --rm runner 2>&1 | tee -a "$test_output"
+"${compose[@]}" logs --no-color 2>&1 | tee -a "$test_output"
+if grep -Fn 'panicked at' "$test_output" >&2; then
+  echo "panic gate: FAILED ('panicked at' found in Restate/Postgres workers E2E output)" >&2
+  exit 1
+fi
+echo "panic gate: clean (no 'panicked at' lines in Restate/Postgres workers E2E output)"
