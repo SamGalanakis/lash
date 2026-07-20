@@ -539,6 +539,152 @@ async fn rlm_protocol_config_lashlang_abilities_drive_prompt_surface() -> Result
 }
 
 #[tokio::test]
+async fn rlm_completed_finish_is_single_copy_in_next_turn_request() -> Result<()> {
+    const ANSWER: &str = "FIG-461 terminal answer";
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("rlm-finish-history-test")
+        .complete({
+            let seen = Arc::clone(&seen);
+            move |request| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    let request_index = {
+                        let mut seen = seen.lock().expect("seen requests");
+                        seen.push(request_text(&request));
+                        seen.len()
+                    };
+                    let answer = match request_index {
+                        1 => ANSWER,
+                        2 => "second answer",
+                        other => panic!("unexpected provider request {other}"),
+                    };
+                    Ok(text_response(&lashlang_block(&format!(
+                        "finish {answer:?}"
+                    ))))
+                }
+            }
+        })
+        .build()
+        .into_handle();
+    let core = explicit_ephemeral_facets(rlm_core_builder())
+        .provider(provider)
+        .model(mock_model_spec())
+        .build()?;
+    let session = core
+        .session("rlm-finish-history-single-copy")
+        .open()
+        .await?;
+
+    session
+        .turn(TurnInput::text("first"))
+        .require_finish()?
+        .run()
+        .await?;
+    session
+        .admin()
+        .state()
+        .append_messages(vec![
+            lash_core::PluginMessage::text(lash_core::MessageRole::Assistant, ANSWER)
+                .with_id("workbench-assistant:fig-461-turn-1"),
+        ])
+        .await?;
+    session
+        .turn(TurnInput::text("second"))
+        .require_finish()?
+        .run()
+        .await?;
+
+    let seen = seen.lock().expect("seen requests");
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[1].matches(ANSWER).count(),
+        1,
+        "the committed terminal answer must occur exactly once in turn 2"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn rlm_multi_turn_finish_history_preserves_observed_lashlang_few_shots() -> Result<()> {
+    const ANSWERS: [&str; 3] = [
+        "first committed answer",
+        "second committed answer",
+        "third committed answer",
+    ];
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("rlm-multi-turn-history-shape-test")
+        .complete({
+            let calls = Arc::clone(&calls);
+            move |request| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    let text = request_text(&request);
+                    if call > 0 {
+                        let observed_turns = call.div_ceil(2);
+                        for turn in 1..=observed_turns {
+                            assert!(
+                                text.contains(&lashlang_block(&format!(
+                                    "print \"turn {turn} observation\""
+                                ))),
+                                "request {call} lost the paired emission-format cell for turn {turn}"
+                            );
+                        }
+                    }
+                    if call == 2 || call == 4 {
+                        let completed_turns = call / 2;
+                        for (index, answer) in ANSWERS.iter().take(completed_turns).enumerate() {
+                            assert_eq!(
+                                text.matches(answer).count(),
+                                1,
+                                "turn {} answer must be single-copy in request {call}",
+                                index + 1
+                            );
+                        }
+                    }
+
+                    let turn = call / 2;
+                    let response = if call % 2 == 0 {
+                        lashlang_block(&format!("print \"turn {} observation\"", turn + 1))
+                    } else {
+                        lashlang_block(&format!("finish {:?}", ANSWERS[turn]))
+                    };
+                    Ok(text_response(&response))
+                }
+            }
+        })
+        .build()
+        .into_handle();
+    let core = explicit_ephemeral_facets(rlm_core_builder())
+        .provider(provider)
+        .model(mock_model_spec())
+        .build()?;
+    let session = core.session("rlm-multi-turn-history-shape").open().await?;
+
+    for (turn, answer) in ANSWERS.iter().enumerate() {
+        session
+            .turn(TurnInput::text(format!("turn {}", turn + 1)))
+            .require_finish()?
+            .run()
+            .await?;
+        session
+            .admin()
+            .state()
+            .append_messages(vec![
+                lash_core::PluginMessage::text(lash_core::MessageRole::Assistant, *answer)
+                    .with_id(format!("workbench-assistant:few-shot-turn-{}", turn + 1)),
+            ])
+            .await?;
+    }
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
+    Ok(())
+}
+
+#[tokio::test]
 async fn rlm_compile_surface_uses_core_plugins_extra_plugins_and_request_options() -> Result<()> {
     // The compile APIs are now operations over the RLM factory and a plugin host
     // the caller builds. The plugin host carries the core tool plugin plus any

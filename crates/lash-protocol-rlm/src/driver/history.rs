@@ -14,6 +14,12 @@
 //!   message. `visit_turn_view` is a push visitor with no lookahead, so the
 //!   prose is buffered (`PendingProse`) and either folded into the next step or
 //!   flushed as a standalone assistant message (a prose-only finish).
+//! - **Completed-turn precedence.** When a successful terminal step is
+//!   followed by a committed assistant transcript message in the same turn,
+//!   the transcript is canonical. The terminal emission cell and its
+//!   never-observed output echo are omitted. This is derived from event/turn
+//!   ordering, never message content. Without a committed transcript, the
+//!   trajectory renders unchanged.
 //! - **Cache fence.** The last history message is marked with a
 //!   `cache_breakpoint` (`mark_last_history_text_cache_breakpoint`) so the
 //!   provider can reuse the stable history prefix across iterations. Active-turn
@@ -26,6 +32,8 @@
 //!   by the step's `entry.index`, so the model can recover it by re-printing the
 //!   reference. Proven by
 //!   `projection::context::tests::history_step_output_resolves_full_untruncated_value`.
+//!   `history[N]` uses compact canonical semantic indices, so omitted internal
+//!   entries consume no index and rendered re-fetch handles use the remap.
 //! - **Variables.** The live variable namespace is rendered into the volatile
 //!   current-iteration tail. It is deliberately outside the stable system and
 //!   history prefix while remaining adjacent to the work it describes.
@@ -155,6 +163,9 @@ pub(super) fn render_history_messages(
     attachments: &mut Vec<LlmAttachment>,
 ) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
+    let chronological =
+        lash_core::ChronologicalProjection::from_turn_view(input.events, input.turn_messages);
+    let history_projection = rlm_history_projection(&chronological);
     let active_cause_ids = input
         .turn_causes
         .iter()
@@ -180,6 +191,10 @@ pub(super) fn render_history_messages(
                 });
             }
             BorrowedChronologicalPayload::ProtocolEvent(event) => {
+                if history_projection.suppresses_chronological(entry.index) {
+                    pending = None;
+                    return;
+                }
                 let Some(event) = decode_rlm_protocol_event(event) else {
                     return;
                 };
@@ -220,7 +235,9 @@ pub(super) fn render_history_messages(
                     })
                     .collect::<Vec<_>>();
                 let obs_text = step_output_text(
-                    entry.index,
+                    history_projection
+                        .projected_index_for_chronological(entry.index)
+                        .unwrap_or(entry.index),
                     &step.output,
                     &image_refs,
                     step.error.as_deref(),
@@ -234,7 +251,9 @@ pub(super) fn render_history_messages(
                 // User / system / event turn: rendered verbatim by role.
                 flush_pending_prose(&mut messages, &mut pending);
                 let text = message_text(
-                    entry.index,
+                    history_projection
+                        .projected_index_for_chronological(entry.index)
+                        .unwrap_or(entry.index),
                     &message_history_text_parts(message.parts),
                     &message_attachment_refs(message.parts),
                     input.max_output_chars,
