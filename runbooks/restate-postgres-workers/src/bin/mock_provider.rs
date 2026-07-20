@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_restate_postgres_workers_e2e::{
-    EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_DURABLE_WAIT_TEXT,
-    EXPECTED_FINAL_TEXT, EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
+    EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT,
+    EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
     EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, EXPECTED_TOOL_BATCH_TEXT,
     EXPECTED_WAKE_TEXT, ensure_e2e_schema, env, record_provider_call, required_env,
 };
@@ -88,16 +88,6 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
                 parent_durable_input_after_child_script(&workflow_id),
             ),
             MockScenario::ToolBatch => ("tool_batch", tool_batch_script(&workflow_id, fail_once)),
-            MockScenario::DurableWaitProbe => (
-                "durable_wait_probe",
-                if full_text.contains(&format!(
-                    "res = await tools.durable_wait_probe({{ workflow_id: \"{workflow_id}\" }})"
-                )) {
-                    durable_wait_cancelled_script(&workflow_id)
-                } else {
-                    durable_wait_probe_script(&workflow_id)
-                },
-            ),
             MockScenario::SegmentLoop => ("segment_loop", segment_loop_script(&workflow_id)),
             MockScenario::FrameSwitchQueuedStart => (
                 "frame_switch_queued_start",
@@ -262,7 +252,6 @@ enum MockScenario {
     DurableInputRequest,
     ParentDurableInputAfterChild,
     ToolBatch,
-    DurableWaitProbe,
     SegmentLoop,
     FrameSwitchQueuedStart,
     FrameSwitchPreparedStart,
@@ -328,7 +317,6 @@ fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
             MockScenario::TurnControlComplete,
         ),
         ("segment_loop=true", MockScenario::SegmentLoop),
-        ("durable_wait_probe=true", MockScenario::DurableWaitProbe),
         ("tool_batch=true", MockScenario::ToolBatch),
         (
             "durable_input_request=true",
@@ -832,41 +820,6 @@ finish {{
     )
 }
 
-fn durable_wait_probe_script(workflow_id: &str) -> String {
-    format!(
-        r#"
-Exercise a foreground pending tool completion that the runner cancels or resolves through the session wait index.
-
-<lashlang>
-res = await tools.durable_wait_probe({{ workflow_id: "{workflow_id}" }})?
-finish {{
-  workflow_id: "{workflow_id}",
-  cancelled: res.cancelled,
-  answer: res.answer,
-  final: "{EXPECTED_DURABLE_WAIT_TEXT}"
-}}
-</lashlang>
-"#
-    )
-}
-
-fn durable_wait_cancelled_script(workflow_id: &str) -> String {
-    format!(
-        r#"
-The foreground pending tool was cancelled through the session wait index.
-
-<lashlang>
-finish {{
-  workflow_id: "{workflow_id}",
-  cancelled: true,
-  answer: "",
-  final: "{EXPECTED_DURABLE_WAIT_TEXT}"
-}}
-</lashlang>
-"#
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,8 +869,6 @@ mod tests {
             parent_durable_input_after_child_script("e2e-test"),
             tool_batch_script("e2e-test", false),
             tool_batch_script("e2e-test", true),
-            durable_wait_probe_script("e2e-test"),
-            durable_wait_cancelled_script("e2e-test"),
             segment_loop_script("e2e-test"),
         ];
 

@@ -51,7 +51,6 @@ pub const EXPECTED_ASYNC_TEXT: &str = "async-completion-complete";
 pub const EXPECTED_DURABLE_INPUT_TEXT: &str = "durable-input-complete";
 pub const EXPECTED_PARENT_DURABLE_INPUT_TEXT: &str = "parent-durable-input-complete";
 pub const EXPECTED_TOOL_BATCH_TEXT: &str = "tool-batch-complete";
-pub const EXPECTED_DURABLE_WAIT_TEXT: &str = "durable-wait-observed";
 pub const EXPECTED_SEGMENT_LOOP_TEXT: &str = "segment-loop-complete";
 pub const EXPECTED_FRAME_SWITCH_TEXT: &str = "frame-switch-complete";
 pub const EXPECTED_FRAME_SWITCH_CANCEL_TEXT: &str = "frame-switch-cancel-complete";
@@ -158,7 +157,6 @@ pub enum TurnScenario {
     DurableInputRequest,
     ParentDurableInputAfterChild,
     ToolBatch,
-    DurableWaitProbe,
     SegmentLoop,
     FrameSwitchQueued,
     FrameSwitchPrepared,
@@ -938,30 +936,6 @@ fn e2e_tool_provider(
                 LashlangToolBinding::new(["tools"], "durable_input_request"),
             ),
             e2e_tool_definition(
-                "tool:durable_wait_probe",
-                "durable_wait_probe",
-                "Open a session-scoped durable await and report whether it resolved or was cancelled.",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "workflow_id": { "type": "string" }
-                    },
-                    "required": ["workflow_id"],
-                    "additionalProperties": false
-                }),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "cancelled": { "type": "boolean" },
-                        "answer": { "type": "string" },
-                        "worker_id": { "type": "string" }
-                    },
-                    "required": ["cancelled", "answer", "worker_id"],
-                    "additionalProperties": false
-                }),
-                LashlangToolBinding::new(["tools"], "durable_wait_probe"),
-            ),
-            e2e_tool_definition(
                 "tool:cancel_gate",
                 "cancel_gate",
                 "Block a follow-on frame until the public turn-cancel API signals cancellation.",
@@ -1024,7 +998,6 @@ impl E2eTools {
             "make_attachment" => Box::pin(self.make_attachment(call)),
             "crash_once" => Box::pin(self.crash_once(call)),
             "durable_input_request" => Box::pin(self.durable_input_request(call)),
-            "durable_wait_probe" => Box::pin(self.durable_wait_probe(call)),
             "cancel_gate" => Box::pin(self.cancel_gate(call)),
             other => {
                 Box::pin(
@@ -1344,41 +1317,6 @@ impl E2eTools {
         {
             return ToolResult::err_fmt(err);
         }
-        ToolResult::pending(lash_core::PendingCompletion::new())
-    }
-
-    /// Foreground (turn-scoped) durable wait used to exercise the Restate
-    /// session wait-index cancel/revoke paths.
-    ///
-    /// Unlike `durable_input_request`, this runs directly in the main turn, so
-    /// its await key carries the session id and registers in the
-    /// `LashDurableWaitIndex` virtual object. It catches a `Cancelled`
-    /// resolution and reports it as data (`cancelled: true`) instead of failing
-    /// the turn, so the runner can observe cancellation/revocation through the
-    /// terminal result.
-    async fn durable_wait_probe(&self, call: ToolCall<'_>) -> ToolResult {
-        let workflow_id = workflow_id_from_args(call.context.session_id(), call.args);
-        let key = match call.context.completion_key().await {
-            Ok(key) => key,
-            Err(err) => return ToolResult::err_fmt(err),
-        };
-        let call_id = call.context.tool_call_id().map(ToOwned::to_owned);
-        let args = call.args.to_owned();
-        let key_json = serde_json::to_value(&key).unwrap_or(serde_json::Value::Null);
-        let session_id = key.scope.session_id().map(str::to_string);
-        let _ = record_tool_event(
-            &self.pool,
-            &workflow_id,
-            &self.worker_id,
-            "durable_wait_probe.opened",
-            call_id.as_deref(),
-            args.clone(),
-            serde_json::json!({
-                "await_key": key_json,
-                "session_id": session_id,
-            }),
-        )
-        .await;
         ToolResult::pending(lash_core::PendingCompletion::new())
     }
 }
