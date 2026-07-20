@@ -587,7 +587,8 @@ async fn enqueue_tool_catalog_refresh(
         .await
         .map_err(AppError::internal)?;
     session.close().await.map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &session_id,
         "mail.tool_catalog.refresh_enqueued",
         json!({
             "reason": reason,
@@ -771,16 +772,22 @@ async fn cancel_work(
             "process `{process_id}` is already terminal"
         )));
     }
+    let session_id = match &process.originator {
+        lash_core::ProcessOriginator::Session { scope } => scope.session_id.clone(),
+        lash_core::ProcessOriginator::Host { .. } => state.current_session_id(),
+    };
     let operation_id = format!("workbench-process-cancel-{}", uuid::Uuid::new_v4());
     restate::submit_process_cancel(
         &state,
         restate::WorkbenchProcessCancelWorkflowRequest {
             operation_id: operation_id.clone(),
+            session_id: session_id.clone(),
             process_id: process_id.clone(),
         },
     )
     .await?;
-    state.trace(
+    state.trace_for_session(
+        &session_id,
         "api.work.cancel_submitted",
         json!({
             "operation_id": operation_id,
@@ -1077,7 +1084,8 @@ pub(crate) async fn enqueue_button_trigger_command(
     });
     let source_key = lash::triggers::empty_trigger_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
         .context("button source key")?;
-    state.trace(
+    state.trace_for_session(
+        session_id,
         "trigger.emit",
         json!({
             "resource_type": BUTTON_TRIGGER_RESOURCE,
@@ -1120,7 +1128,8 @@ pub(crate) async fn enqueue_mail_received_trigger_command(
     });
     let source_key = lash::triggers::empty_trigger_source_key(MAIL_RECEIVED_SOURCE_TYPE)
         .context("mail source key")?;
-    state.trace(
+    state.trace_for_session(
+        session_id,
         "trigger.emit",
         json!({
             "resource_type": MAIL_EVENT_RESOURCE,

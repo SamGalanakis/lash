@@ -68,6 +68,7 @@ pub(crate) struct WorkbenchSessionDeleteWorkflowRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct WorkbenchProcessCancelWorkflowRequest {
     pub operation_id: String,
+    pub session_id: String,
     pub process_id: String,
 }
 
@@ -160,7 +161,8 @@ impl WorkbenchTurnWorkflow for WorkbenchTurnWorkflowImpl {
         let session_id = request.session_id.clone();
         let controller = lash_restate::RestateRuntimeEffectController::new(ctx);
         run_user_turn_terminalized(self.state.clone(), request, &controller).await?;
-        sync_cron_jobs_with_context(&self.state, controller.context(), "user_turn").await?;
+        sync_cron_jobs_with_context(&self.state, controller.context(), &session_id, "user_turn")
+            .await?;
         self.state
             .queued_work_driver
             .claim_and_run_pending(Some(&session_id), "user_turn_completed")
@@ -201,7 +203,13 @@ impl WorkbenchQueuedTurnWorkflow for WorkbenchQueuedTurnWorkflowImpl {
             .await
             .map_err(AppError::internal)
             .map_err(terminal_handler_error)?;
-        sync_cron_jobs_with_context(&self.state, controller.context(), "queued_turn").await?;
+        sync_cron_jobs_with_context(
+            &self.state,
+            controller.context(),
+            &session_id,
+            "queued_turn",
+        )
+        .await?;
         Ok(Json(()))
     }
 }
@@ -391,7 +399,8 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         // in-memory cancel bookkeeping, so reset alone cannot reach them.)
         let current_session = self.state.session_ids.current();
         if state.request.session_id != current_session {
-            self.state.trace(
+            self.state.trace_for_session(
+                &state.request.session_id,
                 "cron.restate.zombie_cancelled",
                 json!({
                     "job_key": ctx.key(),
@@ -418,6 +427,7 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         journaled_workbench_trace(
             controller.context(),
             self.state.clone(),
+            state.request.session_id.clone(),
             "cron.restate.run",
             json!({
                 "job_key": controller.context().key(),
@@ -434,6 +444,7 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         journaled_workbench_trace(
             controller.context(),
             self.state.clone(),
+            state.request.session_id.clone(),
             "cron.restate.emit_completed",
             json!({
                 "job_key": controller.context().key(),
@@ -632,7 +643,8 @@ pub(crate) async fn cancel_cron_jobs_for_session(
             "{}/WorkbenchCronJob/{job_key}/cancel",
             state.restate_ingress_url.trim_end_matches('/')
         );
-        state.trace(
+        state.trace_for_session(
+            session_id,
             "cron.restate.cancel",
             json!({
                 "job_key": job_key,
@@ -825,7 +837,8 @@ async fn run_session_delete(
         .delete_session(&request.session_id, scoped_effect_controller)
         .await
         .map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "reset.restate.session_deleted",
         json!({
             "session_id": request.session_id,
@@ -852,7 +865,8 @@ async fn run_process_cancel(
         .cancel(&request.process_id, scoped_effect_controller)
         .await
         .map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "process.restate.cancel_requested",
         json!({
             "process_id": request.process_id,
@@ -889,7 +903,8 @@ async fn run_queued_turn(
     let ui_events = ChannelTurnEvents {
         turn_state: Arc::clone(&turn_state),
     };
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "queued_work.restate.start",
         json!({
             "reason": request.reason,
@@ -906,7 +921,8 @@ async fn run_queued_turn(
         .await
         .map_err(AppError::runtime)?
     else {
-        state.trace(
+        state.trace_for_session(
+            &request.session_id,
             "queued_work.restate.empty",
             json!({
                 "reason": request.reason,
@@ -963,7 +979,8 @@ async fn terminalize_turn_execution(
             Ok(())
         }
         Ok(Err(err)) if err.retryable => {
-            state.trace(
+            state.trace_for_session(
+                session_id,
                 "turn.restate.retrying",
                 json!({
                     "operation": trace_name,
@@ -1021,7 +1038,8 @@ pub(crate) async fn settle_workbench_turn(
         .cancel_pending_turn_inputs(targets)
         .await
         .map_err(AppError::runtime)?;
-    state.trace(
+    state.trace_for_session(
+        session_id,
         "turn_input.settle_cancelled",
         json!({
             "session_id": session_id,
@@ -1200,11 +1218,12 @@ fn record_turn_failure(
 async fn sync_cron_jobs_with_context(
     state: &AppState,
     ctx: &WorkflowContext<'_>,
+    session_id: &str,
     reason: &str,
 ) -> HandlerResult<()> {
     let session = state
         .core
-        .session(state.current_session_id())
+        .session(session_id)
         .open()
         .await
         .map_err(|err| TerminalError::new(err.to_string()))?;
@@ -1223,21 +1242,21 @@ async fn sync_cron_jobs_with_context(
         if !registration.enabled {
             continue;
         }
-        let (job_key, request) =
-            match cron_request_from_registration(&state.current_session_id(), &registration) {
-                Ok(value) => value,
-                Err(err) => {
-                    state.trace(
-                        "cron.restate.sync_invalid",
-                        json!({
-                            "reason": reason,
-                            "handle": registration.handle,
-                            "error": err,
-                        }),
-                    );
-                    continue;
-                }
-            };
+        let (job_key, request) = match cron_request_from_registration(session_id, &registration) {
+            Ok(value) => value,
+            Err(err) => {
+                state.trace_for_session(
+                    session_id,
+                    "cron.restate.sync_invalid",
+                    json!({
+                        "reason": reason,
+                        "handle": registration.handle,
+                        "error": err,
+                    }),
+                );
+                continue;
+            }
+        };
         scheduled.entry(job_key).or_insert(request);
     }
     let mut active = BTreeSet::new();
@@ -1247,7 +1266,8 @@ async fn sync_cron_jobs_with_context(
             .upsert(Json(request))
             .call()
             .await?;
-        state.trace(
+        state.trace_for_session(
+            session_id,
             "cron.restate.sync_upserted",
             json!({
                 "reason": reason,
@@ -1263,7 +1283,8 @@ async fn sync_cron_jobs_with_context(
             .cancel()
             .call()
             .await?;
-        state.trace(
+        state.trace_for_session(
+            session_id,
             "cron.restate.sync_cancelled",
             json!({
                 "reason": reason,
@@ -1377,15 +1398,17 @@ async fn journaled_now(
 async fn journaled_workbench_trace(
     ctx: &ObjectContext<'_>,
     state: AppState,
+    session_id: String,
     name: &'static str,
     payload: Value,
     effect_name: &'static str,
 ) -> HandlerResult<()> {
     ctx.run(move || {
         let state = state.clone();
+        let session_id = session_id.clone();
         let payload = payload.clone();
         async move {
-            state.trace(name, payload);
+            state.trace_for_session(&session_id, name, payload);
             Ok::<(), HandlerError>(())
         }
     })

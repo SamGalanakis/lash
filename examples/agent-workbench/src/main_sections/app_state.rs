@@ -43,6 +43,7 @@ impl AppState {
         );
     }
 
+    #[cfg(test)]
     fn publish(&self, item: StreamItem) {
         self.publish_for_session(&self.current_session_id(), item);
     }
@@ -114,7 +115,8 @@ impl AppState {
                         false
                     }
                     Err(err) => {
-                        self.trace(
+                        self.trace_for_session(
+                            &address.session_id,
                             "turn.cancel_liveness_unknown",
                             json!({
                                 "session_id": address.session_id,
@@ -130,7 +132,8 @@ impl AppState {
                     .remove(&address.session_id, &address.turn_id);
                 false
             };
-            self.trace(
+            self.trace_for_session(
+                &address.session_id,
                 "turn.cancel_requested",
                 json!({
                     "session_id": address.session_id,
@@ -152,7 +155,7 @@ impl AppState {
             });
         }
         if !receipts.is_empty() {
-            self.publish(StreamItem::Done);
+            self.publish_for_session(session_id, StreamItem::Done);
         }
         Ok(receipts)
     }

@@ -316,6 +316,8 @@ mod process_work_tests {
             .await
             .expect("delete session process edges");
         assert_eq!(deletion.orphaned_process_ids, vec![process_id]);
+        let (_, current_session_id) = state.session_ids.rotate();
+        assert_ne!(current_session_id, session_id);
 
         let Json(work) = list_work(State(state.clone()), Query(SessionQuery::default()))
             .await
@@ -345,6 +347,11 @@ mod process_work_tests {
         assert_eq!(
             request.pointer("/body/process_id").and_then(Value::as_str),
             Some(process_id)
+        );
+        assert_eq!(
+            request.pointer("/body/session_id").and_then(Value::as_str),
+            Some(session_id.as_str()),
+            "process cancellation must retain its originating trace session"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
