@@ -1268,6 +1268,8 @@
       overflow-wrap: anywhere;
     }
 
+    .work-events.error { color: var(--error); }
+
     .execution-explorer[hidden] { display: none; }
 
     .execution-explorer {
@@ -3664,7 +3666,7 @@
         meta.textContent = row.meta;
 
         const events = document.createElement("div");
-        events.className = "work-events";
+        events.className = "work-events" + (row.error ? " error" : "");
         events.textContent = row.detail;
 
         card.append(top, meta, events);
@@ -3709,12 +3711,15 @@
           terminal: Boolean(process.terminal),
           title: item.label || process.label || shortId(process.process_id),
           status: process.status_label || process.lifecycle,
+          error: process.error || null,
           meta: [
             kindLabel(item.kind),
             graph ? graph.node_count + (graph.node_count === 1 ? " node" : " nodes") : "pending graph",
             formatTime(process.updated_at_ms)
           ].filter(Boolean).join(" · "),
-          detail: recent.length ? "latest: " + recent.join(" -> ") : "no events yet"
+          detail: process.error
+            ? "error: " + process.error
+            : (recent.length ? "latest: " + recent.join(" -> ") : "no events yet")
         });
       }
       rows.sort((left, right) => {

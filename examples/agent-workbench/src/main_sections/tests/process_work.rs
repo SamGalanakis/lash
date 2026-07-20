@@ -11,6 +11,11 @@ mod process_work_tests {
         assert!(ui::INDEX_HTML.contains("className = \"work-cancel\""));
         assert!(ui::INDEX_HTML.contains("/cancel\""));
         assert!(ui::INDEX_HTML.contains("Request cooperative process cancellation"));
+        assert!(ui::INDEX_HTML.contains("error: \" + process.error"));
+        assert!(
+            ui::INDEX_HTML.contains("row.error ? \" error\""),
+            "failed work must receive the work rail's visible error treatment"
+        );
     }
 
     #[test]
@@ -164,6 +169,45 @@ mod process_work_tests {
         assert!(
             sunk.iter().all(|event| event.semantics.terminal.is_none()),
             "terminal event must not ride the sink: {sunk:?}"
+        );
+
+        watched
+            .register_process(lash::process::ProcessRegistration::new(
+                "failed-work-rail-proc",
+                lash::process::ProcessInput::External {
+                    metadata: Value::Null,
+                },
+                lash::process::RecoveryDisposition::ExternallyOwned,
+                lash::process::ProcessProvenance::host(),
+            ))
+            .await
+            .expect("register failed process");
+        watched
+            .complete_process(
+                "failed-work-rail-proc",
+                lash::process::ProcessAwaitOutput::Failure {
+                    class: lash::tools::ToolFailureClass::External,
+                    code: "deterministic_failure".to_string(),
+                    message: "deterministic durable process failure".to_string(),
+                    raw: None,
+                    control: None,
+                },
+                lash::process::ProcessCompletionAuthority::external_owner("test"),
+            )
+            .await
+            .expect("fail process");
+        let Json(work) = list_work(State(state.clone()))
+            .await
+            .expect("list failed work");
+        let failed = work
+            .iter()
+            .find(|item| item.process.process_id == "failed-work-rail-proc")
+            .expect("failed process in work API");
+        assert_eq!(failed.process.status_label, "failed");
+        assert!(failed.process.terminal);
+        assert_eq!(
+            failed.process.error.as_deref(),
+            Some("deterministic durable process failure")
         );
 
         // An unknown process id errors instead of hanging.
