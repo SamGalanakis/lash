@@ -52,28 +52,41 @@ async fn async_main() -> AnyhowResult<()> {
         Arc::new(JsonlTraceSink::new(lashlang_execution_path.clone())) as Arc<dyn TraceSink>,
     ])) as Arc<dyn TraceSink>;
 
+    let dev_provider_scenario = failure_provider::DevProviderScenario::from_environment()?;
     let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
-    if api_key.trim().is_empty() {
+    if api_key.trim().is_empty() && dev_provider_scenario.is_none() {
         eprintln!("warning: OPENROUTER_API_KEY is empty; turns will fail until it is set");
     }
     let tavily_api_key = std::env::var("TAVILY_API_KEY").unwrap_or_default();
     if tavily_api_key.trim().is_empty() {
         eprintln!("warning: TAVILY_API_KEY is empty; web tools will return configuration errors");
     }
-    let model = std::env::var("OPENROUTER_MODEL")
-        .unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
+    let model = dev_provider_scenario
+        .map(|_| "dev/failure-paths".to_string())
+        .unwrap_or_else(|| {
+            std::env::var("OPENROUTER_MODEL")
+                .unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string())
+        });
     let model_variant =
         std::env::var("OPENROUTER_MODEL_VARIANT").unwrap_or_else(|_| "high".to_string());
 
-    let provider = ProviderHandle::new(
-        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
-            .with_compat(OpenAiCompat::openrouter())
-            .with_options(ProviderOptions {
-                expose_thinking: true,
-                ..ProviderOptions::default()
-            })
-            .into_components(),
-    );
+    let provider = if let Some(scenario) = dev_provider_scenario {
+        eprintln!(
+            "warning: agent-workbench development provider scenario enabled: {}",
+            scenario.as_str()
+        );
+        scenario.provider()
+    } else {
+        ProviderHandle::new(
+            OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+                .with_compat(OpenAiCompat::openrouter())
+                .with_options(ProviderOptions {
+                    expose_thinking: true,
+                    ..ProviderOptions::default()
+                })
+                .into_components(),
+        )
+    };
     let model_spec = lash::ModelSpec::from_token_limits(
         model.clone(),
         lash::provider::ReasoningSelection::Effort(model_variant.clone()),
@@ -229,6 +242,7 @@ async fn async_main() -> AnyhowResult<()> {
             "trace_path": trace_path_display,
             "lashlang_execution_path": lashlang_execution_path.display().to_string(),
             "model": serde_json::to_value(state.selected_model()).unwrap_or(Value::Null),
+            "dev_provider_scenario": dev_provider_scenario.map(|scenario| scenario.as_str()),
             "web_configured": state.web_configured,
             "store_backend": stores.backend,
             "restate_endpoint_addr": restate_endpoint_addr.to_string(),

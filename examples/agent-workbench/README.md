@@ -104,6 +104,13 @@ Configuration is read from `.env` or the process environment:
 - `OPENROUTER_MODEL`: default `anthropic/claude-sonnet-4.6`.
 - `OPENROUTER_MODEL_VARIANT`: default `high`; choose `provider default` in
   the UI to send no variant for models without configurable thinking.
+- `AGENT_WORKBENCH_DEV_PROVIDER_SCENARIO`: development-only deterministic provider;
+  unset in normal use. Accepted values are `auth-failure-once` (one non-retryable 401,
+  then recovery), `rate-limit-once` (one retryable 429, then success), `failed-process`
+  (starts a Runtime Process that reports a deterministic failure), and `exec-blocked`
+  (parks a foreground Lashlang execution for break-glass practice). These scenarios make
+  no provider network calls, print a startup warning, and use the visible
+  `dev/failure-paths` model id. Unknown values fail startup.
 
 Open the workbench at `http://127.0.0.1:3030` by default, or at the port passed
 to the `just` recipe. Restate ingress is

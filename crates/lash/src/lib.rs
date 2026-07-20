@@ -141,7 +141,7 @@ pub mod tools {
 
 pub mod direct {
     pub use lash_core::llm::types::{
-        LlmAttachment, LlmEventSender, LlmOutputPart, LlmTerminalReason, LlmUsage,
+        LlmAttachment, LlmEventSender, LlmOutputPart, LlmStreamEvent, LlmTerminalReason, LlmUsage,
     };
     pub use lash_core::{
         DirectCompletion, DirectJsonSchema, DirectLlmClient, DirectLlmCompletion, DirectLlmError,
