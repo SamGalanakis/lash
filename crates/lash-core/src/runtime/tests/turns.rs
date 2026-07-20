@@ -3201,7 +3201,7 @@ async fn lease_loss_stops_foreground_turn_before_final_commit() {
 }
 
 #[tokio::test]
-async fn final_commit_lease_expiry_surfaces_session_execution_lease_lost() {
+async fn finish_turn_fenced_commit_maps_lease_expiry_to_session_execution_lease_lost() {
     let clock = Arc::new(ManualClock::new(1_000));
     let store_clock: Arc<dyn crate::Clock> = clock.clone();
     let store = Arc::new(RecordingStore::with_clock(store_clock));
@@ -3243,6 +3243,7 @@ async fn final_commit_lease_expiry_surfaces_session_execution_lease_lost() {
         .expect_err("final commit with an expired lease must fail as lease lost");
 
     assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
+    assert_ne!(err.code, crate::RuntimeErrorCode::StoreCommitFailed);
 }
 
 #[tokio::test]

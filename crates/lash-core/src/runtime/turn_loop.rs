@@ -288,24 +288,6 @@ impl LashRuntime {
         }
     }
 
-    async fn ensure_session_execution_lease_live(
-        &self,
-        guard: Option<&SessionExecutionLeaseGuard>,
-    ) -> Result<(), RuntimeError> {
-        let Some(guard) = guard else {
-            return Ok(());
-        };
-        guard.refresh_or_mark_lost().await.map_err(|err| {
-            RuntimeError::new(
-                RuntimeErrorCode::SessionExecutionLeaseLost,
-                format!(
-                    "session execution lease for session `{}` was lost before commit: {err}",
-                    self.state.session_id
-                ),
-            )
-        })
-    }
-
     // Prompt handback on lease loss. This is no longer load-bearing for
     // correctness: a claim is generation-fenced under the session lease, so once
     // this owner has lost the lease its claims are already superseded and the
@@ -414,10 +396,6 @@ impl LashRuntime {
         }
         let turn_usage_delta = merge_usage_delta_entries(turn_usage_delta);
 
-        if self.session.is_some() {
-            self.ensure_session_execution_lease_live(session_execution_lease)
-                .await?;
-        }
         let assembled_cancelled = matches!(
             assembler.outcome,
             Some(TurnOutcome::Stopped(TurnStop::Cancelled))
@@ -503,9 +481,6 @@ impl LashRuntime {
             }
         };
         self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
-        self.ensure_session_execution_lease_live(session_execution_lease)
-            .await?;
-
         let mut returned_turn = finalized.turn;
         if returned_turn.cancellation.is_some()
             && !matches!(

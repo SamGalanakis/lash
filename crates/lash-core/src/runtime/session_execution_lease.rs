@@ -25,7 +25,6 @@ pub(super) struct SessionExecutionLeaseGuard {
     lease: Arc<StdMutex<SessionExecutionLease>>,
     released: Arc<AtomicBool>,
     lost: Arc<AtomicBool>,
-    timings: LeaseTimings,
     clock: Arc<dyn Clock>,
     guard_id: u64,
     renew_task: tokio::task::JoinHandle<()>,
@@ -94,7 +93,6 @@ impl SessionExecutionLeaseGuard {
             lease,
             released,
             lost,
-            timings,
             clock,
             guard_id: NEXT_LEASE_GUARD_ID.fetch_add(1, Ordering::Relaxed),
             renew_task,
@@ -138,48 +136,6 @@ impl SessionExecutionLeaseGuard {
             guard_id: self.guard_id,
             fencing_token: lease.fencing_token,
         })
-    }
-
-    pub(super) async fn refresh_or_mark_lost(&self) -> Result<(), StoreError> {
-        if self.is_lost() {
-            let fence = self.fence();
-            return Err(StoreError::SessionExecutionLeaseExpired {
-                session_id: fence.session_id,
-            });
-        }
-        let fence = self.fence();
-        match self
-            .store
-            .renew_session_execution_lease(&fence, self.timings.ttl_ms())
-            .await
-        {
-            Ok(renewed) => {
-                tracing::debug!(
-                    session_id = %renewed.session_id,
-                    owner_id = %renewed.owner.owner_id,
-                    incarnation_id = %renewed.owner.incarnation_id,
-                    fencing_token = renewed.fencing_token,
-                    event = "session_execution_lease.renewed",
-                    "renewed session execution lease"
-                );
-                *self.lease.lock().expect("session lease lock") = renewed;
-                Ok(())
-            }
-            Err(err) => {
-                self.lost.store(true, Ordering::Release);
-                self.renew_task.abort();
-                tracing::warn!(
-                    error = %err,
-                    session_id = %fence.session_id,
-                    owner_id = %fence.owner.owner_id,
-                    incarnation_id = %fence.owner.incarnation_id,
-                    fencing_token = fence.fencing_token,
-                    event = "session_execution_lease.lost",
-                    "lost session execution lease"
-                );
-                Err(err)
-            }
-        }
     }
 
     pub(super) async fn release_if_live(&self) -> Result<(), StoreError> {
