@@ -162,6 +162,8 @@ pub struct InMemorySessionStore {
     claim_after_lease_validation_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     fail_next_exact_queue_claim: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    load_session_count: std::sync::atomic::AtomicUsize,
 }
 
 impl InMemorySessionStore {
@@ -191,6 +193,8 @@ impl InMemorySessionStore {
             claim_after_lease_validation_hook: Mutex::new(None),
             #[cfg(test)]
             fail_next_exact_queue_claim: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            load_session_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -684,6 +688,9 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
         &self,
         scope: crate::store::SessionReadScope,
     ) -> Result<Option<crate::store::PersistedSessionRead>, crate::store::StoreError> {
+        #[cfg(test)]
+        self.load_session_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Some(meta) = self.session_head_meta.lock().expect("lock store").clone() else {
             return Ok(None);
         };
@@ -1392,6 +1399,11 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
 impl InMemorySessionStore {
     pub(crate) async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
         *self.session_head_meta.lock().expect("lock store") = Some(meta);
+    }
+
+    pub(crate) fn load_session_count(&self) -> usize {
+        self.load_session_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

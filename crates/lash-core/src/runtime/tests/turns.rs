@@ -2272,6 +2272,113 @@ async fn stream_prepared_turn_follows_agent_frame_switch() {
 }
 
 #[tokio::test]
+async fn retained_lease_reuses_graph_and_reacquisition_reloads() {
+    let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_call_index = Arc::clone(&call_index);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_| {
+            let call_index = Arc::clone(&captured_call_index);
+            async move {
+                match call_index.fetch_add(1, Ordering::SeqCst) {
+                    0 => Ok(LlmResponse {
+                        parts: vec![LlmOutputPart::ToolCall {
+                            call_id: "resident-switch".to_string(),
+                            tool_name: "terminal_tool_0".to_string(),
+                            input_json: "{}".to_string(),
+                            replay: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    }),
+                    1 => Ok(LlmResponse {
+                        full_text: "retained lease follow-on".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "retained lease follow-on".to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    }),
+                    2 => Ok(LlmResponse {
+                        full_text: "reacquired lease turn".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "reacquired lease turn".to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    }),
+                    index => panic!("unexpected provider call {index}"),
+                }
+            }
+        })
+        .build();
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(TerminalControlTool {
+            controls: vec![crate::ToolControl::SwitchAgentFrame {
+                frame_id: "resident-follow-frame".to_string(),
+                initial_nodes: Vec::new(),
+                task: Some("continue on retained lease".to_string()),
+            }],
+        }),
+        transport,
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+
+    let run = runtime
+        .stream_turn_with_agent_frames(
+            TurnInput::text("start retained lease chain"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "resident-chain"),
+            ),
+        )
+        .await
+        .expect("retained lease chain succeeds");
+    assert_eq!(run.turns.len(), 2);
+    assert_eq!(
+        store.load_session_count(),
+        1,
+        "the follow-on physical turn must reuse the graph committed under the retained lease"
+    );
+    for node in &run.turns[0].state.session_graph.nodes {
+        assert!(
+            run.turns[1]
+                .state
+                .session_graph
+                .find_node(&node.node_id)
+                .is_some(),
+            "the skip path lost committed graph node {}",
+            node.node_id
+        );
+    }
+
+    runtime
+        .stream_turn(
+            TurnInput::text("turn after lease release"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "reacquired-turn"),
+            ),
+        )
+        .await
+        .expect("turn after lease reacquisition succeeds");
+    assert_eq!(
+        store.load_session_count(),
+        2,
+        "a released and reacquired lease generation must force a graph reload"
+    );
+}
+
+#[tokio::test]
 async fn frame_switch_limit_commits_terminal_error_and_settles_claim() {
     let switch_count = crate::runtime::logical_turn::MAX_AGENT_FRAME_SWITCHES;
     let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));

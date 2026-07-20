@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio_util::sync::CancellationToken;
 
@@ -12,12 +12,22 @@ use crate::store::{
     StoreError,
 };
 
+static NEXT_LEASE_GUARD_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SessionExecutionLeaseContinuity {
+    guard_id: u64,
+    fencing_token: u64,
+}
+
 pub(super) struct SessionExecutionLeaseGuard {
     store: Arc<dyn RuntimePersistence>,
     lease: Arc<StdMutex<SessionExecutionLease>>,
     released: Arc<AtomicBool>,
     lost: Arc<AtomicBool>,
     timings: LeaseTimings,
+    clock: Arc<dyn Clock>,
+    guard_id: u64,
     renew_task: tokio::task::JoinHandle<()>,
 }
 
@@ -76,7 +86,7 @@ impl SessionExecutionLeaseGuard {
             Arc::clone(&released),
             Arc::clone(&lost),
             timings,
-            clock,
+            Arc::clone(&clock),
             cancel,
         );
         Ok(Some(Self {
@@ -85,6 +95,8 @@ impl SessionExecutionLeaseGuard {
             released,
             lost,
             timings,
+            clock,
+            guard_id: NEXT_LEASE_GUARD_ID.fetch_add(1, Ordering::Relaxed),
             renew_task,
         }))
     }
@@ -115,6 +127,17 @@ impl SessionExecutionLeaseGuard {
 
     pub(super) fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
+    }
+
+    pub(super) fn continuity(&self) -> Option<SessionExecutionLeaseContinuity> {
+        let lease = self.lease.lock().expect("session lease lock");
+        if self.is_lost() || lease.expires_at_epoch_ms <= self.clock.timestamp_ms() {
+            return None;
+        }
+        Some(SessionExecutionLeaseContinuity {
+            guard_id: self.guard_id,
+            fencing_token: lease.fencing_token,
+        })
     }
 
     pub(super) async fn refresh_or_mark_lost(&self) -> Result<(), StoreError> {

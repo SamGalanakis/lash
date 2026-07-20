@@ -572,6 +572,11 @@ impl LashRuntime {
         if release_session_execution_lease && let Some(lease) = session_execution_lease {
             lease.mark_released();
         }
+        self.last_committed_lease_continuity = if release_session_execution_lease {
+            None
+        } else {
+            session_execution_lease.and_then(SessionExecutionLeaseGuard::continuity)
+        };
         self.host
             .core
             .durability
@@ -1315,9 +1320,20 @@ impl LashRuntime {
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
         session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
     ) -> Result<PhysicalTurnExecution, RuntimeError> {
-        self.refresh_session_graph_from_store()
-            .await
-            .map_err(session_head_refresh_error)?;
+        let lease_continuity =
+            session_execution_lease.and_then(SessionExecutionLeaseGuard::continuity);
+        let may_reuse_resident_graph = self.graph_loaded_from_store
+            && lease_continuity.is_some()
+            && lease_continuity == self.last_committed_lease_continuity;
+        if !may_reuse_resident_graph {
+            self.refresh_session_graph_from_store()
+                .await
+                .map_err(session_head_refresh_error)?;
+        }
+        // `load_session` refreshes the committed graph/head, checkpoint,
+        // config, frames, and token ledger. It does not cover pending turn
+        // inputs, queued work, or trigger deliveries; those remain external
+        // ingress and are picked up by their fenced claim paths.
         let input_trace_turn_id = input.trace_turn_id.clone();
         let queued_turn_work = materialize_initial_claims
             .then(|| queued_claims.first())
