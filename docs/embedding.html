@@ -165,7 +165,7 @@ let assistant_text: String = result
     .activities
     .iter()
     .filter_map(|activity| match &amp;activity.event {
-        TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
+        TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_ref()),
         _ =&gt; None,
     })
     .collect();
@@ -258,7 +258,7 @@ let live_preview: String = collected
     .activities
     .iter()
     .filter_map(|activity| match &amp;activity.event {
-        TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
+        TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_ref()),
         _ =&gt; None,
     })
     .collect();
