@@ -112,12 +112,14 @@ register_deployment() {
       --data "$payload" \
       "${admin_url%/}/deployments" 2>&1
   )"; do
+    require_workbench_alive "during Restate deployment registration"
     if (( SECONDS >= deadline )); then
       printf '%s\n' "$last_response" >&2
       return 1
     fi
     sleep 1
   done
+  require_workbench_alive "after Restate deployment registration"
 }
 
 open_browser() {
@@ -165,6 +167,30 @@ tail_log() {
   else
     log "no log file yet at $log_file"
   fi
+}
+
+require_workbench_alive() {
+  local phase="$1"
+  local pid=""
+  pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && pid_alive "$pid"; then
+    return
+  fi
+
+  local exit_status="unknown"
+  if [[ -n "$pid" ]]; then
+    if wait "$pid" 2>/dev/null; then
+      exit_status=0
+    else
+      exit_status=$?
+    fi
+  fi
+  tail_log
+  rm -f "$pid_file" "$meta_file"
+  if [[ -z "$pid" ]]; then
+    die "workbench process metadata disappeared $phase"
+  fi
+  die "workbench process $pid exited with status $exit_status $phase"
 }
 
 workbench_ready() {
@@ -399,13 +425,8 @@ start_detached() {
 wait_workbench_ready() {
   local timeout_seconds="${1:-90}"
   local deadline=$((SECONDS + timeout_seconds))
-  local pid
-  pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
   until workbench_ready; do
-    if [[ -n "$pid" ]] && ! pid_alive "$pid"; then
-      tail_log
-      die "workbench process $pid exited before becoming ready"
-    fi
+    require_workbench_alive "before becoming ready"
     if (( SECONDS >= deadline )); then
       tail_log
       stop_target
@@ -413,6 +434,22 @@ wait_workbench_ready() {
     fi
     sleep 1
   done
+  require_workbench_alive "after the health check became ready"
+}
+
+wait_workbench_endpoint_ready() {
+  local timeout_seconds="${1:-90}"
+  local deadline=$((SECONDS + timeout_seconds))
+  until tcp_ready "$endpoint_wait_host" "$endpoint_port"; do
+    require_workbench_alive "while waiting for its Restate endpoint"
+    if (( SECONDS >= deadline )); then
+      tail_log
+      stop_target
+      die "workbench Restate endpoint did not become ready at $restate_endpoint_addr"
+    fi
+    sleep 1
+  done
+  require_workbench_alive "after its Restate endpoint became ready"
 }
 
 run_up() {
@@ -423,11 +460,7 @@ run_up() {
   ensure_postgres
   start_detached
   wait_workbench_ready 90
-  if ! wait_tcp "workbench Restate endpoint" "$endpoint_wait_host" "$endpoint_port" 90; then
-    tail_log
-    stop_target
-    die "workbench Restate endpoint did not become ready at $restate_endpoint_addr"
-  fi
+  wait_workbench_endpoint_ready 90
   local deployment_url
   deployment_url="$(endpoint_url)"
   log "registering Restate deployment $deployment_url"
@@ -436,6 +469,7 @@ run_up() {
     stop_target
     die "failed to register Restate deployment $deployment_url through $restate_admin_url"
   fi
+  require_workbench_alive "before reporting ready"
   log "ready: $workbench_url"
   open_browser "$workbench_url"
 }
@@ -470,15 +504,14 @@ run_foreground() {
   write_meta
 
   wait_workbench_ready 90
-  if ! wait_tcp "workbench Restate endpoint" "$endpoint_wait_host" "$endpoint_port" 90; then
-    die "workbench Restate endpoint did not become ready at $restate_endpoint_addr"
-  fi
+  wait_workbench_endpoint_ready 90
   local deployment_url
   deployment_url="$(endpoint_url)"
   log "registering Restate deployment $deployment_url"
   register_deployment "$restate_admin_url" "$deployment_url" \
     || die "failed to register Restate deployment $deployment_url through $restate_admin_url"
 
+  require_workbench_alive "before reporting ready"
   log "ready: $workbench_url"
   open_browser "$workbench_url"
   wait "$started_pid"

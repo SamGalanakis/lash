@@ -54,7 +54,8 @@ instead of being mistaken for the workbench.
 
 Configuration is read from `.env` or the process environment:
 
-- `OPENROUTER_API_KEY`: model provider key.
+- `OPENROUTER_API_KEY`: model provider key. Startup refuses to continue when it is
+  unset or empty unless `AGENT_WORKBENCH_DEV_PROVIDER_SCENARIO` is active.
 - `TAVILY_API_KEY`: Tavily key for `web.search(...)` and `web.fetch(...)`, matching the
   CLI web tools.
 - `AGENT_WORKBENCH_ADDR`: bind address, default `127.0.0.1:3030`. Passing a
