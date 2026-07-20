@@ -524,7 +524,9 @@ jobs:
   restate-postgres-workers:
     name: Restate + Postgres + MinIO Workers
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The harness has grown to 24 workflows + turn-control gates; 30 minutes
+    # was hit on 2026-07-20 (job-timeout shows as 'cancelled').
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
