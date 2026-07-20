@@ -187,7 +187,7 @@ mod tests {
             WorkbenchSessionIds::persistent(session_path.clone()).expect("session ids");
         let session_id = session_ids.current();
         let turns = ActiveTurns::persistent(turns_path.clone()).expect("active turns");
-        turns.insert(&session_id, "durable-stop-turn");
+        turns.insert_with_prompt(&session_id, "durable-stop-turn", Some("actual restored prompt".into()));
         drop(session_ids);
         drop(turns);
         let recovered_ids = WorkbenchSessionIds::persistent(session_path).expect("recover ids");
@@ -195,8 +195,9 @@ mod tests {
         assert_eq!(recovered_ids.current(), session_id);
         assert_eq!(
             recovered_turns.for_session(&session_id),
-            vec![lash::TurnAddress::new(session_id, "durable-stop-turn")]
+            vec![lash::TurnAddress::new(&session_id, "durable-stop-turn")]
         );
+        assert_eq!(recovered_turns.prompt_for(&session_id, "durable-stop-turn").as_deref(), Some("actual restored prompt"));
     }
 
     include!("tests/session_resume.rs");
@@ -1725,7 +1726,7 @@ finish initial
         .await
         .expect("Restate-backed workbench turn timed out")
         .expect("finish Restate-backed workbench turn");
-        state.track_turn(&state.current_session_id(), &turn_id);
+        state.track_turn_prompt(&state.current_session_id(), &turn_id, text.to_string());
         invocation_id
     }
 

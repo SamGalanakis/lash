@@ -158,15 +158,59 @@ enum StreamItem {
 #[derive(Clone, Default)]
 struct ActiveTurns {
     inner: Arc<Mutex<BTreeSet<(String, String)>>>,
+    prompts: Arc<Mutex<BTreeMap<(String, String), String>>>,
     path: Option<Arc<PathBuf>>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PersistedActiveTurns {
+    Current {
+        turns: BTreeSet<(String, String)>,
+        #[serde(default)]
+        prompts: Vec<PersistedActiveTurnPrompt>,
+    },
+    Legacy(BTreeSet<(String, String)>),
+}
+
+#[derive(Serialize)]
+struct PersistedActiveTurnsRef<'a> {
+    turns: &'a BTreeSet<(String, String)>,
+    prompts: Vec<PersistedActiveTurnPromptRef<'a>>,
+}
+
+#[derive(Deserialize)]
+struct PersistedActiveTurnPrompt {
+    session_id: String,
+    turn_id: String,
+    prompt: String,
+}
+
+#[derive(Serialize)]
+struct PersistedActiveTurnPromptRef<'a> {
+    session_id: &'a str,
+    turn_id: &'a str,
+    prompt: &'a str,
 }
 
 impl ActiveTurns {
     fn persistent(path: PathBuf) -> AnyhowResult<Self> {
-        let turns = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("decode active turns `{}`", path.display()))?,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+        let (turns, prompts) = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes)
+                .with_context(|| format!("decode active turns `{}`", path.display()))?
+            {
+                PersistedActiveTurns::Current { turns, prompts } => (
+                    turns,
+                    prompts
+                        .into_iter()
+                        .map(|prompt| ((prompt.session_id, prompt.turn_id), prompt.prompt))
+                        .collect(),
+                ),
+                PersistedActiveTurns::Legacy(turns) => (turns, BTreeMap::new()),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                (BTreeSet::new(), BTreeMap::new())
+            }
             Err(err) => {
                 return Err(err)
                     .with_context(|| format!("read active turns `{}`", path.display()));
@@ -174,6 +218,7 @@ impl ActiveTurns {
         };
         let active = Self {
             inner: Arc::new(Mutex::new(turns)),
+            prompts: Arc::new(Mutex::new(prompts)),
             path: Some(Arc::new(path)),
         };
         active.persist();
@@ -181,15 +226,32 @@ impl ActiveTurns {
     }
 
     fn insert(&self, session_id: impl Into<String>, turn_id: impl Into<String>) {
+        self.insert_with_prompt(session_id, turn_id, None);
+    }
+
+    fn insert_with_prompt(
+        &self,
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        prompt: Option<String>,
+    ) {
+        let key = (session_id.into(), turn_id.into());
         let mut active = self.inner.lock().expect("active turn lock");
-        active.insert((session_id.into(), turn_id.into()));
-        self.persist_snapshot(&active);
+        let mut prompts = self.prompts.lock().expect("active turn prompt lock");
+        active.insert(key.clone());
+        if let Some(prompt) = prompt {
+            prompts.insert(key, prompt);
+        }
+        self.persist_snapshot(&active, &prompts);
     }
 
     fn remove(&self, session_id: &str, turn_id: &str) {
+        let key = (session_id.to_string(), turn_id.to_string());
         let mut active = self.inner.lock().expect("active turn lock");
-        active.remove(&(session_id.to_string(), turn_id.to_string()));
-        self.persist_snapshot(&active);
+        let mut prompts = self.prompts.lock().expect("active turn prompt lock");
+        active.remove(&key);
+        prompts.remove(&key);
+        self.persist_snapshot(&active, &prompts);
     }
 
     fn contains(&self, session_id: &str, turn_id: &str) -> bool {
@@ -209,16 +271,43 @@ impl ActiveTurns {
             .collect()
     }
 
-    fn persist(&self) {
-        let active = self.inner.lock().expect("active turn lock");
-        self.persist_snapshot(&active);
+    fn prompt_for(&self, session_id: &str, turn_id: &str) -> Option<String> {
+        self.prompts
+            .lock()
+            .expect("active turn prompt lock")
+            .get(&(session_id.to_string(), turn_id.to_string()))
+            .cloned()
     }
 
-    fn persist_snapshot(&self, active: &BTreeSet<(String, String)>) {
+    fn persist(&self) {
+        let active = self.inner.lock().expect("active turn lock");
+        let prompts = self.prompts.lock().expect("active turn prompt lock");
+        self.persist_snapshot(&active, &prompts);
+    }
+
+    fn persist_snapshot(
+        &self,
+        active: &BTreeSet<(String, String)>,
+        prompts: &BTreeMap<(String, String), String>,
+    ) {
         let Some(path) = self.path.as_deref() else {
             return;
         };
-        let bytes = serde_json::to_vec(active).expect("serialize active turns");
+        let prompts = prompts
+            .iter()
+            .map(
+                |((session_id, turn_id), prompt)| PersistedActiveTurnPromptRef {
+                    session_id,
+                    turn_id,
+                    prompt,
+                },
+            )
+            .collect();
+        let bytes = serde_json::to_vec(&PersistedActiveTurnsRef {
+            turns: active,
+            prompts,
+        })
+        .expect("serialize active turns");
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, bytes)
             .unwrap_or_else(|err| panic!("write active turns `{}`: {err}", temporary.display()));
