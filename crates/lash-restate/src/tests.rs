@@ -3306,18 +3306,12 @@ enum RestateSegmentReplayPoint {
     Resume,
 }
 
-fn restate_segment_exec_outcome(ordinal: u64) -> RuntimeEffectOutcome {
-    RuntimeEffectOutcome::ExecCode {
-        result: Ok(lash_core::ExecResponse {
-            observations: Vec::new(),
-            observation_truncation: Vec::new(),
-            tool_calls: Vec::new(),
-            images: Vec::new(),
-            printed_images: Vec::new(),
-            error: None,
-            duration_ms: 0,
-            terminal_finish: Some(serde_json::json!(ordinal)),
-        }),
+fn restate_segment_tool_attempt_outcome(ordinal: u64) -> RuntimeEffectOutcome {
+    RuntimeEffectOutcome::ToolAttempt {
+        launch: lash_core::ToolAttemptLaunch::Done {
+            record: completed_tool_record(&format!("matrix-call-{ordinal}"), "matrix_tool"),
+        },
+        triggers: Vec::new(),
     }
 }
 
@@ -3373,12 +3367,14 @@ async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants()
                 RuntimeInvocation::effect(
                     lash_core::runtime::RuntimeScope::new(process_id.clone()),
                     format!("matrix-effect-{ordinal}"),
-                    RuntimeEffectKind::ExecCode,
+                    RuntimeEffectKind::ToolAttempt,
                     format!("matrix:{process_id}:{ordinal}"),
                 ),
-                RuntimeEffectCommand::ExecCode {
-                    language: "lashlang".to_string(),
-                    code: format!("finish {ordinal}"),
+                RuntimeEffectCommand::ToolAttempt {
+                    call: prepared_tool_call_with(&format!("matrix-call-{ordinal}"), "matrix_tool"),
+                    execution_grant: None,
+                    attempt: 1,
+                    max_attempts: 1,
                 },
             );
             let first_calls = Arc::clone(&local_calls);
@@ -3387,7 +3383,7 @@ async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants()
                     envelope.clone(),
                     RuntimeEffectLocalExecutor::testing(move |_| async move {
                         first_calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(restate_segment_exec_outcome(ordinal))
+                        Ok(restate_segment_tool_attempt_outcome(ordinal))
                     }),
                 )
                 .await
@@ -3407,7 +3403,7 @@ async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants()
                     envelope,
                     RuntimeEffectLocalExecutor::testing(move |_| async move {
                         replay_calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(restate_segment_exec_outcome(ordinal))
+                        Ok(restate_segment_tool_attempt_outcome(ordinal))
                     }),
                 )
                 .await

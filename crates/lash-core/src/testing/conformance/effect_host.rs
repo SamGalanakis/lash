@@ -277,19 +277,34 @@ pub async fn effect_controller_journaled_effect_replay(
     start_replay: impl FnOnce(),
 ) {
     effect_controller_segmentation_vector(controller).await;
-    let success = exec_code_conformance_envelope("replay-success", "success");
-    let error = exec_code_conformance_envelope("replay-error", "error");
+    let success = replay_conformance_tool_attempt_envelope(
+        "replay-success",
+        "call-replay-success",
+        "replay_success_tool",
+    );
+    let error = replay_conformance_tool_attempt_envelope(
+        "replay-error",
+        "call-replay-error",
+        "replay_error_tool",
+    );
 
     let first_success = controller
         .execute_effect(
             success.clone(),
-            RuntimeEffectLocalExecutor::testing(|_| async move {
-                Ok(replay_conformance_exec_outcome("first-success"))
-            }),
+            replay_conformance_tool_attempt_recording_executor(
+                "replay-success",
+                "call-replay-success",
+                "replay_success_tool",
+                None,
+            ),
         )
         .await
         .expect("first journaled-effect success");
-    assert_replay_conformance_exec_marker(first_success, "first-success");
+    assert_replay_conformance_tool_attempt_marker(
+        first_success,
+        "call-replay-success",
+        "replay_success_tool",
+    );
     let first_error = controller
         .execute_effect(
             error.clone(),
@@ -313,7 +328,11 @@ pub async fn effect_controller_journaled_effect_replay(
         )
         .await
         .expect("replayed journaled-effect success");
-    assert_replay_conformance_exec_marker(replay_success, "first-success");
+    assert_replay_conformance_tool_attempt_marker(
+        replay_success,
+        "call-replay-success",
+        "replay_success_tool",
+    );
     let replay_error = controller
         .execute_effect(
             error,
@@ -637,8 +656,8 @@ pub async fn effect_controller_concurrent_replay_deterministic(
     controller: &dyn RuntimeEffectController,
     start_replay: impl FnOnce(),
 ) {
-    let slow = replay_conformance_exec_envelope("effect-slow");
-    let fast = replay_conformance_exec_envelope("effect-fast");
+    let slow = replay_conformance_tool_attempt_envelope("effect-slow", "call-slow", "slow_tool");
+    let fast = replay_conformance_tool_attempt_envelope("effect-fast", "call-fast", "fast_tool");
     let completion_order = Arc::new(Mutex::new(Vec::new()));
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let release_slow = Arc::new(tokio::sync::Notify::new());
@@ -647,20 +666,28 @@ pub async fn effect_controller_concurrent_replay_deterministic(
         tokio::join!(
             controller.execute_effect(
                 slow.clone(),
-                replay_conformance_recording_executor(
+                replay_conformance_tool_attempt_recording_executor(
                     "effect-slow",
-                    Arc::clone(&barrier),
-                    Arc::clone(&release_slow),
-                    Arc::clone(&completion_order),
+                    "call-slow",
+                    "slow_tool",
+                    Some((
+                        Arc::clone(&barrier),
+                        Arc::clone(&release_slow),
+                        Arc::clone(&completion_order),
+                    )),
                 ),
             ),
             controller.execute_effect(
                 fast.clone(),
-                replay_conformance_recording_executor(
+                replay_conformance_tool_attempt_recording_executor(
                     "effect-fast",
-                    Arc::clone(&barrier),
-                    Arc::clone(&release_slow),
-                    Arc::clone(&completion_order),
+                    "call-fast",
+                    "fast_tool",
+                    Some((
+                        Arc::clone(&barrier),
+                        Arc::clone(&release_slow),
+                        Arc::clone(&completion_order),
+                    )),
                 ),
             ),
         )
@@ -669,8 +696,8 @@ pub async fn effect_controller_concurrent_replay_deterministic(
     .expect("concurrent first-pass effects must both enter their local executors");
     let slow_first = first_pass.0.expect("slow first pass");
     let fast_first = first_pass.1.expect("fast first pass");
-    assert_replay_conformance_exec_marker(slow_first, "effect-slow");
-    assert_replay_conformance_exec_marker(fast_first, "effect-fast");
+    assert_replay_conformance_tool_attempt_marker(slow_first, "call-slow", "slow_tool");
+    assert_replay_conformance_tool_attempt_marker(fast_first, "call-fast", "fast_tool");
     assert_eq!(
         completion_order
             .lock()
@@ -698,8 +725,8 @@ pub async fn effect_controller_concurrent_replay_deterministic(
     .expect("concurrent replay effects must resolve from host history");
     let fast_replay = replay_pass.0.expect("fast replay");
     let slow_replay = replay_pass.1.expect("slow replay");
-    assert_replay_conformance_exec_marker(fast_replay, "effect-fast");
-    assert_replay_conformance_exec_marker(slow_replay, "effect-slow");
+    assert_replay_conformance_tool_attempt_marker(fast_replay, "call-fast", "fast_tool");
+    assert_replay_conformance_tool_attempt_marker(slow_replay, "call-slow", "slow_tool");
     assert!(
         replay_local_calls
             .lock()
@@ -1188,11 +1215,6 @@ async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingB
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn replay_conformance_exec_envelope(effect_id: &'static str) -> RuntimeEffectEnvelope {
-    exec_code_conformance_envelope(effect_id, effect_id)
-}
-
-#[cfg(any(test, feature = "testing"))]
 fn replay_conformance_tool_attempt_envelope(
     effect_id: &'static str,
     call_id: &'static str,
@@ -1224,35 +1246,6 @@ fn replay_conformance_tool_attempt_envelope(
             max_attempts: 1,
         },
     )
-}
-
-#[cfg(any(test, feature = "testing"))]
-fn replay_conformance_recording_executor(
-    effect_id: &'static str,
-    barrier: Arc<tokio::sync::Barrier>,
-    release_slow: Arc<tokio::sync::Notify>,
-    completion_order: Arc<Mutex<Vec<String>>>,
-) -> RuntimeEffectLocalExecutor<'static> {
-    RuntimeEffectLocalExecutor::testing(move |envelope| async move {
-        assert_eq!(envelope.invocation.effect_id(), Some(effect_id));
-        barrier.wait().await;
-        if effect_id == "effect-slow" {
-            release_slow.notified().await;
-        } else {
-            completion_order
-                .lock()
-                .expect("completion order")
-                .push(effect_id.to_string());
-            release_slow.notify_one();
-        }
-        if effect_id == "effect-slow" {
-            completion_order
-                .lock()
-                .expect("completion order")
-                .push(effect_id.to_string());
-        }
-        Ok(replay_conformance_exec_outcome(effect_id))
-    })
 }
 
 #[cfg(any(test, feature = "testing"))]
