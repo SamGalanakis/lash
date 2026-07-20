@@ -369,13 +369,8 @@ impl DurableProcessWorker {
         if subscriptions.is_empty() {
             return Ok(());
         }
-        let router = crate::TriggerRouter::new(
-            Arc::clone(&self.config.trigger_store),
-            Some(Arc::clone(&self.config.process_registry)),
-            self.config.process_work_driver.clone(),
-        );
         let mut seen = BTreeSet::new();
-        let mut started_any = false;
+        let mut candidates = Vec::new();
         for subscription in subscriptions {
             let deliveries = self
                 .config
@@ -390,15 +385,28 @@ impl DurableProcessWorker {
                 if !seen.insert(delivery_key) {
                     continue;
                 }
-                if self
-                    .config
-                    .process_registry
-                    .get_process(&delivery.process_id)
-                    .await
-                    .is_some()
-                {
-                    continue;
-                }
+                candidates.push(delivery);
+            }
+        }
+        let candidate_process_ids = candidates
+            .iter()
+            .map(|delivery| delivery.process_id.clone())
+            .collect::<Vec<_>>();
+        let missing_process_ids = self
+            .config
+            .process_registry
+            .filter_unregistered_process_ids(&candidate_process_ids)
+            .await?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let router = crate::TriggerRouter::new(
+            Arc::clone(&self.config.trigger_store),
+            Some(Arc::clone(&self.config.process_registry)),
+            self.config.process_work_driver.clone(),
+        );
+        let mut started_any = false;
+        for delivery in candidates {
+            if missing_process_ids.contains(&delivery.process_id) {
                 let Some(scoped_effect_controller) = self
                     .config
                     .runtime_host
