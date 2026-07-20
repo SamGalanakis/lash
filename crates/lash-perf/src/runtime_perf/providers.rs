@@ -1398,6 +1398,27 @@ finish { len: result.value }"#,
                                     "value": "runtime perf benchmark ok",
                                     "ordinal": 3,
                                 }
+                            },
+                            {
+                                "tool": "benchmark_echo",
+                                "parameters": {
+                                    "value": "runtime perf benchmark ok",
+                                    "ordinal": 4,
+                                }
+                            },
+                            {
+                                "tool": "benchmark_echo",
+                                "parameters": {
+                                    "value": "runtime perf benchmark ok",
+                                    "ordinal": 5,
+                                }
+                            },
+                            {
+                                "tool": "benchmark_echo",
+                                "parameters": {
+                                    "value": "runtime perf benchmark ok",
+                                    "ordinal": 6,
+                                }
                             }
                         ]
                     }),
