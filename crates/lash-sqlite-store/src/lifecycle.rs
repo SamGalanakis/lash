@@ -47,6 +47,10 @@ impl Store {
             artifact_cache: Mutex::new(BTreeMap::new()),
             options,
             commit_count: AtomicU64::new(0),
+            #[cfg(test)]
+            checkpoint_probe_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            checkpoint_write_transaction_count: AtomicUsize::new(0),
         })
     }
 
@@ -60,6 +64,10 @@ impl Store {
             artifact_cache: Mutex::new(BTreeMap::new()),
             options: StoreOptions::default(),
             commit_count: AtomicU64::new(0),
+            #[cfg(test)]
+            checkpoint_probe_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            checkpoint_write_transaction_count: AtomicUsize::new(0),
         })
     }
 
@@ -151,7 +159,21 @@ impl Store {
             artifact_cache: Mutex::new(BTreeMap::new()),
             options,
             commit_count: AtomicU64::new(0),
+            #[cfg(test)]
+            checkpoint_probe_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            checkpoint_write_transaction_count: AtomicUsize::new(0),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_claim_counts(&self) -> (usize, usize) {
+        (
+            self.checkpoint_probe_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.checkpoint_write_transaction_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     pub async fn save_session_head_meta(&self, meta: SessionHeadMeta) {

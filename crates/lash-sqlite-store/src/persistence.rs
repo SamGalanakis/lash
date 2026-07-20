@@ -25,6 +25,53 @@
 
 use super::*;
 
+const SQLITE_QUEUED_WORK_HEAD_CANDIDATE_PREDICATE: &str = "session_id = ?1
+       AND available_at_ms <= ?2
+       AND (
+            claim_token IS NULL
+            OR claim_session_lease_generation <> ?3
+       )";
+
+fn sqlite_queued_work_head_candidate_cte(boundary: QueuedWorkClaimBoundary) -> String {
+    let delivery_gate = match boundary {
+        QueuedWorkClaimBoundary::Idle => "",
+        QueuedWorkClaimBoundary::ActiveTurnCheckpoint => {
+            "WHERE head_delivery_policy = 'earliest_safe_boundary'"
+        }
+    };
+    format!(
+        "queued_work_head_candidate AS (
+            SELECT head_enqueue_seq, head_batch_id, head_delivery_policy
+            FROM (
+                SELECT enqueue_seq AS head_enqueue_seq,
+                       batch_id AS head_batch_id,
+                       delivery_policy AS head_delivery_policy
+                FROM queued_work_batches
+                WHERE {SQLITE_QUEUED_WORK_HEAD_CANDIDATE_PREDICATE}
+                ORDER BY enqueue_seq ASC
+                LIMIT 1
+            ) AS unfiltered_head
+            {delivery_gate}
+         )"
+    )
+}
+
+fn sqlite_queued_work_claim_candidates_sql(boundary: QueuedWorkClaimBoundary) -> String {
+    let head_candidate = sqlite_queued_work_head_candidate_cte(boundary);
+    format!(
+        "WITH {head_candidate}
+         SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                claim_owner_liveness_json, claim_token, claim_session_lease_generation
+         FROM queued_work_batches
+         CROSS JOIN queued_work_head_candidate
+         WHERE {SQLITE_QUEUED_WORK_HEAD_CANDIDATE_PREDICATE}
+         ORDER BY enqueue_seq ASC
+         LIMIT ?4"
+    )
+}
+
 #[async_trait::async_trait]
 impl SessionCommitStore for Store {
     fn durability_tier(&self) -> DurabilityTier {
@@ -820,21 +867,9 @@ impl QueuedWorkStore for Store {
                     let generation = session_execution_lease.fencing_token;
                     let candidate_rows = {
                         let mut stmt = tx
-                            .prepare(
-                                "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                                        slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
-                                 FROM queued_work_batches
-                                 WHERE session_id = ?1
-                                   AND available_at_ms <= ?2
-                                   AND (
-                                        claim_token IS NULL
-                                        OR claim_session_lease_generation <> ?3
-                                   )
-                                 ORDER BY enqueue_seq ASC
-                                 LIMIT ?4",
-                            )
+                            .prepare(&sqlite_queued_work_claim_candidates_sql(
+                                QueuedWorkClaimBoundary::Idle,
+                            ))
                             .map_err(sqlite_error)?;
                         let rows = stmt
                             .query_map(
@@ -939,7 +974,8 @@ impl QueuedWorkStore for Store {
                         session_lease_generation: lease.session_lease_generation,
                         batches: selected_batches,
                     })))
-                })();
+                })(
+                );
                 match outcome {
                     Ok(TxOutcome::Commit(value)) => Ok(TxOutcome::Commit(Ok(value))),
                     Ok(TxOutcome::Rollback(value)) => Ok(TxOutcome::Rollback(Ok(value))),
@@ -977,21 +1013,7 @@ impl QueuedWorkStore for Store {
                     let generation = session_execution_lease.fencing_token;
                     let candidate_rows = {
                         let mut stmt = tx
-                            .prepare(
-                                "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                                        slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
-                                 FROM queued_work_batches
-                                 WHERE session_id = ?1
-                                   AND available_at_ms <= ?2
-                                   AND (
-                                        claim_token IS NULL
-                                        OR claim_session_lease_generation <> ?3
-                                   )
-                                 ORDER BY enqueue_seq ASC
-                                 LIMIT ?4",
-                            )
+                            .prepare(&sqlite_queued_work_claim_candidates_sql(boundary))
                             .map_err(sqlite_error)?;
                         let rows = stmt
                             .query_map(
@@ -1105,7 +1127,8 @@ impl QueuedWorkStore for Store {
                         session_lease_generation: lease.session_lease_generation,
                         batches: selected_batches,
                     })))
-                })();
+                })(
+                );
                 // Lower a `StoreError` into the rollback arm so the closure body
                 // can keep using `?` while still propagating the error to the
                 // caller. Encode it as a `Result` carried out of the flow.
@@ -1129,6 +1152,9 @@ impl QueuedWorkStore for Store {
         max_inputs: usize,
         max_batches: usize,
     ) -> Result<(Option<lash_core::TurnInputClaim>, Option<QueuedWorkClaim>), StoreError> {
+        #[cfg(test)]
+        self.checkpoint_probe_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = self.clock.timestamp_ms();
         if !checkpoint_work_pending_sqlite(
             &self.conn,
@@ -1145,6 +1171,9 @@ impl QueuedWorkStore for Store {
             return Ok((None, None));
         }
 
+        #[cfg(test)]
+        self.checkpoint_write_transaction_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_id = session_id.to_string();
         let session_execution_lease = session_execution_lease.clone();
         let owner = owner.clone();
@@ -2038,49 +2067,48 @@ async fn checkpoint_work_pending_sqlite(
     let turn_id = turn_id.to_string();
     conn.call(move |conn| {
         let outcome: Result<bool, StoreError> = (|| {
-            let pending: i64 = conn
-                .query_row(
-                    "SELECT (
-                    ?6 > 0 AND EXISTS (
+            let head_candidate = sqlite_queued_work_head_candidate_cte(
+                QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+            );
+            let sql = format!(
+                "WITH {head_candidate}
+                 SELECT (
+                    ?7 > 0 AND EXISTS (
                         SELECT 1
                         FROM pending_turn_inputs
                         WHERE session_id = ?1
-                          AND state = ?2
+                          AND state = ?4
                           AND (claim_token IS NULL OR claim_session_lease_generation <> ?3)
                           AND json_extract(ingress_json, '$.scope') = 'active_turn'
-                          AND json_extract(ingress_json, '$.turn_id') = ?4
+                          AND json_extract(ingress_json, '$.turn_id') = ?5
                           AND (
-                              ?5 = 'before_completion'
-                              OR json_extract(ingress_json, '$.min_boundary') = 'after_work'
+                              ?6 = 'before_completion'
+                              OR COALESCE(
+                                  json_extract(ingress_json, '$.min_boundary'),
+                                  'after_work'
+                              ) = 'after_work'
                           )
                         LIMIT 1
                     )
                 ) OR (
-                    ?7 > 0 AND EXISTS (
+                    ?8 > 0 AND EXISTS (
                         SELECT 1
-                        FROM queued_work_batches AS q
-                        WHERE q.enqueue_seq = (
-                            SELECT MIN(candidate.enqueue_seq)
-                            FROM queued_work_batches AS candidate
-                            WHERE candidate.session_id = ?1
-                              AND candidate.available_at_ms <= ?8
-                              AND (
-                                  candidate.claim_token IS NULL
-                                  OR candidate.claim_session_lease_generation <> ?3
-                              )
-                        )
-                          AND EXISTS (
-                              SELECT 1
-                              FROM queued_work_items AS item
-                              WHERE item.batch_id = q.batch_id
-                                AND json_extract(item.payload_json, '$.type') <> 'session_command'
-                          )
+                        FROM queued_work_head_candidate AS head
+                        JOIN queued_work_items AS item
+                          ON item.batch_id = head.head_batch_id
+                        WHERE json_extract(item.payload_json, '$.type') <> 'session_command'
+                        LIMIT 1
                     )
-                )",
+                )"
+            );
+            let pending: i64 = conn
+                .query_row(
+                    &sql,
                     params![
                         session_id,
-                        lash_core::TurnInputState::PendingActive.as_str(),
+                        now as i64,
                         generation as i64,
+                        lash_core::TurnInputState::PendingActive.as_str(),
                         turn_id,
                         match checkpoint {
                             lash_core::CheckpointKind::AfterWork => "after_work",
@@ -2088,7 +2116,6 @@ async fn checkpoint_work_pending_sqlite(
                         },
                         max_inputs as i64,
                         max_batches as i64,
-                        now as i64,
                     ],
                     |row| row.get(0),
                 )
@@ -2117,21 +2144,7 @@ fn claim_ready_queued_work_sqlite_conn(
     let generation = session_execution_lease.fencing_token;
     let candidate_rows = {
         let mut stmt = tx
-            .prepare(
-                "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                        slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
-                 FROM queued_work_batches
-                 WHERE session_id = ?1
-                   AND available_at_ms <= ?2
-                   AND (
-                        claim_token IS NULL
-                        OR claim_session_lease_generation <> ?3
-                   )
-                 ORDER BY enqueue_seq ASC
-                 LIMIT ?4",
-            )
+            .prepare(&sqlite_queued_work_claim_candidates_sql(boundary))
             .map_err(sqlite_error)?;
         let rows = stmt
             .query_map(

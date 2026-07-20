@@ -1,7 +1,5 @@
 use super::*;
-use crate::store::{
-    QueuedWorkStore, SessionCommitStore, SessionExecutionLeaseStore, TurnInputStore,
-};
+use crate::store::{QueuedWorkStore, SessionCommitStore, SessionExecutionLeaseStore};
 
 // The in-memory `RecordingStore` stands in for the real store across these
 // runtime tests; the conformance suite holds it to the same durability
@@ -51,66 +49,12 @@ async fn same_generation_claim_scans_reach_rows_beyond_the_scan_surplus() {
 #[tokio::test]
 async fn checkpoint_claim_probe_avoids_quiescent_write_transactions() {
     let store = Arc::new(RecordingStore::default());
-    let owner = crate::LeaseOwnerIdentity::opaque(
-        "checkpoint-counter-owner",
-        "checkpoint-counter-owner:incarnation",
-    );
-    let lease = store
-        .try_claim_session_execution_lease("root", &owner, 60_000)
-        .await
-        .expect("claim checkpoint counter lease")
-        .acquired()
-        .expect("checkpoint counter lease acquired");
-
-    let empty = store
-        .claim_checkpoint_work(
-            "root",
-            &lease.fence(),
-            &owner,
-            "counter-turn",
-            crate::CheckpointKind::AfterWork,
-            64,
-            64,
-        )
-        .await
-        .expect("probe quiescent checkpoint");
-    assert!(empty.0.is_none() && empty.1.is_none());
-    assert_eq!(store.checkpoint_claim_counts(), (1, 0));
-
-    store
-        .enqueue_pending_turn_input(crate::PendingTurnInputDraft::new(
-            "root",
-            crate::TurnInputIngress::active_turn(
-                "counter-turn",
-                crate::TurnInputCheckpointBoundary::AfterWork,
-            ),
-            crate::TurnInput::text("pending checkpoint input"),
-        ))
-        .await
-        .expect("enqueue counter input");
-    store
-        .enqueue_queued_work(crate::testing::conformance::queued_process_wake_draft(
-            "root",
-            "pending checkpoint work",
-            crate::DeliveryPolicy::EarliestSafeBoundary,
-            crate::SlotPolicy::Exclusive,
-        ))
-        .await
-        .expect("enqueue counter work");
-    let pending = store
-        .claim_checkpoint_work(
-            "root",
-            &lease.fence(),
-            &owner,
-            "counter-turn",
-            crate::CheckpointKind::AfterWork,
-            64,
-            64,
-        )
-        .await
-        .expect("claim pending checkpoint work");
-    assert!(pending.0.is_some() && pending.1.is_some());
-    assert_eq!(store.checkpoint_claim_counts(), (2, 1));
+    crate::testing::conformance::checkpoint_claim_probe_transaction_counts(
+        Arc::clone(&store) as Arc<dyn crate::RuntimePersistence>,
+        "root",
+        || store.checkpoint_claim_counts(),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

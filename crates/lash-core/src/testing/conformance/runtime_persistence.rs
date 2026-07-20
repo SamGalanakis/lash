@@ -344,6 +344,118 @@ async fn checkpoint_work_claims_both_families_once(store: Arc<dyn RuntimePersist
     );
 }
 
+/// Prove checkpoint admission probes stay read-only for empty queues and for
+/// deferred queue heads, while real checkpoint work still shares one write
+/// transaction and deferred work remains claimable at the idle boundary.
+pub async fn checkpoint_claim_probe_transaction_counts(
+    store: Arc<dyn RuntimePersistence>,
+    session_id: &str,
+    counts: impl Fn() -> (usize, usize),
+) {
+    let turn_id = format!("{session_id}:counter-turn");
+    let owner = lease_owner(&format!("{session_id}:checkpoint-counter-owner"));
+    let lease = store
+        .try_claim_session_execution_lease(session_id, &owner, 60_000)
+        .await
+        .expect("claim checkpoint counter lease")
+        .acquired()
+        .expect("checkpoint counter lease acquired");
+
+    let empty = store
+        .claim_checkpoint_work(
+            session_id,
+            &lease.fence(),
+            &owner,
+            &turn_id,
+            crate::CheckpointKind::AfterWork,
+            64,
+            64,
+        )
+        .await
+        .expect("probe quiescent checkpoint");
+    assert!(empty.0.is_none() && empty.1.is_none());
+    assert_eq!(counts(), (1, 0));
+
+    let deferred = store
+        .enqueue_queued_work(queued_process_wake_draft(
+            session_id,
+            "deferred checkpoint head",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue deferred checkpoint head");
+    let deferred_checkpoint = store
+        .claim_checkpoint_work(
+            session_id,
+            &lease.fence(),
+            &owner,
+            &turn_id,
+            crate::CheckpointKind::AfterWork,
+            64,
+            64,
+        )
+        .await
+        .expect("probe deferred checkpoint head");
+    assert!(
+        deferred_checkpoint.0.is_none() && deferred_checkpoint.1.is_none(),
+        "after-current-turn-commit work must not claim at an active checkpoint"
+    );
+    assert_eq!(
+        counts(),
+        (2, 0),
+        "a deferred queue head must not open a checkpoint write transaction"
+    );
+
+    let deferred_claim = store
+        .claim_ready_queued_work(
+            session_id,
+            &lease.fence(),
+            &owner,
+            QueuedWorkClaimBoundary::Idle,
+            64,
+        )
+        .await
+        .expect("claim deferred work at idle boundary")
+        .expect("deferred work remains claimable at idle boundary");
+    assert_eq!(deferred_claim.batches[0].batch_id, deferred.batch_id);
+
+    store
+        .enqueue_pending_turn_input(crate::PendingTurnInputDraft::new(
+            session_id,
+            crate::TurnInputIngress::active_turn(
+                turn_id.clone(),
+                crate::TurnInputCheckpointBoundary::AfterWork,
+            ),
+            crate::TurnInput::text("pending checkpoint input"),
+        ))
+        .await
+        .expect("enqueue counter input");
+    store
+        .enqueue_queued_work(queued_process_wake_draft(
+            session_id,
+            "pending checkpoint work",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue counter work");
+    let pending = store
+        .claim_checkpoint_work(
+            session_id,
+            &lease.fence(),
+            &owner,
+            &turn_id,
+            crate::CheckpointKind::AfterWork,
+            64,
+            64,
+        )
+        .await
+        .expect("claim pending checkpoint work");
+    assert!(pending.0.is_some() && pending.1.is_some());
+    assert_eq!(counts(), (3, 1));
+}
+
 /// Build a queued process-wake draft for backend conformance tests.
 pub fn queued_process_wake_draft(
     session_id: &str,

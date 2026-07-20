@@ -1,3 +1,52 @@
+const POSTGRES_QUEUED_WORK_HEAD_CANDIDATE_PREDICATE: &str =
+    "session_id = $1
+       AND available_at_ms <= FLOOR(EXTRACT(EPOCH FROM transaction_timestamp()) * 1000)
+       AND (
+            claim_token IS NULL
+            OR claim_session_lease_generation <> $2
+       )";
+
+fn postgres_queued_work_head_candidate_cte(boundary: QueuedWorkClaimBoundary) -> String {
+    let delivery_gate = match boundary {
+        QueuedWorkClaimBoundary::Idle => "",
+        QueuedWorkClaimBoundary::ActiveTurnCheckpoint => {
+            "WHERE head_delivery_policy = 'earliest_safe_boundary'"
+        }
+    };
+    format!(
+        "queued_work_head_candidate AS (
+            SELECT head_enqueue_seq, head_batch_id, head_delivery_policy
+            FROM (
+                SELECT enqueue_seq AS head_enqueue_seq,
+                       batch_id AS head_batch_id,
+                       delivery_policy AS head_delivery_policy
+                FROM lash_queued_work_batches
+                WHERE {POSTGRES_QUEUED_WORK_HEAD_CANDIDATE_PREDICATE}
+                ORDER BY enqueue_seq ASC
+                LIMIT 1
+            ) AS unfiltered_head
+            {delivery_gate}
+         )"
+    )
+}
+
+fn postgres_queued_work_claim_candidates_sql(boundary: QueuedWorkClaimBoundary) -> String {
+    let head_candidate = postgres_queued_work_head_candidate_cte(boundary);
+    format!(
+        "WITH {head_candidate}
+         SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                claim_owner_liveness_json, claim_token, claim_session_lease_generation
+         FROM lash_queued_work_batches
+         CROSS JOIN queued_work_head_candidate
+         WHERE {POSTGRES_QUEUED_WORK_HEAD_CANDIDATE_PREDICATE}
+         ORDER BY enqueue_seq ASC
+         LIMIT $3
+         FOR UPDATE OF lash_queued_work_batches SKIP LOCKED"
+    )
+}
+
 async fn enqueue_queued_work_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     batch: &QueuedWorkBatchDraft,
@@ -821,24 +870,10 @@ impl QueuedWorkStore for PostgresSessionStore {
         // claimable only across a different generation (ADR 0029).
         let generation = session_execution_lease.fencing_token;
         let now = postgres_transaction_epoch_ms(&mut tx).await?;
-        let rows = sqlx::query(
-            "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                    slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                    claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
-             FROM lash_queued_work_batches
-             WHERE session_id = $1
-               AND available_at_ms <= $2
-               AND (
-                    claim_token IS NULL
-                    OR claim_session_lease_generation <> $3
-               )
-             ORDER BY enqueue_seq ASC
-             LIMIT $4
-             FOR UPDATE SKIP LOCKED",
-        )
+        let rows = sqlx::query(&postgres_queued_work_claim_candidates_sql(
+            QueuedWorkClaimBoundary::Idle,
+        ))
         .bind(session_id)
-        .bind(now as i64)
         .bind(generation as i64)
         .bind(claim_scan_limit(1))
         .fetch_all(&mut *tx)
@@ -945,24 +980,8 @@ impl QueuedWorkStore for PostgresSessionStore {
         ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
         let generation = session_execution_lease.fencing_token;
         let now = postgres_transaction_epoch_ms(&mut tx).await?;
-        let rows = sqlx::query(
-            "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                    slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                    claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                    claim_owner_liveness_json, claim_token, claim_session_lease_generation
-             FROM lash_queued_work_batches
-             WHERE session_id = $1
-               AND available_at_ms <= $2
-               AND (
-                    claim_token IS NULL
-                    OR claim_session_lease_generation <> $3
-               )
-             ORDER BY enqueue_seq ASC
-             LIMIT $4
-             FOR UPDATE SKIP LOCKED",
-        )
+        let rows = sqlx::query(&postgres_queued_work_claim_candidates_sql(boundary))
         .bind(session_id)
-        .bind(now as i64)
         .bind(generation as i64)
         .bind(claim_scan_limit(max_batches))
         .fetch_all(&mut *tx)
@@ -1070,6 +1089,9 @@ impl QueuedWorkStore for PostgresSessionStore {
         ),
         StoreError,
     > {
+        #[cfg(test)]
+        self.checkpoint_probe_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if !checkpoint_work_pending_postgres(
             &self.pool,
             session_id,
@@ -1084,6 +1106,9 @@ impl QueuedWorkStore for PostgresSessionStore {
             return Ok((None, None));
         }
 
+        #[cfg(test)]
+        self.checkpoint_write_transaction_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         ensure_session_execution_lease_tx(&mut tx, session_id, session_execution_lease).await?;
         let input = claim_pending_turn_inputs_postgres_tx(
@@ -1891,16 +1916,11 @@ async fn checkpoint_work_pending_postgres(
     if max_inputs == 0 && max_batches == 0 {
         return Ok(false);
     }
-    sqlx::query_scalar(
-        "WITH first_queue AS (
-            SELECT batch_id
-            FROM lash_queued_work_batches
-            WHERE session_id = $1
-              AND available_at_ms <= FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)
-              AND (claim_token IS NULL OR claim_session_lease_generation <> $2)
-            ORDER BY enqueue_seq ASC
-            LIMIT 1
-         )
+    let head_candidate = postgres_queued_work_head_candidate_cte(
+        QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+    );
+    let sql = format!(
+        "WITH {head_candidate}
          SELECT (
             $5 > 0 AND EXISTS (
                 SELECT 1
@@ -1912,7 +1932,10 @@ async fn checkpoint_work_pending_postgres(
                   AND ingress_json::jsonb ->> 'turn_id' = $3
                   AND (
                       $4 = 'before_completion'
-                      OR ingress_json::jsonb ->> 'min_boundary' = 'after_work'
+                      OR COALESCE(
+                          ingress_json::jsonb ->> 'min_boundary',
+                          'after_work'
+                      ) = 'after_work'
                   )
                 LIMIT 1
             )
@@ -1920,12 +1943,14 @@ async fn checkpoint_work_pending_postgres(
             $6 > 0 AND EXISTS (
                 SELECT 1
                 FROM lash_queued_work_items AS item
-                JOIN first_queue AS q ON q.batch_id = item.batch_id
+                JOIN queued_work_head_candidate AS head
+                  ON head.head_batch_id = item.batch_id
                 WHERE item.payload_json::jsonb ->> 'type' <> 'session_command'
                 LIMIT 1
             )
-         )",
-    )
+         )"
+    );
+    sqlx::query_scalar(&sql)
     .bind(session_id)
     .bind(generation as i64)
     .bind(turn_id)
@@ -1954,24 +1979,8 @@ async fn claim_ready_queued_work_postgres_tx(
     }
     let generation = session_execution_lease.fencing_token;
     let now = postgres_transaction_epoch_ms(tx).await?;
-    let rows = sqlx::query(
-        "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                claim_owner_liveness_json, claim_token, claim_session_lease_generation
-         FROM lash_queued_work_batches
-         WHERE session_id = $1
-           AND available_at_ms <= $2
-           AND (
-                claim_token IS NULL
-                OR claim_session_lease_generation <> $3
-           )
-         ORDER BY enqueue_seq ASC
-         LIMIT $4
-         FOR UPDATE SKIP LOCKED",
-    )
+    let rows = sqlx::query(&postgres_queued_work_claim_candidates_sql(boundary))
     .bind(session_id)
-    .bind(now as i64)
     .bind(generation as i64)
     .bind(claim_scan_limit(max_batches))
     .fetch_all(&mut **tx)

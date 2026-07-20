@@ -676,8 +676,11 @@ impl InMemorySessionStore {
             .min_by_key(|entry| entry.batch.enqueue_seq);
         first_ready
             .map(|entry| {
-                Self::queued_batch_work_class(&entry.batch)
-                    .map(|class| class == crate::runtime::QueuedWorkClass::TurnWork)
+                Self::queued_batch_work_class(&entry.batch).map(|class| {
+                    class == crate::runtime::QueuedWorkClass::TurnWork
+                        && entry.batch.delivery_policy
+                            == crate::DeliveryPolicy::EarliestSafeBoundary
+                })
             })
             .transpose()
             .map(Option::unwrap_or_default)
