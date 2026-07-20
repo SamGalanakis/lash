@@ -31,6 +31,8 @@ Defaults:
   restart replaces only the workbench process and preserves Restate.
   down stops both the workbench and any Restate container it started.
   --port PORT binds 127.0.0.1:PORT.
+  Restate ports use the same offset from their defaults as the workbench port
+  uses from 3030, unless their environment variables override them.
   Without --port/--addr, AGENT_WORKBENCH_ADDR is used, then 127.0.0.1:3030.
 USAGE
 }
@@ -54,6 +56,15 @@ addr_host_port() {
     die "expected address as host:port, got '$addr'"
   fi
   printf '%s %s\n' "$host" "$port"
+}
+
+validate_port() {
+  local label="$1"
+  local port="$2"
+  [[ "$port" =~ ^[0-9]+$ ]] || die "$label port must be numeric, got '$port'"
+  local port_number=$((10#$port))
+  (( port_number >= 1 && port_number <= 65535 )) \
+    || die "$label port must be between 1 and 65535, got '$port'"
 }
 
 tcp_ready() {
@@ -529,18 +540,31 @@ elif [[ -n "$port_override" ]]; then
 else
   workbench_addr="${AGENT_WORKBENCH_ADDR:-127.0.0.1:3030}"
 fi
-restate_endpoint_addr="${AGENT_WORKBENCH_RESTATE_ADDR:-127.0.0.1:9081}"
-restate_ingress_url="${RESTATE_INGRESS_URL:-http://127.0.0.1:8080}"
-restate_admin_url="${RESTATE_ADMIN_URL:-http://127.0.0.1:${AGENT_WORKBENCH_RESTATE_ADMIN_PORT:-19070}}"
-restate_image="${AGENT_WORKBENCH_RESTATE_IMAGE:-restatedev/restate:1.7.0}"
-restate_node_port="${AGENT_WORKBENCH_RESTATE_NODE_PORT:-19071}"
-configured_endpoint_url="${AGENT_WORKBENCH_RESTATE_ENDPOINT_URL:-}"
 
 read -r workbench_host workbench_port < <(addr_host_port "$workbench_addr")
+validate_port "workbench" "$workbench_port"
+workbench_port_number=$((10#$workbench_port))
+port_offset=$((workbench_port_number - 3030))
+default_restate_endpoint_port=$((9081 + port_offset))
+default_restate_ingress_port=$((8080 + port_offset))
+default_restate_admin_port=$((19070 + port_offset))
+default_restate_node_port=$((19071 + port_offset))
+
+restate_endpoint_addr="${AGENT_WORKBENCH_RESTATE_ADDR:-127.0.0.1:$default_restate_endpoint_port}"
+restate_ingress_url="${RESTATE_INGRESS_URL:-http://127.0.0.1:$default_restate_ingress_port}"
+restate_admin_url="${RESTATE_ADMIN_URL:-http://127.0.0.1:${AGENT_WORKBENCH_RESTATE_ADMIN_PORT:-$default_restate_admin_port}}"
+restate_image="${AGENT_WORKBENCH_RESTATE_IMAGE:-restatedev/restate:1.7.0}"
+restate_node_port="${AGENT_WORKBENCH_RESTATE_NODE_PORT:-$default_restate_node_port}"
+configured_endpoint_url="${AGENT_WORKBENCH_RESTATE_ENDPOINT_URL:-}"
+
 restate_container="${AGENT_WORKBENCH_RESTATE_CONTAINER:-lash-agent-workbench-dev-restate-$workbench_port}"
 read -r endpoint_host endpoint_port < <(addr_host_port "$restate_endpoint_addr")
 read -r ingress_host ingress_port < <(url_host_port "$restate_ingress_url")
 read -r admin_host admin_port < <(url_host_port "$restate_admin_url")
+validate_port "Restate endpoint" "$endpoint_port"
+validate_port "Restate ingress" "$ingress_port"
+validate_port "Restate admin" "$admin_port"
+validate_port "Restate node" "$restate_node_port"
 
 workbench_wait_host="$workbench_host"
 endpoint_wait_host="$endpoint_host"

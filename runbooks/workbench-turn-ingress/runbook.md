@@ -44,7 +44,11 @@ structure rather than exact assistant wording.
 
 - Boot with a fresh data directory:
   `AGENT_WORKBENCH_DATA_DIR=<fresh-tmp> AGENT_WORKBENCH_OPEN=0 just agent-workbench <port>`.
-  Gate `GET /healthz` → 200. Teardown with `just agent-workbench-down <port>`.
+  Gate `GET /healthz` → 200. The entire Restate stack is port-isolated by default: the
+  helper derives its endpoint, ingress, admin port, node port, and container name from
+  `<port>`, so concurrent runs on distinct workbench ports do not need manual Restate
+  overrides. Teardown with
+  `just agent-workbench-down <port>`.
 - UI: composer, **inject now**, **queue next**, ingress receipt rows, transcript, running
   pill, and Stop control.
 - HTTP truth: `GET /api/state`, `POST /api/turn`, and `POST /api/turn/input` with
