@@ -24,8 +24,49 @@ use lash_restate_postgres_workers_e2e::{
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+const DEFAULT_RUNNER_STALL_TIMEOUT: Duration = Duration::from_secs(240);
+
+struct RunnerProgress {
+    last_update: Instant,
+    description: String,
+}
+
+fn runner_progress() -> &'static Mutex<RunnerProgress> {
+    static PROGRESS: OnceLock<Mutex<RunnerProgress>> = OnceLock::new();
+    PROGRESS.get_or_init(|| {
+        Mutex::new(RunnerProgress {
+            last_update: Instant::now(),
+            description: "runner startup".to_string(),
+        })
+    })
+}
+
+fn report_workflow_progress(workflow_id: &str, phase: &str) {
+    let description = format!("workflow={workflow_id} phase={phase}");
+    {
+        let mut progress = runner_progress().lock().expect("runner progress lock");
+        progress.last_update = Instant::now();
+        progress.description.clone_from(&description);
+    }
+    eprintln!(
+        "[{}] workers-e2e progress: {description}",
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    );
+}
+
+fn runner_stall_timeout() -> Result<Duration> {
+    let Some(raw) = std::env::var("LASH_E2E_STALL_TIMEOUT_SECS").ok() else {
+        return Ok(DEFAULT_RUNNER_STALL_TIMEOUT);
+    };
+    let seconds = raw
+        .parse::<u64>()
+        .with_context(|| format!("LASH_E2E_STALL_TIMEOUT_SECS must be seconds, got `{raw}`"))?;
+    anyhow::ensure!(seconds > 0, "LASH_E2E_STALL_TIMEOUT_SECS must be positive");
+    Ok(Duration::from_secs(seconds))
+}
 
 fn main() -> Result<()> {
     let stack_bytes = e2e_tokio_thread_stack_bytes()?;
@@ -58,6 +99,11 @@ async fn async_main() -> Result<()> {
     let deployment_url = env("WORKER_DEPLOYMENT_URL", "http://worker-proxy:18100");
     register_restate_deployment(&admin_url, &deployment_url).await?;
     let ingress_url = env("RESTATE_INGRESS_URL", "http://restate:8080");
+    let watchdog = tokio::spawn(runner_stall_watchdog(
+        storage.pool().clone(),
+        admin_url.clone(),
+        runner_stall_timeout()?,
+    ));
 
     let main_request = TurnRequest {
         workflow_id: "e2e-main".to_string(),
@@ -287,7 +333,9 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &frame_prepared_request.workflow_id).await?;
     assert_frame_switch_prepared_response(&frame_prepared_response)?;
 
+    report_workflow_progress("e2e-frame-switch-crash", "starting");
     let frame_crash_response = drive_frame_switch_crash_process(&storage).await?;
+    report_workflow_progress("e2e-frame-switch-crash", "completed");
     assert_frame_switch_crash_response(&frame_crash_response)?;
 
     let frame_cancel_request = TurnRequest {
@@ -341,7 +389,64 @@ async fn async_main() -> Result<()> {
             .map(|dir| dir.display().to_string())
             .unwrap_or_else(|| "disabled".to_string())
     );
+    watchdog.abort();
     Ok(())
+}
+
+async fn runner_stall_watchdog(pool: sqlx::PgPool, admin_url: String, timeout: Duration) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let stalled = {
+            let progress = runner_progress().lock().expect("runner progress lock");
+            (progress.last_update.elapsed() >= timeout)
+                .then(|| (progress.last_update.elapsed(), progress.description.clone()))
+        };
+        let Some((elapsed, description)) = stalled else {
+            continue;
+        };
+
+        eprintln!(
+            "[{}] workers-e2e STALL: no workflow progress for {:.1}s; last progress: {}",
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            elapsed.as_secs_f64(),
+            description
+        );
+        dump_runner_stall_diagnostics(&pool, &admin_url).await;
+        // This is an E2E-only binary. Exiting gives the compose wrapper a
+        // nonzero status immediately; its EXIT trap then appends every service
+        // log instead of waiting for the CI job timeout.
+        std::process::exit(124);
+    }
+}
+
+async fn dump_runner_stall_diagnostics(pool: &sqlx::PgPool, admin_url: &str) {
+    let admin = RestateAdminClient::new(admin_url.to_string());
+    match admin
+        .unfinished_invocations_for_service_prefixes(&[
+            TURN_WORKFLOW_NAME,
+            "LashProcessWorkflow",
+            "LashDurableWaitWorkflow",
+        ])
+        .await
+    {
+        Ok(invocations) => {
+            eprintln!("workers-e2e STALL Restate unfinished invocations:\n{invocations:#?}")
+        }
+        Err(err) => eprintln!("workers-e2e STALL Restate query failed: {err:#}"),
+    }
+
+    let recent_events = sqlx::query_as::<_, (String, String, String, i64)>(
+        "SELECT workflow_id, worker_id, event_type, created_at_ms
+         FROM lash_e2e_worker_events
+         ORDER BY event_id DESC
+         LIMIT 25",
+    )
+    .fetch_all(pool)
+    .await;
+    match recent_events {
+        Ok(events) => eprintln!("workers-e2e STALL recent worker events:\n{events:#?}"),
+        Err(err) => eprintln!("workers-e2e STALL worker-event query failed: {err:#}"),
+    }
 }
 
 fn reset_trace_dir(dir: &Path) -> Result<()> {
@@ -515,6 +620,7 @@ async fn wait_for_mock_provider(base_url: &str) -> Result<()> {
 }
 
 async fn submit_workflow(ingress_url: &str, request: &TurnRequest) -> Result<RestateInvocationId> {
+    report_workflow_progress(&request.workflow_id, "submitting");
     let client = reqwest::Client::builder()
         .http2_prior_knowledge()
         .build()
@@ -527,7 +633,10 @@ async fn submit_workflow(ingress_url: &str, request: &TurnRequest) -> Result<Res
             .send_workflow_json(TURN_WORKFLOW_NAME, &request.workflow_id, "run", request)
             .await
         {
-            Ok(invocation_id) => return Ok(invocation_id),
+            Ok(invocation_id) => {
+                report_workflow_progress(&request.workflow_id, "submitted");
+                return Ok(invocation_id);
+            }
             Err(err) => last_error = Some(err.to_string()),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -643,6 +752,7 @@ async fn wait_for_terminal_result(pool: &sqlx::PgPool, workflow_id: &str) -> Res
     let deadline = Instant::now() + Duration::from_secs(180);
     while Instant::now() < deadline {
         if let Some(response) = load_terminal_result(pool, workflow_id).await? {
+            report_workflow_progress(workflow_id, "completed");
             return Ok(response);
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1204,6 +1314,7 @@ async fn drive_turn_control_scenarios(storage: &PostgresStorage, ingress_url: &s
         .await_terminal(&turn_address(&before))
         .await
         .context("attach to cancel-before-start terminal")?;
+    report_workflow_progress(&before.workflow_id, "terminal-attached");
     assert_cancelled_terminal(&before_terminal, before_evidence_id)?;
     assert_cancelled_response(
         &wait_for_terminal_result(storage.pool(), &before.workflow_id).await?,
@@ -1229,6 +1340,7 @@ async fn drive_turn_control_scenarios(storage: &PostgresStorage, ingress_url: &s
         .await_terminal(&turn_address(&cross))
         .await
         .context("attach to cross-process terminal")?;
+    report_workflow_progress(&cross.workflow_id, "terminal-attached");
     assert_cancelled_terminal(&cross_terminal, cross_evidence_id)?;
     assert_cancelled_response(
         &wait_for_terminal_result(storage.pool(), &cross.workflow_id).await?,
@@ -1257,6 +1369,7 @@ async fn drive_turn_control_scenarios(storage: &PostgresStorage, ingress_url: &s
         .await_terminal(&turn_address(&race))
         .await
         .context("attach to completion/cancel race terminal")?;
+    report_workflow_progress(&race.workflow_id, "terminal-attached");
     match race_outcome.outcome {
         TurnCancelOutcome::Requested(_) | TurnCancelOutcome::AlreadyRequested(_) => {
             assert_cancelled_terminal(&race_terminal, race_evidence_id)?;
@@ -1279,10 +1392,12 @@ async fn drive_turn_control_scenarios(storage: &PostgresStorage, ingress_url: &s
         .await
         .context("request cancellation during owner recovery")?;
     assert_requested(&recovery_outcome.outcome, recovery_evidence_id)?;
+    report_workflow_progress(&recovery.workflow_id, "cancel-requested-after-crash");
     let recovery_terminal = driver
         .await_terminal(&turn_address(&recovery))
         .await
         .context("attach to recovered cancellation terminal")?;
+    report_workflow_progress(&recovery.workflow_id, "terminal-attached");
     assert_cancelled_terminal(&recovery_terminal, recovery_evidence_id)?;
     let recovery_response = wait_for_terminal_result(storage.pool(), &recovery.workflow_id).await?;
     assert_cancelled_response(&recovery_response, recovery_evidence_id)?;
@@ -1315,6 +1430,7 @@ async fn drive_break_glass_scenario(
         .kill_invocation_for_test_cleanup(&invocation_id)
         .await
         .context("kill Restate invocation as break-glass")?;
+    report_workflow_progress(&break_glass.workflow_id, "admin-kill-requested");
     wait_for_invocation_terminal(&admin, &invocation_id).await?;
 
     let driver = TurnWorkDriver::new(Arc::new(RestateEffectHost::with_ingress_url(

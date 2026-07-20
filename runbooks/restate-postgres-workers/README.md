@@ -24,6 +24,12 @@ not authorization. Production hosts must authorize callers before exposing the
 same driver, and cancellation remains cooperative: detached effects are not
 guaranteed to stop.
 
+The runner prints timestamped `submitting`, `submitted`, and `completed`
+progress for each workflow. If no workflow progress is reported for 240
+seconds, it prints unfinished Restate invocations and recent worker events,
+then exits so the shell harness can append per-service logs and process state.
+Override that bound with `LASH_E2E_STALL_TIMEOUT_SECS` while debugging.
+
 The package-level build/unit check is lighter and does not start the distributed
 services:
 

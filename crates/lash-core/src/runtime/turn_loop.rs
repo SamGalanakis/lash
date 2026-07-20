@@ -2174,14 +2174,16 @@ async fn run_turn_effect_loop(
     events: &dyn EventSink,
     turn_events: &dyn TurnActivitySink,
 ) -> Result<(crate::MessageSequence, usize), RuntimeError> {
-    let start_gate_controller = shared_cancel_controller
-        .as_deref()
-        .unwrap_or(cancel_controller);
-    if await_turn_cancellation_with_retry(|| {
-        turn_control.observe_pending_cancel(start_gate_controller)
-    })
-    .await
-    .is_some()
+    // The start gate can change the handler's control flow before its first
+    // effect, so durable runtimes must observe it through the handler-scoped
+    // controller. That controller journals the observation and replays the
+    // same answer after an owner crash. The shared controller is intentionally
+    // reserved for the concurrent live watcher below: an out-of-band peek here
+    // could observe a cancel that arrived after the original attempt and make
+    // a replay take a different command path.
+    if await_turn_cancellation_with_retry(|| turn_control.observe_pending_cancel(cancel_controller))
+        .await
+        .is_some()
     {
         cancellation.cancel();
     }

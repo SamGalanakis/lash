@@ -22,6 +22,12 @@ kept releasable.
 4. Keep the branch current and merge only after required CI is green.
 5. Delete the branch after merge.
 
+Changes to turn execution in `lash-core` or its `lash-restate` adapter must run
+both durable geometries locally: `just agent-workbench-restate-e2e` and
+`just restate-postgres-workers-e2e`. The latter is required because replay,
+ingress, and failover behavior can differ behind the two-worker proxy even when
+the single-endpoint workbench is green.
+
 There is no `staging` branch. Preview work belongs in pull requests, while the
 merged product state lives on `main`.
 
