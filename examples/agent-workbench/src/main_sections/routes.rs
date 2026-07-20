@@ -6,12 +6,42 @@ async fn index() -> Html<&'static str> {
     Html(ui::INDEX_HTML)
 }
 
-async fn app_state(State(state): State<AppState>) -> Json<StateSnapshot> {
-    Json(StateSnapshot {
+async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>, AppError> {
+    let session = state
+        .core
+        .session(state.current_session_id())
+        .open()
+        .await
+        .map_err(AppError::internal)?;
+    let messages = session
+        .read_view()
+        .messages()
+        .iter()
+        .map(chat_message_from_committed)
+        .collect();
+    let pending_turn_inputs = session
+        .pending_turn_inputs()
+        .await
+        .map_err(AppError::internal)?;
+    session.close().await.map_err(AppError::internal)?;
+    Ok(Json(StateSnapshot {
         settings: state.settings(),
-        messages: state.messages_snapshot(),
+        messages,
         active_turns: state.active_turns.for_session(&state.current_session_id()),
-    })
+        pending_turn_inputs,
+    }))
+}
+
+fn chat_message_from_committed(message: &lash::messages::Message) -> ChatMessage {
+    ChatMessage {
+        id: message.id.clone(),
+        role: lash::message_role(message).to_string(),
+        text: lash::message_text(message),
+        // The durable session graph records ordering but not a presentation
+        // timestamp. The workbench does not render this field, so keep the
+        // established wire shape without fabricating a time during resume.
+        at: String::new(),
+    }
 }
 
 async fn session_events(
@@ -98,6 +128,94 @@ async fn send_turn(
         return Err(err);
     }
     Ok(Json(CommandAccepted { accepted: true }))
+}
+
+async fn enqueue_turn_input(
+    State(state): State<AppState>,
+    Json(request): Json<TurnInputRequest>,
+) -> Result<Json<TurnInputReceipt>, AppError> {
+    let text = request.text.trim().to_string();
+    if text.is_empty() {
+        return Err(AppError::bad_request("message text is required"));
+    }
+    let session_id = state.current_session_id();
+    let ingress = match request.ingress {
+        TurnInputIngressRequest::ActiveTurn => {
+            let active = state.active_turns.for_session(&session_id);
+            let [address] = active.as_slice() else {
+                return Err(AppError::conflict(
+                    "inject now requires exactly one running turn",
+                ));
+            };
+            lash::persistence::TurnInputIngress::active_turn(
+                address.turn_id.clone(),
+                lash::persistence::TurnInputCheckpointBoundary::AfterWork,
+            )
+        }
+        TurnInputIngressRequest::NextTurn => lash::persistence::TurnInputIngress::next_turn(),
+    };
+    let source_id = format!("workbench-turn-input-{}", uuid::Uuid::new_v4());
+    let pending = state
+        .core
+        .enqueue_turn_input(
+            session_id,
+            lash::TurnInput::text(text.clone()),
+            ingress,
+            Some(source_id),
+        )
+        .await
+        .map_err(AppError::internal)?;
+    reject_if_active_turn_settled(&state, &pending).await?;
+    let receipt = TurnInputReceipt {
+        accepted: true,
+        input_id: pending.input_id.clone(),
+        ingress: pending.ingress.clone(),
+        state: pending.state,
+        text,
+    };
+    state.trace(
+        "turn_input.enqueued",
+        serde_json::to_value(&receipt).unwrap_or(Value::Null),
+    );
+    state.publish(StreamItem::TurnInput {
+        receipt: receipt.clone(),
+    });
+    Ok(Json(receipt))
+}
+
+async fn reject_if_active_turn_settled(
+    state: &AppState,
+    pending: &lash::PendingTurnInput,
+) -> Result<(), AppError> {
+    let Some(turn_id) = pending.ingress.active_turn_id() else {
+        return Ok(());
+    };
+    if state.active_turns.contains(&pending.session_id, turn_id) {
+        return Ok(());
+    }
+
+    let session = state
+        .core
+        .session(pending.session_id.clone())
+        .open()
+        .await
+        .map_err(AppError::runtime)?;
+    let outcome = session
+        .cancel_pending_turn_input(&pending.input_id)
+        .await
+        .map_err(AppError::runtime)?;
+    match outcome {
+        lash::PendingTurnInputCancelOutcome::Cancelled(_)
+        | lash::PendingTurnInputCancelOutcome::AlreadyCancelled(_) => Err(AppError::conflict(
+            "the running turn settled before the input could be injected",
+        )),
+        lash::PendingTurnInputCancelOutcome::AlreadyClaimed { .. }
+        | lash::PendingTurnInputCancelOutcome::AlreadyCompleted(_) => Ok(()),
+        lash::PendingTurnInputCancelOutcome::NotFound => Err(AppError::internal(format!(
+            "active-turn input `{}` disappeared during settle reconciliation",
+            pending.input_id
+        ))),
+    }
 }
 
 async fn button_trigger(
@@ -344,18 +462,19 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
         settings: state.settings(),
         messages: Vec::new(),
         active_turns: Vec::new(),
+        pending_turn_inputs: Vec::new(),
     }))
 }
 
 async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>, AppError> {
-    let session_id = state.current_session_id();
-    let snapshot = state
+    let work = state
         .process_observer
-        .snapshot_for_session(session_id)
+        .snapshot_all(&lash::process::ProcessListFilter {
+            status: lash::process::ProcessStatusFilter::Any,
+            ..lash::process::ProcessListFilter::default()
+        })
         .await
-        .map_err(AppError::internal)?;
-    let work = snapshot
-        .items
+        .map_err(AppError::internal)?
         .into_iter()
         .map(work_item_from_observed)
         .collect::<Vec<_>>();
@@ -367,6 +486,43 @@ async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>,
         }),
     );
     Ok(Json(work))
+}
+
+async fn cancel_work(
+    AxumPath(process_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<ProcessCancelAccepted>, AppError> {
+    let process = state
+        .process_observer
+        .process(&process_id)
+        .await
+        .ok_or_else(|| AppError::not_found(format!("unknown process `{process_id}`")))?;
+    if process.terminal {
+        return Err(AppError::conflict(format!(
+            "process `{process_id}` is already terminal"
+        )));
+    }
+    let operation_id = format!("workbench-process-cancel-{}", uuid::Uuid::new_v4());
+    restate::submit_process_cancel(
+        &state,
+        restate::WorkbenchProcessCancelWorkflowRequest {
+            operation_id: operation_id.clone(),
+            process_id: process_id.clone(),
+        },
+    )
+    .await?;
+    state.trace(
+        "api.work.cancel_submitted",
+        json!({
+            "operation_id": operation_id,
+            "process_id": process_id,
+        }),
+    );
+    Ok(Json(ProcessCancelAccepted {
+        accepted: true,
+        operation_id,
+        process_id,
+    }))
 }
 
 /// Wait for one durable work item to reach a terminal state, then return its

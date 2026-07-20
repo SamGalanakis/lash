@@ -9,9 +9,65 @@ use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use restate_sdk::prelude::Endpoint;
 use restate_sdk::service::Discoverable;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
+use std::task::{Context, Poll, Waker};
+
+struct PanicsWhenPolledAfterReady {
+    completed: bool,
+}
+
+impl Future for PanicsWhenPolledAfterReady {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(!self.completed, "non-fused future was polled after ready");
+        self.completed = true;
+        Poll::Ready(())
+    }
+}
+
+struct PanicsWhenPolledAfterErrorWake {
+    polled: bool,
+}
+
+impl Future for PanicsWhenPolledAfterErrorWake {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(!self.polled, "error-signalling future was re-polled");
+        self.polled = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+#[test]
+fn restate_context_futures_are_structurally_safe_after_ready() {
+    let mut future = Box::pin(guard_restate_context_future(PanicsWhenPolledAfterReady {
+        completed: false,
+    }));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+
+    assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
+    assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+}
+
+#[test]
+fn restate_context_futures_are_not_repolled_after_sdk_error_wake() {
+    let mut future = Box::pin(guard_restate_context_future(
+        PanicsWhenPolledAfterErrorWake { polled: false },
+    ));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+
+    assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+    assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+}
 
 #[test]
 fn restate_session_cancel_sweep_excludes_turn_control_addresses() {

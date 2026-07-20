@@ -49,6 +49,7 @@ struct StateSnapshot {
     settings: Settings,
     messages: Vec<ChatMessage>,
     active_turns: Vec<lash::TurnAddress>,
+    pending_turn_inputs: Vec<lash::PendingTurnInput>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -64,6 +65,28 @@ struct TurnRequest {
     text: String,
     model: Option<String>,
     model_variant: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TurnInputIngressRequest {
+    ActiveTurn,
+    NextTurn,
+}
+
+#[derive(Debug, Deserialize)]
+struct TurnInputRequest {
+    text: String,
+    ingress: TurnInputIngressRequest,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TurnInputReceipt {
+    accepted: bool,
+    input_id: String,
+    ingress: lash::persistence::TurnInputIngress,
+    state: lash::persistence::TurnInputState,
+    text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +150,7 @@ enum StreamItem {
         gap: Box<RemoteLiveReplayGap>,
     },
     Message { message: ChatMessage },
+    TurnInput { receipt: TurnInputReceipt },
     Error { message: String },
     Done,
 }
@@ -168,6 +192,13 @@ impl ActiveTurns {
         self.persist_snapshot(&active);
     }
 
+    fn contains(&self, session_id: &str, turn_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("active turn lock")
+            .contains(&(session_id.to_string(), turn_id.to_string()))
+    }
+
     fn for_session(&self, session_id: &str) -> Vec<lash::TurnAddress> {
         self.inner
             .lock()
@@ -204,6 +235,13 @@ impl ActiveTurns {
 #[derive(Debug, Serialize)]
 struct CommandAccepted {
     accepted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ProcessCancelAccepted {
+    accepted: bool,
+    operation_id: String,
+    process_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -264,6 +302,9 @@ impl lash::runtime::QueuedWorkRunHandle for WorkbenchQueuedWorkSubmitter {
         let session_id = request
             .session_id
             .unwrap_or_else(|| self.session_ids.current());
+        if !self.active_turns.for_session(&session_id).is_empty() {
+            return Ok(());
+        }
         if !self.has_queued_work(&session_id).await? {
             return Ok(());
         }
@@ -304,7 +345,18 @@ impl WorkbenchQueuedWorkSubmitter {
             .list_queued_work(session_id)
             .await
             .map_err(|err| PluginError::Session(err.to_string()))?;
-        Ok(!queued.is_empty())
+        let next_turn_inputs = store
+            .list_pending_turn_inputs(session_id)
+            .await
+            .map_err(|err| PluginError::Session(err.to_string()))?
+            .into_iter()
+            .any(|input| {
+                matches!(
+                    input.ingress,
+                    lash::persistence::TurnInputIngress::NextTurn
+                )
+            });
+        Ok(!queued.is_empty() || next_turn_inputs)
     }
 }
 

@@ -1,7 +1,17 @@
 #[cfg(test)]
 mod process_work_tests {
-    use super::tests::{explicit_durable_test_facets, run_async_test_on_stack_budget};
+    use super::tests::{
+        explicit_durable_test_facets, run_async_test_on_stack_budget,
+        spawn_restate_ingress_capture,
+    };
     use super::*;
+
+    #[test]
+    fn workbench_work_rail_exposes_process_cancellation() {
+        assert!(ui::INDEX_HTML.contains("className = \"work-cancel\""));
+        assert!(ui::INDEX_HTML.contains("/cancel\""));
+        assert!(ui::INDEX_HTML.contains("Request cooperative process cancellation"));
+    }
 
     #[test]
     fn await_work_route_returns_terminal_outcome_and_reconciled_events() {
@@ -157,6 +167,137 @@ mod process_work_tests {
         // An unknown process id errors instead of hanging.
         let missing = await_work(AxumPath("no-such-process".to_string()), State(state)).await;
         assert!(missing.is_err(), "unknown process id must error");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn work_api_keeps_orphaned_process_visible_and_routes_cancel_globally() {
+        run_async_test_on_stack_budget("workbench-orphaned-process-api-test", || {
+            work_api_keeps_orphaned_process_visible_and_routes_cancel_globally_inner()
+        });
+    }
+
+    async fn work_api_keeps_orphaned_process_visible_and_routes_cancel_globally_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-orphaned-process-api-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> = Arc::new(
+            lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("lash-sessions")),
+        );
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete_error("orphaned process API test should not call the provider")
+            .build()
+            .into_handle();
+        let model = lash::ModelSpec::from_token_limits(
+            "test-model",
+            Default::default(),
+            4096,
+            None,
+        )
+        .expect("model spec");
+        let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
+        let core = explicit_durable_test_facets(&data_dir)
+            .provider(provider)
+            .model(model)
+            .store_factory(core_store_factory)
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let process_observer = core
+            .processes()
+            .observer()
+            .expect("process observer configured");
+        let state = AppState {
+            core,
+            process_observer,
+            process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
+            session_ids: WorkbenchSessionIds::fresh(),
+            messages: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: Default::default(),
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx: broadcast::channel(16).0,
+            queued_work_driver: inert_queued_work_driver(),
+            restate_ingress_url,
+            restate_admin_url: "http://127.0.0.1:9070".to_string(),
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            mail_world: mail::MailWorld::new(),
+            active_turns: ActiveTurns::default(),
+        };
+        let session_id = state.current_session_id();
+        let process_id = "process-survives-session-delete";
+        process_registry
+            .register_process(lash::process::ProcessRegistration::new(
+                process_id,
+                lash::process::ProcessInput::External {
+                    metadata: json!({ "test": true }),
+                },
+                lash::process::RecoveryDisposition::ExternallyOwned,
+                lash::process::ProcessProvenance::session(lash::process::SessionScope::new(
+                    &session_id,
+                )),
+            ))
+            .await
+            .expect("register process");
+        process_registry
+            .grant_handle(
+                &lash::process::SessionScope::new(&session_id),
+                process_id,
+                lash::process::ProcessHandleDescriptor::new(
+                    Some("test"),
+                    Some("Session-independent process"),
+                ),
+            )
+            .await
+            .expect("grant process handle");
+        let deletion = process_registry
+            .delete_session_process_state(&session_id)
+            .await
+            .expect("delete session process edges");
+        assert_eq!(deletion.orphaned_process_ids, vec![process_id]);
+
+        let Json(work) = list_work(State(state.clone()))
+            .await
+            .expect("list runtime-wide work");
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].process.process_id, process_id);
+
+        let Json(receipt) = cancel_work(
+            AxumPath(process_id.to_string()),
+            State(state.clone()),
+        )
+        .await
+        .expect("submit process cancellation");
+        assert!(receipt.accepted);
+        assert_eq!(receipt.process_id, process_id);
+        let request = tokio::time::timeout(Duration::from_secs(2), restate_requests.recv())
+            .await
+            .expect("Restate request timeout")
+            .expect("Restate request");
+        assert!(
+            request
+                .get("path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| path.starts_with("WorkbenchProcessCancelWorkflow/")),
+            "unexpected Restate request: {request:#}"
+        );
+        assert_eq!(
+            request.pointer("/body/process_id").and_then(Value::as_str),
+            Some(process_id)
+        );
         let _ = std::fs::remove_dir_all(data_dir);
     }
 }

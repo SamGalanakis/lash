@@ -13,7 +13,9 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
+import tomllib
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,6 +25,16 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 DOCS_JS = DOCS / "docs.js"
 PAGEFIND_FRAGMENTS = DOCS / "pagefind" / "fragment"
+RELEASED_VERSION_FILE = DOCS / "released-version.txt"
+DOC_VERSION_FILES = [
+    ROOT / "README.md",
+    DOCS / "index.html",
+    DOCS / "quickstart.html",
+    DOCS / "tracing.html",
+]
+ALPHA_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+-alpha\.\d+$")
+EXACT_ALPHA_PIN_RE = re.compile(r'=([0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+)')
+ALPHA_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)-alpha\.(\d+)$")
 
 MOVED_STUBS = {
     "architecture.html",
@@ -332,6 +344,100 @@ def check_bold_cross_refs(errors: list[str], pages: dict[Path, PageParser]) -> N
                 )
 
 
+def check_release_version_pins(errors: list[str]) -> None:
+    """Gate install snippets against the latest known release.
+
+    A checked-in version is the offline authority. In a full clone its matching
+    tag must exist and no newer release tag may be present. When that tag is not
+    available (for example in an offline shallow checkout), the checked-in value
+    remains authoritative rather than making docs lint depend on the network.
+    """
+    try:
+        expected = RELEASED_VERSION_FILE.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        errors.append(f"{RELEASED_VERSION_FILE.relative_to(ROOT)}: cannot read: {error}")
+        return
+    if not ALPHA_VERSION_RE.fullmatch(expected):
+        errors.append(
+            f"{RELEASED_VERSION_FILE.relative_to(ROOT)}: expected an alpha release version, got {expected!r}"
+        )
+        return
+
+    for path in DOC_VERSION_FILES:
+        pins = EXACT_ALPHA_PIN_RE.findall(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(ROOT).as_posix()
+        if not pins:
+            errors.append(f"{rel}: no exact Lash alpha release pin found")
+            continue
+        for pin in sorted(set(pins)):
+            if pin != expected:
+                errors.append(
+                    f"{rel}: release pin {pin} does not match {RELEASED_VERSION_FILE.relative_to(ROOT)} ({expected})"
+                )
+
+    try:
+        result = subprocess.run(
+            ["git", "tag", "--list", "v*"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return
+    if result.returncode != 0:
+        return
+
+    tagged: list[tuple[tuple[int, int, int, int], str]] = []
+    for tag in result.stdout.splitlines():
+        match = ALPHA_TAG_RE.fullmatch(tag.strip())
+        if match:
+            tagged.append((tuple(int(part) for part in match.groups()), tag[1:]))
+    if not tagged:
+        return
+    latest_key, latest = max(tagged)
+    expected_match = ALPHA_TAG_RE.fullmatch(f"v{expected}")
+    assert expected_match is not None
+    expected_key = tuple(int(part) for part in expected_match.groups())
+    if latest_key > expected_key or (
+        expected in {version for _, version in tagged} and latest != expected
+    ):
+        errors.append(
+            f"{RELEASED_VERSION_FILE.relative_to(ROOT)}: {expected} is not the latest release tag ({latest})"
+        )
+
+
+def check_quickstart_contract(errors: list[str]) -> None:
+    """Keep the quickstart aligned with the compiled in-repo facade."""
+    quickstart = (DOCS / "quickstart.html").read_text(encoding="utf-8")
+    required_claims = [
+        "minimal embedded-agent program",
+        "app-facing <code>lash-runtime</code> facade",
+        "Rust library import is still <code>use lash::...</code>",
+        "quickstart intentionally leaves most host features out",
+    ]
+    for claim in required_claims:
+        if claim not in quickstart:
+            errors.append(f"docs/quickstart.html: missing scope or crate-name claim {claim!r}")
+    if "lash-cli" in quickstart.lower():
+        errors.append("docs/quickstart.html: quickstart must stay embedded and lash-cli-free")
+
+    facade = tomllib.loads((ROOT / "crates" / "lash" / "Cargo.toml").read_text())
+    if facade.get("package", {}).get("name") != "lash-runtime":
+        errors.append("crates/lash/Cargo.toml: facade package must be named lash-runtime")
+    if facade.get("lib", {}).get("name") != "lash":
+        errors.append("crates/lash/Cargo.toml: lash-runtime library must be imported as lash")
+
+    snippets = tomllib.loads(
+        (ROOT / "examples" / "docs-snippets" / "Cargo.toml").read_text()
+    )
+    if "lash" not in snippets.get("dependencies", {}):
+        errors.append("examples/docs-snippets/Cargo.toml: compiled examples must depend on lash")
+    source = (SNIPPETS_SRC / "quickstart.rs").read_text(encoding="utf-8")
+    if "use lash::{" not in source:
+        errors.append("examples/docs-snippets/src/quickstart.rs: expected a lash library import")
+
+
 SNIPPETS_SRC = ROOT / "examples" / "docs-snippets" / "src"
 REGION_START = re.compile(r"^(\s*)// docs:start:([\w-]+)\s*$")
 PRE_BLOCK = re.compile(r"<pre([^>]*)><code>(.*?)</code></pre>", re.S)
@@ -478,6 +584,8 @@ def main() -> int:
     check_asset_versions(errors, pages)
     check_pagers(errors, canonical, pages)
     check_bold_cross_refs(errors, pages)
+    check_release_version_pins(errors)
+    check_quickstart_contract(errors)
     check_code_snippets(errors, fix)
     if errors:
         for err in errors:

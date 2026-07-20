@@ -199,6 +199,7 @@ mod tests {
         );
     }
 
+    include!("tests/session_resume.rs");
     #[test]
     fn assistant_display_keeps_streamed_prose_with_terminal_value() {
         assert_eq!(
@@ -238,6 +239,16 @@ mod tests {
         assert!(ui::INDEX_HTML.contains("id=\"accountAddForm\""));
         assert!(ui::INDEX_HTML.contains("async function loadAccounts"));
         assert!(ui::INDEX_HTML.contains("async function deleteAccount"));
+    }
+
+    #[test]
+    fn workbench_ui_distinguishes_running_turn_ingress_actions() {
+        assert!(ui::INDEX_HTML.contains("id=\"injectNow\""));
+        assert!(ui::INDEX_HTML.contains("id=\"queueNext\""));
+        assert!(ui::INDEX_HTML.contains("injected now"));
+        assert!(ui::INDEX_HTML.contains("queued next"));
+        assert!(ui::INDEX_HTML.contains("/api/turn/input"));
+        assert!(ui::INDEX_HTML.contains("item.type === \"turn_input\""));
     }
 
     #[test]
@@ -514,6 +525,7 @@ finish "observed through live replay"
                 }
                 StreamItem::ReplayGap { .. }
                 | StreamItem::Message { .. }
+                | StreamItem::TurnInput { .. }
                 | StreamItem::Error { .. }
                 | StreamItem::Done => {}
             }
@@ -1384,7 +1396,7 @@ finish initial
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
-    async fn spawn_restate_ingress_capture() -> (String, mpsc::UnboundedReceiver<Value>) {
+    pub(super) async fn spawn_restate_ingress_capture() -> (String, mpsc::UnboundedReceiver<Value>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

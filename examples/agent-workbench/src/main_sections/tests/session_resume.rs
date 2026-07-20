@@ -1,0 +1,249 @@
+    #[test]
+    fn committed_transcript_and_provider_history_survive_web_process_reconstruction() {
+        run_async_test_on_stack_budget("workbench-session-resume-test", || {
+            committed_transcript_and_provider_history_survive_web_process_reconstruction_inner()
+        });
+    }
+
+    async fn committed_transcript_and_provider_history_survive_web_process_reconstruction_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-session-resume-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create session resume data dir");
+        let session_id_path = data_dir.join("session-id");
+        let first_session_ids = WorkbenchSessionIds::persistent(session_id_path.clone())
+            .expect("create persistent session id");
+        let session_id = first_session_ids.current();
+        let first_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("open first process registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let first_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> = Arc::new(
+            lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("lash-sessions")),
+        );
+        let first_response = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_response_for_provider = Arc::clone(&first_response);
+        let first_provider = lash::testing::TestProvider::builder()
+            .kind("workbench-session-resume-first")
+            .complete(move |_| {
+                let first_response = Arc::clone(&first_response_for_provider);
+                async move {
+                    let index = first_response.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(match index {
+                        0 => text_response(
+                            "<lashlang>\nfinish \"resume answer one\"\n</lashlang>",
+                        ),
+                        1 => text_response(
+                            "<lashlang>\nfinish \"resume answer two\"\n</lashlang>",
+                        ),
+                        other => panic!("unexpected first-process provider call {other}"),
+                    })
+                }
+            })
+            .build()
+            .into_handle();
+        let model = lash::ModelSpec::from_token_limits(
+            "test-model",
+            Default::default(),
+            4096,
+            None,
+        )
+        .expect("model spec");
+        let first_core = explicit_durable_test_facets(&data_dir)
+            .provider(first_provider)
+            .model(model.clone())
+            .store_factory(Arc::clone(&first_store_factory))
+            .process_registry(Arc::clone(&first_registry))
+            .disable_queued_work_driver()
+            .build()
+            .expect("build first workbench core");
+        let first_session = first_core
+            .session(session_id.clone())
+            .open()
+            .await
+            .expect("open first-process session");
+        for (turn_id, text) in [
+            ("resume-turn-one", "resume question one"),
+            ("resume-turn-two", "resume question two"),
+        ] {
+            let output = first_session
+                .turn(lash::TurnInput::text(text))
+                .turn_id(turn_id)
+                .require_finish()
+                .expect("require finish")
+                .run()
+                .await
+                .expect("commit pre-restart turn");
+            crate::restate::commit_assistant_transcript(
+                &first_session,
+                turn_id,
+                output
+                    .final_value()
+                    .and_then(serde_json::Value::as_str)
+                    .expect("string terminal value")
+                    .to_string(),
+            )
+            .await
+            .expect("commit assistant transcript");
+        }
+        crate::restate::commit_assistant_transcript(
+            &first_session,
+            "resume-turn-one",
+            "resume answer one".to_string(),
+        )
+        .await
+        .expect("replay first assistant transcript after a later turn");
+        assert_eq!(
+            first_session.read_view().messages().len(),
+            4,
+            "turn replay must not append a duplicate assistant message"
+        );
+        assert_eq!(first_session.read_view().turn_index(), 2);
+        first_session.close().await.expect("close first session");
+        drop(first_core);
+        drop(first_registry);
+        drop(first_session_ids);
+
+        let resumed_requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let resumed_requests_for_provider = Arc::clone(&resumed_requests);
+        let resumed_provider = lash::testing::TestProvider::builder()
+            .kind("workbench-session-resume-first")
+            .complete(move |request| {
+                let resumed_requests = Arc::clone(&resumed_requests_for_provider);
+                async move {
+                    resumed_requests
+                        .lock()
+                        .expect("resumed provider request lock")
+                        .push(serde_json::to_string(&request).expect("serialize resumed request"));
+                    Ok(text_response(
+                        "<lashlang>\nfinish \"resume answer three\"\n</lashlang>",
+                    ))
+                }
+            })
+            .build()
+            .into_handle();
+        let resumed_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
+                .expect("reopen process registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let resumed_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> = Arc::new(
+            lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("lash-sessions")),
+        );
+        let resumed_core = explicit_durable_test_facets(&data_dir)
+            .provider(resumed_provider)
+            .model(model)
+            .store_factory(Arc::clone(&resumed_store_factory))
+            .process_registry(Arc::clone(&resumed_registry))
+            .disable_queued_work_driver()
+            .build()
+            .expect("build reconstructed workbench core");
+        let resumed_session_ids = WorkbenchSessionIds::persistent(session_id_path)
+            .expect("reopen persistent session id");
+        assert_eq!(resumed_session_ids.current(), session_id);
+        let process_observer = resumed_core
+            .processes()
+            .observer()
+            .expect("process observer configured");
+        let state = AppState {
+            core: resumed_core,
+            process_observer,
+            process_work_driver: inert_process_work_driver(Arc::clone(&resumed_registry)),
+            session_ids: resumed_session_ids,
+            messages: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: Default::default(),
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx: broadcast::channel(16).0,
+            queued_work_driver: inert_queued_work_driver(),
+            restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_admin_url: "http://127.0.0.1:9070".to_string(),
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            mail_world: mail::MailWorld::new(),
+            active_turns: ActiveTurns::default(),
+        };
+
+        assert!(
+            state.messages_snapshot().is_empty(),
+            "the reconstructed web process must begin with no local transcript cache"
+        );
+        let Json(before) = app_state(State(state.clone()))
+            .await
+            .expect("project committed transcript after restart");
+        let before_rows = before
+            .messages
+            .iter()
+            .map(|message| (message.role.as_str(), message.text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            before_rows,
+            vec![
+                ("user", "resume question one"),
+                ("assistant", "resume answer one"),
+                ("user", "resume question two"),
+                ("assistant", "resume answer two"),
+            ]
+        );
+
+        let resumed_session = state
+            .core
+            .session(session_id.clone())
+            .open()
+            .await
+            .expect("open resumed session");
+        let resumed_output = resumed_session
+            .turn(lash::TurnInput::text("resume question three"))
+            .turn_id("resume-turn-three")
+            .require_finish()
+            .expect("require resumed finish")
+            .run()
+            .await
+            .expect("commit resumed turn");
+        crate::restate::commit_assistant_transcript(
+            &resumed_session,
+            "resume-turn-three",
+            resumed_output
+                .final_value()
+                .and_then(serde_json::Value::as_str)
+                .expect("string resumed terminal value")
+                .to_string(),
+        )
+        .await
+        .expect("commit resumed assistant transcript");
+        resumed_session.close().await.expect("close resumed session");
+
+        {
+            let requests = resumed_requests
+                .lock()
+                .expect("resumed provider request lock");
+            assert_eq!(requests.len(), 1);
+            for marker in [
+                "resume question one",
+                "resume answer one",
+                "resume question two",
+                "resume answer two",
+                "resume question three",
+            ] {
+                assert!(
+                    requests[0].contains(marker),
+                    "resumed provider request omitted committed history marker {marker:?}: {}",
+                    requests[0]
+                );
+            }
+        }
+
+        let Json(after) = app_state(State(state.clone()))
+            .await
+            .expect("project transcript after resumed turn");
+        assert_eq!(after.messages.len(), 6);
+        assert_eq!(after.messages[4].text, "resume question three");
+        assert_eq!(after.messages[5].text, "resume answer three");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }

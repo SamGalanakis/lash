@@ -382,6 +382,7 @@ pub(crate) fn plugin_message_from_turn_input(input: &TurnInput) -> Option<Plugin
         return None;
     }
     Some(PluginMessage {
+        id: None,
         role: crate::MessageRole::User,
         content: text.join("\n"),
         origin: None,
@@ -446,6 +447,7 @@ pub(crate) async fn plugin_message_from_turn_input_with_attachments(
         return Ok(None);
     }
     Ok(Some(PluginMessage {
+        id: None,
         role: crate::MessageRole::User,
         content: content.join("\n"),
         origin: None,

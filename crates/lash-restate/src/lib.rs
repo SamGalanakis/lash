@@ -69,6 +69,9 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
+use std::thread::ThreadId;
 use std::time::Duration;
 
 use lash_core::{
@@ -101,6 +104,84 @@ use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
 pub use restate_sdk;
+
+/// Fuse a Restate context future across both of its terminal poll shapes.
+///
+/// `DurableFutureImpl` returns `Ready` on success, but after an internal error
+/// it marks the handler failed, synchronously wakes the task, and returns
+/// `Pending`. Its inner `Map` is already complete in that second shape and
+/// panics if select teardown polls it again, so an ordinary `FutureExt::fuse`
+/// cannot guard it. Stop polling after either `Ready` or that synchronous
+/// error wake; the SDK's outer handler-state future consumes the recorded error.
+struct RestateContextFuture<F> {
+    future: Option<Pin<Box<F>>>,
+}
+
+impl<F> Future for RestateContextFuture<F>
+where
+    F: Future,
+{
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let Some(future) = self.future.as_mut() else {
+            return Poll::Pending;
+        };
+        let tracker = Arc::new(SynchronousWakeTracker {
+            parent: cx.waker().clone(),
+            polling_thread: std::thread::current().id(),
+            polling: AtomicBool::new(true),
+            woke_during_poll: AtomicBool::new(false),
+        });
+        let tracked_waker = Waker::from(Arc::clone(&tracker));
+        let mut tracked_context = Context::from_waker(&tracked_waker);
+        let result = future.as_mut().poll(&mut tracked_context);
+        tracker.polling.store(false, Ordering::Release);
+
+        if result.is_ready() || tracker.woke_during_poll.load(Ordering::Acquire) {
+            self.future = None;
+        }
+        result
+    }
+}
+
+struct SynchronousWakeTracker {
+    parent: Waker,
+    polling_thread: ThreadId,
+    polling: AtomicBool,
+    woke_during_poll: AtomicBool,
+}
+
+impl Wake for SynchronousWakeTracker {
+    fn wake(self: Arc<Self>) {
+        self.record_wake();
+        self.parent.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.record_wake();
+        self.parent.wake_by_ref();
+    }
+}
+
+impl SynchronousWakeTracker {
+    fn record_wake(&self) {
+        if self.polling.load(Ordering::Acquire)
+            && std::thread::current().id() == self.polling_thread
+        {
+            self.woke_during_poll.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn guard_restate_context_future<F>(future: F) -> RestateContextFuture<F>
+where
+    F: Future,
+{
+    RestateContextFuture {
+        future: Some(Box::pin(future)),
+    }
+}
 
 fn restate_await_event_key(
     scope: &ExecutionScope,
@@ -2697,8 +2778,10 @@ macro_rules! impl_restate_controller_context {
                                 ),
                                 (),
                             );
+                        let observe = guard_restate_context_future(observe.call());
+                        tokio::pin!(observe);
                         tokio::select! {
-                            result = observe.call() => {
+                            result = &mut observe => {
                                 let Json(resolution) = result?;
                                 Ok(resolution)
                             }
@@ -3042,8 +3125,10 @@ where
                 };
                 let duration = Duration::from_millis(*duration_ms);
                 let cancellation = local_executor.into_sleep_cancellation();
+                let sleep = guard_restate_context_future(self.context.sleep_send(duration));
+                tokio::pin!(sleep);
                 tokio::select! {
-                    result = self.context.sleep_send(duration) => {
+                    result = &mut sleep => {
                         if let Err(err) = result {
                             tracing_sleep_error(&envelope.invocation, &err);
                             return Err(RuntimeEffectControllerError::new(

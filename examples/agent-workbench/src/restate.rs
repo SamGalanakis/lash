@@ -64,6 +64,12 @@ pub(crate) struct WorkbenchSessionDeleteWorkflowRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct WorkbenchProcessCancelWorkflowRequest {
+    pub operation_id: String,
+    pub process_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct WorkbenchMailReceivedWorkflowRequest {
     pub operation_id: String,
     pub session_id: String,
@@ -299,6 +305,35 @@ impl WorkbenchSessionDeleteWorkflow for WorkbenchSessionDeleteWorkflowImpl {
     }
 }
 
+#[restate_sdk::workflow]
+pub(crate) trait WorkbenchProcessCancelWorkflow {
+    async fn run(request: Json<WorkbenchProcessCancelWorkflowRequest>) -> HandlerResult<Json<()>>;
+}
+
+pub(crate) struct WorkbenchProcessCancelWorkflowImpl {
+    state: AppState,
+}
+
+impl WorkbenchProcessCancelWorkflowImpl {
+    pub(crate) fn new(state: AppState) -> Self {
+        Self { state }
+    }
+}
+
+impl WorkbenchProcessCancelWorkflow for WorkbenchProcessCancelWorkflowImpl {
+    async fn run(
+        &self,
+        ctx: WorkflowContext<'_>,
+        Json(request): Json<WorkbenchProcessCancelWorkflowRequest>,
+    ) -> HandlerResult<Json<()>> {
+        let controller = lash_restate::RestateRuntimeEffectController::new(ctx);
+        run_process_cancel(self.state.clone(), request, &controller)
+            .await
+            .map_err(terminal_handler_error)?;
+        Ok(Json(()))
+    }
+}
+
 #[restate_sdk::object]
 trait WorkbenchCronJob {
     async fn upsert(request: Json<WorkbenchCronRequest>) -> HandlerResult<Json<WorkbenchCronInfo>>;
@@ -449,6 +484,7 @@ pub(crate) fn spawn_restate_endpoint(
         .bind(WorkbenchButtonTriggerWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchMailReceivedWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchSessionDeleteWorkflowImpl::new(state.clone()).serve())
+        .bind(WorkbenchProcessCancelWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchCronJobImpl::new(state).serve())
         .bind(process_deployment.workflow(process_worker).serve())
         .bind(LashDurableWaitWorkflowImpl.serve())
@@ -540,6 +576,20 @@ pub(crate) async fn submit_session_delete(
     .await
 }
 
+pub(crate) async fn submit_process_cancel(
+    state: &AppState,
+    request: WorkbenchProcessCancelWorkflowRequest,
+) -> Result<lash_restate::RestateInvocationId, AppError> {
+    submit_restate_workflow_json(
+        &state.restate_http,
+        &state.restate_ingress_url,
+        "WorkbenchProcessCancelWorkflow",
+        &request.operation_id,
+        &request,
+    )
+    .await
+}
+
 /// Cancel every cron job belonging to `session_id`, derived from the durable
 /// trigger registrations (the same source `sync_cron_jobs_with_context`
 /// schedules from), plus anything this process armed. The in-memory key set
@@ -625,7 +675,15 @@ async fn run_user_turn(
         .stream_to(&ui_events)
         .await
         .map_err(AppError::runtime)?;
-    record_turn_output(&state, output, turn_state, "restate_user_turn.completed");
+    record_turn_output(
+        &state,
+        &session,
+        &request.turn_id,
+        output,
+        turn_state,
+        "restate_user_turn.completed",
+    )
+    .await?;
     Ok(())
 }
 
@@ -645,6 +703,7 @@ async fn run_user_turn_terminalized(
             .catch_unwind()
             .await,
     )
+    .await
 }
 
 async fn run_button_trigger(
@@ -751,7 +810,7 @@ async fn run_session_delete(
             &request.session_id,
         ))
         .map_err(AppError::internal)?;
-    state
+    let report = state
         .core
         .delete_session(&request.session_id, scoped_effect_controller)
         .await
@@ -760,6 +819,34 @@ async fn run_session_delete(
         "reset.restate.session_deleted",
         json!({
             "session_id": request.session_id,
+            "report": report,
+        }),
+    );
+    Ok(())
+}
+
+async fn run_process_cancel(
+    state: AppState,
+    request: WorkbenchProcessCancelWorkflowRequest,
+    controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+) -> Result<(), AppError> {
+    let scoped_effect_controller = controller
+        .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
+            "workbench-process-cancel:{}",
+            request.process_id
+        )))
+        .map_err(AppError::internal)?;
+    let summary = state
+        .core
+        .processes()
+        .cancel(&request.process_id, scoped_effect_controller)
+        .await
+        .map_err(AppError::internal)?;
+    state.trace(
+        "process.restate.cancel_requested",
+        json!({
+            "process_id": request.process_id,
+            "summary": summary,
         }),
     );
     Ok(())
@@ -820,7 +907,15 @@ async fn run_queued_turn(
         state.publish(crate::StreamItem::Done);
         return Ok(());
     };
-    record_turn_output(&state, output, turn_state, "restate_queued_turn.completed");
+    record_turn_output(
+        &state,
+        &session,
+        &request.turn_id,
+        output,
+        turn_state,
+        "restate_queued_turn.completed",
+    )
+    .await?;
     Ok(())
 }
 
@@ -840,9 +935,10 @@ async fn run_queued_turn_terminalized(
             .catch_unwind()
             .await,
     )
+    .await
 }
 
-fn terminalize_turn_execution(
+async fn terminalize_turn_execution(
     state: &AppState,
     session_id: &str,
     turn_id: &str,
@@ -851,7 +947,9 @@ fn terminalize_turn_execution(
 ) -> HandlerResult<()> {
     match result {
         Ok(Ok(())) => {
-            state.active_turns.remove(session_id, turn_id);
+            settle_workbench_turn(state, session_id, turn_id)
+                .await
+                .map_err(HandlerError::from)?;
             Ok(())
         }
         Ok(Err(err)) if err.retryable => {
@@ -868,18 +966,60 @@ fn terminalize_turn_execution(
         }
         Ok(Err(err)) => {
             let message = err.message.clone();
-            state.active_turns.remove(session_id, turn_id);
+            settle_workbench_turn(state, session_id, turn_id)
+                .await
+                .map_err(HandlerError::from)?;
             record_turn_failure(state, session_id, turn_id, trace_name, &message);
             Err(terminal_handler_error(err))
         }
         Err(payload) => {
             let message = panic_payload_message(payload);
             let message = format!("Restate-backed turn panicked: {message}");
-            state.active_turns.remove(session_id, turn_id);
+            settle_workbench_turn(state, session_id, turn_id)
+                .await
+                .map_err(HandlerError::from)?;
             record_turn_failure(state, session_id, turn_id, trace_name, &message);
             Err(TerminalError::new(message).into())
         }
     }
+}
+
+pub(crate) async fn settle_workbench_turn(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<(), AppError> {
+    state.active_turns.remove(session_id, turn_id);
+    let session = state
+        .core
+        .session(session_id.to_string())
+        .open()
+        .await
+        .map_err(AppError::runtime)?;
+    let targets = session
+        .pending_turn_inputs()
+        .await
+        .map_err(AppError::runtime)?
+        .into_iter()
+        .filter(|input| input.ingress.active_turn_id() == Some(turn_id))
+        .map(|input| lash::PendingTurnInputCancelTarget::input_id(input.input_id))
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let cancellations = session
+        .cancel_pending_turn_inputs(targets)
+        .await
+        .map_err(AppError::runtime)?;
+    state.trace(
+        "turn_input.settle_cancelled",
+        json!({
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "cancellations": cancellations,
+        }),
+    );
+    Ok(())
 }
 
 fn workbench_turn_session_execution_owner(
@@ -932,12 +1072,14 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn record_turn_output(
+async fn record_turn_output(
     state: &AppState,
+    session: &lash::LashSession,
+    turn_id: &str,
     output: lash::TurnResult,
     turn_state: Arc<Mutex<TurnStreamState>>,
     trace_name: &str,
-) {
+) -> Result<(), AppError> {
     let streamed_prose = turn_state
         .lock()
         .expect("turn state lock")
@@ -964,9 +1106,39 @@ fn record_turn_output(
     ) {
         state.push_message("event", "turn cancelled");
     } else {
+        commit_assistant_transcript(session, turn_id, assistant_text.clone()).await?;
         state.push_message("assistant", assistant_text);
     }
     state.publish(crate::StreamItem::Done);
+    Ok(())
+}
+
+pub(crate) async fn commit_assistant_transcript(
+    session: &lash::LashSession,
+    turn_id: &str,
+    assistant_text: String,
+) -> Result<(), AppError> {
+    let message_id = format!("workbench-assistant:{turn_id}");
+    let already_committed = session
+        .read_view()
+        .messages()
+        .iter()
+        .any(|message| message.id == message_id);
+    if already_committed {
+        return Ok(());
+    }
+    session
+        .admin()
+        .state()
+        .append_messages(vec![
+            lash::plugins::PluginMessage::text(
+                lash::messages::MessageRole::Assistant,
+                assistant_text,
+            )
+            .with_id(message_id),
+        ])
+        .await
+        .map_err(AppError::runtime)
 }
 
 fn record_turn_failure(

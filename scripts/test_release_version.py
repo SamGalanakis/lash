@@ -79,6 +79,7 @@ class ReleaseVersionTest(unittest.TestCase):
                 root / "docs/tracing.html",
             ]:
                 write(doc_path, "\n")
+            write(root / "docs/released-version.txt", "0.1.0-alpha.1\n")
 
             subprocess.run(
                 ["cargo", "metadata", "--format-version", "1"],
@@ -91,6 +92,7 @@ class ReleaseVersionTest(unittest.TestCase):
             original_cargo_toml = release_version.CARGO_TOML
             original_cargo_lock = release_version.CARGO_LOCK
             original_doc_version_files = release_version.DOC_VERSION_FILES
+            original_released_version_file = release_version.RELEASED_VERSION_FILE
             try:
                 release_version.ROOT = root
                 release_version.CARGO_TOML = root / "Cargo.toml"
@@ -101,12 +103,14 @@ class ReleaseVersionTest(unittest.TestCase):
                     root / "docs/quickstart.html",
                     root / "docs/tracing.html",
                 ]
+                release_version.RELEASED_VERSION_FILE = root / "docs/released-version.txt"
                 release_version.apply_version_text("0.1.0-alpha.2")
             finally:
                 release_version.ROOT = original_root
                 release_version.CARGO_TOML = original_cargo_toml
                 release_version.CARGO_LOCK = original_cargo_lock
                 release_version.DOC_VERSION_FILES = original_doc_version_files
+                release_version.RELEASED_VERSION_FILE = original_released_version_file
 
             subprocess.run(
                 ["cargo", "metadata", "--format-version", "1", "--locked"],
@@ -119,6 +123,10 @@ class ReleaseVersionTest(unittest.TestCase):
             self.assertIn('name = "public-crate"\nversion = "0.1.0-alpha.2"', lockfile)
             self.assertIn('name = "private-crate"\nversion = "0.0.0"', lockfile)
             self.assertNotIn('name = "private-crate"\nversion = "0.1.0-alpha.2"', lockfile)
+            self.assertEqual(
+                (root / "docs/released-version.txt").read_text(),
+                "0.1.0-alpha.2\n",
+            )
 
 
 if __name__ == "__main__":

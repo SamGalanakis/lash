@@ -25,6 +25,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     fn messages_snapshot(&self) -> Vec<ChatMessage> {
         self.messages.lock().expect("messages lock").clone()
     }
@@ -457,6 +458,14 @@ impl AppError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
             retryable: false,
         }
