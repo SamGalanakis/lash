@@ -81,6 +81,14 @@ def is_runtime_report(payload: dict[str, Any]) -> bool:
     )
 
 
+def is_runtime_stack_report(payload: dict[str, Any]) -> bool:
+    return (
+        isinstance(payload.get("first_success_stack_bytes"), dict)
+        and isinstance(payload.get("samples"), list)
+        and isinstance(payload.get("stack_budgets"), dict)
+    )
+
+
 def is_runtime_guard_report(payload: dict[str, Any]) -> bool:
     return (
         "normal_runtime" in payload
@@ -120,6 +128,24 @@ def summarize_runtime(report: dict[str, Any]) -> str:
     if stack_text:
         lines.append(stack_text.strip())
     lines.append("")
+
+    timing_guards = [
+        result
+        for result in report.get("budget_results", [])
+        if str(result.get("metric", "")).startswith("phase:")
+        and str(result.get("metric", "")).endswith(":duration_ms")
+    ]
+    if timing_guards:
+        lines.append("phase timing guards (median across runs):")
+        for result in timing_guards:
+            status = "pass" if result.get("passed") else "FAIL"
+            lines.append(
+                f"  {result.get('scenario', '?'):28s} "
+                f"{result.get('metric', '?')[6:-12]:44s} "
+                f"actual={fmt_ms(result.get('actual')):>9s}  "
+                f"budget={fmt_ms(result.get('budget')):>9s}  {status}"
+            )
+        lines.append("")
 
     for s in report.get("summary", []):
         scenario = s["scenario"]
@@ -248,6 +274,33 @@ def summarize_runtime(report: dict[str, Any]) -> str:
                 lines.append("")
 
         lines.append("")
+    return "\n".join(lines)
+
+
+def summarize_runtime_stack(report: dict[str, Any]) -> str:
+    lines = ["# runtime stack envelope", ""]
+    first_success = report.get("first_success_stack_bytes", {})
+    budgets = report.get("stack_budgets", {})
+    budget_results = report.get("budget_results", {})
+    for scenario in report.get("scenarios", sorted(first_success)):
+        measured = first_success.get(scenario)
+        budget = budgets.get(scenario)
+        passed = budget_results.get(scenario)
+        status = "pass" if passed is True else "FAIL" if passed is False else "not checked"
+        measured_text = fmt_bytes(measured) if isinstance(measured, int | float) else "n/a"
+        budget_text = fmt_bytes(budget) if isinstance(budget, int | float) else "n/a"
+        lines.append(
+            f"  {scenario:28s} minimum_passing={measured_text:>9s}  "
+            f"budget={budget_text:>9s}  {status}"
+        )
+    failures = sum(1 for sample in report.get("samples", []) if sample.get("status") != "ok")
+    unaccounted = sum(
+        1
+        for sample in report.get("samples", [])
+        if sample.get("status") == "ok" and not sample.get("stack_accounted", False)
+    )
+    lines.append("")
+    lines.append(f"failed_or_timeout_samples={failures}  unaccounted_stack_samples={unaccounted}")
     return "\n".join(lines)
 
 
@@ -553,6 +606,30 @@ def summarize_lashlang(report: dict[str, Any]) -> str:
     if stack_text:
         lines.append(stack_text.strip())
     lines.append("")
+
+    budget_results = report.get("budget_results", [])
+    if budget_results:
+        lines.append("## guard maxima")
+        for metric in (
+            "allocated_bytes_per_iter",
+            "allocations_per_iter",
+            "instructions_per_iter",
+        ):
+            matching = [
+                result
+                for result in budget_results
+                if result.get("metric") == metric
+                and isinstance(result.get("actual"), int | float)
+            ]
+            if not matching:
+                continue
+            worst = max(matching, key=lambda result: float(result["actual"]))
+            status = "pass" if all(result.get("passed") for result in matching) else "FAIL"
+            lines.append(
+                f"  {metric:28s} max={worst.get('actual')}  "
+                f"budget={worst.get('budget')}  {status}"
+            )
+        lines.append("")
 
     perf_results = report.get("perf_results", [])
     if perf_results:
@@ -927,6 +1004,9 @@ def main() -> int:
         return 0
     if is_runtime_guard_report(payload):
         print(summarize_runtime_guard(payload))
+        return 0
+    if is_runtime_stack_report(payload):
+        print(summarize_runtime_stack(payload))
         return 0
     if is_runtime_report(payload):
         print(summarize_runtime(payload))
