@@ -1710,10 +1710,7 @@ second_pool = await obliq.search({
   candidate_pool: 512
 })?
 
-candidate_ids = []
-for match in first_pool.matches {
-  candidate_ids = push(candidate_ids, match.doc_id)
-}
+candidate_ids = [match.doc_id for match in first_pool.matches]
 for match in second_pool.matches {
   candidate_ids = push(candidate_ids, match.doc_id)
 }
