@@ -379,6 +379,31 @@ fn remote_trigger_dtos_json_round_trip() {
 }
 
 #[test]
+fn session_scoped_trigger_occurrence_has_pinned_wire_shape() {
+    let request = RemoteTriggerOccurrenceRequest::new(
+        "ui.button.pressed",
+        "source-key",
+        serde_json::json!({ "button": "Blue" }),
+        "button-blue-1",
+    )
+    .with_source(serde_json::json!({ "id": "blue" }))
+    .for_session("session-blue");
+
+    assert_eq!(
+        serde_json::to_value(request).expect("serialize session-scoped trigger occurrence"),
+        serde_json::json!({
+            "protocol_version": REMOTE_PROTOCOL_VERSION,
+            "source_type": "ui.button.pressed",
+            "source_key": "source-key",
+            "payload": { "button": "Blue" },
+            "idempotency_key": "button-blue-1",
+            "source": { "id": "blue" },
+            "session_id": "session-blue",
+        })
+    );
+}
+
+#[test]
 fn remote_session_observation_dtos_json_round_trip_typed_kinds() {
     let observation = RemoteSessionObservation {
         protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -776,8 +801,8 @@ fn wrong_protocol_versions_are_rejected() {
     assert!(matches!(
         request.validate(),
         Err(RemoteProtocolError::UnsupportedProtocolVersion {
-            actual: 11,
-            expected: 12,
+            actual: 12,
+            expected: 13,
         })
     ));
 
@@ -859,7 +884,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 12);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 13);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());
