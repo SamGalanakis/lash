@@ -87,6 +87,7 @@ impl RuntimeTurnDriver<'_> {
             )
         })?;
         let mut transient_messages = Vec::new();
+        let mut committed_user_messages = Vec::new();
         let mut turn_causes = Vec::new();
         let (turn_input_claim, queue_claim) = if let Some(store) = self.session.history_store() {
             let Some(session_execution_lease) = self.session_execution_lease.as_ref() else {
@@ -123,7 +124,7 @@ impl RuntimeTurnDriver<'_> {
                         err,
                     )
                 })?;
-            transient_messages.extend(materialized.transient_messages);
+            committed_user_messages.extend(materialized.messages);
             turn_causes.extend(materialized.turn_causes);
             if !accepted_turn_inputs.is_empty() {
                 send_session_event(
@@ -209,6 +210,7 @@ impl RuntimeTurnDriver<'_> {
         }
 
         Ok(crate::CheckpointDelivery {
+            committed_user_messages,
             messages: committed,
             transient_messages,
             turn_causes,

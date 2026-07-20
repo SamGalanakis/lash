@@ -61,6 +61,13 @@ impl TurnCause {
 
 #[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
 pub struct CheckpointDelivery {
+    /// Normal user messages admitted by durable turn-input ingress.
+    ///
+    /// These are already fully materialized rather than plugin messages so
+    /// they retain the same `origin: None` representation as user input that
+    /// starts a turn.
+    #[serde(default)]
+    pub committed_user_messages: Vec<Message>,
     pub messages: Vec<PluginMessage>,
     pub transient_messages: Vec<PluginMessage>,
     pub turn_causes: Vec<TurnCause>,

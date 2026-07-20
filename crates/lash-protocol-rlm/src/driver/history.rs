@@ -104,7 +104,6 @@ pub(super) fn build_rlm_history_messages_from_turn(
     } else {
         mark_last_history_text_cache_breakpoint(&mut messages);
     }
-    append_transient_turn_messages(input.turn_messages, &mut messages, attachments);
     append_current_iteration_message(
         &mut messages,
         CurrentIterationMessageInput {
@@ -119,41 +118,6 @@ pub(super) fn build_rlm_history_messages_from_turn(
         },
     );
     messages
-}
-
-fn append_transient_turn_messages(
-    turn_messages: &lash_core::MessageSequence,
-    messages: &mut Vec<LlmMessage>,
-    attachments: &mut Vec<LlmAttachment>,
-) {
-    for message in turn_messages.iter().filter(|message| {
-        matches!(
-            message.origin,
-            Some(lash_core::MessageOrigin::Plugin {
-                transient: true,
-                ..
-            })
-        )
-    }) {
-        let mut blocks = vec![text_block(
-            message_history_text_parts(message.parts.as_slice()),
-            false,
-        )];
-        for part in message.parts.iter() {
-            let Some(attachment) = part.attachment.as_ref() else {
-                continue;
-            };
-            let attachment_idx = attachments.len();
-            attachments.push(LlmAttachment::reference(attachment.reference.clone()));
-            blocks.push(LlmContentBlock::Image { attachment_idx });
-        }
-        let role = match message.role {
-            lash_core::MessageRole::User | lash_core::MessageRole::Event => LlmRole::User,
-            lash_core::MessageRole::System => LlmRole::System,
-            lash_core::MessageRole::Assistant => LlmRole::Assistant,
-        };
-        messages.push(LlmMessage::new(role, blocks));
-    }
 }
 
 /// The history portion only (no current-iteration tail): each prior step as an

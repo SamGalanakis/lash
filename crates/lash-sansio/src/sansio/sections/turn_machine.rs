@@ -573,10 +573,12 @@ impl<M: TurnProtocol> TurnMachine<M> {
             return;
         }
 
-        if !delivery.messages.is_empty()
+        if !delivery.committed_user_messages.is_empty()
+            || !delivery.messages.is_empty()
             || !delivery.transient_messages.is_empty()
             || !delivery.turn_causes.is_empty()
         {
+            self.messages.extend(delivery.committed_user_messages);
             self.append_checkpoint_messages(&delivery.messages, false);
             self.append_checkpoint_messages(&delivery.transient_messages, true);
             self.append_turn_causes(delivery.turn_causes);
