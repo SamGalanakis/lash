@@ -189,6 +189,36 @@ impl AwaitEventRegistry {
         Ok(ResolveOutcome::Accepted)
     }
 
+    pub(super) fn peek_resolution(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        if !self.verify(key)? {
+            return Err(RuntimeError::new(
+                "await_event_unknown_or_revoked",
+                "await-event key is invalid or revoked",
+            ));
+        }
+        let state = self.locked_state()?;
+        if key
+            .scope
+            .session_id()
+            .is_some_and(|session_id| state.revoked_session_ids.contains(session_id))
+        {
+            return Err(RuntimeError::new(
+                "await_event_unknown_or_revoked",
+                "await-event key is invalid or revoked",
+            ));
+        }
+        if let Some(completed) = state.completed_turn_control.get(&key.key_id) {
+            return Ok(Some(completed.terminal.clone()));
+        }
+        Ok(state
+            .entries
+            .get(&key.key_id)
+            .and_then(|entry| entry.terminal.clone()))
+    }
+
     fn archive_turn_control(
         &self,
         state: &mut AwaitEventRegistryState,

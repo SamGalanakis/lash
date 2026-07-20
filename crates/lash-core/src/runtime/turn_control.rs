@@ -400,6 +400,22 @@ impl ActiveTurnControl {
         }
     }
 
+    pub(crate) async fn observe_pending_cancel(
+        &self,
+        resolver: &dyn AwaitEventResolver,
+    ) -> Result<Option<TurnCancellationEvidence>, RuntimeError> {
+        let Some(resolution) = resolver.peek_await_event(&self.cancel_key).await? else {
+            return Ok(None);
+        };
+        match decode_gate(resolution)? {
+            TurnGateTerminal::CancelRequested(evidence) => {
+                self.remember(evidence.clone());
+                Ok(Some(evidence))
+            }
+            TurnGateTerminal::CompletionSealed => Ok(None),
+        }
+    }
+
     pub(crate) async fn settle_before_commit(
         &self,
         resolver: &dyn AwaitEventResolver,
@@ -597,11 +613,17 @@ mod tests {
             .await
             .expect("recreate active control under the recovered owner");
         let observed = recovered
+            .observe_pending_cancel(host.as_ref())
+            .await
+            .expect("read recovered turn start gate")
+            .expect("pending cancellation is visible before recovered effects");
+        assert_eq!(observed, expected);
+        let settled = recovered
             .settle_before_commit(host.as_ref(), false)
             .await
             .expect("settle recovered turn")
             .expect("pending cancellation survives owner loss");
-        assert_eq!(observed, expected);
+        assert_eq!(settled, expected);
     }
 
     #[tokio::test]
