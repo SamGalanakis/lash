@@ -529,7 +529,12 @@ impl LashRuntime {
                 commit_effects.completed_queue_claims,
                 commit_effects.completed_turn_input_claims,
                 commit_effects.enqueued_queue_batches,
-                cancel_state.is_cancelled().then(|| trace_turn_id.clone()),
+                // Any active-turn input that missed the turn's final
+                // checkpoint must become the next ordinary user turn. The
+                // store transition is part of this same final commit, so a
+                // terminal race cannot strand pending-active input or make a
+                // replay observe a different delivery boundary.
+                Some(trace_turn_id.clone()),
                 pending_attachment_ids.clone(),
                 release_session_execution_lease
                     .then(|| session_execution_lease.map(SessionExecutionLeaseGuard::completion))

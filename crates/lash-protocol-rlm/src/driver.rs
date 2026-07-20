@@ -537,6 +537,36 @@ mod tests {
         )))
     }
 
+    fn terminal_step_event(
+        protocol_iteration: usize,
+        code: &str,
+        output: Vec<String>,
+        images: Vec<lash_core::AttachmentRef>,
+        final_output: serde_json::Value,
+    ) -> SessionHistoryRecord {
+        SessionHistoryRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmTrajectoryEntry(
+            RlmTrajectoryEntry {
+                id: format!("lashlang_step_{protocol_iteration}"),
+                protocol_iteration,
+                code: code.to_string(),
+                output,
+                images,
+                error: None,
+                final_output: Some(final_output),
+            },
+        )))
+    }
+
+    fn assistant_content_event(id: &str, prose: &str) -> SessionHistoryRecord {
+        SessionHistoryRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmAssistantContent(
+            lash_rlm_types::RlmAssistantContent {
+                id: id.to_string(),
+                reasoning: String::new(),
+                prose: prose.to_string(),
+            },
+        )))
+    }
+
     fn assistant_prose_event(id: &str, text: &str) -> SessionHistoryRecord {
         SessionHistoryRecord::Conversation(ConversationRecord {
             id: id.to_string(),
@@ -703,6 +733,192 @@ mod tests {
             assistant_texts[0],
             crate::cell_scan::render_lashlang_cell_text("Found it. Running it now.", "loc = run()")
         );
+    }
+
+    #[test]
+    fn committed_transcript_supersedes_terminal_step_by_turn_provenance() {
+        let terminal_image = lash_core::AttachmentRef {
+            id: lash_core::AttachmentId::new("terminal-image"),
+            media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
+            byte_len: 3,
+            width: Some(1),
+            height: Some(1),
+            label: Some("terminal.png".to_string()),
+        };
+        let events = [
+            user_event("u1", "compute it"),
+            step_event(0, "print \"observed mid-turn\"", "observed mid-turn"),
+            assistant_content_event("terminal-prose", "Internal terminal commentary."),
+            terminal_step_event(
+                1,
+                "print image\nfinish { answer: 42 }",
+                vec!["terminal-only output".to_string()],
+                vec![terminal_image],
+                serde_json::json!({ "answer": 42 }),
+            ),
+            // Deliberately differs from the finish value: precedence is based
+            // on same-turn provenance, never content equality.
+            assistant_prose_event("committed-a1", "Host-rendered answer: forty-two."),
+            user_event("u2", "continue"),
+            step_event(0, "print \"next turn\"", "next turn"),
+        ];
+        let mut attachments = Vec::new();
+
+        let messages = render_history_messages(
+            &RlmHistoryRenderInput {
+                events: &events,
+                turn_messages: &lash_core::MessageSequence::default(),
+                turn_causes: &[],
+                max_output_chars: 1000,
+                protocol_iteration: 0,
+                finalization: "",
+                required_output: None,
+                final_answer_format: None,
+                budget_suffix: None,
+                bound_variables: "",
+            },
+            &mut attachments,
+        );
+        let rendered = messages
+            .iter()
+            .map(message_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("<lashlang>\nprint \"observed mid-turn\"\n</lashlang>"));
+        assert!(rendered.contains("observed mid-turn"));
+        assert!(rendered.contains("Host-rendered answer: forty-two."));
+        assert!(!rendered.contains("Internal terminal commentary."));
+        assert!(!rendered.contains("finish { answer: 42 }"));
+        assert!(!rendered.contains("terminal-only output"));
+        assert!(!rendered.contains("Final output:"));
+        assert!(rendered.contains("history[4].output[0] (9 chars):\nnext turn"));
+        assert!(!rendered.contains("history[6].output[0]"));
+        assert!(attachments.is_empty());
+    }
+
+    #[test]
+    fn terminal_step_without_committed_transcript_renders_unchanged() {
+        for (code, value, expected) in [
+            (
+                "finish \"string answer\"",
+                serde_json::json!("string answer"),
+                "\"string answer\"",
+            ),
+            (
+                "finish { answer: 42 }",
+                serde_json::json!({ "answer": 42 }),
+                "{\n  \"answer\": 42\n}",
+            ),
+        ] {
+            let events = [
+                user_event("u1", "compute it"),
+                terminal_step_event(0, code, Vec::new(), Vec::new(), value),
+            ];
+            let history = projector(1000).format_history(&events);
+
+            assert!(history.contains(&format!("<lashlang>\n{code}\n</lashlang>")));
+            assert!(history.contains(&format!("Final output:\n{expected}")));
+        }
+    }
+
+    #[test]
+    fn later_turn_assistant_does_not_supersede_uncommitted_terminal_step() {
+        let events = [
+            user_event("u1", "typed value not surfaced"),
+            terminal_step_event(
+                0,
+                "finish 42",
+                Vec::new(),
+                Vec::new(),
+                serde_json::json!(42),
+            ),
+            user_event("u2", "a new turn"),
+            assistant_prose_event("a2", "Natural answer from turn two."),
+        ];
+        let history = projector(1000).format_history(&events);
+
+        assert!(history.contains("<lashlang>\nfinish 42\n</lashlang>"));
+        assert!(history.contains("Final output:\n42"));
+        assert!(history.contains("Natural answer from turn two."));
+    }
+
+    #[test]
+    fn natural_prose_history_is_byte_unchanged() {
+        let events = [
+            user_event("u1", "Tell me naturally."),
+            assistant_prose_event("a1", "A natural prose answer.\n\nSecond paragraph."),
+        ];
+        let mut attachments = Vec::new();
+        let messages = render_history_messages(
+            &RlmHistoryRenderInput {
+                events: &events,
+                turn_messages: &lash_core::MessageSequence::default(),
+                turn_causes: &[],
+                max_output_chars: 1000,
+                protocol_iteration: 0,
+                finalization: "",
+                required_output: None,
+                final_answer_format: None,
+                budget_suffix: None,
+                bound_variables: "",
+            },
+            &mut attachments,
+        );
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(message_text(&messages[0]), "Tell me naturally.");
+        assert_eq!(
+            message_text(&messages[1]),
+            "A natural prose answer.\n\nSecond paragraph."
+        );
+    }
+
+    #[test]
+    fn committed_transcript_remains_the_rolling_cache_fence() {
+        let events = [
+            user_event("u1", "compute"),
+            terminal_step_event(
+                0,
+                "finish \"done\"",
+                Vec::new(),
+                Vec::new(),
+                serde_json::json!("done"),
+            ),
+            assistant_prose_event("a1", "done"),
+        ];
+        let mut attachments = Vec::new();
+        let messages = build_rlm_history_messages_from_turn(
+            RlmHistoryRenderInput {
+                events: &events,
+                turn_messages: &lash_core::MessageSequence::default(),
+                turn_causes: &[],
+                max_output_chars: 1000,
+                protocol_iteration: 0,
+                finalization: "finish",
+                required_output: None,
+                final_answer_format: None,
+                budget_suffix: None,
+                bound_variables: "",
+            },
+            &mut attachments,
+        );
+
+        assert!(matches!(
+            messages[1].blocks.first(),
+            Some(LlmContentBlock::Text {
+                text,
+                cache_breakpoint: true,
+                ..
+            }) if text.as_ref() == "done"
+        ));
+        assert!(matches!(
+            messages[2].blocks.first(),
+            Some(LlmContentBlock::Text {
+                cache_breakpoint: false,
+                ..
+            })
+        ));
     }
 
     #[test]

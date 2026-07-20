@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use lash_core::{ChronologicalPayload, Message, MessageRole, PartKind, RuntimeExecutionContext};
@@ -31,37 +31,60 @@ pub fn decode_rlm_protocol_event(event: &lash_core::ProtocolEvent) -> Option<Rlm
 #[derive(Clone, Debug)]
 pub struct RlmHistoryProjection {
     history: Vec<RlmHistoryItem>,
+    chronological_indices: HashMap<usize, usize>,
+    suppressed_chronological_indices: HashSet<usize>,
 }
 
 impl RlmHistoryProjection {
     pub fn from_chronological(projection: &lash_core::ChronologicalProjection) -> Self {
+        let suppressed_chronological_indices =
+            completed_turn_internal_indices(projection.entries());
         let mut history = Vec::with_capacity(projection.entries().len());
+        let mut chronological_indices = HashMap::with_capacity(projection.entries().len());
         for entry in projection.entries() {
-            match &entry.payload {
-                ChronologicalPayload::Message(message) => {
-                    if let Some(item) = history_item_from_message(message) {
-                        history.push(item);
-                    }
-                }
+            if suppressed_chronological_indices.contains(&entry.index) {
+                continue;
+            }
+            let item = match &entry.payload {
+                ChronologicalPayload::Message(message) => history_item_from_message(message),
                 ChronologicalPayload::ProtocolEvent(event) => {
                     match decode_rlm_protocol_event(event) {
                         Some(RlmProtocolEvent::RlmAssistantContent(content)) => {
-                            history.push(RlmHistoryItem::Message {
+                            Some(RlmHistoryItem::Message {
                                 id: content.id,
                                 role: RlmHistoryRole::Assistant,
                                 content: content.prose,
                                 attachments: Vec::new(),
-                            });
+                            })
                         }
                         Some(RlmProtocolEvent::RlmTrajectoryEntry(step)) => {
-                            history.push(history_item_from_lashlang_step(&step));
+                            Some(history_item_from_lashlang_step(&step))
                         }
-                        _ => {}
+                        _ => None,
                     }
                 }
+            };
+            if let Some(item) = item {
+                chronological_indices.insert(entry.index, history.len());
+                history.push(item);
             }
         }
-        Self { history }
+        Self {
+            history,
+            chronological_indices,
+            suppressed_chronological_indices,
+        }
+    }
+
+    /// Return the compact semantic `history[N]` index for a retained source
+    /// entry. Protocol-internal entries suppressed by completed-turn
+    /// precedence do not consume an index.
+    pub(crate) fn projected_index_for_chronological(&self, index: usize) -> Option<usize> {
+        self.chronological_indices.get(&index).copied()
+    }
+
+    pub(crate) fn suppresses_chronological(&self, index: usize) -> bool {
+        self.suppressed_chronological_indices.contains(&index)
     }
 
     pub fn history(&self) -> &[RlmHistoryItem] {
@@ -83,6 +106,54 @@ impl RlmHistoryProjection {
     pub fn value(&self) -> serde_json::Value {
         serde_json::to_value(&self.history).unwrap_or_else(|_| serde_json::Value::Array(vec![]))
     }
+}
+
+/// Find terminal protocol mechanics superseded by a committed assistant
+/// transcript from the same turn. The relationship is derived from event
+/// provenance: a terminal step and a later assistant message before the next
+/// user/event turn boundary share one completed turn. Content is never
+/// compared. A terminal step with no committed message remains unchanged.
+fn completed_turn_internal_indices(entries: &[lash_core::ChronologicalEntry]) -> HashSet<usize> {
+    let mut suppressed = HashSet::new();
+    let mut pending_assistant_content = None;
+    let mut terminal_step = None;
+
+    for entry in entries {
+        match &entry.payload {
+            ChronologicalPayload::Message(message) => match message.role {
+                MessageRole::User | MessageRole::Event => {
+                    pending_assistant_content = None;
+                    terminal_step = None;
+                }
+                MessageRole::Assistant => {
+                    if history_item_from_message(message).is_some()
+                        && let Some((step_index, content_index)) = terminal_step.take()
+                    {
+                        suppressed.insert(step_index);
+                        if let Some(content_index) = content_index {
+                            suppressed.insert(content_index);
+                        }
+                    }
+                }
+                MessageRole::System => {}
+            },
+            ChronologicalPayload::ProtocolEvent(event) => match decode_rlm_protocol_event(event) {
+                Some(RlmProtocolEvent::RlmAssistantContent(_)) => {
+                    pending_assistant_content = Some(entry.index);
+                }
+                Some(RlmProtocolEvent::RlmTrajectoryEntry(step)) => {
+                    let content_index = pending_assistant_content.take();
+                    terminal_step = step
+                        .final_output
+                        .is_some()
+                        .then_some((entry.index, content_index));
+                }
+                _ => {}
+            },
+        }
+    }
+
+    suppressed
 }
 
 pub fn rlm_history_projection(
@@ -304,6 +375,26 @@ fn image_ref(image: &lash_core::AttachmentRef) -> RlmImageRef {
 mod tests {
     use super::*;
 
+    fn message(id: &str, role: MessageRole, text: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role,
+            parts: lash_core::shared_parts(vec![lash_core::Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: text.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: lash_core::PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]),
+            origin: None,
+        }
+    }
+
     fn step_projection(output: &str) -> lash_core::ChronologicalProjection {
         let entry = RlmTrajectoryEntry {
             id: "lashlang_step_0".to_string(),
@@ -362,5 +453,82 @@ mod tests {
             full.as_str(),
             "re-fetched value must be the full untruncated output"
         );
+    }
+
+    #[test]
+    fn completed_turn_projection_keeps_only_transcript_and_compacts_indices() {
+        let terminal = RlmTrajectoryEntry {
+            id: "terminal".to_string(),
+            protocol_iteration: 1,
+            code: "finish { answer: 42 }".to_string(),
+            output: vec!["terminal output".to_string()],
+            images: Vec::new(),
+            error: None,
+            final_output: Some(serde_json::json!({ "answer": 42 })),
+        };
+        let retained = RlmTrajectoryEntry {
+            id: "retained".to_string(),
+            protocol_iteration: 0,
+            code: "print \"next\"".to_string(),
+            output: vec!["next".to_string()],
+            images: Vec::new(),
+            error: None,
+            final_output: None,
+        };
+        let events = [
+            lash_core::SessionHistoryRecord::Conversation(
+                lash_core::ConversationRecord::from_message(message(
+                    "u1",
+                    MessageRole::User,
+                    "first",
+                )),
+            ),
+            lash_core::SessionHistoryRecord::Protocol(rlm_protocol_event(
+                RlmProtocolEvent::RlmAssistantContent(lash_rlm_types::RlmAssistantContent {
+                    id: "terminal-content".to_string(),
+                    reasoning: String::new(),
+                    prose: "terminal prose".to_string(),
+                }),
+            )),
+            lash_core::SessionHistoryRecord::Protocol(rlm_protocol_event(
+                RlmProtocolEvent::RlmTrajectoryEntry(terminal),
+            )),
+            lash_core::SessionHistoryRecord::Conversation(
+                lash_core::ConversationRecord::from_message(message(
+                    "a1",
+                    MessageRole::Assistant,
+                    "committed answer",
+                )),
+            ),
+            lash_core::SessionHistoryRecord::Conversation(
+                lash_core::ConversationRecord::from_message(message(
+                    "u2",
+                    MessageRole::User,
+                    "second",
+                )),
+            ),
+            lash_core::SessionHistoryRecord::Protocol(rlm_protocol_event(
+                RlmProtocolEvent::RlmTrajectoryEntry(retained),
+            )),
+        ];
+        let chronological = lash_core::ChronologicalProjection::from_turn_view(
+            &events,
+            &lash_core::MessageSequence::default(),
+        );
+        let projection = rlm_history_projection(&chronological);
+
+        assert_eq!(projection.len(), 4);
+        assert!(projection.suppresses_chronological(1));
+        assert!(projection.suppresses_chronological(2));
+        assert_eq!(projection.projected_index_for_chronological(3), Some(1));
+        assert_eq!(projection.projected_index_for_chronological(5), Some(3));
+        assert!(matches!(
+            &projection.history()[1],
+            RlmHistoryItem::Message { content, .. } if content == "committed answer"
+        ));
+        assert!(matches!(
+            &projection.history()[3],
+            RlmHistoryItem::LashlangStep { id, .. } if id == "retained"
+        ));
     }
 }

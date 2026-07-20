@@ -307,17 +307,16 @@ impl TurnInputClaim {
         &self,
         attachment_store: &crate::SessionAttachmentStore,
     ) -> Result<QueuedCheckpointTurnInput, String> {
-        let mut transient_messages = Vec::new();
+        let mut messages = Vec::new();
         for input in &self.inputs {
             if let Some(message) =
-                plugin_message_from_turn_input_with_attachments(&input.input, attachment_store)
-                    .await?
+                committed_message_from_pending_input(input, attachment_store).await?
             {
-                transient_messages.push(message);
+                messages.push(message);
             }
         }
         Ok(QueuedCheckpointTurnInput {
-            transient_messages,
+            messages,
             turn_causes: Vec::new(),
         })
     }
@@ -350,7 +349,7 @@ impl TurnInputClaim {
 
 #[derive(Clone, Debug, Default)]
 pub struct QueuedCheckpointTurnInput {
-    pub transient_messages: Vec<PluginMessage>,
+    pub messages: Vec<crate::Message>,
     pub turn_causes: Vec<TurnCause>,
 }
 
@@ -391,27 +390,22 @@ pub(crate) fn plugin_message_from_turn_input(input: &TurnInput) -> Option<Plugin
     })
 }
 
-pub(crate) async fn plugin_message_from_turn_input_with_attachments(
-    input: &TurnInput,
+async fn committed_message_from_pending_input(
+    pending: &PendingTurnInput,
     attachment_store: &crate::SessionAttachmentStore,
-) -> Result<Option<PluginMessage>, String> {
-    let normalized =
-        super::io::normalize_input_items(&input.items, &input.image_blobs, attachment_store)
-            .await?;
-    let has_image = normalized
-        .iter()
-        .any(|item| matches!(item, super::NormalizedItem::Image(_)));
-    if !has_image {
-        return Ok(plugin_message_from_turn_input(input));
-    }
-
-    let mut content = Vec::new();
+) -> Result<Option<crate::Message>, String> {
+    let normalized = super::io::normalize_input_items(
+        &pending.input.items,
+        &pending.input.image_blobs,
+        attachment_store,
+    )
+    .await?;
+    let message_id = format!("m_ingress_{}", pending.input_id);
     let mut parts = Vec::new();
     for item in normalized {
         match item {
             super::NormalizedItem::Text(text) if !text.is_empty() => {
-                let part_id = format!("pending.p{}", parts.len());
-                content.push(text.clone());
+                let part_id = format!("{message_id}.p{}", parts.len());
                 parts.push(crate::Part {
                     id: part_id,
                     kind: crate::PartKind::Text,
@@ -427,7 +421,7 @@ pub(crate) async fn plugin_message_from_turn_input_with_attachments(
             }
             super::NormalizedItem::Text(_) => {}
             super::NormalizedItem::Image(reference) => {
-                let part_id = format!("pending.p{}", parts.len());
+                let part_id = format!("{message_id}.p{}", parts.len());
                 parts.push(crate::Part {
                     id: part_id,
                     kind: crate::PartKind::Image,
@@ -446,12 +440,10 @@ pub(crate) async fn plugin_message_from_turn_input_with_attachments(
     if parts.is_empty() {
         return Ok(None);
     }
-    Ok(Some(PluginMessage {
-        id: None,
+    Ok(Some(crate::Message {
+        id: message_id,
         role: crate::MessageRole::User,
-        content: content.join("\n"),
         origin: None,
-        parts,
-        images: Vec::new(),
+        parts: crate::shared_parts(parts),
     }))
 }

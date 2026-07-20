@@ -966,6 +966,11 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
     wait_for_endpoint_socket(endpoint_bind).await;
     register_restate_deployment(&admin_url, &endpoint_url).await;
 
+    let mut rendered_events = harness
+        .state
+        .event_tx
+        .subscribe(&harness.state.current_session_id());
+
     let turn_invocation_id =
         run_workbench_turn_via_restate(&harness.state, "initial turn input_ingress_gate=true")
             .await;
@@ -1064,9 +1069,10 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
         "active-turn input must complete exactly once under the in-flight turn id; trace={} ",
         trace_tail(&harness.trace_path)
     );
-    assert!(
-        !captured[2].contains("active injection marker"),
-        "transient active-turn input leaked into the queued full turn"
+    assert_eq!(
+        captured[2].matches("active injection marker").count(),
+        1,
+        "later assembled history must contain the committed active input exactly once"
     );
     assert!(!captured[0].contains("queued next marker"));
     assert!(!captured[1].contains("queued next marker"));
@@ -1096,11 +1102,50 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
             .any(|text| text.contains("queued next marker")),
         "queued input missing from committed transcript: {committed:#?}"
     );
-    assert!(
+    assert_eq!(
         committed
             .iter()
-            .all(|text| !text.contains("active injection marker")),
-        "active injection must remain transient: {committed:#?}"
+            .filter(|text| text.contains("active injection marker"))
+            .count(),
+        1,
+        "active injection must be one committed user message: {committed:#?}"
+    );
+    let Json(snapshot) = app_state(
+        State(harness.state.clone()),
+        Query(SessionQuery::default()),
+    )
+    .await
+    .expect("load settled workbench HTTP state");
+    assert_eq!(
+        snapshot
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "user" && message.text == "active injection marker"
+            })
+            .count(),
+        1,
+        "HTTP transcript must expose the committed active input exactly once"
+    );
+    let mut rendered_active_input = false;
+    loop {
+        match rendered_events.try_recv() {
+            Ok(StreamItem::Message { message })
+                if message.role == "user" && message.text == "active injection marker" =>
+            {
+                rendered_active_input = true;
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                panic!("rendered turn-ingress event stream lagged by {skipped} items")
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+        }
+    }
+    assert!(
+        rendered_active_input,
+        "rendered page stream must receive the committed active input as a normal user message"
     );
     assert!(
         session

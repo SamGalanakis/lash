@@ -14,6 +14,12 @@
 //!   message. `visit_turn_view` is a push visitor with no lookahead, so the
 //!   prose is buffered (`PendingProse`) and either folded into the next step or
 //!   flushed as a standalone assistant message (a prose-only finish).
+//! - **Completed-turn precedence.** When a successful terminal step is
+//!   followed by a committed assistant transcript message in the same turn,
+//!   the transcript is canonical. The terminal emission cell and its
+//!   never-observed output echo are omitted. This is derived from event/turn
+//!   ordering, never message content. Without a committed transcript, the
+//!   trajectory renders unchanged.
 //! - **Cache fence.** The last history message is marked with a
 //!   `cache_breakpoint` (`mark_last_history_text_cache_breakpoint`) so the
 //!   provider can reuse the stable history prefix across iterations. Active-turn
@@ -26,6 +32,8 @@
 //!   by the step's `entry.index`, so the model can recover it by re-printing the
 //!   reference. Proven by
 //!   `projection::context::tests::history_step_output_resolves_full_untruncated_value`.
+//!   `history[N]` uses compact canonical semantic indices, so omitted internal
+//!   entries consume no index and rendered re-fetch handles use the remap.
 //! - **Variables.** The live variable namespace is rendered into the volatile
 //!   current-iteration tail. It is deliberately outside the stable system and
 //!   history prefix while remaining adjacent to the work it describes.
@@ -96,7 +104,6 @@ pub(super) fn build_rlm_history_messages_from_turn(
     } else {
         mark_last_history_text_cache_breakpoint(&mut messages);
     }
-    append_transient_turn_messages(input.turn_messages, &mut messages, attachments);
     append_current_iteration_message(
         &mut messages,
         CurrentIterationMessageInput {
@@ -113,41 +120,6 @@ pub(super) fn build_rlm_history_messages_from_turn(
     messages
 }
 
-fn append_transient_turn_messages(
-    turn_messages: &lash_core::MessageSequence,
-    messages: &mut Vec<LlmMessage>,
-    attachments: &mut Vec<LlmAttachment>,
-) {
-    for message in turn_messages.iter().filter(|message| {
-        matches!(
-            message.origin,
-            Some(lash_core::MessageOrigin::Plugin {
-                transient: true,
-                ..
-            })
-        )
-    }) {
-        let mut blocks = vec![text_block(
-            message_history_text_parts(message.parts.as_slice()),
-            false,
-        )];
-        for part in message.parts.iter() {
-            let Some(attachment) = part.attachment.as_ref() else {
-                continue;
-            };
-            let attachment_idx = attachments.len();
-            attachments.push(LlmAttachment::reference(attachment.reference.clone()));
-            blocks.push(LlmContentBlock::Image { attachment_idx });
-        }
-        let role = match message.role {
-            lash_core::MessageRole::User | lash_core::MessageRole::Event => LlmRole::User,
-            lash_core::MessageRole::System => LlmRole::System,
-            lash_core::MessageRole::Assistant => LlmRole::Assistant,
-        };
-        messages.push(LlmMessage::new(role, blocks));
-    }
-}
-
 /// The history portion only (no current-iteration tail): each prior step as an
 /// assistant cell message + a user observation message, with prose folded in.
 pub(super) fn render_history_messages(
@@ -155,6 +127,9 @@ pub(super) fn render_history_messages(
     attachments: &mut Vec<LlmAttachment>,
 ) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
+    let chronological =
+        lash_core::ChronologicalProjection::from_turn_view(input.events, input.turn_messages);
+    let history_projection = rlm_history_projection(&chronological);
     let active_cause_ids = input
         .turn_causes
         .iter()
@@ -180,6 +155,10 @@ pub(super) fn render_history_messages(
                 });
             }
             BorrowedChronologicalPayload::ProtocolEvent(event) => {
+                if history_projection.suppresses_chronological(entry.index) {
+                    pending = None;
+                    return;
+                }
                 let Some(event) = decode_rlm_protocol_event(event) else {
                     return;
                 };
@@ -220,7 +199,9 @@ pub(super) fn render_history_messages(
                     })
                     .collect::<Vec<_>>();
                 let obs_text = step_output_text(
-                    entry.index,
+                    history_projection
+                        .projected_index_for_chronological(entry.index)
+                        .unwrap_or(entry.index),
                     &step.output,
                     &image_refs,
                     step.error.as_deref(),
@@ -234,7 +215,9 @@ pub(super) fn render_history_messages(
                 // User / system / event turn: rendered verbatim by role.
                 flush_pending_prose(&mut messages, &mut pending);
                 let text = message_text(
-                    entry.index,
+                    history_projection
+                        .projected_index_for_chronological(entry.index)
+                        .unwrap_or(entry.index),
                     &message_history_text_parts(message.parts),
                     &message_attachment_refs(message.parts),
                     input.max_output_chars,
