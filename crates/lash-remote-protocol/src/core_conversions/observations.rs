@@ -174,6 +174,19 @@ impl From<lash_core::TurnEvent> for RemoteTurnEvent {
                 Self::AssistantProseDelta { text }
             }
             lash_core::TurnEvent::ReasoningDelta { text } => Self::ReasoningDelta { text },
+            lash_core::TurnEvent::ModelAttemptReset {
+                assistant_prose_correlation_ids,
+                reasoning_correlation_ids,
+            } => Self::ModelAttemptReset {
+                assistant_prose_correlation_ids: assistant_prose_correlation_ids
+                    .into_iter()
+                    .map(|id| id.0)
+                    .collect(),
+                reasoning_correlation_ids: reasoning_correlation_ids
+                    .into_iter()
+                    .map(|id| id.0)
+                    .collect(),
+            },
             lash_core::TurnEvent::CodeBlockStarted {
                 language,
                 code,

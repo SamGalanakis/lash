@@ -651,6 +651,157 @@ async fn session_observation_replays_live_activity_and_commit() -> Result<()> {
     Ok(())
 }
 
+fn retrying_visible_stream_provider() -> ProviderHandle {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    crate::testing::TestProvider::builder()
+        .kind("retrying-visible-stream")
+        .requires_streaming(true)
+        .options(lash_core::ProviderOptions {
+            reliability: lash_core::provider::ProviderReliability::default()
+                .max_attempts(3)
+                .base_delay_ms(0)
+                .max_delay_ms(0),
+            ..lash_core::ProviderOptions::default()
+        })
+        .complete(move |request| {
+            let attempts = Arc::clone(&attempts);
+            async move {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                let stream = request.stream_events.expect("stream events");
+                stream.send(LlmStreamEvent::ReasoningDelta(format!(
+                    "reasoning-{attempt}"
+                )));
+                stream.send(LlmStreamEvent::Delta(format!("prose-{attempt}")));
+                if attempt < 3 {
+                    return Err(
+                        LlmTransportError::new(format!("retry attempt {attempt}")).retryable(true)
+                    );
+                }
+                Ok(LlmResponse {
+                    full_text: "prose-3".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "prose-3".to_string(),
+                        response_meta: None,
+                    }],
+                    terminal_reason: lash_core::LlmTerminalReason::Stop,
+                    response_metadata: Default::default(),
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build()
+        .into_handle()
+}
+
+fn render_observed_attempt_text(events: &[lash_core::SessionObservationEvent]) -> (String, String) {
+    let mut prose = Vec::new();
+    let mut reasoning = Vec::new();
+    for event in events {
+        let lash_core::SessionObservationEventPayload::TurnActivity(activity) = &event.payload
+        else {
+            continue;
+        };
+        match &activity.event {
+            TurnEvent::AssistantProseDelta { text } => {
+                prose.push((activity.correlation_id.clone(), text.clone()));
+            }
+            TurnEvent::ReasoningDelta { text } => {
+                reasoning.push((activity.correlation_id.clone(), text.clone()));
+            }
+            TurnEvent::ModelAttemptReset {
+                assistant_prose_correlation_ids,
+                reasoning_correlation_ids,
+            } => {
+                prose.retain(|(correlation_id, _)| {
+                    !assistant_prose_correlation_ids.contains(correlation_id)
+                });
+                reasoning.retain(|(correlation_id, _)| {
+                    !reasoning_correlation_ids.contains(correlation_id)
+                });
+            }
+            _ => {}
+        }
+    }
+    (
+        prose.into_iter().map(|(_, text)| text).collect(),
+        reasoning.into_iter().map(|(_, text)| text).collect(),
+    )
+}
+
+fn model_attempt_resets(events: &[lash_core::SessionObservationEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.payload,
+                lash_core::SessionObservationEventPayload::TurnActivity(activity)
+                    if matches!(&activity.event, TurnEvent::ModelAttemptReset { .. })
+            )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn session_observation_retracts_two_retried_visible_attempts_live_and_on_replay() -> Result<()>
+{
+    let core = explicit_ephemeral_facets(LashCore::standard_builder())
+        .provider(retrying_visible_stream_provider())
+        .model(mock_model_spec())
+        .build()?;
+    let session = core.session("retry-visible-observation").open().await?;
+    let cursor = session.observe().current_observation().cursor;
+    let lash_core::SessionObservationSubscription::Subscribed(mut subscription) =
+        session.observe().subscribe_from_cursor(&cursor)?
+    else {
+        panic!("fresh cursor should subscribe without a gap");
+    };
+    let live_collector = tokio::spawn(async move {
+        let mut events = Vec::new();
+        loop {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(2), subscription.next_event())
+                    .await
+                    .expect("timed out waiting for live observation")
+                    .expect("live observation event");
+            let committed = matches!(
+                event.payload,
+                lash_core::SessionObservationEventPayload::Committed { .. }
+            );
+            events.push(event);
+            if committed {
+                break;
+            }
+        }
+        events
+    });
+
+    let output = session
+        .turn(TurnInput::text("retry twice after visible output"))
+        .run()
+        .await?;
+    assert_eq!(output.assistant_message(), Some("prose-3"));
+    let live_events = live_collector.await.expect("live collector task");
+
+    let lash_core::SessionResume::Replayed {
+        events: replay_events,
+    } = session.observe().resume_from_cursor(&cursor)?
+    else {
+        panic!("recent cursor should replay all attempt activity");
+    };
+
+    assert_eq!(
+        render_observed_attempt_text(&live_events),
+        ("prose-3".to_string(), "reasoning-3".to_string())
+    );
+    assert_eq!(
+        render_observed_attempt_text(&replay_events),
+        ("prose-3".to_string(), "reasoning-3".to_string())
+    );
+    assert_eq!(model_attempt_resets(&live_events), 2);
+    assert_eq!(model_attempt_resets(&replay_events), 2);
+    Ok(())
+}
+
 #[tokio::test]
 async fn session_observation_rejects_cursor_from_another_session() -> Result<()> {
     let core = standard_core();

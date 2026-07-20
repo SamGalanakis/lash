@@ -811,6 +811,15 @@ pub enum TurnEvent {
     ReasoningDelta {
         text: String,
     },
+    /// Retracts visible text emitted by a provider attempt that will be retried.
+    ///
+    /// Observers remove only prose and reasoning deltas whose correlation ids
+    /// appear here. The reset is itself replayed in order, so reconnecting
+    /// observers converge on the same visible text as live observers.
+    ModelAttemptReset {
+        assistant_prose_correlation_ids: Vec<TurnActivityId>,
+        reasoning_correlation_ids: Vec<TurnActivityId>,
+    },
     CodeBlockStarted {
         language: String,
         code: String,

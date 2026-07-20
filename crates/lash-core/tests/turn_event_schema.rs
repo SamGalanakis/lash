@@ -30,6 +30,7 @@ fn expected_type_tag(event: &TurnEvent) -> &'static str {
         TurnEvent::ModelRequestStarted { .. } => "model_request_started",
         TurnEvent::AssistantProseDelta { .. } => "assistant_prose_delta",
         TurnEvent::ReasoningDelta { .. } => "reasoning_delta",
+        TurnEvent::ModelAttemptReset { .. } => "model_attempt_reset",
         TurnEvent::CodeBlockStarted { .. } => "code_block_started",
         TurnEvent::CodeBlockCompleted { .. } => "code_block_completed",
         TurnEvent::ToolCallStarted { .. } => "tool_call_started",
@@ -53,6 +54,7 @@ const ALL_TURN_EVENT_TAGS: &[&str] = &[
     "model_request_started",
     "assistant_prose_delta",
     "reasoning_delta",
+    "model_attempt_reset",
     "code_block_started",
     "code_block_completed",
     "tool_call_started",
@@ -140,6 +142,18 @@ fn sample_events() -> Vec<(&'static str, TurnEvent, serde_json::Value)> {
                 text: "thinking".to_string(),
             },
             json!({ "type": "reasoning_delta", "text": "thinking" }),
+        ),
+        (
+            "model_attempt_reset",
+            TurnEvent::ModelAttemptReset {
+                assistant_prose_correlation_ids: vec![TurnActivityId::new("prose-1")],
+                reasoning_correlation_ids: vec![TurnActivityId::new("reasoning-1")],
+            },
+            json!({
+                "type": "model_attempt_reset",
+                "assistant_prose_correlation_ids": ["prose-1"],
+                "reasoning_correlation_ids": ["reasoning-1"],
+            }),
         ),
         (
             "code_block_started (graph_key present)",

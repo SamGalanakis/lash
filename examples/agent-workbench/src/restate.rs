@@ -1083,8 +1083,7 @@ async fn record_turn_output(
     let streamed_prose = turn_state
         .lock()
         .expect("turn state lock")
-        .assistant_prose
-        .clone();
+        .assistant_prose();
     let assistant_text = assistant_text_for_display(&output, &streamed_prose);
     state.trace(
         trace_name,

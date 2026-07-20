@@ -912,6 +912,23 @@ fn remote_activity_preserves_semantic_fields_and_collapses_runtime_diagnostics()
 }
 
 #[test]
+fn remote_activity_preserves_model_attempt_reset_targets() {
+    let activity = lash_core::TurnActivity::independent(lash_core::TurnEvent::ModelAttemptReset {
+        assistant_prose_correlation_ids: vec![lash_core::TurnActivityId::new("prose")],
+        reasoning_correlation_ids: vec![lash_core::TurnActivityId::new("reasoning")],
+    });
+
+    let remote = RemoteTurnActivity::from_core(4, activity);
+    assert_eq!(
+        remote.event,
+        RemoteTurnEvent::ModelAttemptReset {
+            assistant_prose_correlation_ids: vec!["prose".to_string()],
+            reasoning_correlation_ids: vec!["reasoning".to_string()],
+        }
+    );
+}
+
+#[test]
 fn remote_session_observation_from_core_maps_snapshot_metadata() {
     let store = lash_core::InMemoryLiveReplayStore::default();
     let event = lash_core::LiveReplayStore::append(
