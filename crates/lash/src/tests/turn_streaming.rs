@@ -1616,7 +1616,7 @@ fn rlm_active_input_reaches_the_next_provider_iteration() -> Result<()> {
         release_first_tx.send(()).expect("release first response");
         turn.await.expect("turn task")?;
 
-        let requests = requests.lock().expect("request capture");
+        let requests = requests.lock().expect("request capture").clone();
         assert_eq!(requests.len(), 2, "turn must execute a second iteration");
         assert!(!requests[0].contains("mid-turn injection marker"));
         assert!(
