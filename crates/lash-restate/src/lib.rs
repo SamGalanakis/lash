@@ -2667,13 +2667,10 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
 
     fn peek_event<'run>(
         &'run self,
-        _address: RestateDurableWaitAddress,
+        address: RestateDurableWaitAddress,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Resolution>, TerminalError>> + Send + 'run>>
     where
-        'ctx: 'run,
-    {
-        Box::pin(async { Ok(None) })
-    }
+        'ctx: 'run;
 
     fn await_process_terminal<'run>(
         &'run self,

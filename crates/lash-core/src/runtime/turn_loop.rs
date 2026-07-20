@@ -2181,8 +2181,8 @@ async fn run_turn_effect_loop(
     // reserved for the concurrent live watcher below: an out-of-band peek here
     // could observe a cancel that arrived after the original attempt and make
     // a replay take a different command path.
-    if await_turn_cancellation_with_retry(|| turn_control.observe_pending_cancel(cancel_controller))
-        .await
+    if await_turn_cancellation_start_gate(|| turn_control.observe_pending_cancel(cancel_controller))
+        .await?
         .is_some()
     {
         cancellation.cancel();
@@ -2240,6 +2240,38 @@ async fn run_turn_effect_loop(
 
 const TURN_CANCEL_WATCH_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_millis(25);
 const TURN_CANCEL_WATCH_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+/// Keep the journaled turn-start observation bounded so a broken peek cannot
+/// pin one Restate invocation forever. Exhaustion fails closed and lets the
+/// Restate handler retry policy own invocation-level backoff and retirement.
+const TURN_CANCEL_START_GATE_ATTEMPTS: usize = 3;
+
+async fn await_turn_cancellation_start_gate<F, C>(
+    mut watch: F,
+) -> Result<Option<TurnCancellationEvidence>, RuntimeError>
+where
+    F: FnMut() -> C,
+    C: std::future::Future<Output = Result<Option<TurnCancellationEvidence>, RuntimeError>>,
+{
+    let mut backoff = TURN_CANCEL_WATCH_RETRY_INITIAL;
+    for attempt in 1..=TURN_CANCEL_START_GATE_ATTEMPTS {
+        match watch().await {
+            Ok(observation) => return Ok(observation),
+            Err(err) if attempt == TURN_CANCEL_START_GATE_ATTEMPTS => return Err(err),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    attempt,
+                    max_attempts = TURN_CANCEL_START_GATE_ATTEMPTS,
+                    retry_after_ms = backoff.as_millis(),
+                    "turn cancellation start gate failed; retrying before failing the invocation"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2).min(TURN_CANCEL_WATCH_RETRY_MAX);
+            }
+        }
+    }
+    unreachable!("positive start-gate attempt limit")
+}
 
 async fn await_turn_cancellation_with_retry<F, C>(mut watch: F) -> Option<TurnCancellationEvidence>
 where
@@ -2394,7 +2426,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        ActiveTurnControl, agent_frame_follow_turn_id, await_turn_cancellation_with_retry,
+        ActiveTurnControl, TURN_CANCEL_START_GATE_ATTEMPTS, agent_frame_follow_turn_id,
+        await_turn_cancellation_start_gate, await_turn_cancellation_with_retry,
         publish_terminal_after_commit,
     };
     use crate::{
@@ -2461,6 +2494,29 @@ mod tests {
 
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
         assert_eq!(evidence.request_id, "retry-request");
+    }
+
+    #[tokio::test]
+    async fn cancellation_start_gate_fails_after_bounded_retries() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed_attempts = Arc::clone(&attempts);
+        let err = await_turn_cancellation_start_gate(move || {
+            observed_attempts.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(RuntimeError::new(
+                    "cancel_start_gate_unavailable",
+                    "temporary ingress failure",
+                ))
+            }
+        })
+        .await
+        .expect_err("start gate must fail closed after its retry budget");
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            TURN_CANCEL_START_GATE_ATTEMPTS
+        );
+        assert_eq!(err.code.to_string(), "cancel_start_gate_unavailable");
     }
 
     #[tokio::test]
