@@ -1271,6 +1271,7 @@ pub trait QueuedWorkStore: Send + Sync {
     /// Backends must probe durable store state before opening a write
     /// transaction. When either family is pending, both claims are granted in
     /// one write transaction after validating the session-execution fence once.
+    #[allow(clippy::too_many_arguments)]
     async fn claim_checkpoint_work(
         &self,
         session_id: &str,
