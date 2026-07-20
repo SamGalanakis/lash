@@ -647,7 +647,7 @@ async fn rlm_multi_turn_finish_history_preserves_observed_lashlang_few_shots() -
                     }
 
                     let turn = call / 2;
-                    let response = if call % 2 == 0 {
+                    let response = if call.is_multiple_of(2) {
                         lashlang_block(&format!("print \"turn {} observation\"", turn + 1))
                     } else {
                         lashlang_block(&format!("finish {:?}", ANSWERS[turn]))
