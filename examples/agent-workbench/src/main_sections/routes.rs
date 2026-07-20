@@ -165,6 +165,7 @@ async fn enqueue_turn_input(
         )
         .await
         .map_err(AppError::internal)?;
+    reject_if_active_turn_settled(&state, &pending).await?;
     let receipt = TurnInputReceipt {
         accepted: true,
         input_id: pending.input_id.clone(),
@@ -180,6 +181,41 @@ async fn enqueue_turn_input(
         receipt: receipt.clone(),
     });
     Ok(Json(receipt))
+}
+
+async fn reject_if_active_turn_settled(
+    state: &AppState,
+    pending: &lash::PendingTurnInput,
+) -> Result<(), AppError> {
+    let Some(turn_id) = pending.ingress.active_turn_id() else {
+        return Ok(());
+    };
+    if state.active_turns.contains(&pending.session_id, turn_id) {
+        return Ok(());
+    }
+
+    let session = state
+        .core
+        .session(pending.session_id.clone())
+        .open()
+        .await
+        .map_err(AppError::runtime)?;
+    let outcome = session
+        .cancel_pending_turn_input(&pending.input_id)
+        .await
+        .map_err(AppError::runtime)?;
+    match outcome {
+        lash::PendingTurnInputCancelOutcome::Cancelled(_)
+        | lash::PendingTurnInputCancelOutcome::AlreadyCancelled(_) => Err(AppError::conflict(
+            "the running turn settled before the input could be injected",
+        )),
+        lash::PendingTurnInputCancelOutcome::AlreadyClaimed { .. }
+        | lash::PendingTurnInputCancelOutcome::AlreadyCompleted(_) => Ok(()),
+        lash::PendingTurnInputCancelOutcome::NotFound => Err(AppError::internal(format!(
+            "active-turn input `{}` disappeared during settle reconciliation",
+            pending.input_id
+        ))),
+    }
 }
 
 async fn button_trigger(

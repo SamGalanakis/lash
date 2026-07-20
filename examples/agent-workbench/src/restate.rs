@@ -703,6 +703,7 @@ async fn run_user_turn_terminalized(
             .catch_unwind()
             .await,
     )
+    .await
 }
 
 async fn run_button_trigger(
@@ -934,9 +935,10 @@ async fn run_queued_turn_terminalized(
             .catch_unwind()
             .await,
     )
+    .await
 }
 
-fn terminalize_turn_execution(
+async fn terminalize_turn_execution(
     state: &AppState,
     session_id: &str,
     turn_id: &str,
@@ -945,7 +947,9 @@ fn terminalize_turn_execution(
 ) -> HandlerResult<()> {
     match result {
         Ok(Ok(())) => {
-            state.active_turns.remove(session_id, turn_id);
+            settle_workbench_turn(state, session_id, turn_id)
+                .await
+                .map_err(HandlerError::from)?;
             Ok(())
         }
         Ok(Err(err)) if err.retryable => {
@@ -962,18 +966,60 @@ fn terminalize_turn_execution(
         }
         Ok(Err(err)) => {
             let message = err.message.clone();
-            state.active_turns.remove(session_id, turn_id);
+            settle_workbench_turn(state, session_id, turn_id)
+                .await
+                .map_err(HandlerError::from)?;
             record_turn_failure(state, session_id, turn_id, trace_name, &message);
             Err(terminal_handler_error(err))
         }
         Err(payload) => {
             let message = panic_payload_message(payload);
             let message = format!("Restate-backed turn panicked: {message}");
-            state.active_turns.remove(session_id, turn_id);
+            settle_workbench_turn(state, session_id, turn_id)
+                .await
+                .map_err(HandlerError::from)?;
             record_turn_failure(state, session_id, turn_id, trace_name, &message);
             Err(TerminalError::new(message).into())
         }
     }
+}
+
+pub(crate) async fn settle_workbench_turn(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<(), AppError> {
+    state.active_turns.remove(session_id, turn_id);
+    let session = state
+        .core
+        .session(session_id.to_string())
+        .open()
+        .await
+        .map_err(AppError::runtime)?;
+    let targets = session
+        .pending_turn_inputs()
+        .await
+        .map_err(AppError::runtime)?
+        .into_iter()
+        .filter(|input| input.ingress.active_turn_id() == Some(turn_id))
+        .map(|input| lash::PendingTurnInputCancelTarget::input_id(input.input_id))
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let cancellations = session
+        .cancel_pending_turn_inputs(targets)
+        .await
+        .map_err(AppError::runtime)?;
+    state.trace(
+        "turn_input.settle_cancelled",
+        json!({
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "cancellations": cancellations,
+        }),
+    );
+    Ok(())
 }
 
 fn workbench_turn_session_execution_owner(

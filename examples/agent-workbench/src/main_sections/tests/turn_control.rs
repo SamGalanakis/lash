@@ -142,6 +142,59 @@ mod turn_control_timeout_tests {
         assert_eq!(snapshot.pending_turn_inputs.len(), 2);
         assert_eq!(snapshot.pending_turn_inputs[0].input_id, injected.input_id);
         assert_eq!(snapshot.pending_turn_inputs[1].input_id, queued.input_id);
+
+        crate::restate::settle_workbench_turn(&state, &session_id, "running-turn")
+            .await
+            .expect("settle running turn");
+        let session = state
+            .core
+            .session(session_id.clone())
+            .open()
+            .await
+            .expect("open session after turn settle");
+        let after_settle = session
+            .pending_turn_inputs()
+            .await
+            .expect("list pending inputs after turn settle");
+        assert_eq!(after_settle.len(), 1);
+        assert_eq!(after_settle[0].input_id, queued.input_id);
+        session.close().await.expect("close session after settle");
+
+        state.track_turn(&session_id, "settle-race-turn");
+        let checked_ingress = lash::persistence::TurnInputIngress::active_turn(
+            "settle-race-turn",
+            lash::persistence::TurnInputCheckpointBoundary::AfterWork,
+        );
+        crate::restate::settle_workbench_turn(&state, &session_id, "settle-race-turn")
+            .await
+            .expect("settle turn between route check and enqueue");
+        let raced = state
+            .core
+            .enqueue_turn_input(
+                session_id.clone(),
+                lash::TurnInput::text("must not be stranded"),
+                checked_ingress,
+                Some("settle-race-input".to_string()),
+            )
+            .await
+            .expect("enqueue after the checked turn settled");
+        let race_error = reject_if_active_turn_settled(&state, &raced)
+            .await
+            .expect_err("settled active-turn input must be rejected");
+        assert_eq!(race_error.status, StatusCode::CONFLICT);
+        let session = state
+            .core
+            .session(session_id.clone())
+            .open()
+            .await
+            .expect("open session after settle race");
+        let after_race = session
+            .pending_turn_inputs()
+            .await
+            .expect("list pending inputs after settle race");
+        assert_eq!(after_race.len(), 1);
+        assert_eq!(after_race[0].input_id, queued.input_id);
+        session.close().await.expect("close session after settle race");
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

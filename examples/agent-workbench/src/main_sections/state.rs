@@ -192,6 +192,13 @@ impl ActiveTurns {
         self.persist_snapshot(&active);
     }
 
+    fn contains(&self, session_id: &str, turn_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("active turn lock")
+            .contains(&(session_id.to_string(), turn_id.to_string()))
+    }
+
     fn for_session(&self, session_id: &str) -> Vec<lash::TurnAddress> {
         self.inner
             .lock()
