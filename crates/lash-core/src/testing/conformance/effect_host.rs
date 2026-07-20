@@ -869,7 +869,7 @@ fn exec_code_conformance_envelope(effect_id: &str, code: &str) -> RuntimeEffectE
             format!("exec-code-replay:{effect_id}"),
         ),
         RuntimeEffectCommand::ExecCode {
-            language: "lashlang".to_string(),
+            language: "conformance".to_string(),
             code: code.to_string(),
         },
     )
