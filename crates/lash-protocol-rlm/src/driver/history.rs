@@ -16,10 +16,10 @@
 //!   flushed as a standalone assistant message (a prose-only finish).
 //! - **Cache fence.** The last history message is marked with a
 //!   `cache_breakpoint` (`mark_last_history_text_cache_breakpoint`) so the
-//!   provider can reuse the stable history prefix across iterations. Only the
-//!   volatile `=== CURRENT ITERATION ===` tail — iteration number, turn events,
-//!   bound variables, finalization, required-output schema, context budget — is
-//!   appended uncached by `append_current_iteration_message`.
+//!   provider can reuse the stable history prefix across iterations. Active-turn
+//!   input and the volatile `=== CURRENT ITERATION ===` tail — iteration number,
+//!   turn events, bound variables, finalization, required-output schema, context
+//!   budget — are appended uncached.
 //! - **Re-fetch handle.** A lossy-projected step output is tagged
 //!   `full: history[N].output[M]` on its user message; the `history` projected
 //!   binding (`projection/context.rs`) carries the full untruncated value, keyed
@@ -57,7 +57,6 @@ pub(super) struct RlmHistoryRenderInput<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) struct CurrentIterationMessageInput<'a> {
-    pub(super) saw_history: bool,
     pub(super) history_len: usize,
     pub(super) protocol_iteration: usize,
     pub(super) turn_causes: &'a [lash_core::TurnCause],
@@ -86,10 +85,21 @@ pub(super) fn build_rlm_history_messages_from_turn(
         input.turn_messages,
     ))
     .len();
+    if !saw_history {
+        messages.push(LlmMessage::new(
+            LlmRole::User,
+            vec![text_block(
+                "=== HISTORY ===\n\nNo chronological history is available.",
+                false,
+            )],
+        ));
+    } else {
+        mark_last_history_text_cache_breakpoint(&mut messages);
+    }
+    append_transient_turn_messages(input.turn_messages, &mut messages, attachments);
     append_current_iteration_message(
         &mut messages,
         CurrentIterationMessageInput {
-            saw_history,
             history_len,
             protocol_iteration: input.protocol_iteration,
             turn_causes: input.turn_causes,
@@ -101,6 +111,41 @@ pub(super) fn build_rlm_history_messages_from_turn(
         },
     );
     messages
+}
+
+fn append_transient_turn_messages(
+    turn_messages: &lash_core::MessageSequence,
+    messages: &mut Vec<LlmMessage>,
+    attachments: &mut Vec<LlmAttachment>,
+) {
+    for message in turn_messages.iter().filter(|message| {
+        matches!(
+            message.origin,
+            Some(lash_core::MessageOrigin::Plugin {
+                transient: true,
+                ..
+            })
+        )
+    }) {
+        let mut blocks = vec![text_block(
+            message_history_text_parts(message.parts.as_slice()),
+            false,
+        )];
+        for part in message.parts.iter() {
+            let Some(attachment) = part.attachment.as_ref() else {
+                continue;
+            };
+            let attachment_idx = attachments.len();
+            attachments.push(LlmAttachment::reference(attachment.reference.clone()));
+            blocks.push(LlmContentBlock::Image { attachment_idx });
+        }
+        let role = match message.role {
+            lash_core::MessageRole::User | lash_core::MessageRole::Event => LlmRole::User,
+            lash_core::MessageRole::System => LlmRole::System,
+            lash_core::MessageRole::Assistant => LlmRole::Assistant,
+        };
+        messages.push(LlmMessage::new(role, blocks));
+    }
 }
 
 /// The history portion only (no current-iteration tail): each prior step as an
@@ -216,17 +261,6 @@ fn append_current_iteration_message(
     messages: &mut Vec<LlmMessage>,
     input: CurrentIterationMessageInput<'_>,
 ) {
-    if !input.saw_history {
-        messages.push(LlmMessage::new(
-            LlmRole::User,
-            vec![text_block(
-                "=== HISTORY ===\n\nNo chronological history is available.",
-                false,
-            )],
-        ));
-    } else {
-        mark_last_history_text_cache_breakpoint(messages);
-    }
     let mut current_prompt = format!(
         "\n\n\n=== CURRENT ITERATION: {} ===",
         input.protocol_iteration

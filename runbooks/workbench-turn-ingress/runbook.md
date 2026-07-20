@@ -24,13 +24,15 @@ structure rather than exact assistant wording.
    `min_boundary: "after_work"`. **queue next** must render `queued next` and return
    `ingress.scope: "next_turn"`. Each rendered row carries the receipt's `input_id`.
 3. **The durable row is authoritative before claim.** Reconcile each receipt against
-   `/api/state.pending_turn_inputs` and the session SQLite `lash_pending_turn_inputs` row.
+   `/api/state.pending_turn_inputs` and the session SQLite `pending_turn_inputs` row.
    A claim may make a row disappear from the pending API quickly; in that case use the
    SQLite row plus trace, never timing alone.
-4. **Injection is transient and exactly once.** Provider-request evidence may show the
-   injected marker directly. Otherwise require exactly one `turn_input.completed` trace
-   claim for the receipt's input id under the original in-flight turn id. It must never
-   appear in committed transcript history or the later queued turn.
+4. **Injection is transient, model-visible, and exactly once.** When the turn crosses an
+   admitted checkpoint and starts another provider iteration, that next request must contain
+   the injected marker. A `turn_input.completed` trace claim is only a settlement fallback
+   when the turn commits before another provider iteration can start; it is not proof of
+   model delivery. The marker must never appear in committed transcript history or the later
+   queued turn.
 5. **Queued means a full committed turn.** The queued marker must be absent from provider
    requests until the first turn settles, then appear in its own provider request and in
    committed session history. `/api/state` and the rendered transcript must show that
@@ -67,9 +69,13 @@ Choose unique literal markers for this run, for example
 
 ## Phase 1 — Establish an in-flight turn
 
-Send a task likely to create multiple provider/tool boundaries, such as a current web
-research comparison that must use `web.search` twice before answering. Poll, do not sleep,
-until all three gates hold:
+Send a task that requires this exact multi-iteration shape: first use Lashlang `sleep` for
+15 seconds without calling a tool, then call `web.search` for one side of a current
+comparison, call `web.search` for the other side in a later iteration (do not batch the
+searches), and only then answer. If provider evidence does not show the initial sleep before
+the first tool batch, restart with a fresh turn; this scenario must not rely on a merely
+"likely" multi-step task. During that initial sleep, inject before the first search/tool
+batch. Poll, do not add an unrelated fixed delay, until all three gates hold:
 
 - the UI shows the running pill and **stop turn**;
 - the composer offers **inject now** and **queue next**;
@@ -106,8 +112,9 @@ Save `03-queue-receipt.json`, `03-queue-store.json`, and screenshot `03-queued.p
 Poll until the initial turn completes and the queued turn starts and completes; never use
 a fixed delay. Gate in this order:
 
-1. provider-request evidence places the injected marker in the initial turn, or exactly
-   one `turn_input.completed` trace claim places its input id under the initial turn id;
+1. the first provider request after the admitted checkpoint contains the injected marker,
+   proving the model received it during the initial turn; exactly one
+   `turn_input.completed` trace claim also places its input id under that turn id;
 2. that marker is absent from the committed transcript in `/api/state` and the session
    store;
 3. the queued marker is absent from every provider request before the initial terminal;
@@ -132,7 +139,7 @@ container are gone.
 | Running window | one active address; both ingress controls visible | | `01-running.png`, `/api/state` |
 | Inject intent | UI label and receipt agree on exact active turn + `after_work` | | `02-injected.png`, receipt/store JSON |
 | Queue intent | UI label and receipt agree on `next_turn` | | `03-queued.png`, receipt/store JSON |
-| Exactly-once injection | one initial-turn provider delivery or one matching completion claim; never committed/later | | `04-provider-order.json`, session store |
+| Exactly-once injection | marker reaches the next initial-turn provider iteration plus one matching completion claim; never committed/later | | `04-provider-order.json`, session store |
 | Post-settle dispatch | queue marker first appears after initial terminal in its own turn | | provider/trace ordering |
 | Transcript fidelity | queued user/assistant turn agrees across UI, `/api/state`, and store | | `04-two-turns-settled.png`, history JSON |
 | Claim settlement | both durable input ids settle with no duplicate or stranded row | | SQLite evidence |
