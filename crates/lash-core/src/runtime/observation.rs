@@ -39,6 +39,10 @@ impl RuntimeObservation {
         runtime: &LashRuntime,
         cursor: SessionCursor,
         previous: Option<&RuntimeObservation>,
+        revision: SessionRevision,
+        read_view: crate::SessionReadView,
+        persisted_state: super::RuntimeSessionState,
+        usage_report: super::SessionUsageReport,
     ) -> Self {
         let (tool_catalog, tool_catalog_error) = match runtime.active_tool_catalog_shared() {
             Ok(catalog) => (catalog, None),
@@ -85,15 +89,14 @@ impl RuntimeObservation {
                 }
                 (None, _) => (None, None, None),
             };
-        let revision = SessionRevision::from_runtime(runtime);
         Self {
             session_id: Arc::from(runtime.session_id()),
             revision,
             cursor,
-            policy: runtime.read_view().policy().clone(),
-            read_view: runtime.read_view(),
-            persisted_state: runtime.export_persisted_state(),
-            usage_report: runtime.usage_report(),
+            policy: read_view.policy().clone(),
+            read_view,
+            persisted_state,
+            usage_report,
             tool_state,
             tool_catalog,
             tool_catalog_error,
@@ -209,6 +212,26 @@ impl RuntimeObservation {
     }
 }
 
+fn export_observation_state(
+    runtime: &LashRuntime,
+) -> (
+    super::RuntimeSessionState,
+    crate::SessionReadView,
+    super::SessionUsageReport,
+) {
+    let mut state = runtime.export_persisted_state();
+    let read_view = runtime.read_view();
+    let shared_ledger = runtime
+        .shared_token_ledger
+        .lock()
+        .expect("token ledger lock");
+    for entry in shared_ledger.iter().cloned() {
+        super::merge_ledger_entry(&mut state.token_ledger, entry);
+    }
+    let usage_report = super::SessionUsageReport::from_entries(&state.token_ledger);
+    (state, read_view, usage_report)
+}
+
 async fn list_scope_process_handles(
     executor: &Arc<dyn crate::ProcessRegistry>,
     scope: &crate::SessionScope,
@@ -239,7 +262,16 @@ impl RuntimeHandle {
     ) -> Self {
         let revision = SessionRevision::from_runtime(&runtime);
         let cursor = live_replay_store.current_cursor(runtime.session_id(), revision);
-        let observation = RuntimeObservation::from_runtime(&runtime, cursor, None);
+        let (state, read_view, usage_report) = export_observation_state(&runtime);
+        let observation = RuntimeObservation::from_runtime(
+            &runtime,
+            cursor,
+            None,
+            revision,
+            read_view,
+            state,
+            usage_report,
+        );
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
             observation: Arc::new(ArcSwap::from_pointee(observation)),
@@ -258,7 +290,7 @@ impl RuntimeHandle {
     pub fn publish_from(&self, runtime: &LashRuntime) {
         let revision = SessionRevision::from_runtime(runtime);
         let previous = self.observation.load_full();
-        let state = runtime.export_persisted_state();
+        let (state, read_view, usage_report) = export_observation_state(runtime);
         if previous.persisted_state.current_agent_frame_id != state.current_agent_frame_id
             && !state.current_agent_frame_id.is_empty()
             && let Err(err) = self.live_replay_store.append(
@@ -279,10 +311,10 @@ impl RuntimeHandle {
             runtime.session_id(),
             revision,
             SessionObservationEventPayload::Committed {
-                read_view: runtime.read_view(),
+                read_view: read_view.clone(),
             },
         ) {
-            Ok(event) => event.cursor,
+            Ok(event) => event.cursor.clone(),
             Err(err) => {
                 tracing::warn!(
                     session_id = %runtime.session_id(),
@@ -298,6 +330,10 @@ impl RuntimeHandle {
                 runtime,
                 cursor,
                 Some(previous.as_ref()),
+                revision,
+                read_view,
+                state,
+                usage_report,
             )));
     }
 
@@ -651,6 +687,7 @@ impl RuntimeHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     struct PanicLiveReplayStore;
 
@@ -660,7 +697,7 @@ mod tests {
             _session_id: &str,
             _revision: SessionRevision,
             _payload: SessionObservationEventPayload,
-        ) -> Result<SessionObservationEvent, LiveReplayStoreError> {
+        ) -> Result<Arc<SessionObservationEvent>, LiveReplayStoreError> {
             panic!("append should not be called by cursor rejection tests")
         }
 
@@ -732,5 +769,121 @@ mod tests {
                 SessionCursorError::Malformed { .. }
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn publish_revision_matches_the_single_export_across_a_commit() {
+        let runtime = LashRuntime::builder()
+            .with_session_id("revision-equivalence")
+            .with_policy(crate::SessionPolicy {
+                model: crate::ModelSpec::from_token_limits(
+                    "test-model",
+                    Default::default(),
+                    1024,
+                    None,
+                )
+                .expect("model"),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("runtime");
+        let handle = RuntimeHandle::new(runtime);
+        let writer = handle.writer();
+        let mut runtime = writer.lock().await;
+        runtime.state.turn_index = 9;
+        runtime.state.head_revision = Some(17);
+
+        let exported = runtime.export_persisted_state();
+        let exported_revision = SessionRevision::from_state(&exported);
+        let accessor_revision = SessionRevision::from_runtime(&runtime);
+        assert_eq!(accessor_revision, exported_revision);
+
+        handle.publish_from(&runtime);
+        assert_eq!(handle.observe().session_revision(), exported_revision);
+    }
+
+    #[tokio::test]
+    async fn publish_keeps_frame_switch_immediately_before_commit() {
+        let runtime = LashRuntime::builder()
+            .with_session_id("publish-order")
+            .with_policy(crate::SessionPolicy {
+                model: crate::ModelSpec::from_token_limits(
+                    "test-model",
+                    Default::default(),
+                    1024,
+                    None,
+                )
+                .expect("model"),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("runtime");
+        let handle = RuntimeHandle::new(runtime);
+        let cursor = handle.observe().cursor().clone();
+        let writer = handle.writer();
+        let mut runtime = writer.lock().await;
+        runtime.state.current_agent_frame_id = "next-frame".to_string();
+
+        handle.publish_from(&runtime);
+        let SessionResume::Replayed { events } = handle
+            .resume_session_observation(&cursor)
+            .expect("replay publication")
+        else {
+            panic!("publication should remain replayable");
+        };
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].payload,
+            SessionObservationEventPayload::AgentFrameSwitched { .. }
+        ));
+        assert!(matches!(
+            events[1].payload,
+            SessionObservationEventPayload::Committed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "manual lane-O publish_from timing measurement"]
+    async fn measure_publish_from_wall_clock() {
+        const COMMITS: usize = 5_000;
+        let runtime = LashRuntime::builder()
+            .with_session_id("publish-perf")
+            .with_policy(crate::SessionPolicy {
+                model: crate::ModelSpec::from_token_limits(
+                    "test-model",
+                    Default::default(),
+                    1024,
+                    None,
+                )
+                .expect("model"),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("runtime");
+        let handle = RuntimeHandle::with_live_replay_store(
+            runtime,
+            Arc::new(InMemoryLiveReplayStore::with_bounds(
+                COMMITS + 1,
+                std::time::Duration::from_secs(120),
+            )),
+        );
+        let writer = handle.writer();
+        let runtime = writer.lock().await;
+        for _ in 0..100 {
+            handle.publish_from(&runtime);
+        }
+        let started = Instant::now();
+        for _ in 0..COMMITS {
+            handle.publish_from(&runtime);
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "publish_from: commits={COMMITS} elapsed_ns={} ns_per_commit={:.3}",
+            elapsed.as_nanos(),
+            elapsed.as_nanos() as f64 / COMMITS as f64,
+        );
     }
 }

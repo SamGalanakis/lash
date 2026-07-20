@@ -12,6 +12,10 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
             pool: self.pool.clone(),
             session_id: Some(request.session_id.clone()),
             bound_session: Arc::new(OnceLock::new()),
+            #[cfg(test)]
+            checkpoint_probe_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            checkpoint_write_transaction_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         if store
             .load_session_meta()
@@ -44,6 +48,10 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
             pool: self.pool.clone(),
             session_id: Some(request.session_id.clone()),
             bound_session: Arc::new(OnceLock::new()),
+            #[cfg(test)]
+            checkpoint_probe_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            checkpoint_write_transaction_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         if store
             .load_session_meta()

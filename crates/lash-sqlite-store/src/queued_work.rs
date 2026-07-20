@@ -61,6 +61,68 @@ pub(crate) fn queued_work_batch_from_conn(
     })
 }
 
+pub(crate) fn queued_work_batches_from_conn(
+    conn: &Connection,
+    rows: &[QueuedBatchRow],
+) -> Result<Vec<QueuedWorkBatch>, StoreError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut sql = "SELECT batch_id, item_id, payload_json
+         FROM queued_work_items
+         WHERE batch_id IN ("
+        .to_string();
+    for index in 0..rows.len() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('?');
+    }
+    sql.push_str(") ORDER BY batch_id ASC, item_index ASC");
+    let mut stmt = conn.prepare(&sql).map_err(sqlite_error)?;
+    let item_rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(rows.iter().map(|row| row.batch_id.as_str())),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(sqlite_error)?;
+    let mut items_by_batch = BTreeMap::<String, Vec<QueuedWorkItem>>::new();
+    for item_row in item_rows {
+        let (batch_id, item_id, payload_json) = item_row.map_err(sqlite_error)?;
+        items_by_batch
+            .entry(batch_id)
+            .or_default()
+            .push(QueuedWorkItem {
+                item_id,
+                payload: decode_queued_payload(payload_json)?,
+            });
+    }
+    rows.iter()
+        .cloned()
+        .map(|row| {
+            let items = items_by_batch.remove(&row.batch_id).unwrap_or_default();
+            Ok(QueuedWorkBatch {
+                batch_id: row.batch_id,
+                session_id: row.session_id,
+                enqueue_seq: row.enqueue_seq,
+                source_key: row.source_key,
+                delivery_policy: decode_delivery_policy(row.delivery_policy)?,
+                slot_policy: decode_slot_policy(row.slot_policy)?,
+                merge_key: decode_merge_key(row.merge_key_json)?,
+                available_at_ms: row.available_at_ms,
+                enqueued_at_ms: row.enqueued_at_ms,
+                items,
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct QueuedBatchRow {
     pub(crate) enqueue_seq: u64,

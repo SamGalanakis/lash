@@ -88,26 +88,27 @@ impl RuntimeTurnDriver<'_> {
         })?;
         let mut transient_messages = Vec::new();
         let mut turn_causes = Vec::new();
-        let turn_input_claim = if let Some(store) = self.session.history_store() {
+        let (turn_input_claim, queue_claim) = if let Some(store) = self.session.history_store() {
             let Some(session_execution_lease) = self.session_execution_lease.as_ref() else {
                 return Err(RuntimeError::new(
                     RuntimeErrorCode::StoreCommitFailed,
-                    "active checkpoint turn-input claim requires a session execution lease",
+                    "active checkpoint work claim requires a session execution lease",
                 ));
             };
             store
-                .claim_active_turn_inputs(
+                .claim_checkpoint_work(
                     &self.session_id,
                     session_execution_lease,
                     &self.runtime_lease_owner,
                     &self.turn_id,
                     checkpoint,
                     64,
+                    64,
                 )
                 .await
                 .map_err(crate::runtime::runtime_error_from_store_commit)?
         } else {
-            None
+            (None, None)
         };
         if let Some(claim) = turn_input_claim {
             let accepted_turn_inputs = claim.accepted_turn_inputs();
@@ -136,26 +137,6 @@ impl RuntimeTurnDriver<'_> {
             }
             self.pending_turn_input_claims.push(claim);
         }
-        let queue_claim = if let Some(store) = self.session.history_store() {
-            let Some(session_execution_lease) = self.session_execution_lease.as_ref() else {
-                return Err(RuntimeError::new(
-                    RuntimeErrorCode::StoreCommitFailed,
-                    "active checkpoint queued-work claim requires a session execution lease",
-                ));
-            };
-            store
-                .claim_ready_queued_work(
-                    &self.session_id,
-                    session_execution_lease,
-                    &self.runtime_lease_owner,
-                    crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
-                    64,
-                )
-                .await
-                .map_err(crate::runtime::runtime_error_from_store_commit)?
-        } else {
-            None
-        };
         if let Some(claim) = queue_claim {
             let materialized = claim
                 .materialize_for_checkpoint_with_attachments(

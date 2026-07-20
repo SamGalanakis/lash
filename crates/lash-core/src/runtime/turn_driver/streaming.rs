@@ -691,8 +691,9 @@ impl RuntimeTurnDriver<'_> {
             *state.abort_requested = true;
         }
         for reasoning_delta in outcome.reasoning_deltas {
+            let reasoning_delta: Arc<str> = reasoning_delta.into();
             state.stream_accumulator.push_reasoning(
-                reasoning_delta.clone(),
+                reasoning_delta.to_string(),
                 None,
                 Vec::new(),
                 None,
@@ -700,7 +701,7 @@ impl RuntimeTurnDriver<'_> {
             send_session_event(
                 event_tx,
                 SessionStreamEvent::ReasoningDelta {
-                    content: reasoning_delta.clone(),
+                    content: reasoning_delta.to_string(),
                 },
             )
             .await;
@@ -732,10 +733,11 @@ impl RuntimeTurnDriver<'_> {
         );
         if !text.is_empty() {
             state.stream_accumulator.push_text(&text);
+            let text: Arc<str> = text.into();
             send_session_event(
                 event_tx,
                 SessionStreamEvent::TextDelta {
-                    content: text.clone(),
+                    content: text.to_string(),
                 },
             )
             .await;
@@ -830,7 +832,7 @@ impl RuntimeTurnDriver<'_> {
                     send_turn_activity(
                         event_tx,
                         correlation_id,
-                        TurnEvent::ReasoningDelta { text: delta },
+                        TurnEvent::ReasoningDelta { text: delta.into() },
                     )
                     .await;
                 }
@@ -918,7 +920,9 @@ impl RuntimeTurnDriver<'_> {
                     send_turn_activity(
                         event_tx,
                         correlation_id,
-                        TurnEvent::ReasoningDelta { text: text.clone() },
+                        TurnEvent::ReasoningDelta {
+                            text: text.clone().into(),
+                        },
                     )
                     .await;
                 }

@@ -97,6 +97,125 @@ fn restate_session_cancel_sweep_excludes_turn_control_addresses() {
 }
 
 #[test]
+fn durable_wait_index_upgrade_migrates_legacy_aggregate_state() {
+    let session_id = "upgrade-session";
+    let durable_wait = RestateDurableWaitAddress {
+        workflow_key: "durable-workflow".to_string(),
+        session_id: Some(session_id.to_string()),
+        classification: RestateDurableWaitClassification::DurableWait,
+    };
+    let turn_control = RestateDurableWaitAddress {
+        workflow_key: "control-workflow".to_string(),
+        session_id: Some(session_id.to_string()),
+        classification: RestateDurableWaitClassification::TurnControl,
+    };
+    let awakeable = RestateDurableWaitAwakeableRequest {
+        address: durable_wait.clone(),
+        awakeable_id: "awakeable-1".to_string(),
+    };
+
+    // This byte payload is the value persisted under the old `waits` key.
+    let old_layout_bytes = serde_json::to_vec(&RestateDurableWaitIndexState {
+        revoked: true,
+        waits: vec![durable_wait.clone(), turn_control.clone()],
+        awakeables: vec![awakeable.clone()],
+    })
+    .expect("serialize old wait-index layout");
+    let old_layout: RestateDurableWaitIndexState = serde_json::from_slice(&old_layout_bytes)
+        .expect("read old wait-index layout after upgrade");
+
+    let (metadata, migrated_waits) = migrate_legacy_durable_wait_index(old_layout);
+
+    assert!(metadata.revoked);
+    assert_eq!(metadata.awakeables.len(), 1);
+    assert_eq!(metadata.awakeables[0].awakeable_id, awakeable.awakeable_id);
+    assert_eq!(migrated_waits.len(), 2);
+    for (state_key, expected) in migrated_waits {
+        assert!(state_key.starts_with(DURABLE_WAIT_INDEX_WAIT_PREFIX));
+        assert_eq!(
+            durable_wait_address_from_state_key(session_id, &state_key),
+            Some(expected)
+        );
+    }
+    assert!(DURABLE_WAIT_INDEX_METADATA_KEY.starts_with("wait-index/v1/"));
+}
+
+fn wait_index_measurement_address(ordinal: usize) -> RestateDurableWaitAddress {
+    RestateDurableWaitAddress {
+        workflow_key: format!("{ordinal:064x}"),
+        session_id: Some("restate-postgres-workers-e2e".to_string()),
+        classification: RestateDurableWaitClassification::DurableWait,
+    }
+}
+
+fn aggregate_wait_index_serialized_bytes(k: usize) -> usize {
+    let waits = (0..k)
+        .map(wait_index_measurement_address)
+        .collect::<Vec<_>>();
+    let mut bytes = 0;
+    for registered in 1..=k {
+        bytes += serde_json::to_vec(&RestateDurableWaitIndexState {
+            revoked: false,
+            waits: waits[..registered].to_vec(),
+            awakeables: Vec::new(),
+        })
+        .expect("serialize aggregate wait-index register state")
+        .len();
+    }
+    for remaining in (0..k).rev() {
+        bytes += serde_json::to_vec(&RestateDurableWaitIndexState {
+            revoked: false,
+            waits: waits[..remaining].to_vec(),
+            awakeables: Vec::new(),
+        })
+        .expect("serialize aggregate wait-index settle state")
+        .len();
+    }
+    bytes
+}
+
+fn keyed_wait_index_serialized_bytes(k: usize) -> usize {
+    let metadata_bytes = serde_json::to_vec(&RestateDurableWaitIndexMetadata::default())
+        .expect("serialize keyed wait-index metadata")
+        .len();
+    metadata_bytes
+        + (0..k)
+            .map(wait_index_measurement_address)
+            .map(|address| {
+                serde_json::to_vec(&address)
+                    .expect("serialize keyed wait-index entry")
+                    .len()
+            })
+            .sum::<usize>()
+}
+
+#[test]
+fn durable_wait_index_k_effect_measurements_are_linear() {
+    for k in [4, 16] {
+        // Each concurrent effect produces one register and one settle index
+        // invocation in the workers-harness turn shape.
+        let index_object_calls = 2 * k;
+        let before_bytes = aggregate_wait_index_serialized_bytes(k);
+        let after_bytes = keyed_wait_index_serialized_bytes(k);
+        println!(
+            "wait-index measurement K={k}: index_object_calls={index_object_calls}, before_serialized_state_bytes={before_bytes}, after_serialized_state_bytes={after_bytes}"
+        );
+        assert_eq!(index_object_calls, 2 * k);
+        assert!(after_bytes < before_bytes);
+    }
+    assert_eq!(
+        keyed_wait_index_serialized_bytes(16)
+            - serde_json::to_vec(&RestateDurableWaitIndexMetadata::default())
+                .expect("serialize metadata")
+                .len(),
+        4 * (keyed_wait_index_serialized_bytes(4)
+            - serde_json::to_vec(&RestateDurableWaitIndexMetadata::default())
+                .expect("serialize metadata")
+                .len())
+    );
+}
+
+#[test]
 fn restate_effect_name_uses_lash_replay_key() {
     let invocation = RuntimeInvocation::effect(
         lash_core::runtime::RuntimeScope::for_turn("session", "turn", 1, 2),
@@ -516,6 +635,35 @@ impl lash_core::QueuedWorkStore for CommitRetryStore {
                 session_execution_lease,
                 owner,
                 boundary,
+                max_batches,
+            )
+            .await
+    }
+
+    async fn claim_checkpoint_work(
+        &self,
+        session_id: &str,
+        session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        owner: &lash_core::LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: lash_core::CheckpointKind,
+        max_inputs: usize,
+        max_batches: usize,
+    ) -> Result<
+        (
+            Option<lash_core::runtime::TurnInputClaim>,
+            Option<lash_core::runtime::QueuedWorkClaim>,
+        ),
+        lash_core::StoreError,
+    > {
+        self.inner
+            .claim_checkpoint_work(
+                session_id,
+                session_execution_lease,
+                owner,
+                turn_id,
+                checkpoint,
+                max_inputs,
                 max_batches,
             )
             .await

@@ -183,10 +183,11 @@ impl LashRuntime {
                 leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
             },
         };
-        let Some(read) = store.load_session(scope).await.map_err(|err| {
+        let read = store.load_session(scope).await.map_err(|err| {
             SessionError::Protocol(format!("failed to refresh session graph from store: {err}"))
-        })?
-        else {
+        })?;
+        self.graph_loaded_from_store = true;
+        let Some(read) = read else {
             return Ok(());
         };
         let has_newer_graph = self.state.head_revision != Some(read.head_revision)

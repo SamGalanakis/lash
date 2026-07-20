@@ -33,6 +33,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
@@ -114,6 +116,10 @@ pub struct Store {
     artifact_cache: Mutex<BTreeMap<lashlang::ModuleRef, Arc<lashlang::ModuleArtifact>>>,
     options: StoreOptions,
     commit_count: AtomicU64,
+    #[cfg(test)]
+    checkpoint_probe_count: AtomicUsize,
+    #[cfg(test)]
+    checkpoint_write_transaction_count: AtomicUsize,
 }
 
 /// SQLite-backed process registry for one configured runtime deployment.
@@ -744,6 +750,17 @@ mod tests {
     use super::*;
     use lash_core::ProcessInput;
     use lashlang::LashlangArtifactStore;
+
+    #[tokio::test]
+    async fn checkpoint_probe_skips_writes_for_deferred_head() {
+        let store = Arc::new(Store::memory().await.expect("open counter store"));
+        lash_core::testing::conformance::checkpoint_claim_probe_transaction_counts(
+            Arc::clone(&store) as Arc<dyn RuntimePersistence>,
+            "sqlite-checkpoint-counter",
+            || store.checkpoint_claim_counts(),
+        )
+        .await;
+    }
 
     fn registration(id: &str) -> ProcessRegistration {
         ProcessRegistration::new(

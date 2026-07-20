@@ -1,5 +1,7 @@
 //! Compiled sources for the Rust snippets on `docs/streaming.html`.
 
+use std::sync::Arc;
+
 use lash::observe::{SessionObservationEvent, SessionObservationEventPayload};
 use lash::persistence::SessionReadView;
 use lash::{LashSession, TurnActivity, TurnActivitySink, TurnInput};
@@ -118,26 +120,26 @@ async fn reconnect_session(
 }
 // docs:end:session-reconnect
 
-async fn fold_session_event(event: SessionObservationEvent) -> anyhow::Result<()> {
+async fn fold_session_event(event: Arc<SessionObservationEvent>) -> anyhow::Result<()> {
     // docs:start:fold-session-event
-    match event.payload {
+    match &event.payload {
         SessionObservationEventPayload::TurnActivity(activity) => {
-            render_activity(activity).await?;
+            render_activity(activity.clone()).await?;
         }
         SessionObservationEventPayload::Committed { read_view } => {
-            append_committed_view(&read_view).await?;
+            append_committed_view(read_view).await?;
         }
         SessionObservationEventPayload::AgentFrameSwitched { frame_id } => {
-            update_frame(&frame_id).await?;
+            update_frame(frame_id).await?;
         }
         SessionObservationEventPayload::QueueChanged { batch_ids, .. } => {
             // Queue events cover both pending user input ids and non-user
             // queued-work batch ids; refresh the surfaces separately.
-            refetch_pending_turn_inputs(&batch_ids).await?;
-            refetch_queued_work_summaries(&batch_ids).await?;
+            refetch_pending_turn_inputs(batch_ids).await?;
+            refetch_queued_work_summaries(batch_ids).await?;
         }
         SessionObservationEventPayload::ProcessChanged { process_ids, .. } => {
-            refetch_process_summaries(&process_ids).await?;
+            refetch_process_summaries(process_ids).await?;
         }
     }
     // docs:end:fold-session-event

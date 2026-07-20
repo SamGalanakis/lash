@@ -122,14 +122,14 @@ struct TurnUiState {
 #[async_trait]
 impl TurnActivitySink for AppEvents {
     async fn emit(&amp;self, activity: TurnActivity) {
-        let correlation_id = activity.correlation_id.0.clone();
+        let correlation_id = activity.correlation_id.0.to_string();
         match activity.event {
             TurnEvent::AssistantProseDelta { text } =&gt; {
-                append_live_text(text).await;
+                append_live_text(text.to_string()).await;
             }
             TurnEvent::ReasoningDelta { text } =&gt; {
                 let row = self.turn_state.lock().unwrap().reasoning.clone();
-                let row = upsert_reasoning_row(row, text).await;
+                let row = upsert_reasoning_row(row, text.to_string()).await;
                 self.turn_state.lock().unwrap().reasoning = Some(row);
             }
             TurnEvent::ToolCallStarted { name, args, .. } =&gt; {

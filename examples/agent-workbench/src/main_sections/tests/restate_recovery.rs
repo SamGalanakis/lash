@@ -76,7 +76,7 @@ async fn live_restate_suspended_sleep_cancel_wakes_and_streams_evidence_inner() 
         panic!("expected exactly one routed suspended turn")
     };
     let address = address.clone();
-    let mut events = harness.state.event_tx.subscribe();
+    let mut events = harness.state.event_tx.subscribe(&session_id);
     let started = tokio::time::Instant::now();
     let receipts = harness
         .state
@@ -124,10 +124,7 @@ async fn live_restate_suspended_sleep_cancel_wakes_and_streams_evidence_inner() 
         loop {
             if matches!(
                 events.recv().await,
-                Ok(SessionStreamItem {
-                    session_id: ref event_session_id,
-                    item: StreamItem::Message { ref message },
-                }) if event_session_id == &session_id && message.text == expected_message
+                Ok(StreamItem::Message { ref message }) if message.text == expected_message
             ) {
                 break;
             }
@@ -178,7 +175,8 @@ async fn live_restate_provider_auth_failure_terminalizes_and_session_recovers_in
         failure_provider::DevProviderScenario::AuthFailureOnce,
     )
     .await;
-    let mut product_events = harness.state.event_tx.subscribe();
+    let session_id = harness.state.current_session_id();
+    let mut product_events = harness.state.event_tx.subscribe(&session_id);
     let (failed_invocation, failed_address) =
         submit_workbench_turn_via_restate(&harness.state, "trigger deterministic auth failure")
             .await;
@@ -228,10 +226,7 @@ async fn live_restate_provider_auth_failure_terminalizes_and_session_recovers_in
             .await
             .expect("failure transcript event timeout")
             .expect("failure transcript event");
-        if event.session_id != failed_address.session_id {
-            continue;
-        }
-        match event.item {
+        match event {
             StreamItem::Error { message } => rendered_error = Some(message),
             StreamItem::Done => saw_done = true,
             _ => {}
@@ -496,7 +491,7 @@ fn assert_single_retry_marker_message(projection: &str, messages: &[lash::messag
 }
 
 fn fold_retry_observer_prose(
-    events: &[lash::observe::SessionObservationEvent],
+    events: &[Arc<lash::observe::SessionObservationEvent>],
 ) -> (String, usize) {
     let mut chunks = Vec::new();
     let mut resets = 0;
@@ -520,7 +515,10 @@ fn fold_retry_observer_prose(
         }
     }
     (
-        chunks.into_iter().map(|(_, text)| text).collect(),
+        chunks
+            .into_iter()
+            .map(|(_, text)| text.to_string())
+            .collect(),
         resets,
     )
 }

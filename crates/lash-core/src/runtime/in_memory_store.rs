@@ -162,6 +162,12 @@ pub struct InMemorySessionStore {
     claim_after_lease_validation_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     fail_next_exact_queue_claim: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    load_session_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    checkpoint_probe_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    checkpoint_write_transaction_count: std::sync::atomic::AtomicUsize,
 }
 
 impl InMemorySessionStore {
@@ -191,6 +197,12 @@ impl InMemorySessionStore {
             claim_after_lease_validation_hook: Mutex::new(None),
             #[cfg(test)]
             fail_next_exact_queue_claim: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            load_session_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            checkpoint_probe_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            checkpoint_write_transaction_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -395,13 +407,6 @@ impl InMemorySessionStore {
         owner: &crate::LeaseOwnerIdentity,
         kind: InMemoryQueuedWorkClaimKind,
     ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
-        let max_batches = match kind {
-            InMemoryQueuedWorkClaimKind::LeadingSessionCommand => 1,
-            InMemoryQueuedWorkClaimKind::TurnWork { max_batches, .. } => max_batches,
-        };
-        if max_batches == 0 {
-            return Ok(None);
-        }
         let _transaction = self
             .write_transaction
             .lock()
@@ -409,6 +414,28 @@ impl InMemorySessionStore {
         self.verify_session_execution_lease(session_id, session_execution_lease)?;
         #[cfg(test)]
         self.run_claim_after_lease_validation_hook();
+        self.claim_ready_queued_work_after_lease_validation(
+            session_id,
+            session_execution_lease,
+            owner,
+            kind,
+        )
+    }
+
+    fn claim_ready_queued_work_after_lease_validation(
+        &self,
+        session_id: &str,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
+        owner: &crate::LeaseOwnerIdentity,
+        kind: InMemoryQueuedWorkClaimKind,
+    ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
+        let max_batches = match kind {
+            InMemoryQueuedWorkClaimKind::LeadingSessionCommand => 1,
+            InMemoryQueuedWorkClaimKind::TurnWork { max_batches, .. } => max_batches,
+        };
+        if max_batches == 0 {
+            return Ok(None);
+        }
         // The fence is validated live, so its fencing token is the currently-live
         // session-lease generation. A row is claimable when it is unheld or its
         // pinned generation differs from ours; same-generation self-steal is
@@ -500,9 +527,6 @@ impl InMemorySessionStore {
         max_inputs: usize,
         mode: crate::TurnInputClaimMode,
     ) -> Result<Option<crate::TurnInputClaim>, crate::store::StoreError> {
-        if max_inputs == 0 {
-            return Ok(None);
-        }
         let _transaction = self
             .write_transaction
             .lock()
@@ -510,6 +534,26 @@ impl InMemorySessionStore {
         self.verify_session_execution_lease(session_id, session_execution_lease)?;
         #[cfg(test)]
         self.run_claim_after_lease_validation_hook();
+        self.claim_pending_turn_inputs_after_lease_validation(
+            session_id,
+            session_execution_lease,
+            owner,
+            max_inputs,
+            mode,
+        )
+    }
+
+    fn claim_pending_turn_inputs_after_lease_validation(
+        &self,
+        session_id: &str,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
+        owner: &crate::LeaseOwnerIdentity,
+        max_inputs: usize,
+        mode: crate::TurnInputClaimMode,
+    ) -> Result<Option<crate::TurnInputClaim>, crate::store::StoreError> {
+        if max_inputs == 0 {
+            return Ok(None);
+        }
         // Validated-live fence: its fencing token is the currently-live
         // session-lease generation. Rows pinned to it are our own live claims;
         // rows pinned to any other generation (or unheld) are claimable
@@ -587,6 +631,60 @@ impl InMemorySessionStore {
             inputs,
         }))
     }
+
+    fn checkpoint_work_pending_in_memory(
+        &self,
+        session_id: &str,
+        generation: u64,
+        turn_id: &str,
+        checkpoint: crate::CheckpointKind,
+        max_inputs: usize,
+        max_batches: usize,
+    ) -> Result<bool, crate::store::StoreError> {
+        let has_turn_input = max_inputs > 0
+            && self
+                .pending_turn_inputs
+                .lock()
+                .expect("lock pending turn input")
+                .iter()
+                .any(|entry| {
+                    entry.input.session_id == session_id
+                        && entry.input.state == crate::TurnInputState::PendingActive
+                        && (entry.claim_token.is_none()
+                            || entry.claim_session_lease_generation != generation)
+                        && entry
+                            .input
+                            .ingress
+                            .active_turn_id()
+                            .is_some_and(|active| active == turn_id)
+                        && entry.input.ingress.admits_checkpoint(checkpoint)
+                });
+        if has_turn_input || max_batches == 0 {
+            return Ok(has_turn_input);
+        }
+
+        let now = self.clock.timestamp_ms();
+        let queued = self.queued_work.lock().expect("lock queued work");
+        let first_ready = queued
+            .iter()
+            .filter(|entry| {
+                entry.batch.session_id == session_id
+                    && entry.batch.available_at_ms <= now
+                    && (entry.claim_token.is_none()
+                        || entry.claim_session_lease_generation != generation)
+            })
+            .min_by_key(|entry| entry.batch.enqueue_seq);
+        first_ready
+            .map(|entry| {
+                Self::queued_batch_work_class(&entry.batch).map(|class| {
+                    class == crate::runtime::QueuedWorkClass::TurnWork
+                        && entry.batch.delivery_policy
+                            == crate::DeliveryPolicy::EarliestSafeBoundary
+                })
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
 }
 
 impl Default for InMemorySessionStore {
@@ -601,6 +699,9 @@ impl crate::store::SessionCommitStore for InMemorySessionStore {
         &self,
         scope: crate::store::SessionReadScope,
     ) -> Result<Option<crate::store::PersistedSessionRead>, crate::store::StoreError> {
+        #[cfg(test)]
+        self.load_session_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Some(meta) = self.session_head_meta.lock().expect("lock store").clone() else {
             return Ok(None);
         };
@@ -1309,6 +1410,20 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
 impl InMemorySessionStore {
     pub(crate) async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
         *self.session_head_meta.lock().expect("lock store") = Some(meta);
+    }
+
+    pub(crate) fn load_session_count(&self) -> usize {
+        self.load_session_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn checkpoint_claim_counts(&self) -> (usize, usize) {
+        (
+            self.checkpoint_probe_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.checkpoint_write_transaction_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 }
 

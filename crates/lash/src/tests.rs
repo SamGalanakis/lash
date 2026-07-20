@@ -445,6 +445,25 @@ impl lash_core::QueuedWorkStore for SnapshotStore {
         Ok(None)
     }
 
+    async fn claim_checkpoint_work(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _turn_id: &str,
+        _checkpoint: lash_core::CheckpointKind,
+        _max_inputs: usize,
+        _max_batches: usize,
+    ) -> std::result::Result<
+        (
+            Option<lash_core::runtime::TurnInputClaim>,
+            Option<lash_core::runtime::QueuedWorkClaim>,
+        ),
+        lash_core::store::StoreError,
+    > {
+        Ok((None, None))
+    }
+
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         _session_id: &str,
@@ -820,6 +839,25 @@ impl lash_core::QueuedWorkStore for BoundSessionStore {
         Ok(None)
     }
 
+    async fn claim_checkpoint_work(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _turn_id: &str,
+        _checkpoint: lash_core::CheckpointKind,
+        _max_inputs: usize,
+        _max_batches: usize,
+    ) -> std::result::Result<
+        (
+            Option<lash_core::runtime::TurnInputClaim>,
+            Option<lash_core::runtime::QueuedWorkClaim>,
+        ),
+        lash_core::store::StoreError,
+    > {
+        Ok((None, None))
+    }
+
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         _session_id: &str,
@@ -981,7 +1019,7 @@ fn assistant_prose(events: &[TurnActivity]) -> String {
     events
         .iter()
         .filter_map(|activity| match &activity.event {
-            TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
+            TurnEvent::AssistantProseDelta { text } => Some(text.as_ref()),
             _ => None,
         })
         .collect()
@@ -1779,7 +1817,7 @@ fn inline_scope(scope: lash_core::ExecutionScope) -> lash_core::ScopedEffectCont
 fn turn_scope(session_id: &str) -> lash_core::ScopedEffectController<'static> {
     inline_scope(lash_core::ExecutionScope::turn(
         session_id,
-        lash_core::TurnActivityId::fresh().0,
+        lash_core::TurnActivityId::fresh().0.to_string(),
     ))
 }
 

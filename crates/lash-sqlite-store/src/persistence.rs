@@ -25,6 +25,53 @@
 
 use super::*;
 
+const SQLITE_QUEUED_WORK_HEAD_CANDIDATE_PREDICATE: &str = "session_id = ?1
+       AND available_at_ms <= ?2
+       AND (
+            claim_token IS NULL
+            OR claim_session_lease_generation <> ?3
+       )";
+
+fn sqlite_queued_work_head_candidate_cte(boundary: QueuedWorkClaimBoundary) -> String {
+    let delivery_gate = match boundary {
+        QueuedWorkClaimBoundary::Idle => "",
+        QueuedWorkClaimBoundary::ActiveTurnCheckpoint => {
+            "WHERE head_delivery_policy = 'earliest_safe_boundary'"
+        }
+    };
+    format!(
+        "queued_work_head_candidate AS (
+            SELECT head_enqueue_seq, head_batch_id, head_delivery_policy
+            FROM (
+                SELECT enqueue_seq AS head_enqueue_seq,
+                       batch_id AS head_batch_id,
+                       delivery_policy AS head_delivery_policy
+                FROM queued_work_batches
+                WHERE {SQLITE_QUEUED_WORK_HEAD_CANDIDATE_PREDICATE}
+                ORDER BY enqueue_seq ASC
+                LIMIT 1
+            ) AS unfiltered_head
+            {delivery_gate}
+         )"
+    )
+}
+
+fn sqlite_queued_work_claim_candidates_sql(boundary: QueuedWorkClaimBoundary) -> String {
+    let head_candidate = sqlite_queued_work_head_candidate_cte(boundary);
+    format!(
+        "WITH {head_candidate}
+         SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
+                claim_owner_liveness_json, claim_token, claim_session_lease_generation
+         FROM queued_work_batches
+         CROSS JOIN queued_work_head_candidate
+         WHERE {SQLITE_QUEUED_WORK_HEAD_CANDIDATE_PREDICATE}
+         ORDER BY enqueue_seq ASC
+         LIMIT ?4"
+    )
+}
+
 #[async_trait::async_trait]
 impl SessionCommitStore for Store {
     fn durability_tier(&self) -> DurabilityTier {
@@ -820,21 +867,9 @@ impl QueuedWorkStore for Store {
                     let generation = session_execution_lease.fencing_token;
                     let candidate_rows = {
                         let mut stmt = tx
-                            .prepare(
-                                "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                                        slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
-                                 FROM queued_work_batches
-                                 WHERE session_id = ?1
-                                   AND available_at_ms <= ?2
-                                   AND (
-                                        claim_token IS NULL
-                                        OR claim_session_lease_generation <> ?3
-                                   )
-                                 ORDER BY enqueue_seq ASC
-                                 LIMIT ?4",
-                            )
+                            .prepare(&sqlite_queued_work_claim_candidates_sql(
+                                QueuedWorkClaimBoundary::Idle,
+                            ))
                             .map_err(sqlite_error)?;
                         let rows = stmt
                             .query_map(
@@ -939,7 +974,8 @@ impl QueuedWorkStore for Store {
                         session_lease_generation: lease.session_lease_generation,
                         batches: selected_batches,
                     })))
-                })();
+                })(
+                );
                 match outcome {
                     Ok(TxOutcome::Commit(value)) => Ok(TxOutcome::Commit(Ok(value))),
                     Ok(TxOutcome::Rollback(value)) => Ok(TxOutcome::Rollback(Ok(value))),
@@ -977,21 +1013,7 @@ impl QueuedWorkStore for Store {
                     let generation = session_execution_lease.fencing_token;
                     let candidate_rows = {
                         let mut stmt = tx
-                            .prepare(
-                                "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                                        slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                        claim_fencing_token, claim_owner_id, claim_owner_incarnation_id,
-                                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
-                                 FROM queued_work_batches
-                                 WHERE session_id = ?1
-                                   AND available_at_ms <= ?2
-                                   AND (
-                                        claim_token IS NULL
-                                        OR claim_session_lease_generation <> ?3
-                                   )
-                                 ORDER BY enqueue_seq ASC
-                                 LIMIT ?4",
-                            )
+                            .prepare(&sqlite_queued_work_claim_candidates_sql(boundary))
                             .map_err(sqlite_error)?;
                         let rows = stmt
                             .query_map(
@@ -1013,10 +1035,7 @@ impl QueuedWorkStore for Store {
                                 || row.claim_session_lease_generation != generation
                         })
                         .collect::<Vec<_>>();
-                    let candidate_batches = candidate_rows
-                        .iter()
-                        .map(|row| queued_work_batch_from_conn(tx, row.clone()))
-                        .collect::<Result<Vec<_>, StoreError>>()?;
+                    let candidate_batches = queued_work_batches_from_conn(tx, &candidate_rows)?;
                     let candidates = candidate_rows
                         .iter()
                         .zip(candidate_batches.iter())
@@ -1108,10 +1127,101 @@ impl QueuedWorkStore for Store {
                         session_lease_generation: lease.session_lease_generation,
                         batches: selected_batches,
                     })))
-                })();
+                })(
+                );
                 // Lower a `StoreError` into the rollback arm so the closure body
                 // can keep using `?` while still propagating the error to the
                 // caller. Encode it as a `Result` carried out of the flow.
+                match outcome {
+                    Ok(TxOutcome::Commit(value)) => Ok(TxOutcome::Commit(Ok(value))),
+                    Ok(TxOutcome::Rollback(value)) => Ok(TxOutcome::Rollback(Ok(value))),
+                    Err(err) => Ok(TxOutcome::Rollback(Err(err))),
+                }
+            })
+            .await
+            .map_err(sqlite_error)?
+    }
+
+    async fn claim_checkpoint_work(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: lash_core::CheckpointKind,
+        max_inputs: usize,
+        max_batches: usize,
+    ) -> Result<(Option<lash_core::TurnInputClaim>, Option<QueuedWorkClaim>), StoreError> {
+        #[cfg(test)]
+        self.checkpoint_probe_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let now = self.clock.timestamp_ms();
+        if !checkpoint_work_pending_sqlite(
+            &self.conn,
+            now,
+            session_id,
+            session_execution_lease.fencing_token,
+            turn_id,
+            checkpoint,
+            max_inputs,
+            max_batches,
+        )
+        .await?
+        {
+            return Ok((None, None));
+        }
+
+        #[cfg(test)]
+        self.checkpoint_write_transaction_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let session_id = session_id.to_string();
+        let session_execution_lease = session_execution_lease.clone();
+        let owner = owner.clone();
+        let turn_id = turn_id.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                let outcome: Result<
+                    TxOutcome<(Option<lash_core::TurnInputClaim>, Option<QueuedWorkClaim>)>,
+                    StoreError,
+                > = (|| {
+                    ensure_session_execution_lease_conn(
+                        tx,
+                        &session_id,
+                        &session_execution_lease,
+                        now,
+                    )?;
+                    let input = claim_pending_turn_inputs_sqlite_conn(
+                        tx,
+                        now,
+                        &session_id,
+                        &session_execution_lease,
+                        &owner,
+                        max_inputs,
+                        lash_core::TurnInputClaimMode::ActiveTurn {
+                            turn_id,
+                            checkpoint,
+                        },
+                    )?;
+                    let input = match input {
+                        TxOutcome::Commit(input) => input,
+                        TxOutcome::Rollback(input) => {
+                            return Ok(TxOutcome::Rollback((input, None)));
+                        }
+                    };
+                    let queued = claim_ready_queued_work_sqlite_conn(
+                        tx,
+                        now,
+                        &session_id,
+                        &session_execution_lease,
+                        &owner,
+                        QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                        max_batches,
+                    )?;
+                    match queued {
+                        TxOutcome::Commit(queued) => Ok(TxOutcome::Commit((input, queued))),
+                        TxOutcome::Rollback(queued) => Ok(TxOutcome::Rollback((None, queued))),
+                    }
+                })();
                 match outcome {
                     Ok(TxOutcome::Commit(value)) => Ok(TxOutcome::Commit(Ok(value))),
                     Ok(TxOutcome::Rollback(value)) => Ok(TxOutcome::Rollback(Ok(value))),
@@ -1269,6 +1379,40 @@ impl QueuedWorkStore for Store {
                     params![session_id, claim_id, lease_token],
                 )
             })
+            .await
+            .map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    async fn abandon_queued_work_claims(
+        &self,
+        claims: &[QueuedWorkClaim],
+    ) -> Result<(), StoreError> {
+        if claims.is_empty() {
+            return Ok(());
+        }
+        let mut sql = "UPDATE queued_work_batches
+             SET claim_id = NULL,
+                 claim_owner_id = NULL,
+                 claim_owner_incarnation_id = NULL,
+                 claim_owner_liveness_json = NULL,
+                 claim_token = NULL,
+                 claim_session_lease_generation = 0
+             WHERE (session_id, claim_id, claim_token) IN ("
+            .to_string();
+        let mut values: Vec<rusqlite::types::Value> = Vec::with_capacity(claims.len() * 3);
+        for (index, claim) in claims.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str("(?, ?, ?)");
+            values.push(claim.session_id.clone().into());
+            values.push(claim.claim_id.clone().into());
+            values.push(claim.lease_token.clone().into());
+        }
+        sql.push(')');
+        self.conn
+            .write(move |tx| tx.execute(&sql, rusqlite::params_from_iter(values.iter())))
             .await
             .map_err(sqlite_error)?;
         Ok(())
@@ -1742,6 +1886,44 @@ impl TurnInputStore for Store {
             .map_err(sqlite_error)?;
         Ok(())
     }
+
+    async fn abandon_turn_input_claims(
+        &self,
+        claims: &[lash_core::TurnInputClaim],
+    ) -> Result<(), StoreError> {
+        if claims.is_empty() {
+            return Ok(());
+        }
+        let mut sql = "UPDATE pending_turn_inputs
+             SET state = CASE
+                     WHEN state = 'accepted' THEN 'pending_active'
+                     ELSE state
+                 END,
+                 claim_id = NULL,
+                 claim_owner_id = NULL,
+                 claim_owner_incarnation_id = NULL,
+                 claim_owner_liveness_json = NULL,
+                 claim_token = NULL,
+                 claim_session_lease_generation = 0
+             WHERE (session_id, claim_id, claim_token) IN ("
+            .to_string();
+        let mut values: Vec<rusqlite::types::Value> = Vec::with_capacity(claims.len() * 3);
+        for (index, claim) in claims.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str("(?, ?, ?)");
+            values.push(claim.session_id.clone().into());
+            values.push(claim.claim_id.clone().into());
+            values.push(claim.lease_token.clone().into());
+        }
+        sql.push(')');
+        self.conn
+            .write(move |tx| tx.execute(&sql, rusqlite::params_from_iter(values.iter())))
+            .await
+            .map_err(sqlite_error)?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -1867,6 +2049,325 @@ fn cancel_pending_turn_input_row_conn(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn checkpoint_work_pending_sqlite(
+    conn: &SqliteConnection,
+    now: u64,
+    session_id: &str,
+    generation: u64,
+    turn_id: &str,
+    checkpoint: lash_core::CheckpointKind,
+    max_inputs: usize,
+    max_batches: usize,
+) -> Result<bool, StoreError> {
+    if max_inputs == 0 && max_batches == 0 {
+        return Ok(false);
+    }
+    let session_id = session_id.to_string();
+    let turn_id = turn_id.to_string();
+    conn.call(move |conn| {
+        let outcome: Result<bool, StoreError> = (|| {
+            let head_candidate = sqlite_queued_work_head_candidate_cte(
+                QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+            );
+            let sql = format!(
+                "WITH {head_candidate}
+                 SELECT (
+                    ?7 > 0 AND EXISTS (
+                        SELECT 1
+                        FROM pending_turn_inputs
+                        WHERE session_id = ?1
+                          AND state = ?4
+                          AND (claim_token IS NULL OR claim_session_lease_generation <> ?3)
+                          AND json_extract(ingress_json, '$.scope') = 'active_turn'
+                          AND json_extract(ingress_json, '$.turn_id') = ?5
+                          AND (
+                              ?6 = 'before_completion'
+                              OR COALESCE(
+                                  json_extract(ingress_json, '$.min_boundary'),
+                                  'after_work'
+                              ) = 'after_work'
+                          )
+                        LIMIT 1
+                    )
+                ) OR (
+                    ?8 > 0 AND EXISTS (
+                        SELECT 1
+                        FROM queued_work_head_candidate AS head
+                        JOIN queued_work_items AS item
+                          ON item.batch_id = head.head_batch_id
+                        WHERE json_extract(item.payload_json, '$.type') <> 'session_command'
+                        LIMIT 1
+                    )
+                )"
+            );
+            let pending: i64 = conn
+                .query_row(
+                    &sql,
+                    params![
+                        session_id,
+                        now as i64,
+                        generation as i64,
+                        lash_core::TurnInputState::PendingActive.as_str(),
+                        turn_id,
+                        match checkpoint {
+                            lash_core::CheckpointKind::AfterWork => "after_work",
+                            lash_core::CheckpointKind::BeforeCompletion => "before_completion",
+                        },
+                        max_inputs as i64,
+                        max_batches as i64,
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite_error)?;
+            Ok(pending != 0)
+        })();
+        Ok(outcome)
+    })
+    .await
+    .map_err(sqlite_error)?
+}
+
+#[allow(clippy::too_many_arguments)]
+fn claim_ready_queued_work_sqlite_conn(
+    tx: &Connection,
+    now: u64,
+    session_id: &str,
+    session_execution_lease: &SessionExecutionLeaseFence,
+    owner: &LeaseOwnerIdentity,
+    boundary: QueuedWorkClaimBoundary,
+    max_batches: usize,
+) -> Result<TxOutcome<Option<QueuedWorkClaim>>, StoreError> {
+    if max_batches == 0 {
+        return Ok(TxOutcome::Commit(None));
+    }
+    let generation = session_execution_lease.fencing_token;
+    let candidate_rows = {
+        let mut stmt = tx
+            .prepare(&sqlite_queued_work_claim_candidates_sql(boundary))
+            .map_err(sqlite_error)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    session_id,
+                    now as i64,
+                    generation as i64,
+                    claim_scan_limit(max_batches)
+                ],
+                queued_batch_row_from_sql,
+            )
+            .map_err(sqlite_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+    };
+    let candidate_rows = candidate_rows
+        .into_iter()
+        .filter(|row| row.claim_token.is_none() || row.claim_session_lease_generation != generation)
+        .collect::<Vec<_>>();
+    let candidate_batches = candidate_rows
+        .iter()
+        .map(|row| queued_work_batch_from_conn(tx, row.clone()))
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let candidates = candidate_rows
+        .iter()
+        .zip(candidate_batches.iter())
+        .map(|(row, batch)| {
+            Ok(ClaimCandidate {
+                enqueue_seq: row.enqueue_seq,
+                claim_fencing_token: row.claim_fencing_token,
+                work_class: batch.work_class().ok_or_else(|| {
+                    StoreError::Backend(format!(
+                        "queued-work batch `{}` has mixed or empty payload classes",
+                        batch.batch_id
+                    ))
+                })?,
+                delivery_policy: decode_delivery_policy(row.delivery_policy.clone())?,
+                slot_policy: decode_slot_policy(row.slot_policy.clone())?,
+                merge_key: decode_merge_key(row.merge_key_json.clone())?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let selected_len = select_turn_work_claim_prefix(&candidates, boundary, max_batches);
+    if selected_len == 0 {
+        return Ok(TxOutcome::Commit(None));
+    }
+    let mut selected = candidate_rows;
+    selected.truncate(selected_len);
+    let mut selected_batches = candidate_batches;
+    selected_batches.truncate(selected_len);
+    let lease = QueuedWorkClaimLease::derive(&candidates[0], session_id, owner, now, generation);
+    let liveness_json = encode_liveness(&owner.liveness)?;
+    for row in &selected {
+        let claimed = tx
+            .execute(
+                "UPDATE queued_work_batches
+                 SET claim_id = ?3,
+                     claim_owner_id = ?4,
+                     claim_owner_incarnation_id = ?5,
+                     claim_owner_liveness_json = ?6,
+                     claim_token = ?7,
+                     claim_fencing_token = claim_fencing_token + 1,
+                     claim_session_lease_generation = ?8
+                 WHERE session_id = ?1
+                   AND batch_id = ?2
+                   AND (
+                        claim_token IS NULL
+                        OR claim_session_lease_generation <> ?8
+                   )",
+                params![
+                    session_id,
+                    row.batch_id,
+                    lease.claim_id,
+                    owner.owner_id.as_str(),
+                    owner.incarnation_id.as_str(),
+                    liveness_json.as_str(),
+                    lease.lease_token,
+                    lease.session_lease_generation as i64,
+                ],
+            )
+            .map_err(sqlite_error)?;
+        if claimed == 0 {
+            return Ok(TxOutcome::Rollback(None));
+        }
+    }
+    Ok(TxOutcome::Commit(Some(QueuedWorkClaim {
+        session_id: session_id.to_string(),
+        claim_id: lease.claim_id,
+        owner: owner.clone(),
+        lease_token: lease.lease_token,
+        fencing_token: lease.fencing_token,
+        session_lease_generation: lease.session_lease_generation,
+        batches: selected_batches,
+    })))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn claim_pending_turn_inputs_sqlite_conn(
+    tx: &Connection,
+    now: u64,
+    session_id: &str,
+    session_execution_lease: &SessionExecutionLeaseFence,
+    owner: &LeaseOwnerIdentity,
+    max_inputs: usize,
+    mode: lash_core::TurnInputClaimMode,
+) -> Result<TxOutcome<Option<lash_core::TurnInputClaim>>, StoreError> {
+    if max_inputs == 0 {
+        return Ok(TxOutcome::Commit(None));
+    }
+    let generation = session_execution_lease.fencing_token;
+    let wanted_state = match &mode {
+        lash_core::TurnInputClaimMode::ActiveTurn { .. } => {
+            lash_core::TurnInputState::PendingActive
+        }
+        lash_core::TurnInputClaimMode::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
+    };
+    let candidate_rows = {
+        let mut sql = "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                        state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
+                        claim_owner_id, claim_owner_incarnation_id,
+                        claim_owner_liveness_json, claim_token, claim_session_lease_generation
+                 FROM pending_turn_inputs
+                 WHERE session_id = ? AND state = ?
+                   AND (
+                        claim_token IS NULL
+                        OR claim_session_lease_generation <> ?
+                   )"
+        .to_string();
+        let mut values: Vec<rusqlite::types::Value> = vec![
+            session_id.to_string().into(),
+            wanted_state.as_str().to_string().into(),
+            (generation as i64).into(),
+        ];
+        if let lash_core::TurnInputClaimMode::ActiveTurn {
+            turn_id,
+            checkpoint,
+        } = &mode
+        {
+            sql.push_str(
+                " AND json_extract(ingress_json, '$.scope') = 'active_turn'
+                  AND json_extract(ingress_json, '$.turn_id') = ?",
+            );
+            values.push(turn_id.clone().into());
+            if *checkpoint == lash_core::CheckpointKind::AfterWork {
+                sql.push_str(
+                    " AND COALESCE(json_extract(ingress_json, '$.min_boundary'), 'after_work') = 'after_work'",
+                );
+            }
+        }
+        sql.push_str(" ORDER BY enqueue_seq ASC LIMIT ?");
+        values.push(i64::try_from(max_inputs).unwrap_or(i64::MAX).into());
+        let mut stmt = tx.prepare(&sql).map_err(sqlite_error)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(values.iter()),
+                pending_turn_input_row_from_sql,
+            )
+            .map_err(sqlite_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+    };
+    let selected = candidate_rows
+        .into_iter()
+        .take(max_inputs)
+        .map(|row| Ok((row.clone(), pending_turn_input_from_row(row)?)))
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let Some((head, _)) = selected.first() else {
+        return Ok(TxOutcome::Commit(None));
+    };
+    let lease = TurnInputClaimLease::derive(head, session_id, owner, now, generation);
+    let liveness_json = encode_liveness(&owner.liveness)?;
+    let state_after_claim = match &mode {
+        lash_core::TurnInputClaimMode::ActiveTurn { .. } => lash_core::TurnInputState::Accepted,
+        lash_core::TurnInputClaimMode::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
+    };
+    let mut inputs = Vec::new();
+    for (row, mut input) in selected {
+        let claimed = tx
+            .execute(
+                "UPDATE pending_turn_inputs
+                 SET state = ?3,
+                     claim_id = ?4,
+                     claim_owner_id = ?5,
+                     claim_owner_incarnation_id = ?6,
+                     claim_owner_liveness_json = ?7,
+                     claim_token = ?8,
+                     claim_fencing_token = claim_fencing_token + 1,
+                     claim_session_lease_generation = ?9
+                 WHERE session_id = ?1
+                   AND input_id = ?2
+                   AND (
+                        claim_token IS NULL
+                        OR claim_session_lease_generation <> ?9
+                   )",
+                params![
+                    session_id,
+                    row.input_id,
+                    state_after_claim.as_str(),
+                    lease.claim_id,
+                    owner.owner_id.as_str(),
+                    owner.incarnation_id.as_str(),
+                    liveness_json.as_str(),
+                    lease.lease_token,
+                    lease.session_lease_generation as i64,
+                ],
+            )
+            .map_err(sqlite_error)?;
+        if claimed == 0 {
+            return Ok(TxOutcome::Rollback(None));
+        }
+        input.state = state_after_claim;
+        inputs.push(input);
+    }
+    Ok(TxOutcome::Commit(Some(lash_core::TurnInputClaim {
+        session_id: session_id.to_string(),
+        claim_id: lease.claim_id,
+        owner: owner.clone(),
+        lease_token: lease.lease_token,
+        fencing_token: lease.fencing_token,
+        session_lease_generation: lease.session_lease_generation,
+        mode,
+        inputs,
+    })))
+}
+
 async fn claim_pending_turn_inputs_sqlite(
     conn: &SqliteConnection,
     now: u64,
@@ -1900,63 +2401,57 @@ async fn claim_pending_turn_inputs_sqlite(
                 }
             };
             let candidate_rows = {
+                let mut sql =
+                    "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                            state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
+                            claim_owner_id, claim_owner_incarnation_id,
+                            claim_owner_liveness_json, claim_token, claim_session_lease_generation
+                     FROM pending_turn_inputs
+                     WHERE session_id = ? AND state = ?
+                       AND (
+                            claim_token IS NULL
+                            OR claim_session_lease_generation <> ?
+                       )"
+                    .to_string();
+                let mut values: Vec<rusqlite::types::Value> = vec![
+                    session_id.clone().into(),
+                    wanted_state.as_str().to_string().into(),
+                    (generation as i64).into(),
+                ];
+                if let lash_core::TurnInputClaimMode::ActiveTurn {
+                    turn_id,
+                    checkpoint,
+                } = &mode
+                {
+                    sql.push_str(
+                        " AND json_extract(ingress_json, '$.scope') = 'active_turn'
+                          AND json_extract(ingress_json, '$.turn_id') = ?",
+                    );
+                    values.push(turn_id.clone().into());
+                    if *checkpoint == lash_core::CheckpointKind::AfterWork {
+                        sql.push_str(
+                            " AND COALESCE(json_extract(ingress_json, '$.min_boundary'), 'after_work') = 'after_work'",
+                        );
+                    }
+                }
+                sql.push_str(" ORDER BY enqueue_seq ASC LIMIT ?");
+                values.push(i64::try_from(max_inputs).unwrap_or(i64::MAX).into());
                 let mut stmt = tx
-                    .prepare(
-                        "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                                state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
-                                claim_owner_id, claim_owner_incarnation_id,
-                                claim_owner_liveness_json, claim_token, claim_session_lease_generation
-                         FROM pending_turn_inputs
-                         WHERE session_id = ?1 AND state = ?2
-                           AND (
-                                claim_token IS NULL
-                                OR claim_session_lease_generation <> ?3
-                           )
-                         ORDER BY enqueue_seq ASC
-                         LIMIT ?4",
-                    )
+                    .prepare(&sql)
                     .map_err(sqlite_error)?;
                 let rows = stmt
                     .query_map(
-                        params![
-                            session_id,
-                            wanted_state.as_str(),
-                            generation as i64,
-                            (max_inputs as i64).saturating_add(32)
-                        ],
+                        rusqlite::params_from_iter(values.iter()),
                         pending_turn_input_row_from_sql,
                     )
                     .map_err(sqlite_error)?;
                 rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
             };
-            let mut selected = Vec::new();
-            for row in candidate_rows {
-                let claim_available = row.claim_token.is_none()
-                    || row.claim_session_lease_generation != generation;
-                if !claim_available {
-                    continue;
-                }
-                let input = pending_turn_input_from_row(row.clone())?;
-                let matches_mode = match &mode {
-                    lash_core::TurnInputClaimMode::ActiveTurn {
-                        turn_id,
-                        checkpoint,
-                    } => {
-                        input
-                            .ingress
-                            .active_turn_id()
-                            .is_some_and(|active| active == turn_id)
-                            && input.ingress.admits_checkpoint(*checkpoint)
-                    }
-                    lash_core::TurnInputClaimMode::NextTurn => input.state.is_next_turn_pending(),
-                };
-                if matches_mode {
-                    selected.push((row, input));
-                    if selected.len() >= max_inputs {
-                        break;
-                    }
-                }
-            }
+            let selected = candidate_rows
+                .into_iter()
+                .take(max_inputs)
+                .map(|row| Ok((row.clone(), pending_turn_input_from_row(row)?)))
+                .collect::<Result<Vec<_>, StoreError>>()?;
             let Some((head, _)) = selected.first() else {
                 return Ok(TxOutcome::Commit(None));
             };

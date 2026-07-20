@@ -46,6 +46,17 @@ async fn same_generation_claim_scans_reach_rows_beyond_the_scan_surplus() {
     .await;
 }
 
+#[tokio::test]
+async fn checkpoint_claim_probe_avoids_quiescent_write_transactions() {
+    let store = Arc::new(RecordingStore::default());
+    crate::testing::conformance::checkpoint_claim_probe_transaction_counts(
+        Arc::clone(&store) as Arc<dyn crate::RuntimePersistence>,
+        "root",
+        || store.checkpoint_claim_counts(),
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn in_memory_claim_validation_serializes_takeover_before_mutation() {
     let store = Arc::new(RecordingStore::default());

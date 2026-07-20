@@ -202,7 +202,9 @@ fn restate_await_event_key(
 }
 
 const DURABLE_WAIT_PROMISE_KEY: &str = "resolution";
-const DURABLE_WAIT_INDEX_STATE_KEY: &str = "waits";
+const LEGACY_DURABLE_WAIT_INDEX_STATE_KEY: &str = "waits";
+const DURABLE_WAIT_INDEX_METADATA_KEY: &str = "wait-index/v1/metadata";
+const DURABLE_WAIT_INDEX_WAIT_PREFIX: &str = "wait-index/v1/wait/";
 
 /// Wall-clock epoch milliseconds for terminal evidence written at the Restate
 /// tier (ADR 0019 recovery enforcement). The Restate boundary carries no
@@ -339,6 +341,13 @@ pub enum RestateDurableWaitRegistration {
 struct RestateDurableWaitIndexState {
     revoked: bool,
     waits: Vec<RestateDurableWaitAddress>,
+    #[serde(default)]
+    awakeables: Vec<RestateDurableWaitAwakeableRequest>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
+struct RestateDurableWaitIndexMetadata {
+    revoked: bool,
     #[serde(default)]
     awakeables: Vec<RestateDurableWaitAwakeableRequest>,
 }
@@ -2477,14 +2486,100 @@ pub trait LashDurableWaitIndex {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LashDurableWaitIndexImpl;
 
-async fn load_durable_wait_index(
+fn durable_wait_index_state_key(address: &RestateDurableWaitAddress) -> String {
+    let classification = match address.classification {
+        RestateDurableWaitClassification::DurableWait => "durable",
+        RestateDurableWaitClassification::TurnControl => "control",
+    };
+    format!(
+        "{DURABLE_WAIT_INDEX_WAIT_PREFIX}{classification}/{}",
+        address.workflow_key
+    )
+}
+
+fn durable_wait_address_from_state_key(
+    object_key: &str,
+    state_key: &str,
+) -> Option<RestateDurableWaitAddress> {
+    let suffix = state_key.strip_prefix(DURABLE_WAIT_INDEX_WAIT_PREFIX)?;
+    let (classification, workflow_key) = suffix.split_once('/')?;
+    if workflow_key.is_empty() || workflow_key.contains('/') {
+        return None;
+    }
+    let classification = match classification {
+        "durable" => RestateDurableWaitClassification::DurableWait,
+        "control" => RestateDurableWaitClassification::TurnControl,
+        _ => return None,
+    };
+    Some(RestateDurableWaitAddress {
+        workflow_key: workflow_key.to_string(),
+        session_id: Some(object_key.to_string()),
+        classification,
+    })
+}
+
+fn migrate_legacy_durable_wait_index(
+    legacy: RestateDurableWaitIndexState,
+) -> (
+    RestateDurableWaitIndexMetadata,
+    Vec<(String, RestateDurableWaitAddress)>,
+) {
+    let waits = legacy
+        .waits
+        .into_iter()
+        .map(|address| (durable_wait_index_state_key(&address), address))
+        .collect();
+    (
+        RestateDurableWaitIndexMetadata {
+            revoked: legacy.revoked,
+            awakeables: legacy.awakeables,
+        },
+        waits,
+    )
+}
+
+/// Load the v1 index metadata, migrating the pre-v1 aggregate state on miss.
+///
+/// Restate object state is not part of an invocation's replayed journal: these
+/// index handlers are short-lived single calls, so changing their command
+/// sequence does not alter an in-flight multi-call journal. Object state does,
+/// however, survive a deployment upgrade. The versioned metadata miss is
+/// therefore the compatibility boundary: it reads the legacy `waits` value
+/// once, expands its wait vector into v1 per-wait entries, and writes the v1
+/// metadata marker so later calls never consult the legacy layout again.
+async fn load_durable_wait_index_metadata(
     ctx: &ObjectContext<'_>,
-) -> Result<RestateDurableWaitIndexState, TerminalError> {
-    Ok(ctx
-        .get::<Json<RestateDurableWaitIndexState>>(DURABLE_WAIT_INDEX_STATE_KEY)
+) -> Result<RestateDurableWaitIndexMetadata, TerminalError> {
+    if let Some(Json(metadata)) = ctx
+        .get::<Json<RestateDurableWaitIndexMetadata>>(DURABLE_WAIT_INDEX_METADATA_KEY)
+        .await?
+    {
+        return Ok(metadata);
+    }
+
+    let legacy = ctx
+        .get::<Json<RestateDurableWaitIndexState>>(LEGACY_DURABLE_WAIT_INDEX_STATE_KEY)
         .await?
         .map(|Json(state)| state)
-        .unwrap_or_default())
+        .unwrap_or_default();
+    let (metadata, waits) = migrate_legacy_durable_wait_index(legacy);
+    for (state_key, address) in waits {
+        ctx.set(&state_key, Json(address));
+    }
+    ctx.set(DURABLE_WAIT_INDEX_METADATA_KEY, Json(metadata.clone()));
+    ctx.clear(LEGACY_DURABLE_WAIT_INDEX_STATE_KEY);
+    Ok(metadata)
+}
+
+async fn load_indexed_waits(
+    ctx: &ObjectContext<'_>,
+) -> Result<Vec<RestateDurableWaitAddress>, TerminalError> {
+    Ok(ctx
+        .get_keys()
+        .await?
+        .into_iter()
+        .filter_map(|state_key| durable_wait_address_from_state_key(ctx.key(), &state_key))
+        .collect())
 }
 
 async fn resolve_indexed_waits(
@@ -2527,14 +2622,14 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         ctx: ObjectContext<'_>,
         Json(request): Json<RestateDurableWaitIndexRequest>,
     ) -> HandlerResult<Json<RestateDurableWaitRegistration>> {
-        let mut state = load_durable_wait_index(&ctx).await?;
-        if state.revoked {
+        let metadata = load_durable_wait_index_metadata(&ctx).await?;
+        if metadata.revoked {
             return Ok(Json(RestateDurableWaitRegistration::Revoked));
         }
-        if !state.waits.contains(&request.address) {
-            state.waits.push(request.address);
-            ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
-        }
+        ctx.set(
+            &durable_wait_index_state_key(&request.address),
+            Json(request.address),
+        );
         Ok(Json(RestateDurableWaitRegistration::Registered))
     }
 
@@ -2543,11 +2638,10 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         ctx: ObjectContext<'_>,
         Json(request): Json<RestateDurableWaitIndexRequest>,
     ) -> HandlerResult<Json<()>> {
-        let mut state = load_durable_wait_index(&ctx).await?;
+        let _metadata = load_durable_wait_index_metadata(&ctx).await?;
         if request.address.classification == RestateDurableWaitClassification::DurableWait {
-            state.waits.retain(|wait| wait != &request.address);
+            ctx.clear(&durable_wait_index_state_key(&request.address));
         }
-        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
         Ok(Json(()))
     }
 
@@ -2556,8 +2650,8 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         ctx: ObjectContext<'_>,
         Json(request): Json<RestateDurableWaitAwakeableRequest>,
     ) -> HandlerResult<Json<RestateDurableWaitRegistration>> {
-        let mut state = load_durable_wait_index(&ctx).await?;
-        if state.revoked {
+        let mut metadata = load_durable_wait_index_metadata(&ctx).await?;
+        if metadata.revoked {
             return Ok(Json(RestateDurableWaitRegistration::Revoked));
         }
         let peek: restate_sdk::context::Request<'_, (), Json<Option<Resolution>>> =
@@ -2573,13 +2667,13 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         let Json(resolution) = peek.call().await?;
         if let Some(resolution) = resolution {
             ctx.resolve_awakeable(&request.awakeable_id, Json(resolution));
-        } else if !state
+        } else if !metadata
             .awakeables
             .iter()
             .any(|entry| entry.awakeable_id == request.awakeable_id)
         {
-            state.awakeables.push(request);
-            ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+            metadata.awakeables.push(request);
+            ctx.set(DURABLE_WAIT_INDEX_METADATA_KEY, Json(metadata));
         }
         Ok(Json(RestateDurableWaitRegistration::Registered))
     }
@@ -2589,11 +2683,11 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         ctx: ObjectContext<'_>,
         Json(request): Json<RestateDurableWaitAwakeableRequest>,
     ) -> HandlerResult<Json<()>> {
-        let mut state = load_durable_wait_index(&ctx).await?;
-        state
+        let mut metadata = load_durable_wait_index_metadata(&ctx).await?;
+        metadata
             .awakeables
             .retain(|entry| entry.awakeable_id != request.awakeable_id);
-        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        ctx.set(DURABLE_WAIT_INDEX_METADATA_KEY, Json(metadata));
         Ok(Json(()))
     }
 
@@ -2602,8 +2696,8 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         ctx: ObjectContext<'_>,
         Json(request): Json<RestateDurableWaitResolveRequest>,
     ) -> HandlerResult<Json<ResolveOutcome>> {
-        let mut state = load_durable_wait_index(&ctx).await?;
-        if state.revoked {
+        let mut metadata = load_durable_wait_index_metadata(&ctx).await?;
+        if metadata.revoked {
             return Ok(Json(ResolveOutcome::UnknownOrRevoked));
         }
         let workflow_key = request.address.workflow_key.clone();
@@ -2640,34 +2734,36 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
             ResolveOutcome::Accepted => resolution,
             ResolveOutcome::UnknownOrRevoked => return Ok(Json(outcome)),
         };
-        let mut retained = Vec::with_capacity(state.awakeables.len());
-        for entry in std::mem::take(&mut state.awakeables) {
+        let mut retained = Vec::with_capacity(metadata.awakeables.len());
+        for entry in std::mem::take(&mut metadata.awakeables) {
             if entry.address == request.address {
                 ctx.resolve_awakeable(&entry.awakeable_id, Json(terminal.clone()));
             } else {
                 retained.push(entry);
             }
         }
-        state.awakeables = retained;
-        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        metadata.awakeables = retained;
+        ctx.set(DURABLE_WAIT_INDEX_METADATA_KEY, Json(metadata));
         Ok(Json(outcome))
     }
 
     async fn cancel_all(&self, ctx: ObjectContext<'_>) -> HandlerResult<Json<()>> {
-        let mut state = load_durable_wait_index(&ctx).await?;
-        let (waits, controls) = split_cancellable_waits(std::mem::take(&mut state.waits));
-        state.waits = controls;
-        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        let _metadata = load_durable_wait_index_metadata(&ctx).await?;
+        let (waits, _controls) = split_cancellable_waits(load_indexed_waits(&ctx).await?);
+        for address in &waits {
+            ctx.clear(&durable_wait_index_state_key(address));
+        }
         resolve_indexed_waits(&ctx, waits).await?;
         Ok(Json(()))
     }
 
     async fn revoke_all(&self, ctx: ObjectContext<'_>) -> HandlerResult<Json<()>> {
-        let mut state = load_durable_wait_index(&ctx).await?;
-        state.revoked = true;
-        let waits = std::mem::take(&mut state.waits);
-        let awakeables = std::mem::take(&mut state.awakeables);
-        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        let mut metadata = load_durable_wait_index_metadata(&ctx).await?;
+        let waits = load_indexed_waits(&ctx).await?;
+        let awakeables = std::mem::take(&mut metadata.awakeables);
+        metadata.revoked = true;
+        ctx.clear_all();
+        ctx.set(DURABLE_WAIT_INDEX_METADATA_KEY, Json(metadata));
         for entry in awakeables {
             ctx.resolve_awakeable(&entry.awakeable_id, Json(Resolution::Cancelled));
         }

@@ -9,6 +9,7 @@ impl LashRuntime {
     /// workflow.
     pub fn set_runtime_lease_owner(&mut self, owner: crate::LeaseOwnerIdentity) {
         self.runtime_lease_owner = owner;
+        self.last_committed_lease_continuity = None;
     }
 
     pub fn unregister_plugin_session(&self) -> Result<(), crate::PluginError> {
@@ -161,6 +162,8 @@ impl LashRuntime {
             shared_token_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
             process_sync_needed: Arc::new(AtomicBool::new(false)),
             turn_phase_probe: None,
+            last_committed_lease_continuity: None,
+            graph_loaded_from_store: false,
             residency: Residency::default(),
         })
     }

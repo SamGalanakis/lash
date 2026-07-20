@@ -749,15 +749,15 @@ impl EventSink for NoopEventSink {
 /// Stable identifier for a semantic turn activity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct TurnActivityId(pub String);
+pub struct TurnActivityId(pub Arc<str>);
 
 impl TurnActivityId {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<Arc<str>>) -> Self {
         Self(id.into())
     }
 
     pub fn fresh() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
+        Self(Arc::from(uuid::Uuid::new_v4().to_string()))
     }
 }
 
@@ -807,10 +807,10 @@ pub enum TurnEvent {
         protocol_iteration: usize,
     },
     AssistantProseDelta {
-        text: String,
+        text: Arc<str>,
     },
     ReasoningDelta {
-        text: String,
+        text: Arc<str>,
     },
     /// Retracts visible text emitted by a provider attempt that will be retried.
     ///
@@ -1103,6 +1103,13 @@ pub struct LashRuntime {
     pub(in crate::runtime) shared_token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
     pub(in crate::runtime) process_sync_needed: Arc<AtomicBool>,
     pub(in crate::runtime) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
+    /// Lease-guard identity retained across a successful physical-turn commit.
+    /// A match proves no release/reacquisition boundary occurred before the
+    /// next physical turn on this handle.
+    pub(in crate::runtime) last_committed_lease_continuity:
+        Option<session_execution_lease::SessionExecutionLeaseContinuity>,
+    /// Set only after this handle itself has attempted a durable graph load.
+    pub(in crate::runtime) graph_loaded_from_store: bool,
     /// Resident-graph policy chosen by the host. Controls whether
     /// [`LashRuntime::refresh_session_graph_from_store`] reloads the full
     /// graph or just the active path, matching the trimming behavior set at

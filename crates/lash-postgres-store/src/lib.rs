@@ -88,6 +88,10 @@ pub struct PostgresSessionStore {
     /// database, so this can't be inferred from a singleton head row the way the
     /// single-file SQLite store does). Shared across clones via `Arc`.
     bound_session: Arc<OnceLock<String>>,
+    #[cfg(test)]
+    checkpoint_probe_count: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    checkpoint_write_transaction_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -222,6 +226,10 @@ impl PostgresStorage {
             pool: self.pool.clone(),
             session_id: Some(session_id.into()),
             bound_session: Arc::new(OnceLock::new()),
+            #[cfg(test)]
+            checkpoint_probe_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            checkpoint_write_transaction_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -230,6 +238,10 @@ impl PostgresStorage {
             pool: self.pool.clone(),
             session_id: None,
             bound_session: Arc::new(OnceLock::new()),
+            #[cfg(test)]
+            checkpoint_probe_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            checkpoint_write_transaction_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -280,6 +292,16 @@ impl PostgresSessionStore {
         storage.unbound_session_store()
     }
 
+    #[cfg(test)]
+    fn checkpoint_claim_counts(&self) -> (usize, usize) {
+        (
+            self.checkpoint_probe_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.checkpoint_write_transaction_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
     async fn selected_session_id(&self) -> Result<Option<String>, StoreError> {
         if let Some(session_id) = &self.session_id {
             return Ok(Some(session_id.clone()));
@@ -301,3 +323,32 @@ include!("postgres/process_helpers.rs");
 include!("postgres/process_registry.rs");
 include!("postgres/trigger_store.rs");
 include!("postgres/artifact_store.rs");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn checkpoint_probe_skips_writes_for_deferred_head_when_configured() {
+        let Ok(database_url) = std::env::var("LASH_POSTGRES_DATABASE_URL") else {
+            eprintln!("skipping Postgres checkpoint counter: database URL is not set");
+            return;
+        };
+        let storage = PostgresStorage::connect(&database_url)
+            .await
+            .expect("connect checkpoint counter storage");
+        let session_id = format!("postgres-checkpoint-counter:{}", std::process::id());
+        let store = Arc::new(storage.session_store(&session_id));
+        lash_core::testing::conformance::checkpoint_claim_probe_transaction_counts(
+            Arc::clone(&store) as Arc<dyn RuntimePersistence>,
+            &session_id,
+            || store.checkpoint_claim_counts(),
+        )
+        .await;
+        storage
+            .session_store_factory()
+            .delete_session(&session_id)
+            .await
+            .expect("delete checkpoint counter session");
+    }
+}

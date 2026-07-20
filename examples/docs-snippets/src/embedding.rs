@@ -109,7 +109,7 @@ async fn full_core(provider: ProviderHandle) -> anyhow::Result<()> {
         .activities
         .iter()
         .filter_map(|activity| match &activity.event {
-            TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
+            TurnEvent::AssistantProseDelta { text } => Some(text.as_ref()),
             _ => None,
         })
         .collect();
@@ -182,7 +182,7 @@ async fn collected_turn(session: &LashSession) -> anyhow::Result<()> {
         .activities
         .iter()
         .filter_map(|activity| match &activity.event {
-            TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
+            TurnEvent::AssistantProseDelta { text } => Some(text.as_ref()),
             _ => None,
         })
         .collect();

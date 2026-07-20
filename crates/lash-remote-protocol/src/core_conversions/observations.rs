@@ -8,8 +8,8 @@ impl RemoteTurnActivity {
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             sequence,
-            id,
-            correlation_id,
+            id: id.to_string(),
+            correlation_id: correlation_id.to_string(),
             event: RemoteTurnEvent::from(event),
         }
     }
@@ -79,17 +79,17 @@ impl From<lash_core::SessionProcessEventKind> for RemoteSessionProcessEventKind 
 }
 
 impl RemoteSessionObservationEvent {
-    pub fn from_core(sequence: u64, event: lash_core::SessionObservationEvent) -> Self {
+    pub fn from_core(sequence: u64, event: Arc<lash_core::SessionObservationEvent>) -> Self {
         let lash_core::SessionObservationEvent {
             session_id,
             revision,
             cursor,
             payload,
-        } = event;
+        } = event.as_ref();
         let payload = match payload {
             lash_core::SessionObservationEventPayload::TurnActivity(activity) => {
                 RemoteSessionObservationEventPayload::TurnActivity {
-                    activity: Box::new(RemoteTurnActivity::from_core(sequence, activity)),
+                    activity: Box::new(RemoteTurnActivity::from_core(sequence, activity.clone())),
                 }
             }
             // The committed read view is a local handle; only the commit
@@ -98,24 +98,26 @@ impl RemoteSessionObservationEvent {
                 RemoteSessionObservationEventPayload::Committed
             }
             lash_core::SessionObservationEventPayload::AgentFrameSwitched { frame_id } => {
-                RemoteSessionObservationEventPayload::AgentFrameSwitched { frame_id }
+                RemoteSessionObservationEventPayload::AgentFrameSwitched {
+                    frame_id: frame_id.clone(),
+                }
             }
             lash_core::SessionObservationEventPayload::QueueChanged { kind, batch_ids } => {
                 RemoteSessionObservationEventPayload::QueueChanged {
-                    kind: kind.into(),
-                    batch_ids,
+                    kind: (*kind).into(),
+                    batch_ids: batch_ids.clone(),
                 }
             }
             lash_core::SessionObservationEventPayload::ProcessChanged { kind, process_ids } => {
                 RemoteSessionObservationEventPayload::ProcessChanged {
-                    kind: kind.into(),
-                    process_ids,
+                    kind: (*kind).into(),
+                    process_ids: process_ids.clone(),
                 }
             }
         };
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            session_id,
+            session_id: session_id.clone(),
             revision: revision.as_u64(),
             cursor: cursor.to_string(),
             event: payload,
@@ -171,20 +173,24 @@ impl From<lash_core::TurnEvent> for RemoteTurnEvent {
                 Self::ModelRequestStarted { protocol_iteration }
             }
             lash_core::TurnEvent::AssistantProseDelta { text } => {
-                Self::AssistantProseDelta { text }
+                Self::AssistantProseDelta {
+                    text: text.to_string(),
+                }
             }
-            lash_core::TurnEvent::ReasoningDelta { text } => Self::ReasoningDelta { text },
+            lash_core::TurnEvent::ReasoningDelta { text } => Self::ReasoningDelta {
+                text: text.to_string(),
+            },
             lash_core::TurnEvent::ModelAttemptReset {
                 assistant_prose_correlation_ids,
                 reasoning_correlation_ids,
             } => Self::ModelAttemptReset {
                 assistant_prose_correlation_ids: assistant_prose_correlation_ids
                     .into_iter()
-                    .map(|id| id.0)
+                    .map(|id| id.0.to_string())
                     .collect(),
                 reasoning_correlation_ids: reasoning_correlation_ids
                     .into_iter()
-                    .map(|id| id.0)
+                    .map(|id| id.0.to_string())
                     .collect(),
             },
             lash_core::TurnEvent::CodeBlockStarted {

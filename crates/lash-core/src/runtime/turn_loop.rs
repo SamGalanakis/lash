@@ -288,24 +288,6 @@ impl LashRuntime {
         }
     }
 
-    async fn ensure_session_execution_lease_live(
-        &self,
-        guard: Option<&SessionExecutionLeaseGuard>,
-    ) -> Result<(), RuntimeError> {
-        let Some(guard) = guard else {
-            return Ok(());
-        };
-        guard.refresh_or_mark_lost().await.map_err(|err| {
-            RuntimeError::new(
-                RuntimeErrorCode::SessionExecutionLeaseLost,
-                format!(
-                    "session execution lease for session `{}` was lost before commit: {err}",
-                    self.state.session_id
-                ),
-            )
-        })
-    }
-
     // Prompt handback on lease loss. This is no longer load-bearing for
     // correctness: a claim is generation-fenced under the session lease, so once
     // this owner has lost the lease its claims are already superseded and the
@@ -327,15 +309,12 @@ impl LashRuntime {
         else {
             return;
         };
-        for claim in claims {
-            if let Err(abandon_err) = store.abandon_queued_work_claim(claim).await {
-                tracing::warn!(
-                    error = %abandon_err,
-                    session_id = %claim.session_id,
-                    claim_id = %claim.claim_id,
-                    "failed to abandon queued work claim after session execution lease loss"
-                );
-            }
+        if let Err(abandon_err) = store.abandon_queued_work_claims(claims).await {
+            tracing::warn!(
+                error = %abandon_err,
+                claim_count = claims.len(),
+                "failed to abandon queued work claims after session execution lease loss"
+            );
         }
     }
 
@@ -354,15 +333,12 @@ impl LashRuntime {
         else {
             return;
         };
-        for claim in claims {
-            if let Err(abandon_err) = store.abandon_turn_input_claim(claim).await {
-                tracing::warn!(
-                    error = %abandon_err,
-                    session_id = %claim.session_id,
-                    claim_id = %claim.claim_id,
-                    "failed to abandon turn input claim after session execution lease loss"
-                );
-            }
+        if let Err(abandon_err) = store.abandon_turn_input_claims(claims).await {
+            tracing::warn!(
+                error = %abandon_err,
+                claim_count = claims.len(),
+                "failed to abandon turn input claims after session execution lease loss"
+            );
         }
     }
 
@@ -420,10 +396,6 @@ impl LashRuntime {
         }
         let turn_usage_delta = merge_usage_delta_entries(turn_usage_delta);
 
-        if self.session.is_some() {
-            self.ensure_session_execution_lease_live(session_execution_lease)
-                .await?;
-        }
         let assembled_cancelled = matches!(
             assembler.outcome,
             Some(TurnOutcome::Stopped(TurnStop::Cancelled))
@@ -509,9 +481,6 @@ impl LashRuntime {
             }
         };
         self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
-        self.ensure_session_execution_lease_live(session_execution_lease)
-            .await?;
-
         let mut returned_turn = finalized.turn;
         if returned_turn.cancellation.is_some()
             && !matches!(
@@ -578,6 +547,11 @@ impl LashRuntime {
         if release_session_execution_lease && let Some(lease) = session_execution_lease {
             lease.mark_released();
         }
+        self.last_committed_lease_continuity = if release_session_execution_lease {
+            None
+        } else {
+            session_execution_lease.and_then(SessionExecutionLeaseGuard::continuity)
+        };
         self.host
             .core
             .durability
@@ -1321,9 +1295,20 @@ impl LashRuntime {
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
         session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
     ) -> Result<PhysicalTurnExecution, RuntimeError> {
-        self.refresh_session_graph_from_store()
-            .await
-            .map_err(session_head_refresh_error)?;
+        let lease_continuity =
+            session_execution_lease.and_then(SessionExecutionLeaseGuard::continuity);
+        let may_reuse_resident_graph = self.graph_loaded_from_store
+            && lease_continuity.is_some()
+            && lease_continuity == self.last_committed_lease_continuity;
+        if !may_reuse_resident_graph {
+            self.refresh_session_graph_from_store()
+                .await
+                .map_err(session_head_refresh_error)?;
+        }
+        // `load_session` refreshes the committed graph/head, checkpoint,
+        // config, frames, and token ledger. It does not cover pending turn
+        // inputs, queued work, or trigger deliveries; those remain external
+        // ingress and are picked up by their fenced claim paths.
         let input_trace_turn_id = input.trace_turn_id.clone();
         let queued_turn_work = materialize_initial_claims
             .then(|| queued_claims.first())

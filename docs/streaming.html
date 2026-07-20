@@ -135,24 +135,24 @@ async fn reconnect_session(
       <h2>Frontend Folding</h2>
       <p>The frontend should fold live activity optimistically, then refresh settled state when the runtime commits.</p>
     </div>
-    <pre data-lang="rust" data-snippet="streaming#fold-session-event"><code>match event.payload {
+    <pre data-lang="rust" data-snippet="streaming#fold-session-event"><code>match &amp;event.payload {
     SessionObservationEventPayload::TurnActivity(activity) =&gt; {
-        render_activity(activity).await?;
+        render_activity(activity.clone()).await?;
     }
     SessionObservationEventPayload::Committed { read_view } =&gt; {
-        append_committed_view(&amp;read_view).await?;
+        append_committed_view(read_view).await?;
     }
     SessionObservationEventPayload::AgentFrameSwitched { frame_id } =&gt; {
-        update_frame(&amp;frame_id).await?;
+        update_frame(frame_id).await?;
     }
     SessionObservationEventPayload::QueueChanged { batch_ids, .. } =&gt; {
         // Queue events cover both pending user input ids and non-user
         // queued-work batch ids; refresh the surfaces separately.
-        refetch_pending_turn_inputs(&amp;batch_ids).await?;
-        refetch_queued_work_summaries(&amp;batch_ids).await?;
+        refetch_pending_turn_inputs(batch_ids).await?;
+        refetch_queued_work_summaries(batch_ids).await?;
     }
     SessionObservationEventPayload::ProcessChanged { process_ids, .. } =&gt; {
-        refetch_process_summaries(&amp;process_ids).await?;
+        refetch_process_summaries(process_ids).await?;
     }
 }</code></pre>
     <div class="listing">

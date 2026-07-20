@@ -1262,6 +1262,38 @@ impl QueuedWorkStore for RuntimePerfStore {
         )
     }
 
+    async fn claim_checkpoint_work(
+        &self,
+        session_id: &str,
+        session_execution_lease: &store::SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: lash_core::CheckpointKind,
+        max_inputs: usize,
+        max_batches: usize,
+    ) -> Result<(Option<lash_core::TurnInputClaim>, Option<QueuedWorkClaim>), StoreError> {
+        let turn_input_claim = TurnInputStore::claim_active_turn_inputs(
+            self,
+            session_id,
+            session_execution_lease,
+            owner,
+            turn_id,
+            checkpoint,
+            max_inputs,
+        )
+        .await?;
+        let queued_work_claim = self.claim_ready_queued_work_perf(
+            session_id,
+            session_execution_lease,
+            owner,
+            RuntimePerfQueuedWorkClaimKind::TurnWork {
+                boundary: QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                max_batches,
+            },
+        )?;
+        Ok((turn_input_claim, queued_work_claim))
+    }
+
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         session_id: &str,

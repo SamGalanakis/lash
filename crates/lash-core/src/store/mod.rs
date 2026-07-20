@@ -1163,6 +1163,17 @@ pub trait TurnInputStore: Send + Sync {
         &self,
         claim: &crate::TurnInputClaim,
     ) -> Result<(), StoreError>;
+
+    /// Release multiple held pending-turn-input claims in one backend batch.
+    async fn abandon_turn_input_claims(
+        &self,
+        claims: &[crate::TurnInputClaim],
+    ) -> Result<(), StoreError> {
+        for claim in claims {
+            self.abandon_turn_input_claim(claim).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Durable single-writer execution-lane capability, fenced by monotonic
@@ -1255,6 +1266,29 @@ pub trait QueuedWorkStore: Send + Sync {
         max_batches: usize,
     ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
 
+    /// Claim both ingress families admitted at an active-turn checkpoint.
+    ///
+    /// Backends must probe durable store state before opening a write
+    /// transaction. When either family is pending, both claims are granted in
+    /// one write transaction after validating the session-execution fence once.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_checkpoint_work(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: crate::CheckpointKind,
+        max_inputs: usize,
+        max_batches: usize,
+    ) -> Result<
+        (
+            Option<crate::TurnInputClaim>,
+            Option<crate::QueuedWorkClaim>,
+        ),
+        StoreError,
+    >;
+
     /// Claim a specific ready batch set selected from the durable queue.
     ///
     /// This is the host-facing counterpart to
@@ -1279,6 +1313,17 @@ pub trait QueuedWorkStore: Send + Sync {
         &self,
         claim: &crate::QueuedWorkClaim,
     ) -> Result<(), StoreError>;
+
+    /// Release multiple queued-work claims in one backend batch.
+    async fn abandon_queued_work_claims(
+        &self,
+        claims: &[crate::QueuedWorkClaim],
+    ) -> Result<(), StoreError> {
+        for claim in claims {
+            self.abandon_queued_work_claim(claim).await?;
+        }
+        Ok(())
+    }
 
     /// Remove an unclaimed queued-work batch from durable ingress.
     ///

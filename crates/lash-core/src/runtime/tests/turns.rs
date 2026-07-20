@@ -372,6 +372,33 @@ impl crate::runtime::RuntimeTurnPhaseProbe for ExpireLeaseAfterPromptBuild {
     }
 }
 
+struct ExpireLeaseAfterRetainedCommit {
+    clock: Arc<ManualClock>,
+    expired: AtomicBool,
+}
+
+impl ExpireLeaseAfterRetainedCommit {
+    fn new(clock: Arc<ManualClock>) -> Self {
+        Self {
+            clock,
+            expired: AtomicBool::new(false),
+        }
+    }
+}
+
+impl crate::runtime::RuntimeTurnPhaseProbe for ExpireLeaseAfterRetainedCommit {
+    fn begin(&self, phase: crate::runtime::RuntimeTurnPhase) {
+        if phase == crate::runtime::RuntimeTurnPhase::PostPersistHooks
+            && !self.expired.swap(true, Ordering::SeqCst)
+        {
+            self.clock
+                .advance_ms(crate::LeaseTimings::default().ttl_ms() + 1);
+        }
+    }
+
+    fn end(&self, _phase: crate::runtime::RuntimeTurnPhase) {}
+}
+
 async fn standard_runtime_with_transport_and_queue_store(
     transport: TestProvider,
 ) -> (LashRuntime, Arc<RecordingStore>) {
@@ -2272,6 +2299,212 @@ async fn stream_prepared_turn_follows_agent_frame_switch() {
 }
 
 #[tokio::test]
+async fn retained_lease_reuses_graph_and_reacquisition_reloads() {
+    let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_call_index = Arc::clone(&call_index);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_| {
+            let call_index = Arc::clone(&captured_call_index);
+            async move {
+                match call_index.fetch_add(1, Ordering::SeqCst) {
+                    0 => Ok(LlmResponse {
+                        parts: vec![LlmOutputPart::ToolCall {
+                            call_id: "resident-switch".to_string(),
+                            tool_name: "terminal_tool_0".to_string(),
+                            input_json: "{}".to_string(),
+                            replay: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    }),
+                    1 => Ok(LlmResponse {
+                        full_text: "retained lease follow-on".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "retained lease follow-on".to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    }),
+                    2 => Ok(LlmResponse {
+                        full_text: "reacquired lease turn".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "reacquired lease turn".to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    }),
+                    index => panic!("unexpected provider call {index}"),
+                }
+            }
+        })
+        .build();
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(TerminalControlTool {
+            controls: vec![crate::ToolControl::SwitchAgentFrame {
+                frame_id: "resident-follow-frame".to_string(),
+                initial_nodes: Vec::new(),
+                task: Some("continue on retained lease".to_string()),
+            }],
+        }),
+        transport,
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+
+    let run = runtime
+        .stream_turn_with_agent_frames(
+            TurnInput::text("start retained lease chain"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "resident-chain"),
+            ),
+        )
+        .await
+        .expect("retained lease chain succeeds");
+    assert_eq!(run.turns.len(), 2);
+    assert_eq!(
+        store.load_session_count(),
+        1,
+        "the follow-on physical turn must reuse the graph committed under the retained lease"
+    );
+    for node in &run.turns[0].state.session_graph.nodes {
+        assert!(
+            run.turns[1]
+                .state
+                .session_graph
+                .find_node(&node.node_id)
+                .is_some(),
+            "the skip path lost committed graph node {}",
+            node.node_id
+        );
+    }
+
+    runtime
+        .stream_turn(
+            TurnInput::text("turn after lease release"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "reacquired-turn"),
+            ),
+        )
+        .await
+        .expect("turn after lease reacquisition succeeds");
+    assert_eq!(
+        store.load_session_count(),
+        2,
+        "a released and reacquired lease generation must force a graph reload"
+    );
+}
+
+#[tokio::test]
+async fn lost_lease_and_reacquisition_force_graph_reloads() {
+    let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_call_index = Arc::clone(&call_index);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_| {
+            let call_index = Arc::clone(&captured_call_index);
+            async move {
+                let index = call_index.fetch_add(1, Ordering::SeqCst);
+                let response = match index {
+                    0 => LlmResponse {
+                        parts: vec![LlmOutputPart::ToolCall {
+                            call_id: "lost-lease-switch".to_string(),
+                            tool_name: "terminal_tool_0".to_string(),
+                            input_json: "{}".to_string(),
+                            replay: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    },
+                    1 => LlmResponse {
+                        full_text: "reacquired lease turn".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "reacquired lease turn".to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    },
+                    index => panic!("unexpected provider call {index}"),
+                };
+                Ok(response)
+            }
+        })
+        .build();
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store_clock: Arc<dyn crate::Clock> = clock.clone();
+    let store = Arc::new(RecordingStore::with_clock(store_clock));
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let host_clock: Arc<dyn crate::Clock> = clock.clone();
+    let mut config = crate::RuntimeHostConfig::in_memory().with_clock(host_clock);
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        transport.clone().into_handle(),
+    ));
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(TerminalControlTool {
+            controls: vec![crate::ToolControl::SwitchAgentFrame {
+                frame_id: "lost-lease-follow-frame".to_string(),
+                initial_nodes: Vec::new(),
+                task: Some("continue after retained commit".to_string()),
+            }],
+        }),
+        transport,
+        crate::EmbeddedRuntimeHost::new(config),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+    runtime.set_turn_phase_probe(Arc::new(ExpireLeaseAfterRetainedCommit::new(Arc::clone(
+        &clock,
+    ))));
+
+    let err = runtime
+        .stream_turn_with_agent_frames(
+            TurnInput::text("lose the retained lease"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "lost-retained-lease"),
+            ),
+        )
+        .await
+        .expect_err("the follow-on commit must observe the lost lease");
+    assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
+    assert_eq!(
+        store.load_session_count(),
+        1,
+        "the fenced handoff claim must reject the lost lease before a follow-on turn starts"
+    );
+
+    runtime
+        .stream_turn(
+            TurnInput::text("turn after lease loss"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "turn-after-lease-loss"),
+            ),
+        )
+        .await
+        .expect("turn after lease loss and reacquisition succeeds");
+    assert_eq!(
+        store.load_session_count(),
+        2,
+        "a lease acquired after loss must reload the graph again"
+    );
+}
+
+#[tokio::test]
 async fn frame_switch_limit_commits_terminal_error_and_settles_claim() {
     let switch_count = crate::runtime::logical_turn::MAX_AGENT_FRAME_SWITCHES;
     let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2695,7 +2928,7 @@ async fn cancelled_provider_stream_does_not_commit_partial_output() {
     assert!(
         turn_events.snapshot().iter().any(|activity| matches!(
             &activity.event,
-            TurnEvent::AssistantProseDelta { text } if text == "partial provider text"
+            TurnEvent::AssistantProseDelta { text } if text.as_ref() == "partial provider text"
         )),
         "partial provider text should remain observable only as live turn activity"
     );
@@ -3094,7 +3327,7 @@ async fn lease_loss_stops_foreground_turn_before_final_commit() {
 }
 
 #[tokio::test]
-async fn final_commit_lease_expiry_surfaces_session_execution_lease_lost() {
+async fn finish_turn_fenced_commit_maps_lease_expiry_to_session_execution_lease_lost() {
     let clock = Arc::new(ManualClock::new(1_000));
     let store_clock: Arc<dyn crate::Clock> = clock.clone();
     let store = Arc::new(RecordingStore::with_clock(store_clock));
@@ -3136,6 +3369,7 @@ async fn final_commit_lease_expiry_surfaces_session_execution_lease_lost() {
         .expect_err("final commit with an expired lease must fail as lease lost");
 
     assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
+    assert_ne!(err.code, crate::RuntimeErrorCode::StoreCommitFailed);
 }
 
 #[tokio::test]
