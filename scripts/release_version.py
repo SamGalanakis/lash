@@ -35,6 +35,7 @@ DOC_VERSION_FILES = [
     ROOT / "docs" / "quickstart.html",
     ROOT / "docs" / "tracing.html",
 ]
+RELEASED_VERSION_FILE = ROOT / "docs" / "released-version.txt"
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 # Pre-release versions (e.g. "0.1.0-alpha.1") and the "0.0.0-dev" working-tree
 # placeholder both match this shape.
@@ -279,6 +280,7 @@ def update_doc_example_versions(version: str) -> None:
         updated_text = "\n".join(updated_lines) + "\n"
         if updated_text != text:
             path.write_text(updated_text)
+    RELEASED_VERSION_FILE.write_text(f"{version}\n")
 
 
 def update_lockfile_versions(version: str) -> None:

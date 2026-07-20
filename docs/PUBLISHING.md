@@ -68,6 +68,27 @@ python3 scripts/test_release_notes.py
 Those tests pin the lockstep/private-crate version behavior, the publisher's
 transient retry classification, and the release-notes extraction rules.
 
+## Docs release pin
+
+Install snippets use the latest published version, recorded in
+`docs/released-version.txt`. `scripts/lint_docs.py` requires every exact Lash
+pin in the README and docs entry pages to match that file. It also compares the
+value with local `v*` tags and fails when a newer release tag exists. If the
+matching tag is unavailable in an offline or shallow checkout, the checked-in
+value is the fallback, so docs lint never needs network access.
+
+After publishing a release, update the display snippets and fallback together
+in the next docs PR:
+
+```bash
+python3 scripts/release_version.py stamp-docs X.Y.Z
+python3 scripts/lint_docs.py
+```
+
+`stamp-docs` is deliberately separate from the ephemeral manifest stamp used
+by the release workflow: it changes checked-in documentation, not release
+artifacts.
+
 ## Release notes (required)
 
 Every release ships curated notes. Any commit that should contribute
