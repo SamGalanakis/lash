@@ -984,6 +984,28 @@ impl ProcessRegistry for PostgresProcessRegistry {
         Ok(records)
     }
 
+    async fn filter_unregistered_process_ids(
+        &self,
+        process_ids: &[String],
+    ) -> Result<Vec<String>, PluginError> {
+        if process_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_scalar(
+            "SELECT candidate.process_id
+             FROM UNNEST($1::TEXT[]) WITH ORDINALITY AS candidate(process_id, ordinal)
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM lash_processes p
+                 WHERE p.process_id = candidate.process_id
+             )
+             ORDER BY candidate.ordinal ASC",
+        )
+        .bind(process_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(plugin_sqlx_error)
+    }
+
     async fn live_reference_summary(
         &self,
     ) -> Result<Vec<ProcessLiveReferenceSummary>, PluginError> {

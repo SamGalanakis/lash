@@ -306,6 +306,22 @@ pub trait ProcessRegistry: Send + Sync {
     /// `process_id`, so re-running them would be wasted work.
     async fn list_non_terminal(&self) -> Result<Vec<ProcessRecord>, PluginError>;
 
+    /// Return the candidate ids that have no persisted process row, preserving
+    /// input order. Durable backends override this with one `NOT EXISTS`
+    /// anti-join so recovery does not issue one point read per candidate.
+    async fn filter_unregistered_process_ids(
+        &self,
+        process_ids: &[String],
+    ) -> Result<Vec<String>, PluginError> {
+        let mut missing = Vec::new();
+        for process_id in process_ids {
+            if self.get_process(process_id).await.is_none() {
+                missing.push(process_id.clone());
+            }
+        }
+        Ok(missing)
+    }
+
     /// Count non-terminal process rows by their captured definition and
     /// execution-environment references.
     async fn live_reference_summary(&self)
