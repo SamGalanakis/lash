@@ -575,13 +575,15 @@ async fn queued_turn_run_drains_ready_work_and_returns_none_when_idle() -> Resul
         .expect("queued turn should run");
 
     assert_eq!(output.assistant_message(), Some("echo: queued work"));
-    let requests = requests.lock().expect("request capture");
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        serde_json::to_string(&requests[0][1..])
-            .expect("serialize queued-next request user messages"),
-        r#"[{"role":"User","blocks":[{"Text":{"text":"queued work","response_meta":null,"cache_breakpoint":false}}]}]"#
-    );
+    {
+        let requests = requests.lock().expect("request capture");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            serde_json::to_string(&requests[0][1..])
+                .expect("serialize queued-next request user messages"),
+            r#"[{"role":"User","blocks":[{"Text":{"text":"queued work","response_meta":null,"cache_breakpoint":false}}]}]"#
+        );
+    }
     assert!(session.queued_turn().run().await?.is_none());
     Ok(())
 }
