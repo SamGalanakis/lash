@@ -349,10 +349,11 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &frame_cancel_request.workflow_id).await?;
     assert_frame_switch_cancel_response(&frame_cancel_response)?;
 
+    drive_engine_restart_scenario(&storage, &ingress_url, &admin_url).await?;
     drive_turn_control_scenarios(&storage, &ingress_url).await?;
     drive_durable_wait_index_scenarios(&storage, &ingress_url, &admin_url).await?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 24).await?;
+    let responses = wait_for_terminal_results(storage.pool(), 26).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -380,7 +381,7 @@ async fn async_main() -> Result<()> {
     assert_no_active_lash_restate_invocations(&admin_url).await?;
 
     println!(
-        "restate-postgres-workers e2e passed: {} workflows; turn-control gates: cross-process, before-start, seal-race, crash-recovery, terminal-attach, break-glass-negative; trigger process {}; signal process {}; traces {}",
+        "restate-postgres-workers e2e passed: {} workflows; engine-restart gates: journal-replay, post-restart-cancel-evidence, post-restart-completion; turn-control gates: cross-process, before-start, seal-race, crash-recovery, terminal-attach, break-glass-negative; trigger process {}; signal process {}; traces {}",
         responses.len(),
         trigger_process_id,
         signal_process_id,
@@ -1412,6 +1413,159 @@ async fn drive_turn_control_scenarios(storage: &PostgresStorage, ingress_url: &s
     Ok(())
 }
 
+/// Coordinate a real Restate service bounce with the shell harness while both
+/// workers and this runner stay alive. The parked tool attempt makes the
+/// handler reconnect and replay its journaled turn-start cancellation peek;
+/// waiting for a second tool entry proves replay reached the same command path
+/// instead of failing with a journal mismatch.
+async fn drive_engine_restart_scenario(
+    storage: &PostgresStorage,
+    ingress_url: &str,
+    admin_url: &str,
+) -> Result<()> {
+    let driver = RestateTurnDeployment::new(ingress_url.to_string()).turn_work_driver();
+    let parked = turn_control_request("e2e-engine-restart-cancel", false);
+    submit_workflow(ingress_url, &parked).await?;
+    wait_for_cancel_gate_attempts(storage.pool(), &parked.workflow_id, 1).await?;
+    record_harness_signal(storage.pool(), "engine-restart-ready").await?;
+    report_workflow_progress(&parked.workflow_id, "parked-before-engine-restart");
+
+    wait_for_harness_signal(storage.pool(), "engine-restart-complete").await?;
+    wait_for_restate_recovery(admin_url).await?;
+    wait_for_cancel_gate_attempts(storage.pool(), &parked.workflow_id, 2).await?;
+    report_workflow_progress(&parked.workflow_id, "journal-replayed-after-engine-restart");
+
+    let evidence_id = "e2e-cancel-after-engine-restart";
+    let receipt = driver
+        .request_cancel(
+            TurnCancelRequest::new(
+                turn_address(&parked),
+                evidence_id,
+                Some("scripted-engine-restart-runner".to_string()),
+            )
+            .with_reason("cancel a replayed turn after the Restate engine restarted"),
+        )
+        .await
+        .context("request cancellation after Restate engine restart")?;
+    let evidence = match &receipt.outcome {
+        TurnCancelOutcome::Requested(evidence) | TurnCancelOutcome::AlreadyRequested(evidence) => {
+            evidence
+        }
+        other => anyhow::bail!("post-restart cancellation did not win: {other:?}"),
+    };
+    anyhow::ensure!(
+        evidence.request_id == evidence_id
+            && evidence.origin.as_deref() == Some("scripted-engine-restart-runner")
+            && evidence.reason.as_deref()
+                == Some("cancel a replayed turn after the Restate engine restarted"),
+        "post-restart cancellation receipt lost evidence: {evidence:?}"
+    );
+    let terminal = driver
+        .await_terminal(&turn_address(&parked))
+        .await
+        .context("attach to post-restart cancellation terminal")?;
+    assert_engine_restart_cancelled_terminal(&terminal, evidence_id)?;
+    let cancelled = wait_for_terminal_result(storage.pool(), &parked.workflow_id).await?;
+    anyhow::ensure!(
+        cancelled.final_text == "turn-control-cancelled"
+            && cancelled.final_value["cancellation"]["request_id"] == evidence_id
+            && cancelled.final_value["cancellation"]["origin"] == "scripted-engine-restart-runner",
+        "post-restart worker result lost cancellation evidence: {cancelled:#?}"
+    );
+
+    let complete = TurnRequest {
+        workflow_id: "e2e-engine-restart-complete".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::TurnControlComplete,
+        signal: None,
+    };
+    submit_workflow(ingress_url, &complete).await?;
+    let complete_terminal = driver
+        .await_terminal(&turn_address(&complete))
+        .await
+        .context("attach to post-restart completion terminal")?;
+    assert_non_cancel_terminal(&complete_terminal)?;
+    let completed = wait_for_terminal_result(storage.pool(), &complete.workflow_id).await?;
+    anyhow::ensure!(
+        completed.final_text == "turn-control-completed",
+        "post-restart turn did not commit normally: {completed:#?}"
+    );
+    println!(
+        "engine-restart gates passed: journal-replay; post-restart-cancel-evidence; post-restart-completion"
+    );
+    Ok(())
+}
+
+async fn record_harness_signal(pool: &sqlx::PgPool, signal_name: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO lash_e2e_harness_signals (signal_name, created_at_ms)
+         VALUES ($1, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT)
+         ON CONFLICT (signal_name) DO UPDATE SET created_at_ms = EXCLUDED.created_at_ms",
+    )
+    .bind(signal_name)
+    .execute(pool)
+    .await
+    .with_context(|| format!("record harness signal `{signal_name}`"))?;
+    Ok(())
+}
+
+async fn wait_for_harness_signal(pool: &sqlx::PgPool, signal_name: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let seen: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM lash_e2e_harness_signals WHERE signal_name = $1)",
+        )
+        .bind(signal_name)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("poll harness signal `{signal_name}`"))?;
+        if seen {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("timed out waiting for harness signal `{signal_name}`")
+}
+
+async fn wait_for_restate_recovery(admin_url: &str) -> Result<()> {
+    let admin = RestateAdminClient::new(admin_url.to_string());
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while Instant::now() < deadline {
+        if admin
+            .unfinished_invocations_for_service_prefixes(&[TURN_WORKFLOW_NAME])
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("Restate admin API did not recover after engine restart")
+}
+
+fn assert_engine_restart_cancelled_terminal(
+    terminal: &TurnTerminal,
+    request_id: &str,
+) -> Result<()> {
+    let TurnTerminal::Committed {
+        outcome,
+        cancellation: Some(evidence),
+        ..
+    } = terminal
+    else {
+        anyhow::bail!("expected committed post-restart cancellation, got {terminal:?}")
+    };
+    anyhow::ensure!(
+        matches!(outcome, TurnOutcome::Stopped(TurnStop::Cancelled))
+            && evidence.request_id == request_id
+            && evidence.origin.as_deref() == Some("scripted-engine-restart-runner")
+            && evidence.reason.as_deref()
+                == Some("cancel a replayed turn after the Restate engine restarted"),
+        "post-restart terminal lost cancellation evidence: {terminal:?}"
+    );
+    Ok(())
+}
+
 async fn drive_break_glass_scenario(
     storage: &PostgresStorage,
     ingress_url: &str,
@@ -1565,6 +1719,14 @@ fn assert_cancelled_response(response: &TurnResponse, request_id: &str) -> Resul
 }
 
 async fn wait_for_cancel_gate(pool: &sqlx::PgPool, workflow_id: &str) -> Result<()> {
+    wait_for_cancel_gate_attempts(pool, workflow_id, 1).await
+}
+
+async fn wait_for_cancel_gate_attempts(
+    pool: &sqlx::PgPool,
+    workflow_id: &str,
+    expected: i64,
+) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         let count: i64 = sqlx::query_scalar(
@@ -1575,12 +1737,12 @@ async fn wait_for_cancel_gate(pool: &sqlx::PgPool, workflow_id: &str) -> Result<
         .fetch_one(pool)
         .await
         .context("poll cancellation tool gate")?;
-        if count > 0 {
+        if count >= expected {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    anyhow::bail!("timed out waiting for cancellation gate in `{workflow_id}`")
+    anyhow::bail!("timed out waiting for {expected} cancellation-gate attempts in `{workflow_id}`")
 }
 
 async fn wait_for_failover_marker(pool: &sqlx::PgPool, workflow_id: &str) -> Result<String> {

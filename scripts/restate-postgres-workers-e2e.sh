@@ -71,7 +71,50 @@ LASH_MINIO_PREFIX="conformance/restate-postgres-workers-$$" \
   cargo test --locked -p lash-s3-store -- --nocapture \
   2>&1 | tee "$test_output"
 
-"${compose[@]}" --profile runner run --rm runner 2>&1 | tee -a "$test_output"
+"${compose[@]}" --profile runner run --rm runner 2>&1 | tee -a "$test_output" &
+runner_job=$!
+
+deadline=$((SECONDS + 180))
+until signal_ready="$(
+  "${compose[@]}" exec -T postgres \
+    psql -U lash -d lash -Atqc \
+    "SELECT EXISTS(SELECT 1 FROM lash_e2e_harness_signals WHERE signal_name = 'engine-restart-ready')" \
+    2>/dev/null || true
+)" && [[ "$signal_ready" = "t" ]]; do
+  if ! kill -0 "$runner_job" >/dev/null 2>&1; then
+    wait "$runner_job"
+    echo "runner exited before the engine-restart ready gate" >&2
+    exit 1
+  fi
+  if ((SECONDS >= deadline)); then
+    echo "timed out waiting for the engine-restart ready gate" >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+echo "engine-restart harness: parked turn observed; stopping only Restate"
+for service in worker-a worker-b worker-proxy mock-provider; do
+  [[ "$("${compose[@]}" ps --status running -q "$service")" ]] \
+    || { echo "$service was not running before Restate restart" >&2; exit 1; }
+done
+"${compose[@]}" stop restate
+[[ -z "$("${compose[@]}" ps --status running -q restate)" ]] \
+  || { echo "Restate remained running after stop" >&2; exit 1; }
+"${compose[@]}" start restate
+for service in worker-a worker-b worker-proxy mock-provider; do
+  [[ "$("${compose[@]}" ps --status running -q "$service")" ]] \
+    || { echo "$service stopped during Restate restart" >&2; exit 1; }
+done
+"${compose[@]}" exec -T postgres \
+  psql -U lash -d lash -v ON_ERROR_STOP=1 -c \
+  "INSERT INTO lash_e2e_harness_signals (signal_name, created_at_ms)
+   VALUES ('engine-restart-complete', (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT)
+   ON CONFLICT (signal_name) DO UPDATE SET created_at_ms = EXCLUDED.created_at_ms" \
+  >/dev/null
+echo "engine-restart harness: Restate started; workers remained running"
+
+wait "$runner_job"
 "${compose[@]}" logs --no-color 2>&1 | tee -a "$test_output"
 if grep -Fn 'panicked at' "$test_output" >&2; then
   echo "panic gate: FAILED ('panicked at' found in Restate/Postgres workers E2E output)" >&2
