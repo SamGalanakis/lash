@@ -1,8 +1,8 @@
 //! In-process await-event (Durable Wait) registry backing the inline effect
 //! host and controller.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
 use hmac::{Hmac, Mac};
@@ -27,10 +27,7 @@ pub(super) fn inline_await_events() -> &'static AwaitEventRegistry {
 
 #[derive(Debug)]
 struct AwaitEventEntry {
-    /// Session the wait's execution scope belongs to, when it has one. Used by
-    /// [`AwaitEventRegistry::cancel_session`] to find a session's outstanding
-    /// waits without re-deriving key hashes.
-    session_id: Option<String>,
+    verified_key: AwaitEventKey,
     turn_control: bool,
     terminal: Option<Resolution>,
     notify: Arc<Notify>,
@@ -39,7 +36,7 @@ struct AwaitEventEntry {
 impl AwaitEventEntry {
     fn for_key(key: &AwaitEventKey) -> Self {
         Self {
-            session_id: key.scope.session_id().map(ToOwned::to_owned),
+            verified_key: key.clone(),
             turn_control: key.wait.is_turn_control(),
             terminal: None,
             notify: Arc::new(Notify::new()),
@@ -52,22 +49,38 @@ struct AwaitEventRegistryState {
     entries: HashMap<String, AwaitEventEntry>,
     completed_turn_control: HashMap<String, CompletedTurnControlEntry>,
     completed_turn_control_order: VecDeque<String>,
-    revoked_session_ids: HashSet<String>,
-    revoked_session_order: VecDeque<String>,
+    revoked: bool,
 }
 
 #[derive(Debug)]
 struct CompletedTurnControlEntry {
-    session_id: Option<String>,
+    verified_key: AwaitEventKey,
     terminal: Resolution,
 }
+
+impl AwaitEventRegistryState {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            completed_turn_control: HashMap::new(),
+            completed_turn_control_order: VecDeque::new(),
+            revoked: false,
+        }
+    }
+}
+
+type AwaitEventRegistryShard = Arc<std::sync::Mutex<AwaitEventRegistryState>>;
 
 #[derive(Debug)]
 pub(super) struct AwaitEventRegistry {
     secret: Vec<u8>,
-    state: std::sync::Mutex<AwaitEventRegistryState>,
+    session_shards: RwLock<HashMap<String, AwaitEventRegistryShard>>,
+    unscoped_shard: AwaitEventRegistryShard,
+    revoked_session_order: std::sync::Mutex<VecDeque<String>>,
     completed_turn_control_key_limit: usize,
     revoked_session_limit: usize,
+    #[cfg(test)]
+    verify_uncached_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl AwaitEventRegistry {
@@ -78,27 +91,67 @@ impl AwaitEventRegistry {
     fn with_limits(completed_turn_control_key_limit: usize, revoked_session_limit: usize) -> Self {
         Self {
             secret: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            state: std::sync::Mutex::new(AwaitEventRegistryState {
-                entries: HashMap::new(),
-                completed_turn_control: HashMap::new(),
-                completed_turn_control_order: VecDeque::new(),
-                revoked_session_ids: HashSet::new(),
-                revoked_session_order: VecDeque::new(),
-            }),
+            session_shards: RwLock::new(HashMap::new()),
+            unscoped_shard: Arc::new(std::sync::Mutex::new(AwaitEventRegistryState::new())),
+            revoked_session_order: std::sync::Mutex::new(VecDeque::new()),
             completed_turn_control_key_limit,
             revoked_session_limit,
+            #[cfg(test)]
+            verify_uncached_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn shard_for_session(&self, session_id: &str) -> Result<AwaitEventRegistryShard, RuntimeError> {
+        if let Some(shard) = self
+            .session_shards
+            .read()
+            .map_err(|_| Self::poisoned())?
+            .get(session_id)
+            .cloned()
+        {
+            return Ok(shard);
+        }
+        let mut shards = self.session_shards.write().map_err(|_| Self::poisoned())?;
+        Ok(Arc::clone(
+            shards
+                .entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(std::sync::Mutex::new(AwaitEventRegistryState::new()))),
+        ))
+    }
+
+    fn existing_session_shard(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<AwaitEventRegistryShard>, RuntimeError> {
+        Ok(self
+            .session_shards
+            .read()
+            .map_err(|_| Self::poisoned())?
+            .get(session_id)
+            .cloned())
+    }
+
+    fn shard_for_scope(
+        &self,
+        scope: &ExecutionScope,
+    ) -> Result<AwaitEventRegistryShard, RuntimeError> {
+        match scope.session_id() {
+            Some(session_id) => self.shard_for_session(session_id),
+            None => Ok(Arc::clone(&self.unscoped_shard)),
         }
     }
 
     fn locked_state(
-        &self,
+        shard: &AwaitEventRegistryShard,
     ) -> Result<std::sync::MutexGuard<'_, AwaitEventRegistryState>, RuntimeError> {
-        self.state.lock().map_err(|_| {
-            RuntimeError::new(
-                "await_event_registry_poisoned",
-                "await-event registry lock poisoned",
-            )
-        })
+        shard.lock().map_err(|_| Self::poisoned())
+    }
+
+    fn poisoned() -> RuntimeError {
+        RuntimeError::new(
+            "await_event_registry_poisoned",
+            "await-event registry lock poisoned",
+        )
     }
 
     pub(super) fn key_for(
@@ -146,9 +199,19 @@ impl AwaitEventRegistry {
         Ok(format!("{:x}", mac.finalize().into_bytes()))
     }
 
-    fn verify(&self, key: &AwaitEventKey) -> Result<bool, RuntimeError> {
+    fn verify_uncached(&self, key: &AwaitEventKey) -> Result<bool, RuntimeError> {
+        #[cfg(test)]
+        self.verify_uncached_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let expected = self.signature(&key.scope, &key.wait, &key.key_id)?;
         Ok(expected == key.signature)
+    }
+
+    fn unknown_or_revoked() -> RuntimeError {
+        RuntimeError::new(
+            "await_event_unknown_or_revoked",
+            "await-event key is invalid or revoked",
+        )
     }
 
     pub(super) fn resolve(
@@ -156,33 +219,39 @@ impl AwaitEventRegistry {
         key: &AwaitEventKey,
         resolution: Resolution,
     ) -> Result<ResolveOutcome, RuntimeError> {
-        if !self.verify(key)? {
-            return Ok(ResolveOutcome::UnknownOrRevoked);
-        }
-        let mut state = self.locked_state()?;
-        if key
-            .scope
-            .session_id()
-            .is_some_and(|session_id| state.revoked_session_ids.contains(session_id))
-        {
+        let shard = self.shard_for_scope(&key.scope)?;
+        let mut state = Self::locked_state(&shard)?;
+        if state.revoked {
             return Ok(ResolveOutcome::UnknownOrRevoked);
         }
         if let Some(completed) = state.completed_turn_control.get(&key.key_id) {
+            if completed.verified_key != *key {
+                return Ok(ResolveOutcome::UnknownOrRevoked);
+            }
             return Ok(ResolveOutcome::AlreadyResolved {
                 terminal: completed.terminal.clone(),
             });
         }
-        let entry = state
-            .entries
-            .entry(key.key_id.clone())
-            .or_insert_with(|| AwaitEventEntry::for_key(key));
-        if let Some(terminal) = &entry.terminal {
-            return Ok(ResolveOutcome::AlreadyResolved {
-                terminal: terminal.clone(),
-            });
+        if let Some(entry) = state.entries.get_mut(&key.key_id) {
+            if entry.verified_key != *key {
+                return Ok(ResolveOutcome::UnknownOrRevoked);
+            }
+            if let Some(terminal) = &entry.terminal {
+                return Ok(ResolveOutcome::AlreadyResolved {
+                    terminal: terminal.clone(),
+                });
+            }
+            entry.terminal = Some(resolution);
+            entry.notify.notify_waiters();
+        } else {
+            if !self.verify_uncached(key)? {
+                return Ok(ResolveOutcome::UnknownOrRevoked);
+            }
+            let mut entry = AwaitEventEntry::for_key(key);
+            entry.terminal = Some(resolution);
+            entry.notify.notify_waiters();
+            state.entries.insert(key.key_id.clone(), entry);
         }
-        entry.terminal = Some(resolution);
-        entry.notify.notify_waiters();
         if matches!(key.wait, AwaitEventWaitIdentity::TurnTerminal) {
             self.archive_turn_control(&mut state, key)?;
         }
@@ -193,30 +262,27 @@ impl AwaitEventRegistry {
         &self,
         key: &AwaitEventKey,
     ) -> Result<Option<Resolution>, RuntimeError> {
-        if !self.verify(key)? {
-            return Err(RuntimeError::new(
-                "await_event_unknown_or_revoked",
-                "await-event key is invalid or revoked",
-            ));
-        }
-        let state = self.locked_state()?;
-        if key
-            .scope
-            .session_id()
-            .is_some_and(|session_id| state.revoked_session_ids.contains(session_id))
-        {
-            return Err(RuntimeError::new(
-                "await_event_unknown_or_revoked",
-                "await-event key is invalid or revoked",
-            ));
+        let shard = self.shard_for_scope(&key.scope)?;
+        let state = Self::locked_state(&shard)?;
+        if state.revoked {
+            return Err(Self::unknown_or_revoked());
         }
         if let Some(completed) = state.completed_turn_control.get(&key.key_id) {
+            if completed.verified_key != *key {
+                return Err(Self::unknown_or_revoked());
+            }
             return Ok(Some(completed.terminal.clone()));
         }
-        Ok(state
-            .entries
-            .get(&key.key_id)
-            .and_then(|entry| entry.terminal.clone()))
+        if let Some(entry) = state.entries.get(&key.key_id) {
+            if entry.verified_key != *key {
+                return Err(Self::unknown_or_revoked());
+            }
+            return Ok(entry.terminal.clone());
+        }
+        if !self.verify_uncached(key)? {
+            return Err(Self::unknown_or_revoked());
+        }
+        Ok(None)
     }
 
     fn archive_turn_control(
@@ -237,7 +303,7 @@ impl AwaitEventRegistry {
                 .insert(
                     key_id.clone(),
                     CompletedTurnControlEntry {
-                        session_id: entry.session_id,
+                        verified_key: entry.verified_key,
                         terminal,
                     },
                 )
@@ -262,32 +328,36 @@ impl AwaitEventRegistry {
         deadline: Option<Instant>,
         clock: &dyn crate::Clock,
     ) -> Result<Resolution, RuntimeError> {
-        if !self.verify(key)? {
-            return Err(RuntimeError::new(
-                "await_event_unknown_or_revoked",
-                "await-event key is invalid or revoked",
-            ));
-        }
+        let shard = self.shard_for_scope(&key.scope)?;
         loop {
             let notify = {
-                let mut state = self.locked_state()?;
-                if key
-                    .scope
-                    .session_id()
-                    .is_some_and(|session_id| state.revoked_session_ids.contains(session_id))
-                {
-                    return Err(RuntimeError::new(
-                        "await_event_unknown_or_revoked",
-                        "await-event key is invalid or revoked",
-                    ));
+                let mut state = Self::locked_state(&shard)?;
+                if state.revoked {
+                    return Err(Self::unknown_or_revoked());
                 }
                 if let Some(completed) = state.completed_turn_control.get(&key.key_id) {
+                    if completed.verified_key != *key {
+                        return Err(Self::unknown_or_revoked());
+                    }
                     return Ok(completed.terminal.clone());
+                }
+                if let Some(entry) = state.entries.get(&key.key_id)
+                    && entry.verified_key != *key
+                {
+                    return Err(Self::unknown_or_revoked());
+                }
+                if !state.entries.contains_key(&key.key_id) {
+                    if !self.verify_uncached(key)? {
+                        return Err(Self::unknown_or_revoked());
+                    }
+                    state
+                        .entries
+                        .insert(key.key_id.clone(), AwaitEventEntry::for_key(key));
                 }
                 let entry = state
                     .entries
-                    .entry(key.key_id.clone())
-                    .or_insert_with(|| AwaitEventEntry::for_key(key));
+                    .get(&key.key_id)
+                    .expect("await-event entry inserted above");
                 if let Some(terminal) = entry.terminal.clone() {
                     return Ok(terminal);
                 }
@@ -337,55 +407,76 @@ impl AwaitEventRegistry {
     /// bounded recent-session tombstone cache rejects keys created after
     /// deletion without growing for the lifetime of the process.
     pub(super) fn revoke_session(&self, session_id: &str) -> Result<(), RuntimeError> {
-        let mut state = self.locked_state()?;
-        if state.revoked_session_ids.insert(session_id.to_string()) {
-            state
-                .revoked_session_order
-                .push_back(session_id.to_string());
-        }
-        while state.revoked_session_ids.len() > self.revoked_session_limit {
-            let Some(expired) = state.revoked_session_order.pop_front() else {
-                break;
-            };
-            state.revoked_session_ids.remove(&expired);
-        }
-        state.entries.retain(|_, entry| {
-            if entry.session_id.as_deref() == Some(session_id) {
+        let shard = self.shard_for_session(session_id)?;
+        let newly_revoked = {
+            let mut state = Self::locked_state(&shard)?;
+            let newly_revoked = !state.revoked;
+            state.revoked = true;
+            for entry in state.entries.values() {
                 entry.notify.notify_waiters();
-                false
-            } else {
-                true
             }
-        });
-        state
-            .completed_turn_control
-            .retain(|_, entry| entry.session_id.as_deref() != Some(session_id));
-        let retained: HashSet<_> = state.completed_turn_control.keys().cloned().collect();
-        state
-            .completed_turn_control_order
-            .retain(|key_id| retained.contains(key_id));
+            state.entries.clear();
+            state.completed_turn_control.clear();
+            state.completed_turn_control_order.clear();
+            newly_revoked
+        };
+        if !newly_revoked {
+            return Ok(());
+        }
+        let expired = {
+            let mut order = self
+                .revoked_session_order
+                .lock()
+                .map_err(|_| Self::poisoned())?;
+            order.push_back(session_id.to_string());
+            let mut expired = Vec::new();
+            while order.len() > self.revoked_session_limit {
+                if let Some(session_id) = order.pop_front() {
+                    expired.push(session_id);
+                }
+            }
+            expired
+        };
+        if !expired.is_empty() {
+            let mut shards = self.session_shards.write().map_err(|_| Self::poisoned())?;
+            for session_id in expired {
+                shards.remove(&session_id);
+            }
+        }
         Ok(())
     }
 
     #[cfg(test)]
     fn counts(&self) -> Result<(usize, usize, usize), RuntimeError> {
-        let state = self.locked_state()?;
-        Ok((
-            state.entries.len(),
-            state.completed_turn_control.len(),
-            state.revoked_session_ids.len(),
-        ))
+        let mut shards = self
+            .session_shards
+            .read()
+            .map_err(|_| Self::poisoned())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        shards.push(Arc::clone(&self.unscoped_shard));
+        let mut counts = (0, 0, 0);
+        for shard in shards {
+            let state = Self::locked_state(&shard)?;
+            counts.0 += state.entries.len();
+            counts.1 += state.completed_turn_control.len();
+            counts.2 += usize::from(state.revoked);
+        }
+        Ok(counts)
     }
 
     #[cfg(test)]
     fn has_entry(&self, key: &AwaitEventKey) -> Result<bool, RuntimeError> {
-        let state = self.locked_state()?;
+        let shard = self.shard_for_scope(&key.scope)?;
+        let state = Self::locked_state(&shard)?;
         Ok(state.entries.contains_key(&key.key_id))
     }
 
     #[cfg(test)]
     fn is_completed_turn_control(&self, key: &AwaitEventKey) -> Result<bool, RuntimeError> {
-        let state = self.locked_state()?;
+        let shard = self.shard_for_scope(&key.scope)?;
+        let state = Self::locked_state(&shard)?;
         Ok(state.completed_turn_control.contains_key(&key.key_id))
     }
 
@@ -395,12 +486,12 @@ impl AwaitEventRegistry {
     /// normally. This is the standalone host lever, in contrast to the
     /// tombstoning [`revoke_session`](Self::revoke_session).
     pub(super) fn cancel_session(&self, session_id: &str) -> Result<(), RuntimeError> {
-        let mut state = self.locked_state()?;
+        let Some(shard) = self.existing_session_shard(session_id)? else {
+            return Ok(());
+        };
+        let mut state = Self::locked_state(&shard)?;
         for entry in state.entries.values_mut() {
-            if entry.session_id.as_deref() != Some(session_id)
-                || entry.turn_control
-                || entry.terminal.is_some()
-            {
+            if entry.turn_control || entry.terminal.is_some() {
                 continue;
             }
             entry.terminal = Some(Resolution::Cancelled);
@@ -413,6 +504,8 @@ impl AwaitEventRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
+    use std::time::Duration;
 
     fn turn_scope(session_id: &str, turn_id: &str) -> ExecutionScope {
         ExecutionScope::turn(session_id, turn_id)
@@ -536,5 +629,137 @@ mod tests {
         registry.revoke_session("revoke-2").expect("second revoke");
         registry.revoke_session("revoke-3").expect("third revoke");
         assert_eq!(registry.counts().expect("bounded revokes").2, 2);
+    }
+
+    #[test]
+    fn verified_signatures_are_cached_with_live_entries() {
+        let registry = AwaitEventRegistry::new();
+        let key = registry
+            .key_for(
+                &turn_scope("signature-cache", "turn"),
+                AwaitEventWaitIdentity::tool_completion("tool"),
+            )
+            .expect("await-event key");
+        registry
+            .resolve(&key, Resolution::Ok(serde_json::json!("done")))
+            .expect("resolve key");
+        assert_eq!(
+            registry
+                .verify_uncached_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        for _ in 0..10 {
+            assert!(
+                registry
+                    .peek_resolution(&key)
+                    .expect("cached peek")
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            registry
+                .verify_uncached_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "resolved entry peeks must not recompute HMAC signatures"
+        );
+
+        let mut tampered = key;
+        tampered.signature.push('0');
+        assert!(registry.peek_resolution(&tampered).is_err());
+        assert_eq!(
+            registry
+                .verify_uncached_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a cached key mismatch must be rejected without replacing the verified signature"
+        );
+    }
+
+    #[test]
+    fn different_sessions_do_not_share_the_registry_mutex() {
+        let registry = Arc::new(AwaitEventRegistry::new());
+        let key_a = registry
+            .key_for(
+                &turn_scope("shard-a", "turn"),
+                AwaitEventWaitIdentity::tool_completion("tool"),
+            )
+            .expect("session A key");
+        let key_b = registry
+            .key_for(
+                &turn_scope("shard-b", "turn"),
+                AwaitEventWaitIdentity::tool_completion("tool"),
+            )
+            .expect("session B key");
+        let shard_a = registry
+            .shard_for_scope(&key_a.scope)
+            .expect("session A shard");
+        let _held_a = AwaitEventRegistry::locked_state(&shard_a).expect("lock session A");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let registry_b = Arc::clone(&registry);
+        std::thread::spawn(move || {
+            let result = registry_b.resolve(&key_b, Resolution::Ok(serde_json::json!("done")));
+            tx.send(result).expect("return session B result");
+        });
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("session B must not wait for session A's mutex")
+                .expect("resolve session B"),
+            ResolveOutcome::Accepted
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual lane-O await-event contention measurement"]
+    fn measure_concurrent_turn_registry_contention() {
+        const THREADS: usize = 8;
+        const PEEKS_PER_THREAD: usize = 25_000;
+        let registry = Arc::new(AwaitEventRegistry::new());
+        let keys = (0..THREADS)
+            .map(|ordinal| {
+                let key = registry
+                    .key_for(
+                        &turn_scope(&format!("perf-session-{ordinal}"), "turn"),
+                        AwaitEventWaitIdentity::tool_completion("tool"),
+                    )
+                    .expect("perf key");
+                registry
+                    .resolve(&key, Resolution::Ok(serde_json::json!(ordinal)))
+                    .expect("seed resolution");
+                key
+            })
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(THREADS + 1));
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            for key in keys {
+                let registry = Arc::clone(&registry);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..PEEKS_PER_THREAD {
+                        assert!(
+                            registry
+                                .peek_resolution(&key)
+                                .expect("peek resolution")
+                                .is_some()
+                        );
+                    }
+                });
+            }
+            barrier.wait();
+        });
+        let elapsed = started.elapsed();
+        let operations = THREADS * PEEKS_PER_THREAD;
+        eprintln!(
+            "await-event contention: threads={THREADS} operations={operations} elapsed_ms={:.3} ns_per_op={:.3} ops_per_sec={:.0}",
+            elapsed.as_secs_f64() * 1_000.0,
+            elapsed.as_nanos() as f64 / operations as f64,
+            operations as f64 / elapsed.as_secs_f64(),
+        );
+        assert!(elapsed < Duration::from_secs(60));
     }
 }
