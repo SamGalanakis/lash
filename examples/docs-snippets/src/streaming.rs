@@ -1,5 +1,7 @@
 //! Compiled sources for the Rust snippets on `docs/streaming.html`.
 
+use std::sync::Arc;
+
 use lash::observe::{SessionObservationEvent, SessionObservationEventPayload};
 use lash::persistence::SessionReadView;
 use lash::{LashSession, TurnActivity, TurnActivitySink, TurnInput};
@@ -118,11 +120,11 @@ async fn reconnect_session(
 }
 // docs:end:session-reconnect
 
-async fn fold_session_event(event: SessionObservationEvent) -> anyhow::Result<()> {
+async fn fold_session_event(event: Arc<SessionObservationEvent>) -> anyhow::Result<()> {
     // docs:start:fold-session-event
-    match event.payload {
+    match &event.payload {
         SessionObservationEventPayload::TurnActivity(activity) => {
-            render_activity(activity).await?;
+            render_activity(activity.clone()).await?;
         }
         SessionObservationEventPayload::Committed { read_view } => {
             append_committed_view(&read_view).await?;

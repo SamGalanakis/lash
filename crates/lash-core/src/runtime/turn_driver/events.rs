@@ -179,7 +179,7 @@ pub(in crate::runtime) async fn emit_semantic_response_parts(
                 send_turn_activity(
                     event_tx,
                     correlation_id,
-                    TurnEvent::AssistantProseDelta { text },
+                    TurnEvent::AssistantProseDelta { text: text.into() },
                 )
                 .await;
             }
@@ -192,7 +192,9 @@ pub(in crate::runtime) async fn emit_semantic_response_parts(
                 send_turn_activity(
                     event_tx,
                     correlation_id,
-                    TurnEvent::ReasoningDelta { text: text.clone() },
+                    TurnEvent::ReasoningDelta {
+                        text: text.clone().into(),
+                    },
                 )
                 .await;
             }
@@ -212,7 +214,7 @@ pub(in crate::runtime) async fn emit_semantic_response_parts(
         send_independent_turn_event(
             event_tx,
             TurnEvent::AssistantProseDelta {
-                text: full_text.to_string(),
+                text: full_text.into(),
             },
         )
         .await;

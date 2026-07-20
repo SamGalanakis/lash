@@ -227,7 +227,7 @@ pub enum LiveReplayStoreError {
 
 #[derive(Clone, Debug)]
 pub enum LiveReplayResult {
-    Replayed(Vec<SessionObservationEvent>),
+    Replayed(Vec<Arc<SessionObservationEvent>>),
     Gap(LiveReplayGapReason),
 }
 
@@ -237,12 +237,12 @@ pub enum LiveReplaySubscribeResult {
 }
 
 pub struct LiveReplaySubscription {
-    replay: VecDeque<SessionObservationEvent>,
+    replay: VecDeque<Arc<SessionObservationEvent>>,
     receiver: ReusableBoxFuture<
         'static,
         (
-            Result<SessionObservationEvent, broadcast::error::RecvError>,
-            broadcast::Receiver<SessionObservationEvent>,
+            Result<Arc<SessionObservationEvent>, broadcast::error::RecvError>,
+            broadcast::Receiver<Arc<SessionObservationEvent>>,
         ),
     >,
     closed: bool,
@@ -250,8 +250,8 @@ pub struct LiveReplaySubscription {
 
 impl LiveReplaySubscription {
     fn new(
-        replay: Vec<SessionObservationEvent>,
-        receiver: broadcast::Receiver<SessionObservationEvent>,
+        replay: Vec<Arc<SessionObservationEvent>>,
+        receiver: broadcast::Receiver<Arc<SessionObservationEvent>>,
     ) -> Self {
         Self {
             replay: replay.into(),
@@ -260,7 +260,9 @@ impl LiveReplaySubscription {
         }
     }
 
-    pub async fn next_event(&mut self) -> Result<SessionObservationEvent, LiveReplayStoreError> {
+    pub async fn next_event(
+        &mut self,
+    ) -> Result<Arc<SessionObservationEvent>, LiveReplayStoreError> {
         futures_util::StreamExt::next(self)
             .await
             .unwrap_or(Err(LiveReplayStoreError::Closed))
@@ -268,17 +270,17 @@ impl LiveReplaySubscription {
 }
 
 async fn live_replay_recv(
-    mut receiver: broadcast::Receiver<SessionObservationEvent>,
+    mut receiver: broadcast::Receiver<Arc<SessionObservationEvent>>,
 ) -> (
-    Result<SessionObservationEvent, broadcast::error::RecvError>,
-    broadcast::Receiver<SessionObservationEvent>,
+    Result<Arc<SessionObservationEvent>, broadcast::error::RecvError>,
+    broadcast::Receiver<Arc<SessionObservationEvent>>,
 ) {
     let result = receiver.recv().await;
     (result, receiver)
 }
 
 impl Stream for LiveReplaySubscription {
-    type Item = Result<SessionObservationEvent, LiveReplayStoreError>;
+    type Item = Result<Arc<SessionObservationEvent>, LiveReplayStoreError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(event) = self.replay.pop_front() {
@@ -305,7 +307,7 @@ impl Stream for LiveReplaySubscription {
 #[derive(Clone, Debug)]
 pub enum SessionResume {
     Replayed {
-        events: Vec<SessionObservationEvent>,
+        events: Vec<Arc<SessionObservationEvent>>,
     },
     Gap {
         observation: SessionObservation,
@@ -337,7 +339,7 @@ pub trait LiveReplayStore: Send + Sync {
         session_id: &str,
         revision: SessionRevision,
         payload: SessionObservationEventPayload,
-    ) -> Result<SessionObservationEvent, LiveReplayStoreError>;
+    ) -> Result<Arc<SessionObservationEvent>, LiveReplayStoreError>;
 
     /// Return buffered events after `cursor`, or report a recoverable gap.
     ///
@@ -419,7 +421,7 @@ impl Default for InMemoryLiveReplayStore {
 struct LiveReplaySessionBuffer {
     events: VecDeque<StoredObservationEvent>,
     tail_position: u64,
-    sender: Option<broadcast::Sender<SessionObservationEvent>>,
+    sender: Option<broadcast::Sender<Arc<SessionObservationEvent>>>,
 }
 
 impl LiveReplaySessionBuffer {
@@ -434,7 +436,7 @@ impl LiveReplaySessionBuffer {
     fn subscribe(
         &mut self,
         channel_capacity: usize,
-    ) -> broadcast::Receiver<SessionObservationEvent> {
+    ) -> broadcast::Receiver<Arc<SessionObservationEvent>> {
         match self.sender.as_ref() {
             Some(sender) => sender.subscribe(),
             None => {
@@ -445,7 +447,7 @@ impl LiveReplaySessionBuffer {
         }
     }
 
-    fn publish(&mut self, event: SessionObservationEvent) {
+    fn publish(&mut self, event: Arc<SessionObservationEvent>) {
         let Some(sender) = self.sender.as_ref() else {
             return;
         };
@@ -459,7 +461,7 @@ impl LiveReplaySessionBuffer {
 struct StoredObservationEvent {
     position: u64,
     appended_at: Instant,
-    event: SessionObservationEvent,
+    event: Arc<SessionObservationEvent>,
 }
 
 impl InMemoryLiveReplayStore {
@@ -508,7 +510,7 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
         session_id: &str,
         revision: SessionRevision,
         payload: SessionObservationEventPayload,
-    ) -> Result<SessionObservationEvent, LiveReplayStoreError> {
+    ) -> Result<Arc<SessionObservationEvent>, LiveReplayStoreError> {
         let now = self.clock.now();
         let mut sessions = self
             .sessions
@@ -519,12 +521,12 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
             .or_insert_with(LiveReplaySessionBuffer::new);
         buffer.tail_position = buffer.tail_position.saturating_add(1);
         let cursor = SessionCursor::new(session_id, revision, buffer.tail_position);
-        let event = SessionObservationEvent {
+        let event = Arc::new(SessionObservationEvent {
             session_id: session_id.to_string(),
             revision,
             cursor,
             payload,
-        };
+        });
         buffer.events.push_back(StoredObservationEvent {
             position: buffer.tail_position,
             appended_at: now,
@@ -622,12 +624,34 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingAllocator;
+
+    static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOCATED_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            // SAFETY: forwarding the allocator contract unchanged to System.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` and `layout` came from the forwarded System allocation.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
 
     fn activity(text: &str) -> SessionObservationEventPayload {
         SessionObservationEventPayload::TurnActivity(crate::TurnActivity::independent(
-            crate::TurnEvent::AssistantProseDelta {
-                text: text.to_string(),
-            },
+            crate::TurnEvent::AssistantProseDelta { text: text.into() },
         ))
     }
 
@@ -676,7 +700,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         match &events[0].payload {
             SessionObservationEventPayload::TurnActivity(activity) => match &activity.event {
-                crate::TurnEvent::AssistantProseDelta { text } => assert_eq!(text, "a"),
+                crate::TurnEvent::AssistantProseDelta { text } => assert_eq!(text.as_ref(), "a"),
                 _ => panic!("wrong event"),
             },
             _ => panic!("wrong payload"),
@@ -741,13 +765,56 @@ mod tests {
             .append("s", SessionRevision(0), activity("b"))
             .expect("append b");
         let second = subscription.next_event().await.expect("live");
-        match second.payload {
-            SessionObservationEventPayload::TurnActivity(activity) => match activity.event {
-                crate::TurnEvent::AssistantProseDelta { text } => assert_eq!(text, "b"),
+        match &second.payload {
+            SessionObservationEventPayload::TurnActivity(activity) => match &activity.event {
+                crate::TurnEvent::AssistantProseDelta { text } => assert_eq!(text.as_ref(), "b"),
                 _ => panic!("wrong event"),
             },
             _ => panic!("wrong payload"),
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "manual lane-O allocation measurement"]
+    async fn measure_streamed_token_allocations() {
+        const TOKENS: usize = 1_000;
+        let store = InMemoryLiveReplayStore::with_bounds(TOKENS + 1, Duration::from_secs(120));
+        let mut cursor = store.current_cursor("perf-session", SessionRevision(7));
+        let LiveReplaySubscribeResult::Subscribed(mut subscription) = store
+            .subscribe_after_cursor(&cursor)
+            .expect("subscribe for allocation measurement")
+        else {
+            panic!("expected subscription");
+        };
+
+        ALLOCATION_COUNT.store(0, Ordering::SeqCst);
+        ALLOCATED_BYTES.store(0, Ordering::SeqCst);
+        for ordinal in 0..TOKENS {
+            let event = store
+                .append(
+                    "perf-session",
+                    SessionRevision(7),
+                    activity(&format!("token-{ordinal}")),
+                )
+                .expect("append token event");
+            let live = subscription.next_event().await.expect("receive live event");
+            assert_eq!(live.cursor, event.cursor);
+            let LiveReplayResult::Replayed(replayed) = store
+                .replay_after_cursor(&cursor)
+                .expect("replay token event")
+            else {
+                panic!("expected replay");
+            };
+            assert_eq!(replayed.len(), 1);
+            cursor = event.cursor.clone();
+        }
+        let allocations = ALLOCATION_COUNT.load(Ordering::SeqCst);
+        let bytes = ALLOCATED_BYTES.load(Ordering::SeqCst);
+        eprintln!(
+            "streamed-token allocations: total={allocations} per_token={:.3} bytes_total={bytes} bytes_per_token={:.3}",
+            allocations as f64 / TOKENS as f64,
+            bytes as f64 / TOKENS as f64,
+        );
     }
 
     #[test]

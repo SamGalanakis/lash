@@ -131,15 +131,13 @@ fn sample_events() -> Vec<(&'static str, TurnEvent, serde_json::Value)> {
         ),
         (
             "assistant_prose_delta",
-            TurnEvent::AssistantProseDelta {
-                text: "hi".to_string(),
-            },
+            TurnEvent::AssistantProseDelta { text: "hi".into() },
             json!({ "type": "assistant_prose_delta", "text": "hi" }),
         ),
         (
             "reasoning_delta",
             TurnEvent::ReasoningDelta {
-                text: "thinking".to_string(),
+                text: "thinking".into(),
             },
             json!({ "type": "reasoning_delta", "text": "thinking" }),
         ),
@@ -508,4 +506,20 @@ fn turn_activity_envelope_flattens_event() {
 
     let round_trip: TurnActivity = serde_json::from_value(json.clone()).expect("deserialize");
     assert_eq!(serde_json::to_value(&round_trip).unwrap(), json);
+}
+
+#[test]
+fn arc_prose_and_activity_id_preserve_wire_bytes() {
+    let activity = TurnActivity {
+        id: TurnActivityId::new("activity-1"),
+        correlation_id: TurnActivityId::new("prose-1"),
+        event: TurnEvent::AssistantProseDelta {
+            text: "hello".into(),
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_vec(&activity).expect("serialize pinned prose activity"),
+        br#"{"id":"activity-1","correlation_id":"prose-1","type":"assistant_prose_delta","text":"hello"}"#,
+    );
 }

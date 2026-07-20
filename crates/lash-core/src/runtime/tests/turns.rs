@@ -2695,7 +2695,7 @@ async fn cancelled_provider_stream_does_not_commit_partial_output() {
     assert!(
         turn_events.snapshot().iter().any(|activity| matches!(
             &activity.event,
-            TurnEvent::AssistantProseDelta { text } if text == "partial provider text"
+            TurnEvent::AssistantProseDelta { text } if text.as_ref() == "partial provider text"
         )),
         "partial provider text should remain observable only as live turn activity"
     );

@@ -981,7 +981,7 @@ fn assistant_prose(events: &[TurnActivity]) -> String {
     events
         .iter()
         .filter_map(|activity| match &activity.event {
-            TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
+            TurnEvent::AssistantProseDelta { text } => Some(text.as_ref()),
             _ => None,
         })
         .collect()
@@ -1779,7 +1779,7 @@ fn inline_scope(scope: lash_core::ExecutionScope) -> lash_core::ScopedEffectCont
 fn turn_scope(session_id: &str) -> lash_core::ScopedEffectController<'static> {
     inline_scope(lash_core::ExecutionScope::turn(
         session_id,
-        lash_core::TurnActivityId::fresh().0,
+        lash_core::TurnActivityId::fresh().0.to_string(),
     ))
 }
 

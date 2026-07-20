@@ -1004,7 +1004,7 @@ impl TurnActivitySink for ChannelTurnEvents {
             TurnEvent::AssistantProseDelta { text } => {
                 turn_state.assistant_prose.push(TurnStreamProseChunk {
                     correlation_id: activity.correlation_id,
-                    text,
+                    text: text.to_string(),
                 });
             }
             TurnEvent::ModelAttemptReset {
@@ -1033,14 +1033,14 @@ mod turn_stream_state_tests {
         sink.emit(TurnActivity::new(
             lash::TurnActivityId::new("prior"),
             TurnEvent::AssistantProseDelta {
-                text: "kept ".to_string(),
+                text: "kept ".into(),
             },
         ))
         .await;
         sink.emit(TurnActivity::new(
             lash::TurnActivityId::new("failed"),
             TurnEvent::AssistantProseDelta {
-                text: "discarded ".to_string(),
+                text: "discarded ".into(),
             },
         ))
         .await;
@@ -1054,7 +1054,7 @@ mod turn_stream_state_tests {
         sink.emit(TurnActivity::new(
             lash::TurnActivityId::new("successful"),
             TurnEvent::AssistantProseDelta {
-                text: "answer".to_string(),
+                text: "answer".into(),
             },
         ))
         .await;

@@ -496,7 +496,7 @@ fn assert_single_retry_marker_message(projection: &str, messages: &[lash::messag
 }
 
 fn fold_retry_observer_prose(
-    events: &[lash::observe::SessionObservationEvent],
+    events: &[Arc<lash::observe::SessionObservationEvent>],
 ) -> (String, usize) {
     let mut chunks = Vec::new();
     let mut resets = 0;
@@ -520,7 +520,10 @@ fn fold_retry_observer_prose(
         }
     }
     (
-        chunks.into_iter().map(|(_, text)| text).collect(),
+        chunks
+            .into_iter()
+            .map(|(_, text)| text.to_string())
+            .collect(),
         resets,
     )
 }

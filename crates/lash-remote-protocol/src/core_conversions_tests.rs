@@ -975,7 +975,7 @@ fn remote_session_observation_from_core_maps_snapshot_metadata() {
 fn remote_session_observation_from_core_maps_all_payload_variants() {
     fn event(
         payload: lash_core::SessionObservationEventPayload,
-    ) -> lash_core::SessionObservationEvent {
+    ) -> Arc<lash_core::SessionObservationEvent> {
         let store = lash_core::InMemoryLiveReplayStore::default();
         lash_core::LiveReplayStore::append(
             &store,
@@ -988,7 +988,7 @@ fn remote_session_observation_from_core_maps_all_payload_variants() {
 
     let activity =
         lash_core::TurnActivity::independent(lash_core::TurnEvent::AssistantProseDelta {
-            text: "delta".to_string(),
+            text: "delta".into(),
         });
     let remote = RemoteSessionObservationEvent::from_core(
         7,
