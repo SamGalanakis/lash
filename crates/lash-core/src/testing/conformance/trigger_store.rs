@@ -19,6 +19,7 @@ where
     trigger_store_registers_and_runs_individual_lifecycle(make()).await;
     trigger_store_lists_agent_frame_registrations_by_session(make()).await;
     trigger_store_handles_host_scoped_lifecycle(make()).await;
+    trigger_store_scopes_occurrence_delivery_to_one_session(make()).await;
     trigger_store_records_and_reserves_idempotently(make()).await;
 }
 
@@ -381,6 +382,51 @@ async fn trigger_store_handles_host_scoped_lifecycle(store: Arc<dyn crate::Trigg
             .cancel_subscription("host", &scopeless.handle)
             .await
             .expect("cancel scopeless host subscription")
+    );
+}
+
+async fn trigger_store_scopes_occurrence_delivery_to_one_session(
+    store: Arc<dyn crate::TriggerStore>,
+) {
+    let source_key = store
+        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
+        .await
+        .expect("source key");
+    let session_a = store
+        .register_subscription(sample_trigger_subscription_draft(
+            "session-a",
+            &source_key,
+            "same-name",
+        ))
+        .await
+        .expect("register session A");
+    store
+        .register_subscription(sample_trigger_subscription_draft(
+            "session-b",
+            &source_key,
+            "same-name",
+        ))
+        .await
+        .expect("register session B");
+    let occurrence = store
+        .record_occurrence(
+            button_occurrence_request(&source_key, "session-scoped-occurrence")
+                .for_session("session-a"),
+        )
+        .await
+        .expect("record session-scoped occurrence");
+    let deliveries = store
+        .reserve_matching_deliveries(&occurrence.occurrence_id)
+        .await
+        .expect("reserve session-scoped delivery");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(
+        deliveries[0].subscription.subscription_id,
+        session_a.subscription_id
+    );
+    assert_eq!(
+        deliveries[0].subscription.registrant_session_id(),
+        Some("session-a")
     );
 }
 

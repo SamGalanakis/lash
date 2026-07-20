@@ -124,7 +124,10 @@ async fn live_restate_suspended_sleep_cancel_wakes_and_streams_evidence_inner() 
         loop {
             if matches!(
                 events.recv().await,
-                Ok(StreamItem::Message { message }) if message.text == expected_message
+                Ok(SessionStreamItem {
+                    session_id: ref event_session_id,
+                    item: StreamItem::Message { ref message },
+                }) if event_session_id == &session_id && message.text == expected_message
             ) {
                 break;
             }
@@ -240,7 +243,10 @@ finish "started lifecycle gates"
     )
     .await;
 
-    let Json(work_after_delete) = list_work(State(harness.state.clone()))
+    let Json(work_after_delete) = list_work(
+        State(harness.state.clone()),
+        Query(SessionQuery::default()),
+    )
         .await
         .expect("list runtime work after session deletion");
     for process_id in [&survivor_id, &cancellable_id] {
@@ -302,7 +308,10 @@ finish "started lifecycle gates"
         ),
         "session-independent process did not complete successfully: {survived:#?}"
     );
-    let Json(terminal_work) = list_work(State(harness.state.clone()))
+    let Json(terminal_work) = list_work(
+        State(harness.state.clone()),
+        Query(SessionQuery::default()),
+    )
         .await
         .expect("list terminal runtime work");
     assert!(terminal_work.iter().any(|item| {
@@ -463,6 +472,7 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
 
     let Json(injected) = enqueue_turn_input(
         State(harness.state.clone()),
+        Query(SessionQuery::default()),
         Json(TurnInputRequest {
             text: "active injection marker".to_string(),
             ingress: TurnInputIngressRequest::ActiveTurn,
@@ -472,6 +482,7 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
     .expect("enqueue active-turn input through workbench API");
     let Json(queued) = enqueue_turn_input(
         State(harness.state.clone()),
+        Query(SessionQuery::default()),
         Json(TurnInputRequest {
             text: "queued next marker".to_string(),
             ingress: TurnInputIngressRequest::NextTurn,

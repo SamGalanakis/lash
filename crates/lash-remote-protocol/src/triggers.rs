@@ -22,6 +22,8 @@ pub struct RemoteTriggerOccurrenceRequest {
     pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl RemoteTriggerOccurrenceRequest {
@@ -38,11 +40,17 @@ impl RemoteTriggerOccurrenceRequest {
             payload,
             idempotency_key: idempotency_key.into(),
             source: None,
+            session_id: None,
         }
     }
 
     pub fn with_source(mut self, source: serde_json::Value) -> Self {
         self.source = Some(source);
+        self
+    }
+
+    pub fn for_session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 
@@ -62,7 +70,11 @@ impl RemoteTriggerOccurrenceRequest {
             "RemoteTriggerOccurrenceRequest",
             "idempotency_key",
             &self.idempotency_key,
-        )
+        )?;
+        if let Some(session_id) = &self.session_id {
+            require_non_empty("RemoteTriggerOccurrenceRequest", "session_id", session_id)?;
+        }
+        Ok(())
     }
 }
 
@@ -76,6 +88,8 @@ pub struct RemoteTriggerOccurrenceRecord {
     pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub occurred_at_ms: u64,
 }
 

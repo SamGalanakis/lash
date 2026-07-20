@@ -188,6 +188,10 @@ pub struct TriggerOccurrenceRequest {
     pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<serde_json::Value>,
+    /// Optional host routing scope. When present, only subscriptions
+    /// registered by this session can reserve deliveries for the occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl TriggerOccurrenceRequest {
@@ -203,11 +207,17 @@ impl TriggerOccurrenceRequest {
             payload,
             idempotency_key: idempotency_key.into(),
             source: None,
+            session_id: None,
         }
     }
 
     pub fn with_source(mut self, source: serde_json::Value) -> Self {
         self.source = Some(source);
+        self
+    }
+
+    pub fn for_session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 }
@@ -222,6 +232,8 @@ pub struct TriggerOccurrenceRecord {
     pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub occurred_at_ms: u64,
 }
 
@@ -1002,6 +1014,7 @@ impl TriggerStore for InMemoryTriggerStore {
             payload: request.payload,
             idempotency_key: request.idempotency_key.clone(),
             source: request.source,
+            session_id: request.session_id,
             occurred_at_ms: self.clock.timestamp_ms(),
         };
         state
@@ -1058,6 +1071,10 @@ impl TriggerStore for InMemoryTriggerStore {
                 record.enabled
                     && record.source_type == occurrence.source_type
                     && record.source_key == occurrence.source_key
+                    && occurrence
+                        .session_id
+                        .as_deref()
+                        .is_none_or(|session_id| record.registrant_session_id() == Some(session_id))
             })
             .cloned()
             .collect::<Vec<_>>();

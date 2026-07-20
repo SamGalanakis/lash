@@ -460,6 +460,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         payload: request.payload,
                         idempotency_key: request.idempotency_key,
                         source: request.source,
+                        session_id: request.session_id,
                         occurred_at_ms,
                     };
                     tx.execute(
@@ -588,7 +589,14 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         for row in rows {
                             let (subscription_id, json) = row.map_err(process_sqlite_error)?;
                             match Self::decode_subscription(json) {
-                                Ok(subscription) => subscriptions.push(subscription),
+                                Ok(subscription)
+                                    if occurrence.session_id.as_deref().is_none_or(|session_id| {
+                                        subscription.registrant_session_id() == Some(session_id)
+                                    }) =>
+                                {
+                                    subscriptions.push(subscription);
+                                }
+                                Ok(_) => {}
                                 Err(err) => tracing::warn!(
                                     error = %err,
                                     subscription_id,

@@ -729,20 +729,7 @@ async fn run_button_trigger(
     request: WorkbenchButtonTriggerWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
-    let turn_model = model_spec_from_selection(request.model);
-    let session = state
-        .core
-        .session(request.session_id.clone())
-        .open()
-        .await
-        .map_err(AppError::internal)?;
-    apply_model_selection_to_session(
-        &state,
-        &session,
-        turn_model.clone(),
-        "restate_button_trigger",
-    )
-    .await?;
+    state.set_selected_model(request.model.clone());
     let scoped_effect_controller = controller
         .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "button-trigger:{}",
@@ -751,6 +738,7 @@ async fn run_button_trigger(
         .map_err(AppError::internal)?;
     let receipt = enqueue_button_trigger_command(
         &state,
+        &request.session_id,
         request.button,
         &request.pressed_at,
         &request.operation_id,
@@ -758,7 +746,8 @@ async fn run_button_trigger(
     )
     .await
     .map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "button_trigger.restate.trigger_occurrence",
         json!({
             "button": request.button,
@@ -766,11 +755,15 @@ async fn run_button_trigger(
             "started_process_ids": receipt.started_process_ids(),
         }),
     );
-    state.push_message("event", "button trigger occurrence emitted");
+    state.push_message_for_session(
+        &request.session_id,
+        "event",
+        "button trigger occurrence emitted",
+    );
     // Trigger occurrence dispatch is the end of this client-initiated request.
     // Emit a terminal Done so the UI clears its busy state even when no trigger
     // matched (any process the occurrence started streams its own turn separately).
-    state.publish(crate::StreamItem::Done);
+    state.publish_for_session(&request.session_id, crate::StreamItem::Done);
     Ok(())
 }
 
@@ -779,14 +772,7 @@ async fn run_mail_received(
     request: WorkbenchMailReceivedWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
-    let turn_model = model_spec_from_selection(request.model);
-    let session = state
-        .core
-        .session(request.session_id.clone())
-        .open()
-        .await
-        .map_err(AppError::internal)?;
-    apply_model_selection_to_session(&state, &session, turn_model, "restate_mail_received").await?;
+    state.set_selected_model(request.model.clone());
     let scoped_effect_controller = controller
         .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "mail-received:{}",
@@ -795,13 +781,15 @@ async fn run_mail_received(
         .map_err(AppError::internal)?;
     let receipt = enqueue_mail_received_trigger_command(
         &state,
+        &request.session_id,
         &request.delivery,
         &request.operation_id,
         scoped_effect_controller,
     )
     .await
     .map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "mail_received.restate.trigger_occurrence",
         json!({
             "account": request.delivery.account,
@@ -810,11 +798,15 @@ async fn run_mail_received(
             "started_process_ids": receipt.started_process_ids(),
         }),
     );
-    state.push_message("event", "mail received trigger occurrence queued");
+    state.push_message_for_session(
+        &request.session_id,
+        "event",
+        "mail received trigger occurrence queued",
+    );
     // Trigger occurrence dispatch is the end of this client-initiated request.
     // Emit a terminal Done so the UI clears its busy state even when no trigger
     // matched (any process the occurrence started streams its own turn separately).
-    state.publish(crate::StreamItem::Done);
+    state.publish_for_session(&request.session_id, crate::StreamItem::Done);
     Ok(())
 }
 
@@ -922,7 +914,7 @@ async fn run_queued_turn(
                 "turn_id": request.turn_id,
             }),
         );
-        state.publish(crate::StreamItem::Done);
+        state.publish_for_session(&request.session_id, crate::StreamItem::Done);
         return Ok(());
     };
     record_turn_output(
@@ -1103,7 +1095,8 @@ async fn record_turn_output(
         .expect("turn state lock")
         .assistant_prose();
     let assistant_text = assistant_text_for_display(&output, &streamed_prose);
-    state.trace(
+    state.trace_for_session(
+        &session.session_id(),
         trace_name,
         json!({
             "assistant_text": assistant_text.clone(),
@@ -1126,12 +1119,12 @@ async fn record_turn_output(
             .as_ref()
             .map(|evidence| format!("turn stopped · request {}", evidence.request_id))
             .unwrap_or_else(|| "turn stopped".to_string());
-        state.push_message("event", message);
+        state.push_message_for_session(&session.session_id(), "event", message);
     } else {
         commit_assistant_transcript(session, turn_id, assistant_text.clone()).await?;
-        state.push_message("assistant", assistant_text);
+        state.push_message_for_session(&session.session_id(), "assistant", assistant_text);
     }
-    state.publish(crate::StreamItem::Done);
+    state.publish_for_session(&session.session_id(), crate::StreamItem::Done);
     Ok(())
 }
 
@@ -1170,7 +1163,8 @@ fn record_turn_failure(
     trace_name: &str,
     message: &str,
 ) {
-    state.trace(
+    state.trace_for_session(
+        session_id,
         trace_name,
         json!({
             "session_id": session_id,
@@ -1178,11 +1172,14 @@ fn record_turn_failure(
             "error": message,
         }),
     );
-    state.push_message("event", format!("turn failed: {message}"));
-    state.publish(crate::StreamItem::Error {
-        message: message.to_string(),
-    });
-    state.publish(crate::StreamItem::Done);
+    state.push_message_for_session(session_id, "event", format!("turn failed: {message}"));
+    state.publish_for_session(
+        session_id,
+        crate::StreamItem::Error {
+            message: message.to_string(),
+        },
+    );
+    state.publish_for_session(session_id, crate::StreamItem::Done);
 }
 
 async fn sync_cron_jobs_with_context(

@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod process_work_tests {
     use super::tests::{
-        explicit_durable_test_facets, run_async_test_on_stack_budget,
+        explicit_durable_test_facets, in_memory_trigger_store, run_async_test_on_stack_budget,
         spawn_restate_ingress_capture,
     };
     use super::*;
@@ -66,6 +66,7 @@ mod process_work_tests {
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: driver.clone(),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -219,6 +220,7 @@ mod process_work_tests {
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -271,7 +273,7 @@ mod process_work_tests {
             .expect("delete session process edges");
         assert_eq!(deletion.orphaned_process_ids, vec![process_id]);
 
-        let Json(work) = list_work(State(state.clone()))
+        let Json(work) = list_work(State(state.clone()), Query(SessionQuery::default()))
             .await
             .expect("list runtime-wide work");
         assert_eq!(work.len(), 1);

@@ -2,6 +2,7 @@
 struct AppState {
     core: LashCore,
     attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
+    trigger_store: Arc<dyn lash::triggers::TriggerStore>,
     process_observer: lash::process::ProcessWorkObserver,
     process_work_driver: lash::process::ProcessWorkDriver,
     session_ids: WorkbenchSessionIds,
@@ -10,7 +11,7 @@ struct AppState {
     web_configured: bool,
     trace_sink: Option<Arc<dyn TraceSink>>,
     lashlang_execution: Arc<TraceLashlangGraphStore>,
-    event_tx: broadcast::Sender<StreamItem>,
+    event_tx: broadcast::Sender<SessionStreamItem>,
     queued_work_driver: lash::runtime::QueuedWorkDriver,
     restate_ingress_url: String,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -109,6 +110,38 @@ struct TurnInputReceipt {
 #[derive(Debug, Deserialize)]
 struct EventsQuery {
     cursor: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct SessionQuery {
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+impl SessionQuery {
+    fn resolve(&self, state: &AppState) -> Result<String, AppError> {
+        let Some(session_id) = self.session_id.as_deref() else {
+            return Ok(state.current_session_id());
+        };
+        let session_id = session_id.trim();
+        if session_id.is_empty()
+            || session_id.len() > 128
+            || !session_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        {
+            return Err(AppError::bad_request(
+                "session_id must be 1-128 ASCII letters, digits, '.', '_' or '-'",
+            ));
+        }
+        Ok(session_id.to_string())
+    }
+
+    fn is_explicit(&self) -> bool {
+        self.session_id.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -170,6 +203,23 @@ enum StreamItem {
     TurnInput { receipt: TurnInputReceipt },
     Error { message: String },
     Done,
+}
+
+#[derive(Clone, Debug)]
+struct SessionStreamItem {
+    session_id: String,
+    item: StreamItem,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct TriggerEnabledRequest {
+    enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TriggerMutationResponse {
+    changed: bool,
+    registration: Option<lash::triggers::TriggerRegistration>,
 }
 
 #[derive(Clone, Default)]

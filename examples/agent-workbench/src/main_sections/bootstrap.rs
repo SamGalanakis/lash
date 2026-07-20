@@ -158,7 +158,7 @@ async fn async_main() -> AnyhowResult<()> {
         .provider(provider)
         .model(model_spec)
         .store_factory(Arc::clone(&core_store_factory))
-        .trigger_store(trigger_store)
+        .trigger_store(Arc::clone(&trigger_store))
         .trace_sink(Arc::clone(&trace_sink))
         .trace_level(TraceLevel::Extended)
         .configure_plugins(|plugins| {
@@ -192,6 +192,7 @@ async fn async_main() -> AnyhowResult<()> {
     let state = AppState {
         core,
         attachment_store,
+        trigger_store,
         process_observer,
         process_work_driver,
         session_ids,
@@ -248,6 +249,12 @@ async fn async_main() -> AnyhowResult<()> {
         .route("/api/session", delete(reset_chat))
         .route("/api/reset", post(reset_chat))
         .route("/api/button-trigger", post(button_trigger))
+        .route("/api/triggers", get(list_triggers))
+        .route(
+            "/api/triggers/{handle}/enabled",
+            put(set_trigger_enabled),
+        )
+        .route("/api/triggers/{handle}", delete(delete_trigger))
         .route("/api/accounts", get(list_accounts).post(add_account))
         .route("/api/accounts/{slug}", delete(delete_account))
         .route("/api/accounts/{slug}/messages", post(inject_message))

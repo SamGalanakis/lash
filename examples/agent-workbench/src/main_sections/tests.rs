@@ -1,6 +1,10 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(super) fn in_memory_trigger_store() -> Arc<dyn lash::triggers::TriggerStore> {
+        Arc::new(lash_core::InMemoryTriggerStore::new())
+    }
     use lash::persistence::QueuedWorkStore;
     use lash::rlm::RlmTurnBuilderExt;
     use lash::tracing::{
@@ -187,7 +191,11 @@ mod tests {
             WorkbenchSessionIds::persistent(session_path.clone()).expect("session ids");
         let session_id = session_ids.current();
         let turns = ActiveTurns::persistent(turns_path.clone()).expect("active turns");
-        turns.insert_with_prompt(&session_id, "durable-stop-turn", Some("actual restored prompt".into()));
+        turns.insert_with_prompt(
+            &session_id,
+            "durable-stop-turn",
+            Some("actual restored prompt".into()),
+        );
         drop(session_ids);
         drop(turns);
         let recovered_ids = WorkbenchSessionIds::persistent(session_path).expect("recover ids");
@@ -197,7 +205,12 @@ mod tests {
             recovered_turns.for_session(&session_id),
             vec![lash::TurnAddress::new(&session_id, "durable-stop-turn")]
         );
-        assert_eq!(recovered_turns.prompt_for(&session_id, "durable-stop-turn").as_deref(), Some("actual restored prompt"));
+        assert_eq!(
+            recovered_turns
+                .prompt_for(&session_id, "durable-stop-turn")
+                .as_deref(),
+            Some("actual restored prompt")
+        );
     }
 
     include!("tests/session_resume.rs");
@@ -415,6 +428,7 @@ mod tests {
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -438,7 +452,13 @@ mod tests {
 
         state.publish(StreamItem::Done);
 
-        assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(SessionStreamItem {
+                item: StreamItem::Done,
+                ..
+            })
+        ));
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -668,6 +688,7 @@ finish "gap source"
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -707,7 +728,7 @@ finish "gap source"
             .await
             .expect("open cancelled session");
         let (cancelled, turn) = tokio::join!(
-            cancel_turn(State(state.clone())),
+            cancel_turn(State(state.clone()), Query(SessionQuery::default())),
             session
                 .turn(lash::TurnInput::text("already cancelled"))
                 .turn_id("turn-cancel")
@@ -732,7 +753,13 @@ finish "gap source"
             }] if evidence.request_id == "original-stop"
                 && evidence.origin.as_deref() == Some("user")
         ));
-        assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(SessionStreamItem {
+                item: StreamItem::Done,
+                ..
+            })
+        ));
         let duplicate = state
             .core
             .turn_work_driver()
@@ -946,6 +973,7 @@ finish initial
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids,
@@ -1055,178 +1083,7 @@ finish initial
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
-    #[test]
-    fn button_trigger_occurrence_starts_visible_lashlang_process() {
-        run_async_test_on_stack_budget("workbench-button-trigger-test", || {
-            button_trigger_occurrence_starts_visible_lashlang_process_inner()
-        });
-    }
-
-    async fn button_trigger_occurrence_starts_visible_lashlang_process_inner() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "agent-workbench-processes-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let db_path = data_dir.join("processes.db");
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-            data_dir.join("lash-sessions"),
-        ));
-        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
-            session_store_factory.clone();
-        let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&db_path)
-                .await
-                .expect("open registry"),
-        ) as Arc<dyn lash::process::ProcessRegistry>;
-        let provider = trigger_registration_provider();
-        let model =
-            lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
-        let session_ids = WorkbenchSessionIds::fresh();
-        let session_id = session_ids.current();
-        let core = explicit_durable_test_facets(&data_dir)
-            .provider(provider)
-            .model(model)
-            .store_factory(Arc::clone(&core_store_factory))
-            .plugin(Arc::new(WorkbenchPluginFactory::new("")))
-            .process_registry(Arc::clone(&process_registry))
-            .disable_queued_work_driver()
-            .build()
-            .expect("build core");
-        let session = core
-            .session(session_id.clone())
-            .open()
-            .await
-            .expect("open session");
-        register_test_trigger(&session).await;
-        let trigger_records =
-            assert_remote_trigger_subscription_records_round_trip(&data_dir, &session_id).await;
-        assert_eq!(trigger_records.len(), 1);
-        let tool_names = session
-            .tools()
-            .active_manifests()
-            .await
-            .expect("active tools")
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>();
-        let removed_tool_name = ["attach", "button", "trigger"].join("_");
-        assert!(!tool_names.iter().any(|name| name == &removed_tool_name));
-
-        let report = emit_test_button_trigger(&core, ButtonChoice::Red).await;
-        assert_remote_trigger_emit_report_round_trip(&report);
-
-        assert_eq!(report.started_process_ids().len(), 1);
-        let awaiter = lash::process::ProcessAwaiter::polling(Arc::clone(&process_registry));
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            awaiter.await_terminal(&report.started_process_ids()[0]),
-        )
-        .await
-        .expect("trigger process should finish promptly")
-        .expect("trigger process should finish");
-        let handles = session.processes().list_all().await.expect("list handles");
-        assert_eq!(handles.len(), 1);
-        assert_eq!(handles[0].kind, "lashlang");
-        assert_eq!(handles[0].label, "remember");
-        session.close().await.expect("close session");
-
-        let reopened = core
-            .session(session_id.clone())
-            .open()
-            .await
-            .expect("reopen session");
-        let reopened_handles = reopened
-            .processes()
-            .list_all()
-            .await
-            .expect("list handles after reopen");
-        assert_eq!(reopened_handles.len(), 1);
-        assert_eq!(
-            reopened_handles[0].status_label, "completed",
-            "{:?}",
-            reopened_handles[0].lifecycle
-        );
-        drop(reopened);
-
-        assert_remote_started_process_surface(
-            &core,
-            process_registry.as_ref(),
-            &session_id,
-            &report.started_process_ids(),
-        )
-        .await;
-
-        let process_observer = core
-            .processes()
-            .observer()
-            .expect("process observer configured");
-        let state = AppState {
-            core,
-            attachment_store: test_attachment_store(),
-            process_observer,
-            process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
-            session_ids,
-            messages: Arc::new(Mutex::new(Vec::new())),
-            selected_model: Arc::new(Mutex::new(ModelSelection {
-                model: "test-model".to_string(),
-                model_variant: Default::default(),
-            })),
-            web_configured: false,
-            trace_sink: None,
-            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
-            event_tx: broadcast::channel(1024).0,
-            queued_work_driver: inert_queued_work_driver(),
-            restate_ingress_url: "http://127.0.0.1:8080".to_string(),
-            restate_admin_url: "http://127.0.0.1:9070".to_string(),
-            restate_http: reqwest::Client::new(),
-            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            mail_world: mail::MailWorld::new(),
-            active_turns: ActiveTurns::default(),
-        };
-        let target_scope_prefix = format!("session:{}/frame:", state.current_session_id());
-        let session_store =
-            lash_sqlite_store::Store::open(&session_store_factory.path_for_session(&session_id))
-                .await
-                .expect("open session store");
-        let queued = session_store
-            .list_queued_work(&session_id)
-            .await
-            .expect("list queued work");
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].items.len(), 1);
-        let lash::persistence::QueuedWorkPayload::ProcessWake { wake } =
-            &queued[0].items[0].payload
-        else {
-            panic!("expected process wake queue payload");
-        };
-        assert!(wake.input.contains("button_pressed"));
-        assert!(wake.input.contains("Red"));
-        assert!(
-            wake.target_scope_id
-                .as_str()
-                .starts_with(&target_scope_prefix),
-            "process wake should target the current session's active frame, got {}",
-            wake.target_scope_id
-        );
-        let Json(work) = list_work(State(state)).await.expect("list work");
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].process.status_label, "completed");
-        assert!(
-            work[0]
-                .events
-                .iter()
-                .any(|event| event.event_type == "process.completed")
-        );
-        assert!(
-            work[0]
-                .events
-                .iter()
-                .any(|event| event.event_type == "process.wake")
-        );
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
+    include!("tests/trigger_lifecycle.rs");
     #[test]
     fn button_trigger_occurrence_is_finishted_to_restate_workflow() {
         run_async_test_on_stack_budget("workbench-trigger-restate-test", || {
@@ -1306,6 +1163,7 @@ finish initial
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -1337,6 +1195,7 @@ finish initial
 
         let _accepted = button_trigger(
             State(state.clone()),
+            Query(SessionQuery::default()),
             Json(ButtonEventRequest {
                 button: ButtonChoice::Blue,
                 model: Some("button-model".to_string()),
@@ -1467,6 +1326,7 @@ finish initial
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -1540,7 +1400,9 @@ finish initial
             .expect("add account before reset");
         drop(session);
 
-        let Json(snapshot) = reset_chat(State(state.clone())).await.expect("reset");
+        let Json(snapshot) = reset_chat(State(state.clone()), Query(SessionQuery::default()))
+            .await
+            .expect("reset");
 
         assert_ne!(snapshot.settings.session_id, old_session_id);
         assert!(snapshot.messages.is_empty());
@@ -1592,7 +1454,8 @@ finish initial
                 .expect("new work")
                 .is_empty()
         );
-        let Json(graph_index) = list_lashlang_graphs(State(state.clone()))
+        let Json(graph_index) =
+            list_lashlang_graphs(State(state.clone()), Query(SessionQuery::default()))
             .await
             .expect("list graphs after reset");
         assert!(
@@ -1904,6 +1767,7 @@ finish initial
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: process_deployment.process_work_driver(),
             session_ids,
@@ -2187,6 +2051,16 @@ finish initial
         assert_eq!(body["status"], "ok");
     }
 
+    #[test]
+    fn workbench_renders_scoped_tabs_and_trigger_lifecycle_controls() {
+        assert!(ui::INDEX_HTML.contains("id=\"newSessionTab\""));
+        assert!(ui::INDEX_HTML.contains("id=\"triggerRegistrations\""));
+        assert!(ui::INDEX_HTML.contains("re-enable"));
+        assert!(ui::INDEX_HTML.contains("deleteTrigger"));
+        assert!(ui::INDEX_HTML.contains("scopedSessionId"));
+    }
+
+    include!("tests/session_isolation.rs");
     fn test_workbench_core(
         session_store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
         process_registry: Arc<dyn lash::process::ProcessRegistry>,
@@ -2420,6 +2294,22 @@ finish initial
         core: &LashCore,
         button: ButtonChoice,
     ) -> lash::triggers::TriggerEmitReport {
+        emit_test_button_trigger_with_scope(core, button, None).await
+    }
+
+    async fn emit_test_button_trigger_for_session(
+        core: &LashCore,
+        button: ButtonChoice,
+        session_id: &str,
+    ) -> lash::triggers::TriggerEmitReport {
+        emit_test_button_trigger_with_scope(core, button, Some(session_id)).await
+    }
+
+    async fn emit_test_button_trigger_with_scope(
+        core: &LashCore,
+        button: ButtonChoice,
+        session_id: Option<&str>,
+    ) -> lash::triggers::TriggerEmitReport {
         let source_key = lash::triggers::empty_trigger_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
             .expect("source key");
         let idempotency_key = format!(
@@ -2432,19 +2322,23 @@ finish initial
             lash::runtime::ExecutionScope::runtime_operation(format!("trigger:{idempotency_key}")),
         )
         .expect("inline trigger occurrence execution scope");
+        let mut request = lash::triggers::TriggerOccurrenceRequest::new(
+            BUTTON_TRIGGER_SOURCE_TYPE,
+            source_key,
+            json!({
+                "button": button.as_str(),
+                "message": format!("user pressed the {} button", button.lower()),
+                "pressed_at": "2026-06-02T12:00:00Z"
+            }),
+            idempotency_key,
+        )
+        .with_source(json!({}));
+        if let Some(session_id) = session_id {
+            request = request.for_session(session_id);
+        }
         core.triggers()
             .emit(
-                lash::triggers::TriggerOccurrenceRequest::new(
-                    BUTTON_TRIGGER_SOURCE_TYPE,
-                    source_key,
-                    json!({
-                        "button": button.as_str(),
-                        "message": format!("user pressed the {} button", button.lower()),
-                        "pressed_at": "2026-06-02T12:00:00Z"
-                    }),
-                    idempotency_key,
-                )
-                .with_source(json!({})),
+                request,
                 scoped_effect_controller,
             )
             .await

@@ -16,7 +16,7 @@ use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use base64::Engine as _;
 use bytes::Bytes;

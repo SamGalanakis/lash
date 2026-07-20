@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod turn_control_timeout_tests {
-    use super::tests::{explicit_durable_test_facets, run_async_test_on_stack_budget};
+    use super::tests::{
+        explicit_durable_test_facets, in_memory_trigger_store, run_async_test_on_stack_budget,
+    };
     use super::*;
 
     #[test]
@@ -48,6 +50,7 @@ mod turn_control_timeout_tests {
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -73,6 +76,7 @@ mod turn_control_timeout_tests {
 
         let no_active = enqueue_turn_input(
             State(state.clone()),
+            Query(SessionQuery::default()),
             Json(TurnInputRequest {
                 text: "too early".to_string(),
                 ingress: TurnInputIngressRequest::ActiveTurn,
@@ -89,6 +93,7 @@ mod turn_control_timeout_tests {
         );
         let Json(injected) = enqueue_turn_input(
             State(state.clone()),
+            Query(SessionQuery::default()),
             Json(TurnInputRequest {
                 text: "inject exactly once".to_string(),
                 ingress: TurnInputIngressRequest::ActiveTurn,
@@ -110,6 +115,7 @@ mod turn_control_timeout_tests {
 
         let Json(queued) = enqueue_turn_input(
             State(state.clone()),
+            Query(SessionQuery::default()),
             Json(TurnInputRequest {
                 text: "run after settle".to_string(),
                 ingress: TurnInputIngressRequest::NextTurn,
@@ -141,7 +147,7 @@ mod turn_control_timeout_tests {
         assert_eq!(pending[1].input_id, queued.input_id);
         session.close().await.expect("close session");
 
-        let Json(snapshot) = app_state(State(state.clone()))
+        let Json(snapshot) = app_state(State(state.clone()), Query(SessionQuery::default()))
             .await
             .expect("load state snapshot");
         assert!(snapshot.messages.iter().any(|message| {
@@ -275,6 +281,7 @@ mod turn_control_timeout_tests {
         AppState {
             core,
             attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),

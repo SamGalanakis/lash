@@ -263,6 +263,7 @@ impl TriggerStore for PostgresTriggerStore {
             payload: request.payload,
             idempotency_key: request.idempotency_key.clone(),
             source: request.source,
+            session_id: request.session_id,
             occurred_at_ms: current_epoch_ms(),
         };
         sqlx::query(
@@ -376,6 +377,11 @@ impl TriggerStore for PostgresTriggerStore {
                     continue;
                 }
             };
+            if occurrence.session_id.as_deref().is_some_and(|session_id| {
+                subscription.registrant_session_id() != Some(session_id)
+            }) {
+                continue;
+            }
             let process_id = lash_core::deterministic_delivery_process_id(
                 &occurrence.occurrence_id,
                 &subscription.subscription_id,

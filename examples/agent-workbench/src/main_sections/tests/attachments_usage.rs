@@ -190,7 +190,7 @@ async fn run_attachment_usage_gate(
         );
     }
 
-    let Json(before_restart) = app_state(State(state.clone()))
+    let Json(before_restart) = app_state(State(state.clone()), Query(SessionQuery::default()))
         .await
         .expect("read pre-restart workbench state API");
     assert_usage_report_consistent(&before_restart.usage);
@@ -230,7 +230,7 @@ async fn run_attachment_usage_gate(
         resumed_session_ids,
     );
     assert_retrieved_attachment(&resumed_state, &attachment_id, &png_bytes).await;
-    let Json(after_restart) = app_state(State(resumed_state))
+    let Json(after_restart) = app_state(State(resumed_state), Query(SessionQuery::default()))
         .await
         .expect("read post-restart workbench state API");
     assert_eq!(after_restart.usage, persisted_usage);
@@ -280,6 +280,7 @@ fn attachment_usage_gate_state(
     AppState {
         core,
         attachment_store,
+        trigger_store: in_memory_trigger_store(),
         process_observer,
         process_work_driver: inert_process_work_driver(process_registry),
         session_ids,

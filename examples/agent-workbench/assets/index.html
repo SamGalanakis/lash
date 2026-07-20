@@ -200,6 +200,52 @@
       color: var(--ash-text);
     }
 
+    .trigger-registry {
+      width: 100%;
+      display: grid;
+      gap: var(--space-2xs);
+    }
+
+    .trigger-registry-head,
+    .trigger-registration {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-xs);
+    }
+
+    .trigger-registry-head {
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
+      color: var(--ash-text);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .trigger-registration {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: var(--space-2xs) var(--space-xs);
+      background: var(--form-raised);
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
+    }
+
+    .trigger-registration[data-enabled="false"] { opacity: 0.58; }
+    .trigger-registration-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .trigger-registration-actions { display: flex; gap: var(--space-3xs); flex: none; }
+    .trigger-registration-actions button {
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: transparent;
+      color: var(--ash-text);
+      font: inherit;
+      padding: 0.2rem 0.35rem;
+      cursor: pointer;
+    }
+    .trigger-registration-actions button:hover { color: var(--sodium); border-color: var(--sodium); }
+    .trigger-registry-empty { margin: 0; color: var(--ash-text); font-size: 0.72rem; }
+
     .schedule-card {
       width: 100%;
       border: 1px solid var(--line);
@@ -1810,6 +1856,10 @@
           </button>
         </div>
         <p class="trigger-caption">red and blue emit triggers</p>
+        <section class="trigger-registry" aria-label="Trigger registrations">
+          <div class="trigger-registry-head"><span>registrations</span><span id="triggerCount">0</span></div>
+          <div id="triggerRegistrations"><p class="trigger-registry-empty">none in this session</p></div>
+        </section>
         <section class="schedule-card" aria-label="Cron schedule example">
           <div class="schedule-card-label">try scheduling</div>
           <div class="schedule-card-code">cron.Schedule(...)</div>
@@ -1838,6 +1888,7 @@
         <div class="status-row"><span>session</span><span id="sessionId">—</span></div>
         <div class="status-row"><span>usage</span><span id="usageTotal">0 total</span></div>
         <div class="status-row"><span>tokens</span><span id="usageBreakdown">0 in · 0 out</span></div>
+        <button id="newSessionTab" class="ghost-btn" type="button" title="Open an isolated session in a second tab">new session tab</button>
       </div>
     </aside>
 
@@ -1969,6 +2020,17 @@
   </div>
 
   <script>
+    const scopedSessionId = new URLSearchParams(window.location.search).get("session_id");
+    const nativeFetch = window.fetch.bind(window);
+    function scopedApiUrl(input) {
+      if (!scopedSessionId || typeof input !== "string") return input;
+      const url = new URL(input, window.location.href);
+      if (url.origin !== window.location.origin || !url.pathname.startsWith("/api/")) return input;
+      url.searchParams.set("session_id", scopedSessionId);
+      return url.pathname + url.search + url.hash;
+    }
+    window.fetch = (input, init) => nativeFetch(scopedApiUrl(input), init);
+
     const shell = document.querySelector(".shell");
     const mainPanel = document.getElementById("mainPanel");
     const timeline = document.getElementById("timeline");
@@ -2025,6 +2087,15 @@
     const sessionId = document.getElementById("sessionId");
     const usageTotal = document.getElementById("usageTotal");
     const usageBreakdown = document.getElementById("usageBreakdown");
+    const triggerRegistrations = document.getElementById("triggerRegistrations");
+    const triggerCount = document.getElementById("triggerCount");
+    const newSessionTab = document.getElementById("newSessionTab");
+
+    newSessionTab.addEventListener("click", () => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("session_id", "workbench-tab-" + crypto.randomUUID());
+      window.open(url, "_blank", "noopener");
+    });
 
     const renderedMessages = new Set();
     const renderedIngressInputs = new Set();
@@ -2328,7 +2399,7 @@
       injectNowButton.disabled = !busy || modelEmpty();
       queueNextButton.disabled = !busy || modelEmpty();
       for (const button of triggerButtons) {
-        button.setAttribute("aria-disabled", String(unavailable));
+        button.setAttribute("aria-disabled", String(modelEmpty()));
       }
     }
 
@@ -3047,13 +3118,88 @@
 
     function fireButtonTrigger(event) {
       const button = event.currentTarget;
-      if (busy || button.getAttribute("aria-disabled") === "true") return;
+      if (button.getAttribute("aria-disabled") === "true") return;
       if (modelEmpty()) { validateModel(); modelInput.focus(); return; }
-      postCommand("/api/button-trigger", { button: button.dataset.button, ...selectedModelPayload() });
+      postTriggerCommand({ button: button.dataset.button, ...selectedModelPayload() });
+    }
+
+    async function postTriggerCommand(payload) {
+      try {
+        const response = await fetch("/api/button-trigger", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) renderError(errorTextFrom(await response.text(), "trigger failed"));
+      } catch (error) {
+        renderError(error.message || String(error));
+      } finally {
+        refreshWork();
+      }
     }
 
     for (const button of buttonTriggerButtons) {
       button.addEventListener("click", fireButtonTrigger);
+    }
+
+    async function loadTriggers() {
+      try {
+        const response = await fetch("/api/triggers");
+        if (!response.ok) return;
+        renderTriggers(await response.json());
+      } catch (_) { /* polling retries */ }
+    }
+
+    function renderTriggers(registrations) {
+      triggerCount.textContent = String(registrations.length);
+      triggerRegistrations.innerHTML = "";
+      if (!registrations.length) {
+        const empty = document.createElement("p");
+        empty.className = "trigger-registry-empty";
+        empty.textContent = "none in this session";
+        triggerRegistrations.appendChild(empty);
+        return;
+      }
+      for (const registration of registrations) {
+        const row = document.createElement("div");
+        row.className = "trigger-registration";
+        row.dataset.enabled = String(registration.enabled);
+        row.dataset.triggerHandle = registration.handle;
+        const name = document.createElement("span");
+        name.className = "trigger-registration-name";
+        name.textContent = registration.name || registration.source_type || registration.handle;
+        name.title = registration.handle + " · " + registration.source_type;
+        const actions = document.createElement("span");
+        actions.className = "trigger-registration-actions";
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.textContent = registration.enabled ? "disable" : "re-enable";
+        toggle.addEventListener("click", () => setTriggerEnabled(registration.handle, !registration.enabled));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "delete";
+        remove.addEventListener("click", () => deleteTrigger(registration.handle));
+        actions.append(toggle, remove);
+        row.append(name, actions);
+        triggerRegistrations.appendChild(row);
+      }
+    }
+
+    async function setTriggerEnabled(handle, enabled) {
+      const response = await fetch("/api/triggers/" + encodeURIComponent(handle) + "/enabled", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled })
+      });
+      if (!response.ok) renderError(errorTextFrom(await response.text(), "trigger update failed"));
+      await loadTriggers();
+    }
+
+    async function deleteTrigger(handle) {
+      if (!window.confirm("Delete trigger " + handle + "?")) return;
+      const response = await fetch("/api/triggers/" + encodeURIComponent(handle), { method: "DELETE" });
+      if (!response.ok) renderError(errorTextFrom(await response.text(), "trigger delete failed"));
+      await loadTriggers();
     }
 
     /* ── mock email accounts (accounts tab) ── */
@@ -4520,9 +4666,11 @@
 
     loadState().catch(() => {}).finally(() => {
       refreshWork();
+      loadTriggers();
       restartEventStream(true);
     });
     setInterval(refreshWork, 1400);
+    setInterval(loadTriggers, 1400);
     setInterval(loadAccounts, 1500);
   </script>
 </body>
