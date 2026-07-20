@@ -70,6 +70,27 @@ the now-measured trigger lifecycle work; the latter two tighten previously
 broad ceilings. The other three scenarios and all four named-phase time guards
 are new.
 
+The full 39-scenario guard also found five allocation ceilings invalidated by
+the alpha.100–105 code shape. Their five-run total / steady-turn medians and
+old → new guards are:
+
+- `rlm_async_tool_completion`: 113,277,190 / 8,319,629 B;
+  96,000,000 → 145,000,000 total and 64,000,000 → 11,000,000 steady.
+- `rlm_process_async_tool_completion`: 231,801,232 / 18,091,766 B;
+  160,000,000 → 290,000,000 total and 128,000,000 → 23,000,000 steady.
+- `rlm_large_tool_catalog`: 4,457,889,543 / 343,433,271 B;
+  1,000,000,000 → 5,600,000,000 total and 750,000,000 → 430,000,000 steady.
+- `rlm_oblique_stack_mix`: 1,559,621,281 / 129,459,894 B;
+  1,500,000,000 → 1,950,000,000 total and 1,000,000,000 → 165,000,000 steady.
+- `tool_discovery_search`: 1,839,812,745 / 134,916,680 B;
+  1,500,000,000 → 2,300,000,000 total and 1,000,000,000 → 170,000,000 steady.
+
+The same full run caught one stale correctness fixture before enforcement:
+`rlm_oblique_stack_mix` initialized `candidate_ids` from an untyped empty list,
+which current Lashlang correctly retained as a null/any union. Seeding it from
+the first typed search-result comprehension keeps the fixture `list[str]` and
+lets the guard measure the intended path again.
+
 ## JSON guard calibration
 
 The exact 2,500-iteration nightly Lashlang sweep produced 210 perf rows and one

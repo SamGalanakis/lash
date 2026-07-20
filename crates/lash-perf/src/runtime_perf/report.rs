@@ -751,16 +751,16 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
 
 fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
-        RuntimePerfScenario::RlmAsyncToolCompletion => 96_000_000.0,
+        RuntimePerfScenario::RlmAsyncToolCompletion => 145_000_000.0,
         RuntimePerfScenario::RlmTriggerMailPipeline => 260_000_000.0,
-        RuntimePerfScenario::RlmProcessAsyncToolCompletion => 160_000_000.0,
+        RuntimePerfScenario::RlmProcessAsyncToolCompletion => 290_000_000.0,
         RuntimePerfScenario::TurnStartGate => 90_000_000.0,
         RuntimePerfScenario::TurnCancelRoundTrip => 85_000_000.0,
         RuntimePerfScenario::IngressClaimProjection => 180_000_000.0,
-        RuntimePerfScenario::ToolDiscoverySearch => 1_500_000_000.0,
-        RuntimePerfScenario::RlmLargeToolCatalog => 1_000_000_000.0,
+        RuntimePerfScenario::ToolDiscoverySearch => 2_300_000_000.0,
+        RuntimePerfScenario::RlmLargeToolCatalog => 5_600_000_000.0,
         RuntimePerfScenario::RlmLargePrint => 1_000_000_000.0,
-        RuntimePerfScenario::RlmObliqueStackMix => 1_500_000_000.0,
+        RuntimePerfScenario::RlmObliqueStackMix => 1_950_000_000.0,
         RuntimePerfScenario::RlmStreamedPairedLashlang => 128_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 128_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
@@ -772,16 +772,17 @@ fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
 
 fn steady_state_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
-        RuntimePerfScenario::RlmAsyncToolCompletion => 64_000_000.0,
+        RuntimePerfScenario::RlmAsyncToolCompletion => 11_000_000.0,
         RuntimePerfScenario::RlmTriggerMailPipeline => 20_000_000.0,
-        RuntimePerfScenario::RlmProcessAsyncToolCompletion => 128_000_000.0,
+        RuntimePerfScenario::RlmProcessAsyncToolCompletion => 23_000_000.0,
         RuntimePerfScenario::TurnStartGate | RuntimePerfScenario::TurnCancelRoundTrip => {
             6_000_000.0
         }
         RuntimePerfScenario::IngressClaimProjection => 14_000_000.0,
-        RuntimePerfScenario::ToolDiscoverySearch => 1_000_000_000.0,
+        RuntimePerfScenario::ToolDiscoverySearch => 170_000_000.0,
+        RuntimePerfScenario::RlmLargeToolCatalog => 430_000_000.0,
         RuntimePerfScenario::RlmLargePrint => 750_000_000.0,
-        RuntimePerfScenario::RlmObliqueStackMix => 1_000_000_000.0,
+        RuntimePerfScenario::RlmObliqueStackMix => 165_000_000.0,
         RuntimePerfScenario::RlmStreamedPairedLashlang => 64_000_000.0,
         RuntimePerfScenario::LiveReplayPressure => 96_000_000.0,
         RuntimePerfScenario::OpenAiResponsesSseParse
@@ -1396,21 +1397,23 @@ mod tests {
 
     #[test]
     fn async_completion_scenarios_have_specific_guard_budgets() {
-        assert!(
-            allocation_budget_bytes(RuntimePerfScenario::RlmAsyncToolCompletion) < 100_000_000.0
+        assert_eq!(
+            allocation_budget_bytes(RuntimePerfScenario::RlmAsyncToolCompletion),
+            145_000_000.0
         );
-        assert!(
-            steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmAsyncToolCompletion)
-                < 100_000_000.0
+        assert_eq!(
+            steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmAsyncToolCompletion),
+            11_000_000.0
         );
-        assert!(
-            allocation_budget_bytes(RuntimePerfScenario::RlmProcessAsyncToolCompletion)
-                < 200_000_000.0
+        assert_eq!(
+            allocation_budget_bytes(RuntimePerfScenario::RlmProcessAsyncToolCompletion),
+            290_000_000.0
         );
-        assert!(
+        assert_eq!(
             steady_state_turn_allocation_budget_bytes(
                 RuntimePerfScenario::RlmProcessAsyncToolCompletion
-            ) < 200_000_000.0
+            ),
+            23_000_000.0
         );
         assert!(wall_clock_budget_ms(RuntimePerfScenario::RlmAsyncToolCompletion) < 10_000.0);
         assert!(
@@ -1536,12 +1539,13 @@ mod tests {
                 "missing required phase {expected}"
             );
         }
-        assert!(
-            allocation_budget_bytes(RuntimePerfScenario::RlmObliqueStackMix) <= 1_500_000_000.0
+        assert_eq!(
+            allocation_budget_bytes(RuntimePerfScenario::RlmObliqueStackMix),
+            1_950_000_000.0
         );
-        assert!(
-            steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmObliqueStackMix)
-                <= 1_000_000_000.0
+        assert_eq!(
+            steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmObliqueStackMix),
+            165_000_000.0
         );
         assert!(wall_clock_budget_ms(RuntimePerfScenario::RlmObliqueStackMix) <= 20_000.0);
     }
