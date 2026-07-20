@@ -90,7 +90,7 @@ cursor-based browser stream. The docs walk through both at
 <https://lash.run/examples.html>.
 
 ```bash
-# SQLite-backed chat app: RLM, app-owned tools, streaming, optional Restate turns
+# Durable chat app: SQLite or Postgres, RLM, app-owned tools, Restate turns
 OPENROUTER_API_KEY=sk-or-... cargo run -p agent-service        # then open http://127.0.0.1:3000
 
 # Adds durable background work: Lashlang processes, subagents, cron triggers (Restate required)

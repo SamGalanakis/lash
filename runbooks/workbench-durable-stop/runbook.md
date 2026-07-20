@@ -47,6 +47,13 @@ quality. This runbook is authored for a deliberate token-spending browser run.
   `<port>`, so concurrent runs on distinct workbench ports do not need manual Restate
   overrides. Teardown:
   `just agent-workbench-down <port>`.
+- To judge the same flow on Postgres, add `AGENT_WORKBENCH_POSTGRES=1` to the boot
+  command. The dev helper starts a Postgres 16 container on a port derived from
+  `<port>`, passes its URL as `AGENT_WORKBENCH_DATABASE_URL`, records a managed-container
+  marker beside the Restate marker, and preserves both containers across
+  `agent-workbench-restart`. `agent-workbench-down` removes both. Record the Postgres
+  container name and require the startup trace payload's `store_backend` to be
+  `"postgres"` before Phase 1.
 - Browser affordances: chat composer, **stop turn** button, running/idle pill, transcript.
 - Backend truth: `GET /api/state`; `POST /api/turn`; `POST /api/turn/cancel`.
   `/api/state.active_turns` exposes routing addresses so reload can restore the Stop

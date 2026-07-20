@@ -20,9 +20,10 @@ committed row counts, request history, and cross-surface agreement—not on pros
 2. **The replacement process starts cold.** Use `just agent-workbench-restart <port>`;
    do not reload only the page and do not restart Restate or replace the data directory.
 3. **The store is authoritative.** Before and after restart, the active `graph_nodes`
-   path in `<data-dir>/lash-sessions/*.db` must contain every committed user and assistant
-   nonce. `/api/state.messages` and the rendered transcript must project the same ordered
-   rows.
+   path must contain every committed user and assistant nonce: use
+   `<data-dir>/lash-sessions/*.db` in SQLite mode or `lash_graph_nodes` in the managed
+   database in Postgres mode. `/api/state.messages` and the rendered transcript must
+   project the same ordered rows.
 4. **Continuity reaches the provider.** The first post-restart `llm_call_started` record
    in `trace.jsonl` must contain both earlier user nonces and their committed assistant
    replies, as well as the new user nonce. A plausible answer is not a substitute for
@@ -39,10 +40,21 @@ committed row counts, request history, and cross-surface agreement—not on pros
   `<port>`, so concurrent runs on distinct workbench ports do not need manual Restate
   overrides. Teardown:
   `just agent-workbench-down <port>`.
+- Postgres boot variant:
+  `AGENT_WORKBENCH_POSTGRES=1 AGENT_WORKBENCH_DATA_DIR=<fresh-tmp> AGENT_WORKBENCH_OPEN=0 just agent-workbench <port>`.
+  Gate the startup trace's `store_backend: "postgres"`. The helper owns a port-isolated
+  Postgres 16 container and marker file, preserves it across
+  `agent-workbench-restart`, and removes it on `agent-workbench-down`. For store evidence,
+  query `lash_graph_nodes` through the managed database coordinates recorded as
+  `postgres_host`/`postgres_port` in the run metadata (managed credentials are
+  `lash`/`lash`, database `lash`); filter by the rendered session id and the active
+  non-tombstoned path, then save the same normalized JSON rows required below. Do not
+  look for SQLite files in this variant.
 - Browser affordances: chat composer, transcript, idle/running pill, rendered session id.
 - Backend truth: `GET /api/state`; `POST /api/turn`.
-- Disk truth: `<data-dir>/session-id`, `<data-dir>/lash-sessions/*.db` table
-  `graph_nodes` (`node_json`, excluding `tombstoned = 1`), and `<data-dir>/trace.jsonl`.
+- Durable truth: `<data-dir>/session-id`, `<data-dir>/trace.jsonl`, and either the SQLite
+  `graph_nodes` table in `<data-dir>/lash-sessions/*.db` or Postgres
+  `lash_graph_nodes` (`node_json`, excluding tombstoned rows), selected by the boot mode.
   Save extracted JSON rows rather than treating a terminal printout as the artifact.
 - `trace.jsonl` records use serde-flattened payloads: fields such as `type` and `request`
   are at the record's top level, and request messages have the shape

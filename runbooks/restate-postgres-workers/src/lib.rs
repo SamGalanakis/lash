@@ -277,6 +277,17 @@ pub async fn ensure_e2e_schema(pool: &PgPool) -> Result<()> {
     .context("create e2e failover markers table")?;
     sqlx::query(
         r#"
+        CREATE TABLE IF NOT EXISTS lash_e2e_harness_signals (
+            signal_name TEXT PRIMARY KEY,
+            created_at_ms BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .context("create e2e harness signals table")?;
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS lash_e2e_provider_calls (
             call_id BIGSERIAL PRIMARY KEY,
             request_id TEXT NOT NULL,
@@ -349,6 +360,7 @@ pub async fn reset_e2e_rows(pool: &PgPool) -> Result<()> {
         "DELETE FROM lash_e2e_terminal_results",
         "DELETE FROM lash_e2e_worker_events",
         "DELETE FROM lash_e2e_failover_markers",
+        "DELETE FROM lash_e2e_harness_signals",
         "DELETE FROM lash_e2e_durable_step_counts",
         "DELETE FROM lash_e2e_provider_calls",
         "DELETE FROM lash_e2e_tool_events",

@@ -1119,6 +1119,16 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
         })
     }
 
+    fn peek_event<'run>(
+        &'run self,
+        _address: RestateDurableWaitAddress,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Resolution>, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Ok(None) })
+    }
+
     fn await_process_terminal<'run>(
         &'run self,
         process_id: String,
@@ -1344,6 +1354,16 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<PositionalReplayContext> {
         Box::pin(async { Err(TerminalError::new("event await is unsupported")) })
     }
 
+    fn peek_event<'run>(
+        &'run self,
+        _address: RestateDurableWaitAddress,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Resolution>, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Ok(None) })
+    }
+
     fn await_process_terminal<'run>(
         &'run self,
         _process_id: String,
@@ -1467,6 +1487,16 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
         'ctx: 'run,
     {
         self.events.await_event(request, cancellation)
+    }
+
+    fn peek_event<'run>(
+        &'run self,
+        _address: RestateDurableWaitAddress,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Resolution>, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Ok(None) })
     }
 
     fn await_process_terminal<'run>(
