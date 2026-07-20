@@ -1013,10 +1013,7 @@ impl QueuedWorkStore for Store {
                                 || row.claim_session_lease_generation != generation
                         })
                         .collect::<Vec<_>>();
-                    let candidate_batches = candidate_rows
-                        .iter()
-                        .map(|row| queued_work_batch_from_conn(tx, row.clone()))
-                        .collect::<Result<Vec<_>, StoreError>>()?;
+                    let candidate_batches = queued_work_batches_from_conn(tx, &candidate_rows)?;
                     let candidates = candidate_rows
                         .iter()
                         .zip(candidate_batches.iter())
@@ -1269,6 +1266,40 @@ impl QueuedWorkStore for Store {
                     params![session_id, claim_id, lease_token],
                 )
             })
+            .await
+            .map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    async fn abandon_queued_work_claims(
+        &self,
+        claims: &[QueuedWorkClaim],
+    ) -> Result<(), StoreError> {
+        if claims.is_empty() {
+            return Ok(());
+        }
+        let mut sql = "UPDATE queued_work_batches
+             SET claim_id = NULL,
+                 claim_owner_id = NULL,
+                 claim_owner_incarnation_id = NULL,
+                 claim_owner_liveness_json = NULL,
+                 claim_token = NULL,
+                 claim_session_lease_generation = 0
+             WHERE (session_id, claim_id, claim_token) IN ("
+            .to_string();
+        let mut values: Vec<rusqlite::types::Value> = Vec::with_capacity(claims.len() * 3);
+        for (index, claim) in claims.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str("(?, ?, ?)");
+            values.push(claim.session_id.clone().into());
+            values.push(claim.claim_id.clone().into());
+            values.push(claim.lease_token.clone().into());
+        }
+        sql.push(')');
+        self.conn
+            .write(move |tx| tx.execute(&sql, rusqlite::params_from_iter(values.iter())))
             .await
             .map_err(sqlite_error)?;
         Ok(())
@@ -1742,6 +1773,44 @@ impl TurnInputStore for Store {
             .map_err(sqlite_error)?;
         Ok(())
     }
+
+    async fn abandon_turn_input_claims(
+        &self,
+        claims: &[lash_core::TurnInputClaim],
+    ) -> Result<(), StoreError> {
+        if claims.is_empty() {
+            return Ok(());
+        }
+        let mut sql = "UPDATE pending_turn_inputs
+             SET state = CASE
+                     WHEN state = 'accepted' THEN 'pending_active'
+                     ELSE state
+                 END,
+                 claim_id = NULL,
+                 claim_owner_id = NULL,
+                 claim_owner_incarnation_id = NULL,
+                 claim_owner_liveness_json = NULL,
+                 claim_token = NULL,
+                 claim_session_lease_generation = 0
+             WHERE (session_id, claim_id, claim_token) IN ("
+            .to_string();
+        let mut values: Vec<rusqlite::types::Value> = Vec::with_capacity(claims.len() * 3);
+        for (index, claim) in claims.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str("(?, ?, ?)");
+            values.push(claim.session_id.clone().into());
+            values.push(claim.claim_id.clone().into());
+            values.push(claim.lease_token.clone().into());
+        }
+        sql.push(')');
+        self.conn
+            .write(move |tx| tx.execute(&sql, rusqlite::params_from_iter(values.iter())))
+            .await
+            .map_err(sqlite_error)?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -1900,63 +1969,57 @@ async fn claim_pending_turn_inputs_sqlite(
                 }
             };
             let candidate_rows = {
+                let mut sql =
+                    "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
+                            state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
+                            claim_owner_id, claim_owner_incarnation_id,
+                            claim_owner_liveness_json, claim_token, claim_session_lease_generation
+                     FROM pending_turn_inputs
+                     WHERE session_id = ? AND state = ?
+                       AND (
+                            claim_token IS NULL
+                            OR claim_session_lease_generation <> ?
+                       )"
+                    .to_string();
+                let mut values: Vec<rusqlite::types::Value> = vec![
+                    session_id.clone().into(),
+                    wanted_state.as_str().to_string().into(),
+                    (generation as i64).into(),
+                ];
+                if let lash_core::TurnInputClaimMode::ActiveTurn {
+                    turn_id,
+                    checkpoint,
+                } = &mode
+                {
+                    sql.push_str(
+                        " AND json_extract(ingress_json, '$.scope') = 'active_turn'
+                          AND json_extract(ingress_json, '$.turn_id') = ?",
+                    );
+                    values.push(turn_id.clone().into());
+                    if *checkpoint == lash_core::CheckpointKind::AfterWork {
+                        sql.push_str(
+                            " AND COALESCE(json_extract(ingress_json, '$.min_boundary'), 'after_work') = 'after_work'",
+                        );
+                    }
+                }
+                sql.push_str(" ORDER BY enqueue_seq ASC LIMIT ?");
+                values.push(i64::try_from(max_inputs).unwrap_or(i64::MAX).into());
                 let mut stmt = tx
-                    .prepare(
-                        "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
-                                state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
-                                claim_owner_id, claim_owner_incarnation_id,
-                                claim_owner_liveness_json, claim_token, claim_session_lease_generation
-                         FROM pending_turn_inputs
-                         WHERE session_id = ?1 AND state = ?2
-                           AND (
-                                claim_token IS NULL
-                                OR claim_session_lease_generation <> ?3
-                           )
-                         ORDER BY enqueue_seq ASC
-                         LIMIT ?4",
-                    )
+                    .prepare(&sql)
                     .map_err(sqlite_error)?;
                 let rows = stmt
                     .query_map(
-                        params![
-                            session_id,
-                            wanted_state.as_str(),
-                            generation as i64,
-                            (max_inputs as i64).saturating_add(32)
-                        ],
+                        rusqlite::params_from_iter(values.iter()),
                         pending_turn_input_row_from_sql,
                     )
                     .map_err(sqlite_error)?;
                 rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
             };
-            let mut selected = Vec::new();
-            for row in candidate_rows {
-                let claim_available = row.claim_token.is_none()
-                    || row.claim_session_lease_generation != generation;
-                if !claim_available {
-                    continue;
-                }
-                let input = pending_turn_input_from_row(row.clone())?;
-                let matches_mode = match &mode {
-                    lash_core::TurnInputClaimMode::ActiveTurn {
-                        turn_id,
-                        checkpoint,
-                    } => {
-                        input
-                            .ingress
-                            .active_turn_id()
-                            .is_some_and(|active| active == turn_id)
-                            && input.ingress.admits_checkpoint(*checkpoint)
-                    }
-                    lash_core::TurnInputClaimMode::NextTurn => input.state.is_next_turn_pending(),
-                };
-                if matches_mode {
-                    selected.push((row, input));
-                    if selected.len() >= max_inputs {
-                        break;
-                    }
-                }
-            }
+            let selected = candidate_rows
+                .into_iter()
+                .take(max_inputs)
+                .map(|row| Ok((row.clone(), pending_turn_input_from_row(row)?)))
+                .collect::<Result<Vec<_>, StoreError>>()?;
             let Some((head, _)) = selected.first() else {
                 return Ok(TxOutcome::Commit(None));
             };
