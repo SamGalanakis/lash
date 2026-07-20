@@ -442,8 +442,57 @@ async fn live_restate_rate_limit_retry_converges_observers_to_one_copy_inner() {
         "workbench transcript retained duplicate retry prose: {:?}",
         assistant.text
     );
+    let session_id = session.session_id();
+    // This handle predates the externally driven Restate turn. Dropping it
+    // releases the observation snapshot without flushing that stale graph over
+    // the workflow's committed transcript.
+    drop(session);
+    let committed = harness
+        .state
+        .core
+        .session(session_id.clone())
+        .open()
+        .await
+        .expect("open committed retry session");
+    assert_single_retry_marker_message("committed", committed.read_view().messages());
+    committed
+        .close()
+        .await
+        .expect("close committed retry session");
+    let reloaded = harness
+        .state
+        .core
+        .session(session_id)
+        .open()
+        .await
+        .expect("reload retry session");
+    assert_single_retry_marker_message("reload", reloaded.read_view().messages());
+    reloaded.close().await.expect("close reloaded retry session");
     println!("workbench rate-limit gate passed: retry succeeded and live/replay observers converged");
     let _ = std::fs::remove_dir_all(data_dir);
+}
+
+fn assert_single_retry_marker_message(projection: &str, messages: &[lash::messages::Message]) {
+    let messages = messages
+        .iter()
+        .map(chat_message_from_committed)
+        .collect::<Vec<_>>();
+    let marker_messages = messages
+        .iter()
+        .filter(|message| {
+            message.role == "assistant"
+                && message.text.contains("retry observer single-copy marker")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        marker_messages.len(),
+        1,
+        "{projection} workbench projection duplicated retry prose: {messages:#?}"
+    );
+    assert!(
+        marker_messages[0].id.starts_with("workbench-assistant:"),
+        "{projection} workbench projection retained protocol-owned prose: {messages:#?}"
+    );
 }
 
 fn fold_retry_observer_prose(

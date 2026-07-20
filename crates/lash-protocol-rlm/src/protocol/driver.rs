@@ -5,8 +5,8 @@ use lash_core::sansio::{
     WaitingLlmState,
 };
 use lash_core::session_model::{
-    ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionHistoryRecord,
-    SessionStreamEvent, fresh_message_id, make_error_event, shared_parts,
+    ConversationRecord, Message, SessionHistoryRecord, SessionStreamEvent, fresh_message_id,
+    make_error_event,
 };
 use lash_core::{
     CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart, LlmResponse,
@@ -14,7 +14,9 @@ use lash_core::{
     ToolValue, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
     normalized_response_parts,
 };
-use lash_rlm_types::{RlmDiagnosticEvent, RlmProtocolEvent, RlmTermination, RlmTrajectoryEntry};
+use lash_rlm_types::{
+    RlmAssistantContent, RlmDiagnosticEvent, RlmProtocolEvent, RlmTermination, RlmTrajectoryEntry,
+};
 use serde_json::Value;
 
 use crate::projection::rlm_protocol_event;
@@ -566,8 +568,8 @@ fn trajectory_events(
     final_output: Option<Value>,
 ) -> Vec<SessionHistoryRecord> {
     let mut events = Vec::new();
-    if let Some(message) = assistant_content_message(&state.reasoning, &state.prose) {
-        events.push(conversation_event(message));
+    if let Some(event) = assistant_content_event(&state.reasoning, &state.prose) {
+        events.push(event);
     }
     events.push(trajectory_event(trajectory_entry(
         protocol_iteration,
@@ -578,47 +580,18 @@ fn trajectory_events(
     events
 }
 
-fn assistant_content_message(reasoning: &str, prose: &str) -> Option<Message> {
-    let mut parts = Vec::new();
+fn assistant_content_event(reasoning: &str, prose: &str) -> Option<SessionHistoryRecord> {
     let id = fresh_message_id();
     let reasoning = reasoning.trim();
-    if !reasoning.is_empty() {
-        parts.push(Part {
-            id: format!("{id}.r"),
-            kind: PartKind::Reasoning,
-            content: reasoning.to_string(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_replay: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-            response_meta: None,
-        });
-    }
     let prose = prose.trim();
-    if !prose.is_empty() {
-        parts.push(Part {
-            id: format!("{id}.t"),
-            kind: PartKind::Text,
-            content: prose.to_string(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_replay: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-            response_meta: None,
-        });
-    }
-    (!parts.is_empty()).then(|| Message {
-        id,
-        role: MessageRole::Assistant,
-        parts: shared_parts(parts),
-        origin: Some(lash_core::MessageOrigin::Plugin {
-            plugin_id: "rlm_protocol".to_string(),
-            transient: false,
-        }),
+    (!reasoning.is_empty() || !prose.is_empty()).then(|| {
+        SessionHistoryRecord::Protocol(rlm_protocol_event(RlmProtocolEvent::RlmAssistantContent(
+            RlmAssistantContent {
+                id,
+                reasoning: reasoning.to_string(),
+                prose: prose.to_string(),
+            },
+        )))
     })
 }
 

@@ -44,10 +44,19 @@ impl RlmHistoryProjection {
                     }
                 }
                 ChronologicalPayload::ProtocolEvent(event) => {
-                    if let Some(RlmProtocolEvent::RlmTrajectoryEntry(step)) =
-                        decode_rlm_protocol_event(event)
-                    {
-                        history.push(history_item_from_lashlang_step(&step));
+                    match decode_rlm_protocol_event(event) {
+                        Some(RlmProtocolEvent::RlmAssistantContent(content)) => {
+                            history.push(RlmHistoryItem::Message {
+                                id: content.id,
+                                role: RlmHistoryRole::Assistant,
+                                content: content.prose,
+                                attachments: Vec::new(),
+                            });
+                        }
+                        Some(RlmProtocolEvent::RlmTrajectoryEntry(step)) => {
+                            history.push(history_item_from_lashlang_step(&step));
+                        }
+                        _ => {}
                     }
                 }
             }

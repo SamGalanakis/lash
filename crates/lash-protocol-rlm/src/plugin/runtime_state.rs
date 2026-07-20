@@ -296,7 +296,9 @@ impl RlmRuntimeState {
                     )?;
                 }
             }
-            RlmProtocolEvent::RlmTrajectoryEntry(_) | RlmProtocolEvent::RlmDiagnostic(_) => {}
+            RlmProtocolEvent::RlmAssistantContent(_)
+            | RlmProtocolEvent::RlmTrajectoryEntry(_)
+            | RlmProtocolEvent::RlmDiagnostic(_) => {}
         }
         Ok(())
     }

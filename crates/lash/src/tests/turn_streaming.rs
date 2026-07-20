@@ -693,6 +693,229 @@ fn retrying_visible_stream_provider() -> ProviderHandle {
         .into_handle()
 }
 
+fn retrying_rlm_prose_provider(
+    transport_calls: Arc<AtomicUsize>,
+    requests: Arc<StdMutex<Vec<lash_core::LlmRequest>>>,
+) -> ProviderHandle {
+    crate::testing::TestProvider::builder()
+        .kind("retrying-rlm-prose")
+        .requires_streaming(true)
+        .options(lash_core::ProviderOptions {
+            reliability: lash_core::provider::ProviderReliability::default()
+                .max_attempts(2)
+                .base_delay_ms(0)
+                .max_delay_ms(0),
+            ..lash_core::ProviderOptions::default()
+        })
+        .complete(move |request| {
+            let transport_calls = Arc::clone(&transport_calls);
+            let requests = Arc::clone(&requests);
+            async move {
+                requests
+                    .lock()
+                    .expect("retrying RLM requests")
+                    .push(request.clone());
+                let call = transport_calls.fetch_add(1, Ordering::SeqCst);
+                let stream = request.stream_events.expect("stream events");
+                if call == 0 {
+                    stream.send(LlmStreamEvent::Delta(
+                        "retry observer single-copy marker\n<lashlang>\n".to_string(),
+                    ));
+                    return Err(
+                        LlmTransportError::new("deterministic rate limit")
+                            .with_status(429)
+                            .retryable(true),
+                    );
+                }
+                let text = match call {
+                    1 => {
+                        "retry observer single-copy marker\n<lashlang>\nretry_missing_name\n</lashlang>"
+                    }
+                    2 => "<lashlang>\nfinish \"provider retry succeeded\"\n</lashlang>",
+                    _ => "<lashlang>\nfinish \"subsequent turn succeeded\"\n</lashlang>",
+                };
+                stream.send(LlmStreamEvent::Delta(text.to_string()));
+                Ok(LlmResponse {
+                    full_text: text.to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: text.to_string(),
+                        response_meta: None,
+                    }],
+                    response_metadata: Default::default(),
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build()
+        .into_handle()
+}
+
+fn provider_request_text(request: &lash_core::LlmRequest) -> String {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn rlm_provider_retry_commits_only_surviving_prose() -> Result<()> {
+    run_async_test_on_stack_budget("rlm-provider-retry-prose-test", || async {
+        const MARKER: &str = "retry observer single-copy marker";
+        const EXEC_ERROR: &str = "unknown name `retry_missing_name`\n--> line 1, column 1\nretry_missing_name\n^~~~~~~~~~~~~~~~~~";
+        let transport_calls = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let core = explicit_ephemeral_facets(LashCore::rlm_builder(rlm_factory()))
+            .provider(retrying_rlm_prose_provider(
+                Arc::clone(&transport_calls),
+                Arc::clone(&requests),
+            ))
+            .model(mock_model_spec())
+            .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+            .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+            .build()?;
+        let session = core.session("rlm-provider-retry-prose").open().await?;
+
+        let first = session
+            .turn(TurnInput::text("trigger deterministic rate limit retry"))
+            .run()
+            .await?;
+
+        assert_eq!(
+            transport_calls.load(Ordering::SeqCst),
+            3,
+            "one failed attempt, its retry, and one error continuation must finish the turn"
+        );
+        assert_eq!(
+            first.final_value(),
+            Some(&serde_json::json!("provider retry succeeded"))
+        );
+        let rlm_marker_events = first
+            .result
+            .state
+            .read_view()
+            .active_events()
+            .iter()
+            .filter(|event| {
+                let lash_core::SessionHistoryRecord::Protocol(event) = event else {
+                    return false;
+                };
+                matches!(
+                    lash_protocol_rlm::decode_rlm_protocol_event(event),
+                    Some(lash_rlm_types::RlmProtocolEvent::RlmAssistantContent(content))
+                        if content.prose.contains(MARKER)
+                )
+            })
+            .count();
+        assert_eq!(
+            rlm_marker_events, 1,
+            "RLM semantic history retained aborted-attempt prose"
+        );
+        {
+            let requests = requests.lock().expect("retrying RLM requests");
+            assert_eq!(requests.len(), 3, "RLM scheduled a spurious iteration");
+            let continuation_request = requests.last().expect("post-error continuation request");
+            let continuation = provider_request_text(continuation_request);
+            assert_eq!(
+                continuation.matches(MARKER).count(),
+                1,
+                "provider continuation duplicated retry prose: {continuation}"
+            );
+            assert_eq!(
+                continuation.matches(EXEC_ERROR).count(),
+                1,
+                "provider continuation duplicated exec error: {continuation}"
+            );
+            assert_eq!(
+                continuation
+                    .matches(&format!("Error:\n{EXEC_ERROR}"))
+                    .count(),
+                1,
+                "provider continuation duplicated the rendered Error block: {continuation}"
+            );
+        }
+
+        session
+            .admin()
+            .state()
+            .append_messages(vec![
+                lash_core::PluginMessage::text(
+                    lash_core::MessageRole::Assistant,
+                    format!("{MARKER}\n\nprovider retry succeeded"),
+                )
+                .with_id("workbench-assistant:retry-turn"),
+            ])
+            .await?;
+
+        let marker_messages = || {
+            session
+                .read_view()
+                .messages()
+                .iter()
+                .filter(|message| {
+                    message.role == lash_core::MessageRole::Assistant
+                        && message
+                            .parts
+                            .iter()
+                            .any(|part| part.content.contains(MARKER))
+                })
+                .count()
+        };
+        assert_eq!(
+            marker_messages(),
+            1,
+            "conversation history should contain only the host transcript"
+        );
+        let persisted = session.admin().state().persist_current().await?;
+        session.close().await?;
+
+        let reopened = core.session("rlm-provider-retry-prose").open().await?;
+        reopened.admin().state().set_persisted(persisted).await?;
+        assert_eq!(
+            reopened
+                .read_view()
+                .messages()
+                .iter()
+                .filter(|message| {
+                    message.role == lash_core::MessageRole::Assistant
+                        && message
+                            .parts
+                            .iter()
+                            .any(|part| part.content.contains(MARKER))
+                })
+                .count(),
+            1,
+            "reloaded conversation history should contain one transcript"
+        );
+
+        reopened
+            .turn(TurnInput::text("check retry history"))
+            .run()
+            .await?;
+        let requests = requests.lock().expect("retrying RLM requests");
+        assert_eq!(requests.len(), 4);
+        let subsequent_history = requests.last().expect("subsequent request");
+        let subsequent_history_json = serde_json::to_string(subsequent_history)?;
+        let subsequent_history_text = provider_request_text(subsequent_history);
+        let marker_count = subsequent_history_text.matches(MARKER).count();
+        assert_eq!(
+            marker_count, 1,
+            "provider-visible history duplicated retry prose: {subsequent_history_text}"
+        );
+        assert_eq!(
+            subsequent_history_text.matches(EXEC_ERROR).count(),
+            1,
+            "provider-visible history duplicated exec error: {subsequent_history_json}"
+        );
+        Ok(())
+    })
+}
+
 fn render_observed_attempt_text(events: &[lash_core::SessionObservationEvent]) -> (String, String) {
     let mut prose = Vec::new();
     let mut reasoning = Vec::new();

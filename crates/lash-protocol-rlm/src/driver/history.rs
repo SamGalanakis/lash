@@ -180,10 +180,20 @@ pub(super) fn render_history_messages(
                 });
             }
             BorrowedChronologicalPayload::ProtocolEvent(event) => {
-                let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step)) =
-                    decode_rlm_protocol_event(event)
-                else {
+                let Some(event) = decode_rlm_protocol_event(event) else {
                     return;
+                };
+                let step = match event {
+                    lash_rlm_types::RlmProtocolEvent::RlmAssistantContent(content) => {
+                        flush_pending_prose(&mut messages, &mut pending);
+                        pending = Some(PendingProse {
+                            text: content.prose,
+                            image_blocks: Vec::new(),
+                        });
+                        return;
+                    }
+                    lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step) => step,
+                    _ => return,
                 };
                 // Fold buffered prose into one assistant message: prose + cell,
                 // byte-identical to the model's own emission.
