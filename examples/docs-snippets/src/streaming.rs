@@ -127,19 +127,19 @@ async fn fold_session_event(event: Arc<SessionObservationEvent>) -> anyhow::Resu
             render_activity(activity.clone()).await?;
         }
         SessionObservationEventPayload::Committed { read_view } => {
-            append_committed_view(&read_view).await?;
+            append_committed_view(read_view).await?;
         }
         SessionObservationEventPayload::AgentFrameSwitched { frame_id } => {
-            update_frame(&frame_id).await?;
+            update_frame(frame_id).await?;
         }
         SessionObservationEventPayload::QueueChanged { batch_ids, .. } => {
             // Queue events cover both pending user input ids and non-user
             // queued-work batch ids; refresh the surfaces separately.
-            refetch_pending_turn_inputs(&batch_ids).await?;
-            refetch_queued_work_summaries(&batch_ids).await?;
+            refetch_pending_turn_inputs(batch_ids).await?;
+            refetch_queued_work_summaries(batch_ids).await?;
         }
         SessionObservationEventPayload::ProcessChanged { process_ids, .. } => {
-            refetch_process_summaries(&process_ids).await?;
+            refetch_process_summaries(process_ids).await?;
         }
     }
     // docs:end:fold-session-event
