@@ -1181,6 +1181,36 @@ impl QueuedWorkStore for PostgresSessionStore {
         Ok(())
     }
 
+    async fn abandon_queued_work_claims(
+        &self,
+        claims: &[QueuedWorkClaim],
+    ) -> Result<(), StoreError> {
+        if claims.is_empty() {
+            return Ok(());
+        }
+        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "UPDATE lash_queued_work_batches
+             SET claim_id = NULL,
+                 claim_owner_id = NULL,
+                 claim_owner_incarnation_id = NULL,
+                 claim_owner_liveness_json = NULL,
+                 claim_token = NULL,
+                 claim_session_lease_generation = 0
+             WHERE (session_id, claim_id, claim_token) IN ",
+        );
+        query.push_tuples(claims, |mut row, claim| {
+            row.push_bind(&claim.session_id)
+                .push_bind(&claim.claim_id)
+                .push_bind(&claim.lease_token);
+        });
+        query
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_err(store_sqlx_error)?;
+        Ok(())
+    }
+
     async fn cancel_queued_work_batch(
         &self,
         session_id: &str,
@@ -1553,6 +1583,40 @@ impl TurnInputStore for PostgresSessionStore {
         .map_err(store_sqlx_error)?;
         Ok(())
     }
+
+    async fn abandon_turn_input_claims(
+        &self,
+        claims: &[lash_core::TurnInputClaim],
+    ) -> Result<(), StoreError> {
+        if claims.is_empty() {
+            return Ok(());
+        }
+        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "UPDATE lash_pending_turn_inputs
+             SET state = CASE
+                     WHEN state = 'accepted' THEN 'pending_active'
+                     ELSE state
+                 END,
+                 claim_id = NULL,
+                 claim_owner_id = NULL,
+                 claim_owner_incarnation_id = NULL,
+                 claim_owner_liveness_json = NULL,
+                 claim_token = NULL,
+                 claim_session_lease_generation = 0
+             WHERE (session_id, claim_id, claim_token) IN ",
+        );
+        query.push_tuples(claims, |mut row, claim| {
+            row.push_bind(&claim.session_id)
+                .push_bind(&claim.claim_id)
+                .push_bind(&claim.lease_token);
+        });
+        query
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_err(store_sqlx_error)?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -1758,57 +1822,58 @@ async fn claim_pending_turn_inputs_postgres(
         }
         lash_core::TurnInputClaimMode::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
     };
-    let rows = sqlx::query(
+    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                 state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                 claim_owner_id, claim_owner_incarnation_id,
                 claim_owner_liveness_json, claim_token, claim_session_lease_generation
          FROM lash_pending_turn_inputs
-         WHERE session_id = $1 AND state = $2
+         WHERE session_id = ",
+    );
+    query
+        .push_bind(session_id)
+        .push(" AND state = ")
+        .push_bind(wanted_state.as_str())
+        .push(
+            "
            AND (
                 claim_token IS NULL
-                OR claim_session_lease_generation <> $3
-           )
-         ORDER BY enqueue_seq ASC
-         LIMIT $4
-         FOR UPDATE SKIP LOCKED",
-    )
-    .bind(session_id)
-    .bind(wanted_state.as_str())
-    .bind(generation as i64)
-    .bind(claim_scan_limit(max_inputs))
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(store_sqlx_error)?;
-    let mut selected = Vec::new();
-    for row in rows {
-        let row = pending_turn_input_row(row)?;
-        let claim_available =
-            row.claim_token.is_none() || row.claim_session_lease_generation != generation;
-        if !claim_available {
-            continue;
-        }
-        let input = pending_turn_input_from_row(row.clone())?;
-        let matches_mode = match &mode {
-            lash_core::TurnInputClaimMode::ActiveTurn {
-                turn_id,
-                checkpoint,
-            } => {
-                input
-                    .ingress
-                    .active_turn_id()
-                    .is_some_and(|active| active == turn_id)
-                    && input.ingress.admits_checkpoint(*checkpoint)
-            }
-            lash_core::TurnInputClaimMode::NextTurn => input.state.is_next_turn_pending(),
-        };
-        if matches_mode {
-            selected.push((row, input));
-            if selected.len() >= max_inputs {
-                break;
-            }
+                OR claim_session_lease_generation <> ",
+        )
+        .push_bind(generation as i64)
+        .push("\n           )");
+    if let lash_core::TurnInputClaimMode::ActiveTurn {
+        turn_id,
+        checkpoint,
+    } = &mode
+    {
+        query
+            .push(" AND ingress_json::jsonb ->> 'scope' = 'active_turn'")
+            .push(" AND ingress_json::jsonb ->> 'turn_id' = ")
+            .push_bind(turn_id);
+        if *checkpoint == lash_core::CheckpointKind::AfterWork {
+            query.push(
+                " AND COALESCE(ingress_json::jsonb ->> 'min_boundary', 'after_work') = 'after_work'",
+            );
         }
     }
+    query
+        .push(" ORDER BY enqueue_seq ASC LIMIT ")
+        .push_bind(i64::try_from(max_inputs).unwrap_or(i64::MAX))
+        .push(" FOR UPDATE SKIP LOCKED");
+    let rows = query
+        .build()
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_sqlx_error)?;
+    let selected = rows
+        .into_iter()
+        .take(max_inputs)
+        .map(|row| {
+            let row = pending_turn_input_row(row)?;
+            Ok((row.clone(), pending_turn_input_from_row(row)?))
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
     let Some((head, _)) = selected.first() else {
         tx.commit().await.map_err(store_sqlx_error)?;
         return Ok(None);

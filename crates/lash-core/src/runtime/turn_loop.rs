@@ -327,15 +327,12 @@ impl LashRuntime {
         else {
             return;
         };
-        for claim in claims {
-            if let Err(abandon_err) = store.abandon_queued_work_claim(claim).await {
-                tracing::warn!(
-                    error = %abandon_err,
-                    session_id = %claim.session_id,
-                    claim_id = %claim.claim_id,
-                    "failed to abandon queued work claim after session execution lease loss"
-                );
-            }
+        if let Err(abandon_err) = store.abandon_queued_work_claims(claims).await {
+            tracing::warn!(
+                error = %abandon_err,
+                claim_count = claims.len(),
+                "failed to abandon queued work claims after session execution lease loss"
+            );
         }
     }
 
@@ -354,15 +351,12 @@ impl LashRuntime {
         else {
             return;
         };
-        for claim in claims {
-            if let Err(abandon_err) = store.abandon_turn_input_claim(claim).await {
-                tracing::warn!(
-                    error = %abandon_err,
-                    session_id = %claim.session_id,
-                    claim_id = %claim.claim_id,
-                    "failed to abandon turn input claim after session execution lease loss"
-                );
-            }
+        if let Err(abandon_err) = store.abandon_turn_input_claims(claims).await {
+            tracing::warn!(
+                error = %abandon_err,
+                claim_count = claims.len(),
+                "failed to abandon turn input claims after session execution lease loss"
+            );
         }
     }
 

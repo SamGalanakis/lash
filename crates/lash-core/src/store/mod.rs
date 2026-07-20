@@ -1163,6 +1163,17 @@ pub trait TurnInputStore: Send + Sync {
         &self,
         claim: &crate::TurnInputClaim,
     ) -> Result<(), StoreError>;
+
+    /// Release multiple held pending-turn-input claims in one backend batch.
+    async fn abandon_turn_input_claims(
+        &self,
+        claims: &[crate::TurnInputClaim],
+    ) -> Result<(), StoreError> {
+        for claim in claims {
+            self.abandon_turn_input_claim(claim).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Durable single-writer execution-lane capability, fenced by monotonic
@@ -1279,6 +1290,17 @@ pub trait QueuedWorkStore: Send + Sync {
         &self,
         claim: &crate::QueuedWorkClaim,
     ) -> Result<(), StoreError>;
+
+    /// Release multiple queued-work claims in one backend batch.
+    async fn abandon_queued_work_claims(
+        &self,
+        claims: &[crate::QueuedWorkClaim],
+    ) -> Result<(), StoreError> {
+        for claim in claims {
+            self.abandon_queued_work_claim(claim).await?;
+        }
+        Ok(())
+    }
 
     /// Remove an unclaimed queued-work batch from durable ingress.
     ///
