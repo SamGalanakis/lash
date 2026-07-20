@@ -2085,57 +2085,58 @@ async fn claim_pending_turn_inputs_postgres_tx(
         }
         lash_core::TurnInputClaimMode::NextTurn => lash_core::TurnInputState::DeferredNextTurn,
     };
-    let rows = sqlx::query(
+    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "SELECT enqueue_seq, input_id, session_id, source_key, ingress_json,
                 state, input_json, enqueued_at_ms, claim_id, claim_fencing_token,
                 claim_owner_id, claim_owner_incarnation_id,
                 claim_owner_liveness_json, claim_token, claim_session_lease_generation
          FROM lash_pending_turn_inputs
-         WHERE session_id = $1 AND state = $2
+         WHERE session_id = ",
+    );
+    query
+        .push_bind(session_id)
+        .push(" AND state = ")
+        .push_bind(wanted_state.as_str())
+        .push(
+            "
            AND (
                 claim_token IS NULL
-                OR claim_session_lease_generation <> $3
-           )
-         ORDER BY enqueue_seq ASC
-         LIMIT $4
-         FOR UPDATE SKIP LOCKED",
-    )
-    .bind(session_id)
-    .bind(wanted_state.as_str())
-    .bind(generation as i64)
-    .bind(claim_scan_limit(max_inputs))
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(store_sqlx_error)?;
-    let mut selected = Vec::new();
-    for row in rows {
-        let row = pending_turn_input_row(row)?;
-        let claim_available =
-            row.claim_token.is_none() || row.claim_session_lease_generation != generation;
-        if !claim_available {
-            continue;
-        }
-        let input = pending_turn_input_from_row(row.clone())?;
-        let matches_mode = match &mode {
-            lash_core::TurnInputClaimMode::ActiveTurn {
-                turn_id,
-                checkpoint,
-            } => {
-                input
-                    .ingress
-                    .active_turn_id()
-                    .is_some_and(|active| active == turn_id)
-                    && input.ingress.admits_checkpoint(*checkpoint)
-            }
-            lash_core::TurnInputClaimMode::NextTurn => input.state.is_next_turn_pending(),
-        };
-        if matches_mode {
-            selected.push((row, input));
-            if selected.len() >= max_inputs {
-                break;
-            }
+                OR claim_session_lease_generation <> ",
+        )
+        .push_bind(generation as i64)
+        .push("\n           )");
+    if let lash_core::TurnInputClaimMode::ActiveTurn {
+        turn_id,
+        checkpoint,
+    } = &mode
+    {
+        query
+            .push(" AND ingress_json::jsonb ->> 'scope' = 'active_turn'")
+            .push(" AND ingress_json::jsonb ->> 'turn_id' = ")
+            .push_bind(turn_id);
+        if *checkpoint == lash_core::CheckpointKind::AfterWork {
+            query.push(
+                " AND COALESCE(ingress_json::jsonb ->> 'min_boundary', 'after_work') = 'after_work'",
+            );
         }
     }
+    query
+        .push(" ORDER BY enqueue_seq ASC LIMIT ")
+        .push_bind(i64::try_from(max_inputs).unwrap_or(i64::MAX))
+        .push(" FOR UPDATE SKIP LOCKED");
+    let rows = query
+        .build()
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(store_sqlx_error)?;
+    let selected = rows
+        .into_iter()
+        .take(max_inputs)
+        .map(|row| {
+            let row = pending_turn_input_row(row)?;
+            Ok((row.clone(), pending_turn_input_from_row(row)?))
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
     let Some((head, _)) = selected.first() else {
         return Ok(ClaimTransactionOutcome::Commit(None));
     };
