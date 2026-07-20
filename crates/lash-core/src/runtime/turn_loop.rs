@@ -2241,8 +2241,12 @@ async fn run_turn_effect_loop(
 const TURN_CANCEL_WATCH_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_millis(25);
 const TURN_CANCEL_WATCH_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
 /// Keep the journaled turn-start observation bounded so a broken peek cannot
-/// pin one Restate invocation forever. Exhaustion fails closed and lets the
-/// Restate handler retry policy own invocation-level backoff and retirement.
+/// pin one Restate invocation forever. Exhaustion fails closed: the error
+/// propagates and the turn fails without starting any effect (hosts classify
+/// it as non-retryable, so the invocation retires as a failed turn). Transient
+/// transport trouble does not reach this bound — a slow journaled peek stays
+/// pending inside one attempt; only genuine terminal errors (revoked or
+/// unknown keys) burn attempts.
 const TURN_CANCEL_START_GATE_ATTEMPTS: usize = 3;
 
 async fn await_turn_cancellation_start_gate<F, C>(
