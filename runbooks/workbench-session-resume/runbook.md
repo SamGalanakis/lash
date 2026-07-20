@@ -40,6 +40,12 @@ committed row counts, request history, and cross-surface agreement—not on pros
 - Disk truth: `<data-dir>/session-id`, `<data-dir>/lash-sessions/*.db` table
   `graph_nodes` (`node_json`, excluding `tombstoned = 1`), and `<data-dir>/trace.jsonl`.
   Save extracted JSON rows rather than treating a terminal printout as the artifact.
+- `trace.jsonl` records use serde-flattened payloads: fields such as `type` and `request`
+  are at the record's top level, and request messages have the shape
+  `{ "role": ..., "blocks": [{ "kind": ..., "text": ... }] }`. Role vocabulary also
+  differs by surface: store rows use `User`/`Assistant`, API rows use
+  `user`/`assistant`, and the DOM renders `YOU`/`AGENT`. Normalize roles before comparing
+  ordered transcripts; do not treat casing or presentation labels as content drift.
 
 ## Phase 0 — Boot and identify the durable session
 
