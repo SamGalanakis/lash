@@ -230,7 +230,9 @@ impl AppState {
             .map_err(terminal_error)?;
         let final_value = if matches!(
             request.scenario,
-            TurnScenario::TurnControlHold | TurnScenario::TurnControlComplete
+            TurnScenario::TurnControlHold
+                | TurnScenario::TurnControlSleep
+                | TurnScenario::TurnControlComplete
         ) {
             json!({
                 "final": if matches!(
@@ -511,7 +513,9 @@ impl AppState {
                     EXPECTED_FRAME_SWITCH_TEXT
                 }
                 TurnScenario::FrameSwitchCancel => EXPECTED_FRAME_SWITCH_CANCEL_TEXT,
-                TurnScenario::TurnControlHold => "turn-control-cancelled",
+                TurnScenario::TurnControlHold | TurnScenario::TurnControlSleep => {
+                    "turn-control-cancelled"
+                }
                 TurnScenario::TurnControlComplete => "turn-control-completed",
             })
             .to_string();
@@ -688,6 +692,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         TurnScenario::TurnControlHold => format!(
             "Run the exact-turn cancellation hold. workflow_id={} turn_control_hold=true fail_once={}",
             request.workflow_id, request.fail_once
+        ),
+        TurnScenario::TurnControlSleep => format!(
+            "Run the exact-turn suspended sleep cancellation. workflow_id={} turn_control_sleep=true",
+            request.workflow_id
         ),
         TurnScenario::TurnControlComplete => format!(
             "Run the exact-turn completion race. workflow_id={} turn_control_complete=true",

@@ -1687,6 +1687,120 @@ async fn restate_timer_stops_when_its_fresh_attempt_is_cancelled() {
 }
 
 #[tokio::test]
+async fn restate_suspended_timer_is_woken_by_the_durable_turn_cancel_gate() {
+    let context = Arc::new(RecordingContext::default());
+    context.block_sleeps.store(true, Ordering::SeqCst);
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task_context = Arc::clone(&context);
+    let task_cancellation = cancellation.clone();
+    let sleep = tokio::spawn(async move {
+        RestateRuntimeEffectController::new(task_context)
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    runtime_invocation(RuntimeEffectKind::Sleep, "suspended-sleep"),
+                    RuntimeEffectCommand::Sleep {
+                        duration_ms: 300_000,
+                    },
+                ),
+                RuntimeEffectLocalExecutor::sleep(task_cancellation),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(!sleep.is_finished(), "timer must genuinely remain pending");
+
+    let cancel_key = restate_await_event_key(
+        &ExecutionScope::turn("session", "turn"),
+        AwaitEventWaitIdentity::TurnCancelGate,
+    )
+    .expect("cancel gate key");
+    assert_eq!(
+        context.resolve_durable_event(RestateDurableWaitResolveRequest {
+            address: RestateDurableWaitAddress::for_key(&cancel_key),
+            resolution: Resolution::Ok(serde_json::json!({
+                "state": "cancel_requested",
+                "cancellation": {
+                    "request_id": "cancel-suspended-sleep",
+                    "origin": "test",
+                },
+            })),
+        }),
+        ResolveOutcome::Accepted
+    );
+
+    let error = tokio::time::timeout(Duration::from_secs(1), sleep)
+        .await
+        .expect("durable cancel gate must wake a suspended timer promptly")
+        .expect("join suspended timer")
+        .expect_err("durable turn cancellation must abort the timer effect");
+    assert_eq!(error.code, "runtime_effect_sleep_cancelled");
+    assert!(cancellation.is_cancelled());
+}
+
+#[tokio::test]
+async fn restate_suspended_await_event_is_woken_by_the_durable_turn_cancel_gate() {
+    let context = Arc::new(RecordingContext::default());
+    let awaited_key = restate_await_event_key(
+        &ExecutionScope::turn("session", "turn"),
+        AwaitEventWaitIdentity::Custom {
+            key: "wait-for-signal".to_string(),
+        },
+    )
+    .expect("await-event key");
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task_context = Arc::clone(&context);
+    let task_cancellation = cancellation.clone();
+    let wait = tokio::spawn(async move {
+        RestateRuntimeEffectController::new(task_context)
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    runtime_invocation(RuntimeEffectKind::AwaitEvent, "suspended-await-event"),
+                    RuntimeEffectCommand::AwaitEvent { key: awaited_key },
+                ),
+                RuntimeEffectLocalExecutor::await_event(task_cancellation, None),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !wait.is_finished(),
+        "await-event must genuinely remain pending"
+    );
+
+    let cancel_key = restate_await_event_key(
+        &ExecutionScope::turn("session", "turn"),
+        AwaitEventWaitIdentity::TurnCancelGate,
+    )
+    .expect("cancel gate key");
+    assert_eq!(
+        context.resolve_durable_event(RestateDurableWaitResolveRequest {
+            address: RestateDurableWaitAddress::for_key(&cancel_key),
+            resolution: Resolution::Ok(serde_json::json!({
+                "state": "cancel_requested",
+                "cancellation": {
+                    "request_id": "cancel-suspended-await-event",
+                    "origin": "test",
+                },
+            })),
+        }),
+        ResolveOutcome::Accepted
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_secs(1), wait)
+        .await
+        .expect("durable cancel gate must wake a suspended await-event promptly")
+        .expect("join suspended await-event")
+        .expect("turn cancellation should terminalize the await-event");
+    assert!(matches!(
+        outcome,
+        RuntimeEffectOutcome::AwaitEvent {
+            resolution: Resolution::Cancelled,
+        }
+    ));
+    assert!(cancellation.is_cancelled());
+}
+
+#[tokio::test]
 async fn restate_routes_every_execution_scope_to_an_exact_durable_wait_address() {
     let context = Arc::new(RecordingContext::default());
     let host = RestateRuntimeEffectController::new(context.clone());
@@ -5810,6 +5924,10 @@ async fn restate_admin_client_cancels_kills_and_queries_invocation_status() {
             status: "200 OK",
             body: r#"{"rows":[{"id":"inv_123","target":"WorkbenchTurnWorkflow/turn-1/run","target_service_name":"WorkbenchTurnWorkflow","target_service_key":"turn-1","target_handler_name":"run","status":"completed","completion_result":"success","completion_failure":null}]}"#,
         },
+        MockHttpResponse {
+            status: "200 OK",
+            body: r#"{"rows":[{"id":"inv_456","target":"WorkbenchTurnWorkflow/turn-2/run","target_service_name":"WorkbenchTurnWorkflow","target_service_key":"turn-2","target_handler_name":"run","status":"suspended"}]}"#,
+        },
     ])
     .await;
     let client = RestateAdminClient::new(base_url);
@@ -5828,10 +5946,16 @@ async fn restate_admin_client_cancels_kills_and_queries_invocation_status() {
         .await
         .expect("status")
         .expect("status row");
+    let workflow_status = client
+        .workflow_invocation_status("WorkbenchTurnWorkflow", "turn-2", "run")
+        .await
+        .expect("workflow status")
+        .expect("workflow status row");
     server.await.expect("capture server");
 
     assert!(status.completed_successfully());
     assert_eq!(status.target_service_name, "WorkbenchTurnWorkflow");
+    assert!(workflow_status.is_still_active());
     let requests = captured.lock().expect("captured lock");
     assert!(
         requests[0].starts_with("PATCH /invocations/inv_123/cancel "),
@@ -5849,4 +5973,7 @@ async fn restate_admin_client_cancels_kills_and_queries_invocation_status() {
         requests[2]
     );
     assert!(requests[2].contains("FROM sys_invocation WHERE id = 'inv_123'"));
+    assert!(requests[3].contains(
+        "target_service_name = 'WorkbenchTurnWorkflow' AND target_service_key = 'turn-2' AND target_handler_name = 'run'"
+    ));
 }

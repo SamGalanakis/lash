@@ -150,6 +150,7 @@ pub enum TurnScenario {
     FrameSwitchPrepared,
     FrameSwitchCancel,
     TurnControlHold,
+    TurnControlSleep,
     TurnControlComplete,
 }
 

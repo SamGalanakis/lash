@@ -436,6 +436,23 @@ fn restate_durable_wait_request(
     }
 }
 
+fn restate_turn_cancel_wait_request(
+    invocation: &RuntimeInvocation,
+) -> Result<Option<RestateDurableWaitAwaitRequest>, RuntimeEffectControllerError> {
+    let Some(turn_id) = invocation.scope.turn_id.as_deref() else {
+        return Ok(None);
+    };
+    let key = restate_await_event_key(
+        &ExecutionScope::turn(&invocation.scope.session_id, turn_id),
+        AwaitEventWaitIdentity::TurnCancelGate,
+    )?;
+    Ok(Some(restate_durable_wait_request(
+        &key,
+        None,
+        &lash_core::SystemClock,
+    )))
+}
+
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 struct RecordedRuntimeEffect {
     envelope_hash: String,
@@ -838,6 +855,23 @@ impl RestateAdminClient {
         let mut rows = self
             .query_json::<RestateInvocationStatus>(&format!(
                 "SELECT id, target, target_service_name, target_service_key, target_handler_name, status, completion_result, completion_failure FROM sys_invocation WHERE id = {id}"
+            ))
+            .await?;
+        Ok(rows.pop())
+    }
+
+    pub async fn workflow_invocation_status(
+        &self,
+        workflow: &str,
+        workflow_key: &str,
+        handler: &str,
+    ) -> Result<Option<RestateInvocationStatus>, RestateHttpError> {
+        let workflow = sql_string_literal(workflow);
+        let workflow_key = sql_string_literal(workflow_key);
+        let handler = sql_string_literal(handler);
+        let mut rows = self
+            .query_json::<RestateInvocationStatus>(&format!(
+                "SELECT id, target, target_service_name, target_service_key, target_handler_name, status, completion_result, completion_failure FROM sys_invocation WHERE target_service_name = {workflow} AND target_service_key = {workflow_key} AND target_handler_name = {handler} ORDER BY modified_at DESC LIMIT 1"
             ))
             .await?;
         Ok(rows.pop())
@@ -2623,6 +2657,18 @@ impl fmt::Debug for RestateEffectControllerOptions {
 }
 
 #[doc(hidden)]
+pub enum RestateSleepRaceOutcome {
+    Slept,
+    Cancelled,
+}
+
+#[doc(hidden)]
+pub enum RestateAwaitEventRaceOutcome {
+    Event(Resolution),
+    TurnCancelled,
+}
+
+#[doc(hidden)]
 pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
     fn sleep_send<'run>(
         &'run self,
@@ -2630,6 +2676,39 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
     ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
+
+    fn sleep_or_turn_cancel<'run>(
+        &'run self,
+        duration: Duration,
+        turn_cancel: Option<RestateDurableWaitAwaitRequest>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<RestateSleepRaceOutcome, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async move {
+            let Some(turn_cancel) = turn_cancel else {
+                return tokio::select! {
+                    result = self.sleep_send(duration) => {
+                        result.map(|()| RestateSleepRaceOutcome::Slept)
+                    }
+                    _ = cancellation.cancelled() => Ok(RestateSleepRaceOutcome::Cancelled),
+                };
+            };
+            tokio::select! {
+                result = self.sleep_send(duration) => {
+                    result.map(|()| RestateSleepRaceOutcome::Slept)
+                }
+                result = self.await_event(
+                    turn_cancel,
+                    tokio_util::sync::CancellationToken::new(),
+                ) => {
+                    result.map(|_| RestateSleepRaceOutcome::Cancelled)
+                }
+                _ = cancellation.cancelled() => Ok(RestateSleepRaceOutcome::Cancelled),
+            }
+        })
+    }
 
     fn run_json_send<'run, T, Fut>(
         &'run self,
@@ -2664,6 +2743,38 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
     ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
+
+    fn await_event_or_turn_cancel<'run>(
+        &'run self,
+        request: RestateDurableWaitAwaitRequest,
+        turn_cancel: Option<RestateDurableWaitAwaitRequest>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<RestateAwaitEventRaceOutcome, TerminalError>> + Send + 'run>,
+    >
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async move {
+            let Some(turn_cancel) = turn_cancel else {
+                return self
+                    .await_event(request, cancellation)
+                    .await
+                    .map(RestateAwaitEventRaceOutcome::Event);
+            };
+            tokio::select! {
+                result = self.await_event(request, cancellation.clone()) => {
+                    result.map(RestateAwaitEventRaceOutcome::Event)
+                }
+                result = self.await_event(
+                    turn_cancel,
+                    tokio_util::sync::CancellationToken::new(),
+                ) => {
+                    result.map(|_| RestateAwaitEventRaceOutcome::TurnCancelled)
+                }
+            }
+        })
+    }
 
     fn peek_event<'run>(
         &'run self,
@@ -2708,6 +2819,65 @@ macro_rules! impl_restate_controller_context {
                 {
                     Box::pin(async move {
                         restate_sdk::context::ContextTimers::sleep(self, duration).await
+                    })
+                }
+
+                fn sleep_or_turn_cancel<'run>(
+                    &'run self,
+                    duration: Duration,
+                    turn_cancel: Option<RestateDurableWaitAwaitRequest>,
+                    cancellation: tokio_util::sync::CancellationToken,
+                ) -> Pin<Box<dyn Future<Output = Result<RestateSleepRaceOutcome, TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    Box::pin(async move {
+                        let Some(turn_cancel) = turn_cancel else {
+                            return tokio::select! {
+                                result = restate_sdk::context::ContextTimers::sleep(self, duration) => {
+                                    result.map(|()| RestateSleepRaceOutcome::Slept)
+                                }
+                                _ = cancellation.cancelled() => Ok(RestateSleepRaceOutcome::Cancelled),
+                            };
+                        };
+
+                        let workflow_key = turn_cancel.address.workflow_key.clone();
+                        let start: restate_sdk::context::Request<
+                            '_,
+                            Json<RestateDurableWaitAwaitRequest>,
+                            Json<Resolution>,
+                        > = ContextClient::request(
+                            self,
+                            RequestTarget::workflow(
+                                "LashDurableWaitWorkflow",
+                                workflow_key.clone(),
+                                "await_resolution",
+                            ),
+                            Json(turn_cancel),
+                        );
+                        let _ = start.send().invocation_id().await?;
+                        let observe: restate_sdk::context::Request<'_, (), Json<Resolution>> =
+                            ContextClient::request(
+                                self,
+                                RequestTarget::workflow(
+                                    "LashDurableWaitWorkflow",
+                                    workflow_key,
+                                    "observe",
+                                ),
+                                (),
+                            );
+                        let timer = restate_sdk::context::ContextTimers::sleep(self, duration);
+                        let observe = observe.call();
+                        restate_sdk::select! {
+                            result = timer => {
+                                result?;
+                                Ok(RestateSleepRaceOutcome::Slept)
+                            },
+                            result = observe => {
+                                let Json(_) = result?;
+                                Ok(RestateSleepRaceOutcome::Cancelled)
+                            }
+                        }
                     })
                 }
 
@@ -2867,6 +3037,96 @@ macro_rules! impl_restate_controller_context {
                                         Resolution::Cancelled
                                     }
                                 })
+                            }
+                        }
+                    })
+                }
+
+                fn await_event_or_turn_cancel<'run>(
+                    &'run self,
+                    request: RestateDurableWaitAwaitRequest,
+                    turn_cancel: Option<RestateDurableWaitAwaitRequest>,
+                    cancellation: tokio_util::sync::CancellationToken,
+                ) -> Pin<
+                    Box<
+                        dyn Future<Output = Result<RestateAwaitEventRaceOutcome, TerminalError>>
+                            + Send
+                            + 'run,
+                    >,
+                >
+                where
+                    'ctx: 'run,
+                {
+                    Box::pin(async move {
+                        let Some(turn_cancel) = turn_cancel else {
+                            return self
+                                .await_event(request, cancellation)
+                                .await
+                                .map(RestateAwaitEventRaceOutcome::Event);
+                        };
+
+                        let event_workflow_key = request.address.workflow_key.clone();
+                        let event_start: restate_sdk::context::Request<
+                            '_,
+                            Json<RestateDurableWaitAwaitRequest>,
+                            Json<Resolution>,
+                        > = ContextClient::request(
+                            self,
+                            RequestTarget::workflow(
+                                "LashDurableWaitWorkflow",
+                                event_workflow_key.clone(),
+                                "await_resolution",
+                            ),
+                            Json(request),
+                        );
+                        let _ = event_start.send().invocation_id().await?;
+
+                        let cancel_workflow_key = turn_cancel.address.workflow_key.clone();
+                        let cancel_start: restate_sdk::context::Request<
+                            '_,
+                            Json<RestateDurableWaitAwaitRequest>,
+                            Json<Resolution>,
+                        > = ContextClient::request(
+                            self,
+                            RequestTarget::workflow(
+                                "LashDurableWaitWorkflow",
+                                cancel_workflow_key.clone(),
+                                "await_resolution",
+                            ),
+                            Json(turn_cancel),
+                        );
+                        let _ = cancel_start.send().invocation_id().await?;
+
+                        let event_observe: restate_sdk::context::Request<'_, (), Json<Resolution>> =
+                            ContextClient::request(
+                                self,
+                                RequestTarget::workflow(
+                                    "LashDurableWaitWorkflow",
+                                    event_workflow_key,
+                                    "observe",
+                                ),
+                                (),
+                            );
+                        let cancel_observe: restate_sdk::context::Request<'_, (), Json<Resolution>> =
+                            ContextClient::request(
+                                self,
+                                RequestTarget::workflow(
+                                    "LashDurableWaitWorkflow",
+                                    cancel_workflow_key,
+                                    "observe",
+                                ),
+                                (),
+                            );
+                        let event_observe = event_observe.call();
+                        let cancel_observe = cancel_observe.call();
+                        restate_sdk::select! {
+                            result = event_observe => {
+                                let Json(resolution) = result?;
+                                Ok(RestateAwaitEventRaceOutcome::Event(resolution))
+                            },
+                            result = cancel_observe => {
+                                let Json(_) = result?;
+                                Ok(RestateAwaitEventRaceOutcome::TurnCancelled)
                             }
                         }
                     })
@@ -3209,23 +3469,26 @@ where
                     unreachable!("timer execution is only selected for sleep effects");
                 };
                 let duration = Duration::from_millis(*duration_ms);
+                let turn_cancel = restate_turn_cancel_wait_request(&envelope.invocation)?;
                 let cancellation = local_executor.into_sleep_cancellation();
-                let sleep = guard_restate_context_future(self.context.sleep_send(duration));
-                tokio::pin!(sleep);
-                tokio::select! {
-                    result = &mut sleep => {
-                        if let Err(err) = result {
-                            tracing_sleep_error(&envelope.invocation, &err);
-                            return Err(RuntimeEffectControllerError::new(
-                                "restate_effect_controller",
-                                err.to_string(),
-                            ));
-                        }
-                    }
-                    _ = cancellation.cancelled() => {
+                match self
+                    .context
+                    .sleep_or_turn_cancel(duration, turn_cancel, cancellation.clone())
+                    .await
+                {
+                    Ok(RestateSleepRaceOutcome::Slept) => {}
+                    Ok(RestateSleepRaceOutcome::Cancelled) => {
+                        cancellation.cancel();
                         return Err(RuntimeEffectControllerError::new(
                             "runtime_effect_sleep_cancelled",
                             "runtime effect sleep was cancelled",
+                        ));
+                    }
+                    Err(err) => {
+                        tracing_sleep_error(&envelope.invocation, &err);
+                        return Err(RuntimeEffectControllerError::new(
+                            "restate_effect_controller",
+                            err.to_string(),
                         ));
                     }
                 }
@@ -3240,19 +3503,30 @@ where
                     deadline,
                     clock,
                 } = local_executor.into_await_event_options()?;
-                self.context
-                    .await_event(
+                let turn_cancel = restate_turn_cancel_wait_request(&envelope.invocation)?;
+                match self
+                    .context
+                    .await_event_or_turn_cancel(
                         restate_durable_wait_request(&key, deadline, clock.as_ref()),
-                        cancellation,
+                        turn_cancel,
+                        cancellation.clone(),
                     )
                     .await
-                    .map(|resolution| RuntimeEffectOutcome::AwaitEvent { resolution })
-                    .map_err(|err| {
-                        RuntimeEffectControllerError::new(
-                            "restate_effect_controller",
-                            err.to_string(),
-                        )
-                    })
+                {
+                    Ok(RestateAwaitEventRaceOutcome::Event(resolution)) => {
+                        Ok(RuntimeEffectOutcome::AwaitEvent { resolution })
+                    }
+                    Ok(RestateAwaitEventRaceOutcome::TurnCancelled) => {
+                        cancellation.cancel();
+                        Ok(RuntimeEffectOutcome::AwaitEvent {
+                            resolution: Resolution::Cancelled,
+                        })
+                    }
+                    Err(err) => Err(RuntimeEffectControllerError::new(
+                        "restate_effect_controller",
+                        err.to_string(),
+                    )),
+                }
             }
             RestateEffectExecution::JournaledRun => {
                 let current_hash = envelope.stable_hash()?;

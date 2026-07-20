@@ -125,6 +125,10 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
             "turn_control_hold",
             turn_control_hold_script(&workflow_id, fail_once),
         ),
+        MockScenario::TurnControlSleep => (
+            "turn_control_sleep",
+            turn_control_sleep_script(&workflow_id),
+        ),
         MockScenario::TurnControlComplete => (
             "turn_control_complete",
             turn_control_complete_script(&workflow_id),
@@ -249,6 +253,7 @@ enum MockScenario {
     FrameSwitchPending,
     FrameSwitchPostCancel,
     TurnControlHold,
+    TurnControlSleep,
     TurnControlComplete,
 }
 
@@ -295,6 +300,7 @@ fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
             MockScenario::FrameSwitchPostCancel,
         ),
         ("turn_control_hold=true", MockScenario::TurnControlHold),
+        ("turn_control_sleep=true", MockScenario::TurnControlSleep),
         (
             "turn_control_complete=true",
             MockScenario::TurnControlComplete,
@@ -339,6 +345,19 @@ Wait for the exact-turn cooperative cancellation gate.
 <lashlang>
 {crash}gate = await tools.cancel_gate({{ workflow_id: "{workflow_id}" }})?
 finish {{ gate: gate, final: "unreachable" }}
+</lashlang>
+"#
+    )
+}
+
+fn turn_control_sleep_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+Enter a long durable timer that must be woken by exact-turn cancellation.
+
+<lashlang>
+sleep for "300s"
+finish {{ workflow_id: "{workflow_id}", final: "unreachable" }}
 </lashlang>
 "#
     )
