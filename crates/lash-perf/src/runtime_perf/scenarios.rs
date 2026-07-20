@@ -85,6 +85,7 @@ pub(crate) enum RuntimePerfScenario {
     TraceJsonlExtended,
     QueuedWorkClaimStress,
     TurnInputIngressInterrupt,
+    DeepTurnComposition,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -114,7 +115,7 @@ macro_rules! runtime_perf_metadata {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const METADATA: [RuntimePerfScenarioMetadata; 35] = [
+    pub(crate) const METADATA: [RuntimePerfScenarioMetadata; 36] = [
         runtime_perf_metadata!(
             Standard,
             "standard",
@@ -372,9 +373,17 @@ impl RuntimePerfScenario {
             "Measures core turn-input ingress, interrupt, reclaim, and completion below protocol and facade ownership.",
             ["runtime_scenario_defers_checkpoint_turn_input_and_respects_cancel"]
         ),
+        runtime_perf_metadata!(
+            DeepTurnComposition,
+            "deep_turn_composition",
+            Rlm,
+            AgentScenario,
+            "Measures the composed parent/child turn future with active ingress, tool and process loops, cancellation observation, and timer/await-event durable waits.",
+            ["agent_scenario_nested_process_start_await"]
+        ),
     ];
-    pub(crate) const KNOWN: [Self; 35] = runtime_perf_known_scenarios();
-    pub(crate) const DEFAULTS: [Self; 35] = Self::KNOWN;
+    pub(crate) const KNOWN: [Self; 36] = runtime_perf_known_scenarios();
+    pub(crate) const DEFAULTS: [Self; 36] = Self::KNOWN;
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::METADATA
@@ -435,7 +444,7 @@ impl RuntimePerfScenario {
     }
 }
 
-const fn runtime_perf_known_scenarios() -> [RuntimePerfScenario; 35] {
+const fn runtime_perf_known_scenarios() -> [RuntimePerfScenario; 36] {
     [
         RuntimePerfScenario::METADATA[0].scenario,
         RuntimePerfScenario::METADATA[1].scenario,
@@ -472,5 +481,6 @@ const fn runtime_perf_known_scenarios() -> [RuntimePerfScenario; 35] {
         RuntimePerfScenario::METADATA[32].scenario,
         RuntimePerfScenario::METADATA[33].scenario,
         RuntimePerfScenario::METADATA[34].scenario,
+        RuntimePerfScenario::METADATA[35].scenario,
     ]
 }

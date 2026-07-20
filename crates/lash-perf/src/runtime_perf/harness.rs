@@ -211,6 +211,53 @@ impl BenchmarkRuntime {
             .map_err(anyhow::Error::from)
     }
 
+    pub(crate) async fn run_turn_with_id(
+        &self,
+        input: lash::TurnInput,
+        turn_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<lash::TurnResult> {
+        let session = self.session.as_ref().expect("benchmark session");
+        let effect_host = session.effect_host();
+        let scoped_effect_controller = effect_host
+            .scoped(lash::runtime::ExecutionScope::turn(
+                session.session_id(),
+                turn_id,
+            ))
+            .map_err(anyhow::Error::from)?;
+        session
+            .turn(input)
+            .turn_id(turn_id)
+            .cancel(cancel)
+            .advanced()
+            .collect_session_events_with_scope(
+                &lash::runtime::NoopEventSink,
+                scoped_effect_controller,
+            )
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    pub(crate) async fn enqueue_active_turn_input(
+        &self,
+        turn_id: &str,
+        input: lash::TurnInput,
+        source_id: &str,
+    ) -> anyhow::Result<lash_core::PendingTurnInput> {
+        self.session
+            .as_ref()
+            .expect("benchmark session")
+            .enqueue(input)
+            .id(source_id)
+            .ingress(lash_core::TurnInputIngress::active_turn(
+                turn_id,
+                lash_core::TurnInputCheckpointBoundary::AfterWork,
+            ))
+            .send()
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
     pub(crate) async fn run_turn_with_execution_scope(
         &self,
         input: lash::TurnInput,
@@ -521,7 +568,9 @@ pub(crate) async fn build_runtime_with_store(
     }
     if matches!(
         scenario,
-        RuntimePerfScenario::RlmSubagentSpawn | RuntimePerfScenario::RlmObliqueStackMix
+        RuntimePerfScenario::RlmSubagentSpawn
+            | RuntimePerfScenario::RlmObliqueStackMix
+            | RuntimePerfScenario::DeepTurnComposition
     ) {
         plugin_stack.push(Arc::new(lash_subagents::SubagentsPluginFactory::new(
             Arc::new(lash_subagents::CapabilityRegistry::new().with(Arc::new(
@@ -544,7 +593,10 @@ pub(crate) async fn build_runtime_with_store(
             PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolCatalog::default())),
         )));
     }
-    if matches!(scenario, RuntimePerfScenario::RlmTriggerMailPipeline) {
+    if matches!(
+        scenario,
+        RuntimePerfScenario::RlmTriggerMailPipeline | RuntimePerfScenario::DeepTurnComposition
+    ) {
         plugin_stack.push(Arc::new(BenchmarkWorkbenchTriggerPluginFactory));
     }
     let core = match execution_mode {
@@ -1139,6 +1191,10 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::TurnInputIngressInterrupt => format!(
             "Turn {} in turn-input ingress interrupt benchmark mode. Claim, defer, reclaim, complete, and verify pending turn input.",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::DeepTurnComposition => format!(
+            "Turn {} in the deep-composition stack benchmark. Run the parent process/tool loop and child session, then incorporate the injected active-turn input.",
             turn_index + 1
         ),
     }

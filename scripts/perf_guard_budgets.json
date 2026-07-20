@@ -1,4 +1,11 @@
 {
+  "runtime_stack": {
+    "deep_turn_composition": {
+      "budget_bytes": 2293760,
+      "headroom_percent": 25,
+      "measured_minimum_passing_bytes": 1835008
+    }
+  },
   "lashlang": {
     "perf": {
       "default": {

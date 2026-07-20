@@ -300,12 +300,16 @@ def summarize_profile_guard(report: dict[str, Any]) -> str:
     first_success = stack.get("first_success_stack_bytes", {})
     if first_success:
         lines.append("## runtime stack")
-        budget = stack.get("stack_budget_bytes")
-        if isinstance(budget, int | float):
-            lines.append(f"  budget={fmt_bytes(budget)}")
+        budgets = stack.get("stack_budgets", {})
         for scenario, stack_bytes in sorted(first_success.items()):
             label = fmt_bytes(stack_bytes) if isinstance(stack_bytes, int | float) else "n/a"
-            lines.append(f"  {scenario:28s} first_success={label}")
+            budget = budgets.get(scenario) if isinstance(budgets, dict) else None
+            budget_text = (
+                f"  budget={fmt_bytes(budget)}"
+                if isinstance(budget, int | float)
+                else ""
+            )
+            lines.append(f"  {scenario:28s} first_success={label}{budget_text}")
         unaccounted = [
             sample
             for sample in stack.get("samples", [])

@@ -1217,9 +1217,19 @@ fn benchmark_stream_profile_for_request(
 ) -> BenchmarkStreamProfile {
     if matches!(
         scenario,
-        RuntimePerfScenario::RlmSubagentSpawn | RuntimePerfScenario::RlmObliqueStackMix
+        RuntimePerfScenario::RlmSubagentSpawn
+            | RuntimePerfScenario::RlmObliqueStackMix
+            | RuntimePerfScenario::DeepTurnComposition
     ) && request_text(request).contains("Subagent capability: default. Depth: 1/5.")
     {
+        if matches!(scenario, RuntimePerfScenario::DeepTurnComposition) {
+            return text_profile(lashlang_block(
+                r#"
+sleep for "0ms"
+result = await tools.benchmark_async({ value: len(chunk), delay_ms: 0 })?
+finish { len: result.value }"#,
+            ));
+        }
         return text_profile(lashlang_block("finish { len: len(chunk) }"));
     }
 
@@ -1661,6 +1671,30 @@ print {
 }
 
 finish "runtime perf benchmark ok""#,
+            );
+            text_profile(text)
+        }
+        RuntimePerfScenario::DeepTurnComposition => {
+            if request_text(request).contains("deep composition ingress marker") {
+                return text_profile(lashlang_block(r#"finish "runtime perf benchmark ok""#));
+            }
+            let text = lashlang_block(
+                r#"
+process deep_child(agents: Agents, tool: Tools) {
+  pending = await tool.benchmark_async({ value: "parent tool loop", delay_ms: 0 })?
+  sleep for "0ms"
+  child = await agents.spawn({
+    capability: "default",
+    task: "Use the seeded chunk and return its length after the durable waits.",
+    seed: { chunk: ["parent", "child", "tool", "wait"] },
+    output: Type { len: int }
+  })?
+  finish { pending: pending.value, child: child.len }
+}
+
+handle = start deep_child(agents: agents, tool: tools)
+result = (await handle)?
+print result"#,
             );
             text_profile(text)
         }

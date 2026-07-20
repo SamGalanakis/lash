@@ -168,7 +168,8 @@ pub(crate) async fn run_once(
         | RuntimePerfScenario::ToolDiscoverySearch
         | RuntimePerfScenario::ScopedEffectController
         | RuntimePerfScenario::StoreReopen
-        | RuntimePerfScenario::SqliteStoreReopen => {}
+        | RuntimePerfScenario::SqliteStoreReopen
+        | RuntimePerfScenario::DeepTurnComposition => {}
     }
 
     let total_started = Instant::now();
@@ -297,6 +298,18 @@ pub(crate) async fn run_once(
         }
         prepare_turn(&mut runtime, scenario, turn_index).await?;
 
+        let deep_turn_id = matches!(scenario, RuntimePerfScenario::DeepTurnComposition)
+            .then(|| format!("runtime-perf-deep-turn-{}", turn_index + 1));
+        if let Some(turn_id) = deep_turn_id.as_deref() {
+            runtime
+                .enqueue_active_turn_input(
+                    turn_id,
+                    TurnInput::text("deep composition ingress marker"),
+                    &format!("deep-composition-ingress-{}", turn_index + 1),
+                )
+                .await?;
+        }
+
         let phase_probe = Arc::new(RuntimePerfPhaseProbe::default());
         runtime.set_turn_phase_probe(phase_probe.clone()).await;
 
@@ -336,6 +349,15 @@ pub(crate) async fn run_once(
                 "run_turn",
                 Some(cancel.clone()),
                 runtime.run_turn_with_execution_scope(turn_input, cancel, scoped_effect_controller),
+            )
+            .await
+        } else if let Some(turn_id) = deep_turn_id.as_deref() {
+            runtime_perf_timed(
+                scenario,
+                turn_index,
+                "run_turn",
+                Some(cancel.clone()),
+                runtime.run_turn_with_id(turn_input, turn_id, cancel),
             )
             .await
         } else {

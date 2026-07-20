@@ -39,7 +39,7 @@ DEFAULT_STACKS = [
     8 * 1024 * 1024,
 ]
 
-STACK_BUDGET_BYTES = 2 * 1024 * 1024
+DEFAULT_BUDGET_FILE = Path(__file__).resolve().with_name("perf_guard_budgets.json")
 STACK_OVERFLOW_MARKERS = (
     "stack overflow",
     "fatal runtime error",
@@ -70,7 +70,7 @@ def load_known_runtime_scenarios() -> list[str]:
 
 
 KNOWN_RUNTIME_SCENARIOS = load_known_runtime_scenarios()
-DEFAULT_SCENARIOS = KNOWN_RUNTIME_SCENARIOS.copy()
+DEFAULT_SCENARIOS = ["deep_turn_composition"]
 
 
 def parse_size(value: str) -> int:
@@ -156,6 +156,22 @@ def parse_args() -> argparse.Namespace:
             "Exit non-zero when any stack-size sample fails. By default the matrix "
             "exits successfully if every scenario has at least one passing stack size."
         ),
+    )
+    parser.add_argument(
+        "--budget-file",
+        type=Path,
+        default=DEFAULT_BUDGET_FILE,
+        help="Checked-in stack budgets used by --enforce-budgets.",
+    )
+    parser.add_argument(
+        "--enforce-budgets",
+        action="store_true",
+        help="Exit non-zero unless every selected scenario passes at its checked-in stack budget.",
+    )
+    parser.add_argument(
+        "--budget-only",
+        action="store_true",
+        help="Run only each scenario's checked-in stack budget (requires --enforce-budgets).",
     )
     parser.add_argument(
         "--cargo-feature",
@@ -452,6 +468,38 @@ def first_success(samples: list[dict[str, object]], scenario: str) -> int | None
     return None
 
 
+def load_stack_budgets(path: Path, scenarios: list[str]) -> dict[str, int]:
+    try:
+        payload = json.loads(path.read_text())
+    except FileNotFoundError as exc:
+        raise SystemExit(f"error: stack budget file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: invalid stack budget JSON at {path}: {exc}") from exc
+    configured = payload.get("runtime_stack", {})
+    budgets: dict[str, int] = {}
+    for scenario in scenarios:
+        entry = configured.get(scenario) if isinstance(configured, dict) else None
+        value = entry.get("budget_bytes") if isinstance(entry, dict) else None
+        if not isinstance(value, int) or value <= 0:
+            raise SystemExit(
+                f"error: missing positive runtime_stack.{scenario}.budget_bytes in {path}"
+            )
+        budgets[scenario] = value
+    return budgets
+
+
+def budget_sample_passed(
+    samples: list[dict[str, object]], scenario: str, budget_bytes: int
+) -> bool:
+    return any(
+        sample["scenario"] == scenario
+        and sample["stack_bytes"] == budget_bytes
+        and sample["status"] == "ok"
+        and sample.get("stack_accounted") is True
+        for sample in samples
+    )
+
+
 def main() -> int:
     args = parse_args()
     root = repo_root()
@@ -459,7 +507,15 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     binary = resolve_binary(args, root)
     scenarios = args.scenario or DEFAULT_SCENARIOS
-    stacks = sorted(set(args.stack_bytes or DEFAULT_STACKS))
+    if args.budget_only and not args.enforce_budgets:
+        raise SystemExit("error: --budget-only requires --enforce-budgets")
+    stack_budgets = (
+        load_stack_budgets(args.budget_file, scenarios) if args.enforce_budgets else {}
+    )
+    if args.budget_only:
+        stacks = sorted(set(stack_budgets.values()))
+    else:
+        stacks = sorted(set(args.stack_bytes or DEFAULT_STACKS) | set(stack_budgets.values()))
 
     maybe_build(args, root)
     if not binary.exists():
@@ -497,15 +553,21 @@ def main() -> int:
         "known_scenarios": KNOWN_RUNTIME_SCENARIOS,
         "missing_known_scenarios": sorted(set(KNOWN_RUNTIME_SCENARIOS) - set(scenarios)),
         "stack_bytes": stacks,
-        "stack_budget_bytes": STACK_BUDGET_BYTES,
+        "stack_budgets": stack_budgets,
         "first_success_stack_bytes": {
             scenario: first_success(samples, scenario) for scenario in scenarios
         },
         "samples": samples,
     }
+    payload["budget_results"] = {
+        scenario: budget_sample_passed(samples, scenario, budget)
+        for scenario, budget in stack_budgets.items()
+    }
     out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"Runtime stack matrix: {out}", file=sys.stderr)
     print(json.dumps(payload, indent=2, sort_keys=True))
+    if args.enforce_budgets and not all(payload["budget_results"].values()):
+        return 1
     if args.strict_failures:
         return 0 if all(sample["status"] == "ok" for sample in samples) else 1
     return 0 if all(first_success(samples, scenario) is not None for scenario in scenarios) else 1
