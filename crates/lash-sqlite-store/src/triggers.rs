@@ -6,6 +6,15 @@
 
 use super::*;
 
+#[cfg(test)]
+static RESERVATION_STATEMENT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn record_reservation_statement() {
+    RESERVATION_STATEMENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub struct SqliteTriggerStore {
     conn: SqliteConnection,
     clock: Arc<dyn lash_core::Clock>,
@@ -641,6 +650,8 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                     insert.push_str(
                         " ON CONFLICT DO NOTHING RETURNING subscription_id, created_at_ms",
                     );
+                    #[cfg(test)]
+                    record_reservation_statement();
                     let mut stmt = tx.prepare(&insert).map_err(process_sqlite_error)?;
                     let inserted_rows = stmt
                         .query_map(rusqlite::params_from_iter(insert_values.iter()), |row| {
@@ -678,6 +689,8 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                             select_values.push(subscription.subscription_id.clone().into());
                         }
                         select.push(')');
+                        #[cfg(test)]
+                        record_reservation_statement();
                         let mut stmt = tx.prepare(&select).map_err(process_sqlite_error)?;
                         let rows = stmt
                             .query_map(rusqlite::params_from_iter(select_values.iter()), |row| {
@@ -758,4 +771,88 @@ fn escape_sqlite_like(value: &str) -> String {
         escaped.push(ch);
     }
     escaped
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use lash_core::TriggerStore;
+
+    fn subscription_draft(
+        session_id: &str,
+        source_key: &str,
+        index: usize,
+    ) -> lash_core::TriggerSubscriptionDraft {
+        let scope = lash_core::SessionScope::new(session_id);
+        lash_core::TriggerSubscriptionDraft {
+            registrant: lash_core::ProcessOriginator::session(scope.clone()),
+            env_ref: lash_core::ProcessExecutionEnvRef::new(format!("env:{index}")),
+            wake_target: Some(scope),
+            name: Some(format!("subscription-{index}")),
+            source_type: "perf.trigger".to_string(),
+            source_key: source_key.to_string(),
+            source: serde_json::json!({}),
+            payload_schema: lash_core::LashSchema::new(serde_json::json!({ "type": "object" })),
+            target: lash_core::ProcessInput::Engine {
+                kind: "test".to_string(),
+                payload: serde_json::json!({ "index": index }),
+            },
+            target_identity: lash_core::ProcessIdentity::new("test"),
+            event_types: Vec::new(),
+            input_template: BTreeMap::new(),
+            target_label: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reservation_statement_budget_is_constant_across_fanout() {
+        for subscription_count in [1, 8, 64] {
+            let store = SqliteTriggerStore::memory().await.expect("trigger store");
+            let source_key =
+                lash_core::empty_trigger_source_key("perf.trigger").expect("source key");
+            for index in 0..subscription_count {
+                store
+                    .register_subscription(subscription_draft(
+                        &format!("session-{index}"),
+                        &source_key,
+                        index,
+                    ))
+                    .await
+                    .expect("register subscription");
+            }
+            let occurrence = store
+                .record_occurrence(lash_core::TriggerOccurrenceRequest::new(
+                    "perf.trigger",
+                    &source_key,
+                    serde_json::json!({ "fanout": subscription_count }),
+                    format!("fanout-{subscription_count}"),
+                ))
+                .await
+                .expect("record occurrence");
+
+            RESERVATION_STATEMENT_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+            let fresh = store
+                .reserve_matching_deliveries(&occurrence.occurrence_id)
+                .await
+                .expect("fresh reservation");
+            let fresh_statements =
+                RESERVATION_STATEMENT_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(fresh.len(), subscription_count);
+            assert_eq!(fresh_statements, 1);
+
+            RESERVATION_STATEMENT_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+            let replay = store
+                .reserve_matching_deliveries(&occurrence.occurrence_id)
+                .await
+                .expect("replayed reservation");
+            let replay_statements =
+                RESERVATION_STATEMENT_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(replay.len(), subscription_count);
+            assert_eq!(replay_statements, 2);
+            eprintln!(
+                "trigger fanout N={subscription_count}: old={} statements, fresh={fresh_statements}, replay={replay_statements}",
+                subscription_count * 2,
+            );
+        }
+    }
 }
