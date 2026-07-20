@@ -95,8 +95,8 @@ use restate_sdk::context::{
     SharedWorkflowContext, WorkflowContext,
 };
 use restate_sdk::context::{
-    ContextClient, ContextPromises, ContextReadState, ContextWriteState, InvocationHandle,
-    RequestTarget,
+    ContextAwakeables, ContextClient, ContextPromises, ContextReadState, ContextWriteState,
+    InvocationHandle, RequestTarget,
 };
 use restate_sdk::errors::{HandlerError, HandlerResult, TerminalError};
 use restate_sdk::serde::Json;
@@ -323,6 +323,12 @@ pub struct RestateDurableWaitIndexRequest {
     pub address: RestateDurableWaitAddress,
 }
 
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct RestateDurableWaitAwakeableRequest {
+    pub address: RestateDurableWaitAddress,
+    pub awakeable_id: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum RestateDurableWaitRegistration {
     Registered,
@@ -333,6 +339,8 @@ pub enum RestateDurableWaitRegistration {
 struct RestateDurableWaitIndexState {
     revoked: bool,
     waits: Vec<RestateDurableWaitAddress>,
+    #[serde(default)]
+    awakeables: Vec<RestateDurableWaitAwakeableRequest>,
 }
 
 fn restate_process_terminal_await_key(process_id: &str) -> Result<AwaitEventKey, RuntimeError> {
@@ -2453,6 +2461,12 @@ pub trait LashDurableWaitIndex {
         request: Json<RestateDurableWaitIndexRequest>,
     ) -> HandlerResult<Json<RestateDurableWaitRegistration>>;
     async fn settle(request: Json<RestateDurableWaitIndexRequest>) -> HandlerResult<Json<()>>;
+    async fn register_awakeable(
+        request: Json<RestateDurableWaitAwakeableRequest>,
+    ) -> HandlerResult<Json<RestateDurableWaitRegistration>>;
+    async fn unregister_awakeable(
+        request: Json<RestateDurableWaitAwakeableRequest>,
+    ) -> HandlerResult<Json<()>>;
     async fn resolve(
         request: Json<RestateDurableWaitResolveRequest>,
     ) -> HandlerResult<Json<ResolveOutcome>>;
@@ -2537,12 +2551,59 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         Ok(Json(()))
     }
 
+    async fn register_awakeable(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(request): Json<RestateDurableWaitAwakeableRequest>,
+    ) -> HandlerResult<Json<RestateDurableWaitRegistration>> {
+        let mut state = load_durable_wait_index(&ctx).await?;
+        if state.revoked {
+            return Ok(Json(RestateDurableWaitRegistration::Revoked));
+        }
+        let peek: restate_sdk::context::Request<'_, (), Json<Option<Resolution>>> =
+            ContextClient::request(
+                &ctx,
+                RequestTarget::workflow(
+                    "LashDurableWaitWorkflow",
+                    request.address.workflow_key.clone(),
+                    "peek",
+                ),
+                (),
+            );
+        let Json(resolution) = peek.call().await?;
+        if let Some(resolution) = resolution {
+            ctx.resolve_awakeable(&request.awakeable_id, Json(resolution));
+        } else if !state
+            .awakeables
+            .iter()
+            .any(|entry| entry.awakeable_id == request.awakeable_id)
+        {
+            state.awakeables.push(request);
+            ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        }
+        Ok(Json(RestateDurableWaitRegistration::Registered))
+    }
+
+    async fn unregister_awakeable(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(request): Json<RestateDurableWaitAwakeableRequest>,
+    ) -> HandlerResult<Json<()>> {
+        let mut state = load_durable_wait_index(&ctx).await?;
+        state
+            .awakeables
+            .retain(|entry| entry.awakeable_id != request.awakeable_id);
+        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        Ok(Json(()))
+    }
+
     async fn resolve(
         &self,
         ctx: ObjectContext<'_>,
         Json(request): Json<RestateDurableWaitResolveRequest>,
     ) -> HandlerResult<Json<ResolveOutcome>> {
-        if load_durable_wait_index(&ctx).await?.revoked {
+        let mut state = load_durable_wait_index(&ctx).await?;
+        if state.revoked {
             return Ok(Json(ResolveOutcome::UnknownOrRevoked));
         }
         let workflow_key = request.address.workflow_key.clone();
@@ -2563,6 +2624,7 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
             }),
         );
         let _ = start.send().invocation_id().await?;
+        let resolution = request.resolution.clone();
         let resolve: restate_sdk::context::Request<
             '_,
             Json<RestateDurableWaitResolveRequest>,
@@ -2570,9 +2632,25 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         > = ContextClient::request(
             &ctx,
             RequestTarget::workflow("LashDurableWaitWorkflow", workflow_key, "resolve"),
-            Json(request),
+            Json(request.clone()),
         );
-        Ok(resolve.call().await?)
+        let Json(outcome) = resolve.call().await?;
+        let terminal = match &outcome {
+            ResolveOutcome::AlreadyResolved { terminal } => terminal.clone(),
+            ResolveOutcome::Accepted => resolution,
+            ResolveOutcome::UnknownOrRevoked => return Ok(Json(outcome)),
+        };
+        let mut retained = Vec::with_capacity(state.awakeables.len());
+        for entry in std::mem::take(&mut state.awakeables) {
+            if entry.address == request.address {
+                ctx.resolve_awakeable(&entry.awakeable_id, Json(terminal.clone()));
+            } else {
+                retained.push(entry);
+            }
+        }
+        state.awakeables = retained;
+        ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        Ok(Json(outcome))
     }
 
     async fn cancel_all(&self, ctx: ObjectContext<'_>) -> HandlerResult<Json<()>> {
@@ -2970,25 +3048,59 @@ macro_rules! impl_restate_controller_context {
                             };
                         };
 
-                        let workflow_key = turn_cancel.address.workflow_key.clone();
-                        let request: restate_sdk::context::Request<
+                        let Some(session_id) = turn_cancel.address.session_id.clone() else {
+                            return Err(TerminalError::new(
+                                "turn cancellation gate is missing its session id",
+                            ));
+                        };
+                        let (awakeable_id, awakeable) = self.awakeable::<Json<Resolution>>();
+                        let registration_request = RestateDurableWaitAwakeableRequest {
+                            address: turn_cancel.address,
+                            awakeable_id,
+                        };
+                        let register: restate_sdk::context::Request<
                             '_,
-                            Json<RestateTurnSleepWaitRequest>,
-                            Json<RestateSleepRaceOutcome>,
+                            Json<RestateDurableWaitAwakeableRequest>,
+                            Json<RestateDurableWaitRegistration>,
                         > = ContextClient::request(
                             self,
-                            RequestTarget::workflow(
-                                "LashDurableWaitWorkflow",
-                                workflow_key,
-                                "sleep_or_turn_cancel",
+                            RequestTarget::object(
+                                "LashDurableWaitIndex",
+                                session_id.clone(),
+                                "register_awakeable",
                             ),
-                            Json(RestateTurnSleepWaitRequest {
-                                duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
-                            }),
+                            Json(registration_request.clone()),
                         );
-                        let call = guard_restate_context_future(request.call());
-                        let Json(outcome) = call.await?;
-                        Ok(outcome)
+                        let Json(registration) = register.call().await?;
+                        if registration == RestateDurableWaitRegistration::Revoked {
+                            return Ok(RestateSleepRaceOutcome::Cancelled);
+                        }
+
+                        let timer = restate_sdk::context::ContextTimers::sleep(self, duration);
+                        restate_sdk::select! {
+                            result = timer => {
+                                result?;
+                                let unregister: restate_sdk::context::Request<
+                                    '_,
+                                    Json<RestateDurableWaitAwakeableRequest>,
+                                    Json<()>,
+                                > = ContextClient::request(
+                                    self,
+                                    RequestTarget::object(
+                                        "LashDurableWaitIndex",
+                                        session_id,
+                                        "unregister_awakeable",
+                                    ),
+                                    Json(registration_request),
+                                );
+                                let Json(()) = unregister.call().await?;
+                                Ok(RestateSleepRaceOutcome::Slept)
+                            },
+                            result = awakeable => {
+                                let _ = result?;
+                                Ok(RestateSleepRaceOutcome::Cancelled)
+                            }
+                        }
                     })
                 }
 
