@@ -21,6 +21,18 @@ committed Session Read View. The reset targets only prose and reasoning because 
 in-flight append-only text surfaces; tool activity retains its existing structured collection and
 deduplication semantics.
 
+`AttemptReset` is also an assistant-stream lifecycle boundary. The runtime notifies stream
+plugins before it accepts retry output, so protocol segmenters discard partial delimiters and
+captured cell bodies from the abandoned attempt along with the runtime accumulator. Otherwise a
+plugin can reconstruct a contaminated final response even when the runtime's text accumulator is
+clean.
+
+RLM keeps per-iteration assistant reasoning and prose as protocol-owned `RlmAssistantContent`
+events paired with trajectory entries, not as conversation messages. The RLM history projector
+still folds that content into later provider requests, while the host commits the final product
+transcript exactly once. This separation prevents protocol bookkeeping and the host transcript
+from becoming duplicate durable chat messages, including after reload.
+
 The remote observation mirror adds `model_attempt_reset` with string correlation-id lists and
 bumps `REMOTE_PROTOCOL_VERSION` from 11 to 12. Remote protocol validation requires an exact
 version match, so older hosts are rejected at negotiation instead of being asked to deserialize
