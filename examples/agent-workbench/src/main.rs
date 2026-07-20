@@ -49,6 +49,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 const SESSION_ID_PREFIX: &str = "workbench";
 const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 200_000;
+const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 pub(crate) const BUTTON_TRIGGER_RESOURCE: &str = "Button";
 pub(crate) const BUTTON_TRIGGER_ALIAS: &str = "ui.button";
 pub(crate) const BUTTON_TRIGGER_EVENT: &str = "pressed";
