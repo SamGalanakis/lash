@@ -175,19 +175,20 @@ async fn run_attachment_usage_gate(
     assert_eq!(output.final_value(), Some(&json!("attachment accounted")));
     session.close().await.expect("close gate session");
 
-    let requests = provider_requests.lock().expect("provider request lock");
-    assert_eq!(requests.len(), 1, "gate must make exactly one LLM call");
-    assert_eq!(requests[0].attachments.len(), 1);
-    assert_eq!(requests[0].attachments[0].mime, "image/png");
-    assert_eq!(requests[0].attachments[0].data, png_bytes);
-    assert_eq!(
-        requests[0].attachments[0]
-            .reference
-            .as_ref()
-            .map(|reference| &reference.id),
-        Some(&uploaded.attachment.id)
-    );
-    drop(requests);
+    {
+        let requests = provider_requests.lock().expect("provider request lock");
+        assert_eq!(requests.len(), 1, "gate must make exactly one LLM call");
+        assert_eq!(requests[0].attachments.len(), 1);
+        assert_eq!(requests[0].attachments[0].mime, "image/png");
+        assert_eq!(requests[0].attachments[0].data, png_bytes);
+        assert_eq!(
+            requests[0].attachments[0]
+                .reference
+                .as_ref()
+                .map(|reference| &reference.id),
+            Some(&uploaded.attachment.id)
+        );
+    }
 
     let Json(before_restart) = app_state(State(state.clone()))
         .await
