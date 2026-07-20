@@ -17,8 +17,8 @@ on surrounding model prose.
 ## Scenario-specific golden rules
 
 1. **Both processes must be running first.** Do not delete the session until `/api/work`
-   and the rendered rail show distinct `FIG425 survivor <run-id>` and
-   `FIG425 cancellable <run-id>` process cards with non-terminal status.
+   and the rendered rail show distinct `FIG425_survivor_<runid>` and
+   `FIG425_cancellable_<runid>` process cards with non-terminal status.
 2. **Delete the owner, not the runtime.** Use the workbench reset affordance (the API
    operation is `DELETE /api/session`; legacy `POST /api/reset` drives the same path).
    Never stop Restate, the process worker, or the web process during this scenario.
@@ -35,7 +35,11 @@ on surrounding model prose.
 
 - Boot with a fresh durable directory:
   `AGENT_WORKBENCH_DATA_DIR=<fresh-tmp> AGENT_WORKBENCH_OPEN=0 just agent-workbench <port>`.
-  Gate `GET /healthz` → 200. Teardown: `just agent-workbench-down <port>`.
+  Gate `GET /healthz` → 200. The entire Restate stack is port-isolated by default: the
+  helper derives its endpoint, ingress, admin port, node port, and container name from
+  `<port>`, so concurrent runs on distinct workbench ports do not need manual Restate
+  overrides. Teardown:
+  `just agent-workbench-down <port>`.
 - Browser affordances: chat composer, work rail, per-process **cancel**, reset/new-session
   control, rendered session id.
 - Backend truth: `GET /api/state`, `GET /api/work`, `POST
@@ -56,12 +60,28 @@ session id. Screenshot `00-ready.png`.
 ## Phase 1 — Start two durable Runtime Processes
 
 Ask the agent to define and start two explicitly named Lashlang Runtime Processes in one
-turn:
+turn. Process names are Lashlang identifiers, so use underscores; the work rail renders
+the definition name verbatim:
 
-- `FIG425 survivor <run-id>` waits roughly 30 seconds, then finishes successfully with a
-  literal terminal marker;
-- `FIG425 cancellable <run-id>` waits several minutes, then finishes with a marker that
-  must never be reached.
+- `FIG425_survivor_<runid>` waits roughly 4 minutes, then finishes successfully with a
+  literal terminal marker. The longer wait leaves enough time for browser-paced evidence
+  collection and owner deletion before it completes;
+- `FIG425_cancellable_<runid>` waits several minutes by looping over 2-second sleeps,
+  then finishes with a marker that must never be reached. Do not use one multi-minute
+  sleep: Restate-suspended sleep observes cooperative cancellation only when the workflow
+  is re-invoked. Re-invocation after each short sleep therefore settles cancellation in
+  roughly 2 seconds instead of waiting minutes for one suspension to end.
+
+Use this wait shape inside the cancellable definition (with its forbidden marker after
+the loop):
+
+```lashlang
+elapsed_seconds = 0
+while elapsed_seconds < 240 {
+  sleep for "2s"
+  elapsed_seconds = elapsed_seconds + 2
+}
+```
 
 Poll `/api/work` until both named rows are non-terminal, capture their full process ids,
 and require matching running cards in the rendered work rail. Verify `processes.db`
@@ -86,7 +106,7 @@ trace, and database extracts as `02-after-delete-*.json`.
 
 ## Phase 3 — Cancel one orphan through the work rail
 
-Press **cancel** on `FIG425 cancellable <run-id>` and capture the response as
+Press **cancel** on `FIG425_cancellable_<runid>` and capture the response as
 `03-cancel-receipt.json`; require `accepted: true` and the exact process id. Poll
 `/api/work` until that card is terminal/cancelled and its event tail includes
 `process.cancel_requested`. Require the same ordered evidence in `process_events` and
@@ -95,7 +115,7 @@ require that the forbidden finish marker is absent. Screenshot
 
 ## Phase 4 — Let the survivor complete
 
-Without opening or recreating the deleted session, poll until `FIG425 survivor <run-id>`
+Without opening or recreating the deleted session, poll until `FIG425_survivor_<runid>`
 is terminal/completed in `/api/work` and in the rendered rail. Require its terminal
 success event and literal finish marker in `processes.db`; re-query after one more work
 refresh to prove the terminal is retained rather than transient. Screenshot

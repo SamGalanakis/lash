@@ -2174,6 +2174,17 @@ async fn run_turn_effect_loop(
     events: &dyn EventSink,
     turn_events: &dyn TurnActivitySink,
 ) -> Result<(crate::MessageSequence, usize), RuntimeError> {
+    let start_gate_controller = shared_cancel_controller
+        .as_deref()
+        .unwrap_or(cancel_controller);
+    if await_turn_cancellation_with_retry(|| {
+        turn_control.observe_pending_cancel(start_gate_controller)
+    })
+    .await
+    .is_some()
+    {
+        cancellation.cancel();
+    }
     let cancel_watcher = shared_cancel_controller.map(|controller| {
         let turn_control = Arc::clone(&turn_control);
         let cancellation = cancellation.clone();

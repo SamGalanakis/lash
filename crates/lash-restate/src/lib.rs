@@ -1152,6 +1152,13 @@ impl AwaitEventResolver for RestateEffectHost {
         self.controller.resolve_await_event(key, resolution).await
     }
 
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.controller.peek_await_event(key).await
+    }
+
     async fn await_await_event(
         &self,
         key: &AwaitEventKey,
@@ -1286,6 +1293,25 @@ impl AwaitEventResolver for RestateEffectHostController {
             }
             None => Ok(ResolveOutcome::UnknownOrRevoked),
         }
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        let Some(ingress) = &self.await_event_ingress else {
+            return Err(restate_await_event_ingress_required());
+        };
+        let workflow_key = RestateDurableWaitAddress::for_key(key).workflow_key;
+        ingress
+            .ingress
+            .call_workflow_empty::<Option<Resolution>>(
+                "LashDurableWaitWorkflow",
+                &workflow_key,
+                "peek",
+            )
+            .await
+            .map_err(|err| RuntimeError::new("restate_await_event_peek", err.to_string()))
     }
 
     async fn await_await_event(
@@ -2150,6 +2176,9 @@ pub trait LashDurableWaitWorkflow {
     async fn observe() -> HandlerResult<Json<Resolution>>;
 
     #[shared]
+    async fn peek() -> HandlerResult<Json<Option<Resolution>>>;
+
+    #[shared]
     async fn resolve(
         request: Json<RestateDurableWaitResolveRequest>,
     ) -> HandlerResult<Json<ResolveOutcome>>;
@@ -2236,6 +2265,19 @@ impl LashDurableWaitWorkflow for LashDurableWaitWorkflowImpl {
     async fn observe(&self, ctx: SharedWorkflowContext<'_>) -> HandlerResult<Json<Resolution>> {
         let payload = ctx.promise::<String>(DURABLE_WAIT_PROMISE_KEY).await?;
         let resolution = serde_json::from_str(&payload).map_err(TerminalError::from_error)?;
+        Ok(Json(resolution))
+    }
+
+    async fn peek(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+    ) -> HandlerResult<Json<Option<Resolution>>> {
+        let resolution = match ctx.peek_promise::<String>(DURABLE_WAIT_PROMISE_KEY).await? {
+            Some(payload) => {
+                Some(serde_json::from_str(&payload).map_err(TerminalError::from_error)?)
+            }
+            None => None,
+        };
         Ok(Json(resolution))
     }
 
@@ -2623,6 +2665,16 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
     where
         'ctx: 'run;
 
+    fn peek_event<'run>(
+        &'run self,
+        _address: RestateDurableWaitAddress,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Resolution>, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Ok(None) })
+    }
+
     fn await_process_terminal<'run>(
         &'run self,
         process_id: String,
@@ -2820,6 +2872,32 @@ macro_rules! impl_restate_controller_context {
                                 })
                             }
                         }
+                    })
+                }
+
+                fn peek_event<'run>(
+                    &'run self,
+                    address: RestateDurableWaitAddress,
+                ) -> Pin<Box<dyn Future<Output = Result<Option<Resolution>, TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    let request: restate_sdk::context::Request<
+                        '_,
+                        (),
+                        Json<Option<Resolution>>,
+                    > = ContextClient::request(
+                        self,
+                        RequestTarget::workflow(
+                            "LashDurableWaitWorkflow",
+                            address.workflow_key,
+                            "peek",
+                        ),
+                        (),
+                    );
+                    Box::pin(async move {
+                        let Json(resolution) = request.call().await?;
+                        Ok(resolution)
                     })
                 }
 
@@ -3045,6 +3123,16 @@ where
         resolution: Resolution,
     ) -> Result<ResolveOutcome, RuntimeError> {
         resolve_restate_await_event(&self.context, key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.context
+            .peek_event(RestateDurableWaitAddress::for_key(key))
+            .await
+            .map_err(|err| RuntimeError::new("restate_effect_controller", err.to_string()))
     }
 
     async fn await_await_event(

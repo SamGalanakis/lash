@@ -379,6 +379,12 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
 
     let captured = requests.lock().expect("provider request lock").clone();
     assert_eq!(captured.len(), 3, "unexpected provider request sequence");
+    assert!(!captured[0].contains("active injection marker"));
+    assert_eq!(
+        captured[1].matches("active injection marker").count(),
+        1,
+        "active-turn input must reach the next provider iteration exactly once"
+    );
     let completed_in_running_turn = std::fs::read_to_string(&harness.trace_path)
         .expect("read turn ingress trace")
         .lines()

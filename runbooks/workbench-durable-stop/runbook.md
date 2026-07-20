@@ -42,7 +42,11 @@ quality. This runbook is authored for a deliberate token-spending browser run.
 
 - Boot with a fresh durable directory:
   `AGENT_WORKBENCH_DATA_DIR=<fresh-tmp> AGENT_WORKBENCH_OPEN=0 just agent-workbench <port>`.
-  Gate `GET /healthz` → 200. Teardown: `just agent-workbench-down <port>`.
+  Gate `GET /healthz` → 200. The entire Restate stack is port-isolated by default: the
+  helper derives its endpoint, ingress, admin port, node port, and container name from
+  `<port>`, so concurrent runs on distinct workbench ports do not need manual Restate
+  overrides. Teardown:
+  `just agent-workbench-down <port>`.
 - Browser affordances: chat composer, **stop turn** button, running/idle pill, transcript.
 - Backend truth: `GET /api/state`; `POST /api/turn`; `POST /api/turn/cancel`.
   `/api/state.active_turns` exposes routing addresses so reload can restore the Stop

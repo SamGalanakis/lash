@@ -1537,6 +1537,97 @@ async fn accepted_active_steer_interrupt_is_not_requeued() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn rlm_active_input_reaches_the_next_provider_iteration() -> Result<()> {
+    run_async_test_on_stack_budget("rlm-active-input-next-iteration", || async {
+        let (first_started_tx, first_started_rx) = oneshot::channel::<()>();
+        let (release_first_tx, release_first_rx) = oneshot::channel::<()>();
+        let first_started_tx = Arc::new(StdMutex::new(Some(first_started_tx)));
+        let release_first_rx = Arc::new(TokioMutex::new(Some(release_first_rx)));
+        let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let captured_requests = Arc::clone(&requests);
+        let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = crate::testing::TestProvider::builder()
+            .kind("rlm-active-input-next-iteration")
+            .complete(move |request| {
+                let first_started_tx = Arc::clone(&first_started_tx);
+                let release_first_rx = Arc::clone(&release_first_rx);
+                let captured_requests = Arc::clone(&captured_requests);
+                let call_index = Arc::clone(&call_index);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("request capture")
+                        .push(serde_json::to_string(&request).expect("serialize request"));
+                    match call_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => {
+                            if let Some(tx) = first_started_tx.lock().expect("first signal").take()
+                            {
+                                let _ = tx.send(());
+                            }
+                            if let Some(rx) = release_first_rx.lock().await.take() {
+                                let _ = rx.await;
+                            }
+                            Ok(text_response(&lashlang_block(
+                                r#"print("first work complete")"#,
+                            )))
+                        }
+                        1 => Ok(text_response(&lashlang_block(
+                            r#"finish "active input delivered""#,
+                        ))),
+                        other => panic!("unexpected provider call {other}"),
+                    }
+                }
+            })
+            .build()
+            .into_handle();
+        let core = explicit_ephemeral_facets(LashCore::rlm_builder(rlm_factory()))
+            .provider(provider)
+            .model(mock_model_spec())
+            .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+            .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+            .disable_queued_work_driver()
+            .build()?;
+        let session = core
+            .session("rlm-active-input-next-iteration")
+            .open()
+            .await?;
+        let active_turn_id = "rlm-active-input-turn";
+        let turn_session = session.clone();
+        let turn = tokio::spawn(async move {
+            turn_session
+                .turn(TurnInput::text("perform two iterations"))
+                .turn_id(active_turn_id)
+                .require_finish()?
+                .run()
+                .await
+        });
+
+        first_started_rx.await.expect("first provider call started");
+        session
+            .enqueue(TurnInput::text("mid-turn injection marker"))
+            .id("rlm-mid-turn-injection")
+            .ingress(lash_core::TurnInputIngress::active_turn(
+                active_turn_id,
+                lash_core::TurnInputCheckpointBoundary::AfterWork,
+            ))
+            .send()
+            .await?;
+        release_first_tx.send(()).expect("release first response");
+        turn.await.expect("turn task")?;
+
+        let requests = requests.lock().expect("request capture").clone();
+        assert_eq!(requests.len(), 2, "turn must execute a second iteration");
+        assert!(!requests[0].contains("mid-turn injection marker"));
+        assert!(
+            requests[1].contains("mid-turn injection marker"),
+            "active input was claimed but omitted from the next RLM provider request"
+        );
+        assert!(session.pending_turn_inputs().await?.is_empty());
+        Ok(())
+    })
+}
+
 #[tokio::test]
 async fn await_queued_work_batch_resolves_when_drained() -> Result<()> {
     let core = explicit_ephemeral_facets(LashCore::standard_builder())

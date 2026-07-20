@@ -376,6 +376,23 @@ pub trait AwaitEventResolver: Send + Sync {
         Ok(ResolveOutcome::UnknownOrRevoked)
     }
 
+    /// Read a keyed promise without waiting for or resolving it.
+    ///
+    /// Turn owners use this as a synchronous start gate before beginning a
+    /// new effect. An unresolved promise returns `None` and remains open.
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        if key.wait.is_turn_control() {
+            return super::await_events::inline_await_events().peek_resolution(key);
+        }
+        Err(RuntimeError::new(
+            "await_event_unsupported",
+            "this effect boundary does not support await-event reads",
+        ))
+    }
+
     async fn await_await_event(
         &self,
         key: &AwaitEventKey,
@@ -1292,6 +1309,13 @@ impl AwaitEventResolver for InlineRuntimeEffectController {
         inline_await_events().resolve(key, resolution)
     }
 
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        inline_await_events().peek_resolution(key)
+    }
+
     async fn await_await_event(
         &self,
         key: &AwaitEventKey,
@@ -1391,6 +1415,13 @@ impl AwaitEventResolver for InlineEffectHost {
         resolution: Resolution,
     ) -> Result<ResolveOutcome, RuntimeError> {
         self.controller.resolve_await_event(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.controller.peek_await_event(key).await
     }
 
     async fn await_await_event(

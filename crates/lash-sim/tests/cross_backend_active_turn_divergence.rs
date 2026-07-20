@@ -9,13 +9,21 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
+use async_trait::async_trait;
 use lash::persistence::{
     AttachmentStore, FileAttachmentStore, InMemoryAttachmentStore,
     InMemoryProcessExecutionEnvStore, InMemorySessionStoreFactory, ProcessExecutionEnvStore,
 };
 use lash::{LashCore, PendingTurnInputCancelOutcome, TurnInput};
-use lash_core::{SessionStoreFactory, TurnInputCheckpointBoundary, TurnInputIngress};
+use lash_core::{
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, EffectHost, ExecutionScope,
+    InlineRuntimeEffectController, Resolution, ResolveOutcome, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectLocalExecutor,
+    RuntimeEffectOutcome, RuntimeError, ScopedEffectController, SessionStoreFactory,
+    TurnInputCheckpointBoundary, TurnInputIngress,
+};
 use lash_sim::ProviderWireScript;
 use lash_sim::ScriptedLlmHttpTransport;
 use lash_sim::runtime_providers::{
@@ -35,12 +43,29 @@ async fn build_core(
     attachment_store: Arc<dyn AttachmentStore>,
     scripts: Vec<ProviderWireScript>,
 ) -> (LashCore, Arc<ScriptedLlmHttpTransport>) {
+    build_core_with_effect_host(
+        store_factory,
+        process_env_store,
+        attachment_store,
+        scripts,
+        Arc::new(lash::durability::InlineEffectHost::default()),
+    )
+    .await
+}
+
+async fn build_core_with_effect_host(
+    store_factory: Arc<dyn SessionStoreFactory>,
+    process_env_store: Arc<dyn ProcessExecutionEnvStore>,
+    attachment_store: Arc<dyn AttachmentStore>,
+    scripts: Vec<ProviderWireScript>,
+    effect_host: Arc<dyn EffectHost>,
+) -> (LashCore, Arc<ScriptedLlmHttpTransport>) {
     // UN-GATED transport: deliver each scripted response complete/synchronously.
     let transport = Arc::new(ScriptedLlmHttpTransport::from_scripts(scripts));
     let (provider_handle, model, _kind) =
         runtime_provider_components(PROVIDER_KIND, &transport).expect("provider components");
     let core = LashCore::standard_builder()
-        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .effect_host(effect_host)
         .attachment_store(attachment_store)
         .process_env_store(process_env_store)
         .store_factory(store_factory)
@@ -49,6 +74,82 @@ async fn build_core(
         .build()
         .expect("core");
     (core, transport)
+}
+
+#[derive(Clone)]
+struct YieldBeforeCancelWatchController {
+    inner: InlineRuntimeEffectController,
+}
+
+#[async_trait]
+impl AwaitEventResolver for YieldBeforeCancelWatchController {
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        self.inner.await_event_key(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.inner.resolve_await_event(key, resolution).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: lash::CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        if matches!(key.wait, AwaitEventWaitIdentity::TurnCancelGate) {
+            for _ in 0..256 {
+                tokio::task::yield_now().await;
+            }
+        }
+        self.inner.await_await_event(key, cancel, deadline).await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.revoke_await_events_for_session(session_id).await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.cancel_await_events_for_session(session_id).await
+    }
+}
+
+#[async_trait]
+impl RuntimeEffectController for YieldBeforeCancelWatchController {
+    async fn execute_effect(
+        &self,
+        envelope: RuntimeEffectEnvelope,
+        local_executor: RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        self.inner.execute_effect(envelope, local_executor).await
+    }
+}
+
+impl EffectHost for YieldBeforeCancelWatchController {
+    fn scoped<'run>(
+        &'run self,
+        scope: ExecutionScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
+        ScopedEffectController::shared(Arc::new(self.clone()), scope)
+    }
+
+    fn scoped_static(
+        &self,
+        scope: ExecutionScope,
+    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
+        Ok(Some(ScopedEffectController::shared(
+            Arc::new(self.clone()),
+            scope,
+        )?))
+    }
 }
 
 async fn build_in_memory(n_scripts: usize) -> (LashCore, Arc<ScriptedLlmHttpTransport>) {
@@ -75,6 +176,29 @@ async fn build_sqlite(dir: &Path, n_scripts: usize) -> (LashCore, Arc<ScriptedLl
         process_env_store,
         Arc::new(FileAttachmentStore::new(dir.join("attachments"))),
         scripts(n_scripts),
+    )
+    .await
+}
+
+async fn build_sqlite_with_effect_host(
+    dir: &Path,
+    n_scripts: usize,
+    effect_host: Arc<dyn EffectHost>,
+) -> (LashCore, Arc<ScriptedLlmHttpTransport>) {
+    std::fs::create_dir_all(dir).expect("create sqlite dir");
+    let process_env_store: Arc<dyn ProcessExecutionEnvStore> = Arc::new(
+        lash_sqlite_store::Store::open(&dir.join("process-env.sqlite"))
+            .await
+            .expect("process env store"),
+    );
+    build_core_with_effect_host(
+        Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            dir.to_path_buf(),
+        )),
+        process_env_store,
+        Arc::new(FileAttachmentStore::new(dir.join("attachments"))),
+        scripts(n_scripts),
+        effect_host,
     )
     .await
 }
@@ -451,7 +575,14 @@ async fn sqlite_reopen_preserves_cancelled_turn_commit_and_allows_next_turn() {
     let session_id = "turn-cancel-sqlite-reopen";
     let turn_id = "cancelled-before-reopen";
 
-    let (first_core, first_transport) = build_sqlite(&sqlite_dir, 1).await;
+    let (first_core, first_transport) = build_sqlite_with_effect_host(
+        &sqlite_dir,
+        1,
+        Arc::new(YieldBeforeCancelWatchController {
+            inner: InlineRuntimeEffectController,
+        }),
+    )
+    .await;
     let first_driver = first_core.turn_work_driver();
     let outcome = first_driver
         .request_cancel(lash::TurnCancelRequest::new(
