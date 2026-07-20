@@ -154,6 +154,8 @@ impl ProcessWorkObserver {
     /// this is the runtime-wide observation surface: it does not depend on a
     /// session handle grant and therefore continues to expose processes whose
     /// originating session has been deleted.
+    /// Because grants are bypassed, the host must authorize access; routing
+    /// identity is not authorization.
     pub async fn snapshot_all(
         &self,
         filter: &ProcessListFilter,
