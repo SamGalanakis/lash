@@ -73,8 +73,8 @@ body as `01-before-restart.png`, and compare its SHA-256 with the source.
 ## Phase 2 — Reference the attachment in a turn
 
 Enter a short prompt with a unique marker such as `FIG425-ATTACH-<run-id>` asking for a
-brief description, then press **send** while capturing `/api/turn`. Require its JSON body
-to contain the upload id as `attachment_id`. Poll until the UI is idle,
+brief description, then press **send** while capturing `/api/turn`. Require its request
+JSON body to contain the upload id as `attachment_id`. Poll until the UI is idle,
 `/api/state.active_turns` is empty, and the committed user/assistant pair is rendered.
 
 From the matching trace turn, save the `llm_call_started` record as
