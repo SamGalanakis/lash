@@ -519,8 +519,25 @@ async fn forked_child_session_keeps_hidden_live_tool_non_executable_across_rebui
     );
 }
 
-#[tokio::test]
-async fn parent_turn_receives_live_child_token_usage_events() {
+#[test]
+fn parent_turn_receives_live_child_token_usage_events() {
+    const STACK_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("child-session-live-usage-test".to_string())
+        .stack_size(STACK_BUDGET_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("child-session usage test runtime")
+                .block_on(parent_turn_receives_live_child_token_usage_events_inner())
+        })
+        .expect("spawn child-session usage test thread")
+        .join()
+        .expect("child-session usage test thread");
+}
+
+async fn parent_turn_receives_live_child_token_usage_events_inner() {
     let transport = mock_openai_compatible_provider(vec![
         MockCall {
             stream_events: vec![

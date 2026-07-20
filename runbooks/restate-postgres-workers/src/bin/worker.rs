@@ -28,7 +28,7 @@ use lash_restate_postgres_workers_e2e::{
     TurnResponse, TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
     default_session_originator_scope_id, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
     process_registry_from_storage, record_terminal_result, record_turn_activity,
-    record_worker_event, required_env, s3_store_from_env,
+    record_worker_event, required_env, s3_store_from_env, turn_session_id,
 };
 
 fn terminal_error(err: impl Display) -> TerminalError {
@@ -203,7 +203,7 @@ impl AppState {
             format!("{session_execution_owner_id}/incarnation"),
         );
         let session = core
-            .session(DEFAULT_SESSION_ID)
+            .session(turn_session_id(&request.workflow_id))
             .session_execution_owner(session_execution_owner)
             .open()
             .await
@@ -230,7 +230,9 @@ impl AppState {
             .map_err(terminal_error)?;
         let final_value = if matches!(
             request.scenario,
-            TurnScenario::TurnControlHold | TurnScenario::TurnControlComplete
+            TurnScenario::TurnControlHold
+                | TurnScenario::TurnControlSleep
+                | TurnScenario::TurnControlComplete
         ) {
             json!({
                 "final": if matches!(
@@ -511,7 +513,9 @@ impl AppState {
                     EXPECTED_FRAME_SWITCH_TEXT
                 }
                 TurnScenario::FrameSwitchCancel => EXPECTED_FRAME_SWITCH_CANCEL_TEXT,
-                TurnScenario::TurnControlHold => "turn-control-cancelled",
+                TurnScenario::TurnControlHold | TurnScenario::TurnControlSleep => {
+                    "turn-control-cancelled"
+                }
                 TurnScenario::TurnControlComplete => "turn-control-completed",
             })
             .to_string();
@@ -688,6 +692,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         TurnScenario::TurnControlHold => format!(
             "Run the exact-turn cancellation hold. workflow_id={} turn_control_hold=true fail_once={}",
             request.workflow_id, request.fail_once
+        ),
+        TurnScenario::TurnControlSleep => format!(
+            "Run the exact-turn suspended sleep cancellation. workflow_id={} turn_control_sleep=true",
+            request.workflow_id
         ),
         TurnScenario::TurnControlComplete => format!(
             "Run the exact-turn completion race. workflow_id={} turn_control_complete=true",

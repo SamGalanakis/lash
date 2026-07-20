@@ -19,7 +19,7 @@ use lash_restate_postgres_workers_e2e::{
     ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
     build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
     expected_attachment_bytes, process_registry_from_storage, record_terminal_result,
-    reset_e2e_rows, s3_store_from_env,
+    reset_e2e_rows, s3_store_from_env, turn_session_id,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -349,11 +349,12 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &frame_cancel_request.workflow_id).await?;
     assert_frame_switch_cancel_response(&frame_cancel_response)?;
 
+    drive_suspended_sleep_cancel_scenario(&storage, &ingress_url, &admin_url).await?;
     drive_engine_restart_scenario(&storage, &ingress_url, &admin_url).await?;
     drive_turn_control_scenarios(&storage, &ingress_url).await?;
     drive_durable_wait_index_scenarios(&storage, &ingress_url, &admin_url).await?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 26).await?;
+    let responses = wait_for_terminal_results(storage.pool(), 28).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -381,7 +382,7 @@ async fn async_main() -> Result<()> {
     assert_no_active_lash_restate_invocations(&admin_url).await?;
 
     println!(
-        "restate-postgres-workers e2e passed: {} workflows; engine-restart gates: journal-replay, post-restart-cancel-evidence, post-restart-completion; turn-control gates: cross-process, before-start, seal-race, crash-recovery, terminal-attach, break-glass-negative; trigger process {}; signal process {}; traces {}",
+        "restate-postgres-workers e2e passed: {} workflows; suspended-sleep gates: post-suspension-cancel; engine-restart gates: journal-replay, suspended-sleep-cancel, post-restart-cancel-evidence, post-restart-completion; turn-control gates: cross-process, before-start, seal-race, crash-recovery, terminal-attach, break-glass-negative; trigger process {}; signal process {}; traces {}",
         responses.len(),
         trigger_process_id,
         signal_process_id,
@@ -1413,11 +1414,53 @@ async fn drive_turn_control_scenarios(storage: &PostgresStorage, ingress_url: &s
     Ok(())
 }
 
+/// Prove cancellation wakes a timer only after Restate reports the parent turn
+/// suspended; the 300-second deadline is intentionally far outside the gate.
+async fn drive_suspended_sleep_cancel_scenario(
+    storage: &PostgresStorage,
+    ingress_url: &str,
+    admin_url: &str,
+) -> Result<()> {
+    let request = TurnRequest {
+        workflow_id: "e2e-suspended-sleep-cancel".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::TurnControlSleep,
+        signal: None,
+    };
+    let invocation_id = submit_workflow(ingress_url, &request).await?;
+    let admin = RestateAdminClient::new(admin_url.to_string());
+    wait_for_invocation_suspended(&admin, &invocation_id, Duration::from_secs(90)).await?;
+    report_workflow_progress(&request.workflow_id, "durable-sleep-suspended");
+
+    let evidence_id = "e2e-cancel-suspended-sleep";
+    let driver = RestateTurnDeployment::new(ingress_url.to_string()).turn_work_driver();
+    let started = Instant::now();
+    let receipt = driver
+        .request_cancel(cancel_request(&request, evidence_id))
+        .await
+        .context("request cancellation after durable sleep suspended")?;
+    assert_requested(&receipt.outcome, evidence_id)?;
+    let terminal = tokio::time::timeout(
+        Duration::from_secs(10),
+        driver.await_terminal(&turn_address(&request)),
+    )
+    .await
+    .context("suspended durable sleep did not wake within 10 seconds")??;
+    assert_cancelled_terminal(&terminal, evidence_id)?;
+    anyhow::ensure!(
+        started.elapsed() < Duration::from_secs(10),
+        "suspended sleep cancellation waited for the 300-second timer"
+    );
+    let response = wait_for_terminal_result(storage.pool(), &request.workflow_id).await?;
+    assert_cancelled_response(&response, evidence_id)?;
+    println!("suspended-sleep gates passed: post-suspension-cancel");
+    Ok(())
+}
+
 /// Coordinate a real Restate service bounce with the shell harness while both
-/// workers and this runner stay alive. The parked tool attempt makes the
-/// handler reconnect and replay its journaled turn-start cancellation peek;
-/// waiting for a second tool entry proves replay reached the same command path
-/// instead of failing with a journal mismatch.
+/// workers and this runner stay alive. The tool wait preserves the existing
+/// start-gate replay proof, while the timer proves a resolved cancel promise
+/// wakes a suspended parent after the engine returns.
 async fn drive_engine_restart_scenario(
     storage: &PostgresStorage,
     ingress_url: &str,
@@ -1426,14 +1469,45 @@ async fn drive_engine_restart_scenario(
     let driver = RestateTurnDeployment::new(ingress_url.to_string()).turn_work_driver();
     let parked = turn_control_request("e2e-engine-restart-cancel", false);
     submit_workflow(ingress_url, &parked).await?;
+    let sleeping = TurnRequest {
+        workflow_id: "e2e-engine-restart-suspended-sleep".to_string(),
+        fail_once: false,
+        scenario: TurnScenario::TurnControlSleep,
+        signal: None,
+    };
+    let sleeping_invocation_id = submit_workflow(ingress_url, &sleeping).await?;
+    let admin = RestateAdminClient::new(admin_url.to_string());
     wait_for_cancel_gate_attempts(storage.pool(), &parked.workflow_id, 1).await?;
+    wait_for_invocation_suspended(&admin, &sleeping_invocation_id, Duration::from_secs(90)).await?;
     record_harness_signal(storage.pool(), "engine-restart-ready").await?;
     report_workflow_progress(&parked.workflow_id, "parked-before-engine-restart");
 
     wait_for_harness_signal(storage.pool(), "engine-restart-complete").await?;
     wait_for_restate_recovery(admin_url).await?;
     wait_for_cancel_gate_attempts(storage.pool(), &parked.workflow_id, 2).await?;
+    wait_for_invocation_suspended(&admin, &sleeping_invocation_id, Duration::from_secs(30)).await?;
     report_workflow_progress(&parked.workflow_id, "journal-replayed-after-engine-restart");
+
+    let sleep_evidence_id = "e2e-cancel-suspended-sleep-after-engine-restart";
+    let sleep_cancel_started = Instant::now();
+    let sleep_receipt = driver
+        .request_cancel(cancel_request(&sleeping, sleep_evidence_id))
+        .await
+        .context("request suspended sleep cancellation after Restate engine restart")?;
+    assert_requested(&sleep_receipt.outcome, sleep_evidence_id)?;
+    let sleep_terminal = tokio::time::timeout(
+        Duration::from_secs(10),
+        driver.await_terminal(&turn_address(&sleeping)),
+    )
+    .await
+    .context("post-restart suspended sleep did not wake within 10 seconds")??;
+    assert_cancelled_terminal(&sleep_terminal, sleep_evidence_id)?;
+    anyhow::ensure!(
+        sleep_cancel_started.elapsed() < Duration::from_secs(10),
+        "post-restart suspended sleep cancellation waited for the 300-second timer"
+    );
+    let sleep_response = wait_for_terminal_result(storage.pool(), &sleeping.workflow_id).await?;
+    assert_cancelled_response(&sleep_response, sleep_evidence_id)?;
 
     let evidence_id = "e2e-cancel-after-engine-restart";
     let receipt = driver
@@ -1491,7 +1565,7 @@ async fn drive_engine_restart_scenario(
         "post-restart turn did not commit normally: {completed:#?}"
     );
     println!(
-        "engine-restart gates passed: journal-replay; post-restart-cancel-evidence; post-restart-completion"
+        "engine-restart gates passed: journal-replay; suspended-sleep-cancel; post-restart-cancel-evidence; post-restart-completion"
     );
     Ok(())
 }
@@ -1627,7 +1701,10 @@ fn turn_control_request(workflow_id: &str, fail_once: bool) -> TurnRequest {
 }
 
 fn turn_address(request: &TurnRequest) -> TurnAddress {
-    TurnAddress::new(DEFAULT_SESSION_ID, request.workflow_id.clone())
+    TurnAddress::new(
+        turn_session_id(&request.workflow_id),
+        request.workflow_id.clone(),
+    )
 }
 
 fn cancel_request(request: &TurnRequest, request_id: &str) -> TurnCancelRequest {
@@ -1780,6 +1857,32 @@ async fn wait_for_invocation_terminal(
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     anyhow::bail!("break-glass invocation `{invocation_id}` did not terminate")
+}
+
+async fn wait_for_invocation_suspended(
+    admin: &RestateAdminClient,
+    invocation_id: &RestateInvocationId,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let last_status = admin
+            .invocation_status(invocation_id)
+            .await
+            .context("read Restate invocation suspension status")?;
+        if last_status
+            .as_ref()
+            .is_some_and(|status| status.status == "suspended")
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "Restate invocation `{invocation_id}` did not suspend within {timeout:?}; last status={last_status:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// `RestateEffectHost::{cancel,revoke}_await_events_for_session` controller

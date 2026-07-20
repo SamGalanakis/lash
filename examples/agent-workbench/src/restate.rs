@@ -1103,7 +1103,12 @@ async fn record_turn_output(
         output.outcome,
         lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
     ) {
-        state.push_message("event", "turn cancelled");
+        let message = output
+            .cancellation
+            .as_ref()
+            .map(|evidence| format!("turn stopped · request {}", evidence.request_id))
+            .unwrap_or_else(|| "turn stopped".to_string());
+        state.push_message("event", message);
     } else {
         commit_assistant_transcript(session, turn_id, assistant_text.clone()).await?;
         state.push_message("assistant", assistant_text);

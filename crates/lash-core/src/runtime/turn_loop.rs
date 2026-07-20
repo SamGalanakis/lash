@@ -2022,22 +2022,42 @@ impl LashRuntime {
         .await;
         let (new_messages, _new_protocol_iteration) = match run_result {
             Ok(result) => result,
-            Err(_err) if cancel.is_cancelled() && turn_control.evidence().is_some() => {
+            Err(err) if cancel.is_cancelled() => {
+                if turn_control.evidence().is_none() {
+                    turn_control
+                        .observe_pending_cancel(finish_scoped_effect_controller.controller())
+                        .await?;
+                }
+                if turn_control.evidence().is_some() {
+                    self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
+                    return Box::pin(self.finish_cancelled_turn_after_effect_abort(
+                        *driver,
+                        assembler,
+                        cancellation_messages,
+                        events,
+                        &finish_scoped_effect_controller,
+                        &cancel,
+                        session_execution_lease,
+                        session_execution_lease_release_policy,
+                        turn_control.as_ref(),
+                        turn_index,
+                        trace_turn_id,
+                    ))
+                    .await;
+                }
                 self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
-                return Box::pin(self.finish_cancelled_turn_after_effect_abort(
-                    *driver,
-                    assembler,
-                    cancellation_messages,
-                    events,
-                    &finish_scoped_effect_controller,
-                    &cancel,
-                    session_execution_lease,
-                    session_execution_lease_release_policy,
-                    turn_control.as_ref(),
-                    turn_index,
-                    trace_turn_id,
-                ))
-                .await;
+                let RuntimeTurnDriver {
+                    session,
+                    pending_queue_claims,
+                    pending_turn_input_claims,
+                    ..
+                } = *driver;
+                self.session = Some(session);
+                self.abandon_queued_work_claims_after_lease_loss(&err, &pending_queue_claims)
+                    .await;
+                self.abandon_turn_input_claims_after_lease_loss(&err, &pending_turn_input_claims)
+                    .await;
+                return Err(err);
             }
             Err(err) => {
                 self.mark_phase_end(RuntimeTurnPhase::EffectLoop);

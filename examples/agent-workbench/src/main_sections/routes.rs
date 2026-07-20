@@ -13,7 +13,7 @@ async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>,
         .open()
         .await
         .map_err(AppError::internal)?;
-    let messages = session
+    let mut messages: Vec<_> = session
         .read_view()
         .messages()
         .iter()
@@ -24,10 +24,22 @@ async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>,
         .await
         .map_err(AppError::internal)?;
     session.close().await.map_err(AppError::internal)?;
+    let active_turns = state.active_turns.for_session(&state.current_session_id());
+    messages.extend(active_turns.iter().filter_map(|address| {
+        state
+            .active_turns
+            .prompt_for(&address.session_id, &address.turn_id)
+            .map(|text| ChatMessage {
+                id: format!("workbench-active-prompt:{}", address.turn_id),
+                role: "user".to_string(),
+                text,
+                at: String::new(),
+            })
+    }));
     Ok(Json(StateSnapshot {
         settings: state.settings(),
         messages,
-        active_turns: state.active_turns.for_session(&state.current_session_id()),
+        active_turns,
         pending_turn_inputs,
     }))
 }
@@ -112,7 +124,7 @@ async fn send_turn(
     state.set_selected_model(ModelSelection::from_spec(&turn_model));
     let turn_id = format!("workbench-turn-{}", uuid::Uuid::new_v4());
     let session_id = state.current_session_id();
-    state.track_turn(&session_id, &turn_id);
+    state.track_turn_prompt(&session_id, &turn_id, text.clone());
     if let Err(err) = restate::submit_user_turn(
         &state,
         restate::WorkbenchTurnWorkflowRequest {

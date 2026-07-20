@@ -134,6 +134,7 @@ impl RuntimeSessionServices {
                 services.current.host.queued_work_driver.clone(),
             )
             .with_cancellation_token(cancellation_for_runtime.clone())
+            .without_turn_cancel_observation()
             .with_process_work_driver(services.current.host.process_work_driver.clone());
             if let Some(invocation) = execution_context_for_runtime.causal_invocation.clone() {
                 context = context.with_parent_invocation(invocation);

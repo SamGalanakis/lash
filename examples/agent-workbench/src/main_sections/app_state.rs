@@ -43,8 +43,14 @@ impl AppState {
         let _ = self.event_tx.send(item);
     }
 
+    #[cfg(test)]
     fn track_turn(&self, session_id: &str, turn_id: &str) {
         self.active_turns.insert(session_id, turn_id);
+    }
+
+    fn track_turn_prompt(&self, session_id: &str, turn_id: &str, prompt: String) {
+        self.active_turns
+            .insert_with_prompt(session_id, turn_id, Some(prompt));
     }
 
     /// Fan out exact-address cooperative cancellation to the active turns the
@@ -84,8 +90,35 @@ impl AppState {
             } else {
                 (None, None)
             };
-            self.active_turns
-                .remove(&address.session_id, &address.turn_id);
+            let routing_retained = if terminal.is_none()
+                && terminal_error
+                    .as_ref()
+                    .is_some_and(|err| err.code.as_str() == "turn_terminal_await_timeout")
+            {
+                match self.restate_turn_is_active(&address).await {
+                    Ok(true) => true,
+                    Ok(false) => {
+                        self.active_turns
+                            .remove(&address.session_id, &address.turn_id);
+                        false
+                    }
+                    Err(err) => {
+                        self.trace(
+                            "turn.cancel_liveness_unknown",
+                            json!({
+                                "session_id": address.session_id,
+                                "turn_id": address.turn_id,
+                                "error": err.to_string(),
+                            }),
+                        );
+                        true
+                    }
+                }
+            } else {
+                self.active_turns
+                    .remove(&address.session_id, &address.turn_id);
+                false
+            };
             self.trace(
                 "turn.cancel_requested",
                 json!({
@@ -96,6 +129,7 @@ impl AppState {
                     "outcome": format!("{:?}", receipt.outcome),
                     "terminal": terminal,
                     "terminal_error": terminal_error,
+                    "routing_retained": routing_retained,
                 }),
             );
             receipts.push(TurnCancelReceipt {
@@ -110,6 +144,24 @@ impl AppState {
             self.publish(StreamItem::Done);
         }
         Ok(receipts)
+    }
+
+    async fn restate_turn_is_active(&self, address: &lash::TurnAddress) -> AnyhowResult<bool> {
+        let workflow = if address.turn_id.starts_with("workbench-queued-") {
+            "WorkbenchQueuedTurnWorkflow"
+        } else {
+            "WorkbenchTurnWorkflow"
+        };
+        let admin = lash_restate::RestateAdminClient::new(
+            lash_restate::RestateConnection::with_client(
+                self.restate_admin_url.clone(),
+                self.restate_http.clone(),
+            ),
+        );
+        Ok(admin
+            .workflow_invocation_status(workflow, &address.turn_id, "run")
+            .await?
+            .is_some_and(|status| status.is_still_active()))
     }
 
     fn push_message(&self, role: impl Into<String>, text: impl Into<String>) -> ChatMessage {
