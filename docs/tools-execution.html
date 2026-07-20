@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">tool<span class="slash">/</span>execution</h1>
-    <p class="opener__lede">Scheduling, completion modes, durable tool effects, and output projection for tools that need more than a simple inline <code>ToolResult::ok(...)</code>.</p>
+    <p class="opener__lede">Scheduling, completion modes, atomic-attempt semantics, and output projection for tools that need more than a simple inline <code>ToolResult::ok(...)</code>.</p>
   </section>
 
   <main class="body" id="content">
@@ -85,98 +85,42 @@ ToolResult::pending(PendingCompletion::new())</code></pre>
           <p><code>PendingCompletion</code> configures the wait: an optional <code>deadline</code>, an <code>on_timeout</code> behavior (<code>ErrorAsResult</code> feeds a timeout result back to the model; <code>FailTurn</code> fails the whole turn), and an <code>on_cancel</code> hint (<code>CancelExternalWork</code> by default, or <code>Ignore</code> to leave the out-of-band work running). Adjust it with <code>PendingCompletion::new().with_deadline(..)</code> and <code>.fail_turn_on_timeout()</code>. The remote protocol carries tool grants only; execute tools through a normal <code>ToolProvider</code> at the host boundary.</p>
         </div>
 
-        <div class="section" id="durable-tool-effects">
+        <div class="section" id="atomic-tool-attempts">
           <div class="section-header">
-            <h2>Durable Tool Effects</h2>
-            <p>Durable tool effects are for advanced in-process tools that need to do nondeterministic work inside the caller's existing effect log. The tool borrows the boundary with <code>call.context.durable_effects()?</code>; Lash records JSON steps and waits without exposing Restate, Temporal, or any workflow-native context.</p>
+            <h2>Atomic Tool Attempts</h2>
+            <p><strong>Attempts are atomic. In-attempt effects are opaque. Durable composition lives in the process layer.</strong> A prepared tool attempt is one journaled entry. Lash does not split the host code inside <code>execute()</code> into nested durable effects.</p>
           </div>
-          <aside class="callout callout--note">
-            <strong>Use this when</strong>
-            <p>A normal tool is executing inside a durable turn or Lashlang process and the work must replay as one ordered log: create an external request once, emit a domain event once, wait for a resolver, then complete exactly once after resume. If the work can finish inline, return <code>ToolResult::ok(...)</code>. If another service owns the whole job and will return a final tool result later, use <a href="#tool-completion-modes">deferred completion</a> instead.</p>
+          <aside class="callout callout--warning">
+            <strong>Cost semantics</strong>
+            <p>In-attempt effects are at-least-once. An attempt retry, or a crash after an external effect succeeds but before the attempt outcome is recorded, runs the whole attempt again. A direct LLM call can therefore be billed again. Make external writes idempotent when needed.</p>
           </aside>
           <div class="listing">
             <div class="listing__row">
-              <div class="listing__label">requirements</div>
-              <div class="listing__body"><p><code>durable_effects()</code> succeeds only for a prepared tool call with a non-empty call id, running under an effect controller that advertises durable-effects support. Otherwise it returns a clear runtime error such as <code>durable_effects_missing_call_id</code> or <code>durable_effects_unavailable</code>.</p></div>
+              <div class="listing__label">completed replay</div>
+              <div class="listing__body"><p>After the tool-attempt outcome is recorded, replay returns that outcome and does not execute the tool or invoke an in-attempt provider again.</p></div>
             </div>
             <div class="listing__row">
-              <div class="listing__label">journaled step</div>
-              <div class="listing__body"><p><code>run_json(step_id, input, run)</code> records one JSON step in the caller's effect log. <code>step_id</code> must be non-empty and unique within the tool invocation. The stable replay envelope includes the step id, the JSON input, and the invocation replay key, so replay can return the recorded value without re-running the local closure.</p></div>
+              <div class="listing__label">direct completion</div>
+              <div class="listing__body"><p><code>context.direct_completions().complete(...)</code> is an ordinary in-attempt operation. It uses the normal request planning, usage, trace, and bookkeeping paths, while the provider call runs locally under the open tool-attempt entry.</p></div>
             </div>
             <div class="listing__row">
-              <div class="listing__label">external wait</div>
-              <div class="listing__body"><p><code>external_event_key(key)</code> returns a signed custom <code>AwaitEventKey</code>. Store the whole returned key if an external route will resolve it later; the string you passed in is not enough. <code>await_event_json(key)</code> parks through the existing <code>AwaitEvent</code> effect path and resumes with <code>Resolution::Ok</code>'s JSON value, or maps error, timeout, and cancellation resolutions into runtime errors.</p></div>
+              <div class="listing__label">retry delay</div>
+              <div class="listing__body"><p>A tool retry delay is a cancellable local sleep inside the atomic attempt. If the retry policy starts another attempt, all opaque work in that new attempt executes again.</p></div>
             </div>
             <div class="listing__row">
-              <div class="listing__label">process event</div>
-              <div class="listing__body"><p><code>emit_process_event(event_type, payload)</code> appends a typed process event when the tool is executing inside a durable process. Calls outside a process fail with <code>durable_effect_process_event_unavailable</code>; use <code>context.process_events().emit(...)</code> only when you do not need the durable-effects facade.</p></div>
+              <div class="listing__label">composition</div>
+              <div class="listing__body"><p>When work needs several independently durable effects, waits, or decisions, decompose it into process steps. Nested tool-batch dispatch is unavailable inside an attempt because it would create ambiguous nested durability.</p></div>
             </div>
           </div>
-          <h3>Journal a JSON Step</h3>
-          <p>Use <code>run_json</code> around the side effect that must not double-run after replay. The closure receives the JSON input that was recorded in the envelope; return a JSON value that is safe to store in the effect log.</p>
-          <pre data-lang="rust"><code>let durable = match call.context.durable_effects() {
-    Ok(durable) =&gt; durable,
-    Err(err) =&gt; return ToolResult::err_fmt(err),
-};
-
-let opened = match durable
-    .run_json(
-        "create-input-request",
-        serde_json::json!({ "question": call.args["question"].clone() }),
-        |input| async move {
-            // Create the external record, enqueue work, or call a service.
-            Ok(serde_json::json!({
-                "request_id": "request-1",
-                "question": input["question"].clone()
-            }))
-        },
-    )
-    .await
-{
-    Ok(value) =&gt; value,
-    Err(err) =&gt; return ToolResult::err_fmt(err),
-};</code></pre>
-          <h3>Wait On An External Resolver</h3>
-          <p>Generate the key before publishing the request, persist or emit the full key, then await that same key. Hosts resolve it through their effect host; the tool stays local and does not receive workflow-engine context.</p>
-          <pre data-lang="rust"><code>let key = match durable
-    .external_event_key(format!("input-request:{}", opened["request_id"]))
-    .await
-{
-    Ok(key) =&gt; key,
-    Err(err) =&gt; return ToolResult::err_fmt(err),
-};
-
-// Store or emit the complete key. The resolver needs the signed key, not just
-// the human-readable custom identity string used above.
-if let Err(err) = publish_input_request(opened.clone(), key.clone()).await {
-    return ToolResult::err_fmt(format_args!("{err}"));
-}
-
-let answer = match durable.await_event_json(key).await {
-    Ok(value) =&gt; value,
-    Err(err) =&gt; return ToolResult::err_fmt(err),
-};</code></pre>
-          <h3>Emit A Domain Process Event</h3>
-          <p>When the tool is running inside a Lashlang process, process event context is carried into the <code>ToolContext</code>. That lets ordinary tools append domain events from the same implementation path the model calls.</p>
-          <pre data-lang="rust"><code>if let Err(err) = durable
-    .emit_process_event(
-        "work.input_request.opened",
-        serde_json::json!({
-            "request_id": opened["request_id"].clone(),
-            "await_key_id": key.key_id,
-        }),
-    )
-    .await
-{
-    return ToolResult::err_fmt(err);
+          <h3>Choose The Durable Boundary</h3>
+          <p>Return <code>ToolResult::ok(...)</code> when all work belongs to one attempt. Use <a href="#tool-completion-modes"><code>ToolResult::Pending</code></a> when an external owner will eventually provide one final tool result. Use a Lashlang process when each operation must settle before the next begins:</p>
+          <pre data-lang="text"><code>process fulfill(order: Order) {
+  quoted = await tools.quote({ order: order })?
+  approved = await tools.request_approval({ quote: quoted })?
+  receipt = await tools.charge({ approval: approved })?
+  finish receipt
 }</code></pre>
-          <h3>Replay Rules</h3>
-          <ul class="bullets">
-            <li><strong>Step ids are local to one tool invocation.</strong> Reusing the same id in the same call fails before the closure runs. Use stable names such as <code>create</code> and <code>complete</code>, not random ids.</li>
-            <li><strong>Inputs are part of the envelope hash.</strong> Changing the JSON input changes the recorded effect identity, which protects replay from silently accepting a different side effect.</li>
-            <li><strong>Inline is not crash-durable.</strong> The inline effect controller supports the API for local runs and tests, but workflow adapters such as the Restate host are what persist outcomes across process crashes.</li>
-            <li><strong>Remote tool execution is not special-cased.</strong> A durable tool can call a remote service from inside <code>run_json</code>, but the runtime still sees a local <code>ToolProvider</code> and a local effect log.</li>
-          </ul>
+          <p>Each awaited tool call is its own atomic attempt and process state carries the durable composition. This keeps retry and crash behavior visible in the authored workflow instead of hiding it inside opaque host code.</p>
         </div>
 
         <div class="section" id="tool-output-budget">
