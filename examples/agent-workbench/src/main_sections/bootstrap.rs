@@ -82,30 +82,15 @@ async fn async_main() -> AnyhowResult<()> {
     )
     .map_err(|err| anyhow!("invalid OPENROUTER_MODEL metadata: {err}"))?;
     let model_spec = with_workbench_model_capability(model_spec);
-    let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-        data_dir.join("lash-sessions"),
-    ));
-    let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
-        session_store_factory.clone();
-    let process_registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
-            .await
-            .context("open process registry")?,
-    ) as Arc<dyn lash::process::ProcessRegistry>;
-    let trigger_store = Arc::new(
-        lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
-            .await
-            .context("open trigger store")?,
-    );
-    // Deployment-level Lashlang artifact/process-env store (compiled
-    // trigger/process modules plus durable process environment specs), shared
-    // across the session tree. SQLite keeps installed triggers and process
-    // rebuild metadata durable across restarts.
-    let artifact_store = Arc::new(
-        lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
-            .await
-            .context("open lashlang artifact store")?,
-    );
+    let database_url = std::env::var("AGENT_WORKBENCH_DATABASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let stores = WorkbenchStores::open(&data_dir, database_url.as_deref()).await?;
+    eprintln!("agent-workbench durable store: {}", stores.backend);
+    let core_store_factory = Arc::clone(&stores.session_store_factory);
+    let process_registry = Arc::clone(&stores.process_registry);
+    let trigger_store = Arc::clone(&stores.trigger_store);
+    let artifact_store = Arc::clone(&stores.artifact_store);
     let subagent_registry = Arc::new(lash_subagents::default_registry(&BTreeMap::new()));
     let mail_world = mail::MailWorld::new();
     let session_ids = WorkbenchSessionIds::persistent(data_dir.join("session-id"))?;
@@ -159,13 +144,13 @@ async fn async_main() -> AnyhowResult<()> {
         Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )),
-        artifact_store.clone(),
+        Arc::clone(&stores.process_env_store),
     );
 
     let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
         lash::rlm::RlmProtocolPluginConfig::default()
             .with_lashlang_abilities(workbench_lashlang_abilities()),
-        Arc::clone(&artifact_store) as Arc<dyn lash::persistence::LashlangArtifactStore>,
+        Arc::clone(&artifact_store),
     )
     .with_lashlang_execution_sink(Arc::clone(&lashlang_execution_sink));
     let core = LashCore::rlm_builder(factory)
@@ -242,6 +227,7 @@ async fn async_main() -> AnyhowResult<()> {
             "lashlang_execution_path": lashlang_execution_path.display().to_string(),
             "model": serde_json::to_value(state.selected_model()).unwrap_or(Value::Null),
             "web_configured": state.web_configured,
+            "store_backend": stores.backend,
             "restate_endpoint_addr": restate_endpoint_addr.to_string(),
             "restate_ingress_url": state.restate_ingress_url,
         }),

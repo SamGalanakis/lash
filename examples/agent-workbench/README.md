@@ -12,6 +12,15 @@ after printing the URL:
 OPENROUTER_API_KEY=... just agent-workbench 3000
 ```
 
+SQLite is the default. To run every durable workbench facet on a managed,
+port-isolated Postgres container instead:
+
+```bash
+OPENROUTER_API_KEY=... AGENT_WORKBENCH_POSTGRES=1 just agent-workbench 3000
+```
+
+Alternatively, set `AGENT_WORKBENCH_DATABASE_URL` to an existing Postgres database.
+
 Open `http://127.0.0.1:3000`. Useful lifecycle commands:
 
 ```bash
@@ -22,9 +31,9 @@ just agent-workbench-restart 3000
 just agent-workbench-down 3000
 ```
 
-`restart` replaces only the workbench web process and preserves the Restate
-container and its retained invocations. `down` stops both the workbench and any
-Restate container started by the entrypoint.
+`restart` replaces only the workbench web process and preserves the Restate and
+managed Postgres containers. `down` stops the workbench and every container the
+entrypoint started.
 
 Validate the example build and unit tests:
 
@@ -57,6 +66,15 @@ Configuration is read from `.env` or the process environment:
 - `RESTATE_INGRESS_URL`: Restate ingress URL, default `http://127.0.0.1:8080`.
 - `AGENT_WORKBENCH_DATA_DIR`: persistence directory, default
   `.agent-workbench`.
+- `AGENT_WORKBENCH_DATABASE_URL`: use the `lash-postgres-store` session, process,
+  trigger, artifact, and process-environment stores at this URL. Unset defaults to
+  SQLite.
+- `AGENT_WORKBENCH_POSTGRES`: set to `1` to have the dev entrypoint start a managed
+  Postgres 16 container and synthesize `AGENT_WORKBENCH_DATABASE_URL`.
+- `AGENT_WORKBENCH_POSTGRES_PORT`, `AGENT_WORKBENCH_POSTGRES_IMAGE`, and
+  `AGENT_WORKBENCH_POSTGRES_CONTAINER`: managed Postgres overrides. The default port
+  and container name are derived from the workbench port so concurrent runs remain
+  isolated.
 - `AGENT_WORKBENCH_TRACE`: JSONL trace path, default
   `.agent-workbench/trace.jsonl`.
 - `AGENT_WORKBENCH_LASHLANG_EXECUTION_TRACE`: JSONL Lashlang execution graph

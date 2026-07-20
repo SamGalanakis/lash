@@ -1808,31 +1808,33 @@ finish initial
         session_ids: WorkbenchSessionIds,
         active_turns: ActiveTurns,
     ) -> LiveWorkbenchRestateHarness {
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-            data_dir.join("lash-sessions"),
-        ));
-        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
-            session_store_factory.clone();
-        let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
-                .await
-                .expect("open process registry"),
-        ) as Arc<dyn lash::process::ProcessRegistry>;
-        let trigger_store = Arc::new(
-            lash_sqlite_store::SqliteTriggerStore::open(&data_dir.join("triggers.db"))
-                .await
-                .expect("open trigger store"),
-        );
-        let process_env_store = Arc::new(
-            lash_sqlite_store::Store::open(&data_dir.join("process-env.db"))
-                .await
-                .expect("open process env store"),
-        );
-        let artifact_store = Arc::new(
-            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
-                .await
-                .expect("open artifact store"),
-        ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
+        live_workbench_restate_state_with_provider_and_database(
+            data_dir,
+            restate_ingress_url,
+            provider,
+            session_ids,
+            active_turns,
+            None,
+        )
+        .await
+    }
+
+    async fn live_workbench_restate_state_with_provider_and_database(
+        data_dir: &std::path::Path,
+        restate_ingress_url: String,
+        provider: ProviderHandle,
+        session_ids: WorkbenchSessionIds,
+        active_turns: ActiveTurns,
+        database_url: Option<&str>,
+    ) -> LiveWorkbenchRestateHarness {
+        let stores = WorkbenchStores::open(data_dir, database_url)
+            .await
+            .expect("open live workbench stores");
+        let core_store_factory = Arc::clone(&stores.session_store_factory);
+        let process_registry = Arc::clone(&stores.process_registry);
+        let trigger_store = Arc::clone(&stores.trigger_store);
+        let process_env_store = Arc::clone(&stores.process_env_store);
+        let artifact_store = Arc::clone(&stores.artifact_store);
         let trace_path = data_dir.join("trace.jsonl");
         let lashlang_execution_path = data_dir.join("lashlang-execution.jsonl");
         let trace_sink = Arc::new(JsonlTraceSink::new(trace_path.clone())) as Arc<dyn TraceSink>;

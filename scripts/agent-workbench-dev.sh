@@ -28,8 +28,10 @@ Usage:
 
 Defaults:
   up is detached and idempotent.
-  restart replaces only the workbench process and preserves Restate.
-  down stops both the workbench and any Restate container it started.
+  restart replaces only the workbench process and preserves managed services.
+  down stops the workbench and any Restate or Postgres container it started.
+  AGENT_WORKBENCH_POSTGRES=1 starts a port-isolated managed Postgres container
+  unless AGENT_WORKBENCH_DATABASE_URL points at an existing database.
   --port PORT binds 127.0.0.1:PORT.
   Restate ports use the same offset from their defaults as the workbench port
   uses from 3030, unless their environment variables override them.
@@ -40,6 +42,7 @@ USAGE
 url_host_port() {
   local url="${1#*://}"
   url="${url%%/*}"
+  url="${url##*@}"
   local host="${url%:*}"
   local port="${url##*:}"
   if [[ -z "$host" || -z "$port" || "$host" = "$port" ]]; then
@@ -215,9 +218,22 @@ stop_started_restate() {
   fi
 }
 
+stop_started_postgres() {
+  if [[ -f "$postgres_marker_file" ]]; then
+    local container
+    container="$(cat "$postgres_marker_file")"
+    if [[ -n "$container" ]]; then
+      log "stopping Postgres container $container"
+      docker rm -f "$container" >/dev/null 2>&1 || true
+    fi
+    rm -f "$postgres_marker_file"
+  fi
+}
+
 stop_target() {
   stop_pid_file "$pid_file"
   stop_started_restate
+  stop_started_postgres
 }
 
 stop_all_known() {
@@ -234,6 +250,16 @@ stop_all_known() {
     container="$(cat "$file")"
     if [[ -n "$container" ]]; then
       log "stopping Restate container $container"
+      docker rm -f "$container" >/dev/null 2>&1 || true
+    fi
+    rm -f "$file"
+  done
+  for file in "$state_dir"/postgres-*.container; do
+    [[ -e "$file" ]] || continue
+    local container
+    container="$(cat "$file")"
+    if [[ -n "$container" ]]; then
+      log "stopping Postgres container $container"
       docker rm -f "$container" >/dev/null 2>&1 || true
     fi
     rm -f "$file"
@@ -289,6 +315,32 @@ ensure_restate() {
   fi
 }
 
+ensure_postgres() {
+  (( postgres_enabled )) || return
+  if tcp_ready "$postgres_host" "$postgres_port"; then
+    log "using existing Postgres at $postgres_host:$postgres_port"
+    return
+  fi
+
+  command -v docker >/dev/null 2>&1 || die "Postgres is not running and docker is unavailable"
+  log "starting Postgres container $postgres_container from $postgres_image"
+  docker rm -f "$postgres_container" >/dev/null 2>&1 || true
+  docker run -d --rm \
+    --name "$postgres_container" \
+    --network host \
+    -e POSTGRES_USER=lash \
+    -e POSTGRES_PASSWORD=lash \
+    -e POSTGRES_DB=lash \
+    "$postgres_image" -p "$postgres_port" >/dev/null
+  printf '%s\n' "$postgres_container" > "$postgres_marker_file"
+
+  if ! wait_tcp "Postgres" "$postgres_host" "$postgres_port" 60; then
+    docker logs "$postgres_container" >&2 || true
+    stop_started_postgres
+    die "Postgres did not become ready at $postgres_host:$postgres_port"
+  fi
+}
+
 endpoint_url() {
   if [[ -n "$configured_endpoint_url" ]]; then
     printf '%s\n' "$configured_endpoint_url"
@@ -306,6 +358,9 @@ write_meta() {
     printf 'restate_endpoint_addr=%q\n' "$restate_endpoint_addr"
     printf 'restate_ingress_url=%q\n' "$restate_ingress_url"
     printf 'restate_admin_url=%q\n' "$restate_admin_url"
+    printf 'store_backend=%q\n' "$store_backend"
+    printf 'postgres_host=%q\n' "$postgres_host"
+    printf 'postgres_port=%q\n' "$postgres_port"
     printf 'log_file=%q\n' "$log_file"
   } > "$meta_file"
 }
@@ -322,12 +377,14 @@ start_detached() {
     setsid env \
       AGENT_WORKBENCH_ADDR="$workbench_addr" \
       AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
+      AGENT_WORKBENCH_DATABASE_URL="$agent_workbench_database_url" \
       RESTATE_INGRESS_URL="$restate_ingress_url" \
       "$workbench_bin" >> "$log_file" 2>&1 < /dev/null &
   else
     nohup env \
       AGENT_WORKBENCH_ADDR="$workbench_addr" \
       AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
+      AGENT_WORKBENCH_DATABASE_URL="$agent_workbench_database_url" \
       RESTATE_INGRESS_URL="$restate_ingress_url" \
       "$workbench_bin" >> "$log_file" 2>&1 < /dev/null &
   fi
@@ -361,6 +418,7 @@ run_up() {
     return
   fi
   ensure_restate
+  ensure_postgres
   start_detached
   wait_workbench_ready 90
   if ! wait_tcp "workbench Restate endpoint" "$endpoint_wait_host" "$endpoint_port" 90; then
@@ -385,6 +443,7 @@ run_foreground() {
     return
   fi
   ensure_restate
+  ensure_postgres
 
   local started_pid=""
   cleanup_foreground() {
@@ -393,12 +452,14 @@ run_foreground() {
       wait "$started_pid" >/dev/null 2>&1 || true
     fi
     stop_started_restate
+    stop_started_postgres
   }
   trap cleanup_foreground EXIT INT TERM
 
   log "starting workbench at $workbench_url"
   AGENT_WORKBENCH_ADDR="$workbench_addr" \
   AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
+  AGENT_WORKBENCH_DATABASE_URL="$agent_workbench_database_url" \
   RESTATE_INGRESS_URL="$restate_ingress_url" \
   cargo run -p agent-workbench &
   started_pid="$!"
@@ -549,6 +610,7 @@ default_restate_endpoint_port=$((9081 + port_offset))
 default_restate_ingress_port=$((8080 + port_offset))
 default_restate_admin_port=$((19070 + port_offset))
 default_restate_node_port=$((19071 + port_offset))
+default_postgres_port=$((15432 + port_offset))
 
 restate_endpoint_addr="${AGENT_WORKBENCH_RESTATE_ADDR:-127.0.0.1:$default_restate_endpoint_port}"
 restate_ingress_url="${RESTATE_INGRESS_URL:-http://127.0.0.1:$default_restate_ingress_port}"
@@ -556,6 +618,27 @@ restate_admin_url="${RESTATE_ADMIN_URL:-http://127.0.0.1:${AGENT_WORKBENCH_RESTA
 restate_image="${AGENT_WORKBENCH_RESTATE_IMAGE:-restatedev/restate:1.7.0}"
 restate_node_port="${AGENT_WORKBENCH_RESTATE_NODE_PORT:-$default_restate_node_port}"
 configured_endpoint_url="${AGENT_WORKBENCH_RESTATE_ENDPOINT_URL:-}"
+
+postgres_requested="${AGENT_WORKBENCH_POSTGRES:-0}"
+agent_workbench_database_url="${AGENT_WORKBENCH_DATABASE_URL:-}"
+postgres_enabled=0
+case "$postgres_requested" in
+  1|true|True|TRUE|yes|Yes|YES) postgres_enabled=1 ;;
+  0|false|False|FALSE|no|No|NO|'') ;;
+  *) die "AGENT_WORKBENCH_POSTGRES must be true or false, got '$postgres_requested'" ;;
+esac
+if [[ -n "$agent_workbench_database_url" ]]; then
+  postgres_enabled=1
+fi
+postgres_port="${AGENT_WORKBENCH_POSTGRES_PORT:-$default_postgres_port}"
+postgres_host="${AGENT_WORKBENCH_POSTGRES_HOST:-127.0.0.1}"
+postgres_image="${AGENT_WORKBENCH_POSTGRES_IMAGE:-postgres:16-alpine}"
+postgres_container="${AGENT_WORKBENCH_POSTGRES_CONTAINER:-lash-agent-workbench-dev-postgres-$workbench_port}"
+if (( postgres_enabled )) && [[ -z "$agent_workbench_database_url" ]]; then
+  agent_workbench_database_url="postgres://lash:lash@$postgres_host:$postgres_port/lash"
+elif [[ -n "$agent_workbench_database_url" ]]; then
+  read -r postgres_host postgres_port < <(url_host_port "$agent_workbench_database_url")
+fi
 
 restate_container="${AGENT_WORKBENCH_RESTATE_CONTAINER:-lash-agent-workbench-dev-restate-$workbench_port}"
 read -r endpoint_host endpoint_port < <(addr_host_port "$restate_endpoint_addr")
@@ -565,6 +648,13 @@ validate_port "Restate endpoint" "$endpoint_port"
 validate_port "Restate ingress" "$ingress_port"
 validate_port "Restate admin" "$admin_port"
 validate_port "Restate node" "$restate_node_port"
+if (( postgres_enabled )); then
+  validate_port "Postgres" "$postgres_port"
+fi
+store_backend="sqlite"
+if (( postgres_enabled )); then
+  store_backend="postgres"
+fi
 
 workbench_wait_host="$workbench_host"
 endpoint_wait_host="$endpoint_host"
@@ -581,6 +671,7 @@ pid_file="$state_dir/workbench-$state_key.pid"
 meta_file="$state_dir/workbench-$state_key.meta"
 log_file="$state_dir/workbench-$state_key.log"
 restate_marker_file="$state_dir/restate-$state_key.container"
+postgres_marker_file="$state_dir/postgres-$state_key.container"
 
 case "$action" in
   up|start)

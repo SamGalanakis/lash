@@ -31,8 +31,8 @@ fn live_restate_processes_outlive_session_delete_and_cancel_globally() {
 async fn live_restate_processes_outlive_session_delete_and_cancel_globally_inner() {
     let ingress_url = std::env::var("RESTATE_INGRESS_URL")
         .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");
-    let admin_url = std::env::var("RESTATE_ADMIN_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
+    let admin_url =
+        std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
     let endpoint_bind: SocketAddr = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_BIND")
         .unwrap_or_else(|_| "127.0.0.1:19081".to_string())
         .parse()
@@ -143,19 +143,28 @@ finish "started lifecycle gates"
     .await;
     let cancelled = tokio::time::timeout(
         Duration::from_secs(20),
-        harness.state.process_work_driver.await_terminal(&cancellable_id),
+        harness
+            .state
+            .process_work_driver
+            .await_terminal(&cancellable_id),
     )
     .await
     .expect("cancelled process terminal timeout")
     .expect("await cancelled process");
     assert!(
-        matches!(cancelled, lash::process::ProcessAwaitOutput::Cancelled { .. }),
+        matches!(
+            cancelled,
+            lash::process::ProcessAwaitOutput::Cancelled { .. }
+        ),
         "process cancellation settled with the wrong outcome: {cancelled:#?}"
     );
 
     let survived = tokio::time::timeout(
         Duration::from_secs(20),
-        harness.state.process_work_driver.await_terminal(&survivor_id),
+        harness
+            .state
+            .process_work_driver
+            .await_terminal(&survivor_id),
     )
     .await
     .expect("surviving process terminal timeout")
@@ -250,8 +259,8 @@ async fn wait_for_process_event(
 async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_inner() {
     let ingress_url = std::env::var("RESTATE_INGRESS_URL")
         .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");
-    let admin_url = std::env::var("RESTATE_ADMIN_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
+    let admin_url =
+        std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
     let endpoint_bind: SocketAddr = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_BIND")
         .unwrap_or_else(|_| "127.0.0.1:19081".to_string())
         .parse()
@@ -279,7 +288,8 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
             let release_first_provider_call = Arc::clone(&release_first_provider_call_for_provider);
             let response_index = Arc::clone(&response_index_for_provider);
             async move {
-                let serialized = serde_json::to_string(&request).expect("serialize provider request");
+                let serialized =
+                    serde_json::to_string(&request).expect("serialize provider request");
                 requests
                     .lock()
                     .expect("provider request lock")
@@ -316,11 +326,9 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
     wait_for_endpoint_socket(endpoint_bind).await;
     register_restate_deployment(&admin_url, &endpoint_url).await;
 
-    let turn_invocation_id = run_workbench_turn_via_restate(
-        &harness.state,
-        "initial turn input_ingress_gate=true",
-    )
-    .await;
+    let turn_invocation_id =
+        run_workbench_turn_via_restate(&harness.state, "initial turn input_ingress_gate=true")
+            .await;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(20), provider_call_rx.recv())
             .await
@@ -409,7 +417,8 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
         })
         .count();
     assert_eq!(
-        completed_in_running_turn, 1,
+        completed_in_running_turn,
+        1,
         "active-turn input must complete exactly once under the in-flight turn id; trace={} ",
         trace_tail(&harness.trace_path)
     );
@@ -429,14 +438,20 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
         .await
         .expect("open settled ingress session");
     let read_view = session.read_view();
-    assert_eq!(read_view.turn_index(), 2, "queued input must commit its own turn");
+    assert_eq!(
+        read_view.turn_index(),
+        2,
+        "queued input must commit its own turn"
+    );
     let committed = read_view
         .messages()
         .iter()
         .map(lash::message_text)
         .collect::<Vec<_>>();
     assert!(
-        committed.iter().any(|text| text.contains("queued next marker")),
+        committed
+            .iter()
+            .any(|text| text.contains("queued next marker")),
         "queued input missing from committed transcript: {committed:#?}"
     );
     assert!(
@@ -458,10 +473,16 @@ async fn live_restate_turn_input_ingress_delivers_once_and_queues_after_settle_i
 }
 
 async fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable_inner() {
+    for backend in ["sqlite", "postgres"] {
+        live_restate_ingress_owner_restart_for_store(backend).await;
+    }
+}
+
+async fn live_restate_ingress_owner_restart_for_store(backend: &'static str) {
     let ingress_url = std::env::var("RESTATE_INGRESS_URL")
         .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");
-    let admin_url = std::env::var("RESTATE_ADMIN_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
+    let admin_url =
+        std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
     let endpoint_bind: SocketAddr = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_BIND")
         .unwrap_or_else(|_| "127.0.0.1:19081".to_string())
         .parse()
@@ -469,19 +490,19 @@ async fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable_inne
     let endpoint_url = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_URL")
         .unwrap_or_else(|_| format!("http://{endpoint_bind}"));
     let data_dir = std::env::temp_dir().join(format!(
-        "agent-workbench-recovery-e2e-{}",
+        "agent-workbench-recovery-{backend}-e2e-{}",
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&data_dir).expect("create recovery E2E data dir");
-    let session_id = "workbench-recovery-e2e".to_string();
-    let turn_id = "workbench-turn-recovery-e2e".to_string();
+    let session_id = format!("workbench-recovery-{backend}-e2e");
+    let turn_id = format!("workbench-turn-recovery-{backend}-e2e");
     std::fs::write(data_dir.join("session-id"), &session_id)
         .expect("write recovery E2E session id");
     let active_turns = ActiveTurns::persistent(data_dir.join("active-turns.json"))
         .expect("open recovery E2E active-turn routing");
     active_turns.insert(&session_id, &turn_id);
 
-    let mut first = spawn_recovery_e2e_child(&data_dir, endpoint_bind, &ingress_url);
+    let mut first = spawn_recovery_e2e_child(&data_dir, endpoint_bind, &ingress_url, backend);
     let first_pid = first.id().expect("first recovery child pid");
     wait_for_endpoint_socket(endpoint_bind).await;
     register_restate_deployment(&admin_url, &endpoint_url).await;
@@ -507,18 +528,20 @@ async fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable_inne
     )
     .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let first_generation = session_lease_generation(&data_dir);
+    let first_generation = session_lease_generation(&data_dir, backend, &session_id).await;
 
     first.kill().await.expect("kill first ingress owner");
     first.wait().await.expect("reap first ingress owner");
 
     let restart_started = tokio::time::Instant::now();
-    let mut replacement = spawn_recovery_e2e_child(&data_dir, endpoint_bind, &ingress_url);
+    let mut replacement = spawn_recovery_e2e_child(&data_dir, endpoint_bind, &ingress_url, backend);
     let _replacement_pid = replacement.id().expect("replacement recovery child pid");
     wait_for_endpoint_socket(endpoint_bind).await;
     register_restate_deployment(&admin_url, &endpoint_url).await;
     wait_for_session_lease_generation(
         &data_dir,
+        backend,
+        &session_id,
         first_generation + 1,
         Duration::from_secs(10),
     )
@@ -528,7 +551,7 @@ async fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable_inne
         "replacement waited for the session lease TTL instead of fencing the dead owner"
     );
     assert_eq!(
-        session_lease_generation(&data_dir),
+        session_lease_generation(&data_dir, backend, &session_id).await,
         first_generation + 1,
         "replacement must resume under a superseding session-lease generation"
     );
@@ -547,7 +570,7 @@ async fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable_inne
         .request_cancel(
             lash::TurnCancelRequest::new(
                 address.clone(),
-                "workbench-recovery-e2e-cancel",
+                format!("workbench-recovery-{backend}-e2e-cancel"),
                 Some("user".to_string()),
             )
             .with_reason("deterministic ingress-owner restart gate"),
@@ -574,11 +597,17 @@ async fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable_inne
         panic!("recovered turn returned non-committed terminal: {terminal:#?}");
     };
     assert!(
-        matches!(outcome, lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)),
+        matches!(
+            outcome,
+            lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
+        ),
         "recovered turn did not commit Cancelled: {outcome:#?}"
     );
     let evidence = cancellation.expect("Cancelled terminal must carry evidence");
-    assert_eq!(evidence.request_id, "workbench-recovery-e2e-cancel");
+    assert_eq!(
+        evidence.request_id,
+        format!("workbench-recovery-{backend}-e2e-cancel")
+    );
     assert_eq!(evidence.origin.as_deref(), Some("user"));
     assert_eq!(
         evidence.reason.as_deref(),
@@ -586,6 +615,7 @@ async fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable_inne
     );
     replacement.kill().await.expect("stop replacement child");
     replacement.wait().await.expect("reap replacement child");
+    println!("workbench ingress-owner restart gate passed: backend={backend}");
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
@@ -593,6 +623,7 @@ fn spawn_recovery_e2e_child(
     data_dir: &std::path::Path,
     endpoint_bind: SocketAddr,
     ingress_url: &str,
+    backend: &str,
 ) -> tokio::process::Child {
     let mut command = tokio::process::Command::new(
         std::env::current_exe().expect("resolve workbench test executable"),
@@ -603,6 +634,7 @@ fn spawn_recovery_e2e_child(
         .arg("--nocapture")
         .env("AGENT_WORKBENCH_RECOVERY_E2E_CHILD", "1")
         .env("AGENT_WORKBENCH_RECOVERY_E2E_DATA_DIR", data_dir)
+        .env("AGENT_WORKBENCH_RECOVERY_E2E_BACKEND", backend)
         .env(
             "AGENT_WORKBENCH_RECOVERY_E2E_ENDPOINT_BIND",
             endpoint_bind.to_string(),
@@ -614,8 +646,7 @@ fn spawn_recovery_e2e_child(
 
 async fn live_restate_recovery_child() {
     let data_dir = PathBuf::from(
-        std::env::var("AGENT_WORKBENCH_RECOVERY_E2E_DATA_DIR")
-            .expect("recovery child data dir"),
+        std::env::var("AGENT_WORKBENCH_RECOVERY_E2E_DATA_DIR").expect("recovery child data dir"),
     );
     let endpoint_bind: SocketAddr = std::env::var("AGENT_WORKBENCH_RECOVERY_E2E_ENDPOINT_BIND")
         .expect("recovery child endpoint bind")
@@ -623,6 +654,16 @@ async fn live_restate_recovery_child() {
         .expect("valid recovery child endpoint bind");
     let ingress_url =
         std::env::var("RESTATE_INGRESS_URL").expect("recovery child Restate ingress URL");
+    let backend = std::env::var("AGENT_WORKBENCH_RECOVERY_E2E_BACKEND")
+        .expect("recovery child store backend");
+    let database_url = match backend.as_str() {
+        "sqlite" => None,
+        "postgres" => Some(
+            std::env::var("AGENT_WORKBENCH_E2E_DATABASE_URL")
+                .expect("Postgres recovery E2E database URL"),
+        ),
+        other => panic!("unsupported recovery E2E backend `{other}`"),
+    };
     let provider_owner_path = data_dir.join("provider-owner");
     let provider = lash::testing::TestProvider::builder()
         .kind("workbench-recovery-e2e")
@@ -642,12 +683,13 @@ async fn live_restate_recovery_child() {
         .expect("open child active-turn routing");
     let session_ids = WorkbenchSessionIds::persistent(data_dir.join("session-id"))
         .expect("open child session id");
-    let harness = live_workbench_restate_state_with_provider(
+    let harness = live_workbench_restate_state_with_provider_and_database(
         &data_dir,
         ingress_url,
         provider,
         session_ids,
         active_turns,
+        database_url.as_deref(),
     )
     .await;
     restate::spawn_restate_endpoint(
@@ -659,11 +701,7 @@ async fn live_restate_recovery_child() {
     std::future::pending::<()>().await;
 }
 
-async fn wait_for_provider_owner(
-    data_dir: &std::path::Path,
-    expected_pid: u32,
-    timeout: Duration,
-) {
+async fn wait_for_provider_owner(data_dir: &std::path::Path, expected_pid: u32, timeout: Duration) {
     let path = data_dir.join("provider-owner");
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -683,32 +721,58 @@ async fn wait_for_provider_owner(
     }
 }
 
-fn session_lease_generation(data_dir: &std::path::Path) -> i64 {
-    let sessions_dir = data_dir.join("lash-sessions");
-    let database_path = std::fs::read_dir(&sessions_dir)
-        .expect("read recovery E2E session store directory")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|extension| extension == "db"))
-        .expect("locate recovery E2E SQLite session store");
-    rusqlite::Connection::open(database_path)
-        .expect("open recovery E2E SQLite session store")
-        .query_row(
-            "SELECT lease_fencing_token FROM session_execution_leases",
-            [],
-            |row| row.get(0),
-        )
-        .expect("read recovery E2E session lease generation")
+async fn session_lease_generation(
+    data_dir: &std::path::Path,
+    backend: &str,
+    session_id: &str,
+) -> i64 {
+    match backend {
+        "sqlite" => {
+            let sessions_dir = data_dir.join("lash-sessions");
+            let database_path = std::fs::read_dir(&sessions_dir)
+                .expect("read recovery E2E session store directory")
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| path.extension().is_some_and(|extension| extension == "db"))
+                .expect("locate recovery E2E SQLite session store");
+            rusqlite::Connection::open(database_path)
+                .expect("open recovery E2E SQLite session store")
+                .query_row(
+                    "SELECT lease_fencing_token FROM session_execution_leases",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read recovery E2E SQLite session lease generation")
+        }
+        "postgres" => {
+            let database_url = std::env::var("AGENT_WORKBENCH_E2E_DATABASE_URL")
+                .expect("Postgres recovery E2E database URL");
+            let pool = sqlx::PgPool::connect(&database_url)
+                .await
+                .expect("connect to recovery E2E Postgres");
+            sqlx::query_scalar(
+                "SELECT lease_fencing_token FROM lash_session_execution_leases
+                 WHERE session_id = $1",
+            )
+            .bind(session_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read recovery E2E Postgres session lease generation")
+        }
+        other => panic!("unsupported recovery E2E backend `{other}`"),
+    }
 }
 
 async fn wait_for_session_lease_generation(
     data_dir: &std::path::Path,
+    backend: &str,
+    session_id: &str,
     expected: i64,
     timeout: Duration,
 ) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if session_lease_generation(data_dir) == expected {
+        if session_lease_generation(data_dir, backend, session_id).await == expected {
             return;
         }
         assert!(

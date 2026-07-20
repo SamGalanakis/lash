@@ -97,24 +97,34 @@ agent-workbench-restate-e2e:
   node_port="${AGENT_WORKBENCH_RESTATE_NODE_PORT:-15123}"
   endpoint_bind="${AGENT_WORKBENCH_E2E_ENDPOINT_BIND:-127.0.0.1:19081}"
   endpoint_url="${AGENT_WORKBENCH_E2E_ENDPOINT_URL:-http://127.0.0.1:19081}"
+  postgres_container="${AGENT_WORKBENCH_E2E_POSTGRES_CONTAINER:-lash-agent-workbench-postgres-e2e}"
+  postgres_port="${AGENT_WORKBENCH_E2E_POSTGRES_PORT:-15433}"
+  database_url="${AGENT_WORKBENCH_E2E_DATABASE_URL:-postgres://lash:lash@127.0.0.1:$postgres_port/lash}"
   admin_url="${RESTATE_ADMIN_URL:-http://127.0.0.1:$admin_port}"
   ingress_url="${RESTATE_INGRESS_URL:-http://127.0.0.1:$ingress_port}"
   test_output="$(mktemp "${TMPDIR:-/tmp}/lash-agent-workbench-restate-e2e.XXXXXX")"
 
   cleanup() {
     docker rm -f "$container" >/dev/null 2>&1 || true
+    docker rm -f "$postgres_container" >/dev/null 2>&1 || true
     rm -f "$test_output"
   }
   trap cleanup EXIT
   cleanup
 
   bash "{{repo}}/scripts/docker-pull-with-retry.sh" "$image"
+  bash "{{repo}}/scripts/docker-pull-with-retry.sh" postgres:16-alpine
 
   docker run -d --name "$container" --network host \
     -e RESTATE_ADMIN__BIND_PORT="$admin_port" \
     -e RESTATE_INGRESS__BIND_PORT="$ingress_port" \
     -e RESTATE_BIND_PORT="$node_port" \
     "$image" >/dev/null
+  docker run -d --name "$postgres_container" --network host \
+    -e POSTGRES_USER=lash \
+    -e POSTGRES_PASSWORD=lash \
+    -e POSTGRES_DB=lash \
+    postgres:16-alpine -p "$postgres_port" >/dev/null
 
   deadline=$((SECONDS + 60))
   until (echo >"/dev/tcp/127.0.0.1/$admin_port") >/dev/null 2>&1; do
@@ -133,11 +143,20 @@ agent-workbench-restate-e2e:
     fi
     sleep 1
   done
+  until (echo >"/dev/tcp/127.0.0.1/$postgres_port") >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      docker logs "$postgres_container" >&2 || true
+      echo "Postgres port $postgres_port did not become ready" >&2
+      exit 1
+    fi
+    sleep 1
+  done
 
   RESTATE_INGRESS_URL="$ingress_url" \
   RESTATE_ADMIN_URL="$admin_url" \
   AGENT_WORKBENCH_E2E_ENDPOINT_BIND="$endpoint_bind" \
   AGENT_WORKBENCH_E2E_ENDPOINT_URL="$endpoint_url" \
+  AGENT_WORKBENCH_E2E_DATABASE_URL="$database_url" \
   cargo test -p agent-workbench \
     live_restate_ -- --ignored --nocapture --test-threads=1 \
     2>&1 | tee "$test_output"
