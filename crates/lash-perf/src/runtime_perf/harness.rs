@@ -1,4 +1,9 @@
-use std::{fmt::Write as _, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt::Write as _,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use lash::{
     LashCore, TurnOutcome,
@@ -22,8 +27,8 @@ use tokio_util::sync::CancellationToken;
 use super::openai_compat::OpenAiCompatBenchServer;
 use super::providers::{
     BENCHMARK_MAIL_RECEIVED_SOURCE_TYPE, BenchmarkEchoTool, BenchmarkLargeToolCatalog,
-    BenchmarkObliqueTools, BenchmarkWorkbenchMailTool, benchmark_provider,
-    benchmark_stream_profile,
+    BenchmarkObliqueTools, BenchmarkProviderControl, BenchmarkWorkbenchMailTool,
+    benchmark_provider, benchmark_provider_with_control, benchmark_stream_profile,
 };
 use super::scenarios::{ExecutionMode, RuntimePerfScenario};
 use super::store::{RuntimePerfStore, RuntimePerfStoreFactory};
@@ -104,6 +109,7 @@ pub(crate) struct BenchmarkRuntime {
     core: BenchmarkCore,
     session: Option<lash::LashSession>,
     store: Option<Arc<RuntimePerfStore>>,
+    provider_control: Option<Arc<BenchmarkProviderControl>>,
     _openai_compat_server: Option<OpenAiCompatBenchServer>,
 }
 
@@ -209,6 +215,130 @@ impl BenchmarkRuntime {
             )
             .await
             .map_err(anyhow::Error::from)
+    }
+
+    pub(crate) async fn run_turn_with_id(
+        &self,
+        input: lash::TurnInput,
+        turn_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<lash::TurnResult> {
+        let session = self.session.as_ref().expect("benchmark session");
+        let effect_host = session.effect_host();
+        let scoped_effect_controller = effect_host
+            .scoped(lash::runtime::ExecutionScope::turn(
+                session.session_id(),
+                turn_id,
+            ))
+            .map_err(anyhow::Error::from)?;
+        session
+            .turn(input)
+            .turn_id(turn_id)
+            .cancel(cancel)
+            .advanced()
+            .collect_session_events_with_scope(
+                &lash::runtime::NoopEventSink,
+                scoped_effect_controller,
+            )
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    pub(crate) async fn enqueue_active_turn_input(
+        &self,
+        turn_id: &str,
+        input: lash::TurnInput,
+        source_id: &str,
+    ) -> anyhow::Result<lash_core::PendingTurnInput> {
+        self.session
+            .as_ref()
+            .expect("benchmark session")
+            .enqueue(input)
+            .id(source_id)
+            .ingress(lash_core::TurnInputIngress::active_turn(
+                turn_id,
+                lash_core::TurnInputCheckpointBoundary::AfterWork,
+            ))
+            .send()
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    pub(crate) async fn run_cancel_round_trip(
+        &self,
+        input: lash::TurnInput,
+        turn_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        request_id: &str,
+    ) -> anyhow::Result<(lash::TurnResult, std::time::Duration)> {
+        let control = self
+            .provider_control
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("cancel round-trip provider control missing"))?;
+        let driver = self.core().turn_work_driver();
+        let address = lash_core::TurnAddress::new(
+            format!(
+                "runtime-perf-{}",
+                RuntimePerfScenario::TurnCancelRoundTrip.name()
+            ),
+            turn_id,
+        );
+        let turn = self.run_turn_with_id(input, turn_id, cancel);
+        tokio::pin!(turn);
+        tokio::select! {
+            () = control.provider_started.notified() => {}
+            result = &mut turn => {
+                return result.and_then(|_| Err(anyhow::anyhow!(
+                    "cancel round-trip turn completed before the provider parked"
+                )));
+            }
+        }
+        let round_trip_started = std::time::Instant::now();
+        let receipt = driver
+            .request_cancel(
+                lash_core::TurnCancelRequest::new(address, request_id, Some("runtime-perf".into()))
+                    .with_reason("measure request-to-token-to-seal"),
+            )
+            .await?;
+        if !matches!(receipt.outcome, lash_core::TurnCancelOutcome::Requested(_)) {
+            anyhow::bail!(
+                "cancel round-trip request did not win the gate: {:?}",
+                receipt.outcome
+            );
+        }
+        turn.await.map(|turn| (turn, round_trip_started.elapsed()))
+    }
+
+    pub(crate) async fn run_ingress_claim_projection(
+        &self,
+        input: lash::TurnInput,
+        turn_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        source_id: &str,
+    ) -> anyhow::Result<(lash::TurnResult, std::time::Duration)> {
+        let control = self
+            .provider_control
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ingress projection provider control missing"))?;
+        let turn = self.run_turn_with_id(input, turn_id, cancel);
+        tokio::pin!(turn);
+        tokio::select! {
+            () = control.provider_started.notified() => {}
+            result = &mut turn => {
+                return result.and_then(|_| Err(anyhow::anyhow!(
+                    "ingress projection turn completed before the first provider call parked"
+                )));
+            }
+        }
+        let projection_started = std::time::Instant::now();
+        self.enqueue_active_turn_input(
+            turn_id,
+            lash::TurnInput::text("ingress projection marker"),
+            source_id,
+        )
+        .await?;
+        control.release_provider.notify_one();
+        turn.await.map(|turn| (turn, projection_started.elapsed()))
     }
 
     pub(crate) async fn run_turn_with_execution_scope(
@@ -495,17 +625,29 @@ pub(crate) async fn build_runtime_with_store(
         .as_ref()
         .map(|server| server.base_url.clone())
         .unwrap_or_else(|| "https://example.invalid/v1".to_string());
-    let provider: ProviderHandle = match scenario {
-        RuntimePerfScenario::OpenAiCompatStream => ProviderHandle::new(
-            OpenAiCompatibleProvider::new("test-key", base_url.clone())
-                .with_options(ProviderOptions {
-                    reliability: ProviderReliability::disabled(),
-                    ..ProviderOptions::default()
-                })
-                .into_components(),
-        ),
-        _ => benchmark_provider(scenario).into_handle(),
-    };
+    let (provider, provider_control): (ProviderHandle, Option<Arc<BenchmarkProviderControl>>) =
+        match scenario {
+            RuntimePerfScenario::OpenAiCompatStream => (
+                ProviderHandle::new(
+                    OpenAiCompatibleProvider::new("test-key", base_url.clone())
+                        .with_options(ProviderOptions {
+                            reliability: ProviderReliability::disabled(),
+                            ..ProviderOptions::default()
+                        })
+                        .into_components(),
+                ),
+                None,
+            ),
+            _ => {
+                let (provider, control) = benchmark_provider_with_control(scenario);
+                (provider.into_handle(), control)
+            }
+        };
+    let effect_host = matches!(scenario, RuntimePerfScenario::TurnStartGate).then(|| {
+        Arc::new(lash_core::InlineEffectHost::new(Arc::new(
+            RetryingStartGateController::default(),
+        ))) as Arc<dyn lash_core::EffectHost>
+    });
     let store = store.unwrap_or_else(|| Arc::new(RuntimePerfStore::default()));
     let mut plugin_stack = standard_tool_stack(StandardToolStackOptions {
         standard_context_approach: standard_context_approach.clone(),
@@ -521,7 +663,9 @@ pub(crate) async fn build_runtime_with_store(
     }
     if matches!(
         scenario,
-        RuntimePerfScenario::RlmSubagentSpawn | RuntimePerfScenario::RlmObliqueStackMix
+        RuntimePerfScenario::RlmSubagentSpawn
+            | RuntimePerfScenario::RlmObliqueStackMix
+            | RuntimePerfScenario::DeepTurnComposition
     ) {
         plugin_stack.push(Arc::new(lash_subagents::SubagentsPluginFactory::new(
             Arc::new(lash_subagents::CapabilityRegistry::new().with(Arc::new(
@@ -544,7 +688,10 @@ pub(crate) async fn build_runtime_with_store(
             PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolCatalog::default())),
         )));
     }
-    if matches!(scenario, RuntimePerfScenario::RlmTriggerMailPipeline) {
+    if matches!(
+        scenario,
+        RuntimePerfScenario::RlmTriggerMailPipeline | RuntimePerfScenario::DeepTurnComposition
+    ) {
         plugin_stack.push(Arc::new(BenchmarkWorkbenchTriggerPluginFactory));
     }
     let core = match execution_mode {
@@ -554,6 +701,9 @@ pub(crate) async fn build_runtime_with_store(
                 .provider(provider)
                 .model(benchmark_model_spec())
                 .plugins(plugin_stack);
+            if let Some(effect_host) = effect_host.clone() {
+                builder = builder.effect_host(effect_host);
+            }
             if let Some(config) = trace_config {
                 if let Some(path) = config.trace_jsonl_path {
                     builder = builder.trace_jsonl_path(path);
@@ -590,6 +740,9 @@ pub(crate) async fn build_runtime_with_store(
                 .model(benchmark_model_spec())
                 .plugins(plugin_stack)
                 .max_turns(RUNTIME_PERF_MAX_TURNS);
+            if let Some(effect_host) = effect_host {
+                builder = builder.effect_host(effect_host);
+            }
             if let Some(config) = trace_config {
                 if let Some(path) = config.trace_jsonl_path {
                     builder = builder.trace_jsonl_path(path);
@@ -614,8 +767,106 @@ pub(crate) async fn build_runtime_with_store(
         core,
         session: Some(session),
         store: Some(store),
+        provider_control,
         _openai_compat_server: openai_compat_server,
     })
+}
+
+#[derive(Default)]
+struct RetryingStartGateController {
+    attempts_by_key: Mutex<HashMap<String, usize>>,
+}
+
+#[async_trait::async_trait]
+impl lash_core::AwaitEventResolver for RetryingStartGateController {
+    fn supports_durable_effects(&self) -> bool {
+        true
+    }
+
+    async fn await_event_key(
+        &self,
+        scope: &lash_core::ExecutionScope,
+        wait: lash_core::AwaitEventWaitIdentity,
+    ) -> Result<lash_core::AwaitEventKey, lash_core::RuntimeError> {
+        lash_core::InlineRuntimeEffectController
+            .await_event_key(scope, wait)
+            .await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+        resolution: lash_core::Resolution,
+    ) -> Result<lash_core::ResolveOutcome, lash_core::RuntimeError> {
+        lash_core::InlineRuntimeEffectController
+            .resolve_await_event(key, resolution)
+            .await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+    ) -> Result<Option<lash_core::Resolution>, lash_core::RuntimeError> {
+        if matches!(key.wait, lash_core::AwaitEventWaitIdentity::TurnCancelGate) {
+            let mut attempts = self
+                .attempts_by_key
+                .lock()
+                .expect("start gate attempt counter");
+            let attempt = attempts.entry(key.key_id.clone()).or_default();
+            *attempt += 1;
+            if *attempt < 3 {
+                return Err(lash_core::RuntimeError::new(
+                    "runtime_perf_start_gate_retry",
+                    "deterministic start-gate retry fixture",
+                ));
+            }
+        }
+        lash_core::InlineRuntimeEffectController
+            .peek_await_event(key)
+            .await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+        cancel: tokio_util::sync::CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<lash_core::Resolution, lash_core::RuntimeError> {
+        lash_core::InlineRuntimeEffectController
+            .await_await_event(key, cancel, deadline)
+            .await
+    }
+
+    async fn revoke_await_events_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<(), lash_core::RuntimeError> {
+        lash_core::InlineRuntimeEffectController
+            .revoke_await_events_for_session(session_id)
+            .await
+    }
+
+    async fn cancel_await_events_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<(), lash_core::RuntimeError> {
+        lash_core::InlineRuntimeEffectController
+            .cancel_await_events_for_session(session_id)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::RuntimeEffectController for RetryingStartGateController {
+    async fn execute_effect(
+        &self,
+        envelope: lash_core::RuntimeEffectEnvelope,
+        local_executor: lash_core::RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<lash_core::RuntimeEffectOutcome, lash_core::RuntimeEffectControllerError> {
+        lash_core::InlineRuntimeEffectController
+            .execute_effect(envelope, local_executor)
+            .await
+    }
 }
 
 struct BenchmarkWorkbenchTriggerPluginFactory;
@@ -806,6 +1057,7 @@ pub(crate) async fn build_runtime_with_sqlite_store(
         core,
         session: Some(session),
         store: None,
+        provider_control: None,
         _openai_compat_server: None,
     })
 }
@@ -1139,6 +1391,22 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::TurnInputIngressInterrupt => format!(
             "Turn {} in turn-input ingress interrupt benchmark mode. Claim, defer, reclaim, complete, and verify pending turn input.",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::DeepTurnComposition => format!(
+            "Turn {} in the deep-composition stack benchmark. Run the parent process/tool loop and child session, then incorporate the injected active-turn input.",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::TurnStartGate => format!(
+            "Turn {} in the cancellation start-gate benchmark. Reply with exactly: runtime perf benchmark ok",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::TurnCancelRoundTrip => format!(
+            "Turn {} in the cancellation round-trip benchmark. Wait for the exact-turn cancellation request.",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::IngressClaimProjection => format!(
+            "Turn {} in the active-ingress projection benchmark. Continue after the checkpoint and incorporate the injected marker.",
             turn_index + 1
         ),
     }

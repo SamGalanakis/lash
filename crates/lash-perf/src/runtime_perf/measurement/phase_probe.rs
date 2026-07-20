@@ -168,7 +168,11 @@ pub(crate) async fn run_once(
         | RuntimePerfScenario::ToolDiscoverySearch
         | RuntimePerfScenario::ScopedEffectController
         | RuntimePerfScenario::StoreReopen
-        | RuntimePerfScenario::SqliteStoreReopen => {}
+        | RuntimePerfScenario::SqliteStoreReopen
+        | RuntimePerfScenario::DeepTurnComposition
+        | RuntimePerfScenario::TurnStartGate
+        | RuntimePerfScenario::TurnCancelRoundTrip
+        | RuntimePerfScenario::IngressClaimProjection => {}
     }
 
     let total_started = Instant::now();
@@ -297,6 +301,18 @@ pub(crate) async fn run_once(
         }
         prepare_turn(&mut runtime, scenario, turn_index).await?;
 
+        let deep_turn_id = matches!(scenario, RuntimePerfScenario::DeepTurnComposition)
+            .then(|| format!("runtime-perf-deep-turn-{}", lash_core::TurnActivityId::fresh().0));
+        if let Some(turn_id) = deep_turn_id.as_deref() {
+            runtime
+                .enqueue_active_turn_input(
+                    turn_id,
+                    TurnInput::text("deep composition ingress marker"),
+                    &format!("deep-composition-ingress-{}", turn_index + 1),
+                )
+                .await?;
+        }
+
         let phase_probe = Arc::new(RuntimePerfPhaseProbe::default());
         runtime.set_turn_phase_probe(phase_probe.clone()).await;
 
@@ -338,6 +354,71 @@ pub(crate) async fn run_once(
                 runtime.run_turn_with_execution_scope(turn_input, cancel, scoped_effect_controller),
             )
             .await
+        } else if matches!(scenario, RuntimePerfScenario::TurnCancelRoundTrip) {
+            let turn_id = format!(
+                "runtime-perf-cancel-round-trip-{}",
+                lash_core::TurnActivityId::fresh().0
+            );
+            let (turn, duration) = runtime_perf_timed(
+                scenario,
+                turn_index,
+                "run_turn",
+                Some(cancel.clone()),
+                runtime.run_cancel_round_trip(
+                    turn_input,
+                    &turn_id,
+                    cancel,
+                    &format!("runtime-perf-cancel-request-{}", turn_index + 1),
+                ),
+            )
+            .await?;
+            extra_phase_profile.insert(
+                "turn_cancel.request_to_token_to_seal".to_string(),
+                RuntimePerfPhaseRunResult {
+                    samples: 1,
+                    duration_ms: round3(duration.as_secs_f64() * 1000.0),
+                    allocations: zero_allocation_delta(),
+                    rss_growth_kb: None,
+                },
+            );
+            Ok(turn)
+        } else if matches!(scenario, RuntimePerfScenario::IngressClaimProjection) {
+            let turn_id = format!(
+                "runtime-perf-ingress-projection-{}",
+                lash_core::TurnActivityId::fresh().0
+            );
+            let (turn, duration) = runtime_perf_timed(
+                scenario,
+                turn_index,
+                "run_turn",
+                Some(cancel.clone()),
+                runtime.run_ingress_claim_projection(
+                    turn_input,
+                    &turn_id,
+                    cancel,
+                    &format!("runtime-perf-ingress-projection-{}", turn_index + 1),
+                ),
+            )
+            .await?;
+            extra_phase_profile.insert(
+                "turn_input_ingress.enqueue_to_claim_to_projection".to_string(),
+                RuntimePerfPhaseRunResult {
+                    samples: 1,
+                    duration_ms: round3(duration.as_secs_f64() * 1000.0),
+                    allocations: zero_allocation_delta(),
+                    rss_growth_kb: None,
+                },
+            );
+            Ok(turn)
+        } else if let Some(turn_id) = deep_turn_id.as_deref() {
+            runtime_perf_timed(
+                scenario,
+                turn_index,
+                "run_turn",
+                Some(cancel.clone()),
+                runtime.run_turn_with_id(turn_input, turn_id, cancel),
+            )
+            .await
         } else {
             runtime_perf_timed(
                 scenario,
@@ -355,7 +436,13 @@ pub(crate) async fn run_once(
                 turn_index + 1
             )
         })?;
-        validate_runtime_perf_turn(scenario, turn_index, &turn)?;
+        if matches!(scenario, RuntimePerfScenario::TurnCancelRoundTrip) {
+            if !matches!(turn.outcome, TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)) {
+                anyhow::bail!("cancel round-trip turn did not finish cancelled: {:?}", turn.outcome);
+            }
+        } else {
+            validate_runtime_perf_turn(scenario, turn_index, &turn)?;
+        }
         let run_turn_ms = elapsed_ms(turn_started);
         let run_turn_alloc = alloc_delta(turn_before_alloc, allocator_stats());
         let after_turn_memory = process_memory_sample();

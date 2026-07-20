@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use lash_core::llm::types::{
@@ -28,8 +31,36 @@ pub(crate) struct BenchmarkStreamProfile {
     pub(crate) parts: Vec<LlmOutputPart>,
 }
 
+pub(crate) struct BenchmarkProviderControl {
+    pub(crate) provider_started: tokio::sync::Notify,
+    pub(crate) release_provider: tokio::sync::Notify,
+    provider_calls: AtomicUsize,
+}
+
+impl BenchmarkProviderControl {
+    fn new() -> Self {
+        Self {
+            provider_started: tokio::sync::Notify::new(),
+            release_provider: tokio::sync::Notify::new(),
+            provider_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
 pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider {
-    TestProvider::builder()
+    benchmark_provider_with_control(scenario).0
+}
+
+pub(crate) fn benchmark_provider_with_control(
+    scenario: RuntimePerfScenario,
+) -> (TestProvider, Option<Arc<BenchmarkProviderControl>>) {
+    let control = matches!(
+        scenario,
+        RuntimePerfScenario::TurnCancelRoundTrip | RuntimePerfScenario::IngressClaimProjection
+    )
+    .then(|| Arc::new(BenchmarkProviderControl::new()));
+    let completion_control = control.clone();
+    let provider = TestProvider::builder()
         .kind("benchmark")
         .serialize_config(move || {
             serde_json::json!({
@@ -37,49 +68,82 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
             })
         })
         .requires_streaming(true)
-        .complete(move |req| async move {
-            let profile = benchmark_stream_profile_for_request(scenario, &req);
-            let usage = LlmUsage {
-                input_tokens: 1_024,
-                output_tokens: 64,
-                cache_read_input_tokens: 512,
-                cache_write_input_tokens: 0,
-                reasoning_output_tokens: 48,
-            };
-            if let Some(tx) = req.stream_events.as_ref() {
-                if profile.deltas.is_empty() {
-                    for part in &profile.parts {
-                        tx.send(LlmStreamEvent::Part(part.clone()));
-                    }
-                } else {
-                    for delta in &profile.deltas {
-                        tx.send(LlmStreamEvent::Delta(delta.clone()));
-                    }
+        .complete(move |req| {
+            let completion_control = completion_control.clone();
+            async move {
+                if matches!(scenario, RuntimePerfScenario::TurnCancelRoundTrip) {
+                    completion_control
+                        .as_ref()
+                        .expect("cancel round-trip control")
+                        .provider_started
+                        .notify_one();
+                    return std::future::pending().await;
                 }
-                tx.send(LlmStreamEvent::Usage(usage.clone()));
+                let ingress_profile =
+                    if matches!(scenario, RuntimePerfScenario::IngressClaimProjection) {
+                        let control = completion_control
+                            .as_ref()
+                            .expect("ingress projection control");
+                        let call_index = control.provider_calls.fetch_add(1, Ordering::SeqCst);
+                        if call_index.is_multiple_of(2) {
+                            control.provider_started.notify_one();
+                            control.release_provider.notified().await;
+                            Some(text_profile(lashlang_block(
+                                r#"print("checkpoint before projection")"#,
+                            )))
+                        } else {
+                            Some(text_profile(lashlang_block(
+                                r#"finish "runtime perf benchmark ok""#,
+                            )))
+                        }
+                    } else {
+                        None
+                    };
+                let profile = ingress_profile
+                    .unwrap_or_else(|| benchmark_stream_profile_for_request(scenario, &req));
+                let usage = LlmUsage {
+                    input_tokens: 1_024,
+                    output_tokens: 64,
+                    cache_read_input_tokens: 512,
+                    cache_write_input_tokens: 0,
+                    reasoning_output_tokens: 48,
+                };
+                if let Some(tx) = req.stream_events.as_ref() {
+                    if profile.deltas.is_empty() {
+                        for part in &profile.parts {
+                            tx.send(LlmStreamEvent::Part(part.clone()));
+                        }
+                    } else {
+                        for delta in &profile.deltas {
+                            tx.send(LlmStreamEvent::Delta(delta.clone()));
+                        }
+                    }
+                    tx.send(LlmStreamEvent::Usage(usage.clone()));
+                }
+                let parts = if profile.parts.is_empty() {
+                    vec![LlmOutputPart::Text {
+                        text: profile.full_text.clone(),
+                        response_meta: None,
+                    }]
+                } else {
+                    profile.parts
+                };
+                Ok(LlmResponse {
+                    full_text: profile.full_text.clone(),
+                    parts,
+                    usage,
+                    terminal_reason: lash_core::LlmTerminalReason::Stop,
+                    terminal_diagnostic: None,
+                    provider_usage: None,
+                    request_body: None,
+                    http_summary: None,
+                    execution_evidence: None,
+                    response_metadata: Default::default(),
+                })
             }
-            let parts = if profile.parts.is_empty() {
-                vec![LlmOutputPart::Text {
-                    text: profile.full_text.clone(),
-                    response_meta: None,
-                }]
-            } else {
-                profile.parts
-            };
-            Ok(LlmResponse {
-                full_text: profile.full_text.clone(),
-                parts,
-                usage,
-                terminal_reason: lash_core::LlmTerminalReason::Stop,
-                terminal_diagnostic: None,
-                provider_usage: None,
-                request_body: None,
-                http_summary: None,
-                execution_evidence: None,
-                response_metadata: Default::default(),
-            })
         })
-        .build()
+        .build();
+    (provider, control)
 }
 
 #[derive(Default)]
@@ -254,6 +318,7 @@ async fn execute_benchmark_mail_send(
         "text": text,
     });
     let idempotency_key = format!("{replay_key}:mail.received:{account}");
+    let _phase = call.context.named_phase("trigger.occurrence_to_delivery");
     if let Err(err) = call
         .context
         .triggers()
@@ -1217,9 +1282,19 @@ fn benchmark_stream_profile_for_request(
 ) -> BenchmarkStreamProfile {
     if matches!(
         scenario,
-        RuntimePerfScenario::RlmSubagentSpawn | RuntimePerfScenario::RlmObliqueStackMix
+        RuntimePerfScenario::RlmSubagentSpawn
+            | RuntimePerfScenario::RlmObliqueStackMix
+            | RuntimePerfScenario::DeepTurnComposition
     ) && request_text(request).contains("Subagent capability: default. Depth: 1/5.")
     {
+        if matches!(scenario, RuntimePerfScenario::DeepTurnComposition) {
+            return text_profile(lashlang_block(
+                r#"
+sleep for "0ms"
+result = await tools.benchmark_async({ value: len(chunk), delay_ms: 0 })?
+finish { len: result.value }"#,
+            ));
+        }
         return text_profile(lashlang_block("finish { len: len(chunk) }"));
     }
 
@@ -1635,10 +1710,7 @@ second_pool = await obliq.search({
   candidate_pool: 512
 })?
 
-candidate_ids = []
-for match in first_pool.matches {
-  candidate_ids = push(candidate_ids, match.doc_id)
-}
+candidate_ids = [match.doc_id for match in first_pool.matches]
 for match in second_pool.matches {
   candidate_ids = push(candidate_ids, match.doc_id)
 }
@@ -1661,6 +1733,37 @@ print {
 }
 
 finish "runtime perf benchmark ok""#,
+            );
+            text_profile(text)
+        }
+        RuntimePerfScenario::IngressClaimProjection => {
+            if request_text(request).contains("ingress projection marker") {
+                text_profile(lashlang_block(r#"finish "runtime perf benchmark ok""#))
+            } else {
+                text_profile(lashlang_block(r#"print("checkpoint before projection")"#))
+            }
+        }
+        RuntimePerfScenario::DeepTurnComposition => {
+            if request_text(request).contains("deep composition ingress marker") {
+                return text_profile(lashlang_block(r#"finish "runtime perf benchmark ok""#));
+            }
+            let text = lashlang_block(
+                r#"
+process deep_child(agents: Agents, tool: Tools) {
+  pending = await tool.benchmark_async({ value: "parent tool loop", delay_ms: 0 })?
+  sleep for "0ms"
+  child = await agents.spawn({
+    capability: "default",
+    task: "Use the seeded chunk and return its length after the durable waits.",
+    seed: { chunk: ["parent", "child", "tool", "wait"] },
+    output: Type { len: int }
+  })?
+  finish { pending: pending.value, child: child.len }
+}
+
+handle = start deep_child(agents: agents, tool: tools)
+result = (await handle)?
+print result"#,
             );
             text_profile(text)
         }

@@ -1,14 +1,21 @@
 {
+  "runtime_stack": {
+    "deep_turn_composition": {
+      "budget_bytes": 2293760,
+      "headroom_percent": 25,
+      "measured_minimum_passing_bytes": 1835008
+    }
+  },
   "lashlang": {
     "perf": {
       "default": {
-        "allocated_bytes_per_iter_max": 2000000,
-        "allocations_per_iter_max": 50000
+        "allocated_bytes_per_iter_max": 2200000,
+        "allocations_per_iter_max": 12000
       }
     },
     "profile": {
       "default": {
-        "instructions_per_iter_max": 500000
+        "instructions_per_iter_max": 12000
       }
     }
   }
