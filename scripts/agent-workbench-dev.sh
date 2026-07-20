@@ -294,7 +294,7 @@ ensure_restate() {
   command -v docker >/dev/null 2>&1 || die "Restate is not running and docker is unavailable"
   log "starting Restate container $restate_container from $restate_image"
   docker rm -f "$restate_container" >/dev/null 2>&1 || true
-  docker run -d --rm \
+  docker run -d \
     --name "$restate_container" \
     --network host \
     -e RESTATE_INGRESS__BIND_PORT="$ingress_port" \
@@ -316,7 +316,7 @@ ensure_restate() {
 }
 
 ensure_postgres() {
-  (( postgres_enabled )) || return
+  (( postgres_enabled )) || return 0
   if tcp_ready "$postgres_host" "$postgres_port"; then
     log "using existing Postgres at $postgres_host:$postgres_port"
     return
@@ -325,7 +325,7 @@ ensure_postgres() {
   command -v docker >/dev/null 2>&1 || die "Postgres is not running and docker is unavailable"
   log "starting Postgres container $postgres_container from $postgres_image"
   docker rm -f "$postgres_container" >/dev/null 2>&1 || true
-  docker run -d --rm \
+  docker run -d \
     --name "$postgres_container" \
     --network host \
     -e POSTGRES_USER=lash \
