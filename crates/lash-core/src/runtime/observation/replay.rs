@@ -244,15 +244,14 @@ pub enum LiveReplaySubscribeResult {
     Gap(LiveReplayGapReason),
 }
 
+type LiveReplayRecvResult = (
+    Result<Arc<SessionObservationEvent>, broadcast::error::RecvError>,
+    broadcast::Receiver<Arc<SessionObservationEvent>>,
+);
+
 pub struct LiveReplaySubscription {
     replay: VecDeque<Arc<SessionObservationEvent>>,
-    receiver: ReusableBoxFuture<
-        'static,
-        (
-            Result<Arc<SessionObservationEvent>, broadcast::error::RecvError>,
-            broadcast::Receiver<Arc<SessionObservationEvent>>,
-        ),
-    >,
+    receiver: ReusableBoxFuture<'static, LiveReplayRecvResult>,
     closed: bool,
 }
 
@@ -279,10 +278,7 @@ impl LiveReplaySubscription {
 
 async fn live_replay_recv(
     mut receiver: broadcast::Receiver<Arc<SessionObservationEvent>>,
-) -> (
-    Result<Arc<SessionObservationEvent>, broadcast::error::RecvError>,
-    broadcast::Receiver<Arc<SessionObservationEvent>>,
-) {
+) -> LiveReplayRecvResult {
     let result = receiver.recv().await;
     (result, receiver)
 }
