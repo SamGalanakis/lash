@@ -1540,6 +1540,47 @@ fn runtime_invocation(kind: RuntimeEffectKind, effect_id: &str) -> RuntimeInvoca
     )
 }
 
+#[test]
+fn restate_turn_cancel_race_excludes_process_owned_waits() {
+    let process_sleep = RuntimeInvocation::effect(
+        lash_core::runtime::RuntimeScope::for_turn("session", "turn", 1, 0),
+        "parent:process:worker:sleep:1",
+        RuntimeEffectKind::Sleep,
+        "session:turn:1:0:process:worker:sleep:1",
+    );
+    assert!(
+        restate_timer_turn_cancel_wait_request(&process_sleep)
+            .expect("process sleep classification")
+            .is_none(),
+        "background process sleep must outlive its originating turn"
+    );
+
+    let process_wait = restate_await_event_key(
+        &ExecutionScope::process("worker"),
+        AwaitEventWaitIdentity::process_signal("worker", "continue", 1),
+    )
+    .expect("process wait key");
+    assert!(
+        restate_await_event_turn_cancel_wait_request(
+            &runtime_invocation(RuntimeEffectKind::AwaitEvent, "process-wait"),
+            &process_wait,
+        )
+        .expect("process await-event classification")
+        .is_none(),
+        "background process await-event must outlive its originating turn"
+    );
+
+    assert!(
+        restate_timer_turn_cancel_wait_request(&runtime_invocation(
+            RuntimeEffectKind::Sleep,
+            "turn-sleep",
+        ))
+        .expect("turn sleep classification")
+        .is_some(),
+        "foreground turn sleep must observe the durable cancellation gate"
+    );
+}
+
 #[tokio::test]
 async fn restate_controller_executes_atomic_effect_inside_run() {
     let context = Arc::new(RecordingContext::default());

@@ -453,6 +453,32 @@ fn restate_turn_cancel_wait_request(
     )))
 }
 
+fn restate_timer_turn_cancel_wait_request(
+    invocation: &RuntimeInvocation,
+) -> Result<Option<RestateDurableWaitAwaitRequest>, RuntimeEffectControllerError> {
+    // Process interpreter effects retain their originating turn scope for
+    // causal tracing, but their stable replay identity is deliberately
+    // namespaced with `process:`. They outlive that foreground turn and must
+    // not inherit its cancellation gate.
+    if invocation
+        .replay_key()
+        .is_some_and(|key| key.starts_with("process:") || key.contains(":process:"))
+    {
+        return Ok(None);
+    }
+    restate_turn_cancel_wait_request(invocation)
+}
+
+fn restate_await_event_turn_cancel_wait_request(
+    invocation: &RuntimeInvocation,
+    key: &AwaitEventKey,
+) -> Result<Option<RestateDurableWaitAwaitRequest>, RuntimeEffectControllerError> {
+    if !matches!(key.scope, ExecutionScope::Turn { .. }) {
+        return Ok(None);
+    }
+    restate_turn_cancel_wait_request(invocation)
+}
+
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 struct RecordedRuntimeEffect {
     envelope_hash: String,
@@ -3469,7 +3495,7 @@ where
                     unreachable!("timer execution is only selected for sleep effects");
                 };
                 let duration = Duration::from_millis(*duration_ms);
-                let turn_cancel = restate_turn_cancel_wait_request(&envelope.invocation)?;
+                let turn_cancel = restate_timer_turn_cancel_wait_request(&envelope.invocation)?;
                 let cancellation = local_executor.into_sleep_cancellation();
                 match self
                     .context
@@ -3503,7 +3529,8 @@ where
                     deadline,
                     clock,
                 } = local_executor.into_await_event_options()?;
-                let turn_cancel = restate_turn_cancel_wait_request(&envelope.invocation)?;
+                let turn_cancel =
+                    restate_await_event_turn_cancel_wait_request(&envelope.invocation, &key)?;
                 match self
                     .context
                     .await_event_or_turn_cancel(
