@@ -78,6 +78,7 @@
                 .expect("commit pre-restart turn");
             crate::restate::commit_assistant_transcript(
                 &first_session,
+                turn_id,
                 output
                     .final_value()
                     .and_then(serde_json::Value::as_str)
@@ -87,6 +88,18 @@
             .await
             .expect("commit assistant transcript");
         }
+        crate::restate::commit_assistant_transcript(
+            &first_session,
+            "resume-turn-one",
+            "resume answer one".to_string(),
+        )
+        .await
+        .expect("replay first assistant transcript after a later turn");
+        assert_eq!(
+            first_session.read_view().messages().len(),
+            4,
+            "turn replay must not append a duplicate assistant message"
+        );
         assert_eq!(first_session.read_view().turn_index(), 2);
         first_session.close().await.expect("close first session");
         drop(first_core);
@@ -195,6 +208,7 @@
             .expect("commit resumed turn");
         crate::restate::commit_assistant_transcript(
             &resumed_session,
+            "resume-turn-three",
             resumed_output
                 .final_value()
                 .and_then(serde_json::Value::as_str)

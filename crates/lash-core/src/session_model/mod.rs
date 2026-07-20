@@ -60,7 +60,12 @@ pub(crate) async fn send_event(tx: &mpsc::Sender<SessionStreamEvent>, event: Ses
 }
 
 pub(crate) fn plugin_message_to_message(plugin_message: &PluginMessage) -> Message {
-    let message_id = fresh_message_id();
+    let message_id = plugin_message
+        .id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(fresh_message_id);
     let mut parts = if plugin_message.parts.is_empty() {
         vec![Part {
             id: format!("{message_id}.p0"),

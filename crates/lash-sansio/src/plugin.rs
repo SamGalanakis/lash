@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PluginMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub role: MessageRole,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -18,12 +20,18 @@ pub struct PluginMessage {
 impl PluginMessage {
     pub fn text(role: MessageRole, content: impl Into<String>) -> Self {
         Self {
+            id: None,
             role,
             content: content.into(),
             origin: None,
             parts: Vec::new(),
             images: Vec::new(),
         }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     pub fn with_origin(mut self, origin: MessageOrigin) -> Self {

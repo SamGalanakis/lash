@@ -678,6 +678,7 @@ async fn run_user_turn(
     record_turn_output(
         &state,
         &session,
+        &request.turn_id,
         output,
         turn_state,
         "restate_user_turn.completed",
@@ -908,6 +909,7 @@ async fn run_queued_turn(
     record_turn_output(
         &state,
         &session,
+        &request.turn_id,
         output,
         turn_state,
         "restate_queued_turn.completed",
@@ -1027,6 +1029,7 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
 async fn record_turn_output(
     state: &AppState,
     session: &lash::LashSession,
+    turn_id: &str,
     output: lash::TurnResult,
     turn_state: Arc<Mutex<TurnStreamState>>,
     trace_name: &str,
@@ -1057,7 +1060,7 @@ async fn record_turn_output(
     ) {
         state.push_message("event", "turn cancelled");
     } else {
-        commit_assistant_transcript(session, assistant_text.clone()).await?;
+        commit_assistant_transcript(session, turn_id, assistant_text.clone()).await?;
         state.push_message("assistant", assistant_text);
     }
     state.publish(crate::StreamItem::Done);
@@ -1066,26 +1069,28 @@ async fn record_turn_output(
 
 pub(crate) async fn commit_assistant_transcript(
     session: &lash::LashSession,
+    turn_id: &str,
     assistant_text: String,
 ) -> Result<(), AppError> {
+    let message_id = format!("workbench-assistant:{turn_id}");
     let already_committed = session
         .read_view()
         .messages()
-        .last()
-        .is_some_and(|message| {
-            lash::message_role(message) == "assistant"
-                && lash::message_text(message) == assistant_text
-        });
+        .iter()
+        .any(|message| message.id == message_id);
     if already_committed {
         return Ok(());
     }
     session
         .admin()
         .state()
-        .append_messages(vec![lash::plugins::PluginMessage::text(
-            lash::messages::MessageRole::Assistant,
-            assistant_text,
-        )])
+        .append_messages(vec![
+            lash::plugins::PluginMessage::text(
+                lash::messages::MessageRole::Assistant,
+                assistant_text,
+            )
+            .with_id(message_id),
+        ])
         .await
         .map_err(AppError::runtime)
 }
