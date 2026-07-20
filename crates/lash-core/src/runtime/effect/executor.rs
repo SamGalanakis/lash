@@ -379,7 +379,10 @@ pub trait AwaitEventResolver: Send + Sync {
     /// Read a keyed promise without waiting for or resolving it.
     ///
     /// Turn owners use this as a synchronous start gate before beginning a
-    /// new effect. An unresolved promise returns `None` and remains open.
+    /// new effect. Durable owners must perform that read through their
+    /// handler-scoped, replay-aware controller: its result affects subsequent
+    /// command order and therefore must replay identically after an owner
+    /// crash. An unresolved promise returns `None` and remains open.
     async fn peek_await_event(
         &self,
         key: &AwaitEventKey,
