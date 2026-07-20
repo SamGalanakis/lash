@@ -341,6 +341,8 @@ mod turn_control_timeout_tests {
             }] if error.code.as_str() == "turn_terminal_await_timeout"
         ));
         assert!(state.active_turns.for_session(&session_id).is_empty());
+        assert!(ui::INDEX_HTML.contains("turn_terminal_await_timeout"));
+        assert!(ui::INDEX_HTML.contains("turn route cleared · terminal outcome unknown"));
         let recovered = ActiveTurns::persistent(data_dir.join("active-turns.json"))
             .expect("reopen active turns");
         assert!(recovered.for_session(&session_id).is_empty());

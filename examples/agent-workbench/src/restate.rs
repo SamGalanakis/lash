@@ -1101,6 +1101,8 @@ async fn record_turn_output(
         json!({
             "assistant_text": assistant_text.clone(),
             "streamed_prose": streamed_prose,
+            "outcome": &output.outcome,
+            "errors": &output.errors,
             "final_value": output.final_value().cloned(),
             "tool_value": output.tool_value().map(|(tool_name, value)| {
                 json!({
@@ -1110,19 +1112,32 @@ async fn record_turn_output(
             }),
         }),
     );
-    if matches!(
-        output.outcome,
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
-    ) {
-        let message = output
-            .cancellation
-            .as_ref()
-            .map(|evidence| format!("turn stopped · request {}", evidence.request_id))
-            .unwrap_or_else(|| "turn stopped".to_string());
-        state.push_message_for_session(&session.session_id(), "event", message);
-    } else {
-        commit_assistant_transcript(session, turn_id, assistant_text.clone()).await?;
-        state.push_message_for_session(&session.session_id(), "assistant", assistant_text);
+    match &output.outcome {
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => {
+            let message = output
+                .cancellation
+                .as_ref()
+                .map(|evidence| format!("turn stopped · request {}", evidence.request_id))
+                .unwrap_or_else(|| "turn stopped".to_string());
+            state.push_message_for_session(&session.session_id(), "event", message);
+        }
+        lash::TurnOutcome::Stopped(stop) => {
+            let message = output
+                .errors
+                .last()
+                .map(|issue| issue.message.clone())
+                .unwrap_or_else(|| format!("turn stopped with {stop:?}"));
+            state.push_message_for_session(
+                &session.session_id(),
+                "event",
+                format!("turn failed: {message}"),
+            );
+            state.publish_for_session(&session.session_id(), crate::StreamItem::Error { message });
+        }
+        _ => {
+            commit_assistant_transcript(session, turn_id, assistant_text.clone()).await?;
+            state.push_message_for_session(&session.session_id(), "assistant", assistant_text);
+        }
     }
     state.publish_for_session(&session.session_id(), crate::StreamItem::Done);
     Ok(())

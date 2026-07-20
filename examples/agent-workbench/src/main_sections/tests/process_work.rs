@@ -196,7 +196,7 @@ mod process_work_tests {
             )
             .await
             .expect("fail process");
-        let Json(work) = list_work(State(state.clone()))
+        let Json(work) = list_work(State(state.clone()), Query(SessionQuery::default()))
             .await
             .expect("list failed work");
         let failed = work

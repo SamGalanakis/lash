@@ -108,7 +108,8 @@ Configuration is read from `.env` or the process environment:
   unset in normal use. Accepted values are `auth-failure-once` (one non-retryable 401,
   then recovery), `rate-limit-once` (one retryable 429, then success), `failed-process`
   (starts a Runtime Process that reports a deterministic failure), and `exec-blocked`
-  (parks a foreground Lashlang execution for break-glass practice). These scenarios make
+  (parks the first foreground Lashlang execution for break-glass practice, then lets the
+  next turn prove recovery). These scenarios make
   no provider network calls, print a startup warning, and use the visible
   `dev/failure-paths` model id. Unknown values fail startup.
 

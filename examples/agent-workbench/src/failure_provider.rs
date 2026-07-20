@@ -115,7 +115,9 @@ impl Provider for DevFailureProvider {
                 "<lashlang>\nfinish \"session recovered after provider auth failure\"\n</lashlang>",
             )),
             DevProviderScenario::RateLimitOnce if call == 0 => {
-                send_delta(&request, "retry observer single-copy marker");
+                // Cross the RLM prose boundary before failing so the retry
+                // reset has visible first-attempt output to retract.
+                send_delta(&request, "retry observer single-copy marker\n<lashlang>\n");
                 Err(
                     LlmTransportError::new("development provider rate limit; retry is safe")
                         .with_status(429)
@@ -136,12 +138,16 @@ start FIG425_deterministic_failure()
 finish "started deterministic failing process"
 </lashlang>"#,
             )),
-            DevProviderScenario::ExecBlocked => Ok(streamed_response(
+            DevProviderScenario::ExecBlocked if call == 0 => Ok(streamed_response(
                 &request,
                 r#"<lashlang>
 sleep for "10m"
 finish "exec block unexpectedly returned"
 </lashlang>"#,
+            )),
+            DevProviderScenario::ExecBlocked => Ok(streamed_response(
+                &request,
+                "<lashlang>\nfinish \"session recovered after break glass\"\n</lashlang>",
             )),
         }
     }

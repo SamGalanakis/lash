@@ -2873,7 +2873,10 @@
           const receipt = await response.json();
           const committed = (receipt.cancellations || []).find(item => item.terminal?.status === "committed");
           const evidence = committed?.terminal?.cancellation;
+          const unresolved = (receipt.cancellations || []).find(item =>
+            item.terminal_error?.code === "turn_terminal_await_timeout");
           if (evidence) renderNote("turn stopped · request " + evidence.request_id);
+          else if (unresolved) renderNote("turn route cleared · terminal outcome unknown");
           else if (!receipt.accepted) renderNote("turn already finished");
         })
         .catch(error => renderError("couldn't stop the turn: " + (error.message || error)))

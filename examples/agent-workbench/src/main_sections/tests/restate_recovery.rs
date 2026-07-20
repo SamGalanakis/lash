@@ -156,6 +156,369 @@ fn live_restate_processes_outlive_session_delete_and_cancel_globally() {
     });
 }
 
+#[test]
+#[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
+fn live_restate_provider_auth_failure_terminalizes_and_session_recovers() {
+    run_async_test_on_stack_budget_multi_thread("workbench-auth-failure-e2e", 4, || {
+        live_restate_provider_auth_failure_terminalizes_and_session_recovers_inner()
+    });
+}
+
+#[test]
+#[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
+fn live_restate_rate_limit_retry_converges_observers_to_one_copy() {
+    run_async_test_on_stack_budget_multi_thread("workbench-rate-limit-retry-e2e", 4, || {
+        live_restate_rate_limit_retry_converges_observers_to_one_copy_inner()
+    });
+}
+
+async fn live_restate_provider_auth_failure_terminalizes_and_session_recovers_inner() {
+    let (harness, data_dir) = live_failure_path_harness(
+        "auth-failure",
+        failure_provider::DevProviderScenario::AuthFailureOnce,
+    )
+    .await;
+    let mut product_events = harness.state.event_tx.subscribe();
+    let (failed_invocation, failed_address) =
+        submit_workbench_turn_via_restate(&harness.state, "trigger deterministic auth failure")
+            .await;
+    let terminal = harness
+        .state
+        .core
+        .turn_work_driver()
+        .await_terminal_with_timeout(&failed_address, Duration::from_secs(20))
+        .await
+        .expect("auth failure must publish a turn terminal");
+    let lash::TurnTerminal::Committed {
+        outcome,
+        cancellation,
+        ..
+    } = terminal
+    else {
+        panic!("provider auth failure did not settle through the turn contract: {terminal:#?}");
+    };
+    assert_eq!(
+        outcome,
+        lash::TurnOutcome::Stopped(lash::TurnStop::ProviderError)
+    );
+    assert_eq!(cancellation, None, "provider failure is not cancellation");
+    let invocation = wait_for_restate_invocation_completion(
+        &harness.state,
+        &failed_invocation,
+        Duration::from_secs(20),
+    )
+    .await;
+    assert!(
+        invocation.completed_successfully(),
+        "Restate must durably complete the honest ProviderError turn result"
+    );
+    assert!(
+        harness
+            .state
+            .active_turns
+            .for_session(&failed_address.session_id)
+            .is_empty(),
+        "failed turn left a dangling active route"
+    );
+
+    let mut rendered_error = None;
+    let mut saw_done = false;
+    while rendered_error.is_none() || !saw_done {
+        let event = tokio::time::timeout(Duration::from_secs(5), product_events.recv())
+            .await
+            .expect("failure transcript event timeout")
+            .expect("failure transcript event");
+        if event.session_id != failed_address.session_id {
+            continue;
+        }
+        match event.item {
+            StreamItem::Error { message } => rendered_error = Some(message),
+            StreamItem::Done => saw_done = true,
+            _ => {}
+        }
+    }
+    assert!(
+        rendered_error
+            .as_deref()
+            .is_some_and(|message| message.contains("rejected credentials mid-turn")),
+        "transcript error did not preserve the provider failure: {rendered_error:#?}"
+    );
+    assert!(harness.state.messages_snapshot().iter().any(|message| {
+        message.role == "event"
+            && message.text.contains("turn failed")
+            && message.text.contains("rejected credentials mid-turn")
+            && !message.text.to_ascii_lowercase().contains("cancelled")
+    }));
+
+    let (recovery_invocation, recovery_address) = submit_workbench_turn_via_restate(
+        &harness.state,
+        "prove the same session accepts the next turn",
+    )
+    .await;
+    wait_for_restate_invocation_success(
+        &harness.state,
+        &recovery_invocation,
+        Duration::from_secs(20),
+    )
+    .await;
+    let recovery_terminal = harness
+        .state
+        .core
+        .turn_work_driver()
+        .await_terminal_with_timeout(&recovery_address, Duration::from_secs(20))
+        .await
+        .expect("recovery turn terminal");
+    assert!(
+        matches!(recovery_terminal, lash::TurnTerminal::Committed { .. }),
+        "next turn did not recover: {recovery_terminal:#?}"
+    );
+    wait_for_workbench_message(
+        &harness.state,
+        "session recovered after provider auth failure",
+        Duration::from_secs(20),
+    )
+    .await;
+    println!("workbench auth-failure gate passed: failed terminal, visible error, next turn recovered");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+async fn submit_workbench_turn_via_restate(
+    state: &AppState,
+    text: &str,
+) -> (lash_restate::RestateInvocationId, lash::TurnAddress) {
+    state.push_message("user", text);
+    let turn_id = format!("workbench-turn-{}", uuid::Uuid::new_v4());
+    let session_id = state.current_session_id();
+    let request = restate::WorkbenchTurnWorkflowRequest {
+        turn_id: turn_id.clone(),
+        session_id: session_id.clone(),
+        text: text.to_string(),
+        model: state.selected_model(),
+        attachment_id: None,
+    };
+    state.track_turn_prompt(&session_id, &turn_id, text.to_string());
+    let invocation_id = tokio::time::timeout(
+        Duration::from_secs(60),
+        restate::submit_user_turn(state, request),
+    )
+    .await
+    .expect("Restate-backed workbench turn timed out")
+    .expect("submit Restate-backed workbench turn");
+    (
+        invocation_id,
+        lash::TurnAddress::new(session_id, turn_id),
+    )
+}
+
+async fn wait_for_restate_invocation_completion(
+    state: &AppState,
+    invocation_id: &lash_restate::RestateInvocationId,
+    timeout: Duration,
+) -> lash_restate::RestateInvocationStatus {
+    let admin = lash_restate::RestateAdminClient::new(
+        lash_restate::RestateConnection::with_client(
+            state.restate_admin_url.clone(),
+            state.restate_http.clone(),
+        ),
+    );
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = admin
+            .invocation_status(invocation_id)
+            .await
+            .expect("query Restate invocation status")
+            && status.status == "completed"
+        {
+            return status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for Restate invocation {invocation_id} to complete"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn live_restate_rate_limit_retry_converges_observers_to_one_copy_inner() {
+    let (harness, data_dir) = live_failure_path_harness(
+        "rate-limit-retry",
+        failure_provider::DevProviderScenario::RateLimitOnce,
+    )
+    .await;
+    let session = harness
+        .state
+        .core
+        .session(harness.state.current_session_id())
+        .open()
+        .await
+        .expect("open observer session");
+    let cursor = session.observe().current_observation().cursor;
+    let lash::observe::SessionObservationSubscription::Subscribed(mut subscription) =
+        session
+            .observe()
+            .subscribe_from_cursor(&cursor)
+            .expect("subscribe before retry turn")
+    else {
+        panic!("fresh observer cursor unexpectedly had a replay gap");
+    };
+    let collector = tokio::spawn(async move {
+        let mut events = Vec::new();
+        let mut saw_turn_activity = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(20), subscription.next_event())
+                .await
+                .expect("retry observer event timeout")
+                .expect("retry observer event");
+            saw_turn_activity |= matches!(
+                event.payload,
+                lash::observe::SessionObservationEventPayload::TurnActivity(_)
+            );
+            let committed = matches!(
+                event.payload,
+                lash::observe::SessionObservationEventPayload::Committed { .. }
+            );
+            events.push(event);
+            if committed && saw_turn_activity {
+                return events;
+            }
+        }
+    });
+
+    let (invocation, address) =
+        submit_workbench_turn_via_restate(&harness.state, "trigger deterministic rate limit retry")
+            .await;
+    wait_for_restate_invocation_success(&harness.state, &invocation, Duration::from_secs(20)).await;
+    let terminal = harness
+        .state
+        .core
+        .turn_work_driver()
+        .await_terminal_with_timeout(&address, Duration::from_secs(20))
+        .await
+        .expect("retry turn terminal");
+    assert!(
+        matches!(terminal, lash::TurnTerminal::Committed { .. }),
+        "successful retry did not commit: {terminal:#?}"
+    );
+    let live_events = collector.await.expect("retry observer collector");
+    let lash::observe::SessionResume::Replayed {
+        events: replay_events,
+    } = session
+        .observe()
+        .resume_from_cursor(&cursor)
+        .expect("replay retry events")
+    else {
+        panic!("retry events should remain in bounded replay");
+    };
+    for (label, events) in [("live", &live_events), ("replay", &replay_events)] {
+        let (prose, resets) = fold_retry_observer_prose(events);
+        assert_eq!(
+            resets, 1,
+            "{label} observer missed ModelAttemptReset: {events:#?}"
+        );
+        assert_eq!(
+            prose.matches("retry observer single-copy marker").count(),
+            1,
+            "{label} observer retained duplicate retry prose: {prose:?}"
+        );
+    }
+    wait_for_workbench_message(
+        &harness.state,
+        "provider retry succeeded",
+        Duration::from_secs(20),
+    )
+    .await;
+    let assistant = harness
+        .state
+        .messages_snapshot()
+        .into_iter()
+        .find(|message| message.role == "assistant")
+        .expect("retry assistant transcript");
+    assert_eq!(
+        assistant
+            .text
+            .matches("retry observer single-copy marker")
+            .count(),
+        1,
+        "workbench transcript retained duplicate retry prose: {:?}",
+        assistant.text
+    );
+    println!("workbench rate-limit gate passed: retry succeeded and live/replay observers converged");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+fn fold_retry_observer_prose(
+    events: &[lash::observe::SessionObservationEvent],
+) -> (String, usize) {
+    let mut chunks = Vec::new();
+    let mut resets = 0;
+    for event in events {
+        let lash::observe::SessionObservationEventPayload::TurnActivity(activity) = &event.payload
+        else {
+            continue;
+        };
+        match &activity.event {
+            lash::TurnEvent::AssistantProseDelta { text } => {
+                chunks.push((activity.correlation_id.clone(), text.clone()));
+            }
+            lash::TurnEvent::ModelAttemptReset {
+                assistant_prose_correlation_ids,
+                ..
+            } => {
+                resets += 1;
+                chunks.retain(|(id, _)| !assistant_prose_correlation_ids.contains(id));
+            }
+            _ => {}
+        }
+    }
+    (
+        chunks.into_iter().map(|(_, text)| text).collect(),
+        resets,
+    )
+}
+
+async fn live_failure_path_harness(
+    label: &str,
+    scenario: failure_provider::DevProviderScenario,
+) -> (LiveFailurePathHarness, PathBuf) {
+    let ingress_url = std::env::var("RESTATE_INGRESS_URL")
+        .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");
+    let admin_url =
+        std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
+    let endpoint_bind: SocketAddr = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:19081".to_string())
+        .parse()
+        .expect("valid workbench E2E endpoint bind");
+    let endpoint_url = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_URL")
+        .unwrap_or_else(|_| format!("http://{endpoint_bind}"));
+    let data_dir = std::env::temp_dir().join(format!(
+        "agent-workbench-{label}-e2e-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&data_dir).expect("create failure-path E2E data dir");
+    let harness = live_workbench_restate_state_with_provider(
+        &data_dir,
+        ingress_url,
+        scenario.provider(),
+        WorkbenchSessionIds::fresh(),
+        ActiveTurns::default(),
+    )
+    .await;
+    let state = harness.state.clone();
+    restate::spawn_restate_endpoint(
+        endpoint_bind,
+        state.clone(),
+        harness.process_deployment,
+        harness.process_worker,
+    );
+    wait_for_endpoint_socket(endpoint_bind).await;
+    register_restate_deployment(&admin_url, &endpoint_url).await;
+    (LiveFailurePathHarness { state }, data_dir)
+}
+
+struct LiveFailurePathHarness {
+    state: AppState,
+}
+
 async fn live_restate_processes_outlive_session_delete_and_cancel_globally_inner() {
     let ingress_url = std::env::var("RESTATE_INGRESS_URL")
         .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");
