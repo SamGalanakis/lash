@@ -28,7 +28,7 @@ use lash_restate_postgres_workers_e2e::{
     TurnResponse, TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
     default_session_originator_scope_id, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
     process_registry_from_storage, record_terminal_result, record_turn_activity,
-    record_worker_event, required_env, s3_store_from_env,
+    record_worker_event, required_env, s3_store_from_env, turn_session_id,
 };
 
 fn terminal_error(err: impl Display) -> TerminalError {
@@ -203,7 +203,7 @@ impl AppState {
             format!("{session_execution_owner_id}/incarnation"),
         );
         let session = core
-            .session(DEFAULT_SESSION_ID)
+            .session(turn_session_id(&request.workflow_id))
             .session_execution_owner(session_execution_owner)
             .open()
             .await

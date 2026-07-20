@@ -2666,7 +2666,11 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         let mut state = load_durable_wait_index(&ctx).await?;
         state.revoked = true;
         let waits = std::mem::take(&mut state.waits);
+        let awakeables = std::mem::take(&mut state.awakeables);
         ctx.set(DURABLE_WAIT_INDEX_STATE_KEY, Json(state));
+        for entry in awakeables {
+            ctx.resolve_awakeable(&entry.awakeable_id, Json(Resolution::Cancelled));
+        }
         resolve_indexed_waits(&ctx, waits).await?;
         Ok(Json(()))
     }

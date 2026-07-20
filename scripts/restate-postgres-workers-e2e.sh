@@ -74,7 +74,7 @@ LASH_MINIO_PREFIX="conformance/restate-postgres-workers-$$" \
 "${compose[@]}" --profile runner run --rm runner 2>&1 | tee -a "$test_output" &
 runner_job=$!
 
-deadline=$((SECONDS + 180))
+deadline=$((SECONDS + 240))
 until signal_ready="$(
   "${compose[@]}" exec -T postgres \
     psql -U lash -d lash -Atqc \

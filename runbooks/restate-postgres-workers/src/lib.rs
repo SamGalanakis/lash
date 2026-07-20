@@ -31,6 +31,19 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_SESSION_ID: &str = "restate-postgres-workers-e2e";
+pub const ENGINE_RESTART_SLEEP_SESSION_ID: &str =
+    "restate-postgres-workers-e2e-engine-restart-sleep";
+pub const ENGINE_RESTART_SLEEP_WORKFLOW_ID: &str = "e2e-engine-restart-suspended-sleep";
+
+/// Keep the restart timer independent from the pre-existing parked gate turn,
+/// since one session intentionally admits only one active turn at a time.
+pub fn turn_session_id(workflow_id: &str) -> &'static str {
+    if workflow_id == ENGINE_RESTART_SLEEP_WORKFLOW_ID {
+        ENGINE_RESTART_SLEEP_SESSION_ID
+    } else {
+        DEFAULT_SESSION_ID
+    }
+}
 pub const TURN_WORKFLOW_NAME: &str = "E2eTurnWorkflow";
 pub const EXPECTED_FINAL_TEXT: &str = "kitchen-sink-complete";
 pub const EXPECTED_WAKE_TEXT: &str = "wake-consumed";

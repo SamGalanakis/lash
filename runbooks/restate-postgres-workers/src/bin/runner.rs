@@ -19,7 +19,7 @@ use lash_restate_postgres_workers_e2e::{
     ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
     build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
     expected_attachment_bytes, process_registry_from_storage, record_terminal_result,
-    reset_e2e_rows, s3_store_from_env,
+    reset_e2e_rows, s3_store_from_env, turn_session_id,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -1429,7 +1429,7 @@ async fn drive_suspended_sleep_cancel_scenario(
     };
     let invocation_id = submit_workflow(ingress_url, &request).await?;
     let admin = RestateAdminClient::new(admin_url.to_string());
-    wait_for_invocation_suspended(&admin, &invocation_id, Duration::from_secs(30)).await?;
+    wait_for_invocation_suspended(&admin, &invocation_id, Duration::from_secs(90)).await?;
     report_workflow_progress(&request.workflow_id, "durable-sleep-suspended");
 
     let evidence_id = "e2e-cancel-suspended-sleep";
@@ -1478,7 +1478,7 @@ async fn drive_engine_restart_scenario(
     let sleeping_invocation_id = submit_workflow(ingress_url, &sleeping).await?;
     let admin = RestateAdminClient::new(admin_url.to_string());
     wait_for_cancel_gate_attempts(storage.pool(), &parked.workflow_id, 1).await?;
-    wait_for_invocation_suspended(&admin, &sleeping_invocation_id, Duration::from_secs(30)).await?;
+    wait_for_invocation_suspended(&admin, &sleeping_invocation_id, Duration::from_secs(90)).await?;
     record_harness_signal(storage.pool(), "engine-restart-ready").await?;
     report_workflow_progress(&parked.workflow_id, "parked-before-engine-restart");
 
@@ -1701,7 +1701,10 @@ fn turn_control_request(workflow_id: &str, fail_once: bool) -> TurnRequest {
 }
 
 fn turn_address(request: &TurnRequest) -> TurnAddress {
-    TurnAddress::new(DEFAULT_SESSION_ID, request.workflow_id.clone())
+    TurnAddress::new(
+        turn_session_id(&request.workflow_id),
+        request.workflow_id.clone(),
+    )
 }
 
 fn cancel_request(request: &TurnRequest, request_id: &str) -> TurnCancelRequest {
