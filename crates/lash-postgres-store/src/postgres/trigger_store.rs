@@ -117,6 +117,16 @@ impl TriggerStore for PostgresTriggerStore {
         registrant_scope_id: &str,
         handle: &str,
     ) -> Result<bool, PluginError> {
+        self.set_subscription_enabled(registrant_scope_id, handle, false)
+            .await
+    }
+
+    async fn set_subscription_enabled(
+        &self,
+        registrant_scope_id: &str,
+        handle: &str,
+        enabled: bool,
+    ) -> Result<bool, PluginError> {
         let mut tx = self.pool.begin().await.map_err(plugin_sqlx_error)?;
         let row = sqlx::query(
             "SELECT enabled, record_json FROM lash_trigger_subscriptions
@@ -132,12 +142,12 @@ impl TriggerStore for PostgresTriggerStore {
             tx.commit().await.map_err(plugin_sqlx_error)?;
             return Ok(false);
         };
-        let changed: bool = row.get(0);
+        let changed = row.get::<bool, _>(0) != enabled;
         let json: String = row.get(1);
         let updated_at_ms = current_epoch_ms();
         match serde_json::from_str::<TriggerSubscriptionRecord>(&json) {
             Ok(mut record) => {
-                record.enabled = false;
+                record.enabled = enabled;
                 record.updated_at_ms = updated_at_ms;
                 sqlx::query(
                     "UPDATE lash_trigger_subscriptions
@@ -158,15 +168,16 @@ impl TriggerStore for PostgresTriggerStore {
                     error = %err,
                     registrant_scope_id,
                     handle,
-                    "disabling malformed trigger subscription without rewriting record JSON"
+                    "updating malformed trigger subscription without rewriting record JSON"
                 );
                 sqlx::query(
                     "UPDATE lash_trigger_subscriptions
-                     SET enabled = FALSE, updated_at_ms = $3
+                     SET enabled = $3, updated_at_ms = $4
                      WHERE registrant_scope_id = $1 AND handle = $2",
                 )
                 .bind(registrant_scope_id)
                 .bind(handle)
+                .bind(enabled)
                 .bind(updated_at_ms as i64)
                 .execute(&mut *tx)
                 .await
@@ -175,6 +186,24 @@ impl TriggerStore for PostgresTriggerStore {
         }
         tx.commit().await.map_err(plugin_sqlx_error)?;
         Ok(changed)
+    }
+
+    async fn delete_subscription(
+        &self,
+        registrant_scope_id: &str,
+        handle: &str,
+    ) -> Result<bool, PluginError> {
+        let deleted = sqlx::query(
+            "DELETE FROM lash_trigger_subscriptions
+             WHERE registrant_scope_id = $1 AND handle = $2",
+        )
+        .bind(registrant_scope_id)
+        .bind(handle)
+        .execute(&self.pool)
+        .await
+        .map_err(plugin_sqlx_error)?
+        .rows_affected();
+        Ok(deleted != 0)
     }
 
     async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError> {
@@ -234,6 +263,7 @@ impl TriggerStore for PostgresTriggerStore {
             payload: request.payload,
             idempotency_key: request.idempotency_key.clone(),
             source: request.source,
+            session_id: request.session_id,
             occurred_at_ms: current_epoch_ms(),
         };
         sqlx::query(
@@ -347,6 +377,11 @@ impl TriggerStore for PostgresTriggerStore {
                     continue;
                 }
             };
+            if occurrence.session_id.as_deref().is_some_and(|session_id| {
+                subscription.registrant_session_id() != Some(session_id)
+            }) {
+                continue;
+            }
             let process_id = lash_core::deterministic_delivery_process_id(
                 &occurrence.occurrence_id,
                 &subscription.subscription_id,

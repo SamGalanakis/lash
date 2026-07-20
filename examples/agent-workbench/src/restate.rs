@@ -39,6 +39,8 @@ pub(crate) struct WorkbenchTurnWorkflowRequest {
     pub session_id: String,
     pub text: String,
     pub model: ModelSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +68,7 @@ pub(crate) struct WorkbenchSessionDeleteWorkflowRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct WorkbenchProcessCancelWorkflowRequest {
     pub operation_id: String,
+    pub session_id: String,
     pub process_id: String,
 }
 
@@ -158,7 +161,8 @@ impl WorkbenchTurnWorkflow for WorkbenchTurnWorkflowImpl {
         let session_id = request.session_id.clone();
         let controller = lash_restate::RestateRuntimeEffectController::new(ctx);
         run_user_turn_terminalized(self.state.clone(), request, &controller).await?;
-        sync_cron_jobs_with_context(&self.state, controller.context(), "user_turn").await?;
+        sync_cron_jobs_with_context(&self.state, controller.context(), &session_id, "user_turn")
+            .await?;
         self.state
             .queued_work_driver
             .claim_and_run_pending(Some(&session_id), "user_turn_completed")
@@ -199,7 +203,13 @@ impl WorkbenchQueuedTurnWorkflow for WorkbenchQueuedTurnWorkflowImpl {
             .await
             .map_err(AppError::internal)
             .map_err(terminal_handler_error)?;
-        sync_cron_jobs_with_context(&self.state, controller.context(), "queued_turn").await?;
+        sync_cron_jobs_with_context(
+            &self.state,
+            controller.context(),
+            &session_id,
+            "queued_turn",
+        )
+        .await?;
         Ok(Json(()))
     }
 }
@@ -389,7 +399,8 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         // in-memory cancel bookkeeping, so reset alone cannot reach them.)
         let current_session = self.state.session_ids.current();
         if state.request.session_id != current_session {
-            self.state.trace(
+            self.state.trace_for_session(
+                &state.request.session_id,
                 "cron.restate.zombie_cancelled",
                 json!({
                     "job_key": ctx.key(),
@@ -416,6 +427,7 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         journaled_workbench_trace(
             controller.context(),
             self.state.clone(),
+            state.request.session_id.clone(),
             "cron.restate.run",
             json!({
                 "job_key": controller.context().key(),
@@ -432,6 +444,7 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         journaled_workbench_trace(
             controller.context(),
             self.state.clone(),
+            state.request.session_id.clone(),
             "cron.restate.emit_completed",
             json!({
                 "job_key": controller.context().key(),
@@ -630,7 +643,8 @@ pub(crate) async fn cancel_cron_jobs_for_session(
             "{}/WorkbenchCronJob/{job_key}/cancel",
             state.restate_ingress_url.trim_end_matches('/')
         );
-        state.trace(
+        state.trace_for_session(
+            session_id,
             "cron.restate.cancel",
             json!({
                 "job_key": job_key,
@@ -647,6 +661,7 @@ async fn run_user_turn(
     request: WorkbenchTurnWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
+    let mut input = workbench_turn_input(&state, &request).await?;
     let turn_model = model_spec_from_selection(request.model);
     let session = state
         .core
@@ -664,7 +679,6 @@ async fn run_user_turn(
     let ui_events = ChannelTurnEvents {
         turn_state: Arc::clone(&turn_state),
     };
-    let mut input = TurnInput::text(request.text.clone());
     input.trace_turn_id = Some(request.turn_id.clone());
     let output = session
         .turn(input)
@@ -685,6 +699,22 @@ async fn run_user_turn(
     )
     .await?;
     Ok(())
+}
+
+pub(crate) async fn workbench_turn_input(
+    state: &AppState,
+    request: &WorkbenchTurnWorkflowRequest,
+) -> Result<TurnInput, AppError> {
+    let mut input = TurnInput::text(request.text.clone());
+    if let Some(attachment_id) = request.attachment_id.as_deref() {
+        let stored = state
+            .attachment_store
+            .get(&lash_core::AttachmentId::new(attachment_id))
+            .await
+            .map_err(AppError::internal)?;
+        input = input.with_image_ref(attachment_id, stored.bytes);
+    }
+    Ok(input)
 }
 
 async fn run_user_turn_terminalized(
@@ -711,20 +741,7 @@ async fn run_button_trigger(
     request: WorkbenchButtonTriggerWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
-    let turn_model = model_spec_from_selection(request.model);
-    let session = state
-        .core
-        .session(request.session_id.clone())
-        .open()
-        .await
-        .map_err(AppError::internal)?;
-    apply_model_selection_to_session(
-        &state,
-        &session,
-        turn_model.clone(),
-        "restate_button_trigger",
-    )
-    .await?;
+    state.set_selected_model(request.model.clone());
     let scoped_effect_controller = controller
         .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "button-trigger:{}",
@@ -733,6 +750,7 @@ async fn run_button_trigger(
         .map_err(AppError::internal)?;
     let receipt = enqueue_button_trigger_command(
         &state,
+        &request.session_id,
         request.button,
         &request.pressed_at,
         &request.operation_id,
@@ -740,7 +758,8 @@ async fn run_button_trigger(
     )
     .await
     .map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "button_trigger.restate.trigger_occurrence",
         json!({
             "button": request.button,
@@ -748,11 +767,15 @@ async fn run_button_trigger(
             "started_process_ids": receipt.started_process_ids(),
         }),
     );
-    state.push_message("event", "button trigger occurrence emitted");
+    state.push_message_for_session(
+        &request.session_id,
+        "event",
+        "button trigger occurrence emitted",
+    );
     // Trigger occurrence dispatch is the end of this client-initiated request.
     // Emit a terminal Done so the UI clears its busy state even when no trigger
     // matched (any process the occurrence started streams its own turn separately).
-    state.publish(crate::StreamItem::Done);
+    state.publish_for_session(&request.session_id, crate::StreamItem::Done);
     Ok(())
 }
 
@@ -761,14 +784,7 @@ async fn run_mail_received(
     request: WorkbenchMailReceivedWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
-    let turn_model = model_spec_from_selection(request.model);
-    let session = state
-        .core
-        .session(request.session_id.clone())
-        .open()
-        .await
-        .map_err(AppError::internal)?;
-    apply_model_selection_to_session(&state, &session, turn_model, "restate_mail_received").await?;
+    state.set_selected_model(request.model.clone());
     let scoped_effect_controller = controller
         .scoped_effect_controller(lash::runtime::ExecutionScope::runtime_operation(format!(
             "mail-received:{}",
@@ -777,13 +793,15 @@ async fn run_mail_received(
         .map_err(AppError::internal)?;
     let receipt = enqueue_mail_received_trigger_command(
         &state,
+        &request.session_id,
         &request.delivery,
         &request.operation_id,
         scoped_effect_controller,
     )
     .await
     .map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "mail_received.restate.trigger_occurrence",
         json!({
             "account": request.delivery.account,
@@ -792,11 +810,15 @@ async fn run_mail_received(
             "started_process_ids": receipt.started_process_ids(),
         }),
     );
-    state.push_message("event", "mail received trigger occurrence queued");
+    state.push_message_for_session(
+        &request.session_id,
+        "event",
+        "mail received trigger occurrence queued",
+    );
     // Trigger occurrence dispatch is the end of this client-initiated request.
     // Emit a terminal Done so the UI clears its busy state even when no trigger
     // matched (any process the occurrence started streams its own turn separately).
-    state.publish(crate::StreamItem::Done);
+    state.publish_for_session(&request.session_id, crate::StreamItem::Done);
     Ok(())
 }
 
@@ -815,7 +837,8 @@ async fn run_session_delete(
         .delete_session(&request.session_id, scoped_effect_controller)
         .await
         .map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "reset.restate.session_deleted",
         json!({
             "session_id": request.session_id,
@@ -842,7 +865,8 @@ async fn run_process_cancel(
         .cancel(&request.process_id, scoped_effect_controller)
         .await
         .map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "process.restate.cancel_requested",
         json!({
             "process_id": request.process_id,
@@ -879,7 +903,8 @@ async fn run_queued_turn(
     let ui_events = ChannelTurnEvents {
         turn_state: Arc::clone(&turn_state),
     };
-    state.trace(
+    state.trace_for_session(
+        &request.session_id,
         "queued_work.restate.start",
         json!({
             "reason": request.reason,
@@ -896,7 +921,8 @@ async fn run_queued_turn(
         .await
         .map_err(AppError::runtime)?
     else {
-        state.trace(
+        state.trace_for_session(
+            &request.session_id,
             "queued_work.restate.empty",
             json!({
                 "reason": request.reason,
@@ -904,7 +930,7 @@ async fn run_queued_turn(
                 "turn_id": request.turn_id,
             }),
         );
-        state.publish(crate::StreamItem::Done);
+        state.publish_for_session(&request.session_id, crate::StreamItem::Done);
         return Ok(());
     };
     record_turn_output(
@@ -953,7 +979,8 @@ async fn terminalize_turn_execution(
             Ok(())
         }
         Ok(Err(err)) if err.retryable => {
-            state.trace(
+            state.trace_for_session(
+                session_id,
                 "turn.restate.retrying",
                 json!({
                     "operation": trace_name,
@@ -1011,7 +1038,8 @@ pub(crate) async fn settle_workbench_turn(
         .cancel_pending_turn_inputs(targets)
         .await
         .map_err(AppError::runtime)?;
-    state.trace(
+    state.trace_for_session(
+        session_id,
         "turn_input.settle_cancelled",
         json!({
             "session_id": session_id,
@@ -1085,11 +1113,14 @@ async fn record_turn_output(
         .expect("turn state lock")
         .assistant_prose();
     let assistant_text = assistant_text_for_display(&output, &streamed_prose);
-    state.trace(
+    state.trace_for_session(
+        &session.session_id(),
         trace_name,
         json!({
             "assistant_text": assistant_text.clone(),
             "streamed_prose": streamed_prose,
+            "outcome": &output.outcome,
+            "errors": &output.errors,
             "final_value": output.final_value().cloned(),
             "tool_value": output.tool_value().map(|(tool_name, value)| {
                 json!({
@@ -1099,21 +1130,34 @@ async fn record_turn_output(
             }),
         }),
     );
-    if matches!(
-        output.outcome,
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
-    ) {
-        let message = output
-            .cancellation
-            .as_ref()
-            .map(|evidence| format!("turn stopped · request {}", evidence.request_id))
-            .unwrap_or_else(|| "turn stopped".to_string());
-        state.push_message("event", message);
-    } else {
-        commit_assistant_transcript(session, turn_id, assistant_text.clone()).await?;
-        state.push_message("assistant", assistant_text);
+    match &output.outcome {
+        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => {
+            let message = output
+                .cancellation
+                .as_ref()
+                .map(|evidence| format!("turn stopped · request {}", evidence.request_id))
+                .unwrap_or_else(|| "turn stopped".to_string());
+            state.push_message_for_session(&session.session_id(), "event", message);
+        }
+        lash::TurnOutcome::Stopped(stop) => {
+            let message = output
+                .errors
+                .last()
+                .map(|issue| issue.message.clone())
+                .unwrap_or_else(|| format!("turn stopped with {stop:?}"));
+            state.push_message_for_session(
+                &session.session_id(),
+                "event",
+                format!("turn failed: {message}"),
+            );
+            state.publish_for_session(&session.session_id(), crate::StreamItem::Error { message });
+        }
+        _ => {
+            commit_assistant_transcript(session, turn_id, assistant_text.clone()).await?;
+            state.push_message_for_session(&session.session_id(), "assistant", assistant_text);
+        }
     }
-    state.publish(crate::StreamItem::Done);
+    state.publish_for_session(&session.session_id(), crate::StreamItem::Done);
     Ok(())
 }
 
@@ -1152,7 +1196,8 @@ fn record_turn_failure(
     trace_name: &str,
     message: &str,
 ) {
-    state.trace(
+    state.trace_for_session(
+        session_id,
         trace_name,
         json!({
             "session_id": session_id,
@@ -1160,21 +1205,25 @@ fn record_turn_failure(
             "error": message,
         }),
     );
-    state.push_message("event", format!("turn failed: {message}"));
-    state.publish(crate::StreamItem::Error {
-        message: message.to_string(),
-    });
-    state.publish(crate::StreamItem::Done);
+    state.push_message_for_session(session_id, "event", format!("turn failed: {message}"));
+    state.publish_for_session(
+        session_id,
+        crate::StreamItem::Error {
+            message: message.to_string(),
+        },
+    );
+    state.publish_for_session(session_id, crate::StreamItem::Done);
 }
 
 async fn sync_cron_jobs_with_context(
     state: &AppState,
     ctx: &WorkflowContext<'_>,
+    session_id: &str,
     reason: &str,
 ) -> HandlerResult<()> {
     let session = state
         .core
-        .session(state.current_session_id())
+        .session(session_id)
         .open()
         .await
         .map_err(|err| TerminalError::new(err.to_string()))?;
@@ -1193,21 +1242,21 @@ async fn sync_cron_jobs_with_context(
         if !registration.enabled {
             continue;
         }
-        let (job_key, request) =
-            match cron_request_from_registration(&state.current_session_id(), &registration) {
-                Ok(value) => value,
-                Err(err) => {
-                    state.trace(
-                        "cron.restate.sync_invalid",
-                        json!({
-                            "reason": reason,
-                            "handle": registration.handle,
-                            "error": err,
-                        }),
-                    );
-                    continue;
-                }
-            };
+        let (job_key, request) = match cron_request_from_registration(session_id, &registration) {
+            Ok(value) => value,
+            Err(err) => {
+                state.trace_for_session(
+                    session_id,
+                    "cron.restate.sync_invalid",
+                    json!({
+                        "reason": reason,
+                        "handle": registration.handle,
+                        "error": err,
+                    }),
+                );
+                continue;
+            }
+        };
         scheduled.entry(job_key).or_insert(request);
     }
     let mut active = BTreeSet::new();
@@ -1217,7 +1266,8 @@ async fn sync_cron_jobs_with_context(
             .upsert(Json(request))
             .call()
             .await?;
-        state.trace(
+        state.trace_for_session(
+            session_id,
             "cron.restate.sync_upserted",
             json!({
                 "reason": reason,
@@ -1233,7 +1283,8 @@ async fn sync_cron_jobs_with_context(
             .cancel()
             .call()
             .await?;
-        state.trace(
+        state.trace_for_session(
+            session_id,
             "cron.restate.sync_cancelled",
             json!({
                 "reason": reason,
@@ -1347,15 +1398,17 @@ async fn journaled_now(
 async fn journaled_workbench_trace(
     ctx: &ObjectContext<'_>,
     state: AppState,
+    session_id: String,
     name: &'static str,
     payload: Value,
     effect_name: &'static str,
 ) -> HandlerResult<()> {
     ctx.run(move || {
         let state = state.clone();
+        let session_id = session_id.clone();
         let payload = payload.clone();
         async move {
-            state.trace(name, payload);
+            state.trace_for_session(&session_id, name, payload);
             Ok::<(), HandlerError>(())
         }
     })

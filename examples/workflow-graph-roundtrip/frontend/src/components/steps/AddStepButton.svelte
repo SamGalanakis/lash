@@ -7,7 +7,13 @@
   // host-owned catalog + grouping the canvas palette uses) and hands the chosen
   // operation back to the parent, which wires it through the existing add-node
   // flow at this exact position.
-  let { catalog = [], topLevel = true, onPick, label = 'Add a step here' } = $props();
+  let {
+    catalog = [],
+    topLevel = true,
+    onPick,
+    label = 'Add a step here',
+    menuPlacement = 'center',
+  } = $props();
 
   let open = $state(false);
   const groups = $derived(groupOperations(catalog, { includePower: false, topLevel }));
@@ -37,7 +43,7 @@
   <span class="rail-line rail-line--bot" aria-hidden="true"></span>
 
   {#if open}
-    <div class="add-menu" role="menu">
+    <div class="add-menu" class:is-below={menuPlacement === 'below'} role="menu">
       {#if groups.length}
         {#each groups as grp (grp.id)}
           <div class="add-group">{grp.label}</div>
@@ -133,6 +139,13 @@
     border: 1px solid var(--line-strong);
     border-radius: 12px;
     box-shadow: 0 18px 42px -16px rgba(0, 0, 0, 0.76);
+  }
+  /* The first rail control sits immediately below the sticky top bar. Open its
+     menu downward so the leading actions remain visible and clickable instead
+     of occupying the top bar's pointer layer. */
+  .add-menu.is-below {
+    top: calc(50% + 14px);
+    transform: none;
   }
   .add-group {
     font-family: var(--font-mono);

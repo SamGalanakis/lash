@@ -14,14 +14,14 @@ impl AppState {
         *self.selected_model.lock().expect("selected model lock") = model;
     }
 
-    fn settings(&self) -> Settings {
+    fn settings_for_session(&self, session_id: String) -> Settings {
         let selected_model = self.selected_model();
         Settings {
             model: selected_model.model,
             model_variant: selected_model.model_variant,
             web_configured: self.web_configured,
             model_variants: vec!["", "low", "medium", "high"],
-            session_id: self.current_session_id(),
+            session_id,
         }
     }
 
@@ -31,16 +31,28 @@ impl AppState {
     }
 
     fn trace(&self, name: &str, payload: Value) {
+        self.trace_for_session(&self.current_session_id(), name, payload);
+    }
+
+    fn trace_for_session(&self, session_id: &str, name: &str, payload: Value) {
         emit_workbench_trace(
             &self.trace_sink,
-            Some(self.current_session_id()),
+            Some(session_id.to_string()),
             name,
             payload,
         );
     }
 
+    #[cfg(test)]
     fn publish(&self, item: StreamItem) {
-        let _ = self.event_tx.send(item);
+        self.publish_for_session(&self.current_session_id(), item);
+    }
+
+    fn publish_for_session(&self, session_id: &str, item: StreamItem) {
+        let _ = self.event_tx.send(SessionStreamItem {
+            session_id: session_id.to_string(),
+            item,
+        });
     }
 
     #[cfg(test)]
@@ -103,7 +115,8 @@ impl AppState {
                         false
                     }
                     Err(err) => {
-                        self.trace(
+                        self.trace_for_session(
+                            &address.session_id,
                             "turn.cancel_liveness_unknown",
                             json!({
                                 "session_id": address.session_id,
@@ -119,7 +132,8 @@ impl AppState {
                     .remove(&address.session_id, &address.turn_id);
                 false
             };
-            self.trace(
+            self.trace_for_session(
+                &address.session_id,
                 "turn.cancel_requested",
                 json!({
                     "session_id": address.session_id,
@@ -141,7 +155,7 @@ impl AppState {
             });
         }
         if !receipts.is_empty() {
-            self.publish(StreamItem::Done);
+            self.publish_for_session(session_id, StreamItem::Done);
         }
         Ok(receipts)
     }
@@ -165,6 +179,15 @@ impl AppState {
     }
 
     fn push_message(&self, role: impl Into<String>, text: impl Into<String>) -> ChatMessage {
+        self.push_message_for_session(&self.current_session_id(), role, text)
+    }
+
+    fn push_message_for_session(
+        &self,
+        session_id: &str,
+        role: impl Into<String>,
+        text: impl Into<String>,
+    ) -> ChatMessage {
         let message = ChatMessage {
             id: uuid::Uuid::new_v4().to_string(),
             role: role.into(),
@@ -175,7 +198,7 @@ impl AppState {
             .lock()
             .expect("messages lock")
             .push(message.clone());
-        self.publish(StreamItem::Message {
+        self.publish_for_session(session_id, StreamItem::Message {
             message: message.clone(),
         });
         message
@@ -388,7 +411,8 @@ async fn apply_model_selection_to_session(
         })
         .await
         .map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &session.session_id(),
         "model_selection.applied",
         json!({
             "reason": reason,

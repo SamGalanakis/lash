@@ -149,6 +149,8 @@
             .expect("process observer configured");
         let state = AppState {
             core: resumed_core,
+            attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&resumed_registry)),
             session_ids: resumed_session_ids,
@@ -174,7 +176,7 @@
             state.messages_snapshot().is_empty(),
             "the reconstructed web process must begin with no local transcript cache"
         );
-        let Json(before) = app_state(State(state.clone()))
+        let Json(before) = app_state(State(state.clone()), Query(SessionQuery::default()))
             .await
             .expect("project committed transcript after restart");
         let before_rows = before
@@ -239,7 +241,7 @@
             }
         }
 
-        let Json(after) = app_state(State(state.clone()))
+        let Json(after) = app_state(State(state.clone()), Query(SessionQuery::default()))
             .await
             .expect("project transcript after resumed turn");
         assert_eq!(after.messages.len(), 6);

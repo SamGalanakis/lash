@@ -109,9 +109,9 @@ pub mod tools {
     pub use lash_core::{
         CancelHint, PendingCompletion, PreparedToolCall, TimeoutBehavior, ToolActivation,
         ToolArgumentProjectionPolicy, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
-        ToolContract, ToolDefinition, ToolDurableEffects, ToolExecutionGrant, ToolManifest,
-        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
-        ToolScheduling, ToolSourceHandle, ToolTriggerClient,
+        ToolContract, ToolDefinition, ToolDurableEffects, ToolExecutionGrant, ToolFailureClass,
+        ToolManifest, ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider,
+        ToolResult, ToolScheduling, ToolSourceHandle, ToolTriggerClient,
     };
     pub use lash_core::{
         PLUGIN_TOOL_SOURCE_ID, ToolId, ToolRestoreReport, ToolState, ToolStateEntry,
@@ -141,7 +141,7 @@ pub mod tools {
 
 pub mod direct {
     pub use lash_core::llm::types::{
-        LlmAttachment, LlmEventSender, LlmOutputPart, LlmTerminalReason, LlmUsage,
+        LlmAttachment, LlmEventSender, LlmOutputPart, LlmStreamEvent, LlmTerminalReason, LlmUsage,
     };
     pub use lash_core::{
         DirectCompletion, DirectJsonSchema, DirectLlmClient, DirectLlmCompletion, DirectLlmError,

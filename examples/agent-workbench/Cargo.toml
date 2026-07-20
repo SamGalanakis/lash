@@ -15,6 +15,7 @@ publish = false
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = "0.8"
+base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 chrono-tz = { workspace = true }
@@ -22,6 +23,7 @@ croner = { workspace = true }
 dotenvy = "0.15"
 futures-util = { workspace = true }
 lash = { workspace = true, features = ["rlm"] }
+lash-core = { workspace = true }
 lashlang = { workspace = true }
 lash-plugin-process-controls = { workspace = true, features = ["lashlang"] }
 lash-protocol-rlm = { workspace = true }
@@ -43,6 +45,7 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 lash-lashlang-runtime = { workspace = true }
 lash = { workspace = true, features = ["rlm", "testing"] }
+lash-core = { workspace = true }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 sqlx = { workspace = true }

@@ -1,6 +1,8 @@
 #[derive(Clone)]
 struct AppState {
     core: LashCore,
+    attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
+    trigger_store: Arc<dyn lash::triggers::TriggerStore>,
     process_observer: lash::process::ProcessWorkObserver,
     process_work_driver: lash::process::ProcessWorkDriver,
     session_ids: WorkbenchSessionIds,
@@ -9,7 +11,7 @@ struct AppState {
     web_configured: bool,
     trace_sink: Option<Arc<dyn TraceSink>>,
     lashlang_execution: Arc<TraceLashlangGraphStore>,
-    event_tx: broadcast::Sender<StreamItem>,
+    event_tx: broadcast::Sender<SessionStreamItem>,
     queued_work_driver: lash::runtime::QueuedWorkDriver,
     restate_ingress_url: String,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -50,6 +52,7 @@ struct StateSnapshot {
     messages: Vec<ChatMessage>,
     active_turns: Vec<lash::TurnAddress>,
     pending_turn_inputs: Vec<lash::PendingTurnInput>,
+    usage: lash::usage::SessionUsageReport,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -65,6 +68,21 @@ struct TurnRequest {
     text: String,
     model: Option<String>,
     model_variant: Option<String>,
+    #[serde(default)]
+    attachment_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachmentUploadRequest {
+    name: String,
+    mime: String,
+    data_base64: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AttachmentUploadResponse {
+    attachment: lash_core::AttachmentRef,
+    retrieve_url: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -92,6 +110,38 @@ struct TurnInputReceipt {
 #[derive(Debug, Deserialize)]
 struct EventsQuery {
     cursor: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct SessionQuery {
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+impl SessionQuery {
+    fn resolve(&self, state: &AppState) -> Result<String, AppError> {
+        let Some(session_id) = self.session_id.as_deref() else {
+            return Ok(state.current_session_id());
+        };
+        let session_id = session_id.trim();
+        if session_id.is_empty()
+            || session_id.len() > 128
+            || !session_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        {
+            return Err(AppError::bad_request(
+                "session_id must be 1-128 ASCII letters, digits, '.', '_' or '-'",
+            ));
+        }
+        Ok(session_id.to_string())
+    }
+
+    fn is_explicit(&self) -> bool {
+        self.session_id.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -153,6 +203,23 @@ enum StreamItem {
     TurnInput { receipt: TurnInputReceipt },
     Error { message: String },
     Done,
+}
+
+#[derive(Clone, Debug)]
+struct SessionStreamItem {
+    session_id: String,
+    item: StreamItem,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct TriggerEnabledRequest {
+    enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TriggerMutationResponse {
+    changed: bool,
+    registration: Option<lash::triggers::TriggerRegistration>,
 }
 
 #[derive(Clone, Default)]
@@ -391,6 +458,11 @@ impl lash::runtime::QueuedWorkRunHandle for WorkbenchQueuedWorkSubmitter {
         let session_id = request
             .session_id
             .unwrap_or_else(|| self.session_ids.current());
+        // A trigger process may finish while a foreground turn still owns this
+        // session's ingress. Its wake stays in the durable queued-work store;
+        // terminalization calls `claim_and_run_pending` again after releasing
+        // the lease, so submitting a competing queued turn here is both
+        // unnecessary and unsafe.
         if !self.active_turns.for_session(&session_id).is_empty() {
             return Ok(());
         }

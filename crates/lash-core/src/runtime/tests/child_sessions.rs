@@ -736,8 +736,25 @@ async fn parent_turn_receives_live_child_token_usage_events_inner() {
     assert_eq!(usage.by_source["subagent"].usage.reasoning_output_tokens, 1);
 }
 
-#[tokio::test]
-async fn parent_turn_keeps_cached_only_child_usage_live() {
+#[test]
+fn parent_turn_keeps_cached_only_child_usage_live() {
+    const STACK_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("child-session-cached-usage-test".to_string())
+        .stack_size(STACK_BUDGET_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("child-session cached-usage test runtime")
+                .block_on(parent_turn_keeps_cached_only_child_usage_live_inner())
+        })
+        .expect("spawn child-session cached-usage test thread")
+        .join()
+        .expect("child-session cached-usage test thread");
+}
+
+async fn parent_turn_keeps_cached_only_child_usage_live_inner() {
     let transport = mock_provider(vec![
         MockCall {
             stream_events: vec![

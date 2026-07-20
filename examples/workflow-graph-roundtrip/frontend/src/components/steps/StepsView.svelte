@@ -45,6 +45,7 @@
               {catalog}
               topLevel={false}
               label="Add a step at the start"
+              menuPlacement="below"
               onPick={(op) => onInsert(view.insertTarget, 0, op)}
             />
           {/if}
@@ -79,7 +80,12 @@
         <div class="block-label">Steps</div>
         <div class="flow">
           {#if onInsert}
-            <AddStepButton {catalog} label="Add a step at the start" onPick={(op) => onInsert({ main: true }, 0, op)} />
+            <AddStepButton
+              {catalog}
+              label="Add a step at the start"
+              menuPlacement="below"
+              onPick={(op) => onInsert({ main: true }, 0, op)}
+            />
           {/if}
           {#each view.main as entry, i (entry.id)}
             <StepCard {entry} {catalog} index={i} depth={0} primary={true} />
@@ -105,6 +111,7 @@
             {catalog}
             topLevel={!view.flat}
             label="Add the first step"
+            menuPlacement="below"
             onPick={(op) => onInsert(view.flat && view.insertTarget ? view.insertTarget : { main: true }, 0, op)}
           />
         </div>

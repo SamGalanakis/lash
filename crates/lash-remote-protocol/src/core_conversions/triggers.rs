@@ -24,6 +24,7 @@ impl TryFrom<RemoteTriggerOccurrenceRequest> for lash_core::TriggerOccurrenceReq
             payload,
             idempotency_key,
             source,
+            session_id,
         } = value;
         let mut request = lash_core::TriggerOccurrenceRequest::new(
             source_type,
@@ -32,6 +33,7 @@ impl TryFrom<RemoteTriggerOccurrenceRequest> for lash_core::TriggerOccurrenceReq
             idempotency_key,
         );
         request.source = source;
+        request.session_id = session_id;
         Ok(request)
     }
 }
@@ -44,6 +46,7 @@ impl From<lash_core::TriggerOccurrenceRequest> for RemoteTriggerOccurrenceReques
             payload,
             idempotency_key,
             source,
+            session_id,
         } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -52,6 +55,7 @@ impl From<lash_core::TriggerOccurrenceRequest> for RemoteTriggerOccurrenceReques
             payload,
             idempotency_key,
             source,
+            session_id,
         }
     }
 }
@@ -65,6 +69,7 @@ impl From<lash_core::TriggerOccurrenceRecord> for RemoteTriggerOccurrenceRecord 
             payload,
             idempotency_key,
             source,
+            session_id,
             occurred_at_ms,
         } = value;
         Self {
@@ -74,6 +79,7 @@ impl From<lash_core::TriggerOccurrenceRecord> for RemoteTriggerOccurrenceRecord 
             payload,
             idempotency_key,
             source,
+            session_id,
             occurred_at_ms,
         }
     }
@@ -88,6 +94,7 @@ impl From<RemoteTriggerOccurrenceRecord> for lash_core::TriggerOccurrenceRecord 
             payload,
             idempotency_key,
             source,
+            session_id,
             occurred_at_ms,
         } = value;
         Self {
@@ -97,6 +104,7 @@ impl From<RemoteTriggerOccurrenceRecord> for lash_core::TriggerOccurrenceRecord 
             payload,
             idempotency_key,
             source,
+            session_id,
             occurred_at_ms,
         }
     }

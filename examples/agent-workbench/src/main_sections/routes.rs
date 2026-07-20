@@ -6,10 +6,14 @@ async fn index() -> Html<&'static str> {
     Html(ui::INDEX_HTML)
 }
 
-async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>, AppError> {
+async fn app_state(
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<StateSnapshot>, AppError> {
+    let session_id = query.resolve(&state)?;
     let session = state
         .core
-        .session(state.current_session_id())
+        .session(session_id.clone())
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -23,8 +27,9 @@ async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>,
         .pending_turn_inputs()
         .await
         .map_err(AppError::internal)?;
+    let usage = session.usage_report();
     session.close().await.map_err(AppError::internal)?;
-    let active_turns = state.active_turns.for_session(&state.current_session_id());
+    let active_turns = state.active_turns.for_session(&session_id);
     messages.extend(active_turns.iter().filter_map(|address| {
         state
             .active_turns
@@ -37,11 +42,103 @@ async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>,
             })
     }));
     Ok(Json(StateSnapshot {
-        settings: state.settings(),
+        settings: state.settings_for_session(session_id.clone()),
         messages,
         active_turns,
         pending_turn_inputs,
+        usage,
     }))
+}
+
+const MAX_WORKBENCH_ATTACHMENT_BYTES: usize = 1024 * 1024;
+
+async fn upload_attachment(
+    State(state): State<AppState>,
+    Json(request): Json<AttachmentUploadRequest>,
+) -> Result<Json<AttachmentUploadResponse>, AppError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(AppError::bad_request("attachment name is required"));
+    }
+    if name.chars().count() > 200 {
+        return Err(AppError::bad_request(
+            "attachment name must be at most 200 characters",
+        ));
+    }
+    let media_type = lash_core::MediaType::from_mime(&request.mime).ok_or_else(|| {
+        AppError::bad_request(
+            "the workbench turn contract currently accepts PNG image attachments only",
+        )
+    })?;
+    if media_type.canonical_mime() != "image/png" {
+        return Err(AppError::bad_request(
+            "the workbench turn contract currently accepts PNG image attachments only",
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(request.data_base64.trim())
+        .map_err(|_| AppError::bad_request("attachment data_base64 is not valid base64"))?;
+    if bytes.is_empty() {
+        return Err(AppError::bad_request("attachment file is empty"));
+    }
+    if bytes.len() > MAX_WORKBENCH_ATTACHMENT_BYTES {
+        return Err(AppError::bad_request(format!(
+            "attachment exceeds the {} byte workbench limit",
+            MAX_WORKBENCH_ATTACHMENT_BYTES
+        )));
+    }
+    let attachment = state
+        .attachment_store
+        .put(
+            bytes,
+            lash_core::AttachmentCreateMeta::new(media_type, None, None, Some(name.to_string())),
+        )
+        .await
+        .map_err(AppError::internal)?;
+    let retrieve_url = format!("/api/attachments/{}", attachment.id);
+    state.trace(
+        "api.attachment.uploaded",
+        json!({
+            "attachment_id": attachment.id,
+            "mime": attachment.canonical_mime(),
+            "byte_len": attachment.byte_len,
+            "name": name,
+        }),
+    );
+    Ok(Json(AttachmentUploadResponse {
+        attachment,
+        retrieve_url,
+    }))
+}
+
+async fn retrieve_attachment(
+    AxumPath(attachment_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    let attachment_id = attachment_id.trim();
+    if attachment_id.is_empty() {
+        return Err(AppError::bad_request("attachment id is required"));
+    }
+    let stored = match state
+        .attachment_store
+        .get(&lash_core::AttachmentId::new(attachment_id))
+        .await
+    {
+        Ok(stored) => stored,
+        Err(lash_core::AttachmentStoreError::NotFound(_)) => {
+            return Err(AppError::not_found(format!(
+                "attachment `{attachment_id}` was not found"
+            )));
+        }
+        Err(err) => return Err(AppError::internal(err)),
+    };
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header("x-lash-attachment-id", attachment_id)
+        .body(Body::from(stored.bytes))
+        .expect("valid attachment response"))
 }
 
 fn chat_message_from_committed(message: &lash::messages::Message) -> ChatMessage {
@@ -60,9 +157,13 @@ async fn session_events(
     State(state): State<AppState>,
     Query(query): Query<EventsQuery>,
 ) -> Result<Response, AppError> {
+    let session_id = SessionQuery {
+        session_id: query.session_id.clone(),
+    }
+    .resolve(&state)?;
     let session = state
         .core
-        .session(state.current_session_id())
+        .session(session_id.clone())
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -81,11 +182,12 @@ async fn session_events(
     tokio::spawn(async move {
         loop {
             match product_events.recv().await {
-                Ok(item) => {
-                    if tx.send(item).await.is_err() {
+                Ok(item) if item.session_id == session_id => {
+                    if tx.send(item.item).await.is_err() {
                         break;
                     }
                 }
+                Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(count)) => {
                     let _ = tx
                         .send(StreamItem::Error {
@@ -102,28 +204,52 @@ async fn session_events(
 
 async fn send_turn(
     State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
     Json(request): Json<TurnRequest>,
 ) -> Result<Json<CommandAccepted>, AppError> {
     let text = request.text.trim().to_string();
     if text.is_empty() {
         return Err(AppError::bad_request("message text is required"));
     }
+    let attachment_id = request
+        .attachment_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    if let Some(attachment_id) = attachment_id.as_deref() {
+        match state
+            .attachment_store
+            .get(&lash_core::AttachmentId::new(attachment_id))
+            .await
+        {
+            Ok(_) => {}
+            Err(lash_core::AttachmentStoreError::NotFound(_)) => {
+                return Err(AppError::not_found(format!(
+                    "attachment `{attachment_id}` was not found"
+                )));
+            }
+            Err(err) => return Err(AppError::internal(err)),
+        }
+    }
     let turn_model = model_spec_for_request(
         &state,
         request.model.as_deref(),
         request.model_variant.as_deref(),
     )?;
-    state.trace(
+    let session_id = query.resolve(&state)?;
+    state.trace_for_session(
+        &session_id,
         "api.turn.request",
         json!({
             "text": text.clone(),
+            "attachment_id": attachment_id,
             "model": serde_json::to_value(&turn_model).unwrap_or(Value::Null),
         }),
     );
-    state.push_message("user", text.clone());
+    state.push_message_for_session(&session_id, "user", text.clone());
     state.set_selected_model(ModelSelection::from_spec(&turn_model));
     let turn_id = format!("workbench-turn-{}", uuid::Uuid::new_v4());
-    let session_id = state.current_session_id();
     state.track_turn_prompt(&session_id, &turn_id, text.clone());
     if let Err(err) = restate::submit_user_turn(
         &state,
@@ -132,6 +258,7 @@ async fn send_turn(
             session_id: session_id.clone(),
             text,
             model: ModelSelection::from_spec(&turn_model),
+            attachment_id,
         },
     )
     .await
@@ -144,13 +271,14 @@ async fn send_turn(
 
 async fn enqueue_turn_input(
     State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
     Json(request): Json<TurnInputRequest>,
 ) -> Result<Json<TurnInputReceipt>, AppError> {
     let text = request.text.trim().to_string();
     if text.is_empty() {
         return Err(AppError::bad_request("message text is required"));
     }
-    let session_id = state.current_session_id();
+    let session_id = query.resolve(&state)?;
     let ingress = match request.ingress {
         TurnInputIngressRequest::ActiveTurn => {
             let active = state.active_turns.for_session(&session_id);
@@ -170,7 +298,7 @@ async fn enqueue_turn_input(
     let pending = state
         .core
         .enqueue_turn_input(
-            session_id,
+            session_id.clone(),
             lash::TurnInput::text(text.clone()),
             ingress,
             Some(source_id),
@@ -185,11 +313,12 @@ async fn enqueue_turn_input(
         state: pending.state,
         text,
     };
-    state.trace(
+    state.trace_for_session(
+        &session_id,
         "turn_input.enqueued",
         serde_json::to_value(&receipt).unwrap_or(Value::Null),
     );
-    state.publish(StreamItem::TurnInput {
+    state.publish_for_session(&session_id, StreamItem::TurnInput {
         receipt: receipt.clone(),
     });
     Ok(Json(receipt))
@@ -232,8 +361,10 @@ async fn reject_if_active_turn_settled(
 
 async fn button_trigger(
     State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
     Json(request): Json<ButtonEventRequest>,
 ) -> Result<Json<CommandAccepted>, AppError> {
+    let session_id = query.resolve(&state)?;
     let turn_model = model_spec_for_request(
         &state,
         request.model.as_deref(),
@@ -241,7 +372,8 @@ async fn button_trigger(
     )?;
     let model = ModelSelection::from_spec(&turn_model);
     state.set_selected_model(model.clone());
-    state.trace(
+    state.trace_for_session(
+        &session_id,
         "api.button_trigger.request",
         json!({
             "button": request.button,
@@ -249,7 +381,8 @@ async fn button_trigger(
         }),
     );
     let pressed_at = Utc::now().to_rfc3339();
-    state.push_message(
+    state.push_message_for_session(
+        &session_id,
         "event",
         format!("{} button trigger occurrence", request.button.lower()),
     );
@@ -257,7 +390,7 @@ async fn button_trigger(
         &state,
         restate::WorkbenchButtonTriggerWorkflowRequest {
             operation_id: format!("workbench-button-{}", uuid::Uuid::new_v4()),
-            session_id: state.current_session_id(),
+            session_id,
             button: request.button,
             model,
             pressed_at,
@@ -269,6 +402,100 @@ async fn button_trigger(
 
 async fn list_accounts(State(state): State<AppState>) -> Json<Vec<mail::AccountSummary>> {
     Json(state.mail_world.account_summaries())
+}
+
+async fn list_triggers(
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<Vec<lash::triggers::TriggerRegistration>>, AppError> {
+    let session_id = query.resolve(&state)?;
+    let records = state
+        .trigger_store
+        .list_subscriptions(lash::triggers::TriggerSubscriptionFilter::for_session(
+            &session_id,
+        ))
+        .await
+        .map_err(AppError::internal)?;
+    Ok(Json(
+        records
+            .iter()
+            .map(lash::triggers::TriggerRegistration::from)
+            .collect(),
+    ))
+}
+
+async fn set_trigger_enabled(
+    AxumPath(handle): AxumPath<String>,
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+    Json(request): Json<TriggerEnabledRequest>,
+) -> Result<Json<TriggerMutationResponse>, AppError> {
+    let session_id = query.resolve(&state)?;
+    let record = trigger_record_for_session(&state, &session_id, &handle).await?;
+    let changed = state
+        .trigger_store
+        .set_subscription_enabled(
+            &record.registrant_scope_id(),
+            &record.handle,
+            request.enabled,
+        )
+        .await
+        .map_err(AppError::internal)?;
+    let mut registration = lash::triggers::TriggerRegistration::from(&record);
+    registration.enabled = request.enabled;
+    state.trace_for_session(
+        &session_id,
+        "api.triggers.enabled",
+        json!({
+            "handle": handle,
+            "enabled": request.enabled,
+            "changed": changed,
+        }),
+    );
+    Ok(Json(TriggerMutationResponse {
+        changed,
+        registration: Some(registration),
+    }))
+}
+
+async fn delete_trigger(
+    AxumPath(handle): AxumPath<String>,
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<TriggerMutationResponse>, AppError> {
+    let session_id = query.resolve(&state)?;
+    let record = trigger_record_for_session(&state, &session_id, &handle).await?;
+    let changed = state
+        .trigger_store
+        .delete_subscription(&record.registrant_scope_id(), &record.handle)
+        .await
+        .map_err(AppError::internal)?;
+    state.trace_for_session(
+        &session_id,
+        "api.triggers.delete",
+        json!({ "handle": handle, "changed": changed }),
+    );
+    Ok(Json(TriggerMutationResponse {
+        changed,
+        registration: None,
+    }))
+}
+
+async fn trigger_record_for_session(
+    state: &AppState,
+    session_id: &str,
+    handle: &str,
+) -> Result<lash::triggers::TriggerSubscriptionRecord, AppError> {
+    let mut filter = lash::triggers::TriggerSubscriptionFilter::for_session(session_id);
+    filter.handle = Some(handle.to_string());
+    state
+        .trigger_store
+        .list_subscriptions(filter)
+        .await
+        .map_err(AppError::internal)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::not_found(format!("unknown trigger `{handle}`")))
 }
 
 async fn add_account(
@@ -360,7 +587,8 @@ async fn enqueue_tool_catalog_refresh(
         .await
         .map_err(AppError::internal)?;
     session.close().await.map_err(AppError::internal)?;
-    state.trace(
+    state.trace_for_session(
+        &session_id,
         "mail.tool_catalog.refresh_enqueued",
         json!({
             "reason": reason,
@@ -415,10 +643,14 @@ async fn inject_message(
     Ok(Json(CommandAccepted { accepted: true }))
 }
 
-async fn cancel_turn(State(state): State<AppState>) -> Result<Json<TurnCancelResponse>, AppError> {
-    let session_id = state.current_session_id();
+async fn cancel_turn(
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<TurnCancelResponse>, AppError> {
+    let session_id = query.resolve(&state)?;
     let cancellations = state.cancel_turns_for_session(&session_id).await?;
-    state.trace(
+    state.trace_for_session(
+        &session_id,
         "api.turn.cancel",
         json!({ "session_id": session_id, "cancellations": cancellations }),
     );
@@ -428,8 +660,11 @@ async fn cancel_turn(State(state): State<AppState>) -> Result<Json<TurnCancelRes
     }))
 }
 
-async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>, AppError> {
-    let old_session_id = state.current_session_id();
+async fn reset_chat(
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<StateSnapshot>, AppError> {
+    let old_session_id = query.resolve(&state)?;
     restate::cancel_cron_jobs_for_session(&state, &old_session_id, "reset").await?;
     restate::submit_session_delete(
         &state,
@@ -439,14 +674,19 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
         },
     )
     .await?;
-    let (rotated_old, _) = state.session_ids.rotate();
-    if rotated_old != old_session_id {
-        eprintln!(
-            "warning: workbench session changed during reset; deleted {old_session_id}, rotated {rotated_old}"
-        );
-    }
-    let new_session_id = state.current_session_id();
-    state.trace(
+    let new_session_id = if query.is_explicit() {
+        old_session_id.clone()
+    } else {
+        let (rotated_old, new_session_id) = state.session_ids.rotate();
+        if rotated_old != old_session_id {
+            eprintln!(
+                "warning: workbench session changed during reset; deleted {old_session_id}, rotated {rotated_old}"
+            );
+        }
+        new_session_id
+    };
+    state.trace_for_session(
+        &old_session_id,
         "api.reset",
         json!({
             "old_session_id": old_session_id,
@@ -455,7 +695,7 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
     );
     let session = state
         .core
-        .session(new_session_id)
+        .session(new_session_id.clone())
         .open()
         .await
         .map_err(AppError::internal)?;
@@ -467,30 +707,48 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
         })
         .await
         .map_err(AppError::internal)?;
-    state.messages.lock().expect("messages lock").clear();
-    state.lashlang_execution.clear();
-    state.mail_world.clear();
+    if !query.is_explicit() {
+        state.messages.lock().expect("messages lock").clear();
+        state.lashlang_execution.clear();
+        state.mail_world.clear();
+    }
     Ok(Json(StateSnapshot {
-        settings: state.settings(),
+        settings: state.settings_for_session(new_session_id),
         messages: Vec::new(),
         active_turns: Vec::new(),
         pending_turn_inputs: Vec::new(),
+        usage: session.usage_report(),
     }))
 }
 
-async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>, AppError> {
-    let work = state
-        .process_observer
-        .snapshot_all(&lash::process::ProcessListFilter {
-            status: lash::process::ProcessStatusFilter::Any,
-            ..lash::process::ProcessListFilter::default()
-        })
-        .await
-        .map_err(AppError::internal)?
+async fn list_work(
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<Vec<WorkItem>>, AppError> {
+    let session_id = query.resolve(&state)?;
+    let observed = if query.is_explicit() {
+        state
+            .process_observer
+            .snapshot_for_session(session_id.clone())
+            .await
+            .map_err(AppError::internal)?
+            .items
+    } else {
+        state
+            .process_observer
+            .snapshot_all(&lash::process::ProcessListFilter {
+                status: lash::process::ProcessStatusFilter::Any,
+                ..lash::process::ProcessListFilter::default()
+            })
+            .await
+            .map_err(AppError::internal)?
+    };
+    let work = observed
         .into_iter()
         .map(work_item_from_observed)
         .collect::<Vec<_>>();
-    state.trace(
+    state.trace_for_session(
+        &session_id,
         "api.work.response",
         json!({
             "count": work.len(),
@@ -514,16 +772,22 @@ async fn cancel_work(
             "process `{process_id}` is already terminal"
         )));
     }
+    let session_id = match &process.originator {
+        lash_core::ProcessOriginator::Session { scope } => scope.session_id.clone(),
+        lash_core::ProcessOriginator::Host { .. } => state.current_session_id(),
+    };
     let operation_id = format!("workbench-process-cancel-{}", uuid::Uuid::new_v4());
     restate::submit_process_cancel(
         &state,
         restate::WorkbenchProcessCancelWorkflowRequest {
             operation_id: operation_id.clone(),
+            session_id: session_id.clone(),
             process_id: process_id.clone(),
         },
     )
     .await?;
-    state.trace(
+    state.trace_for_session(
+        &session_id,
         "api.work.cancel_submitted",
         json!({
             "operation_id": operation_id,
@@ -595,10 +859,12 @@ async fn await_work(
 
 async fn list_lashlang_graphs(
     State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
 ) -> Result<Json<execution_graphs::LashlangGraphIndex>, AppError> {
+    let session_id = query.resolve(&state)?;
     let index = execution_graphs::index_for_session(
         &state.process_observer,
-        &state.current_session_id(),
+        &session_id,
         state.lashlang_execution.graphs(),
     )
     .await?;
@@ -608,10 +874,12 @@ async fn list_lashlang_graphs(
 async fn lashlang_graph(
     AxumPath(graph_key): AxumPath<String>,
     State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
 ) -> Result<Json<TraceLashlangGraph>, AppError> {
+    let session_id = query.resolve(&state)?;
     let graph = execution_graphs::visible_graph_by_key(
         &state.process_observer,
-        &state.current_session_id(),
+        &session_id,
         state.lashlang_execution.graphs(),
         &graph_key,
     )
@@ -803,6 +1071,7 @@ mod turn_stream_state_tests {
 
 pub(crate) async fn enqueue_button_trigger_command(
     state: &AppState,
+    session_id: &str,
     button: ButtonChoice,
     pressed_at: &str,
     operation_id: &str,
@@ -815,7 +1084,8 @@ pub(crate) async fn enqueue_button_trigger_command(
     });
     let source_key = lash::triggers::empty_trigger_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
         .context("button source key")?;
-    state.trace(
+    state.trace_for_session(
+        session_id,
         "trigger.emit",
         json!({
             "resource_type": BUTTON_TRIGGER_RESOURCE,
@@ -836,7 +1106,8 @@ pub(crate) async fn enqueue_button_trigger_command(
                 payload,
                 format!("workbench-button-trigger:{operation_id}"),
             )
-            .with_source(json!({})),
+            .with_source(json!({}))
+            .for_session(session_id),
             scoped_effect_controller,
         )
         .await
@@ -845,6 +1116,7 @@ pub(crate) async fn enqueue_button_trigger_command(
 
 pub(crate) async fn enqueue_mail_received_trigger_command(
     state: &AppState,
+    session_id: &str,
     message: &mail::MailDelivery,
     operation_id: &str,
     scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
@@ -856,7 +1128,8 @@ pub(crate) async fn enqueue_mail_received_trigger_command(
     });
     let source_key = lash::triggers::empty_trigger_source_key(MAIL_RECEIVED_SOURCE_TYPE)
         .context("mail source key")?;
-    state.trace(
+    state.trace_for_session(
+        session_id,
         "trigger.emit",
         json!({
             "resource_type": MAIL_EVENT_RESOURCE,
@@ -877,7 +1150,8 @@ pub(crate) async fn enqueue_mail_received_trigger_command(
                 payload,
                 format!("workbench-mail-trigger:{operation_id}"),
             )
-            .with_source(json!({})),
+            .with_source(json!({}))
+            .for_session(session_id),
             scoped_effect_controller,
         )
         .await

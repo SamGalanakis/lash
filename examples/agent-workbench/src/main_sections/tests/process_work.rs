@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod process_work_tests {
     use super::tests::{
-        explicit_durable_test_facets, run_async_test_on_stack_budget,
+        explicit_durable_test_facets, in_memory_trigger_store, run_async_test_on_stack_budget,
         spawn_restate_ingress_capture,
     };
     use super::*;
@@ -11,6 +11,11 @@ mod process_work_tests {
         assert!(ui::INDEX_HTML.contains("className = \"work-cancel\""));
         assert!(ui::INDEX_HTML.contains("/cancel\""));
         assert!(ui::INDEX_HTML.contains("Request cooperative process cancellation"));
+        assert!(ui::INDEX_HTML.contains("error: \" + process.error"));
+        assert!(
+            ui::INDEX_HTML.contains("row.error ? \" error\""),
+            "failed work must receive the work rail's visible error treatment"
+        );
     }
 
     #[test]
@@ -65,6 +70,8 @@ mod process_work_tests {
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: driver.clone(),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -164,6 +171,45 @@ mod process_work_tests {
             "terminal event must not ride the sink: {sunk:?}"
         );
 
+        watched
+            .register_process(lash::process::ProcessRegistration::new(
+                "failed-work-rail-proc",
+                lash::process::ProcessInput::External {
+                    metadata: Value::Null,
+                },
+                lash::process::RecoveryDisposition::ExternallyOwned,
+                lash::process::ProcessProvenance::host(),
+            ))
+            .await
+            .expect("register failed process");
+        watched
+            .complete_process(
+                "failed-work-rail-proc",
+                lash::process::ProcessAwaitOutput::Failure {
+                    class: lash::tools::ToolFailureClass::External,
+                    code: "deterministic_failure".to_string(),
+                    message: "deterministic durable process failure".to_string(),
+                    raw: None,
+                    control: None,
+                },
+                lash::process::ProcessCompletionAuthority::external_owner("test"),
+            )
+            .await
+            .expect("fail process");
+        let Json(work) = list_work(State(state.clone()), Query(SessionQuery::default()))
+            .await
+            .expect("list failed work");
+        let failed = work
+            .iter()
+            .find(|item| item.process.process_id == "failed-work-rail-proc")
+            .expect("failed process in work API");
+        assert_eq!(failed.process.status_label, "failed");
+        assert!(failed.process.terminal);
+        assert_eq!(
+            failed.process.error.as_deref(),
+            Some("deterministic durable process failure")
+        );
+
         // An unknown process id errors instead of hanging.
         let missing = await_work(AxumPath("no-such-process".to_string()), State(state)).await;
         assert!(missing.is_err(), "unknown process id must error");
@@ -217,6 +263,8 @@ mod process_work_tests {
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
+            trigger_store: in_memory_trigger_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -268,8 +316,10 @@ mod process_work_tests {
             .await
             .expect("delete session process edges");
         assert_eq!(deletion.orphaned_process_ids, vec![process_id]);
+        let (_, current_session_id) = state.session_ids.rotate();
+        assert_ne!(current_session_id, session_id);
 
-        let Json(work) = list_work(State(state.clone()))
+        let Json(work) = list_work(State(state.clone()), Query(SessionQuery::default()))
             .await
             .expect("list runtime-wide work");
         assert_eq!(work.len(), 1);
@@ -297,6 +347,11 @@ mod process_work_tests {
         assert_eq!(
             request.pointer("/body/process_id").and_then(Value::as_str),
             Some(process_id)
+        );
+        assert_eq!(
+            request.pointer("/body/session_id").and_then(Value::as_str),
+            Some(session_id.as_str()),
+            "process cancellation must retain its originating trace session"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }

@@ -52,28 +52,41 @@ async fn async_main() -> AnyhowResult<()> {
         Arc::new(JsonlTraceSink::new(lashlang_execution_path.clone())) as Arc<dyn TraceSink>,
     ])) as Arc<dyn TraceSink>;
 
+    let dev_provider_scenario = failure_provider::DevProviderScenario::from_environment()?;
     let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
-    if api_key.trim().is_empty() {
+    if api_key.trim().is_empty() && dev_provider_scenario.is_none() {
         eprintln!("warning: OPENROUTER_API_KEY is empty; turns will fail until it is set");
     }
     let tavily_api_key = std::env::var("TAVILY_API_KEY").unwrap_or_default();
     if tavily_api_key.trim().is_empty() {
         eprintln!("warning: TAVILY_API_KEY is empty; web tools will return configuration errors");
     }
-    let model = std::env::var("OPENROUTER_MODEL")
-        .unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
+    let model = dev_provider_scenario
+        .map(|_| "dev/failure-paths".to_string())
+        .unwrap_or_else(|| {
+            std::env::var("OPENROUTER_MODEL")
+                .unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string())
+        });
     let model_variant =
         std::env::var("OPENROUTER_MODEL_VARIANT").unwrap_or_else(|_| "high".to_string());
 
-    let provider = ProviderHandle::new(
-        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
-            .with_compat(OpenAiCompat::openrouter())
-            .with_options(ProviderOptions {
-                expose_thinking: true,
-                ..ProviderOptions::default()
-            })
-            .into_components(),
-    );
+    let provider = if let Some(scenario) = dev_provider_scenario {
+        eprintln!(
+            "warning: agent-workbench development provider scenario enabled: {}",
+            scenario.as_str()
+        );
+        scenario.provider()
+    } else {
+        ProviderHandle::new(
+            OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+                .with_compat(OpenAiCompat::openrouter())
+                .with_options(ProviderOptions {
+                    expose_thinking: true,
+                    ..ProviderOptions::default()
+                })
+                .into_components(),
+        )
+    };
     let model_spec = lash::ModelSpec::from_token_limits(
         model.clone(),
         lash::provider::ReasoningSelection::Effort(model_variant.clone()),
@@ -139,11 +152,12 @@ async fn async_main() -> AnyhowResult<()> {
         ),
     );
 
+    let attachment_store = Arc::new(lash::persistence::FileAttachmentStore::new(
+        data_dir.join("attachments"),
+    )) as Arc<dyn lash::persistence::AttachmentStore>;
     let runtime_host_config = lash::durability::RuntimeHostConfig::new(
         turn_deployment.effect_host(),
-        Arc::new(lash::persistence::FileAttachmentStore::new(
-            data_dir.join("attachments"),
-        )),
+        Arc::clone(&attachment_store),
         Arc::clone(&stores.process_env_store),
     );
 
@@ -157,7 +171,7 @@ async fn async_main() -> AnyhowResult<()> {
         .provider(provider)
         .model(model_spec)
         .store_factory(Arc::clone(&core_store_factory))
-        .trigger_store(trigger_store)
+        .trigger_store(Arc::clone(&trigger_store))
         .trace_sink(Arc::clone(&trace_sink))
         .trace_level(TraceLevel::Extended)
         .configure_plugins(|plugins| {
@@ -190,6 +204,8 @@ async fn async_main() -> AnyhowResult<()> {
 
     let state = AppState {
         core,
+        attachment_store,
+        trigger_store,
         process_observer,
         process_work_driver,
         session_ids,
@@ -226,6 +242,7 @@ async fn async_main() -> AnyhowResult<()> {
             "trace_path": trace_path_display,
             "lashlang_execution_path": lashlang_execution_path.display().to_string(),
             "model": serde_json::to_value(state.selected_model()).unwrap_or(Value::Null),
+            "dev_provider_scenario": dev_provider_scenario.map(|scenario| scenario.as_str()),
             "web_configured": state.web_configured,
             "store_backend": stores.backend,
             "restate_endpoint_addr": restate_endpoint_addr.to_string(),
@@ -239,11 +256,19 @@ async fn async_main() -> AnyhowResult<()> {
         .route("/api/state", get(app_state))
         .route("/api/events", get(session_events))
         .route("/api/turn", post(send_turn))
+        .route("/api/attachments", post(upload_attachment))
+        .route("/api/attachments/{attachment_id}", get(retrieve_attachment))
         .route("/api/turn/input", post(enqueue_turn_input))
         .route("/api/turn/cancel", post(cancel_turn))
         .route("/api/session", delete(reset_chat))
         .route("/api/reset", post(reset_chat))
         .route("/api/button-trigger", post(button_trigger))
+        .route("/api/triggers", get(list_triggers))
+        .route(
+            "/api/triggers/{handle}/enabled",
+            put(set_trigger_enabled),
+        )
+        .route("/api/triggers/{handle}", delete(delete_trigger))
         .route("/api/accounts", get(list_accounts).post(add_account))
         .route("/api/accounts/{slug}", delete(delete_account))
         .route("/api/accounts/{slug}/messages", post(inject_message))

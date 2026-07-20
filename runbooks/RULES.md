@@ -66,11 +66,14 @@ Apply every rule below to the browser surface:
   yourself; a UI change that breaks an affordance the runbook names is a finding, not a
   reason to guess.
 
-**Real tokens, deliberate runs.** The examples have no deterministic test provider: they
-call OpenRouter (and Tavily for web tools) with keys from the environment / repo `.env`.
-Every browser scenario is deliberate, token-spending, and model-nondeterministic. Gate on
-**structural outcomes** (a terminal game state, a message present in an inbox), never on
-exact model prose. A missing required key is a harness gap → Abort, do not stub around it.
+**Real tokens, deliberate runs.** Except for an explicitly documented, dev-only provider
+scenario in a runbook, the examples call OpenRouter (and Tavily for web tools) with keys
+from the environment / repo `.env`. Browser scenarios are deliberate, token-spending,
+and model-nondeterministic unless their runbook names that exception. Gate real-provider
+runs on **structural outcomes** (a terminal game state, a message present in an inbox),
+never on exact model prose. A missing required key is a harness gap → Abort; do not add an
+ad hoc stub. A deterministic provider is valid only when the runbook names its public
+environment selector, expected exact output, and dev-only startup warning.
 
 **Boot and teardown are part of the run.** Phase 0 boots the example (`cargo run -p
 agent-service`, `just agent-workbench <port>`) and gates on its readiness signal

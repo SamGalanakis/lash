@@ -52,7 +52,8 @@ export function layoutDocument(doc) {
       h += exprCount * 10;
       // Typed assignment / computation nodes render dedicated expression rows
       // that are not part of `fields`, so reserve space for them here.
-      if (kind === 'state_update') h += 52; // target ≔ expression
+      if (kind === 'terminal') h += 76; // finish/fail toggle + result expression
+      else if (kind === 'state_update') h += 52; // target ≔ expression
       else if (kind === 'computation') h += 84; // optional binding + expression
       // data / call / effect nodes render an optional `let <binding> =` row.
       else if (kind === 'data' || kind === 'call' || kind === 'effect') h += 30;

@@ -1,4 +1,5 @@
 mod execution_graphs;
+mod failure_provider;
 mod mail;
 mod restate;
 mod ui;
@@ -16,8 +17,9 @@ use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use base64::Engine as _;
 use bytes::Bytes;
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -57,6 +59,11 @@ pub(crate) const MAIL_EVENT_ALIAS: &str = "mail";
 pub(crate) const MAIL_EVENT_EVENT: &str = "received";
 pub(crate) const MAIL_RECEIVED_SOURCE_TYPE: &str = "mail.received";
 const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(test)]
+fn test_attachment_store() -> Arc<dyn lash::persistence::AttachmentStore> {
+    Arc::new(lash::persistence::InMemoryAttachmentStore::new())
+}
 #[cfg(not(test))]
 const TURN_TERMINAL_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]

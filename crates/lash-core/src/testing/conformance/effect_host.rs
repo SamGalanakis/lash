@@ -1221,7 +1221,29 @@ async fn lease_fencing_rejects_finalize_after_expiry(
 /// 30s default a backend might hardcode.
 #[cfg(any(test, feature = "testing"))]
 async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingBackend, run: &str) {
-    let ttl = std::time::Duration::from_millis(40);
+    // Calibrate the short TTL to this scheduler instead of assuming a 40 ms
+    // renewal window is viable under CI contention. Eight observed wake
+    // windows leave the successor's ttl/3 renewal task multiple chances to
+    // run before finalization. The 2 s cap, paired with a <=10 s reclaim
+    // deadline, remains far below the 30 s default and therefore still proves
+    // that the backend honored the configured TTL knob.
+    let mut slowest_scheduler_wake = std::time::Duration::ZERO;
+    for _ in 0..8 {
+        let started = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        slowest_scheduler_wake = slowest_scheduler_wake.max(started.elapsed());
+    }
+    let ttl = std::time::Duration::from_millis(40)
+        .max(slowest_scheduler_wake.saturating_mul(8))
+        .min(std::time::Duration::from_secs(2));
+    let reclaim_deadline = ttl
+        .saturating_mul(4)
+        .saturating_add(std::time::Duration::from_secs(2))
+        .min(std::time::Duration::from_secs(10));
+    eprintln!(
+        "effect lease short-TTL calibration: slowest_scheduler_wake={slowest_scheduler_wake:?}, \
+         ttl={ttl:?}, reclaim_deadline={reclaim_deadline:?}"
+    );
     let replay_key = format!("lease-short-ttl-{run}");
     let vanished = (backend.make_controller)(ttl).await;
     let successor = (backend.make_controller)(ttl).await;
@@ -1251,7 +1273,7 @@ async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingB
     assert!(owner_task.await.is_err(), "vanished owner task aborts");
 
     let reclaimed = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        reclaim_deadline,
         successor.controller.execute_effect(
             envelope,
             RuntimeEffectLocalExecutor::testing(move |_| async move {

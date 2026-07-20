@@ -200,6 +200,52 @@
       color: var(--ash-text);
     }
 
+    .trigger-registry {
+      width: 100%;
+      display: grid;
+      gap: var(--space-2xs);
+    }
+
+    .trigger-registry-head,
+    .trigger-registration {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-xs);
+    }
+
+    .trigger-registry-head {
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
+      color: var(--ash-text);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .trigger-registration {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: var(--space-2xs) var(--space-xs);
+      background: var(--form-raised);
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
+    }
+
+    .trigger-registration[data-enabled="false"] { opacity: 0.58; }
+    .trigger-registration-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .trigger-registration-actions { display: flex; gap: var(--space-3xs); flex: none; }
+    .trigger-registration-actions button {
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: transparent;
+      color: var(--ash-text);
+      font: inherit;
+      padding: 0.2rem 0.35rem;
+      cursor: pointer;
+    }
+    .trigger-registration-actions button:hover { color: var(--sodium); border-color: var(--sodium); }
+    .trigger-registry-empty { margin: 0; color: var(--ash-text); font-size: 0.72rem; }
+
     .schedule-card {
       width: 100%;
       border: 1px solid var(--line);
@@ -953,6 +999,27 @@
 
     .composer-actions[hidden] { display: none; }
 
+    .attach {
+      min-width: 132px;
+      min-height: 34px;
+      padding: 0 var(--space-sm);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: transparent;
+      color: var(--ash-text);
+      font-family: var(--font-ui);
+      font-size: 0.7rem;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .attach:hover { color: var(--chalk); border-color: var(--line-strong); }
+    .attach.ready { color: var(--lichen); border-color: var(--lichen); }
+    .attach.uploading { color: var(--sodium-soft); border-color: var(--line-strong); }
+    .attach:disabled { opacity: 0.45; cursor: not-allowed; }
+
     .composer textarea {
       width: 100%;
       min-height: 56px;
@@ -1200,6 +1267,8 @@
       color: var(--ash-text);
       overflow-wrap: anywhere;
     }
+
+    .work-events.error { color: var(--error); }
 
     .execution-explorer[hidden] { display: none; }
 
@@ -1789,6 +1858,10 @@
           </button>
         </div>
         <p class="trigger-caption">red and blue emit triggers</p>
+        <section class="trigger-registry" aria-label="Trigger registrations">
+          <div class="trigger-registry-head"><span>registrations</span><span id="triggerCount">0</span></div>
+          <div id="triggerRegistrations"><p class="trigger-registry-empty">none in this session</p></div>
+        </section>
         <section class="schedule-card" aria-label="Cron schedule example">
           <div class="schedule-card-label">try scheduling</div>
           <div class="schedule-card-code">cron.Schedule(...)</div>
@@ -1815,6 +1888,9 @@
       <div class="status-stack">
         <div class="status-row"><span>web</span><span id="webState">loading</span></div>
         <div class="status-row"><span>session</span><span id="sessionId">—</span></div>
+        <div class="status-row"><span>usage</span><span id="usageTotal">0 total</span></div>
+        <div class="status-row"><span>tokens</span><span id="usageBreakdown">0 in · 0 out</span></div>
+        <button id="newSessionTab" class="ghost-btn" type="button" title="Open an isolated session in a second tab">new session tab</button>
       </div>
     </aside>
 
@@ -1894,6 +1970,9 @@
       <form id="composer" class="composer">
         <textarea id="prompt" rows="2" placeholder="ask the agent — enter to send, shift + enter for a newline"></textarea>
         <div id="idleActions" class="composer-actions">
+          <input id="attachmentInput" type="file" accept="image/png" hidden />
+          <button id="attach" class="attach" type="button"
+                  title="Upload one PNG and reference it in the next turn">attach png</button>
           <button id="send" class="send" type="submit">send</button>
         </div>
         <div id="runningActions" class="composer-actions" hidden aria-label="Running turn input actions">
@@ -1943,6 +2022,17 @@
   </div>
 
   <script>
+    const scopedSessionId = new URLSearchParams(window.location.search).get("session_id");
+    const nativeFetch = window.fetch.bind(window);
+    function scopedApiUrl(input) {
+      if (!scopedSessionId || typeof input !== "string") return input;
+      const url = new URL(input, window.location.href);
+      if (url.origin !== window.location.origin || !url.pathname.startsWith("/api/")) return input;
+      url.searchParams.set("session_id", scopedSessionId);
+      return url.pathname + url.search + url.hash;
+    }
+    window.fetch = (input, init) => nativeFetch(scopedApiUrl(input), init);
+
     const shell = document.querySelector(".shell");
     const mainPanel = document.getElementById("mainPanel");
     const timeline = document.getElementById("timeline");
@@ -1981,6 +2071,8 @@
     const composer = document.getElementById("composer");
     const promptInput = document.getElementById("prompt");
     const sendButton = document.getElementById("send");
+    const attachButton = document.getElementById("attach");
+    const attachmentInput = document.getElementById("attachmentInput");
     const idleActions = document.getElementById("idleActions");
     const runningActions = document.getElementById("runningActions");
     const injectNowButton = document.getElementById("injectNow");
@@ -1995,6 +2087,17 @@
     const busyText = document.getElementById("busyText");
     const webState = document.getElementById("webState");
     const sessionId = document.getElementById("sessionId");
+    const usageTotal = document.getElementById("usageTotal");
+    const usageBreakdown = document.getElementById("usageBreakdown");
+    const triggerRegistrations = document.getElementById("triggerRegistrations");
+    const triggerCount = document.getElementById("triggerCount");
+    const newSessionTab = document.getElementById("newSessionTab");
+
+    newSessionTab.addEventListener("click", () => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("session_id", "workbench-tab-" + crypto.randomUUID());
+      window.open(url, "_blank", "noopener");
+    });
 
     const renderedMessages = new Set();
     const renderedIngressInputs = new Set();
@@ -2012,6 +2115,8 @@
     let eventStreamGeneration = 0;
     let replayCursor = null;
     let lastRequest = null;
+    let selectedAttachment = null;
+    let attachmentUploadInFlight = false;
     let workStale = false;
     let workRefreshGeneration = 0;
     let selectedWorkKey = null;
@@ -2290,12 +2395,13 @@
     }
 
     function syncCommandAvailability() {
-      const unavailable = busy || modelEmpty();
+      const unavailable = busy || modelEmpty() || attachmentUploadInFlight;
       sendButton.disabled = unavailable;
+      attachButton.disabled = busy || attachmentUploadInFlight;
       injectNowButton.disabled = !busy || modelEmpty();
       queueNextButton.disabled = !busy || modelEmpty();
       for (const button of triggerButtons) {
-        button.setAttribute("aria-disabled", String(unavailable));
+        button.setAttribute("aria-disabled", String(modelEmpty()));
       }
     }
 
@@ -2641,7 +2747,7 @@
     async function postCommand(url, payload) {
       if (busy) {
         renderNote("turn already running");
-        return;
+        return false;
       }
       lastRequest = { url, payload };
       const commandController = new AbortController();
@@ -2665,8 +2771,9 @@
           const text = await response.text();
           renderError(text || "request failed", { retry: true });
           setBusy(false, "ready");
-          return;
+          return false;
         }
+        return true;
       } catch (error) {
         if (error.name === "AbortError") {
           if (!resetInFlight) renderNote("turn stopped");
@@ -2674,6 +2781,7 @@
           renderError(error.message || String(error), { retry: true });
         }
         if (!resetInFlight) setBusy(false, "ready");
+        return false;
       } finally {
         if (controller === commandController) controller = null;
         if (!resetInFlight) refreshWork();
@@ -2738,6 +2846,7 @@
       if (item.type === "done") {
         finishTransientRows();
         setBusy(false, "ready");
+        refreshUsage();
       }
     }
 
@@ -2764,7 +2873,10 @@
           const receipt = await response.json();
           const committed = (receipt.cancellations || []).find(item => item.terminal?.status === "committed");
           const evidence = committed?.terminal?.cancellation;
+          const unresolved = (receipt.cancellations || []).find(item =>
+            item.terminal_error?.code === "turn_terminal_await_timeout");
           if (evidence) renderNote("turn stopped · request " + evidence.request_id);
+          else if (unresolved) renderNote("turn route cleared · terminal outcome unknown");
           else if (!receipt.accepted) renderNote("turn already finished");
         })
         .catch(error => renderError("couldn't stop the turn: " + (error.message || error)))
@@ -2827,8 +2939,10 @@
         const state = await response.json();
         clearTranscript();
         clearExecutionState();
+        clearAttachment();
         lastRequest = null;
         sessionId.textContent = state.settings.session_id || "—";
+        renderUsage(state.usage);
         restartEventStream(true);
         setBusy(false, "ready");
       } catch (error) {
@@ -2886,15 +3000,88 @@
 
     let lastUserText = "";
 
-    composer.addEventListener("submit", event => {
+    composer.addEventListener("submit", async event => {
       event.preventDefault();
       const text = promptInput.value.trim();
       if (!text) return;
       if (modelEmpty()) { validateModel(); modelInput.focus(); return; }
       lastUserText = text;
       promptInput.value = "";
-      postCommand("/api/turn", { text, ...selectedModelPayload() });
+      const attachment = selectedAttachment;
+      const accepted = await postCommand("/api/turn", {
+        text,
+        attachment_id: attachment?.id || null,
+        ...selectedModelPayload()
+      });
+      if (accepted && selectedAttachment?.id === attachment?.id) clearAttachment();
     });
+
+    function clearAttachment() {
+      selectedAttachment = null;
+      attachmentInput.value = "";
+      attachButton.classList.remove("ready", "uploading");
+      attachButton.textContent = "attach png";
+      attachButton.title = "Upload one PNG and reference it in the next turn";
+      syncCommandAvailability();
+    }
+
+    function fileBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.addEventListener("load", () => resolve(String(reader.result).split(",", 2)[1] || ""));
+        reader.addEventListener("error", () => reject(reader.error || new Error("could not read file")));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function uploadAttachment(file) {
+      if (!file) return;
+      if (file.type !== "image/png") {
+        renderError("attachments use Lash's current image turn contract; choose a PNG file");
+        clearAttachment();
+        return;
+      }
+      if (!file.size || file.size > 1024 * 1024) {
+        renderError("the PNG attachment must be between 1 byte and 1 MiB");
+        clearAttachment();
+        return;
+      }
+      attachmentUploadInFlight = true;
+      selectedAttachment = null;
+      attachButton.classList.remove("ready");
+      attachButton.classList.add("uploading");
+      attachButton.textContent = "uploading…";
+      syncCommandAvailability();
+      try {
+        const response = await fetch("/api/attachments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: file.name,
+            mime: file.type,
+            data_base64: await fileBase64(file)
+          })
+        });
+        if (!response.ok) {
+          throw new Error(errorTextFrom(await response.text(), "attachment upload failed"));
+        }
+        const uploaded = await response.json();
+        selectedAttachment = uploaded.attachment;
+        attachButton.classList.remove("uploading");
+        attachButton.classList.add("ready");
+        attachButton.textContent = "attached · " + file.name;
+        attachButton.title = file.name + " · " + uploaded.attachment.byte_len + " bytes · click to replace";
+      } catch (error) {
+        renderError("couldn't attach the PNG: " + (error.message || error));
+        clearAttachment();
+      } finally {
+        attachmentUploadInFlight = false;
+        syncCommandAvailability();
+      }
+    }
+
+    attachButton.addEventListener("click", () => attachmentInput.click());
+    attachmentInput.addEventListener("change", () => uploadAttachment(attachmentInput.files?.[0]));
 
     async function submitRunningInput(ingress) {
       const text = promptInput.value.trim();
@@ -2936,13 +3123,88 @@
 
     function fireButtonTrigger(event) {
       const button = event.currentTarget;
-      if (busy || button.getAttribute("aria-disabled") === "true") return;
+      if (button.getAttribute("aria-disabled") === "true") return;
       if (modelEmpty()) { validateModel(); modelInput.focus(); return; }
-      postCommand("/api/button-trigger", { button: button.dataset.button, ...selectedModelPayload() });
+      postTriggerCommand({ button: button.dataset.button, ...selectedModelPayload() });
+    }
+
+    async function postTriggerCommand(payload) {
+      try {
+        const response = await fetch("/api/button-trigger", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) renderError(errorTextFrom(await response.text(), "trigger failed"));
+      } catch (error) {
+        renderError(error.message || String(error));
+      } finally {
+        refreshWork();
+      }
     }
 
     for (const button of buttonTriggerButtons) {
       button.addEventListener("click", fireButtonTrigger);
+    }
+
+    async function loadTriggers() {
+      try {
+        const response = await fetch("/api/triggers");
+        if (!response.ok) return;
+        renderTriggers(await response.json());
+      } catch (_) { /* polling retries */ }
+    }
+
+    function renderTriggers(registrations) {
+      triggerCount.textContent = String(registrations.length);
+      triggerRegistrations.innerHTML = "";
+      if (!registrations.length) {
+        const empty = document.createElement("p");
+        empty.className = "trigger-registry-empty";
+        empty.textContent = "none in this session";
+        triggerRegistrations.appendChild(empty);
+        return;
+      }
+      for (const registration of registrations) {
+        const row = document.createElement("div");
+        row.className = "trigger-registration";
+        row.dataset.enabled = String(registration.enabled);
+        row.dataset.triggerHandle = registration.handle;
+        const name = document.createElement("span");
+        name.className = "trigger-registration-name";
+        name.textContent = registration.name || registration.source_type || registration.handle;
+        name.title = registration.handle + " · " + registration.source_type;
+        const actions = document.createElement("span");
+        actions.className = "trigger-registration-actions";
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.textContent = registration.enabled ? "disable" : "re-enable";
+        toggle.addEventListener("click", () => setTriggerEnabled(registration.handle, !registration.enabled));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "delete";
+        remove.addEventListener("click", () => deleteTrigger(registration.handle));
+        actions.append(toggle, remove);
+        row.append(name, actions);
+        triggerRegistrations.appendChild(row);
+      }
+    }
+
+    async function setTriggerEnabled(handle, enabled) {
+      const response = await fetch("/api/triggers/" + encodeURIComponent(handle) + "/enabled", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled })
+      });
+      if (!response.ok) renderError(errorTextFrom(await response.text(), "trigger update failed"));
+      await loadTriggers();
+    }
+
+    async function deleteTrigger(handle) {
+      if (!window.confirm("Delete trigger " + handle + "?")) return;
+      const response = await fetch("/api/triggers/" + encodeURIComponent(handle), { method: "DELETE" });
+      if (!response.ok) renderError(errorTextFrom(await response.text(), "trigger delete failed"));
+      await loadTriggers();
     }
 
     /* ── mock email accounts (accounts tab) ── */
@@ -3248,6 +3510,7 @@
       }
       webState.textContent = state.settings.web_configured ? "ready" : "not configured";
       sessionId.textContent = state.settings.session_id;
+      renderUsage(state.usage);
       for (const message of state.messages) renderMessage(message);
       for (const pending of state.pending_turn_inputs || []) {
         const textItem = (pending.input?.items || []).find(item => item.Text?.text);
@@ -3265,6 +3528,34 @@
       const response = await fetch("/api/state");
       if (!response.ok) throw new Error("state request failed (" + response.status + ")");
       return await response.json();
+    }
+
+    function formatTokenCount(value) {
+      return new Intl.NumberFormat().format(Number(value) || 0);
+    }
+
+    function renderUsage(report) {
+      const usage = report?.usage || {};
+      const input = (Number(usage.input_tokens) || 0) +
+        (Number(usage.cache_read_input_tokens) || 0) +
+        (Number(usage.cache_write_input_tokens) || 0);
+      const output = Number(usage.output_tokens) || 0;
+      const total = Number(usage.total_tokens) || 0;
+      usageTotal.textContent = formatTokenCount(total) + " total";
+      usageBreakdown.textContent = formatTokenCount(input) + " in · " +
+        formatTokenCount(output) + " out";
+      usageTotal.title = (report?.entry_count || 0) + " source/model ledger entries";
+      usageBreakdown.title = "uncached input " + formatTokenCount(usage.input_tokens) +
+        " · cache read " + formatTokenCount(usage.cache_read_input_tokens) +
+        " · cache write " + formatTokenCount(usage.cache_write_input_tokens) +
+        " · reasoning output " + formatTokenCount(usage.reasoning_output_tokens);
+    }
+
+    async function refreshUsage() {
+      try {
+        const state = await fetchStateSnapshot();
+        renderUsage(state.usage);
+      } catch (_) { /* the reconnect path will refresh the full snapshot */ }
     }
 
     async function loadState() {
@@ -3378,7 +3669,7 @@
         meta.textContent = row.meta;
 
         const events = document.createElement("div");
-        events.className = "work-events";
+        events.className = "work-events" + (row.error ? " error" : "");
         events.textContent = row.detail;
 
         card.append(top, meta, events);
@@ -3423,12 +3714,15 @@
           terminal: Boolean(process.terminal),
           title: item.label || process.label || shortId(process.process_id),
           status: process.status_label || process.lifecycle,
+          error: process.error || null,
           meta: [
             kindLabel(item.kind),
             graph ? graph.node_count + (graph.node_count === 1 ? " node" : " nodes") : "pending graph",
             formatTime(process.updated_at_ms)
           ].filter(Boolean).join(" · "),
-          detail: recent.length ? "latest: " + recent.join(" -> ") : "no events yet"
+          detail: process.error
+            ? "error: " + process.error
+            : (recent.length ? "latest: " + recent.join(" -> ") : "no events yet")
         });
       }
       rows.sort((left, right) => {
@@ -4380,9 +4674,11 @@
 
     loadState().catch(() => {}).finally(() => {
       refreshWork();
+      loadTriggers();
       restartEventStream(true);
     });
     setInterval(refreshWork, 1400);
+    setInterval(loadTriggers, 1400);
     setInterval(loadAccounts, 1500);
   </script>
 </body>
