@@ -90,7 +90,11 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
             MockScenario::ToolBatch => ("tool_batch", tool_batch_script(&workflow_id, fail_once)),
             MockScenario::DurableWaitProbe => (
                 "durable_wait_probe",
-                durable_wait_probe_script(&workflow_id),
+                if full_text.contains("res = await tools.durable_wait_probe(") {
+                    durable_wait_cancelled_script(&workflow_id)
+                } else {
+                    durable_wait_probe_script(&workflow_id)
+                },
             ),
             MockScenario::SegmentLoop => ("segment_loop", segment_loop_script(&workflow_id)),
             MockScenario::FrameSwitchQueuedStart => (
@@ -832,11 +836,28 @@ fn durable_wait_probe_script(workflow_id: &str) -> String {
 Exercise a foreground pending tool completion that the runner cancels or resolves through the session wait index.
 
 <lashlang>
-res = await tools.durable_wait_probe({{ workflow_id: "{workflow_id}" }})
+res = await tools.durable_wait_probe({{ workflow_id: "{workflow_id}" }})?
 finish {{
   workflow_id: "{workflow_id}",
-  cancelled: !res.ok,
-  answer: res.ok ? res.value.answer : "",
+  cancelled: res.cancelled,
+  answer: res.answer,
+  final: "{EXPECTED_DURABLE_WAIT_TEXT}"
+}}
+</lashlang>
+"#
+    )
+}
+
+fn durable_wait_cancelled_script(workflow_id: &str) -> String {
+    format!(
+        r#"
+The foreground pending tool was cancelled through the session wait index.
+
+<lashlang>
+finish {{
+  workflow_id: "{workflow_id}",
+  cancelled: true,
+  answer: "",
   final: "{EXPECTED_DURABLE_WAIT_TEXT}"
 }}
 </lashlang>
@@ -894,6 +915,7 @@ mod tests {
             tool_batch_script("e2e-test", false),
             tool_batch_script("e2e-test", true),
             durable_wait_probe_script("e2e-test"),
+            durable_wait_cancelled_script("e2e-test"),
             segment_loop_script("e2e-test"),
         ];
 
