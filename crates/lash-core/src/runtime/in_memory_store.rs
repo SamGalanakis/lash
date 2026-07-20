@@ -164,6 +164,10 @@ pub struct InMemorySessionStore {
     fail_next_exact_queue_claim: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     load_session_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    checkpoint_probe_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    checkpoint_write_transaction_count: std::sync::atomic::AtomicUsize,
 }
 
 impl InMemorySessionStore {
@@ -195,6 +199,10 @@ impl InMemorySessionStore {
             fail_next_exact_queue_claim: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             load_session_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            checkpoint_probe_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            checkpoint_write_transaction_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1404,6 +1412,15 @@ impl InMemorySessionStore {
     pub(crate) fn load_session_count(&self) -> usize {
         self.load_session_count
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn checkpoint_claim_counts(&self) -> (usize, usize) {
+        (
+            self.checkpoint_probe_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.checkpoint_write_transaction_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 }
 

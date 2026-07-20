@@ -58,6 +58,9 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
         ),
         crate::store::StoreError,
     > {
+        #[cfg(test)]
+        self.checkpoint_probe_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if !self.checkpoint_work_pending_in_memory(
             session_id,
             session_execution_lease.fencing_token,
@@ -69,6 +72,9 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
             return Ok((None, None));
         }
 
+        #[cfg(test)]
+        self.checkpoint_write_transaction_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _transaction = self
             .write_transaction
             .lock()
