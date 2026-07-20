@@ -271,6 +271,16 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
         registrant_scope_id: &str,
         handle: &str,
     ) -> Result<bool, lash_core::PluginError> {
+        self.set_subscription_enabled(registrant_scope_id, handle, false)
+            .await
+    }
+
+    async fn set_subscription_enabled(
+        &self,
+        registrant_scope_id: &str,
+        handle: &str,
+        enabled: bool,
+    ) -> Result<bool, lash_core::PluginError> {
         let registrant_scope_id = registrant_scope_id.to_string();
         let handle = handle.to_string();
         let updated_at_ms = self.clock.timestamp_ms();
@@ -287,13 +297,13 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         )
                         .optional()
                         .map_err(process_sqlite_error)?;
-                    let Some((subscription_id, enabled, json)) = selected else {
+                    let Some((subscription_id, stored_enabled, json)) = selected else {
                         return Ok(false);
                     };
-                    let changed = enabled != 0;
+                    let changed = (stored_enabled != 0) != enabled;
                     match Self::decode_subscription(json) {
                         Ok(mut record) => {
-                            record.enabled = false;
+                            record.enabled = enabled;
                             record.updated_at_ms = updated_at_ms;
                             tx.execute(
                                 "UPDATE trigger_subscriptions
@@ -323,7 +333,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                                 params![
                                     subscription_id.as_str(),
                                     handle.as_str(),
-                                    0i64,
+                                    i64::from(enabled),
                                     updated_at_ms as i64,
                                 ],
                             )
@@ -331,6 +341,30 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         }
                     }
                     Ok(changed)
+                })()))
+            })
+            .await
+            .map_err(process_sqlite_error)?
+    }
+
+    async fn delete_subscription(
+        &self,
+        registrant_scope_id: &str,
+        handle: &str,
+    ) -> Result<bool, lash_core::PluginError> {
+        let registrant_scope_id = registrant_scope_id.to_string();
+        let handle = handle.to_string();
+        self.conn
+            .write_flow(move |tx| {
+                Ok(trigger_tx_outcome((|| {
+                    let deleted = tx
+                        .execute(
+                            "DELETE FROM trigger_subscriptions
+                             WHERE registrant_scope_id = ?1 AND handle = ?2",
+                            params![registrant_scope_id.as_str(), handle.as_str()],
+                        )
+                        .map_err(process_sqlite_error)?;
+                    Ok(deleted != 0)
                 })()))
             })
             .await

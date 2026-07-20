@@ -639,6 +639,34 @@ pub trait TriggerStore: Send + Sync {
         handle: &str,
     ) -> Result<bool, PluginError>;
 
+    /// Set whether one scoped subscription participates in future delivery
+    /// reservations. Returns whether the stored value changed.
+    async fn set_subscription_enabled(
+        &self,
+        registrant_scope_id: &str,
+        handle: &str,
+        enabled: bool,
+    ) -> Result<bool, PluginError> {
+        if enabled {
+            return Err(PluginError::Session(
+                "re-enabling trigger subscriptions is unsupported by this store".to_string(),
+            ));
+        }
+        self.cancel_subscription(registrant_scope_id, handle).await
+    }
+
+    /// Delete one scoped subscription and its delivery records. Historical
+    /// occurrences remain available because they describe source events.
+    async fn delete_subscription(
+        &self,
+        _registrant_scope_id: &str,
+        _handle: &str,
+    ) -> Result<bool, PluginError> {
+        Err(PluginError::Session(
+            "deleting individual trigger subscriptions is unsupported by this store".to_string(),
+        ))
+    }
+
     async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError>;
 
     async fn record_occurrence(
@@ -870,6 +898,16 @@ impl TriggerStore for InMemoryTriggerStore {
         registrant_scope_id: &str,
         handle: &str,
     ) -> Result<bool, PluginError> {
+        self.set_subscription_enabled(registrant_scope_id, handle, false)
+            .await
+    }
+
+    async fn set_subscription_enabled(
+        &self,
+        registrant_scope_id: &str,
+        handle: &str,
+        enabled: bool,
+    ) -> Result<bool, PluginError> {
         let mut state = self
             .state
             .lock()
@@ -880,10 +918,36 @@ impl TriggerStore for InMemoryTriggerStore {
         }) else {
             return Ok(false);
         };
-        let changed = record.enabled;
-        record.enabled = false;
+        let changed = record.enabled != enabled;
+        record.enabled = enabled;
         record.updated_at_ms = now;
         Ok(changed)
+    }
+
+    async fn delete_subscription(
+        &self,
+        registrant_scope_id: &str,
+        handle: &str,
+    ) -> Result<bool, PluginError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
+        let Some(subscription_id) = state
+            .subscriptions
+            .values()
+            .find(|record| {
+                record.registrant_scope_id() == registrant_scope_id && record.handle == handle
+            })
+            .map(|record| record.subscription_id.clone())
+        else {
+            return Ok(false);
+        };
+        state.subscriptions.remove(&subscription_id);
+        state.deliveries.retain(|(_, delivery_subscription_id), _| {
+            delivery_subscription_id != &subscription_id
+        });
+        Ok(true)
     }
 
     async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError> {

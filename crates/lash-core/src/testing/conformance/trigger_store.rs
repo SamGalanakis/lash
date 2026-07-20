@@ -16,7 +16,7 @@ where
 {
     trigger_store_reports_declared_tier(make(), expected_tier);
     trigger_source_key_is_stable(make()).await;
-    trigger_store_registers_lists_and_cancels(make()).await;
+    trigger_store_registers_and_runs_individual_lifecycle(make()).await;
     trigger_store_lists_agent_frame_registrations_by_session(make()).await;
     trigger_store_handles_host_scoped_lifecycle(make()).await;
     trigger_store_records_and_reserves_idempotently(make()).await;
@@ -123,7 +123,9 @@ async fn trigger_source_key_is_stable(store: Arc<dyn crate::TriggerStore>) {
     assert!(!first.is_empty(), "source keys must be non-empty");
 }
 
-async fn trigger_store_registers_lists_and_cancels(store: Arc<dyn crate::TriggerStore>) {
+async fn trigger_store_registers_and_runs_individual_lifecycle(
+    store: Arc<dyn crate::TriggerStore>,
+) {
     let source_key = store
         .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
         .await
@@ -187,6 +189,46 @@ async fn trigger_store_registers_lists_and_cancels(store: Arc<dyn crate::Trigger
         .expect("list disabled");
     assert_eq!(disabled.len(), 1);
     assert!(!disabled[0].enabled);
+
+    assert!(
+        store
+            .set_subscription_enabled(&session_scope_id("session-a"), &first.handle, true)
+            .await
+            .expect("re-enable first")
+    );
+    assert!(
+        !store
+            .set_subscription_enabled(&session_scope_id("session-a"), &first.handle, true)
+            .await
+            .expect("idempotently re-enable first")
+    );
+    let enabled = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
+        .await
+        .expect("list re-enabled subscription");
+    assert_eq!(enabled.len(), 1);
+    assert!(enabled[0].enabled);
+
+    assert!(
+        !store
+            .delete_subscription(&session_scope_id("session-b"), &first.handle)
+            .await
+            .expect("wrong-session delete"),
+        "delete must be scoped by session"
+    );
+    assert!(
+        store
+            .delete_subscription(&session_scope_id("session-a"), &first.handle)
+            .await
+            .expect("delete first")
+    );
+    assert!(
+        store
+            .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
+            .await
+            .expect("list after delete")
+            .is_empty()
+    );
 }
 
 async fn trigger_store_lists_agent_frame_registrations_by_session(
