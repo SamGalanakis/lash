@@ -533,11 +533,11 @@ restate_endpoint_addr="${AGENT_WORKBENCH_RESTATE_ADDR:-127.0.0.1:9081}"
 restate_ingress_url="${RESTATE_INGRESS_URL:-http://127.0.0.1:8080}"
 restate_admin_url="${RESTATE_ADMIN_URL:-http://127.0.0.1:${AGENT_WORKBENCH_RESTATE_ADMIN_PORT:-19070}}"
 restate_image="${AGENT_WORKBENCH_RESTATE_IMAGE:-restatedev/restate:1.7.0}"
-restate_container="${AGENT_WORKBENCH_RESTATE_CONTAINER:-lash-agent-workbench-dev-restate}"
 restate_node_port="${AGENT_WORKBENCH_RESTATE_NODE_PORT:-19071}"
 configured_endpoint_url="${AGENT_WORKBENCH_RESTATE_ENDPOINT_URL:-}"
 
 read -r workbench_host workbench_port < <(addr_host_port "$workbench_addr")
+restate_container="${AGENT_WORKBENCH_RESTATE_CONTAINER:-lash-agent-workbench-dev-restate-$workbench_port}"
 read -r endpoint_host endpoint_port < <(addr_host_port "$restate_endpoint_addr")
 read -r ingress_host ingress_port < <(url_host_port "$restate_ingress_url")
 read -r admin_host admin_port < <(url_host_port "$restate_admin_url")
