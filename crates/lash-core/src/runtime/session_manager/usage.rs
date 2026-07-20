@@ -1,5 +1,6 @@
 use super::*;
 
+#[derive(Clone)]
 pub(in crate::runtime::session_manager) struct ChannelEventSink {
     pub(in crate::runtime::session_manager) tx: mpsc::Sender<SessionStreamEvent>,
     pub(in crate::runtime::session_manager) live_usage: Option<LiveChildUsageForwarder>,

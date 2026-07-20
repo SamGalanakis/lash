@@ -4,6 +4,80 @@ use crate::ToolProvider as _;
 
 struct AttachmentWritingTool;
 
+#[derive(Clone)]
+struct NestedChildSessionTool {
+    parents: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for NestedChildSessionTool {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        vec![nested_child_session_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == "spawn_nested_child")
+            .then(|| Arc::new(nested_child_session_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        let context = call.context;
+        let parent_id = context.session_id().to_string();
+        self.parents
+            .lock()
+            .expect("nested child parents lock")
+            .push(parent_id.clone());
+        let (child_id, turn_id) = match parent_id.as_str() {
+            "root" => ("nested-child", "nested-child-turn"),
+            "nested-child" => ("nested-grandchild", "nested-grandchild-turn"),
+            other => {
+                return crate::ToolResult::err_fmt(format_args!(
+                    "unexpected nested child parent `{other}`"
+                ));
+            }
+        };
+        let child = match context
+            .sessions()
+            .create_session(
+                crate::SessionCreateRequest::child_session(
+                    &parent_id,
+                    crate::SessionStartPoint::Empty,
+                    crate::PluginOptions::default(),
+                )
+                .with_session_id(child_id)
+                .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
+            )
+            .await
+        {
+            Ok(child) => child,
+            Err(err) => return crate::ToolResult::err_fmt(format_args!("{err}")),
+        };
+        let result = context
+            .sessions()
+            .start_turn(
+                &child.session_id,
+                turn_id,
+                TurnInput::text("run nested child"),
+            )
+            .await;
+        let _ = context.sessions().close_session(&child.session_id).await;
+        match result {
+            Ok(_) => crate::ToolResult::ok(json!({ "status": "ok" })),
+            Err(err) => crate::ToolResult::err_fmt(format_args!("{err}")),
+        }
+    }
+}
+
+fn nested_child_session_tool_definition() -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        "tool:spawn_nested_child",
+        "spawn_nested_child",
+        "spawn a nested child session",
+        crate::ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+}
+
 #[async_trait::async_trait]
 impl crate::ToolProvider for AttachmentWritingTool {
     fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
@@ -519,25 +593,8 @@ async fn forked_child_session_keeps_hidden_live_tool_non_executable_across_rebui
     );
 }
 
-#[test]
-fn parent_turn_receives_live_child_token_usage_events() {
-    const STACK_BUDGET_BYTES: usize = 8 * 1024 * 1024;
-    std::thread::Builder::new()
-        .name("child-session-live-usage-test".to_string())
-        .stack_size(STACK_BUDGET_BYTES)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("child-session usage test runtime")
-                .block_on(parent_turn_receives_live_child_token_usage_events_inner())
-        })
-        .expect("spawn child-session usage test thread")
-        .join()
-        .expect("child-session usage test thread");
-}
-
-async fn parent_turn_receives_live_child_token_usage_events_inner() {
+#[tokio::test]
+async fn parent_turn_receives_live_child_token_usage_events() {
     let transport = mock_openai_compatible_provider(vec![
         MockCall {
             stream_events: vec![
@@ -736,25 +793,62 @@ async fn parent_turn_receives_live_child_token_usage_events_inner() {
     assert_eq!(usage.by_source["subagent"].usage.reasoning_output_tokens, 1);
 }
 
-#[test]
-fn parent_turn_keeps_cached_only_child_usage_live() {
-    const STACK_BUDGET_BYTES: usize = 8 * 1024 * 1024;
-    std::thread::Builder::new()
-        .name("child-session-cached-usage-test".to_string())
-        .stack_size(STACK_BUDGET_BYTES)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("child-session cached-usage test runtime")
-                .block_on(parent_turn_keeps_cached_only_child_usage_live_inner())
-        })
-        .expect("spawn child-session cached-usage test thread")
-        .join()
-        .expect("child-session cached-usage test thread");
+#[tokio::test]
+async fn nested_child_turns_use_independent_default_task_stacks() {
+    let tool_call = |call_id: &str| MockCall {
+        stream_events: vec![LlmStreamEvent::Part(LlmOutputPart::ToolCall {
+            call_id: call_id.to_string(),
+            tool_name: "spawn_nested_child".to_string(),
+            input_json: "{}".to_string(),
+            replay: None,
+        })],
+        response: Ok(LlmResponse::default()),
+    };
+    let text = |value: &str| MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: value.to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: value.to_string(),
+                response_meta: None,
+            }],
+            response_metadata: Default::default(),
+            ..LlmResponse::default()
+        }),
+    };
+    let transport = mock_provider(vec![
+        tool_call("parent-spawn"),
+        tool_call("child-spawn"),
+        text("grandchild done"),
+        text("child done"),
+        text("parent done"),
+    ]);
+    let parents = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tools: Arc<dyn crate::ToolProvider> = Arc::new(NestedChildSessionTool {
+        parents: Arc::clone(&parents),
+    });
+    let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
+
+    let turn = runtime
+        .stream_turn(
+            TurnInput::text("run three levels"),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "nested-parent-turn"),
+            ),
+        )
+        .await
+        .expect("three-level nested turn");
+
+    assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
+    assert_eq!(
+        *parents.lock().expect("nested child parents lock"),
+        vec!["root".to_string(), "nested-child".to_string()]
+    );
 }
 
-async fn parent_turn_keeps_cached_only_child_usage_live_inner() {
+#[tokio::test]
+async fn parent_turn_keeps_cached_only_child_usage_live() {
     let transport = mock_provider(vec![
         MockCall {
             stream_events: vec![

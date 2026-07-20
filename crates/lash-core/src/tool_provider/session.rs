@@ -57,11 +57,10 @@ impl<'run> ToolSessionAdmin<'run> {
         turn_id: &str,
         input: crate::TurnInput,
     ) -> Result<crate::AssembledTurn, PluginError> {
-        let scoped_effect_controller = crate::ScopedEffectController::borrowed(
-            self.effect_controller.controller(),
-            crate::ExecutionScope::turn(session_id, turn_id),
-        )
-        .map_err(|err| PluginError::Session(err.to_string()))?;
+        let scoped_effect_controller = self
+            .effect_controller
+            .scoped_for(crate::ExecutionScope::turn(session_id, turn_id))
+            .map_err(|err| PluginError::Session(err.to_string()))?;
         let request =
             crate::SessionTurnRequest::new(session_id, turn_id, input, scoped_effect_controller)?;
         self.session_lifecycle.start_turn(request).await

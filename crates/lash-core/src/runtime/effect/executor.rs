@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod scoped;
+
 use crate::LlmRequest as CoreLlmRequest;
 use crate::ProcessRecord;
 use crate::ProcessRegistry;

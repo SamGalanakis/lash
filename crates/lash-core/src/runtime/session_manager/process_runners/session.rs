@@ -34,8 +34,7 @@ impl RuntimeSessionServices {
         };
         let child_session_id = child.session_id.clone();
         let child_turn_id = registration.id.clone();
-        let child_scoped_effect_controller = match crate::ScopedEffectController::borrowed(
-            scoped_effect_controller.controller(),
+        let child_scoped_effect_controller = match scoped_effect_controller.rescope(
             crate::ExecutionScope::turn(&child_session_id, &child_turn_id),
         ) {
             Ok(controller) => controller,

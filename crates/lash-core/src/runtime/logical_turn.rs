@@ -28,22 +28,19 @@ impl LogicalTurnClaims {
         self.queued.is_empty() && self.turn_inputs.is_empty()
     }
 
-    pub(super) fn into_commit_effects(
-        self,
+    pub(super) fn commit_effects(
+        &self,
         outcome: &TurnOutcome,
         session_id: &str,
         turn_id: &str,
         protocol_turn_options: Option<crate::ProtocolTurnOptions>,
     ) -> LogicalTurnCommitEffects {
         let claimed = !self.is_empty();
-        let completed_queue_claims: Vec<_> = self
-            .queued
-            .into_iter()
-            .map(|claim| claim.completion())
-            .collect();
+        let completed_queue_claims: Vec<_> =
+            self.queued.iter().map(|claim| claim.completion()).collect();
         let completed_turn_input_claims: Vec<_> = self
             .turn_inputs
-            .into_iter()
+            .iter()
             .map(|claim| claim.completion())
             .collect();
         let originating_queue_claims = completed_queue_claims.clone();
