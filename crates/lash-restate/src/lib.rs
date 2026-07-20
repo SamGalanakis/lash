@@ -71,6 +71,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::{FutureExt, future::Fuse};
 use lash_core::{
     AbandonEvidence, AbandonWriter, AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity,
     DurabilityTier, DurableProcessWorker, EffectHost, ExecutionScope, PluginError, ProcessAttach,
@@ -101,6 +102,13 @@ use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
 pub use restate_sdk;
+
+fn fuse_restate_context_future<F>(future: F) -> Fuse<F>
+where
+    F: Future,
+{
+    future.fuse()
+}
 
 fn restate_await_event_key(
     scope: &ExecutionScope,
@@ -2697,8 +2705,10 @@ macro_rules! impl_restate_controller_context {
                                 ),
                                 (),
                             );
+                        let observe = fuse_restate_context_future(observe.call());
+                        tokio::pin!(observe);
                         tokio::select! {
-                            result = observe.call() => {
+                            result = &mut observe => {
                                 let Json(resolution) = result?;
                                 Ok(resolution)
                             }
@@ -3042,8 +3052,10 @@ where
                 };
                 let duration = Duration::from_millis(*duration_ms);
                 let cancellation = local_executor.into_sleep_cancellation();
+                let sleep = fuse_restate_context_future(self.context.sleep_send(duration));
+                tokio::pin!(sleep);
                 tokio::select! {
-                    result = self.context.sleep_send(duration) => {
+                    result = &mut sleep => {
                         if let Err(err) = result {
                             tracing_sleep_error(&envelope.invocation, &err);
                             return Err(RuntimeEffectControllerError::new(
