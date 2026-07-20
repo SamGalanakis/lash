@@ -139,11 +139,12 @@ async fn async_main() -> AnyhowResult<()> {
         ),
     );
 
+    let attachment_store = Arc::new(lash::persistence::FileAttachmentStore::new(
+        data_dir.join("attachments"),
+    )) as Arc<dyn lash::persistence::AttachmentStore>;
     let runtime_host_config = lash::durability::RuntimeHostConfig::new(
         turn_deployment.effect_host(),
-        Arc::new(lash::persistence::FileAttachmentStore::new(
-            data_dir.join("attachments"),
-        )),
+        Arc::clone(&attachment_store),
         Arc::clone(&stores.process_env_store),
     );
 
@@ -190,6 +191,7 @@ async fn async_main() -> AnyhowResult<()> {
 
     let state = AppState {
         core,
+        attachment_store,
         process_observer,
         process_work_driver,
         session_ids,
@@ -239,6 +241,8 @@ async fn async_main() -> AnyhowResult<()> {
         .route("/api/state", get(app_state))
         .route("/api/events", get(session_events))
         .route("/api/turn", post(send_turn))
+        .route("/api/attachments", post(upload_attachment))
+        .route("/api/attachments/{attachment_id}", get(retrieve_attachment))
         .route("/api/turn/input", post(enqueue_turn_input))
         .route("/api/turn/cancel", post(cancel_turn))
         .route("/api/session", delete(reset_chat))

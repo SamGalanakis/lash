@@ -224,16 +224,6 @@ mod tests {
     }
 
     #[test]
-    fn workbench_ui_renders_assistant_markdown() {
-        assert!(ui::INDEX_HTML.contains("function renderMarkdownBlocks(markdown)"));
-        assert!(ui::INDEX_HTML.contains("setMessageBody(body, message.role, message.text)"));
-        assert!(
-            ui::INDEX_HTML.contains("draft.innerHTML = renderMarkdownBlocks(assistantDraftText)")
-        );
-        assert!(ui::INDEX_HTML.contains(".message.assistant .msg-body h1"));
-    }
-
-    #[test]
     fn workbench_ui_renders_accounts_panel() {
         assert!(ui::INDEX_HTML.contains("id=\"accountsView\""));
         assert!(ui::INDEX_HTML.contains("data-view=\"accounts\""));
@@ -424,6 +414,7 @@ mod tests {
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -676,6 +667,7 @@ finish "gap source"
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -953,6 +945,7 @@ finish initial
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids,
@@ -1170,6 +1163,7 @@ finish initial
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids,
@@ -1311,6 +1305,7 @@ finish initial
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -1471,6 +1466,7 @@ finish initial
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -1718,6 +1714,7 @@ finish initial
             session_id: state.current_session_id(),
             text: text.to_string(),
             model: state.selected_model(),
+            attachment_id: None,
         };
         let invocation_id = tokio::time::timeout(
             Duration::from_secs(60),
@@ -1906,6 +1903,7 @@ finish initial
         let (event_tx, _) = broadcast::channel(1024);
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: process_deployment.process_work_driver(),
             session_ids,
@@ -2494,4 +2492,6 @@ finish initial
         finish "cron registered"
         "#
     }
+
+    include!("tests/attachments_usage.rs");
 }

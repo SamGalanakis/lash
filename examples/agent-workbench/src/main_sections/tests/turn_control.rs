@@ -47,6 +47,7 @@ mod turn_control_timeout_tests {
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -273,6 +274,7 @@ mod turn_control_timeout_tests {
             .expect("process observer configured");
         AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),

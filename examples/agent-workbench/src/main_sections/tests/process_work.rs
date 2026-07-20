@@ -65,6 +65,7 @@ mod process_work_tests {
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: driver.clone(),
             session_ids: WorkbenchSessionIds::fresh(),
@@ -217,6 +218,7 @@ mod process_work_tests {
             .expect("process observer configured");
         let state = AppState {
             core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&process_registry)),
             session_ids: WorkbenchSessionIds::fresh(),

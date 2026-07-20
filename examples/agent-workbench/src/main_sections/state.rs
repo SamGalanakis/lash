@@ -1,6 +1,7 @@
 #[derive(Clone)]
 struct AppState {
     core: LashCore,
+    attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
     process_observer: lash::process::ProcessWorkObserver,
     process_work_driver: lash::process::ProcessWorkDriver,
     session_ids: WorkbenchSessionIds,
@@ -50,6 +51,7 @@ struct StateSnapshot {
     messages: Vec<ChatMessage>,
     active_turns: Vec<lash::TurnAddress>,
     pending_turn_inputs: Vec<lash::PendingTurnInput>,
+    usage: lash::usage::SessionUsageReport,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -65,6 +67,21 @@ struct TurnRequest {
     text: String,
     model: Option<String>,
     model_variant: Option<String>,
+    #[serde(default)]
+    attachment_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachmentUploadRequest {
+    name: String,
+    mime: String,
+    data_base64: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AttachmentUploadResponse {
+    attachment: lash_core::AttachmentRef,
+    retrieve_url: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

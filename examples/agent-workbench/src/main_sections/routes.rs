@@ -23,6 +23,7 @@ async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>,
         .pending_turn_inputs()
         .await
         .map_err(AppError::internal)?;
+    let usage = session.usage_report();
     session.close().await.map_err(AppError::internal)?;
     let active_turns = state.active_turns.for_session(&state.current_session_id());
     messages.extend(active_turns.iter().filter_map(|address| {
@@ -41,7 +42,99 @@ async fn app_state(State(state): State<AppState>) -> Result<Json<StateSnapshot>,
         messages,
         active_turns,
         pending_turn_inputs,
+        usage,
     }))
+}
+
+const MAX_WORKBENCH_ATTACHMENT_BYTES: usize = 1024 * 1024;
+
+async fn upload_attachment(
+    State(state): State<AppState>,
+    Json(request): Json<AttachmentUploadRequest>,
+) -> Result<Json<AttachmentUploadResponse>, AppError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(AppError::bad_request("attachment name is required"));
+    }
+    if name.chars().count() > 200 {
+        return Err(AppError::bad_request(
+            "attachment name must be at most 200 characters",
+        ));
+    }
+    let media_type = lash_core::MediaType::from_mime(&request.mime).ok_or_else(|| {
+        AppError::bad_request(
+            "the workbench turn contract currently accepts PNG image attachments only",
+        )
+    })?;
+    if media_type.canonical_mime() != "image/png" {
+        return Err(AppError::bad_request(
+            "the workbench turn contract currently accepts PNG image attachments only",
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(request.data_base64.trim())
+        .map_err(|_| AppError::bad_request("attachment data_base64 is not valid base64"))?;
+    if bytes.is_empty() {
+        return Err(AppError::bad_request("attachment file is empty"));
+    }
+    if bytes.len() > MAX_WORKBENCH_ATTACHMENT_BYTES {
+        return Err(AppError::bad_request(format!(
+            "attachment exceeds the {} byte workbench limit",
+            MAX_WORKBENCH_ATTACHMENT_BYTES
+        )));
+    }
+    let attachment = state
+        .attachment_store
+        .put(
+            bytes,
+            lash_core::AttachmentCreateMeta::new(media_type, None, None, Some(name.to_string())),
+        )
+        .await
+        .map_err(AppError::internal)?;
+    let retrieve_url = format!("/api/attachments/{}", attachment.id);
+    state.trace(
+        "api.attachment.uploaded",
+        json!({
+            "attachment_id": attachment.id,
+            "mime": attachment.canonical_mime(),
+            "byte_len": attachment.byte_len,
+            "name": name,
+        }),
+    );
+    Ok(Json(AttachmentUploadResponse {
+        attachment,
+        retrieve_url,
+    }))
+}
+
+async fn retrieve_attachment(
+    AxumPath(attachment_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    let attachment_id = attachment_id.trim();
+    if attachment_id.is_empty() {
+        return Err(AppError::bad_request("attachment id is required"));
+    }
+    let stored = match state
+        .attachment_store
+        .get(&lash_core::AttachmentId::new(attachment_id))
+        .await
+    {
+        Ok(stored) => stored,
+        Err(lash_core::AttachmentStoreError::NotFound(_)) => {
+            return Err(AppError::not_found(format!(
+                "attachment `{attachment_id}` was not found"
+            )));
+        }
+        Err(err) => return Err(AppError::internal(err)),
+    };
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header("x-lash-attachment-id", attachment_id)
+        .body(Body::from(stored.bytes))
+        .expect("valid attachment response"))
 }
 
 fn chat_message_from_committed(message: &lash::messages::Message) -> ChatMessage {
@@ -108,6 +201,27 @@ async fn send_turn(
     if text.is_empty() {
         return Err(AppError::bad_request("message text is required"));
     }
+    let attachment_id = request
+        .attachment_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    if let Some(attachment_id) = attachment_id.as_deref() {
+        match state
+            .attachment_store
+            .get(&lash_core::AttachmentId::new(attachment_id))
+            .await
+        {
+            Ok(_) => {}
+            Err(lash_core::AttachmentStoreError::NotFound(_)) => {
+                return Err(AppError::not_found(format!(
+                    "attachment `{attachment_id}` was not found"
+                )));
+            }
+            Err(err) => return Err(AppError::internal(err)),
+        }
+    }
     let turn_model = model_spec_for_request(
         &state,
         request.model.as_deref(),
@@ -117,6 +231,7 @@ async fn send_turn(
         "api.turn.request",
         json!({
             "text": text.clone(),
+            "attachment_id": attachment_id,
             "model": serde_json::to_value(&turn_model).unwrap_or(Value::Null),
         }),
     );
@@ -132,6 +247,7 @@ async fn send_turn(
             session_id: session_id.clone(),
             text,
             model: ModelSelection::from_spec(&turn_model),
+            attachment_id,
         },
     )
     .await
@@ -475,6 +591,7 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
         messages: Vec::new(),
         active_turns: Vec::new(),
         pending_turn_inputs: Vec::new(),
+        usage: session.usage_report(),
     }))
 }
 

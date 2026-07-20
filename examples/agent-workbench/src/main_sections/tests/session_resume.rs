@@ -149,6 +149,7 @@
             .expect("process observer configured");
         let state = AppState {
             core: resumed_core,
+            attachment_store: test_attachment_store(),
             process_observer,
             process_work_driver: inert_process_work_driver(Arc::clone(&resumed_registry)),
             session_ids: resumed_session_ids,

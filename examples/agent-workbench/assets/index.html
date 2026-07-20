@@ -953,6 +953,27 @@
 
     .composer-actions[hidden] { display: none; }
 
+    .attach {
+      min-width: 132px;
+      min-height: 34px;
+      padding: 0 var(--space-sm);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: transparent;
+      color: var(--ash-text);
+      font-family: var(--font-ui);
+      font-size: 0.7rem;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .attach:hover { color: var(--chalk); border-color: var(--line-strong); }
+    .attach.ready { color: var(--lichen); border-color: var(--lichen); }
+    .attach.uploading { color: var(--sodium-soft); border-color: var(--line-strong); }
+    .attach:disabled { opacity: 0.45; cursor: not-allowed; }
+
     .composer textarea {
       width: 100%;
       min-height: 56px;
@@ -1815,6 +1836,8 @@
       <div class="status-stack">
         <div class="status-row"><span>web</span><span id="webState">loading</span></div>
         <div class="status-row"><span>session</span><span id="sessionId">—</span></div>
+        <div class="status-row"><span>usage</span><span id="usageTotal">0 total</span></div>
+        <div class="status-row"><span>tokens</span><span id="usageBreakdown">0 in · 0 out</span></div>
       </div>
     </aside>
 
@@ -1894,6 +1917,9 @@
       <form id="composer" class="composer">
         <textarea id="prompt" rows="2" placeholder="ask the agent — enter to send, shift + enter for a newline"></textarea>
         <div id="idleActions" class="composer-actions">
+          <input id="attachmentInput" type="file" accept="image/png" hidden />
+          <button id="attach" class="attach" type="button"
+                  title="Upload one PNG and reference it in the next turn">attach png</button>
           <button id="send" class="send" type="submit">send</button>
         </div>
         <div id="runningActions" class="composer-actions" hidden aria-label="Running turn input actions">
@@ -1981,6 +2007,8 @@
     const composer = document.getElementById("composer");
     const promptInput = document.getElementById("prompt");
     const sendButton = document.getElementById("send");
+    const attachButton = document.getElementById("attach");
+    const attachmentInput = document.getElementById("attachmentInput");
     const idleActions = document.getElementById("idleActions");
     const runningActions = document.getElementById("runningActions");
     const injectNowButton = document.getElementById("injectNow");
@@ -1995,6 +2023,8 @@
     const busyText = document.getElementById("busyText");
     const webState = document.getElementById("webState");
     const sessionId = document.getElementById("sessionId");
+    const usageTotal = document.getElementById("usageTotal");
+    const usageBreakdown = document.getElementById("usageBreakdown");
 
     const renderedMessages = new Set();
     const renderedIngressInputs = new Set();
@@ -2012,6 +2042,8 @@
     let eventStreamGeneration = 0;
     let replayCursor = null;
     let lastRequest = null;
+    let selectedAttachment = null;
+    let attachmentUploadInFlight = false;
     let workStale = false;
     let workRefreshGeneration = 0;
     let selectedWorkKey = null;
@@ -2290,8 +2322,9 @@
     }
 
     function syncCommandAvailability() {
-      const unavailable = busy || modelEmpty();
+      const unavailable = busy || modelEmpty() || attachmentUploadInFlight;
       sendButton.disabled = unavailable;
+      attachButton.disabled = busy || attachmentUploadInFlight;
       injectNowButton.disabled = !busy || modelEmpty();
       queueNextButton.disabled = !busy || modelEmpty();
       for (const button of triggerButtons) {
@@ -2641,7 +2674,7 @@
     async function postCommand(url, payload) {
       if (busy) {
         renderNote("turn already running");
-        return;
+        return false;
       }
       lastRequest = { url, payload };
       const commandController = new AbortController();
@@ -2665,8 +2698,9 @@
           const text = await response.text();
           renderError(text || "request failed", { retry: true });
           setBusy(false, "ready");
-          return;
+          return false;
         }
+        return true;
       } catch (error) {
         if (error.name === "AbortError") {
           if (!resetInFlight) renderNote("turn stopped");
@@ -2674,6 +2708,7 @@
           renderError(error.message || String(error), { retry: true });
         }
         if (!resetInFlight) setBusy(false, "ready");
+        return false;
       } finally {
         if (controller === commandController) controller = null;
         if (!resetInFlight) refreshWork();
@@ -2738,6 +2773,7 @@
       if (item.type === "done") {
         finishTransientRows();
         setBusy(false, "ready");
+        refreshUsage();
       }
     }
 
@@ -2827,8 +2863,10 @@
         const state = await response.json();
         clearTranscript();
         clearExecutionState();
+        clearAttachment();
         lastRequest = null;
         sessionId.textContent = state.settings.session_id || "—";
+        renderUsage(state.usage);
         restartEventStream(true);
         setBusy(false, "ready");
       } catch (error) {
@@ -2886,15 +2924,88 @@
 
     let lastUserText = "";
 
-    composer.addEventListener("submit", event => {
+    composer.addEventListener("submit", async event => {
       event.preventDefault();
       const text = promptInput.value.trim();
       if (!text) return;
       if (modelEmpty()) { validateModel(); modelInput.focus(); return; }
       lastUserText = text;
       promptInput.value = "";
-      postCommand("/api/turn", { text, ...selectedModelPayload() });
+      const attachment = selectedAttachment;
+      const accepted = await postCommand("/api/turn", {
+        text,
+        attachment_id: attachment?.id || null,
+        ...selectedModelPayload()
+      });
+      if (accepted && selectedAttachment?.id === attachment?.id) clearAttachment();
     });
+
+    function clearAttachment() {
+      selectedAttachment = null;
+      attachmentInput.value = "";
+      attachButton.classList.remove("ready", "uploading");
+      attachButton.textContent = "attach png";
+      attachButton.title = "Upload one PNG and reference it in the next turn";
+      syncCommandAvailability();
+    }
+
+    function fileBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.addEventListener("load", () => resolve(String(reader.result).split(",", 2)[1] || ""));
+        reader.addEventListener("error", () => reject(reader.error || new Error("could not read file")));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function uploadAttachment(file) {
+      if (!file) return;
+      if (file.type !== "image/png") {
+        renderError("attachments use Lash's current image turn contract; choose a PNG file");
+        clearAttachment();
+        return;
+      }
+      if (!file.size || file.size > 1024 * 1024) {
+        renderError("the PNG attachment must be between 1 byte and 1 MiB");
+        clearAttachment();
+        return;
+      }
+      attachmentUploadInFlight = true;
+      selectedAttachment = null;
+      attachButton.classList.remove("ready");
+      attachButton.classList.add("uploading");
+      attachButton.textContent = "uploading…";
+      syncCommandAvailability();
+      try {
+        const response = await fetch("/api/attachments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: file.name,
+            mime: file.type,
+            data_base64: await fileBase64(file)
+          })
+        });
+        if (!response.ok) {
+          throw new Error(errorTextFrom(await response.text(), "attachment upload failed"));
+        }
+        const uploaded = await response.json();
+        selectedAttachment = uploaded.attachment;
+        attachButton.classList.remove("uploading");
+        attachButton.classList.add("ready");
+        attachButton.textContent = "attached · " + file.name;
+        attachButton.title = file.name + " · " + uploaded.attachment.byte_len + " bytes · click to replace";
+      } catch (error) {
+        renderError("couldn't attach the PNG: " + (error.message || error));
+        clearAttachment();
+      } finally {
+        attachmentUploadInFlight = false;
+        syncCommandAvailability();
+      }
+    }
+
+    attachButton.addEventListener("click", () => attachmentInput.click());
+    attachmentInput.addEventListener("change", () => uploadAttachment(attachmentInput.files?.[0]));
 
     async function submitRunningInput(ingress) {
       const text = promptInput.value.trim();
@@ -3248,6 +3359,7 @@
       }
       webState.textContent = state.settings.web_configured ? "ready" : "not configured";
       sessionId.textContent = state.settings.session_id;
+      renderUsage(state.usage);
       for (const message of state.messages) renderMessage(message);
       for (const pending of state.pending_turn_inputs || []) {
         const textItem = (pending.input?.items || []).find(item => item.Text?.text);
@@ -3265,6 +3377,34 @@
       const response = await fetch("/api/state");
       if (!response.ok) throw new Error("state request failed (" + response.status + ")");
       return await response.json();
+    }
+
+    function formatTokenCount(value) {
+      return new Intl.NumberFormat().format(Number(value) || 0);
+    }
+
+    function renderUsage(report) {
+      const usage = report?.usage || {};
+      const input = (Number(usage.input_tokens) || 0) +
+        (Number(usage.cache_read_input_tokens) || 0) +
+        (Number(usage.cache_write_input_tokens) || 0);
+      const output = Number(usage.output_tokens) || 0;
+      const total = Number(usage.total_tokens) || 0;
+      usageTotal.textContent = formatTokenCount(total) + " total";
+      usageBreakdown.textContent = formatTokenCount(input) + " in · " +
+        formatTokenCount(output) + " out";
+      usageTotal.title = (report?.entry_count || 0) + " source/model ledger entries";
+      usageBreakdown.title = "uncached input " + formatTokenCount(usage.input_tokens) +
+        " · cache read " + formatTokenCount(usage.cache_read_input_tokens) +
+        " · cache write " + formatTokenCount(usage.cache_write_input_tokens) +
+        " · reasoning output " + formatTokenCount(usage.reasoning_output_tokens);
+    }
+
+    async function refreshUsage() {
+      try {
+        const state = await fetchStateSnapshot();
+        renderUsage(state.usage);
+      } catch (_) { /* the reconnect path will refresh the full snapshot */ }
     }
 
     async function loadState() {

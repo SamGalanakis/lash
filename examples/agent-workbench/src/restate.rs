@@ -39,6 +39,8 @@ pub(crate) struct WorkbenchTurnWorkflowRequest {
     pub session_id: String,
     pub text: String,
     pub model: ModelSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -647,6 +649,7 @@ async fn run_user_turn(
     request: WorkbenchTurnWorkflowRequest,
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
+    let mut input = workbench_turn_input(&state, &request).await?;
     let turn_model = model_spec_from_selection(request.model);
     let session = state
         .core
@@ -664,7 +667,6 @@ async fn run_user_turn(
     let ui_events = ChannelTurnEvents {
         turn_state: Arc::clone(&turn_state),
     };
-    let mut input = TurnInput::text(request.text.clone());
     input.trace_turn_id = Some(request.turn_id.clone());
     let output = session
         .turn(input)
@@ -685,6 +687,22 @@ async fn run_user_turn(
     )
     .await?;
     Ok(())
+}
+
+pub(crate) async fn workbench_turn_input(
+    state: &AppState,
+    request: &WorkbenchTurnWorkflowRequest,
+) -> Result<TurnInput, AppError> {
+    let mut input = TurnInput::text(request.text.clone());
+    if let Some(attachment_id) = request.attachment_id.as_deref() {
+        let stored = state
+            .attachment_store
+            .get(&lash_core::AttachmentId::new(attachment_id))
+            .await
+            .map_err(AppError::internal)?;
+        input = input.with_image_ref(attachment_id, stored.bytes);
+    }
+    Ok(input)
 }
 
 async fn run_user_turn_terminalized(

@@ -639,6 +639,7 @@ async fn live_restate_ingress_owner_restart_for_store(backend: &'static str) {
             model: "mock-model".to_string(),
             model_variant: Some("high".to_string()),
         },
+        attachment_id: None,
     };
     lash_restate::RestateIngressClient::new(ingress_url.clone())
         .send_workflow_json("WorkbenchTurnWorkflow", &turn_id, "run", &request)
