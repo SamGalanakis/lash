@@ -14,8 +14,8 @@ pub use executor::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, BoundaryReason, EffectHost,
     ExecutionScope, ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController,
     Resolution, ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectLocalExecutor, ScopedEffectController,
-    SegmentProgress,
+    RuntimeEffectControllerError, RuntimeEffectLocalExecutor, RuntimeSleepOptions,
+    ScopedEffectController, SegmentProgress,
 };
 pub use lash_sansio::CausalRef;
 

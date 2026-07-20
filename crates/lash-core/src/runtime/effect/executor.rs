@@ -29,6 +29,13 @@ pub struct RuntimeAwaitEventOptions {
     pub cancellation: CancellationToken,
     pub deadline: Option<Instant>,
     pub clock: Arc<dyn crate::Clock>,
+    pub observe_turn_cancel: bool,
+}
+
+/// Host controls attached to one sleep effect.
+pub struct RuntimeSleepOptions {
+    pub cancellation: CancellationToken,
+    pub observe_turn_cancel: bool,
 }
 
 use super::await_events::inline_await_events;
@@ -764,11 +771,13 @@ enum RuntimeEffectLocalExecutorState<'run> {
     SleepOnly {
         cancellation: CancellationToken,
         clock: Arc<dyn crate::Clock>,
+        observe_turn_cancel: bool,
     },
     ExternalWaitOptions {
         cancellation: CancellationToken,
         deadline: Option<Instant>,
         clock: Arc<dyn crate::Clock>,
+        observe_turn_cancel: bool,
     },
     Process(ProcessLocalExecution),
     Runner(Box<dyn RuntimeEffectLocalRunner + Send + 'run>),
@@ -799,6 +808,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
             state: RuntimeEffectLocalExecutorState::SleepOnly {
                 cancellation,
                 clock,
+                observe_turn_cancel: true,
             },
         }
     }
@@ -817,8 +827,25 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 cancellation,
                 deadline,
                 clock,
+                observe_turn_cancel: true,
             },
         }
+    }
+
+    #[doc(hidden)]
+    pub fn with_turn_cancel_observation(mut self, observe_turn_cancel: bool) -> Self {
+        match &mut self.state {
+            RuntimeEffectLocalExecutorState::SleepOnly {
+                observe_turn_cancel: current,
+                ..
+            }
+            | RuntimeEffectLocalExecutorState::ExternalWaitOptions {
+                observe_turn_cancel: current,
+                ..
+            } => *current = observe_turn_cancel,
+            _ => {}
+        }
+        self
     }
 
     pub fn processes(
@@ -916,6 +943,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
             RuntimeEffectLocalExecutorState::SleepOnly {
                 cancellation,
                 clock,
+                ..
             } => execute_local_sleep(envelope, cancellation, clock.as_ref()).await,
             RuntimeEffectLocalExecutorState::ExternalWaitOptions { .. } => {
                 Err(RuntimeEffectControllerError::new(
@@ -961,23 +989,36 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 cancellation,
                 deadline,
                 clock,
+                observe_turn_cancel,
             } => Ok(RuntimeAwaitEventOptions {
                 cancellation,
                 deadline,
                 clock,
+                observe_turn_cancel,
             }),
             _ => Ok(RuntimeAwaitEventOptions {
                 cancellation: CancellationToken::new(),
                 deadline: None,
                 clock: Arc::new(crate::SystemClock),
+                observe_turn_cancel: false,
             }),
         }
     }
 
-    pub fn into_sleep_cancellation(self) -> CancellationToken {
+    pub fn into_sleep_options(self) -> RuntimeSleepOptions {
         match self.state {
-            RuntimeEffectLocalExecutorState::SleepOnly { cancellation, .. } => cancellation,
-            _ => CancellationToken::new(),
+            RuntimeEffectLocalExecutorState::SleepOnly {
+                cancellation,
+                observe_turn_cancel,
+                ..
+            } => RuntimeSleepOptions {
+                cancellation,
+                observe_turn_cancel,
+            },
+            _ => RuntimeSleepOptions {
+                cancellation: CancellationToken::new(),
+                observe_turn_cancel: false,
+            },
         }
     }
 }
@@ -1352,6 +1393,7 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
                     cancellation,
                     deadline,
                     clock,
+                    ..
                 } = local_executor.into_await_event_options()?;
                 let resolution = inline_await_events()
                     .await_resolution(&key, cancellation, deadline, clock.as_ref())

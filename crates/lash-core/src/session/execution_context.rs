@@ -25,6 +25,7 @@ pub struct RuntimeExecutionContext<'run> {
     turn_phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
+    observe_turn_cancel: bool,
     /// Per-tool trace emission handle for this execution. Present only when the
     /// host installed a trace sink; `None` keeps every trace call a no-op.
     tracing: Option<RuntimeExecutionTracing>,
@@ -151,6 +152,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             turn_phase_probe: None,
             turn_event_tx: None,
             cancellation_token: None,
+            observe_turn_cancel: true,
             tracing: None,
             code_block_graph_key: None,
             batch_parent_call_id: None,
@@ -432,6 +434,11 @@ impl<'run> RuntimeExecutionContext<'run> {
         self
     }
 
+    pub(crate) fn without_turn_cancel_observation(mut self) -> Self {
+        self.observe_turn_cancel = false;
+        self
+    }
+
     pub(crate) fn with_process_work_driver(
         mut self,
         process_work_driver: Option<crate::ProcessWorkDriver>,
@@ -525,7 +532,8 @@ impl<'run> RuntimeExecutionContext<'run> {
                 crate::RuntimeEffectLocalExecutor::sleep_with_clock(
                     cancellation,
                     std::sync::Arc::clone(&self.dispatch.clock),
-                ),
+                )
+                .with_turn_cancel_observation(self.observe_turn_cancel),
             )
             .await?;
         match outcome {
@@ -577,7 +585,8 @@ impl<'run> RuntimeExecutionContext<'run> {
                     cancellation,
                     None,
                     std::sync::Arc::clone(&self.dispatch.clock),
-                ),
+                )
+                .with_turn_cancel_observation(self.observe_turn_cancel),
             )
             .await?;
         match outcome.into_await_event()? {

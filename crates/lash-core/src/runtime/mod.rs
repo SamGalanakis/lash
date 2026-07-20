@@ -104,8 +104,9 @@ pub use effect::{
     RuntimeDirectLlmOutcome, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
     RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeLlmCallOutcome,
-    RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController, SegmentProgress,
-    ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome, ToolCallLaunch,
+    RuntimeReplay, RuntimeScope, RuntimeSleepOptions, RuntimeSubject, ScopedEffectController,
+    SegmentProgress, ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome,
+    ToolCallLaunch,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};

@@ -1542,28 +1542,23 @@ fn runtime_invocation(kind: RuntimeEffectKind, effect_id: &str) -> RuntimeInvoca
 
 #[test]
 fn restate_turn_cancel_race_excludes_process_owned_waits() {
-    let process_sleep = RuntimeInvocation::effect(
+    let process_scoped_sleep = RuntimeInvocation::effect(
         lash_core::runtime::RuntimeScope::for_turn("session", "turn", 1, 0),
         "parent:process:worker:sleep:1",
         RuntimeEffectKind::Sleep,
         "session:turn:1:0:process:worker:sleep:1",
     );
     assert!(
-        restate_timer_turn_cancel_wait_request(&process_sleep)
+        restate_timer_turn_cancel_wait_request(&process_scoped_sleep, false)
             .expect("process sleep classification")
             .is_none(),
         "background process sleep must outlive its originating turn"
     );
 
-    let process_wait = restate_await_event_key(
-        &ExecutionScope::process("worker"),
-        AwaitEventWaitIdentity::process_signal("worker", "continue", 1),
-    )
-    .expect("process wait key");
     assert!(
         restate_await_event_turn_cancel_wait_request(
             &runtime_invocation(RuntimeEffectKind::AwaitEvent, "process-wait"),
-            &process_wait,
+            false,
         )
         .expect("process await-event classification")
         .is_none(),
@@ -1571,13 +1566,23 @@ fn restate_turn_cancel_race_excludes_process_owned_waits() {
     );
 
     assert!(
-        restate_timer_turn_cancel_wait_request(&runtime_invocation(
-            RuntimeEffectKind::Sleep,
-            "turn-sleep",
-        ))
+        restate_timer_turn_cancel_wait_request(
+            &runtime_invocation(RuntimeEffectKind::Sleep, "turn-sleep"),
+            true,
+        )
         .expect("turn sleep classification")
         .is_some(),
         "foreground turn sleep must observe the durable cancellation gate"
+    );
+
+    assert!(
+        restate_await_event_turn_cancel_wait_request(
+            &runtime_invocation(RuntimeEffectKind::AwaitEvent, "turn-process-wait"),
+            true,
+        )
+        .expect("foreground process await-event classification")
+        .is_some(),
+        "a Lashlang wait inside a foreground turn must observe the turn gate"
     );
 }
 

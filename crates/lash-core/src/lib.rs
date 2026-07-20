@@ -442,7 +442,7 @@ pub use runtime::{
     RuntimeAwaitEventOptions, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
     RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeSessionState,
-    ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome,
+    RuntimeSleepOptions, ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome,
 };
 pub use schemars::JsonSchema;
 pub(crate) use session::RuntimeExecutionTracing;

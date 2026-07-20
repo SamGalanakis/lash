@@ -83,8 +83,8 @@ use lash_core::{
     Resolution, ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectCommand,
     RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
     RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
-    RuntimeInvocation, ScopedEffectController, TurnAddress, TurnAttach, TurnTerminal,
-    TurnWorkDriver, watch_process_registry_with_sink,
+    RuntimeInvocation, RuntimeSleepOptions, ScopedEffectController, TurnAddress, TurnAttach,
+    TurnTerminal, TurnWorkDriver, watch_process_registry_with_sink,
 };
 use lash_http_transport::{
     HttpMethod, HttpRequest, HttpResponse, HttpTransport, HttpTransportError, ReqwestClient,
@@ -455,15 +455,9 @@ fn restate_turn_cancel_wait_request(
 
 fn restate_timer_turn_cancel_wait_request(
     invocation: &RuntimeInvocation,
+    observe_turn_cancel: bool,
 ) -> Result<Option<RestateDurableWaitAwaitRequest>, RuntimeEffectControllerError> {
-    // Process interpreter effects retain their originating turn scope for
-    // causal tracing, but their stable replay identity is deliberately
-    // namespaced with `process:`. They outlive that foreground turn and must
-    // not inherit its cancellation gate.
-    if invocation
-        .replay_key()
-        .is_some_and(|key| key.starts_with("process:") || key.contains(":process:"))
-    {
+    if !observe_turn_cancel {
         return Ok(None);
     }
     restate_turn_cancel_wait_request(invocation)
@@ -471,9 +465,9 @@ fn restate_timer_turn_cancel_wait_request(
 
 fn restate_await_event_turn_cancel_wait_request(
     invocation: &RuntimeInvocation,
-    key: &AwaitEventKey,
+    observe_turn_cancel: bool,
 ) -> Result<Option<RestateDurableWaitAwaitRequest>, RuntimeEffectControllerError> {
-    if !matches!(key.scope, ExecutionScope::Turn { .. }) {
+    if !observe_turn_cancel {
         return Ok(None);
     }
     restate_turn_cancel_wait_request(invocation)
@@ -3539,8 +3533,14 @@ where
                     unreachable!("timer execution is only selected for sleep effects");
                 };
                 let duration = Duration::from_millis(*duration_ms);
-                let turn_cancel = restate_timer_turn_cancel_wait_request(&envelope.invocation)?;
-                let cancellation = local_executor.into_sleep_cancellation();
+                let RuntimeSleepOptions {
+                    cancellation,
+                    observe_turn_cancel,
+                } = local_executor.into_sleep_options();
+                let turn_cancel = restate_timer_turn_cancel_wait_request(
+                    &envelope.invocation,
+                    observe_turn_cancel,
+                )?;
                 match self
                     .context
                     .sleep_or_turn_cancel(duration, turn_cancel, cancellation.clone())
@@ -3572,9 +3572,12 @@ where
                     cancellation,
                     deadline,
                     clock,
+                    observe_turn_cancel,
                 } = local_executor.into_await_event_options()?;
-                let turn_cancel =
-                    restate_await_event_turn_cancel_wait_request(&envelope.invocation, &key)?;
+                let turn_cancel = restate_await_event_turn_cancel_wait_request(
+                    &envelope.invocation,
+                    observe_turn_cancel,
+                )?;
                 match self
                     .context
                     .await_event_or_turn_cancel(
