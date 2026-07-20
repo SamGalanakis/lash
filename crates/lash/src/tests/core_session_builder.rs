@@ -542,6 +542,14 @@ async fn rlm_protocol_config_lashlang_abilities_drive_prompt_surface() -> Result
 async fn rlm_completed_finish_is_single_copy_in_next_turn_request() -> Result<()> {
     const ANSWER: &str = "FIG-461 terminal answer";
 
+    let trace_path = std::env::temp_dir().join(format!(
+        "lash-fig-461-history-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let provider = lash_core::testing::TestProvider::builder()
         .kind("rlm-finish-history-test")
@@ -571,6 +579,7 @@ async fn rlm_completed_finish_is_single_copy_in_next_turn_request() -> Result<()
     let core = explicit_ephemeral_facets(rlm_core_builder())
         .provider(provider)
         .model(mock_model_spec())
+        .trace_jsonl_path(trace_path.clone())
         .build()?;
     let session = core
         .session("rlm-finish-history-single-copy")
@@ -595,6 +604,7 @@ async fn rlm_completed_finish_is_single_copy_in_next_turn_request() -> Result<()
         .require_finish()?
         .run()
         .await?;
+    core.flush_trace_sink()?;
 
     let seen = seen.lock().expect("seen requests");
     assert_eq!(seen.len(), 2);
@@ -603,6 +613,20 @@ async fn rlm_completed_finish_is_single_copy_in_next_turn_request() -> Result<()
         1,
         "the committed terminal answer must occur exactly once in turn 2"
     );
+    let trace = std::fs::read_to_string(&trace_path).expect("read FIG-461 trace");
+    let llm_starts = trace
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("trace event JSON"))
+        .filter(|event| event["type"] == "llm_call_started")
+        .collect::<Vec<_>>();
+    assert_eq!(llm_starts.len(), 2);
+    let turn_two_messages = serde_json::to_string(&llm_starts[1]["request"]["messages"])?;
+    assert_eq!(
+        turn_two_messages.matches(ANSWER).count(),
+        1,
+        "the sentence must occur exactly once in turn 2 llm_call_started request.messages"
+    );
+    let _ = std::fs::remove_file(trace_path);
     Ok(())
 }
 
