@@ -111,7 +111,8 @@ to the `just` recipe. Restate ingress is
 `http://127.0.0.1:19070`.
 
 The browser UI has three work areas: the left rail contains red and blue trigger
-buttons, a cron schedule card, and per-turn model controls; the center
+buttons, a cron schedule card, per-turn model controls, and the persisted session token
+ledger; the center
 pane is a chat/event stream; and the right rail polls the process registry for
 visible background work. A **chat / accounts** tab switch at the top of the
 center pane opens a dedicated mock-email view (see below). The buttons emit
@@ -153,6 +154,15 @@ the last cursor as `?cursor=...`, emits `replay_cursor`, forwards
 bounded-replay windows as `replay_gap` with `RemoteLiveReplayGap` plus a fresh
 remote observation snapshot. Resetting the workbench rotates the session id and
 restarts the browser stream from a fresh cursor.
+
+The chat composer can upload one PNG (up to 1 MiB) through
+`POST /api/attachments`, then includes the returned content-addressed id as
+`attachment_id` in `POST /api/turn`. The Restate workflow resolves the durable file-store
+blob and supplies it through Lash's `TurnInput::with_image_ref` contract. The same bytes
+remain available at `GET /api/attachments/{attachment_id}` across a workbench restart.
+`GET /api/state` includes the canonical `session.usage_report()` projection; the left rail
+renders its total plus input/output counters. Run the model-free SQLite/Postgres persistence
+gate with `just agent-workbench-attachment-usage-gate <port>`.
 
 The **accounts** tab is a mocked multi-account inbox world you control live.
 Type a name (for example `Work`) and press **add account** to connect one;

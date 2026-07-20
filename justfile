@@ -178,6 +178,9 @@ agent-workbench-restate-e2e:
   fi
   echo "panic gate: clean (no 'panicked at' lines in agent-workbench Restate E2E output)"
 
+agent-workbench-attachment-usage-gate port='3030':
+  bash "{{repo}}/scripts/agent-workbench-attachment-usage-gate.sh" "{{port}}"
+
 restate-postgres-workers-e2e:
   bash "{{repo}}/scripts/restate-postgres-workers-e2e.sh"
 

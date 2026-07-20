@@ -46,28 +46,32 @@ fn attachment_usage_gate_sqlite() {
 #[test]
 #[ignore = "requires Postgres; use `just agent-workbench-attachment-usage-gate <port>`"]
 fn attachment_usage_gate_postgres() {
-    run_async_test_on_stack_budget("workbench-attachment-usage-postgres-gate", || async {
-        let database_url = std::env::var("AGENT_WORKBENCH_USAGE_GATE_DATABASE_URL")
-            .expect("AGENT_WORKBENCH_USAGE_GATE_DATABASE_URL is required");
-        let first_storage = lash_postgres_store::PostgresStorage::connect(&database_url)
-            .await
-            .expect("connect first Postgres gate storage");
-        let resumed_storage = lash_postgres_store::PostgresStorage::connect(&database_url)
-            .await
-            .expect("connect resumed Postgres gate storage");
-        let first_factory = Arc::new(first_storage.session_store_factory())
-            as Arc<dyn lash::persistence::SessionStoreFactory>;
-        let resumed_factory = Arc::new(resumed_storage.session_store_factory())
-            as Arc<dyn lash::persistence::SessionStoreFactory>;
-        let data_dir = std::env::temp_dir().join(format!(
-            "agent-workbench-attachment-usage-postgres-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&data_dir).expect("create Postgres gate data dir");
+    run_async_test_on_stack_budget_multi_thread(
+        "workbench-attachment-usage-postgres-gate",
+        4,
+        || async {
+            let database_url = std::env::var("AGENT_WORKBENCH_USAGE_GATE_DATABASE_URL")
+                .expect("AGENT_WORKBENCH_USAGE_GATE_DATABASE_URL is required");
+            let first_storage = lash_postgres_store::PostgresStorage::connect(&database_url)
+                .await
+                .expect("connect first Postgres gate storage");
+            let resumed_storage = lash_postgres_store::PostgresStorage::connect(&database_url)
+                .await
+                .expect("connect resumed Postgres gate storage");
+            let first_factory = Arc::new(first_storage.session_store_factory())
+                as Arc<dyn lash::persistence::SessionStoreFactory>;
+            let resumed_factory = Arc::new(resumed_storage.session_store_factory())
+                as Arc<dyn lash::persistence::SessionStoreFactory>;
+            let data_dir = std::env::temp_dir().join(format!(
+                "agent-workbench-attachment-usage-postgres-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&data_dir).expect("create Postgres gate data dir");
 
-        run_attachment_usage_gate(&data_dir, first_factory, resumed_factory).await;
-        std::fs::remove_dir_all(&data_dir).expect("remove Postgres gate data dir");
-    });
+            run_attachment_usage_gate(&data_dir, first_factory, resumed_factory).await;
+            std::fs::remove_dir_all(&data_dir).expect("remove Postgres gate data dir");
+        },
+    );
 }
 
 async fn run_attachment_usage_gate(
