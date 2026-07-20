@@ -46,6 +46,10 @@ impl TurnCommitDraft {
         self.graph.read_model().active_events
     }
 
+    pub(super) fn message_sequence(&self) -> MessageSequence {
+        self.graph.message_sequence()
+    }
+
     pub(super) fn apply_prepared_messages(&mut self, messages: &MessageSequence) {
         self.apply_message_projection(messages);
     }

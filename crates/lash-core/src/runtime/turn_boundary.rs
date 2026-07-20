@@ -138,14 +138,12 @@ impl TurnBoundary {
             TurnCommitStage::Finalized(finalized) => &mut finalized.state,
         }
     }
-
     pub(super) fn state(&self) -> &RuntimeSessionState {
         match &self.stage {
             TurnCommitStage::Drafting(draft) => draft.state(),
             TurnCommitStage::Finalized(finalized) => &finalized.state,
         }
     }
-
     pub(super) fn apply_prepared_messages(&mut self, messages: &MessageSequence) {
         self.draft_mut().apply_prepared_messages(messages);
     }
@@ -160,9 +158,11 @@ impl TurnBoundary {
         self.draft_ref()
             .read_view(policy, turn_index, protocol_turn_options, messages)
     }
-
     pub(super) fn active_events(&self) -> Arc<Vec<SessionHistoryRecord>> {
         self.draft_ref().active_events()
+    }
+    pub(super) fn message_sequence(&self) -> MessageSequence {
+        self.draft_ref().message_sequence()
     }
 
     pub(super) fn finalize_turn_read_state(

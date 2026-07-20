@@ -57,27 +57,44 @@ impl ManagedSessionCapability {
                 },
             );
         }
-        let turn = {
-            let mut runtime_guard = runtime.runtime.lock().await;
-            let result = Box::pin(async {
-                let run = runtime_guard
-                    .stream_turn_with_agent_frames(
-                        input,
-                        crate::runtime::TurnOptions::new(cancel, scoped_effect_controller)
-                            .with_events(&sink),
-                    )
-                    .await
-                    .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-                let turn = run.into_final_turn().ok_or_else(|| {
-                    crate::PluginError::Session(
-                        "agent frame run completed without a turn".to_string(),
-                    )
-                })?;
-                Ok(turn)
-            })
-            .await;
-            runtime.publish_from(&runtime_guard);
-            result
+        let turn = match scoped_effect_controller.into_static() {
+            Ok(scoped_effect_controller) => {
+                // Canonical recursion-growth seam: every shareable child turn
+                // gets a fresh Tokio task stack here. Future turn-path growth
+                // belongs behind this boundary, rather than in new boxes at
+                // whichever recursive poll site happens to overflow next.
+                let task = tokio::spawn(run_managed_session_turn(
+                    runtime,
+                    input,
+                    cancel,
+                    scoped_effect_controller,
+                    sink.clone(),
+                ));
+                let mut abort_on_drop = AbortTaskOnDrop::new(task.abort_handle());
+                let joined = task.await;
+                abort_on_drop.disarm();
+                match joined {
+                    Ok(turn) => turn,
+                    Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+                    Err(err) => Err(crate::PluginError::Session(format!(
+                        "child session turn task was cancelled: {err}"
+                    ))),
+                }
+            }
+            Err(scoped_effect_controller) => {
+                // Handler-scoped durable controllers cannot outlive their host
+                // invocation and therefore cannot cross Tokio's `'static`
+                // spawn contract. Preserve their exact journal semantics by
+                // retaining the scoped controller on the calling task.
+                run_managed_session_turn(
+                    runtime,
+                    input,
+                    cancel,
+                    scoped_effect_controller,
+                    sink.clone(),
+                )
+                .await
+            }
         };
         self.turns.lock().await.remove(&turn_id);
         drop(sink);
@@ -110,6 +127,59 @@ impl ManagedSessionCapability {
             .expect("child turn live usage lock")
             .remove(turn_id)
             .unwrap_or_default()
+    }
+}
+
+async fn run_managed_session_turn(
+    runtime: RuntimeHandle,
+    input: crate::TurnInput,
+    cancel: CancellationToken,
+    scoped_effect_controller: crate::ScopedEffectController<'_>,
+    sink: ChannelEventSink,
+) -> Result<AssembledTurn, crate::PluginError> {
+    // This mutex is the managed runtime's single-writer boundary. Hold it for
+    // the complete turn and publish from the guarded post-turn state before
+    // releasing it, exactly as the former inline path did.
+    let mut runtime_guard = runtime.runtime.lock().await;
+    let result = runtime_guard
+        .stream_turn_with_agent_frames(
+            input,
+            crate::runtime::TurnOptions::new(cancel, scoped_effect_controller).with_events(&sink),
+        )
+        .await
+        .map_err(|err| crate::PluginError::Session(err.to_string()))
+        .and_then(|run| {
+            run.into_final_turn().ok_or_else(|| {
+                crate::PluginError::Session("agent frame run completed without a turn".to_string())
+            })
+        });
+    runtime.publish_from(&runtime_guard);
+    result
+}
+
+struct AbortTaskOnDrop {
+    handle: tokio::task::AbortHandle,
+    armed: bool,
+}
+
+impl AbortTaskOnDrop {
+    fn new(handle: tokio::task::AbortHandle) -> Self {
+        Self {
+            handle,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.abort();
+        }
     }
 }
 
