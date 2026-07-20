@@ -292,9 +292,11 @@ pub async fn effect_controller_journaled_effect_replay(
         .execute_effect(
             success.clone(),
             replay_conformance_tool_attempt_recording_executor(
-                "replay-success",
-                "call-replay-success",
-                "replay_success_tool",
+                ReplayConformanceToolAttempt::new(
+                    "replay-success",
+                    "call-replay-success",
+                    "replay_success_tool",
+                ),
                 None,
             ),
         )
@@ -658,58 +660,22 @@ pub async fn effect_controller_concurrent_replay_deterministic(
 ) {
     let slow = replay_conformance_tool_attempt_envelope("effect-slow", "call-slow", "slow_tool");
     let fast = replay_conformance_tool_attempt_envelope("effect-fast", "call-fast", "fast_tool");
-    let completion_order = Arc::new(Mutex::new(Vec::new()));
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let release_slow = Arc::new(tokio::sync::Notify::new());
-
-    let first_pass = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        tokio::join!(
-            controller.execute_effect(
-                slow.clone(),
-                replay_conformance_tool_attempt_recording_executor(
-                    "effect-slow",
-                    "call-slow",
-                    "slow_tool",
-                    Some((
-                        Arc::clone(&barrier),
-                        Arc::clone(&release_slow),
-                        Arc::clone(&completion_order),
-                    )),
-                ),
-            ),
-            controller.execute_effect(
-                fast.clone(),
-                replay_conformance_tool_attempt_recording_executor(
-                    "effect-fast",
-                    "call-fast",
-                    "fast_tool",
-                    Some((
-                        Arc::clone(&barrier),
-                        Arc::clone(&release_slow),
-                        Arc::clone(&completion_order),
-                    )),
-                ),
-            ),
-        )
-    })
-    .await
-    .expect("concurrent first-pass effects must both enter their local executors");
+    let first_pass = replay_conformance_concurrent_first_pass(
+        controller,
+        slow.clone(),
+        ReplayConformanceToolAttempt::new("effect-slow", "call-slow", "slow_tool"),
+        fast.clone(),
+        ReplayConformanceToolAttempt::new("effect-fast", "call-fast", "fast_tool"),
+    )
+    .await;
     let slow_first = first_pass.0.expect("slow first pass");
     let fast_first = first_pass.1.expect("fast first pass");
     assert_replay_conformance_tool_attempt_marker(slow_first, "call-slow", "slow_tool");
     assert_replay_conformance_tool_attempt_marker(fast_first, "call-fast", "fast_tool");
-    assert_eq!(
-        completion_order
-            .lock()
-            .expect("completion order")
-            .as_slice(),
-        &["effect-fast".to_string(), "effect-slow".to_string()],
-        "first pass must prove local completion order can differ from effect request order"
-    );
 
     start_replay();
     let replay_local_calls = Arc::new(Mutex::new(Vec::new()));
-    let replay_pass = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let replay_pass = tokio::time::timeout(REPLAY_CONFORMANCE_DEADLOCK_TIMEOUT, async {
         tokio::join!(
             controller.execute_effect(
                 fast,
@@ -753,63 +719,26 @@ pub async fn effect_controller_tool_attempt_fanout_replay_deterministic(
         replay_conformance_tool_attempt_envelope("tool-attempt-slow", "call-slow", "slow_tool");
     let fast =
         replay_conformance_tool_attempt_envelope("tool-attempt-fast", "call-fast", "fast_tool");
-    let completion_order = Arc::new(Mutex::new(Vec::new()));
 
     let first_pass = if controller.supports_concurrent_effects() {
-        let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let release_slow = Arc::new(tokio::sync::Notify::new());
-        let first_pass = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            tokio::join!(
-                controller.execute_effect(
-                    slow.clone(),
-                    replay_conformance_tool_attempt_recording_executor(
-                        "tool-attempt-slow",
-                        "call-slow",
-                        "slow_tool",
-                        Some((
-                            Arc::clone(&barrier),
-                            Arc::clone(&release_slow),
-                            Arc::clone(&completion_order),
-                        )),
-                    ),
-                ),
-                controller.execute_effect(
-                    fast.clone(),
-                    replay_conformance_tool_attempt_recording_executor(
-                        "tool-attempt-fast",
-                        "call-fast",
-                        "fast_tool",
-                        Some((
-                            Arc::clone(&barrier),
-                            Arc::clone(&release_slow),
-                            Arc::clone(&completion_order),
-                        )),
-                    ),
-                ),
-            )
-        })
+        replay_conformance_concurrent_first_pass(
+            controller,
+            slow.clone(),
+            ReplayConformanceToolAttempt::new("tool-attempt-slow", "call-slow", "slow_tool"),
+            fast.clone(),
+            ReplayConformanceToolAttempt::new("tool-attempt-fast", "call-fast", "fast_tool"),
+        )
         .await
-        .expect("concurrent tool-attempt first pass must enter both local executors");
-        assert_eq!(
-            completion_order
-                .lock()
-                .expect("tool-attempt completion order")
-                .as_slice(),
-            &[
-                "tool-attempt-fast".to_string(),
-                "tool-attempt-slow".to_string()
-            ],
-            "first pass must prove tool-attempt completion order can differ from source order"
-        );
-        first_pass
     } else {
         let slow_first = controller
             .execute_effect(
                 slow.clone(),
                 replay_conformance_tool_attempt_recording_executor(
-                    "tool-attempt-slow",
-                    "call-slow",
-                    "slow_tool",
+                    ReplayConformanceToolAttempt::new(
+                        "tool-attempt-slow",
+                        "call-slow",
+                        "slow_tool",
+                    ),
                     None,
                 ),
             )
@@ -818,21 +747,15 @@ pub async fn effect_controller_tool_attempt_fanout_replay_deterministic(
             .execute_effect(
                 fast.clone(),
                 replay_conformance_tool_attempt_recording_executor(
-                    "tool-attempt-fast",
-                    "call-fast",
-                    "fast_tool",
+                    ReplayConformanceToolAttempt::new(
+                        "tool-attempt-fast",
+                        "call-fast",
+                        "fast_tool",
+                    ),
                     None,
                 ),
             )
             .await;
-        assert_eq!(
-            completion_order
-                .lock()
-                .expect("tool-attempt completion order")
-                .as_slice(),
-            &[] as &[String],
-            "serial conformance path must not use the concurrent completion-order probe"
-        );
         (slow_first, fast_first)
     };
 
@@ -844,7 +767,7 @@ pub async fn effect_controller_tool_attempt_fanout_replay_deterministic(
     start_replay();
     let replay_local_calls = Arc::new(Mutex::new(Vec::new()));
     let replay_pass = if controller.supports_concurrent_effects() {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(REPLAY_CONFORMANCE_DEADLOCK_TIMEOUT, async {
             tokio::join!(
                 controller.execute_effect(
                     fast,
@@ -1249,40 +1172,149 @@ fn replay_conformance_tool_attempt_envelope(
 }
 
 #[cfg(any(test, feature = "testing"))]
-type ReplayConformanceProbe = (
-    Arc<tokio::sync::Barrier>,
-    Arc<tokio::sync::Notify>,
-    Arc<Mutex<Vec<String>>>,
-);
+const REPLAY_CONFORMANCE_DEADLOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(any(test, feature = "testing"))]
-fn replay_conformance_tool_attempt_recording_executor(
+#[derive(Clone, Copy)]
+struct ReplayConformanceToolAttempt {
     effect_id: &'static str,
     call_id: &'static str,
     tool_name: &'static str,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl ReplayConformanceToolAttempt {
+    const fn new(effect_id: &'static str, call_id: &'static str, tool_name: &'static str) -> Self {
+        Self {
+            effect_id,
+            call_id,
+            tool_name,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+struct ReplayConformanceProbe {
+    entered: tokio::sync::mpsc::UnboundedSender<&'static str>,
+    release: Arc<tokio::sync::Notify>,
+    completion_order: Arc<Mutex<Vec<String>>>,
+}
+
+/// Run a slow request before a fast request, prove both local executors are
+/// entered before either may finish, then observe the fast controller call
+/// finish recording before allowing the slow executor to complete.
+#[cfg(any(test, feature = "testing"))]
+async fn replay_conformance_concurrent_first_pass(
+    controller: &dyn RuntimeEffectController,
+    slow_envelope: RuntimeEffectEnvelope,
+    slow: ReplayConformanceToolAttempt,
+    fast_envelope: RuntimeEffectEnvelope,
+    fast: ReplayConformanceToolAttempt,
+) -> (
+    Result<RuntimeEffectOutcome, RuntimeEffectControllerError>,
+    Result<RuntimeEffectOutcome, RuntimeEffectControllerError>,
+) {
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let start_fast = Arc::new(tokio::sync::Notify::new());
+    let release_slow = Arc::new(tokio::sync::Notify::new());
+    let release_fast = Arc::new(tokio::sync::Notify::new());
+    let fast_recorded = Arc::new(tokio::sync::Notify::new());
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
+
+    let slow_call = controller.execute_effect(
+        slow_envelope,
+        replay_conformance_tool_attempt_recording_executor(
+            slow,
+            Some(ReplayConformanceProbe {
+                entered: entered_tx.clone(),
+                release: Arc::clone(&release_slow),
+                completion_order: Arc::clone(&completion_order),
+            }),
+        ),
+    );
+    let fast_call = {
+        let start_fast = Arc::clone(&start_fast);
+        let release_fast = Arc::clone(&release_fast);
+        let fast_recorded = Arc::clone(&fast_recorded);
+        let completion_order = Arc::clone(&completion_order);
+        async move {
+            start_fast.notified().await;
+            let outcome = controller
+                .execute_effect(
+                    fast_envelope,
+                    replay_conformance_tool_attempt_recording_executor(
+                        fast,
+                        Some(ReplayConformanceProbe {
+                            entered: entered_tx,
+                            release: Arc::clone(&release_fast),
+                            completion_order: Arc::clone(&completion_order),
+                        }),
+                    ),
+                )
+                .await;
+            fast_recorded.notify_one();
+            outcome
+        }
+    };
+    let orchestrate = async {
+        assert_eq!(
+            entered_rx.recv().await,
+            Some(slow.effect_id),
+            "the first requested effect must enter its local executor"
+        );
+        start_fast.notify_one();
+        assert_eq!(
+            entered_rx.recv().await,
+            Some(fast.effect_id),
+            "the second effect must enter while the first local executor is still gated"
+        );
+        release_fast.notify_one();
+        fast_recorded.notified().await;
+        release_slow.notify_one();
+    };
+
+    let (slow_outcome, fast_outcome, ()) =
+        tokio::time::timeout(REPLAY_CONFORMANCE_DEADLOCK_TIMEOUT, async {
+            tokio::join!(slow_call, fast_call, orchestrate)
+        })
+        .await
+        .expect(
+            "concurrent first-pass effects must enter both local executors and record fast first",
+        );
+    assert_eq!(
+        completion_order
+            .lock()
+            .expect("completion order")
+            .as_slice(),
+        &[fast.effect_id.to_string(), slow.effect_id.to_string()],
+        "first pass must prove local completion order can differ from effect request order"
+    );
+    (slow_outcome, fast_outcome)
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn replay_conformance_tool_attempt_recording_executor(
+    attempt: ReplayConformanceToolAttempt,
     concurrent_probe: Option<ReplayConformanceProbe>,
 ) -> RuntimeEffectLocalExecutor<'static> {
     RuntimeEffectLocalExecutor::testing(move |envelope| async move {
-        assert_eq!(envelope.invocation.effect_id(), Some(effect_id));
-        if let Some((barrier, release_slow, completion_order)) = concurrent_probe {
-            barrier.wait().await;
-            if effect_id == "tool-attempt-slow" {
-                release_slow.notified().await;
-            } else {
-                completion_order
-                    .lock()
-                    .expect("tool-attempt completion order")
-                    .push(effect_id.to_string());
-                release_slow.notify_one();
-            }
-            if effect_id == "tool-attempt-slow" {
-                completion_order
-                    .lock()
-                    .expect("tool-attempt completion order")
-                    .push(effect_id.to_string());
-            }
+        assert_eq!(envelope.invocation.effect_id(), Some(attempt.effect_id));
+        if let Some(probe) = concurrent_probe {
+            probe
+                .entered
+                .send(attempt.effect_id)
+                .expect("conformance orchestrator must observe executor entry");
+            probe.release.notified().await;
+            probe
+                .completion_order
+                .lock()
+                .expect("tool-attempt completion order")
+                .push(attempt.effect_id.to_string());
         }
-        Ok(replay_conformance_tool_attempt_outcome(call_id, tool_name))
+        Ok(replay_conformance_tool_attempt_outcome(
+            attempt.call_id,
+            attempt.tool_name,
+        ))
     })
 }
 
