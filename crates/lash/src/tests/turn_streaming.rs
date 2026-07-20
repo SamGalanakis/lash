@@ -727,10 +727,12 @@ fn retrying_rlm_prose_provider(
                             .retryable(true),
                     );
                 }
-                let text = if call == 1 {
-                    "retry observer single-copy marker\n<lashlang>\nfinish \"provider retry succeeded\"\n</lashlang>"
-                } else {
-                    "<lashlang>\nfinish \"subsequent turn succeeded\"\n</lashlang>"
+                let text = match call {
+                    1 => {
+                        "retry observer single-copy marker\n<lashlang>\nretry_missing_name\n</lashlang>"
+                    }
+                    2 => "<lashlang>\nfinish \"provider retry succeeded\"\n</lashlang>",
+                    _ => "<lashlang>\nfinish \"subsequent turn succeeded\"\n</lashlang>",
                 };
                 stream.send(LlmStreamEvent::Delta(text.to_string()));
                 Ok(LlmResponse {
@@ -748,10 +750,24 @@ fn retrying_rlm_prose_provider(
         .into_handle()
 }
 
+fn provider_request_text(request: &lash_core::LlmRequest) -> String {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn rlm_provider_retry_commits_only_surviving_prose() -> Result<()> {
     run_async_test_on_stack_budget("rlm-provider-retry-prose-test", || async {
         const MARKER: &str = "retry observer single-copy marker";
+        const EXEC_ERROR: &str = "unknown name `retry_missing_name`\n--> line 1, column 1\nretry_missing_name\n^~~~~~~~~~~~~~~~~~";
         let transport_calls = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let core = explicit_ephemeral_facets(LashCore::rlm_builder(rlm_factory()))
@@ -772,8 +788,8 @@ fn rlm_provider_retry_commits_only_surviving_prose() -> Result<()> {
 
         assert_eq!(
             transport_calls.load(Ordering::SeqCst),
-            2,
-            "one failed provider attempt plus one retry must finish the turn"
+            3,
+            "one failed attempt, its retry, and one error continuation must finish the turn"
         );
         assert_eq!(
             first.final_value(),
@@ -800,6 +816,29 @@ fn rlm_provider_retry_commits_only_surviving_prose() -> Result<()> {
             rlm_marker_events, 1,
             "RLM semantic history retained aborted-attempt prose"
         );
+        {
+            let requests = requests.lock().expect("retrying RLM requests");
+            assert_eq!(requests.len(), 3, "RLM scheduled a spurious iteration");
+            let continuation_request = requests.last().expect("post-error continuation request");
+            let continuation = provider_request_text(continuation_request);
+            assert_eq!(
+                continuation.matches(MARKER).count(),
+                1,
+                "provider continuation duplicated retry prose: {continuation}"
+            );
+            assert_eq!(
+                continuation.matches(EXEC_ERROR).count(),
+                1,
+                "provider continuation duplicated exec error: {continuation}"
+            );
+            assert_eq!(
+                continuation
+                    .matches(&format!("Error:\n{EXEC_ERROR}"))
+                    .count(),
+                1,
+                "provider continuation duplicated the rendered Error block: {continuation}"
+            );
+        }
 
         session
             .admin()
@@ -859,13 +898,19 @@ fn rlm_provider_retry_commits_only_surviving_prose() -> Result<()> {
             .run()
             .await?;
         let requests = requests.lock().expect("retrying RLM requests");
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 4);
         let subsequent_history = requests.last().expect("subsequent request");
         let subsequent_history_json = serde_json::to_string(subsequent_history)?;
-        let marker_count = subsequent_history_json.matches(MARKER).count();
+        let subsequent_history_text = provider_request_text(subsequent_history);
+        let marker_count = subsequent_history_text.matches(MARKER).count();
         assert_eq!(
             marker_count, 1,
-            "provider-visible history duplicated retry prose: {subsequent_history_json}"
+            "provider-visible history duplicated retry prose: {subsequent_history_text}"
+        );
+        assert_eq!(
+            subsequent_history_text.matches(EXEC_ERROR).count(),
+            1,
+            "provider-visible history duplicated exec error: {subsequent_history_json}"
         );
         Ok(())
     })

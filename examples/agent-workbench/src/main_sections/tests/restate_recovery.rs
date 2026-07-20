@@ -442,9 +442,23 @@ async fn live_restate_rate_limit_retry_converges_observers_to_one_copy_inner() {
         "workbench transcript retained duplicate retry prose: {:?}",
         assistant.text
     );
-    assert_single_retry_marker_message("committed", session.read_view().messages());
     let session_id = session.session_id();
-    session.close().await.expect("close retry observer session");
+    // This handle predates the externally driven Restate turn. Dropping it
+    // releases the observation snapshot without flushing that stale graph over
+    // the workflow's committed transcript.
+    drop(session);
+    let committed = harness
+        .state
+        .core
+        .session(session_id.clone())
+        .open()
+        .await
+        .expect("open committed retry session");
+    assert_single_retry_marker_message("committed", committed.read_view().messages());
+    committed
+        .close()
+        .await
+        .expect("close committed retry session");
     let reloaded = harness
         .state
         .core
