@@ -30,15 +30,42 @@ impl Future for PanicsWhenPolledAfterReady {
     }
 }
 
+struct PanicsWhenPolledAfterErrorWake {
+    polled: bool,
+}
+
+impl Future for PanicsWhenPolledAfterErrorWake {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(!self.polled, "error-signalling future was re-polled");
+        self.polled = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
 #[test]
 fn restate_context_futures_are_structurally_safe_after_ready() {
-    let mut future = Box::pin(fuse_restate_context_future(PanicsWhenPolledAfterReady {
+    let mut future = Box::pin(guard_restate_context_future(PanicsWhenPolledAfterReady {
         completed: false,
     }));
     let waker = Waker::noop();
     let mut context = Context::from_waker(waker);
 
     assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
+    assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+}
+
+#[test]
+fn restate_context_futures_are_not_repolled_after_sdk_error_wake() {
+    let mut future = Box::pin(guard_restate_context_future(
+        PanicsWhenPolledAfterErrorWake { polled: false },
+    ));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+
+    assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
     assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
 }
 

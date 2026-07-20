@@ -2249,7 +2249,6 @@ version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "bytes",
- "futures-util",
  "http",
  "http-body-util",
  "lash-core",
