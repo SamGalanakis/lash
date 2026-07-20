@@ -537,8 +537,26 @@ async fn explicit_effect_controller_creates_turn_scope_internally() -> Result<()
 
 #[tokio::test]
 async fn queued_turn_run_drains_ready_work_and_returns_none_when_idle() -> Result<()> {
+    let requests = Arc::new(StdMutex::new(
+        Vec::<Vec<lash_core::llm::types::LlmMessage>>::new(),
+    ));
+    let captured_requests = Arc::clone(&requests);
+    let provider = crate::testing::TestProvider::builder()
+        .kind("queued-next-prompt-shape")
+        .complete(move |request| {
+            let captured_requests = Arc::clone(&captured_requests);
+            async move {
+                captured_requests
+                    .lock()
+                    .expect("request capture")
+                    .push(request.messages.clone());
+                Ok(text_response("echo: queued work"))
+            }
+        })
+        .build()
+        .into_handle();
     let core = explicit_ephemeral_facets(LashCore::standard_builder())
-        .provider(mock_provider())
+        .provider(provider)
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .disable_queued_work_driver()
@@ -557,6 +575,13 @@ async fn queued_turn_run_drains_ready_work_and_returns_none_when_idle() -> Resul
         .expect("queued turn should run");
 
     assert_eq!(output.assistant_message(), Some("echo: queued work"));
+    let requests = requests.lock().expect("request capture");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        serde_json::to_string(&requests[0][1..])
+            .expect("serialize queued-next request user messages"),
+        r#"[{"role":"User","blocks":[{"Text":{"text":"queued work","response_meta":null,"cache_breakpoint":false}}]}]"#
+    );
     assert!(session.queued_turn().run().await?.is_none());
     Ok(())
 }
@@ -1687,10 +1712,13 @@ async fn cancel_running_turns_reaches_queued_turn_drains() -> Result<()> {
 }
 
 #[tokio::test]
-async fn active_steer_interrupt_defers_once_and_skips_cancelled_queued_turn() -> Result<()> {
+async fn active_steer_after_last_call_defers_to_next_turn_first_call() -> Result<()> {
     let (started_tx, started_rx) = oneshot::channel::<()>();
     let started_tx = Arc::new(StdMutex::new(Some(started_tx)));
-    let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let requests = Arc::new(StdMutex::new(Vec::<(
+        String,
+        Vec<lash_core::llm::types::LlmMessage>,
+    )>::new()));
     let captured_requests = Arc::clone(&requests);
     let provider = crate::testing::TestProvider::builder()
         .kind("embed-test")
@@ -1702,7 +1730,7 @@ async fn active_steer_interrupt_defers_once_and_skips_cancelled_queued_turn() ->
                 captured_requests
                     .lock()
                     .expect("request log")
-                    .push(user_text.clone());
+                    .push((user_text.clone(), request.messages.clone()));
                 if user_text == "primary hangs" {
                     if let Some(tx) = started_tx.lock().expect("started signal").take() {
                         let _ = tx.send(());
@@ -1793,7 +1821,7 @@ async fn active_steer_interrupt_defers_once_and_skips_cancelled_queued_turn() ->
     assert_eq!(
         requests
             .iter()
-            .filter(|text| text.as_str() == "deferred active steer")
+            .filter(|(text, _)| text == "deferred active steer")
             .count(),
         1,
         "deferred active steer must be sent exactly once"
@@ -1801,8 +1829,18 @@ async fn active_steer_interrupt_defers_once_and_skips_cancelled_queued_turn() ->
     assert!(
         !requests
             .iter()
-            .any(|text| text.as_str() == "cancelled next turn"),
+            .any(|(text, _)| text == "cancelled next turn"),
         "cancelled queued turn must not reach the provider"
+    );
+    let deferred_request = requests
+        .iter()
+        .find(|(text, _)| text == "deferred active steer")
+        .map(|(_, messages)| messages)
+        .expect("deferred active input provider request");
+    assert_eq!(
+        serde_json::to_string(&deferred_request[1..])
+            .expect("serialize deferred active-input request messages"),
+        r#"[{"role":"User","blocks":[{"Text":{"text":"primary hangs","response_meta":null,"cache_breakpoint":false}}]},{"role":"User","blocks":[{"Text":{"text":"deferred active steer","response_meta":null,"cache_breakpoint":false}}]}]"#
     );
     Ok(())
 }
@@ -1926,7 +1964,9 @@ fn rlm_active_input_reaches_the_next_provider_iteration() -> Result<()> {
         let (release_first_tx, release_first_rx) = oneshot::channel::<()>();
         let first_started_tx = Arc::new(StdMutex::new(Some(first_started_tx)));
         let release_first_rx = Arc::new(TokioMutex::new(Some(release_first_rx)));
-        let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let requests = Arc::new(StdMutex::new(
+            Vec::<Vec<lash_core::llm::types::LlmMessage>>::new(),
+        ));
         let captured_requests = Arc::clone(&requests);
         let call_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = crate::testing::TestProvider::builder()
@@ -1940,7 +1980,7 @@ fn rlm_active_input_reaches_the_next_provider_iteration() -> Result<()> {
                     captured_requests
                         .lock()
                         .expect("request capture")
-                        .push(serde_json::to_string(&request).expect("serialize request"));
+                        .push(request.messages.clone());
                     match call_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                         0 => {
                             if let Some(tx) = first_started_tx.lock().expect("first signal").take()
@@ -1957,6 +1997,7 @@ fn rlm_active_input_reaches_the_next_provider_iteration() -> Result<()> {
                         1 => Ok(text_response(&lashlang_block(
                             r#"finish "active input delivered""#,
                         ))),
+                        2 => Ok(text_response(&lashlang_block(r#"finish "later turn""#))),
                         other => panic!("unexpected provider call {other}"),
                     }
                 }
@@ -1997,13 +2038,44 @@ fn rlm_active_input_reaches_the_next_provider_iteration() -> Result<()> {
             .await?;
         release_first_tx.send(()).expect("release first response");
         turn.await.expect("turn task")?;
+        let committed_marker_count = session
+            .read_view()
+            .messages()
+            .iter()
+            .filter(|message| crate::message_text(message) == "mid-turn injection marker")
+            .count();
+        assert_eq!(
+            committed_marker_count, 1,
+            "active input must be one normal committed transcript message"
+        );
+        session
+            .turn(TurnInput::text("later turn input"))
+            .turn_id("rlm-later-turn")
+            .require_finish()?
+            .run()
+            .await?;
 
         let requests = requests.lock().expect("request capture").clone();
-        assert_eq!(requests.len(), 2, "turn must execute a second iteration");
-        assert!(!requests[0].contains("mid-turn injection marker"));
+        assert_eq!(requests.len(), 3, "two turns must execute three calls");
+        let first_messages = serde_json::to_string(&requests[0]).expect("serialize first request");
+        let second_messages =
+            serde_json::to_string(&requests[1]).expect("serialize second request");
+        assert!(!first_messages.contains("mid-turn injection marker"));
         assert!(
-            requests[1].contains("mid-turn injection marker"),
+            second_messages.contains("mid-turn injection marker"),
             "active input was claimed but omitted from the next RLM provider request"
+        );
+        assert_eq!(
+            serde_json::to_string(&requests[1][1..requests[1].len() - 1])
+                .expect("serialize stable request message prefix"),
+            r#"[{"role":"User","blocks":[{"Text":{"text":"perform two iterations","response_meta":null,"cache_breakpoint":false}}]},{"role":"Assistant","blocks":[{"Text":{"text":"<lashlang>\nprint(\"first work complete\")\n</lashlang>","response_meta":null,"cache_breakpoint":false}}]},{"role":"User","blocks":[{"Text":{"text":"history[1].output[0] (19 chars):\nfirst work complete","response_meta":null,"cache_breakpoint":false}}]},{"role":"User","blocks":[{"Text":{"text":"mid-turn injection marker","response_meta":null,"cache_breakpoint":true}}]}]"#
+        );
+        assert_eq!(
+            serde_json::to_string(&requests[2])?
+                .matches("mid-turn injection marker")
+                .count(),
+            1,
+            "later assembled history must contain the committed input exactly once"
         );
         assert!(session.pending_turn_inputs().await?.is_empty());
         Ok(())

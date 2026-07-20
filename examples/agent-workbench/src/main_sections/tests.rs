@@ -277,6 +277,8 @@ mod tests {
         assert!(ui::INDEX_HTML.contains("queued next"));
         assert!(ui::INDEX_HTML.contains("/api/turn/input"));
         assert!(ui::INDEX_HTML.contains("item.type === \"turn_input\""));
+        assert!(ui::INDEX_HTML.contains("item.type === \"message\""));
+        assert!(ui::INDEX_HTML.contains("renderMessage(item.message)"));
     }
 
     #[test]

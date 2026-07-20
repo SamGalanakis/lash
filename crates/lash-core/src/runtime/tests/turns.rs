@@ -377,6 +377,25 @@ struct ExpireLeaseAfterRetainedCommit {
     expired: AtomicBool,
 }
 
+struct PauseAtFinalizeTurn {
+    entered: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+}
+
+impl crate::runtime::RuntimeTurnPhaseProbe for PauseAtFinalizeTurn {
+    fn begin(&self, phase: crate::runtime::RuntimeTurnPhase) {
+        if phase != crate::runtime::RuntimeTurnPhase::FinalizeTurn {
+            return;
+        }
+        self.entered.store(true, Ordering::SeqCst);
+        while !self.release.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+    }
+
+    fn end(&self, _phase: crate::runtime::RuntimeTurnPhase) {}
+}
+
 impl ExpireLeaseAfterRetainedCommit {
     fn new(clock: Arc<ManualClock>) -> Self {
         Self {
@@ -926,7 +945,7 @@ async fn assembled_turn_reports_turn_timing_from_injected_clock() {
 }
 
 #[tokio::test]
-async fn queued_checkpoint_input_continues_standard_turn() {
+async fn queued_checkpoint_input_commits_before_continuing_standard_turn() {
     let transport = mock_provider(vec![
         MockCall {
             stream_events: Vec::new(),
@@ -992,17 +1011,18 @@ async fn queued_checkpoint_input_continues_standard_turn() {
                         .any(|part| part.content.contains("Second answer."))
             })
     );
-    assert!(
-        active_conversation_messages(&turn.state)
-            .iter()
-            .all(|message| {
-                !(message.role == MessageRole::User
-                    && message
-                        .parts
-                        .iter()
-                        .any(|part| part.content == "one more thing"))
-            })
-    );
+    let admitted = active_conversation_messages(&turn.state)
+        .into_iter()
+        .filter(|message| {
+            message.role == MessageRole::User
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| part.content == "one more thing")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(admitted.len(), 1);
+    assert!(admitted[0].origin.is_none());
 }
 
 #[tokio::test]
@@ -1168,7 +1188,7 @@ async fn checkpoint_hook_can_inject_messages() {
 }
 
 #[tokio::test]
-async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicate_user_message() {
+async fn queued_checkpoint_input_accepts_and_persists_one_normal_user_message() {
     let transport = mock_provider(vec![
         MockCall {
             stream_events: Vec::new(),
@@ -1250,13 +1270,121 @@ async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicat
         })
         .count();
     assert_eq!(
-        follow_up_count, 0,
-        "injected active-turn input must stay out of persisted history"
+        follow_up_count, 1,
+        "injected active-turn input must persist exactly once in history"
+    );
+    let follow_up = projected
+        .iter()
+        .find(|message| {
+            message.role == crate::MessageRole::User
+                && message.parts.iter().any(|part| part.content == "follow up")
+        })
+        .expect("committed injected input");
+    assert!(
+        follow_up.origin.is_none(),
+        "injected input must use the normal user-message representation"
     );
     assert!(projected.iter().any(|message| {
         message.role == crate::MessageRole::User
             && message.parts.iter().any(|part| part.content == "hello")
     }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_input_after_last_call_is_first_admitted_on_next_turn() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_calls = Arc::clone(&calls);
+    let transport = TestProvider::builder()
+        .kind("after-last-call-ingress")
+        .complete(move |request| {
+            let captured_requests = Arc::clone(&captured_requests);
+            let captured_calls = Arc::clone(&captured_calls);
+            async move {
+                captured_requests
+                    .lock()
+                    .expect("request capture")
+                    .push(request.messages.clone());
+                let text = match captured_calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => "first turn complete",
+                    1 => "deferred input complete",
+                    other => panic!("unexpected provider call {other}"),
+                };
+                Ok(LlmResponse {
+                    full_text: text.to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: text.to_string(),
+                        response_meta: None,
+                    }],
+                    response_metadata: Default::default(),
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build();
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    runtime.set_turn_phase_probe(Arc::new(PauseAtFinalizeTurn {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    }));
+
+    let first_turn = tokio::spawn(async move {
+        runtime
+            .run_turn_assembled(
+                TurnInput::text("first turn input"),
+                CancellationToken::new(),
+                named_turn_scope("root", "after-last-call-turn"),
+            )
+            .await
+            .expect("first turn");
+        runtime
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("turn reaches finalization after its last call");
+    enqueue_turn_input_for_checkpoint(
+        store.as_ref(),
+        "root",
+        "after-last-call-turn",
+        Some("host:late-active".to_string()),
+        TurnInput::text("late active input"),
+    )
+    .await;
+    release.store(true, Ordering::SeqCst);
+    let mut runtime = first_turn.await.expect("first turn task");
+
+    let pending = crate::store::TurnInputStore::list_pending_turn_inputs(store.as_ref(), "root")
+        .await
+        .expect("deferred late input");
+    assert_eq!(pending.len(), 1);
+    assert!(matches!(
+        pending[0].ingress,
+        crate::TurnInputIngress::NextTurn
+    ));
+    assert_eq!(pending[0].state, crate::TurnInputState::DeferredNextTurn);
+
+    runtime
+        .stream_next_queued_work(TurnOptions::new(
+            CancellationToken::new(),
+            named_turn_scope("root", "late-active-next-turn"),
+        ))
+        .await
+        .expect("drain deferred input")
+        .expect("deferred input starts a turn");
+
+    let requests = requests.lock().expect("request capture");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        serde_json::to_string(&requests[1][1..]).expect("serialize next-turn first-call messages"),
+        r#"[{"role":"User","blocks":[{"Text":{"text":"first turn input","response_meta":null,"cache_breakpoint":false}}]},{"role":"Assistant","blocks":[{"Text":{"text":"first turn complete","response_meta":null,"cache_breakpoint":false}}]},{"role":"User","blocks":[{"Text":{"text":"late active input","response_meta":null,"cache_breakpoint":false}}]}]"#
+    );
 }
 
 // Boundary: Runtime Scenarios own command-only queue completion at the store

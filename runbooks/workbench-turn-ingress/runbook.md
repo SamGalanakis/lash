@@ -5,10 +5,10 @@
 > the turn-ingress scenario.
 
 **Purpose.** Prove that a downstream host can submit user input while a workbench turn is
-running with either Lash ingress contract: inject it exactly once into the in-flight turn,
-or preserve it as a draft that commits as a separate next turn after the current turn
-settles. The rendered intent, HTTP receipt, durable row, trace, and provider evidence must
-all name the same operation.
+running with either Lash ingress contract: admit it as an ordinary committed user message at
+the in-flight turn's next checkpoint, or preserve it as a draft that commits as a separate
+next turn after the current turn settles. The rendered transcript, HTTP receipt and state,
+durable row and session graph, trace, and provider evidence must all agree.
 
 **Real tokens.** The browser run uses OpenRouter, so timing and prose are nondeterministic.
 Gate on durable input identities, ingress scopes, turn boundaries, and provider/trace
@@ -27,13 +27,14 @@ structure rather than exact assistant wording.
    `/api/state.pending_turn_inputs` and the session SQLite `pending_turn_inputs` row.
    A claim may make a row disappear from the pending API quickly; in that case use the
    SQLite row plus trace, never timing alone.
-4. **Injection is transient, model-visible, and exactly once.** When the turn crosses an
+4. **Injection is committed, model-visible, and exactly once.** When the turn crosses an
    admitted checkpoint and starts another provider iteration, that next request must contain
-   the injected input. A `turn_input.completed` trace claim is only a settlement fallback
-   when the turn commits before another provider iteration can start; it is not proof of
-   model delivery. The injected input must not create a phantom committed user message or be
-   delivered again into the later queued turn. Its marker may legitimately appear in the
-   assistant answer that acknowledges it.
+   the injected input as an ordinary user message. The same message must appear exactly once
+   in the durable session graph, `GET /api/state`, and the rendered transcript, then flow
+   through normal assembled history exactly once in later turns. A `turn_input.completed`
+   trace claim proves settlement but does not replace provider and transcript evidence. If
+   the input arrives after the turn's last checkpoint, it must become the next turn's first
+   committed user input instead of being stranded.
 5. **Queued means a full committed turn.** The queued marker must be absent from provider
    requests until the first turn settles, then appear in its own provider request and in
    committed session history. `/api/state` and the rendered transcript must show that
@@ -119,16 +120,18 @@ Save `03-queue-receipt.json`, `03-queue-store.json`, and screenshot `03-queued.p
 Poll until the initial turn completes and the queued turn starts and completes; never use
 a fixed delay. Gate in this order:
 
-1. the first provider request after the admitted checkpoint contains the injected marker,
-   proving the model received it during the initial turn; exactly one
-   `turn_input.completed` trace claim also places its input id under that turn id;
-2. the injected input creates no committed user message in `/api/state` or the session store
-   and is not delivered again in the later queued turn; the acknowledging assistant answer
-   may legitimately contain its marker;
+1. the first provider request after the admitted checkpoint contains the injected marker
+   exactly once as a user message, proving the model received it during the initial turn;
+   exactly one `turn_input.completed` trace claim also places its input id under that turn id;
+2. the injected marker appears exactly once as a committed user message in the durable
+   session graph, `GET /api/state`, and the rendered page; capture all three surfaces and
+   require their message text and ordering to agree;
 3. the queued marker is absent from every provider request before the initial terminal;
 4. a later provider request contains the queued marker and begins only after that terminal;
-5. the queued marker is a committed user message in the durable session read model, the
-   UI and `/api/state` render it, and it has its own assistant result;
+5. the later queued turn's assembled request contains the earlier injected marker exactly
+   once in chronological history plus the queued marker once as its new committed user
+   message; the UI and `/api/state` render both, and the queued turn has its own assistant
+   result;
 6. neither input remains pending, and the SQLite lifecycle rows are completed rather than
    duplicated or abandoned.
 
@@ -147,13 +150,13 @@ container are gone.
 | Running window | one active address; both ingress controls visible | | `01-running.png`, `/api/state` |
 | Inject intent | UI label and receipt agree on exact active turn + `after_work` | | `02-injected.png`, receipt/store JSON |
 | Queue intent | UI label and receipt agree on `next_turn` | | `03-queued.png`, receipt/store JSON |
-| Exactly-once injection | input reaches the next initial-turn provider iteration plus one matching completion claim; no phantom user message or later re-delivery | | `04-provider-order.json`, session store |
+| Exactly-once injection | input reaches the next initial-turn provider iteration, commits once as a normal user message, and appears once in later assembled history | | `04-provider-order.json`, session store |
 | Post-settle dispatch | queue marker first appears after initial terminal in its own turn | | provider/trace ordering |
-| Transcript fidelity | queued user/assistant turn agrees across UI, `/api/state`, and store | | `04-two-turns-settled.png`, history JSON |
+| Transcript fidelity | injected and queued user messages agree across rendered page, `/api/state`, and durable session graph | | `04-two-turns-settled.png`, history JSON |
 | Claim settlement | both durable input ids settle with no duplicate or stranded row | | SQLite evidence |
 
 **Aggregate:** did the host-selected ingress operation match the rendered intent and
-durable evidence, with one transient injection and one later committed full turn?
+durable evidence, with one checkpoint-committed injection and one later committed full turn?
 
 ---
 

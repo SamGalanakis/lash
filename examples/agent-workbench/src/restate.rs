@@ -1130,6 +1130,24 @@ async fn record_turn_output(
             }),
         }),
     );
+    // Active-turn ingress is now an ordinary committed user message. Publish
+    // the exact committed graph projection so the live page replaces the
+    // ingress receipt with the same message that `/api/state` and resume read.
+    // Re-publishing earlier ingress messages is harmless because the browser
+    // deduplicates committed message ids.
+    for message in session
+        .read_view()
+        .messages()
+        .iter()
+        .filter(|message| message.id.starts_with("m_ingress_"))
+    {
+        state.publish_for_session(
+            &session.session_id(),
+            crate::StreamItem::Message {
+                message: crate::chat_message_from_committed(message),
+            },
+        );
+    }
     match &output.outcome {
         lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => {
             let message = output
