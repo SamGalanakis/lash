@@ -2491,7 +2491,7 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
         "batch_side_effect",
         "make_attachment",
         "crash_once",
-        "durable_input_request",
+        "durable_input_request.opened",
     ] {
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM lash_e2e_tool_events WHERE tool_name = $1")
