@@ -230,6 +230,19 @@ impl QueuedWorkStore for FacadeStore {
         Ok(None)
     }
 
+    async fn claim_checkpoint_work(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &SessionExecutionLeaseFence,
+        _owner: &LeaseOwnerIdentity,
+        _turn_id: &str,
+        _checkpoint: CheckpointKind,
+        _max_inputs: usize,
+        _max_batches: usize,
+    ) -> Result<(Option<TurnInputClaim>, Option<QueuedWorkClaim>), StoreError> {
+        Ok((None, None))
+    }
+
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         _session_id: &str,
