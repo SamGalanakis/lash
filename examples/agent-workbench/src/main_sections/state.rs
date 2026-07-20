@@ -458,6 +458,11 @@ impl lash::runtime::QueuedWorkRunHandle for WorkbenchQueuedWorkSubmitter {
         let session_id = request
             .session_id
             .unwrap_or_else(|| self.session_ids.current());
+        // A trigger process may finish while a foreground turn still owns this
+        // session's ingress. Its wake stays in the durable queued-work store;
+        // terminalization calls `claim_and_run_pending` again after releasing
+        // the lease, so submitting a competing queued turn here is both
+        // unnecessary and unsafe.
         if !self.active_turns.for_session(&session_id).is_empty() {
             return Ok(());
         }
