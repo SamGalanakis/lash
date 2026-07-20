@@ -86,6 +86,9 @@ pub(crate) enum RuntimePerfScenario {
     QueuedWorkClaimStress,
     TurnInputIngressInterrupt,
     DeepTurnComposition,
+    TurnStartGate,
+    TurnCancelRoundTrip,
+    IngressClaimProjection,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -115,7 +118,7 @@ macro_rules! runtime_perf_metadata {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const METADATA: [RuntimePerfScenarioMetadata; 36] = [
+    pub(crate) const METADATA: [RuntimePerfScenarioMetadata; 39] = [
         runtime_perf_metadata!(
             Standard,
             "standard",
@@ -381,9 +384,30 @@ impl RuntimePerfScenario {
             "Measures the composed parent/child turn future with active ingress, tool and process loops, cancellation observation, and timer/await-event durable waits.",
             ["agent_scenario_nested_process_start_await"]
         ),
+        runtime_perf_metadata!(
+            TurnStartGate,
+            "turn_start_gate",
+            Standard,
+            RuntimeScenario,
+            "Measures the inline turn-cancel gate peek through the bounded retry wrapper below protocol and facade ownership."
+        ),
+        runtime_perf_metadata!(
+            TurnCancelRoundTrip,
+            "turn_cancel_round_trip",
+            Standard,
+            RuntimeScenario,
+            "Measures request-to-token-to-terminal-seal cancellation below protocol and facade ownership."
+        ),
+        runtime_perf_metadata!(
+            IngressClaimProjection,
+            "ingress_claim_projection",
+            Rlm,
+            RlmProtocolScenario,
+            "Measures active-turn input enqueue, checkpoint claim, and next-request RLM projection."
+        ),
     ];
-    pub(crate) const KNOWN: [Self; 36] = runtime_perf_known_scenarios();
-    pub(crate) const DEFAULTS: [Self; 36] = Self::KNOWN;
+    pub(crate) const KNOWN: [Self; 39] = runtime_perf_known_scenarios();
+    pub(crate) const DEFAULTS: [Self; 39] = Self::KNOWN;
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::METADATA
@@ -444,7 +468,7 @@ impl RuntimePerfScenario {
     }
 }
 
-const fn runtime_perf_known_scenarios() -> [RuntimePerfScenario; 36] {
+const fn runtime_perf_known_scenarios() -> [RuntimePerfScenario; 39] {
     [
         RuntimePerfScenario::METADATA[0].scenario,
         RuntimePerfScenario::METADATA[1].scenario,
@@ -482,5 +506,8 @@ const fn runtime_perf_known_scenarios() -> [RuntimePerfScenario; 36] {
         RuntimePerfScenario::METADATA[33].scenario,
         RuntimePerfScenario::METADATA[34].scenario,
         RuntimePerfScenario::METADATA[35].scenario,
+        RuntimePerfScenario::METADATA[36].scenario,
+        RuntimePerfScenario::METADATA[37].scenario,
+        RuntimePerfScenario::METADATA[38].scenario,
     ]
 }

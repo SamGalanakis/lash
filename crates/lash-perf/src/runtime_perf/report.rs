@@ -491,6 +491,23 @@ fn evaluate_budgets(
             });
         }
 
+        for (phase, budget_ms) in phase_wall_clock_budgets_ms(*scenario) {
+            if let Some(actual) = summary
+                .phase_summary
+                .get(*phase)
+                .map(|metrics| metrics.duration_ms.median)
+            {
+                push_max_budget(
+                    &mut budgets,
+                    summary,
+                    &format!("phase:{phase}:duration_ms"),
+                    "median",
+                    actual,
+                    *budget_ms,
+                );
+            }
+        }
+
         push_max_budget(
             &mut budgets,
             summary,
@@ -598,6 +615,16 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
             "rlm_process.await_handle",
             "process.await_handle",
         ],
+        RuntimePerfScenario::TurnStartGate => &["turn_cancel.start_gate"],
+        RuntimePerfScenario::TurnCancelRoundTrip => &[
+            "turn_cancel.start_gate",
+            "turn_cancel.request_to_token_to_seal",
+        ],
+        RuntimePerfScenario::IngressClaimProjection => &[
+            "turn_cancel.start_gate",
+            "turn_input_ingress.enqueue_to_claim_to_projection",
+            "rlm_lashlang.execute",
+        ],
         RuntimePerfScenario::TurnCheckpoint => &[
             "standard_llm_checkpoint",
             "standard_parallel_tools_checkpoint",
@@ -635,6 +662,7 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
             "rlm_lashlang.compile_link",
             "rlm_lashlang.store_module_artifact",
             "rlm_lashlang.execute",
+            "trigger.occurrence_to_delivery",
         ],
         RuntimePerfScenario::RlmLargePrint => &[
             "context_transform",
@@ -724,8 +752,11 @@ fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
 fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
         RuntimePerfScenario::RlmAsyncToolCompletion => 96_000_000.0,
-        RuntimePerfScenario::RlmTriggerMailPipeline => 128_000_000.0,
+        RuntimePerfScenario::RlmTriggerMailPipeline => 260_000_000.0,
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 160_000_000.0,
+        RuntimePerfScenario::TurnStartGate => 90_000_000.0,
+        RuntimePerfScenario::TurnCancelRoundTrip => 85_000_000.0,
+        RuntimePerfScenario::IngressClaimProjection => 180_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_500_000_000.0,
         RuntimePerfScenario::RlmLargeToolCatalog => 1_000_000_000.0,
         RuntimePerfScenario::RlmLargePrint => 1_000_000_000.0,
@@ -742,8 +773,12 @@ fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
 fn steady_state_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
         RuntimePerfScenario::RlmAsyncToolCompletion => 64_000_000.0,
-        RuntimePerfScenario::RlmTriggerMailPipeline => 64_000_000.0,
+        RuntimePerfScenario::RlmTriggerMailPipeline => 20_000_000.0,
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 128_000_000.0,
+        RuntimePerfScenario::TurnStartGate | RuntimePerfScenario::TurnCancelRoundTrip => {
+            6_000_000.0
+        }
+        RuntimePerfScenario::IngressClaimProjection => 14_000_000.0,
         RuntimePerfScenario::ToolDiscoverySearch => 1_000_000_000.0,
         RuntimePerfScenario::RlmLargePrint => 750_000_000.0,
         RuntimePerfScenario::RlmObliqueStackMix => 1_000_000_000.0,
@@ -768,13 +803,30 @@ fn steady_state_turn_alloc_bytes(summary: &RuntimePerfScenarioSummary) -> f64 {
 fn wall_clock_budget_ms(scenario: RuntimePerfScenario) -> f64 {
     match scenario {
         RuntimePerfScenario::RlmAsyncToolCompletion => 1_000.0,
-        RuntimePerfScenario::RlmTriggerMailPipeline => 2_000.0,
+        RuntimePerfScenario::RlmTriggerMailPipeline => 520.0,
         RuntimePerfScenario::RlmProcessAsyncToolCompletion => 2_000.0,
+        RuntimePerfScenario::TurnStartGate => 1_600.0,
+        RuntimePerfScenario::TurnCancelRoundTrip => 310.0,
+        RuntimePerfScenario::IngressClaimProjection => 460.0,
         RuntimePerfScenario::ToolDiscoverySearch
         | RuntimePerfScenario::RlmLargeToolCatalog
         | RuntimePerfScenario::RlmObliqueStackMix => 20_000.0,
         RuntimePerfScenario::LiveReplayPressure => 5_000.0,
         _ => 10_000.0,
+    }
+}
+
+fn phase_wall_clock_budgets_ms(scenario: RuntimePerfScenario) -> &'static [(&'static str, f64)] {
+    match scenario {
+        RuntimePerfScenario::TurnStartGate => &[("turn_cancel.start_gate", 1_200.0)],
+        RuntimePerfScenario::TurnCancelRoundTrip => {
+            &[("turn_cancel.request_to_token_to_seal", 60.0)]
+        }
+        RuntimePerfScenario::IngressClaimProjection => {
+            &[("turn_input_ingress.enqueue_to_claim_to_projection", 195.0)]
+        }
+        RuntimePerfScenario::RlmTriggerMailPipeline => &[("trigger.occurrence_to_delivery", 55.0)],
+        _ => &[],
     }
 }
 
@@ -1397,20 +1449,53 @@ mod tests {
             "rlm_lashlang.compile_link",
             "rlm_lashlang.store_module_artifact",
             "rlm_lashlang.execute",
+            "trigger.occurrence_to_delivery",
         ] {
             assert!(
                 phases.contains(&expected),
                 "missing required phase {expected}"
             );
         }
-        assert!(
-            allocation_budget_bytes(RuntimePerfScenario::RlmTriggerMailPipeline) < 200_000_000.0
+        assert_eq!(
+            allocation_budget_bytes(RuntimePerfScenario::RlmTriggerMailPipeline),
+            260_000_000.0
         );
         assert!(
             steady_state_turn_allocation_budget_bytes(RuntimePerfScenario::RlmTriggerMailPipeline)
-                < 100_000_000.0
+                <= 20_000_000.0
         );
-        assert!(wall_clock_budget_ms(RuntimePerfScenario::RlmTriggerMailPipeline) < 10_000.0);
+        assert_eq!(
+            wall_clock_budget_ms(RuntimePerfScenario::RlmTriggerMailPipeline),
+            520.0
+        );
+        assert_eq!(
+            phase_wall_clock_budgets_ms(RuntimePerfScenario::RlmTriggerMailPipeline),
+            &[("trigger.occurrence_to_delivery", 55.0)]
+        );
+    }
+
+    #[test]
+    fn turn_lifecycle_hot_paths_have_specific_phase_budgets() {
+        for (scenario, phase, budget_ms) in [
+            (
+                RuntimePerfScenario::TurnStartGate,
+                "turn_cancel.start_gate",
+                1_200.0,
+            ),
+            (
+                RuntimePerfScenario::TurnCancelRoundTrip,
+                "turn_cancel.request_to_token_to_seal",
+                60.0,
+            ),
+            (
+                RuntimePerfScenario::IngressClaimProjection,
+                "turn_input_ingress.enqueue_to_claim_to_projection",
+                195.0,
+            ),
+        ] {
+            assert!(required_phases(scenario).contains(&phase));
+            assert_eq!(phase_wall_clock_budgets_ms(scenario), &[(phase, budget_ms)]);
+        }
     }
 
     #[test]

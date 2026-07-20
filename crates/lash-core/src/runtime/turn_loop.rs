@@ -2201,10 +2201,16 @@ async fn run_turn_effect_loop(
     // reserved for the concurrent live watcher below: an out-of-band peek here
     // could observe a cancel that arrived after the original attempt and make
     // a replay take a different command path.
-    if await_turn_cancellation_start_gate(|| turn_control.observe_pending_cancel(cancel_controller))
-        .await?
-        .is_some()
-    {
+    let start_gate = crate::runtime::RuntimeNamedPhase::begin(
+        driver.turn_phase_probe.clone(),
+        "turn_cancel.start_gate",
+    );
+    let pending_cancel = await_turn_cancellation_start_gate(|| {
+        turn_control.observe_pending_cancel(cancel_controller)
+    })
+    .await?;
+    drop(start_gate);
+    if pending_cancel.is_some() {
         cancellation.cancel();
     }
     let cancel_watcher = shared_cancel_controller.map(|controller| {

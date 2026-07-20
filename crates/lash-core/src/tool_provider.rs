@@ -523,6 +523,14 @@ impl<'run> ToolContext<'run> {
         self.cancellation_token.as_ref()
     }
 
+    #[doc(hidden)]
+    pub fn named_phase(&self, phase: &'static str) -> crate::runtime::RuntimeNamedPhase {
+        match self.runtime_execution_context.as_ref() {
+            Some(context) => context.named_phase(phase),
+            None => crate::runtime::RuntimeNamedPhase::begin(None, phase),
+        }
+    }
+
     pub fn async_process_id(&self) -> Option<&str> {
         self.async_process_id.as_deref()
     }
