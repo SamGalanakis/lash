@@ -282,7 +282,7 @@ impl RuntimeHandle {
                 read_view: runtime.read_view(),
             },
         ) {
-            Ok(event) => event.cursor,
+            Ok(event) => event.cursor.clone(),
             Err(err) => {
                 tracing::warn!(
                     session_id = %runtime.session_id(),
@@ -651,6 +651,7 @@ impl RuntimeHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     struct PanicLiveReplayStore;
 
@@ -660,7 +661,7 @@ mod tests {
             _session_id: &str,
             _revision: SessionRevision,
             _payload: SessionObservationEventPayload,
-        ) -> Result<SessionObservationEvent, LiveReplayStoreError> {
+        ) -> Result<Arc<SessionObservationEvent>, LiveReplayStoreError> {
             panic!("append should not be called by cursor rejection tests")
         }
 
@@ -732,5 +733,48 @@ mod tests {
                 SessionCursorError::Malformed { .. }
             ))
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "manual lane-O publish_from timing measurement"]
+    async fn measure_publish_from_wall_clock() {
+        const COMMITS: usize = 5_000;
+        let runtime = LashRuntime::builder()
+            .with_session_id("publish-perf")
+            .with_policy(crate::SessionPolicy {
+                model: crate::ModelSpec::from_token_limits(
+                    "test-model",
+                    Default::default(),
+                    1024,
+                    None,
+                )
+                .expect("model"),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("runtime");
+        let handle = RuntimeHandle::with_live_replay_store(
+            runtime,
+            Arc::new(InMemoryLiveReplayStore::with_bounds(
+                COMMITS + 1,
+                std::time::Duration::from_secs(120),
+            )),
+        );
+        let writer = handle.writer();
+        let runtime = writer.lock().await;
+        for _ in 0..100 {
+            handle.publish_from(&runtime);
+        }
+        let started = Instant::now();
+        for _ in 0..COMMITS {
+            handle.publish_from(&runtime);
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "publish_from: commits={COMMITS} elapsed_ns={} ns_per_commit={:.3}",
+            elapsed.as_nanos(),
+            elapsed.as_nanos() as f64 / COMMITS as f64,
+        );
     }
 }

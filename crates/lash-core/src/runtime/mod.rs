@@ -749,15 +749,15 @@ impl EventSink for NoopEventSink {
 /// Stable identifier for a semantic turn activity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct TurnActivityId(pub String);
+pub struct TurnActivityId(pub Arc<str>);
 
 impl TurnActivityId {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<Arc<str>>) -> Self {
         Self(id.into())
     }
 
     pub fn fresh() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
+        Self(Arc::from(uuid::Uuid::new_v4().to_string()))
     }
 }
 
@@ -807,10 +807,10 @@ pub enum TurnEvent {
         protocol_iteration: usize,
     },
     AssistantProseDelta {
-        text: String,
+        text: Arc<str>,
     },
     ReasoningDelta {
-        text: String,
+        text: Arc<str>,
     },
     /// Retracts visible text emitted by a provider attempt that will be retried.
     ///

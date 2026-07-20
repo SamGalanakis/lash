@@ -271,16 +271,14 @@ async fn live_replay_store_reports_unavailable_for_cursor_ahead_of_tail(
 
 fn live_replay_text_payload(text: &str) -> SessionObservationEventPayload {
     SessionObservationEventPayload::TurnActivity(TurnActivity::independent(
-        TurnEvent::AssistantProseDelta {
-            text: text.to_string(),
-        },
+        TurnEvent::AssistantProseDelta { text: text.into() },
     ))
 }
 
 fn expect_live_replay_replayed(
     result: Result<LiveReplayResult, LiveReplayStoreError>,
     context: &str,
-) -> Vec<SessionObservationEvent> {
+) -> Vec<Arc<SessionObservationEvent>> {
     match result.expect(context) {
         LiveReplayResult::Replayed(events) => events,
         LiveReplayResult::Gap(reason) => {
@@ -333,7 +331,7 @@ fn expect_live_replay_subscribe_gap(
 async fn next_live_replay_event(
     subscription: &mut crate::LiveReplaySubscription,
     context: &str,
-) -> SessionObservationEvent {
+) -> Arc<SessionObservationEvent> {
     tokio::time::timeout(Duration::from_secs(1), subscription.next())
         .await
         .unwrap_or_else(|_| panic!("{context}: timed out waiting for live replay event"))
@@ -341,10 +339,10 @@ async fn next_live_replay_event(
         .unwrap_or_else(|err| panic!("{context}: live replay subscriber failed: {err}"))
 }
 
-fn assert_live_replay_labels(events: &[SessionObservationEvent], expected: &[&str]) {
+fn assert_live_replay_labels(events: &[Arc<SessionObservationEvent>], expected: &[&str]) {
     let labels = events
         .iter()
-        .map(live_replay_event_label)
+        .map(|event| live_replay_event_label(event))
         .collect::<Vec<_>>();
     let expected = expected
         .iter()

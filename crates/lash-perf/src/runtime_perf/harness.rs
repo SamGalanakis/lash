@@ -196,7 +196,7 @@ impl BenchmarkRuntime {
         let scoped_effect_controller = effect_host
             .scoped(lash::runtime::ExecutionScope::turn(
                 session.session_id(),
-                lash_core::TurnActivityId::fresh().0,
+                lash_core::TurnActivityId::fresh().0.to_string(),
             ))
             .map_err(anyhow::Error::from)?;
         session

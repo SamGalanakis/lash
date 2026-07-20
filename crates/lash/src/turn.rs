@@ -727,7 +727,7 @@ impl AdvancedQueuedTurn {
 }
 
 fn fresh_turn_id() -> String {
-    lash_core::TurnActivityId::fresh().0
+    lash_core::TurnActivityId::fresh().0.to_string()
 }
 
 fn fresh_queue_drain_id() -> String {

@@ -466,7 +466,7 @@ impl ChannelTurnEvents {
                         existing.push_str(text);
                         Some((*id, existing.clone(), false))
                     }
-                    None => Some((0, text.clone(), true)),
+                    None => Some((0, text.to_string(), true)),
                 }
             };
             if let Some((id, reasoning, insert)) = update {
@@ -536,7 +536,7 @@ impl ChannelTurnEvents {
                         .lock()
                         .expect("turn state lock")
                         .tools
-                        .insert(activity.correlation_id.0.clone(), message.id);
+                        .insert(activity.correlation_id.0.to_string(), message.id);
                 }
                 Err(err) => {
                     self.emit_error(err.message).await;
@@ -550,7 +550,7 @@ impl ChannelTurnEvents {
                 .lock()
                 .expect("turn state lock")
                 .tools
-                .remove(&activity.correlation_id.0);
+                .remove(activity.correlation_id.0.as_ref());
             let result = self
                 .state
                 .with_db({

@@ -638,7 +638,7 @@ async fn session_observation_replays_live_activity_and_commit() -> Result<()> {
             lash_core::SessionObservationEventPayload::TurnActivity(activity)
                 if matches!(
                     &activity.event,
-                    TurnEvent::AssistantProseDelta { text } if text == "echo: observe me"
+                    TurnEvent::AssistantProseDelta { text } if text.as_ref() == "echo: observe me"
                 )
         )
     }));
@@ -693,7 +693,9 @@ fn retrying_visible_stream_provider() -> ProviderHandle {
         .into_handle()
 }
 
-fn render_observed_attempt_text(events: &[lash_core::SessionObservationEvent]) -> (String, String) {
+fn render_observed_attempt_text(
+    events: &[Arc<lash_core::SessionObservationEvent>],
+) -> (String, String) {
     let mut prose = Vec::new();
     let mut reasoning = Vec::new();
     for event in events {
@@ -723,12 +725,18 @@ fn render_observed_attempt_text(events: &[lash_core::SessionObservationEvent]) -
         }
     }
     (
-        prose.into_iter().map(|(_, text)| text).collect(),
-        reasoning.into_iter().map(|(_, text)| text).collect(),
+        prose
+            .into_iter()
+            .map(|(_, text)| text.to_string())
+            .collect(),
+        reasoning
+            .into_iter()
+            .map(|(_, text)| text.to_string())
+            .collect(),
     )
 }
 
-fn model_attempt_resets(events: &[lash_core::SessionObservationEvent]) -> usize {
+fn model_attempt_resets(events: &[Arc<lash_core::SessionObservationEvent>]) -> usize {
     events
         .iter()
         .filter(|event| {
@@ -1040,7 +1048,7 @@ fn observation_assistant_delta(event: &lash_core::SessionObservationEvent) -> Op
     match &event.payload {
         lash_core::SessionObservationEventPayload::TurnActivity(activity) => {
             match &activity.event {
-                TurnEvent::AssistantProseDelta { text } => Some(text.clone()),
+                TurnEvent::AssistantProseDelta { text } => Some(text.to_string()),
                 _ => None,
             }
         }
@@ -1211,7 +1219,7 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
     let prose = events
         .into_iter()
         .filter_map(|event| match event.event {
-            TurnEvent::AssistantProseDelta { text } => Some(text),
+            TurnEvent::AssistantProseDelta { text } => Some(text.to_string()),
             _ => None,
         })
         .collect::<String>();
@@ -2266,7 +2274,7 @@ async fn stream_returns_terminal_metadata_without_prose() -> Result<()> {
         .await
         .into_iter()
         .filter_map(|event| match event.event {
-            TurnEvent::AssistantProseDelta { text } => Some(text),
+            TurnEvent::AssistantProseDelta { text } => Some(text.to_string()),
             _ => None,
         })
         .collect::<String>();
@@ -2319,7 +2327,7 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
     let prose = events
         .into_iter()
         .filter_map(|event| match event.event {
-            TurnEvent::AssistantProseDelta { text } => Some(text),
+            TurnEvent::AssistantProseDelta { text } => Some(text.to_string()),
             _ => None,
         })
         .collect::<String>();

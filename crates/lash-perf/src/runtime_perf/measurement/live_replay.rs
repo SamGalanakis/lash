@@ -528,7 +528,9 @@ async fn run_once_trace_jsonl(
 
 fn live_replay_text_payload(text: impl Into<String>) -> SessionObservationEventPayload {
     SessionObservationEventPayload::TurnActivity(lash_core::TurnActivity::independent(
-        lash_core::TurnEvent::AssistantProseDelta { text: text.into() },
+        lash_core::TurnEvent::AssistantProseDelta {
+            text: text.into().into(),
+        },
     ))
 }
 

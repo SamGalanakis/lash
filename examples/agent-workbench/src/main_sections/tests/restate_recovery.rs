@@ -447,7 +447,7 @@ async fn live_restate_rate_limit_retry_converges_observers_to_one_copy_inner() {
 }
 
 fn fold_retry_observer_prose(
-    events: &[lash::observe::SessionObservationEvent],
+    events: &[Arc<lash::observe::SessionObservationEvent>],
 ) -> (String, usize) {
     let mut chunks = Vec::new();
     let mut resets = 0;
@@ -471,7 +471,10 @@ fn fold_retry_observer_prose(
         }
     }
     (
-        chunks.into_iter().map(|(_, text)| text).collect(),
+        chunks
+            .into_iter()
+            .map(|(_, text)| text.to_string())
+            .collect(),
         resets,
     )
 }

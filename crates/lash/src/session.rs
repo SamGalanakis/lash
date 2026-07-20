@@ -985,7 +985,7 @@ impl ObservableSession {
 #[derive(Clone, Debug)]
 pub enum SessionObservationStreamItem {
     /// A replayed or live session observation event.
-    Event(SessionObservationEvent),
+    Event(Arc<SessionObservationEvent>),
     /// A recoverable replay gap with a fresh durable observation.
     Gap {
         observation: SessionObservation,
