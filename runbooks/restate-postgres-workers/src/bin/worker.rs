@@ -500,13 +500,11 @@ impl AppState {
                 TurnScenario::SignalSuspend => "signal-suspend-started",
                 TurnScenario::SignalProcess => "signal-sent",
                 TurnScenario::AsyncCompletion => EXPECTED_ASYNC_TEXT,
+                TurnScenario::ProcessLlmQuery => "process-llm-query-complete",
                 TurnScenario::DurableInputRequest => EXPECTED_DURABLE_INPUT_TEXT,
                 TurnScenario::ParentDurableInputAfterChild => EXPECTED_PARENT_DURABLE_INPUT_TEXT,
                 TurnScenario::ToolBatch => {
                     lash_restate_postgres_workers_e2e::EXPECTED_TOOL_BATCH_TEXT
-                }
-                TurnScenario::DurableWaitProbe => {
-                    lash_restate_postgres_workers_e2e::EXPECTED_DURABLE_WAIT_TEXT
                 }
                 TurnScenario::SegmentLoop => EXPECTED_SEGMENT_LOOP_TEXT,
                 TurnScenario::FrameSwitchQueued | TurnScenario::FrameSwitchPrepared => {
@@ -657,6 +655,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
             "Run the E2E async host tool completion scenario. workflow_id={} async_completion=true",
             request.workflow_id
         ),
+        TurnScenario::ProcessLlmQuery => format!(
+            "Run the process llm_query scenario. workflow_id={} process_llm_query=true fail_once={}",
+            request.workflow_id, request.fail_once
+        ),
         TurnScenario::DurableInputRequest => format!(
             "Run the E2E durable input request scenario. workflow_id={} durable_input_request=true",
             request.workflow_id
@@ -668,10 +670,6 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         TurnScenario::ToolBatch => format!(
             "Run the E2E tool batch scenario. workflow_id={} tool_batch=true fail_once={}",
             request.workflow_id, request.fail_once
-        ),
-        TurnScenario::DurableWaitProbe => format!(
-            "Run the E2E foreground durable wait scenario. workflow_id={} durable_wait_probe=true",
-            request.workflow_id
         ),
         TurnScenario::SegmentLoop => format!(
             "Run the E2E segmented authored loop control pair. workflow_id={} segment_loop=true",

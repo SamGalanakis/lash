@@ -47,9 +47,6 @@ impl RuntimeEffectController for RecordingEffectHostController {
             });
         match envelope.command {
             RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
-            RuntimeEffectCommand::DurableStep { input, .. } => {
-                Ok(RuntimeEffectOutcome::DurableStep { value: input })
-            }
             command => Err(RuntimeEffectControllerError::new(
                 "recording_effect_host_unsupported_command",
                 format!(
@@ -154,83 +151,6 @@ where
     effect_host_await_event_rejects_tampered_keys(make()).await;
 }
 
-/// Run the generic durable-step conformance suite for effect hosts that expose
-/// durable tool effects through their scoped controllers.
-#[cfg(any(test, feature = "testing"))]
-pub async fn effect_host_durable_steps<F>(make: F)
-where
-    F: Fn() -> Arc<dyn EffectHost>,
-{
-    let host = make();
-    assert!(
-        host.supports_durable_effects(),
-        "durable-step conformance requires a host that advertises durable effects"
-    );
-    let scoped = host
-        .scoped(ExecutionScope::turn(
-            "durable-step-session",
-            "durable-step-turn",
-        ))
-        .expect("durable-step scope");
-    effect_controller_durable_steps(scoped.controller()).await;
-}
-
-/// Run durable-step execution checks for a handler-scoped controller.
-#[cfg(any(test, feature = "testing"))]
-pub async fn effect_controller_durable_steps(controller: &dyn RuntimeEffectController) {
-    assert!(
-        controller.supports_durable_effects(),
-        "durable-step conformance requires a controller that advertises durable effects"
-    );
-    let first = durable_step_conformance_envelope("create", serde_json::json!({ "x": 1 }));
-    let second = durable_step_conformance_envelope("create", serde_json::json!({ "x": 1 }));
-    assert_eq!(
-        first.stable_hash().expect("first hash"),
-        second.stable_hash().expect("second hash"),
-        "same step id/input/replay key must hash stably"
-    );
-    assert!(
-        first.invocation.replay_key().is_some(),
-        "durable-step envelope must carry replay.key"
-    );
-    let changed = durable_step_conformance_envelope("create", serde_json::json!({ "x": 2 }));
-    assert_ne!(
-        first.stable_hash().expect("first hash"),
-        changed.stable_hash().expect("changed hash"),
-        "durable-step input must participate in the stable envelope hash"
-    );
-
-    let outcome = controller
-        .execute_effect(
-            first,
-            RuntimeEffectLocalExecutor::durable_step(|input| async move {
-                Ok(serde_json::json!({ "recorded": input }))
-            }),
-        )
-        .await
-        .expect("durable-step success");
-    assert_eq!(
-        outcome.into_durable_step().expect("durable-step outcome"),
-        serde_json::json!({ "recorded": { "x": 1 } })
-    );
-
-    let err = controller
-        .execute_effect(
-            durable_step_conformance_envelope("error", serde_json::json!({ "x": 1 })),
-            RuntimeEffectLocalExecutor::durable_step(|_| async {
-                Err(crate::RuntimeError::new(
-                    "durable_step_conformance_error",
-                    "durable step failed",
-                ))
-            }),
-        )
-        .await
-        .expect_err("durable-step error must be recorded as controller error");
-    assert_eq!(err.code, "durable_step_conformance_error");
-
-    effect_controller_segmentation_vector(controller).await;
-}
-
 /// Exercise the controller seam with a deterministic segmentation cadence.
 ///
 /// Effect controllers do not own process handover persistence, so the shared
@@ -286,20 +206,26 @@ pub async fn effect_controller_segmentation_vector(controller: &dyn RuntimeEffec
             let input = serde_json::json!({ "iteration": ordinal, "accumulator": ordinal * 3 });
             let outcome = controller
                 .execute_effect(
-                    durable_step_conformance_envelope(
+                    exec_code_conformance_envelope(
                         &format!("{id_prefix}-{ordinal}"),
-                        input.clone(),
+                        &input.to_string(),
                     ),
-                    RuntimeEffectLocalExecutor::durable_step(move |value| async move {
+                    RuntimeEffectLocalExecutor::testing(move |_| async move {
                         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        Ok(value)
+                        Ok(replay_conformance_exec_outcome(&input.to_string()))
                     }),
                 )
                 .await
-                .expect("segmentation vector durable effect")
-                .into_durable_step()
-                .expect("segmentation vector durable-step outcome");
-            effects.push(outcome);
+                .expect("segmentation vector journaled effect");
+            let RuntimeEffectOutcome::ExecCode { result } = outcome else {
+                panic!("segmentation vector must return exec-code outcome");
+            };
+            effects.push(
+                result
+                    .expect("segmentation exec result")
+                    .terminal_finish
+                    .expect("segmentation exec marker"),
+            );
             progress.effects_executed += 1;
             if honor_boundaries
                 && ordinal + 1 < 7
@@ -344,72 +270,82 @@ pub async fn effect_controller_segmentation_vector(controller: &dyn RuntimeEffec
     assert_eq!(terminal_deliveries, 1, "the lineage has one real terminal");
 }
 
-/// Run durable-step replay checks for controllers with an explicit replay mode.
+/// Run journaled-effect replay checks for controllers with an explicit replay mode.
 #[cfg(any(test, feature = "testing"))]
-pub async fn effect_controller_durable_steps_replay(
+pub async fn effect_controller_journaled_effect_replay(
     controller: &dyn RuntimeEffectController,
     start_replay: impl FnOnce(),
 ) {
-    effect_controller_durable_steps(controller).await;
-    let success =
-        durable_step_conformance_envelope("replay-success", serde_json::json!({ "n": 1 }));
-    let error = durable_step_conformance_envelope("replay-error", serde_json::json!({ "n": 2 }));
+    effect_controller_segmentation_vector(controller).await;
+    let success = replay_conformance_tool_attempt_envelope(
+        "replay-success",
+        "call-replay-success",
+        "replay_success_tool",
+    );
+    let error = replay_conformance_tool_attempt_envelope(
+        "replay-error",
+        "call-replay-error",
+        "replay_error_tool",
+    );
 
     let first_success = controller
         .execute_effect(
             success.clone(),
-            RuntimeEffectLocalExecutor::durable_step(|input| async move {
-                Ok(serde_json::json!({ "first": input }))
-            }),
+            replay_conformance_tool_attempt_recording_executor(
+                ReplayConformanceToolAttempt::new(
+                    "replay-success",
+                    "call-replay-success",
+                    "replay_success_tool",
+                ),
+                None,
+            ),
         )
         .await
-        .expect("first durable-step success");
-    assert_eq!(
-        first_success
-            .into_durable_step()
-            .expect("first durable-step value"),
-        serde_json::json!({ "first": { "n": 1 } })
+        .expect("first journaled-effect success");
+    assert_replay_conformance_tool_attempt_marker(
+        first_success,
+        "call-replay-success",
+        "replay_success_tool",
     );
     let first_error = controller
         .execute_effect(
             error.clone(),
-            RuntimeEffectLocalExecutor::durable_step(|_| async {
-                Err(crate::RuntimeError::new(
-                    "durable_step_replay_error",
-                    "recorded error",
+            RuntimeEffectLocalExecutor::testing(|_| async {
+                Err(RuntimeEffectControllerError::new(
+                    "journaled_effect_replay_error",
+                    "recorded journaled-effect error",
                 ))
             }),
         )
         .await
-        .expect_err("first durable-step error");
-    assert_eq!(first_error.code, "durable_step_replay_error");
+        .expect_err("first journaled-effect error");
+    assert_eq!(first_error.code, "journaled_effect_replay_error");
 
     start_replay();
     let local_calls = Arc::new(Mutex::new(Vec::new()));
     let replay_success = controller
         .execute_effect(
             success,
-            durable_step_conformance_failing_executor(Arc::clone(&local_calls)),
+            replay_conformance_failing_executor(Arc::clone(&local_calls)),
         )
         .await
-        .expect("replayed durable-step success");
-    assert_eq!(
-        replay_success
-            .into_durable_step()
-            .expect("replayed durable-step value"),
-        serde_json::json!({ "first": { "n": 1 } })
+        .expect("replayed journaled-effect success");
+    assert_replay_conformance_tool_attempt_marker(
+        replay_success,
+        "call-replay-success",
+        "replay_success_tool",
     );
     let replay_error = controller
         .execute_effect(
             error,
-            durable_step_conformance_failing_executor(Arc::clone(&local_calls)),
+            replay_conformance_failing_executor(Arc::clone(&local_calls)),
         )
         .await
-        .expect_err("replayed durable-step error");
-    assert_eq!(replay_error.code, "durable_step_replay_error");
+        .expect_err("replayed journaled-effect error");
+    assert_eq!(replay_error.code, "journaled_effect_replay_error");
     assert!(
         local_calls.lock().expect("local calls").is_empty(),
-        "durable-step replay must not invoke local closures"
+        "journaled-effect replay must not invoke local closures"
     );
 }
 
@@ -722,52 +658,24 @@ pub async fn effect_controller_concurrent_replay_deterministic(
     controller: &dyn RuntimeEffectController,
     start_replay: impl FnOnce(),
 ) {
-    let slow = replay_conformance_durable_step_envelope("effect-slow");
-    let fast = replay_conformance_durable_step_envelope("effect-fast");
-    let completion_order = Arc::new(Mutex::new(Vec::new()));
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let release_slow = Arc::new(tokio::sync::Notify::new());
-
-    let first_pass = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        tokio::join!(
-            controller.execute_effect(
-                slow.clone(),
-                replay_conformance_recording_executor(
-                    "effect-slow",
-                    Arc::clone(&barrier),
-                    Arc::clone(&release_slow),
-                    Arc::clone(&completion_order),
-                ),
-            ),
-            controller.execute_effect(
-                fast.clone(),
-                replay_conformance_recording_executor(
-                    "effect-fast",
-                    Arc::clone(&barrier),
-                    Arc::clone(&release_slow),
-                    Arc::clone(&completion_order),
-                ),
-            ),
-        )
-    })
-    .await
-    .expect("concurrent first-pass effects must both enter their local executors");
+    let slow = replay_conformance_tool_attempt_envelope("effect-slow", "call-slow", "slow_tool");
+    let fast = replay_conformance_tool_attempt_envelope("effect-fast", "call-fast", "fast_tool");
+    let first_pass = replay_conformance_concurrent_first_pass(
+        controller,
+        slow.clone(),
+        ReplayConformanceToolAttempt::new("effect-slow", "call-slow", "slow_tool"),
+        fast.clone(),
+        ReplayConformanceToolAttempt::new("effect-fast", "call-fast", "fast_tool"),
+    )
+    .await;
     let slow_first = first_pass.0.expect("slow first pass");
     let fast_first = first_pass.1.expect("fast first pass");
-    assert_replay_conformance_durable_step_marker(slow_first, "effect-slow");
-    assert_replay_conformance_durable_step_marker(fast_first, "effect-fast");
-    assert_eq!(
-        completion_order
-            .lock()
-            .expect("completion order")
-            .as_slice(),
-        &["effect-fast".to_string(), "effect-slow".to_string()],
-        "first pass must prove local completion order can differ from effect request order"
-    );
+    assert_replay_conformance_tool_attempt_marker(slow_first, "call-slow", "slow_tool");
+    assert_replay_conformance_tool_attempt_marker(fast_first, "call-fast", "fast_tool");
 
     start_replay();
     let replay_local_calls = Arc::new(Mutex::new(Vec::new()));
-    let replay_pass = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let replay_pass = tokio::time::timeout(REPLAY_CONFORMANCE_DEADLOCK_TIMEOUT, async {
         tokio::join!(
             controller.execute_effect(
                 fast,
@@ -783,8 +691,8 @@ pub async fn effect_controller_concurrent_replay_deterministic(
     .expect("concurrent replay effects must resolve from host history");
     let fast_replay = replay_pass.0.expect("fast replay");
     let slow_replay = replay_pass.1.expect("slow replay");
-    assert_replay_conformance_durable_step_marker(fast_replay, "effect-fast");
-    assert_replay_conformance_durable_step_marker(slow_replay, "effect-slow");
+    assert_replay_conformance_tool_attempt_marker(fast_replay, "call-fast", "fast_tool");
+    assert_replay_conformance_tool_attempt_marker(slow_replay, "call-slow", "slow_tool");
     assert!(
         replay_local_calls
             .lock()
@@ -811,63 +719,26 @@ pub async fn effect_controller_tool_attempt_fanout_replay_deterministic(
         replay_conformance_tool_attempt_envelope("tool-attempt-slow", "call-slow", "slow_tool");
     let fast =
         replay_conformance_tool_attempt_envelope("tool-attempt-fast", "call-fast", "fast_tool");
-    let completion_order = Arc::new(Mutex::new(Vec::new()));
 
     let first_pass = if controller.supports_concurrent_effects() {
-        let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let release_slow = Arc::new(tokio::sync::Notify::new());
-        let first_pass = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            tokio::join!(
-                controller.execute_effect(
-                    slow.clone(),
-                    replay_conformance_tool_attempt_recording_executor(
-                        "tool-attempt-slow",
-                        "call-slow",
-                        "slow_tool",
-                        Some((
-                            Arc::clone(&barrier),
-                            Arc::clone(&release_slow),
-                            Arc::clone(&completion_order),
-                        )),
-                    ),
-                ),
-                controller.execute_effect(
-                    fast.clone(),
-                    replay_conformance_tool_attempt_recording_executor(
-                        "tool-attempt-fast",
-                        "call-fast",
-                        "fast_tool",
-                        Some((
-                            Arc::clone(&barrier),
-                            Arc::clone(&release_slow),
-                            Arc::clone(&completion_order),
-                        )),
-                    ),
-                ),
-            )
-        })
+        replay_conformance_concurrent_first_pass(
+            controller,
+            slow.clone(),
+            ReplayConformanceToolAttempt::new("tool-attempt-slow", "call-slow", "slow_tool"),
+            fast.clone(),
+            ReplayConformanceToolAttempt::new("tool-attempt-fast", "call-fast", "fast_tool"),
+        )
         .await
-        .expect("concurrent tool-attempt first pass must enter both local executors");
-        assert_eq!(
-            completion_order
-                .lock()
-                .expect("tool-attempt completion order")
-                .as_slice(),
-            &[
-                "tool-attempt-fast".to_string(),
-                "tool-attempt-slow".to_string()
-            ],
-            "first pass must prove tool-attempt completion order can differ from source order"
-        );
-        first_pass
     } else {
         let slow_first = controller
             .execute_effect(
                 slow.clone(),
                 replay_conformance_tool_attempt_recording_executor(
-                    "tool-attempt-slow",
-                    "call-slow",
-                    "slow_tool",
+                    ReplayConformanceToolAttempt::new(
+                        "tool-attempt-slow",
+                        "call-slow",
+                        "slow_tool",
+                    ),
                     None,
                 ),
             )
@@ -876,21 +747,15 @@ pub async fn effect_controller_tool_attempt_fanout_replay_deterministic(
             .execute_effect(
                 fast.clone(),
                 replay_conformance_tool_attempt_recording_executor(
-                    "tool-attempt-fast",
-                    "call-fast",
-                    "fast_tool",
+                    ReplayConformanceToolAttempt::new(
+                        "tool-attempt-fast",
+                        "call-fast",
+                        "fast_tool",
+                    ),
                     None,
                 ),
             )
             .await;
-        assert_eq!(
-            completion_order
-                .lock()
-                .expect("tool-attempt completion order")
-                .as_slice(),
-            &[] as &[String],
-            "serial conformance path must not use the concurrent completion-order probe"
-        );
         (slow_first, fast_first)
     };
 
@@ -902,7 +767,7 @@ pub async fn effect_controller_tool_attempt_fanout_replay_deterministic(
     start_replay();
     let replay_local_calls = Arc::new(Mutex::new(Vec::new()));
     let replay_pass = if controller.supports_concurrent_effects() {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(REPLAY_CONFORMANCE_DEADLOCK_TIMEOUT, async {
             tokio::join!(
                 controller.execute_effect(
                     fast,
@@ -945,38 +810,19 @@ pub async fn effect_controller_tool_attempt_fanout_replay_deterministic(
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn durable_step_conformance_envelope(
-    step_id: &str,
-    input: serde_json::Value,
-) -> RuntimeEffectEnvelope {
+fn exec_code_conformance_envelope(effect_id: &str, code: &str) -> RuntimeEffectEnvelope {
     RuntimeEffectEnvelope::new(
         RuntimeInvocation::effect(
-            RuntimeScope::for_turn("durable-step-session", "durable-step-turn", 7, 0),
-            format!("durable-step:{step_id}"),
-            RuntimeEffectKind::DurableStep,
-            format!("durable-step-replay:{step_id}"),
+            RuntimeScope::for_turn("journaled-session", "journaled-turn", 7, 0),
+            format!("exec-code:{effect_id}"),
+            RuntimeEffectKind::ExecCode,
+            format!("exec-code-replay:{effect_id}"),
         ),
-        RuntimeEffectCommand::DurableStep {
-            step_id: step_id.to_string(),
-            input,
+        RuntimeEffectCommand::ExecCode {
+            language: "conformance".to_string(),
+            code: code.to_string(),
         },
     )
-}
-
-#[cfg(any(test, feature = "testing"))]
-fn durable_step_conformance_failing_executor(
-    local_calls: Arc<Mutex<Vec<String>>>,
-) -> RuntimeEffectLocalExecutor<'static> {
-    RuntimeEffectLocalExecutor::durable_step(move |input| async move {
-        local_calls
-            .lock()
-            .expect("local calls")
-            .push(input.to_string());
-        Err(crate::RuntimeError::new(
-            "durable_step_replay_local_executor_called",
-            "recorded durable-step replay must not invoke local execution",
-        ))
-    })
 }
 
 /// One controller bound to a shared durable effect-replay store, paired with a
@@ -1292,27 +1138,6 @@ async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingB
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn replay_conformance_durable_step_envelope(effect_id: &'static str) -> RuntimeEffectEnvelope {
-    RuntimeEffectEnvelope::new(
-        RuntimeInvocation::effect(
-            RuntimeScope::for_turn(
-                "effect-conformance-session",
-                "effect-conformance-turn",
-                7,
-                0,
-            ),
-            effect_id,
-            RuntimeEffectKind::DurableStep,
-            format!("effect-conformance:effect-conformance-turn:{effect_id}"),
-        ),
-        RuntimeEffectCommand::DurableStep {
-            step_id: effect_id.to_string(),
-            input: serde_json::json!(effect_id),
-        },
-    )
-}
-
-#[cfg(any(test, feature = "testing"))]
 fn replay_conformance_tool_attempt_envelope(
     effect_id: &'static str,
     call_id: &'static str,
@@ -1347,71 +1172,149 @@ fn replay_conformance_tool_attempt_envelope(
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn replay_conformance_recording_executor(
-    effect_id: &'static str,
-    barrier: Arc<tokio::sync::Barrier>,
-    release_slow: Arc<tokio::sync::Notify>,
-    completion_order: Arc<Mutex<Vec<String>>>,
-) -> RuntimeEffectLocalExecutor<'static> {
-    RuntimeEffectLocalExecutor::testing(move |envelope| async move {
-        assert_eq!(envelope.invocation.effect_id(), Some(effect_id));
-        barrier.wait().await;
-        if effect_id == "effect-slow" {
-            release_slow.notified().await;
-        } else {
-            completion_order
-                .lock()
-                .expect("completion order")
-                .push(effect_id.to_string());
-            release_slow.notify_one();
-        }
-        if effect_id == "effect-slow" {
-            completion_order
-                .lock()
-                .expect("completion order")
-                .push(effect_id.to_string());
-        }
-        Ok(RuntimeEffectOutcome::DurableStep {
-            value: serde_json::json!(effect_id),
-        })
-    })
-}
+const REPLAY_CONFORMANCE_DEADLOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(any(test, feature = "testing"))]
-type ReplayConformanceProbe = (
-    Arc<tokio::sync::Barrier>,
-    Arc<tokio::sync::Notify>,
-    Arc<Mutex<Vec<String>>>,
-);
-
-#[cfg(any(test, feature = "testing"))]
-fn replay_conformance_tool_attempt_recording_executor(
+#[derive(Clone, Copy)]
+struct ReplayConformanceToolAttempt {
     effect_id: &'static str,
     call_id: &'static str,
     tool_name: &'static str,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl ReplayConformanceToolAttempt {
+    const fn new(effect_id: &'static str, call_id: &'static str, tool_name: &'static str) -> Self {
+        Self {
+            effect_id,
+            call_id,
+            tool_name,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+struct ReplayConformanceProbe {
+    entered: tokio::sync::mpsc::UnboundedSender<&'static str>,
+    release: Arc<tokio::sync::Notify>,
+    completion_order: Arc<Mutex<Vec<String>>>,
+}
+
+/// Run a slow request before a fast request, prove both local executors are
+/// entered before either may finish, then observe the fast controller call
+/// finish recording before allowing the slow executor to complete.
+#[cfg(any(test, feature = "testing"))]
+async fn replay_conformance_concurrent_first_pass(
+    controller: &dyn RuntimeEffectController,
+    slow_envelope: RuntimeEffectEnvelope,
+    slow: ReplayConformanceToolAttempt,
+    fast_envelope: RuntimeEffectEnvelope,
+    fast: ReplayConformanceToolAttempt,
+) -> (
+    Result<RuntimeEffectOutcome, RuntimeEffectControllerError>,
+    Result<RuntimeEffectOutcome, RuntimeEffectControllerError>,
+) {
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let start_fast = Arc::new(tokio::sync::Notify::new());
+    let release_slow = Arc::new(tokio::sync::Notify::new());
+    let release_fast = Arc::new(tokio::sync::Notify::new());
+    let fast_recorded = Arc::new(tokio::sync::Notify::new());
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
+
+    let slow_call = controller.execute_effect(
+        slow_envelope,
+        replay_conformance_tool_attempt_recording_executor(
+            slow,
+            Some(ReplayConformanceProbe {
+                entered: entered_tx.clone(),
+                release: Arc::clone(&release_slow),
+                completion_order: Arc::clone(&completion_order),
+            }),
+        ),
+    );
+    let fast_call = {
+        let start_fast = Arc::clone(&start_fast);
+        let release_fast = Arc::clone(&release_fast);
+        let fast_recorded = Arc::clone(&fast_recorded);
+        let completion_order = Arc::clone(&completion_order);
+        async move {
+            start_fast.notified().await;
+            let outcome = controller
+                .execute_effect(
+                    fast_envelope,
+                    replay_conformance_tool_attempt_recording_executor(
+                        fast,
+                        Some(ReplayConformanceProbe {
+                            entered: entered_tx,
+                            release: Arc::clone(&release_fast),
+                            completion_order: Arc::clone(&completion_order),
+                        }),
+                    ),
+                )
+                .await;
+            fast_recorded.notify_one();
+            outcome
+        }
+    };
+    let orchestrate = async {
+        assert_eq!(
+            entered_rx.recv().await,
+            Some(slow.effect_id),
+            "the first requested effect must enter its local executor"
+        );
+        start_fast.notify_one();
+        assert_eq!(
+            entered_rx.recv().await,
+            Some(fast.effect_id),
+            "the second effect must enter while the first local executor is still gated"
+        );
+        release_fast.notify_one();
+        fast_recorded.notified().await;
+        release_slow.notify_one();
+    };
+
+    let (slow_outcome, fast_outcome, ()) =
+        tokio::time::timeout(REPLAY_CONFORMANCE_DEADLOCK_TIMEOUT, async {
+            tokio::join!(slow_call, fast_call, orchestrate)
+        })
+        .await
+        .expect(
+            "concurrent first-pass effects must enter both local executors and record fast first",
+        );
+    assert_eq!(
+        completion_order
+            .lock()
+            .expect("completion order")
+            .as_slice(),
+        &[fast.effect_id.to_string(), slow.effect_id.to_string()],
+        "first pass must prove local completion order can differ from effect request order"
+    );
+    (slow_outcome, fast_outcome)
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn replay_conformance_tool_attempt_recording_executor(
+    attempt: ReplayConformanceToolAttempt,
     concurrent_probe: Option<ReplayConformanceProbe>,
 ) -> RuntimeEffectLocalExecutor<'static> {
     RuntimeEffectLocalExecutor::testing(move |envelope| async move {
-        assert_eq!(envelope.invocation.effect_id(), Some(effect_id));
-        if let Some((barrier, release_slow, completion_order)) = concurrent_probe {
-            barrier.wait().await;
-            if effect_id == "tool-attempt-slow" {
-                release_slow.notified().await;
-            } else {
-                completion_order
-                    .lock()
-                    .expect("tool-attempt completion order")
-                    .push(effect_id.to_string());
-                release_slow.notify_one();
-            }
-            if effect_id == "tool-attempt-slow" {
-                completion_order
-                    .lock()
-                    .expect("tool-attempt completion order")
-                    .push(effect_id.to_string());
-            }
+        assert_eq!(envelope.invocation.effect_id(), Some(attempt.effect_id));
+        if let Some(probe) = concurrent_probe {
+            probe
+                .entered
+                .send(attempt.effect_id)
+                .expect("conformance orchestrator must observe executor entry");
+            probe.release.notified().await;
+            probe
+                .completion_order
+                .lock()
+                .expect("tool-attempt completion order")
+                .push(attempt.effect_id.to_string());
         }
-        Ok(replay_conformance_tool_attempt_outcome(call_id, tool_name))
+        Ok(replay_conformance_tool_attempt_outcome(
+            attempt.call_id,
+            attempt.tool_name,
+        ))
     })
 }
 
@@ -1478,18 +1381,6 @@ fn assert_replay_conformance_exec_marker(outcome: RuntimeEffectOutcome, expected
     assert_eq!(
         response.terminal_finish,
         Some(serde_json::json!(expected)),
-        "replayed outcome must come from the matching replay key"
-    );
-}
-
-#[cfg(any(test, feature = "testing"))]
-fn assert_replay_conformance_durable_step_marker(outcome: RuntimeEffectOutcome, expected: &str) {
-    let RuntimeEffectOutcome::DurableStep { value } = outcome else {
-        panic!("expected durable-step effect outcome");
-    };
-    assert_eq!(
-        value,
-        serde_json::json!(expected),
         "replayed outcome must come from the matching replay key"
     );
 }

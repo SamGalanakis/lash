@@ -478,8 +478,8 @@ pub use store::{
 pub use tool_provider::{
     PreparedToolBatch, PreparedToolBatchCall, PreparedToolCall, ProgressSender, SandboxMessage,
     ToolCall, ToolChildExecutionTraceHook, ToolChildProcessStarted, ToolContext,
-    ToolDurableEffects, ToolExecutionGrant, ToolPrepareCall, ToolPrepareContext, ToolProvider,
-    ToolSessionAdmin, ToolSessionModel, ToolSessionProcessAdmin, ToolTriggerClient,
+    ToolExecutionGrant, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolSessionAdmin,
+    ToolSessionModel, ToolSessionProcessAdmin, ToolTriggerClient,
 };
 
 #[cfg(test)]

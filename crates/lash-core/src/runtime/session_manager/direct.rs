@@ -57,12 +57,43 @@ impl<'run> DirectCompletionClient<'run> {
         request: crate::DirectRequest,
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
+        self.direct_completion_at(request, usage_source, DirectExecutionPosition::Independent)
+            .await
+    }
+
+    pub(crate) async fn direct_completion_for_tool(
+        &self,
+        request: crate::DirectRequest,
+        usage_source: &str,
+        parent_invocation: Option<&crate::RuntimeInvocation>,
+    ) -> Result<crate::DirectCompletion, crate::PluginError> {
+        let position = if parent_invocation.is_some_and(|invocation| {
+            invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolAttempt)
+        }) {
+            DirectExecutionPosition::ToolAttempt
+        } else {
+            DirectExecutionPosition::Independent
+        };
+        self.direct_completion_at(request, usage_source, position)
+            .await
+    }
+
+    async fn direct_completion_at(
+        &self,
+        request: crate::DirectRequest,
+        usage_source: &str,
+        position: DirectExecutionPosition,
+    ) -> Result<crate::DirectCompletion, crate::PluginError> {
         match &self.source {
             DirectCompletionSource::Runtime(source) => {
                 source
                     .manager
                     .direct
-                    .invoke_direct_completion(source.invocation_context(), request, usage_source)
+                    .invoke_direct_completion(
+                        source.invocation_context(position),
+                        request,
+                        usage_source,
+                    )
                     .await
             }
             #[cfg(any(test, feature = "testing"))]
@@ -85,7 +116,7 @@ impl<'run> DirectCompletionClient<'run> {
                     .manager
                     .direct
                     .invoke_direct_llm_completion(
-                        source.invocation_context(),
+                        source.invocation_context(DirectExecutionPosition::Independent),
                         request,
                         usage_source,
                     )
@@ -124,12 +155,13 @@ impl<'run> DirectCompletionClient<'run> {
 }
 
 impl<'run> RuntimeDirectSource<'run> {
-    fn invocation_context(&self) -> DirectInvocationContext<'_> {
+    fn invocation_context(&self, position: DirectExecutionPosition) -> DirectInvocationContext<'_> {
         DirectInvocationContext {
             current: &self.manager.current,
             usage_capability: &self.manager.usage,
             effect_controller: self.effect_controller.controller(),
             turn_id: self.turn_id.as_deref(),
+            position,
         }
     }
 }
@@ -139,6 +171,7 @@ pub(in crate::runtime::session_manager) struct DirectInvocationContext<'a> {
     usage_capability: &'a UsageCapability,
     effect_controller: &'a dyn crate::RuntimeEffectController,
     turn_id: Option<&'a str>,
+    position: DirectExecutionPosition,
 }
 
 struct DirectEffectPlan {
@@ -146,6 +179,13 @@ struct DirectEffectPlan {
     envelope: crate::RuntimeEffectEnvelope,
     request: Box<crate::LlmRequest>,
     usage_source: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DirectExecutionPosition {
+    #[default]
+    Independent,
+    ToolAttempt,
 }
 
 impl DirectCompletionCapability {
@@ -210,16 +250,19 @@ impl DirectCompletionCapability {
             request,
             usage_source,
         } = plan;
-        let outcome = context
-            .effect_controller
-            .execute_effect(
-                envelope,
-                crate::RuntimeEffectLocalExecutor::direct(
-                    provider,
-                    Arc::clone(&current.host.core.durability.attachment_store),
-                ),
-            )
-            .await?;
+        let local_executor = crate::RuntimeEffectLocalExecutor::direct(
+            provider,
+            Arc::clone(&current.host.core.durability.attachment_store),
+        );
+        let outcome = match context.position {
+            DirectExecutionPosition::Independent => {
+                context
+                    .effect_controller
+                    .execute_effect(envelope, local_executor)
+                    .await?
+            }
+            DirectExecutionPosition::ToolAttempt => local_executor.execute(envelope).await?,
+        };
         crate::runtime::effect::apply_direct_outcome(
             current,
             context.usage_capability,

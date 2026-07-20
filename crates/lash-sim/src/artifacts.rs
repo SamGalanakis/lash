@@ -540,7 +540,7 @@ pub(crate) fn model_only_boundary_reviews() -> Vec<ModelOnlyBoundaryReview> {
         ModelOnlyBoundaryReview {
             boundary_kind: "durable_effect",
             status: "runtime_effect_controller_backed_with_reviewed_host_history_ceiling",
-            production_abstraction_used: "RuntimeEffectEnvelope, RuntimeEffectCommand::DurableStep, RuntimeEffectLocalExecutor::durable_step, SqliteRuntimeEffectController, and PostgresRuntimeEffectController",
+            production_abstraction_used: "RuntimeEffectEnvelope, RuntimeEffectCommand::ToolAttempt, RuntimeEffectLocalExecutor::testing, SqliteRuntimeEffectController, and PostgresRuntimeEffectController",
             model_only_scope: "workflow-host crash history outside store-backed effect replay remains excluded; generated memory runs and generated SQLite dynamic reruns execute production runtime effect replay controllers, while Postgres conformance/contention lanes cover native Postgres replay storage in lash_runtime_effect_replay",
             oracle_id: "sim.oracle.durable-effect-exactly-once.v1",
             artifact_evidence: "durable-effect observations include runtime_effect.controller=sqlite_runtime_effect_controller or postgres_runtime_effect_controller, local_executor_called false on replay, first completion, replay for the same durable key, Postgres effect_history_replay.status=native_postgres_runtime_effect_controller, and generated SQLite divergence artifacts on mismatch",

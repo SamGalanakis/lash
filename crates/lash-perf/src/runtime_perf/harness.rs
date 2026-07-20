@@ -780,10 +780,6 @@ struct RetryingStartGateController {
 
 #[async_trait::async_trait]
 impl lash_core::AwaitEventResolver for RetryingStartGateController {
-    fn supports_durable_effects(&self) -> bool {
-        true
-    }
-
     async fn await_event_key(
         &self,
         scope: &lash_core::ExecutionScope,

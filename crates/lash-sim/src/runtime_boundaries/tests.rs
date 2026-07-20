@@ -462,8 +462,8 @@ async fn sqlite_seeded_segment_crash_matrix_preserves_results_and_effect_identit
         let mut baseline_results = Vec::new();
         for effect in 0..effect_count {
             baseline_results.push(
-                run_seeded_segment_effect(&mut baseline, "unsegmented", effect)
-                    .await["runtime_effect_outcome"]
+                run_seeded_segment_effect(&mut baseline, "unsegmented", effect).await
+                    ["result_digest"]
                     .clone(),
             );
         }
@@ -490,8 +490,7 @@ async fn sqlite_seeded_segment_crash_matrix_preserves_results_and_effect_identit
         let mut segmented_results = Vec::new();
         for effect in 0..budget {
             segmented_results.push(
-                run_seeded_segment_effect(&mut harness, &process_id, effect)
-                    .await["runtime_effect_outcome"]
+                run_seeded_segment_effect(&mut harness, &process_id, effect).await["result_digest"]
                     .clone(),
             );
         }
@@ -537,8 +536,8 @@ async fn sqlite_seeded_segment_crash_matrix_preserves_results_and_effect_identit
                     .expect("persist handover");
                 harness = sqlite_segment_harness(&root);
                 segmented_results.push(
-                    run_seeded_segment_effect(&mut harness, &process_id, budget)
-                        .await["runtime_effect_outcome"]
+                    run_seeded_segment_effect(&mut harness, &process_id, budget).await
+                        ["result_digest"]
                         .clone(),
                 );
                 harness = sqlite_segment_harness(&root);
@@ -557,8 +556,7 @@ async fn sqlite_seeded_segment_crash_matrix_preserves_results_and_effect_identit
         };
         for effect in start..effect_count {
             segmented_results.push(
-                run_seeded_segment_effect(&mut harness, &process_id, effect)
-                    .await["runtime_effect_outcome"]
+                run_seeded_segment_effect(&mut harness, &process_id, effect).await["result_digest"]
                     .clone(),
             );
         }

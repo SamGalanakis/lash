@@ -1097,19 +1097,86 @@ impl ToolProvider for PendingAppTools {
 struct DurableInputTools {
     key_tx:
         StdMutex<Option<oneshot::Sender<std::result::Result<lash_core::AwaitEventKey, String>>>>,
-    step_count: Arc<AtomicUsize>,
+    attempt_count: Arc<AtomicUsize>,
+}
+
+struct RetryingDirectTools;
+
+#[async_trait]
+impl ToolProvider for RetryingDirectTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![retrying_direct_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "retrying_direct").then(|| Arc::new(retrying_direct_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        assert_eq!(call.name, "retrying_direct");
+        let model = match call.context.sessions().model().await {
+            Ok(model) => model,
+            Err(err) => return lash_core::ToolResult::err_fmt(err),
+        };
+        let completion = match call
+            .context
+            .direct_completions()
+            .complete(
+                lash_core::DirectRequest::text(
+                    model.model,
+                    format!(
+                        "retrying direct completion attempt {}",
+                        call.context.attempt_number()
+                    ),
+                ),
+                "retrying_direct",
+            )
+            .await
+        {
+            Ok(completion) => completion,
+            Err(err) => return lash_core::ToolResult::err_fmt(err),
+        };
+        if call.context.attempt_number() == 1 {
+            return lash_core::ToolResult::failure(lash_core::ToolFailure::safe_retry(
+                lash_core::ToolFailureClass::Execution,
+                "retrying_direct_first_attempt",
+                "retry the complete atomic attempt",
+                Some(0),
+            ));
+        }
+        lash_core::ToolResult::ok(serde_json::json!(completion.text))
+    }
+}
+
+fn retrying_direct_tool_definition() -> lash_core::ToolDefinition {
+    lash_core::ToolDefinition::raw(
+        "tool:retrying_direct",
+        "retrying_direct",
+        "Call a direct completion and retry the complete attempt once.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "string" }),
+    )
+    .with_retry_policy(lash_core::ToolRetryPolicy::safe(2, 0, 0))
+    .with_lashlang_binding(lash_lashlang_runtime::LashlangToolBinding::new(
+        ["tools"],
+        "retrying_direct",
+    ))
 }
 
 impl DurableInputTools {
     fn new(key_tx: oneshot::Sender<std::result::Result<lash_core::AwaitEventKey, String>>) -> Self {
         Self {
             key_tx: StdMutex::new(Some(key_tx)),
-            step_count: Arc::new(AtomicUsize::new(0)),
+            attempt_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    fn step_count(&self) -> usize {
-        self.step_count.load(Ordering::SeqCst)
+    fn attempt_count(&self) -> usize {
+        self.attempt_count.load(Ordering::SeqCst)
     }
 
     fn send_key_result(&self, result: std::result::Result<lash_core::AwaitEventKey, String>) {
@@ -1131,100 +1198,36 @@ impl ToolProvider for DurableInputTools {
 
     async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
         assert_eq!(call.name, "mock_input_request");
-        let durable = match call.context.durable_effects() {
-            Ok(durable) => durable,
-            Err(err) => {
-                self.send_key_result(Err(err.to_string()));
-                return lash_core::ToolResult::err_fmt(err);
-            }
-        };
         let question = call
             .args
             .get("question")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("answer")
             .to_string();
-
-        let step_count = Arc::clone(&self.step_count);
-        let opened = match durable
-            .run_json(
-                "create",
-                serde_json::json!({ "question": question }),
-                move |input| {
-                    let step_count = Arc::clone(&step_count);
-                    async move {
-                        step_count.fetch_add(1, Ordering::SeqCst);
-                        Ok(serde_json::json!({
-                            "request_id": "request-1",
-                            "question": input["question"].clone()
-                        }))
-                    }
-                },
-            )
-            .await
-        {
-            Ok(value) => value,
-            Err(err) => {
-                self.send_key_result(Err(err.to_string()));
-                return lash_core::ToolResult::err_fmt(err);
-            }
-        };
-
-        let key = match durable
-            .external_event_key("mock-input-request:request-1")
-            .await
-        {
+        let key = match call.context.completion_key().await {
             Ok(key) => key,
             Err(err) => {
                 self.send_key_result(Err(err.to_string()));
                 return lash_core::ToolResult::err_fmt(err);
             }
         };
-        if let Err(err) = durable
-            .emit_process_event(
-                "process.yield",
-                serde_json::json!({
-                    "type": "work.input_request.opened",
-                    "request_id": opened["request_id"].clone(),
-                    "question": opened["question"].clone(),
-                    "await_key_id": key.key_id,
-                }),
-            )
-            .await
-        {
+        self.attempt_count.fetch_add(1, Ordering::SeqCst);
+        let event = lash_core::ProcessEventAppendRequest::new(
+            "process.yield",
+            serde_json::json!({
+                "type": "work.input_request.opened",
+                "request_id": "request-1",
+                "question": question,
+                "await_key_id": key.key_id,
+            }),
+        )
+        .with_replay_key("mock-input-request:request-1");
+        if let Err(err) = call.context.process_events().emit_request(event).await {
             self.send_key_result(Err(err.to_string()));
             return lash_core::ToolResult::err_fmt(err);
         }
-        self.send_key_result(Ok(key.clone()));
-
-        let resolved = match durable.await_event_json(key).await {
-            Ok(value) => value,
-            Err(err) => return lash_core::ToolResult::err_fmt(err),
-        };
-        let step_count = Arc::clone(&self.step_count);
-        match durable
-            .run_json(
-                "complete",
-                serde_json::json!({
-                    "request_id": opened["request_id"].clone(),
-                    "answer": resolved["answer"].clone(),
-                }),
-                move |input| {
-                    let step_count = Arc::clone(&step_count);
-                    async move {
-                        step_count.fetch_add(1, Ordering::SeqCst);
-                        Ok(serde_json::json!({
-                            "request_id": input["request_id"].clone(),
-                            "answer": input["answer"].clone(),
-                        }))
-                    }
-                },
-            )
-            .await
-        {
-            Ok(value) => lash_core::ToolResult::ok(value),
-            Err(err) => lash_core::ToolResult::err_fmt(err),
-        }
+        self.send_key_result(Ok(key));
+        lash_core::ToolResult::pending(lash_core::PendingCompletion::new())
     }
 }
 

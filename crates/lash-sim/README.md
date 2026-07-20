@@ -54,7 +54,7 @@ cargo run -p lash-sim -- run --out target/lash-sim/search \
 - Generated traces are produced by `lash-sim.generated-workload.v8`, a
   deterministic state-machine generator over sessions, provider scripts,
   queued ingress, cancellation, triggers, observer reconnects, backend
-  failure choices, provider mutations, tools, exec-code, durable effects,
+  failure choices, provider mutations, atomic tools, exec-code, process waits,
   process wakes, worker lease/failover, retries, and duplicates.
 - Generated traces include scheduler/completion evidence, a named
   `sim.oracle.operational-coverage.v1` oracle for the operational case set,

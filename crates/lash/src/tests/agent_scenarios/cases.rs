@@ -6,7 +6,8 @@ use super::contracts::{
     assert_no_forbidden_error_text, assert_subagent_bridge_exec_graphs,
 };
 use super::harness::{
-    AgentScenario, lashlang_block, run_agent_durable_input_request_scenario,
+    AgentScenario, lashlang_block, run_agent_direct_completion_attempt_retry_scenario,
+    run_agent_durable_input_request_scenario, run_agent_process_llm_query_scenario,
     run_agent_session_turn_process_scenario, run_agent_turn_scenario,
     run_agent_turn_scenario_without_success_assertions,
 };
@@ -45,6 +46,16 @@ const DURABLE_INPUT_REQUEST: AgentScenarioCoverage = agent_scenario_coverage!(
     agent_scenario_process_durable_input_request_tool,
     "durable input suspension",
     "Live durable input suspension, external resolution, process event, and final value."
+);
+const PROCESS_LLM_QUERY: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_process_llm_query_with_typed_output,
+    "process llm query with typed output",
+    "A Lashlang process can await ordinary llm.query structured output end to end."
+);
+const DIRECT_COMPLETION_ATTEMPT_RETRY: AgentScenarioCoverage = agent_scenario_coverage!(
+    agent_scenario_direct_completion_attempt_retry_reinvokes_provider_once,
+    "direct completion atomic attempt retry",
+    "A tool-attempt retry re-executes its opaque direct completion exactly once."
 );
 const SHELL_RESULTS_ARE_DATA: AgentScenarioCoverage = agent_scenario_coverage!(
     agent_scenario_shell_nonzero_and_pipeline_results_are_data,
@@ -91,6 +102,8 @@ const AGENT_SCENARIO_COVERAGE: &[AgentScenarioCoverage] = &[
     FOREGROUND_LABELED_TOOL_CALL,
     STARTED_PROCESS_LABELED_TOOL_CALL,
     DURABLE_INPUT_REQUEST,
+    PROCESS_LLM_QUERY,
+    DIRECT_COMPLETION_ATTEMPT_RETRY,
     SHELL_RESULTS_ARE_DATA,
     SHELL_OUTPUT_VARIABLE,
     STARTED_PROCESS_SUBAGENT,
@@ -103,7 +116,7 @@ const AGENT_SCENARIO_COVERAGE: &[AgentScenarioCoverage] = &[
 
 #[test]
 fn agent_scenario_coverage_metadata_is_unique_and_complete() {
-    assert_eq!(AGENT_SCENARIO_COVERAGE.len(), 11);
+    assert_eq!(AGENT_SCENARIO_COVERAGE.len(), 13);
     let mut names = BTreeSet::new();
     for coverage in AGENT_SCENARIO_COVERAGE {
         let _declared_test = coverage.declared_test;
@@ -179,6 +192,20 @@ finish result"#,
 fn agent_scenario_process_durable_input_request_tool() -> Result<()> {
     run_async_test_on_stack_budget("agent-scenario-durable-input-request", || async {
         run_agent_durable_input_request_scenario().await
+    })
+}
+
+#[test]
+fn agent_scenario_process_llm_query_with_typed_output() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-process-llm-query", || async {
+        run_agent_process_llm_query_scenario().await
+    })
+}
+
+#[test]
+fn agent_scenario_direct_completion_attempt_retry_reinvokes_provider_once() -> Result<()> {
+    run_async_test_on_stack_budget("agent-scenario-direct-completion-attempt-retry", || async {
+        run_agent_direct_completion_attempt_retry_scenario().await
     })
 }
 

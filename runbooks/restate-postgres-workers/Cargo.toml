@@ -28,6 +28,7 @@ axum = "0.8"
 chrono = { workspace = true }
 lash-core = { workspace = true }
 lash = { workspace = true, features = ["rlm"] }
+lash-llm-tools = { workspace = true }
 lash-postgres-store = { workspace = true }
 lash-protocol-rlm = { workspace = true }
 lash-provider-openai = { workspace = true }
@@ -39,5 +40,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"

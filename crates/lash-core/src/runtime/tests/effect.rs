@@ -213,12 +213,8 @@ impl RuntimeEffectController for RecordingEffectController {
                 resolution: crate::Resolution::Ok(serde_json::json!(null)),
             }),
             RuntimeEffectCommand::DurableStep { step_id, input } => {
-                local_executor
-                    .execute(RuntimeEffectEnvelope::new(
-                        envelope.invocation,
-                        RuntimeEffectCommand::DurableStep { step_id, input },
-                    ))
-                    .await
+                let _ = (step_id, local_executor);
+                Ok(RuntimeEffectOutcome::DurableStep { value: input })
             }
             RuntimeEffectCommand::Direct { request, .. } => {
                 // Both the text-only (`direct_completion`) and full-response
@@ -906,7 +902,7 @@ async fn durable_controller_with_all_durable_stores_runs_turn() {
 }
 
 #[tokio::test]
-async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
+async fn tool_direct_completion_is_opaque_inside_scoped_attempt() {
     struct DirectTool;
 
     fn direct_tool_definition() -> crate::ToolDefinition {
@@ -1013,12 +1009,13 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
         scoped_recorder.count_kind(RuntimeEffectKind::ToolAttempt),
         1
     );
-    assert_eq!(scoped_recorder.count_kind(RuntimeEffectKind::Direct), 1);
+    assert_eq!(scoped_recorder.count_kind(RuntimeEffectKind::Direct), 0);
     assert_eq!(default_recorder.count_kind(RuntimeEffectKind::Direct), 0);
     assert!(
         scoped_recorder
             .envelopes()
             .iter()
+            .filter(|envelope| envelope.contains("tool_attempt"))
             .any(|envelope| envelope.contains("direct-call-1"))
     );
 }

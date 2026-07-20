@@ -794,11 +794,13 @@ finish { recovered: true }
     let key = wait_for_contract_durable_input_key(&mut key_rx, &turn).await?;
     let completed_before_resolution = events.tool_completed_count().await;
     let suspended_before_resolution = !turn.is_finished() && completed_before_resolution == 0;
-    let await_custom_key = match &key.wait {
-        lash_core::AwaitEventWaitIdentity::Custom { key } => key.clone(),
+    let await_tool_call_id_present = match &key.wait {
+        lash_core::AwaitEventWaitIdentity::ToolCompletion { tool_call_id } => {
+            !tool_call_id.is_empty()
+        }
         other => {
             return Err(FixedScriptRunnerError::Assertion(format!(
-                "durable input used non-custom await key `{other:?}`"
+                "durable input used non-tool-completion await key `{other:?}`"
             )));
         }
     };
@@ -806,7 +808,10 @@ finish { recovered: true }
         .completions()
         .resolve(
             key,
-            lash_core::Resolution::Ok(json!({ "answer": "approved" })),
+            lash_core::Resolution::Ok(json!({
+                "request_id": "request-1",
+                "answer": "approved"
+            })),
         )
         .await
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
@@ -819,12 +824,12 @@ finish { recovered: true }
         .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     let completed_after_resolution = events.tool_completed_count().await;
     let durable_input = json!({
-        "await_custom_key": await_custom_key,
+        "await_tool_call_id_present": await_tool_call_id_present,
         "suspended_before_resolution": suspended_before_resolution,
         "completed_event_count_before_resolution": completed_before_resolution,
         "completed_event_count_after_resolution": completed_after_resolution,
         "resolve_accepted": matches!(resolve_outcome, lash_core::ResolveOutcome::Accepted),
-        "durable_step_count": tools.step_count(),
+        "atomic_attempt_count": tools.attempt_count(),
     });
     agent_process_execution_result(
         &core,

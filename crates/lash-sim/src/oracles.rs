@@ -3776,11 +3776,11 @@ fn agent_contract_execution_fact(
                 0,
                 contract,
             )?;
-            require_agent_u64(result, "/durable_input/durable_step_count", 2, contract)?;
-            require_agent_str(
+            require_agent_u64(result, "/durable_input/atomic_attempt_count", 1, contract)?;
+            require_agent_bool(
                 result,
-                "/durable_input/await_custom_key",
-                "mock-input-request:request-1",
+                "/durable_input/await_tool_call_id_present",
+                true,
                 contract,
             )?;
             require_agent_completed_process_entry(result, "request_answer", contract)?;
@@ -3794,7 +3794,7 @@ fn agent_contract_execution_fact(
             require_agent_no_process_event(result, "process.waiting", contract)?;
             json!({
                 "final_value": "approved",
-                "await_custom_key": "mock-input-request:request-1",
+                "await_tool_call_id_present": true,
                 "suspended_before_resolution": true,
                 "completed_process": "request_answer",
                 "process_event": "work.input_request.opened",

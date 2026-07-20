@@ -1203,10 +1203,6 @@ impl AwaitEventResolver for RestateEffectHost {
         DurabilityTier::Durable
     }
 
-    fn supports_durable_effects(&self) -> bool {
-        true
-    }
-
     async fn await_event_key(
         &self,
         scope: &ExecutionScope,
@@ -3636,10 +3632,6 @@ where
 {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
-    }
-
-    fn supports_durable_effects(&self) -> bool {
-        true
     }
 
     async fn await_event_key(

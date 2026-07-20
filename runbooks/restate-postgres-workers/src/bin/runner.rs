@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use lash_core::AwaitEventResolver as _;
 use lash_core::{
-    AwaitEventKey, ExecutionScope, InlineRuntimeEffectController, ScopedEffectController,
-    SessionCommitStore, TurnAddress, TurnCancelOutcome, TurnCancelRequest, TurnOutcome, TurnStop,
-    TurnTerminal, TurnWorkDriver,
+    AwaitEventKey, AwaitEventWaitIdentity, ExecutionScope, InlineRuntimeEffectController,
+    Resolution, ScopedEffectController, SessionCommitStore, TurnAddress, TurnCancelOutcome,
+    TurnCancelRequest, TurnOutcome, TurnStop, TurnTerminal, TurnWorkDriver,
 };
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{
@@ -13,11 +13,10 @@ use lash_restate::{
 };
 use lash_restate_postgres_workers_e2e::{
     ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
-    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_DURABLE_WAIT_TEXT, EXPECTED_FINAL_TEXT,
-    EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
-    EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, EXPECTED_TOOL_BATCH_TEXT,
-    ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
-    build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
+    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_FRAME_SWITCH_CANCEL_TEXT,
+    EXPECTED_FRAME_SWITCH_TEXT, EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT,
+    EXPECTED_TOOL_BATCH_TEXT, ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse,
+    TurnScenario, build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
     expected_attachment_bytes, process_registry_from_storage, record_terminal_result,
     reset_e2e_rows, s3_store_from_env, turn_session_id,
 };
@@ -227,6 +226,21 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &async_request.workflow_id).await?;
     assert_async_completion_response(&async_response)?;
 
+    for (workflow_id, fail_once) in [
+        ("e2e-process-llm-query", false),
+        ("e2e-process-llm-query-replay", true),
+    ] {
+        let request = TurnRequest {
+            workflow_id: workflow_id.to_string(),
+            fail_once,
+            scenario: TurnScenario::ProcessLlmQuery,
+            signal: None,
+        };
+        submit_workflow(&ingress_url, &request).await?;
+        let response = wait_for_terminal_result(storage.pool(), workflow_id).await?;
+        assert_process_llm_query_response(&response)?;
+    }
+
     let durable_input_request = TurnRequest {
         workflow_id: "e2e-durable-input".to_string(),
         fail_once: false,
@@ -239,7 +253,11 @@ async fn async_main() -> Result<()> {
     let durable_resolve = RestateEffectHost::with_ingress_url(ingress_url.clone())
         .resolve_await_event(
             &durable_key,
-            lash_core::Resolution::Ok(json!({ "answer": "durable-approved" })),
+            lash_core::Resolution::Ok(json!({
+                "request_id": "e2e-durable-input:request-1",
+                "answer": "durable-approved",
+                "worker_id": "runner"
+            })),
         )
         .await
         .context("resolve durable input await key")?;
@@ -264,7 +282,11 @@ async fn async_main() -> Result<()> {
     let parent_durable_resolve = RestateEffectHost::with_ingress_url(ingress_url.clone())
         .resolve_await_event(
             &parent_durable_key,
-            lash_core::Resolution::Ok(json!({ "answer": "parent-approved" })),
+            lash_core::Resolution::Ok(json!({
+                "request_id": "e2e-parent-durable-input-after-child:request-1",
+                "answer": "parent-approved",
+                "worker_id": "runner"
+            })),
         )
         .await
         .context("resolve parent durable input await key")?;
@@ -352,9 +374,9 @@ async fn async_main() -> Result<()> {
     drive_suspended_sleep_cancel_scenario(&storage, &ingress_url, &admin_url).await?;
     drive_engine_restart_scenario(&storage, &ingress_url, &admin_url).await?;
     drive_turn_control_scenarios(&storage, &ingress_url).await?;
-    drive_durable_wait_index_scenarios(&storage, &ingress_url, &admin_url).await?;
+    drive_durable_wait_index_scenarios(&ingress_url, &admin_url).await?;
 
-    let responses = wait_for_terminal_results(storage.pool(), 28).await?;
+    let responses = wait_for_terminal_results(storage.pool(), 26).await?;
 
     assert_processes_terminal(storage.pool()).await?;
     assert_no_duplicate_runtime_rows(storage.pool()).await?;
@@ -364,7 +386,7 @@ async fn async_main() -> Result<()> {
     assert_frame_switch_provider_order(storage.pool()).await?;
     assert_tool_and_turn_telemetry(storage.pool()).await?;
     assert_tool_batch_side_effects(storage.pool()).await?;
-    assert_durable_input_steps(storage.pool()).await?;
+    assert_durable_input_attempts(storage.pool()).await?;
     assert_trigger_delivery(storage.pool(), &trigger_process_id).await?;
     assert_attachments_round_trip(storage.pool(), &attachment_store, &responses).await?;
     assert_reopened_session_agrees(
@@ -1006,6 +1028,32 @@ fn assert_durable_input_response(response: &TurnResponse) -> Result<()> {
     Ok(())
 }
 
+fn assert_process_llm_query_response(response: &TurnResponse) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == "process-llm-query-complete",
+        "workflow `{}` process llm_query final mismatch: {}",
+        response.workflow_id,
+        response.final_text
+    );
+    anyhow::ensure!(
+        response.final_value.get("category").and_then(Value::as_str) == Some("personal"),
+        "workflow `{}` process llm_query category mismatch: {}",
+        response.workflow_id,
+        response.final_value
+    );
+    anyhow::ensure!(
+        response
+            .final_value
+            .get("confidence")
+            .and_then(Value::as_f64)
+            == Some(0.98),
+        "workflow `{}` process llm_query confidence mismatch: {}",
+        response.workflow_id,
+        response.final_value
+    );
+    Ok(())
+}
+
 fn assert_parent_durable_input_response(response: &TurnResponse) -> Result<()> {
     anyhow::ensure!(
         response.final_text == EXPECTED_PARENT_DURABLE_INPUT_TEXT,
@@ -1285,16 +1333,6 @@ async fn wait_for_durable_input_key(
     anyhow::bail!("timed out waiting for durable input key for `{workflow_id}`")
 }
 
-/// Drive pending foreground durable waits and turn control through the real
-/// Restate session-wait-index cancel / re-register / revoke handlers.
-///
-/// The `durable_wait_probe` scenario parks a session-scoped durable wait in the
-/// `LashDurableWaitIndex` virtual object (unlike the in-process wait scenarios,
-/// whose Process-scoped keys never enter the session index). We then drive the
-/// real `LashDurableWaitIndexImpl::{cancel_all,revoke_all}` handlers over
-/// Restate ingress and assert the observable turn outcomes.
-///
-/// Cancel/revoke are driven through the production
 async fn drive_turn_control_scenarios(storage: &PostgresStorage, ingress_url: &str) -> Result<()> {
     let deployment = RestateTurnDeployment::new(ingress_url.to_string());
     let driver = deployment.turn_work_driver();
@@ -1889,53 +1927,88 @@ async fn wait_for_invocation_suspended(
 /// route. Restate rejects no-input handler invocations that carry a body or
 /// content-type, so this doubles as live regression coverage for the
 /// empty-body ingress encoding in `update_restate_session_waits_via_ingress`.
-async fn drive_durable_wait_index_scenarios(
-    storage: &PostgresStorage,
-    ingress_url: &str,
-    admin_url: &str,
-) -> Result<()> {
+async fn drive_durable_wait_index_scenarios(ingress_url: &str, admin_url: &str) -> Result<()> {
     let host = RestateEffectHost::with_ingress_url(ingress_url.to_string());
 
-    // 1) Cancel a pending wait through the real cancel_all handler; the turn
-    //    must observe the wait resolving as Cancelled and leave no stuck
-    //    invocations behind.
-    let cancel_workflow_id = "e2e-wait-cancel";
-    submit_durable_wait_probe(ingress_url, cancel_workflow_id).await?;
-    let cancel_key = wait_for_durable_wait_key(storage.pool(), cancel_workflow_id).await?;
-    let cancel_session_id = durable_wait_session_id(&cancel_key)?;
+    // 1) A controller-owned wait registers in the real Restate session index
+    //    and observes cancel_all as a terminal cancellation.
+    let cancel_key = host
+        .await_event_key(
+            &ExecutionScope::turn(DEFAULT_SESSION_ID, "e2e-wait-cancel"),
+            AwaitEventWaitIdentity::Custom {
+                key: "controller-wait".to_string(),
+            },
+        )
+        .await
+        .context("build controller cancellation wait key")?;
+    let wait_host = host.clone();
+    let wait_key = cancel_key.clone();
+    let cancelled_wait = tokio::spawn(async move {
+        wait_host
+            .await_await_event(
+                &wait_key,
+                tokio_util::sync::CancellationToken::new(),
+                Some(Instant::now() + Duration::from_secs(90)),
+            )
+            .await
+    });
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while !cancelled_wait.is_finished() {
+        host.cancel_await_events_for_session(DEFAULT_SESSION_ID)
+            .await
+            .context("cancel controller-owned session waits")?;
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "controller-owned session wait did not observe cancel_all"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let cancelled = cancelled_wait
+        .await
+        .context("join cancelled controller wait")?
+        .context("await cancelled controller wait")?;
     anyhow::ensure!(
-        cancel_session_id == DEFAULT_SESSION_ID,
-        "durable wait registered under unexpected session `{cancel_session_id}`"
+        cancelled == Resolution::Cancelled,
+        "controller-owned wait resolved unexpectedly: {cancelled:?}"
     );
-    let cancel_response = drive_session_wait_update(
-        storage.pool(),
-        &host,
-        &cancel_session_id,
-        cancel_workflow_id,
-    )
-    .await?;
-    assert_durable_wait_cancelled(&cancel_response)?;
     assert_no_problem_lash_restate_invocations(admin_url).await?;
 
-    // 2) Re-register a NEW wait on the same session and resolve it normally to
-    //    prove cancellation left the session usable (cancel is not permanent).
-    let reregister_workflow_id = "e2e-wait-reregister";
-    submit_durable_wait_probe(ingress_url, reregister_workflow_id).await?;
-    let reregister_key = wait_for_durable_wait_key(storage.pool(), reregister_workflow_id).await?;
-    let reregister_resolve = host
-        .resolve_await_event(
-            &reregister_key,
-            lash_core::Resolution::Ok(json!({ "answer": "post-cancel-approved" })),
+    // 2) A new controller-owned wait on the same session resolves normally,
+    //    proving cancellation did not permanently revoke the index.
+    let reregister_key = host
+        .await_event_key(
+            &ExecutionScope::turn(DEFAULT_SESSION_ID, "e2e-wait-reregister"),
+            AwaitEventWaitIdentity::Custom {
+                key: "controller-wait".to_string(),
+            },
         )
+        .await
+        .context("build re-registered controller wait key")?;
+    let expected = Resolution::Ok(json!({
+        "cancelled": false,
+        "answer": "post-cancel-approved",
+        "worker_id": "runner"
+    }));
+    let reregister_resolve = host
+        .resolve_await_event(&reregister_key, expected.clone())
         .await
         .context("resolve re-registered durable wait")?;
     anyhow::ensure!(
         matches!(reregister_resolve, lash_core::ResolveOutcome::Accepted),
         "re-registered durable wait resolve was not accepted: {reregister_resolve:?}"
     );
-    let reregister_response =
-        wait_for_terminal_result(storage.pool(), reregister_workflow_id).await?;
-    assert_durable_wait_resolved(&reregister_response, "post-cancel-approved")?;
+    let reregistered = host
+        .await_await_event(
+            &reregister_key,
+            tokio_util::sync::CancellationToken::new(),
+            Some(Instant::now() + Duration::from_secs(90)),
+        )
+        .await
+        .context("await re-registered controller wait")?;
+    anyhow::ensure!(
+        reregistered == expected,
+        "re-registered controller wait resolved unexpectedly: {reregistered:?}"
+    );
 
     // 3) Revoke (the session-deletion path) now includes reserved turn
     // control promises. Validate that contract directly: after revocation,
@@ -1974,133 +2047,7 @@ async fn drive_durable_wait_index_scenarios(
         "revoked turn control gate remained addressable: {revoked:?}"
     );
     assert_no_problem_lash_restate_invocations(admin_url).await?;
-    Ok(())
-}
-
-async fn submit_durable_wait_probe(ingress_url: &str, workflow_id: &str) -> Result<()> {
-    submit_workflow(
-        ingress_url,
-        &TurnRequest {
-            workflow_id: workflow_id.to_string(),
-            fail_once: false,
-            scenario: TurnScenario::DurableWaitProbe,
-            signal: None,
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-fn durable_wait_session_id(key: &AwaitEventKey) -> Result<String> {
-    key.scope
-        .session_id()
-        .map(str::to_string)
-        .context("durable wait key carried no session id; the session wait index was not exercised")
-}
-
-/// Repeatedly drive the production cancel/revoke controller route until the
-/// parked turn resolves. Both handlers are idempotent, so retrying is safe and
-/// removes any race between wait registration and the update landing on the
-/// index.
-async fn drive_session_wait_update(
-    pool: &sqlx::PgPool,
-    host: &RestateEffectHost,
-    session_id: &str,
-    workflow_id: &str,
-) -> Result<TurnResponse> {
-    let deadline = Instant::now() + Duration::from_secs(90);
-    loop {
-        host.cancel_await_events_for_session(session_id)
-            .await
-            .map_err(|err| {
-                anyhow::anyhow!("`cancel_all` for `{session_id}` via controller: {err}")
-            })?;
-        if let Some(response) = load_terminal_result(pool, workflow_id).await? {
-            return Ok(response);
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for `{workflow_id}` to resolve after `cancel_all`");
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
-async fn wait_for_durable_wait_key(
-    pool: &sqlx::PgPool,
-    workflow_id: &str,
-) -> Result<AwaitEventKey> {
-    let deadline = Instant::now() + Duration::from_secs(120);
-    while Instant::now() < deadline {
-        let row: Option<String> = sqlx::query_scalar(
-            "SELECT result_json
-             FROM lash_e2e_tool_events
-             WHERE workflow_id = $1 AND tool_name = 'durable_wait_probe.opened'
-             ORDER BY event_id DESC
-             LIMIT 1",
-        )
-        .bind(workflow_id)
-        .fetch_optional(pool)
-        .await
-        .with_context(|| format!("load durable wait key for `{workflow_id}`"))?;
-        if let Some(result_json) = row {
-            let value: Value = serde_json::from_str(&result_json)
-                .with_context(|| format!("decode durable wait key row for `{workflow_id}`"))?;
-            let key_value = value
-                .get("await_key")
-                .cloned()
-                .context("durable wait key row missing await_key")?;
-            let key: AwaitEventKey =
-                serde_json::from_value(key_value).context("decode durable wait AwaitEventKey")?;
-            return Ok(key);
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    anyhow::bail!("timed out waiting for durable wait key for `{workflow_id}`")
-}
-
-fn assert_durable_wait_cancelled(response: &TurnResponse) -> Result<()> {
-    anyhow::ensure!(
-        response.final_text == EXPECTED_DURABLE_WAIT_TEXT,
-        "workflow `{}` durable wait final mismatch: {}",
-        response.workflow_id,
-        response.final_text
-    );
-    anyhow::ensure!(
-        response
-            .final_value
-            .get("cancelled")
-            .and_then(Value::as_bool)
-            == Some(true),
-        "workflow `{}` durable wait was not cancelled: {}",
-        response.workflow_id,
-        response.final_value
-    );
-    Ok(())
-}
-
-fn assert_durable_wait_resolved(response: &TurnResponse, expected_answer: &str) -> Result<()> {
-    anyhow::ensure!(
-        response.final_text == EXPECTED_DURABLE_WAIT_TEXT,
-        "workflow `{}` durable wait final mismatch: {}",
-        response.workflow_id,
-        response.final_text
-    );
-    anyhow::ensure!(
-        response
-            .final_value
-            .get("cancelled")
-            .and_then(Value::as_bool)
-            == Some(false),
-        "workflow `{}` durable wait should have resolved, not cancelled: {}",
-        response.workflow_id,
-        response.final_value
-    );
-    anyhow::ensure!(
-        response.final_value.get("answer").and_then(Value::as_str) == Some(expected_answer),
-        "workflow `{}` durable wait answer mismatch: {}",
-        response.workflow_id,
-        response.final_value
-    );
+    eprintln!("durable-wait index gates passed: cancel; reregister; revoke");
     Ok(())
 }
 
@@ -2417,7 +2364,11 @@ async fn assert_worker_distribution(pool: &sqlx::PgPool) -> Result<()> {
 }
 
 async fn assert_failover(pool: &sqlx::PgPool) -> Result<()> {
-    for workflow_id in ["e2e-failover", "e2e-tool-batch-failover"] {
+    for workflow_id in [
+        "e2e-failover",
+        "e2e-tool-batch-failover",
+        "e2e-process-llm-query-replay",
+    ] {
         // The crash injector keeps the marker's logical worker unavailable for
         // this workflow even after Compose restarts its container. Completion
         // therefore proves takeover by the healthy peer rather than depending
@@ -2493,6 +2444,20 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
         tool_batch_failover_calls == 1,
         "expected one durable tool-batch failover provider completion, got {tool_batch_failover_calls}"
     );
+    for workflow_id in ["e2e-process-llm-query", "e2e-process-llm-query-replay"] {
+        let direct_calls: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lash_e2e_provider_calls
+             WHERE workflow_id = $1 AND scenario = 'process_llm_query_direct'",
+        )
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("count process llm_query direct calls for `{workflow_id}`"))?;
+        anyhow::ensure!(
+            direct_calls == 1,
+            "workflow `{workflow_id}` invoked the llm_query provider {direct_calls} times; completed-attempt replay must reuse the recorded attempt"
+        );
+    }
     let scenarios: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT scenario FROM lash_e2e_provider_calls ORDER BY scenario",
     )
@@ -2502,9 +2467,10 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
     for expected in [
         "async_completion",
         "durable_input_request",
-        "durable_wait_probe",
         "kitchen_sink",
         "parent_durable_input_after_child",
+        "process_llm_query",
+        "process_llm_query_direct",
         "queued_wake",
         "trigger_setup",
         "signal_suspend",
@@ -2525,7 +2491,7 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
         "batch_side_effect",
         "make_attachment",
         "crash_once",
-        "durable_input_request",
+        "durable_input_request.opened",
     ] {
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM lash_e2e_tool_events WHERE tool_name = $1")
@@ -2583,28 +2549,26 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn assert_durable_input_steps(pool: &sqlx::PgPool) -> Result<()> {
+async fn assert_durable_input_attempts(pool: &sqlx::PgPool) -> Result<()> {
     for workflow_id in ["e2e-durable-input", "e2e-parent-durable-input-after-child"] {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT step_id, count
-             FROM lash_e2e_durable_step_counts
+             FROM lash_e2e_tool_attempt_counts
              WHERE workflow_id = $1
              ORDER BY step_id",
         )
         .bind(workflow_id)
         .fetch_all(pool)
         .await
-        .with_context(|| format!("load durable input step counts for `{workflow_id}`"))?;
+        .with_context(|| format!("load durable input attempt counts for `{workflow_id}`"))?;
         let counts = rows
             .into_iter()
             .collect::<std::collections::BTreeMap<_, _>>();
-        for step_id in ["complete", "create"] {
-            let count = counts.get(step_id).copied().unwrap_or_default();
-            anyhow::ensure!(
-                count == 1,
-                "workflow `{workflow_id}` durable input step `{step_id}` ran {count} times; counts={counts:?}"
-            );
-        }
+        let count = counts.get("attempt").copied().unwrap_or_default();
+        anyhow::ensure!(
+            count == 1,
+            "workflow `{workflow_id}` durable input attempt ran {count} times; counts={counts:?}"
+        );
     }
     Ok(())
 }

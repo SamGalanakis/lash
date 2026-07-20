@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_restate_postgres_workers_e2e::{
-    EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_DURABLE_WAIT_TEXT,
-    EXPECTED_FINAL_TEXT, EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
+    EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT,
+    EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
     EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, EXPECTED_TOOL_BATCH_TEXT,
     EXPECTED_WAKE_TEXT, ensure_e2e_schema, env, record_provider_call, required_env,
 };
@@ -60,80 +60,91 @@ async fn chat_completion(State(state): State<AppState>, Json(request): Json<Valu
     let fail_once = latest_fail_once_marker(&latest_user)
         .or_else(|| latest_fail_once_marker(&full_text))
         .unwrap_or(false);
-    let (scenario, content) = match scenario {
-        MockScenario::TriggerSetup => ("trigger_setup", trigger_setup_script()),
-        MockScenario::QueuedWake => ("queued_wake", queued_wake_script()),
-        MockScenario::SignalSuspend => ("signal_suspend", signal_suspend_script(&workflow_id)),
-        MockScenario::AsyncCompletion => {
-            ("async_completion", async_completion_script(&workflow_id))
+    let is_llm_query_direct = full_text.contains("llm_query_result");
+    let (scenario, content) = if is_llm_query_direct {
+        (
+            "process_llm_query_direct",
+            r#"{"kind":"value","value":{"category":"personal","confidence":0.98},"error":null}"#
+                .to_string(),
+        )
+    } else {
+        match scenario {
+            MockScenario::TriggerSetup => ("trigger_setup", trigger_setup_script()),
+            MockScenario::QueuedWake => ("queued_wake", queued_wake_script()),
+            MockScenario::SignalSuspend => ("signal_suspend", signal_suspend_script(&workflow_id)),
+            MockScenario::AsyncCompletion => {
+                ("async_completion", async_completion_script(&workflow_id))
+            }
+            MockScenario::ProcessLlmQuery => (
+                "process_llm_query",
+                process_llm_query_script(&workflow_id, fail_once),
+            ),
+            MockScenario::DurableInputRequest => (
+                "durable_input_request",
+                durable_input_request_script(&workflow_id),
+            ),
+            MockScenario::ParentDurableInputAfterChild => (
+                "parent_durable_input_after_child",
+                parent_durable_input_after_child_script(&workflow_id),
+            ),
+            MockScenario::ToolBatch => ("tool_batch", tool_batch_script(&workflow_id, fail_once)),
+            MockScenario::SegmentLoop => ("segment_loop", segment_loop_script(&workflow_id)),
+            MockScenario::FrameSwitchQueuedStart => (
+                "frame_switch_queued_start",
+                frame_switch_start_script(&workflow_id, "frame_switch_queued_follow=true"),
+            ),
+            MockScenario::FrameSwitchPreparedStart => (
+                "frame_switch_prepared_start",
+                frame_switch_start_script(&workflow_id, "frame_switch_prepared_follow=true"),
+            ),
+            MockScenario::FrameSwitchCrashStart => (
+                "frame_switch_crash_start",
+                frame_switch_start_script(&workflow_id, "frame_switch_crash_follow=true"),
+            ),
+            MockScenario::FrameSwitchCancelStart => (
+                "frame_switch_cancel_start",
+                frame_switch_start_script(&workflow_id, "frame_switch_cancel_follow=true"),
+            ),
+            MockScenario::FrameSwitchQueuedFollow => (
+                "frame_switch_queued_follow",
+                frame_switch_follow_script(&workflow_id),
+            ),
+            MockScenario::FrameSwitchPreparedFollow => (
+                "frame_switch_prepared_follow",
+                frame_switch_follow_script(&workflow_id),
+            ),
+            MockScenario::FrameSwitchCrashFollow => (
+                "frame_switch_crash_follow",
+                frame_switch_follow_script(&workflow_id),
+            ),
+            MockScenario::FrameSwitchCancelFollow => (
+                "frame_switch_cancel_follow",
+                frame_switch_cancel_follow_script(&workflow_id),
+            ),
+            MockScenario::FrameSwitchPending => (
+                "frame_switch_pending",
+                frame_switch_pending_script(&workflow_id),
+            ),
+            MockScenario::FrameSwitchPostCancel => (
+                "frame_switch_post_cancel",
+                frame_switch_post_cancel_script(&workflow_id),
+            ),
+            MockScenario::TurnControlHold => (
+                "turn_control_hold",
+                turn_control_hold_script(&workflow_id, fail_once),
+            ),
+            MockScenario::TurnControlSleep => (
+                "turn_control_sleep",
+                turn_control_sleep_script(&workflow_id),
+            ),
+            MockScenario::TurnControlComplete => (
+                "turn_control_complete",
+                turn_control_complete_script(&workflow_id),
+            ),
+            MockScenario::KitchenSink => {
+                ("kitchen_sink", kitchen_sink_script(&workflow_id, fail_once))
+            }
         }
-        MockScenario::DurableInputRequest => (
-            "durable_input_request",
-            durable_input_request_script(&workflow_id),
-        ),
-        MockScenario::ParentDurableInputAfterChild => (
-            "parent_durable_input_after_child",
-            parent_durable_input_after_child_script(&workflow_id),
-        ),
-        MockScenario::ToolBatch => ("tool_batch", tool_batch_script(&workflow_id, fail_once)),
-        MockScenario::DurableWaitProbe => (
-            "durable_wait_probe",
-            durable_wait_probe_script(&workflow_id),
-        ),
-        MockScenario::SegmentLoop => ("segment_loop", segment_loop_script(&workflow_id)),
-        MockScenario::FrameSwitchQueuedStart => (
-            "frame_switch_queued_start",
-            frame_switch_start_script(&workflow_id, "frame_switch_queued_follow=true"),
-        ),
-        MockScenario::FrameSwitchPreparedStart => (
-            "frame_switch_prepared_start",
-            frame_switch_start_script(&workflow_id, "frame_switch_prepared_follow=true"),
-        ),
-        MockScenario::FrameSwitchCrashStart => (
-            "frame_switch_crash_start",
-            frame_switch_start_script(&workflow_id, "frame_switch_crash_follow=true"),
-        ),
-        MockScenario::FrameSwitchCancelStart => (
-            "frame_switch_cancel_start",
-            frame_switch_start_script(&workflow_id, "frame_switch_cancel_follow=true"),
-        ),
-        MockScenario::FrameSwitchQueuedFollow => (
-            "frame_switch_queued_follow",
-            frame_switch_follow_script(&workflow_id),
-        ),
-        MockScenario::FrameSwitchPreparedFollow => (
-            "frame_switch_prepared_follow",
-            frame_switch_follow_script(&workflow_id),
-        ),
-        MockScenario::FrameSwitchCrashFollow => (
-            "frame_switch_crash_follow",
-            frame_switch_follow_script(&workflow_id),
-        ),
-        MockScenario::FrameSwitchCancelFollow => (
-            "frame_switch_cancel_follow",
-            frame_switch_cancel_follow_script(&workflow_id),
-        ),
-        MockScenario::FrameSwitchPending => (
-            "frame_switch_pending",
-            frame_switch_pending_script(&workflow_id),
-        ),
-        MockScenario::FrameSwitchPostCancel => (
-            "frame_switch_post_cancel",
-            frame_switch_post_cancel_script(&workflow_id),
-        ),
-        MockScenario::TurnControlHold => (
-            "turn_control_hold",
-            turn_control_hold_script(&workflow_id, fail_once),
-        ),
-        MockScenario::TurnControlSleep => (
-            "turn_control_sleep",
-            turn_control_sleep_script(&workflow_id),
-        ),
-        MockScenario::TurnControlComplete => (
-            "turn_control_complete",
-            turn_control_complete_script(&workflow_id),
-        ),
-        MockScenario::KitchenSink => ("kitchen_sink", kitchen_sink_script(&workflow_id, fail_once)),
     };
     let response = json!({
         "id": request_id,
@@ -237,10 +248,10 @@ enum MockScenario {
     TriggerSetup,
     SignalSuspend,
     AsyncCompletion,
+    ProcessLlmQuery,
     DurableInputRequest,
     ParentDurableInputAfterChild,
     ToolBatch,
-    DurableWaitProbe,
     SegmentLoop,
     FrameSwitchQueuedStart,
     FrameSwitchPreparedStart,
@@ -306,7 +317,6 @@ fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
             MockScenario::TurnControlComplete,
         ),
         ("segment_loop=true", MockScenario::SegmentLoop),
-        ("durable_wait_probe=true", MockScenario::DurableWaitProbe),
         ("tool_batch=true", MockScenario::ToolBatch),
         (
             "durable_input_request=true",
@@ -317,6 +327,7 @@ fn latest_scenario_marker(text: &str) -> Option<MockScenario> {
             MockScenario::ParentDurableInputAfterChild,
         ),
         ("async_completion=true", MockScenario::AsyncCompletion),
+        ("process_llm_query=true", MockScenario::ProcessLlmQuery),
         ("trigger_setup=true", MockScenario::TriggerSetup),
         ("signal_suspend=true", MockScenario::SignalSuspend),
         ("Background process wake", MockScenario::QueuedWake),
@@ -674,6 +685,41 @@ finish {{
     )
 }
 
+fn process_llm_query_script(workflow_id: &str, fail_once: bool) -> String {
+    let replay_probe = if fail_once {
+        format!(
+            r#"
+  await tools.crash_once({{ workflow_id: "{workflow_id}" }})?"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"
+Exercise the exact FIG-446 process-to-llm_query geometry with typed output.
+
+<lashlang>
+process enrich(event: {{ email: str }}) {{
+  enriched = await llm.query({{
+    task: "Classify this email. workflow_id={workflow_id} process_llm_query=true",
+    inputs: {{ event: event }},
+    output: Type {{ category: str, confidence: float }}
+  }})?{replay_probe}
+  finish enriched
+}}
+handle = start enrich(event: {{ email: "hello@example.com" }})
+result = (await handle)?
+finish {{
+  workflow_id: "{workflow_id}",
+  category: result.category,
+  confidence: result.confidence,
+  final: "process-llm-query-complete"
+}}
+</lashlang>
+"#
+    )
+}
+
 fn durable_input_request_script(workflow_id: &str) -> String {
     format!(
         r#"
@@ -774,24 +820,6 @@ finish {{
     )
 }
 
-fn durable_wait_probe_script(workflow_id: &str) -> String {
-    format!(
-        r#"
-Exercise a foreground durable wait that the runner cancels or revokes through the session wait index.
-
-<lashlang>
-res = await tools.durable_wait_probe({{ workflow_id: "{workflow_id}" }})?
-finish {{
-  workflow_id: "{workflow_id}",
-  cancelled: res.cancelled,
-  answer: res.answer,
-  final: "{EXPECTED_DURABLE_WAIT_TEXT}"
-}}
-</lashlang>
-"#
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,7 +869,6 @@ mod tests {
             parent_durable_input_after_child_script("e2e-test"),
             tool_batch_script("e2e-test", false),
             tool_batch_script("e2e-test", true),
-            durable_wait_probe_script("e2e-test"),
             segment_loop_script("e2e-test"),
         ];
 

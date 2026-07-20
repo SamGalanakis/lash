@@ -199,15 +199,24 @@ impl RuntimeBoundaryHarness {
             RuntimeInvocation::effect(
                 RuntimeScope::new(event.actor_alias.clone()),
                 effect_id.clone(),
-                RuntimeEffectKind::DurableStep,
+                RuntimeEffectKind::ToolAttempt,
                 durable_key.clone(),
             ),
-            RuntimeEffectCommand::DurableStep {
-                step_id: effect_id.clone(),
-                input: json!({
+            RuntimeEffectCommand::ToolAttempt {
+                call: PreparedToolCall::from_parts(
+                    effect_id.clone(),
+                    ToolId::from("tool:sim_opaque_effect"),
+                    "sim_opaque_effect",
+                    json!({
                     "durable_key": durable_key,
                     "session": event.actor_alias,
-                }),
+                    }),
+                    None,
+                    json!({"prepared_by": "lash-sim"}),
+                ),
+                execution_grant: None,
+                attempt: 1,
+                max_attempts: 1,
             },
         );
         let envelope_hash = envelope.stable_hash().map_err(|err| {
@@ -216,25 +225,42 @@ impl RuntimeBoundaryHarness {
         let local_calls = Arc::new(AtomicUsize::new(0));
         let local_calls_for_executor = Arc::clone(&local_calls);
         let scripted_result = requested_result.clone();
+        let call_id = effect_id.clone();
         let controller = self.ensure_effect_controller().await?;
         let outcome = controller
             .execute_effect(
                 envelope.clone(),
-                RuntimeEffectLocalExecutor::durable_step(move |_| async move {
+                RuntimeEffectLocalExecutor::testing(move |_| async move {
                     local_calls_for_executor.fetch_add(1, Ordering::SeqCst);
-                    Ok(scripted_result)
+                    Ok(RuntimeEffectOutcome::ToolAttempt {
+                        launch: ToolAttemptLaunch::Done {
+                            record: ToolCallRecord {
+                                call_id: Some(call_id),
+                                tool: "sim_opaque_effect".to_string(),
+                                args: Value::Null,
+                                output: ToolCallOutput::success(scripted_result),
+                                duration_ms: 0,
+                            },
+                        },
+                        triggers: Vec::new(),
+                    })
                 }),
             )
             .await
             .map_err(|err| RuntimeBoundaryError::new(format!("durable effect failed: {err}")))?;
-        let RuntimeEffectOutcome::DurableStep { value } = &outcome else {
+        let RuntimeEffectOutcome::ToolAttempt { launch, .. } = &outcome else {
             return Err(RuntimeBoundaryError::new(
-                "durable effect controller returned non-durable-step outcome",
+                "durable effect controller returned non-tool-attempt outcome",
+            ));
+        };
+        let ToolAttemptLaunch::Done { record } = launch else {
+            return Err(RuntimeBoundaryError::new(
+                "durable effect controller returned pending tool attempt",
             ));
         };
         let local_execution_count = local_calls.load(Ordering::SeqCst);
         let replayed = local_execution_count == 0;
-        let result_digest = value_digest(value);
+        let result_digest = value_digest(&record.output.value_for_projection());
         let entry = self
             .durable_entries
             .entry(durable_key.clone())
@@ -255,7 +281,7 @@ impl RuntimeBoundaryHarness {
             "replay_count": entry.replay_count,
             "replayed": replayed,
             "runtime_effect": {
-                "kind": RuntimeEffectKind::DurableStep.as_str(),
+                "kind": RuntimeEffectKind::ToolAttempt.as_str(),
                 "effect_id": effect_id,
                 "replay_key": envelope.invocation.replay_key(),
                 "envelope_hash": envelope_hash,

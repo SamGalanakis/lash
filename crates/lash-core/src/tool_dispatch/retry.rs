@@ -200,25 +200,28 @@ async fn sleep_before_retry(
     attempt: u32,
     retry_after_ms: u64,
 ) -> Result<(), crate::RuntimeEffectControllerError> {
-    if tool_context
+    let inside_tool_attempt = tool_context
         .parent_invocation
         .as_ref()
         .is_some_and(|invocation| {
             invocation.effect_kind() == Some(crate::RuntimeEffectKind::ToolAttempt)
-        })
-        && context.effect_controller.controller().durability_tier()
-            == crate::DurabilityTier::Durable
-    {
-        return Err(crate::RuntimeEffectControllerError::new(
-            "tool_attempt_retry_sleep_unavailable",
-            "retry sleeps are not available inside a journaled tool attempt",
-        ));
-    }
+        });
     let duration = std::time::Duration::from_millis(retry_after_ms);
     let cancellation = tool_context
         .cancellation_token()
         .cloned()
         .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+    if inside_tool_attempt {
+        let sleep = context.clock.sleep(duration);
+        tokio::pin!(sleep);
+        return tokio::select! {
+            _ = cancellation.cancelled() => Err(crate::RuntimeEffectControllerError::new(
+                "runtime_effect_sleep_cancelled",
+                "tool retry sleep was cancelled",
+            )),
+            _ = &mut sleep => Ok(()),
+        };
+    }
     let invocation = if let Some(parent) = tool_context.parent_invocation.as_ref() {
         crate::runtime::tool_retry_sleep_invocation(parent, tool_name, attempt)
     } else {

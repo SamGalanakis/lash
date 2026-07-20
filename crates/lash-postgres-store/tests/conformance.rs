@@ -210,13 +210,10 @@ async fn postgres_runtime_effect_controller_satisfies_conformance_when_configure
     };
     reset(&storage).await;
 
-    let host = Arc::new(storage.effect_host()) as Arc<dyn lash_core::EffectHost>;
-    lash_core::testing::conformance::effect_host_durable_steps(|| Arc::clone(&host)).await;
-
     let controller = storage.runtime_effect_controller(ExecutionScope::runtime_operation(
         "postgres-effect-controller-conformance",
     ));
-    lash_core::testing::conformance::effect_controller_durable_steps_replay(&controller, || {
+    lash_core::testing::conformance::effect_controller_journaled_effect_replay(&controller, || {
         controller.start_replay()
     })
     .await;
