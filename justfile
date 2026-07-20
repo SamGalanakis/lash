@@ -29,6 +29,15 @@ agent-workbench-down port='3030':
 agent-workbench-foreground port='3030':
   ./scripts/agent-workbench-dev.sh foreground --port "{{port}}"
 
+workflow-graph-roundtrip port='3031':
+  #!/usr/bin/env bash
+  set -euo pipefail
+  target_dir="${WORKFLOW_GRAPH_TARGET_DIR:-/tmp/lash-workflow-graph-{{port}}}"
+  npm --prefix "{{repo}}/examples/workflow-graph-roundtrip/frontend" ci
+  npm --prefix "{{repo}}/examples/workflow-graph-roundtrip/frontend" run build
+  WORKFLOW_GRAPH_ADDR="127.0.0.1:{{port}}" CARGO_TARGET_DIR="$target_dir" \
+    cargo run -p workflow-graph-roundtrip
+
 workflow-graph-integration-verify:
   npm --prefix "{{repo}}/examples/workflow-graph-roundtrip/frontend" ci
   npm --prefix "{{repo}}/examples/workflow-graph-roundtrip/frontend" run build

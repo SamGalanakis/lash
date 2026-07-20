@@ -26,5 +26,7 @@ when present. A frontend dev server
 can also run separately because the API permits cross-origin GET, POST, and
 OPTIONS requests.
 
-See [RUNBOOK.md](RUNBOOK.md) for the production frontend build, server startup,
-operator checks, and integration verification command.
+See the suite's
+[workflow editor authoring runbook](../../runbooks/workflow-editor-authoring/runbook.md)
+for the judged browser journey. [RUNBOOK.md](RUNBOOK.md) remains as a stable
+compatibility link and records the deterministic integration command.
