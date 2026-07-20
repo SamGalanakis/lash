@@ -1266,6 +1266,28 @@ pub trait QueuedWorkStore: Send + Sync {
         max_batches: usize,
     ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
 
+    /// Claim both ingress families admitted at an active-turn checkpoint.
+    ///
+    /// Backends must probe durable store state before opening a write
+    /// transaction. When either family is pending, both claims are granted in
+    /// one write transaction after validating the session-execution fence once.
+    async fn claim_checkpoint_work(
+        &self,
+        session_id: &str,
+        session_execution_lease: &SessionExecutionLeaseFence,
+        owner: &LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: crate::CheckpointKind,
+        max_inputs: usize,
+        max_batches: usize,
+    ) -> Result<
+        (
+            Option<crate::TurnInputClaim>,
+            Option<crate::QueuedWorkClaim>,
+        ),
+        StoreError,
+    >;
+
     /// Claim a specific ready batch set selected from the durable queue.
     ///
     /// This is the host-facing counterpart to

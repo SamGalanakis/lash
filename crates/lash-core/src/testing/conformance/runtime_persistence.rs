@@ -251,6 +251,7 @@ where
     // [`SessionCommitStore`].
     queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
     concurrent_queue_and_turn_input_claims_have_one_owner(make()).await;
+    checkpoint_work_claims_both_families_once(make()).await;
     queued_work_cancel_removes_only_unclaimed_batches(make()).await;
     queued_work_exact_claim_uses_selected_batch_ids(make()).await;
     queued_work_classes_gate_command_and_turn_claims(make()).await;
@@ -275,6 +276,72 @@ where
     if options.reclaims_unreachable_blobs {
         gc_reclaims_unreachable_checkpoint_blobs_and_preserves_live(make()).await;
     }
+}
+
+async fn checkpoint_work_claims_both_families_once(store: Arc<dyn RuntimePersistence>) {
+    let session_id = "checkpoint-work";
+    let turn_id = "checkpoint-turn";
+    let owner = lease_owner("checkpoint-owner");
+    let input = store
+        .enqueue_pending_turn_input(pending_active_turn_input_draft(
+            session_id,
+            turn_id,
+            crate::TurnInputCheckpointBoundary::AfterWork,
+            "checkpoint input",
+        ))
+        .await
+        .expect("enqueue checkpoint input");
+    let batch = store
+        .enqueue_queued_work(queued_draft(
+            session_id,
+            "checkpoint queued work",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue checkpoint queued work");
+    let lease = store
+        .try_claim_session_execution_lease(session_id, &owner, 60_000)
+        .await
+        .expect("claim checkpoint session lease")
+        .acquired()
+        .expect("checkpoint session lease acquired");
+
+    let (input_claim, queue_claim) = store
+        .claim_checkpoint_work(
+            session_id,
+            &lease.fence(),
+            &owner,
+            turn_id,
+            crate::CheckpointKind::AfterWork,
+            10,
+            10,
+        )
+        .await
+        .expect("claim both checkpoint work families");
+    let input_claim = input_claim.expect("checkpoint input claim exists");
+    let queue_claim = queue_claim.expect("checkpoint queue claim exists");
+    assert_eq!(input_claim.inputs[0].input_id, input.input_id);
+    assert_eq!(queue_claim.batches[0].batch_id, batch.batch_id);
+    assert_eq!(input_claim.session_lease_generation, lease.fencing_token);
+    assert_eq!(queue_claim.session_lease_generation, lease.fencing_token);
+
+    let second = store
+        .claim_checkpoint_work(
+            session_id,
+            &lease.fence(),
+            &owner,
+            turn_id,
+            crate::CheckpointKind::AfterWork,
+            10,
+            10,
+        )
+        .await
+        .expect("same-generation checkpoint re-claim");
+    assert!(
+        second.0.is_none() && second.1.is_none(),
+        "checkpoint claims must be granted exactly once per lease generation"
+    );
 }
 
 /// Build a queued process-wake draft for backend conformance tests.

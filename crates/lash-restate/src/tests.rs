@@ -640,6 +640,35 @@ impl lash_core::QueuedWorkStore for CommitRetryStore {
             .await
     }
 
+    async fn claim_checkpoint_work(
+        &self,
+        session_id: &str,
+        session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        owner: &lash_core::LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: lash_core::CheckpointKind,
+        max_inputs: usize,
+        max_batches: usize,
+    ) -> Result<
+        (
+            Option<lash_core::runtime::TurnInputClaim>,
+            Option<lash_core::runtime::QueuedWorkClaim>,
+        ),
+        lash_core::StoreError,
+    > {
+        self.inner
+            .claim_checkpoint_work(
+                session_id,
+                session_execution_lease,
+                owner,
+                turn_id,
+                checkpoint,
+                max_inputs,
+                max_batches,
+            )
+            .await
+    }
+
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         session_id: &str,

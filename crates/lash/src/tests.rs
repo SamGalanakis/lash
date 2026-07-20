@@ -445,6 +445,25 @@ impl lash_core::QueuedWorkStore for SnapshotStore {
         Ok(None)
     }
 
+    async fn claim_checkpoint_work(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _turn_id: &str,
+        _checkpoint: lash_core::CheckpointKind,
+        _max_inputs: usize,
+        _max_batches: usize,
+    ) -> std::result::Result<
+        (
+            Option<lash_core::runtime::TurnInputClaim>,
+            Option<lash_core::runtime::QueuedWorkClaim>,
+        ),
+        lash_core::store::StoreError,
+    > {
+        Ok((None, None))
+    }
+
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         _session_id: &str,
@@ -818,6 +837,25 @@ impl lash_core::QueuedWorkStore for BoundSessionStore {
         lash_core::store::StoreError,
     > {
         Ok(None)
+    }
+
+    async fn claim_checkpoint_work(
+        &self,
+        _session_id: &str,
+        _session_execution_lease: &lash_core::SessionExecutionLeaseFence,
+        _owner: &lash_core::LeaseOwnerIdentity,
+        _turn_id: &str,
+        _checkpoint: lash_core::CheckpointKind,
+        _max_inputs: usize,
+        _max_batches: usize,
+    ) -> std::result::Result<
+        (
+            Option<lash_core::runtime::TurnInputClaim>,
+            Option<lash_core::runtime::QueuedWorkClaim>,
+        ),
+        lash_core::store::StoreError,
+    > {
+        Ok((None, None))
     }
 
     async fn claim_ready_queued_work_by_batch_ids(

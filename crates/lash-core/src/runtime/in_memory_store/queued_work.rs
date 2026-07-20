@@ -42,6 +42,62 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
         )
     }
 
+    async fn claim_checkpoint_work(
+        &self,
+        session_id: &str,
+        session_execution_lease: &crate::SessionExecutionLeaseFence,
+        owner: &crate::LeaseOwnerIdentity,
+        turn_id: &str,
+        checkpoint: crate::CheckpointKind,
+        max_inputs: usize,
+        max_batches: usize,
+    ) -> Result<
+        (
+            Option<crate::TurnInputClaim>,
+            Option<crate::QueuedWorkClaim>,
+        ),
+        crate::store::StoreError,
+    > {
+        if !self.checkpoint_work_pending_in_memory(
+            session_id,
+            session_execution_lease.fencing_token,
+            turn_id,
+            checkpoint,
+            max_inputs,
+            max_batches,
+        )? {
+            return Ok((None, None));
+        }
+
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
+        self.verify_session_execution_lease(session_id, session_execution_lease)?;
+        #[cfg(test)]
+        self.run_claim_after_lease_validation_hook();
+        let turn_input_claim = self.claim_pending_turn_inputs_after_lease_validation(
+            session_id,
+            session_execution_lease,
+            owner,
+            max_inputs,
+            crate::TurnInputClaimMode::ActiveTurn {
+                turn_id: turn_id.to_string(),
+                checkpoint,
+            },
+        )?;
+        let queued_work_claim = self.claim_ready_queued_work_after_lease_validation(
+            session_id,
+            session_execution_lease,
+            owner,
+            super::InMemoryQueuedWorkClaimKind::TurnWork {
+                boundary: crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                max_batches,
+            },
+        )?;
+        Ok((turn_input_claim, queued_work_claim))
+    }
+
     async fn claim_ready_queued_work_by_batch_ids(
         &self,
         session_id: &str,
