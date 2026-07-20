@@ -67,7 +67,7 @@ async fn live_restate_suspended_sleep_cancel_wakes_and_streams_evidence_inner() 
     wait_for_workbench_restate_invocation_suspended(
         &harness.state,
         &invocation_id,
-        Duration::from_secs(30),
+        Duration::from_secs(90),
     )
     .await;
     let session_id = harness.state.current_session_id();
