@@ -1849,6 +1849,9 @@ finish initial
             .trace_sink(Arc::clone(&trace_sink))
             .trace_level(TraceLevel::Extended)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
+            .plugin(Arc::new(
+                lash_llm_tools::LlmToolsPluginFactory::default(),
+            ))
             .effect_host(turn_deployment.effect_host())
             .process_work_driver(process_deployment.process_work_driver())
             .queued_work_driver(queued_work_driver.clone())

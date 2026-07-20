@@ -608,10 +608,6 @@ impl AwaitEventResolver for SqliteRuntimeEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
-
-    fn supports_durable_effects(&self) -> bool {
-        true
-    }
 }
 
 #[async_trait::async_trait]

@@ -36,11 +36,13 @@ request data and call
 for the Restate-backed turn. Restate recovery is handler replay with the same turn id
 and request data, not a Lash-owned in-flight checkpoint reload.
 
-The adapter records atomic Lash LLM calls, tool attempts, direct completions,
-checkpoints, execution-surface syncs, and durable steps with Restate
-`ctx.run(...).name(lash:<replay_key>)`. Composite tool-batch and exec-code
-interpreters are rebuilt for every handler attempt; their nested atomic effects
-retain stable replay keys. Runtime sleeps use Restate durable timers.
+The adapter records atomic Lash LLM calls, tool attempts, independent direct
+completions, checkpoints, and execution-surface syncs with Restate
+`ctx.run(...).name(lash:<replay_key>)`. A direct completion made by opaque tool
+code runs inside the open atomic tool attempt. Composite tool-batch and
+exec-code interpreters are rebuilt for every handler attempt; their nested
+atomic effects retain stable replay keys. Runtime sleeps outside tool attempts
+use Restate durable timers.
 Upgrade note: invocations that journaled `ExecCode` under the pre-fix wrapping
 will diverge on replay after upgrade; they were already panic-looping and need
 an admin `KILL`.

@@ -109,9 +109,9 @@ pub mod tools {
     pub use lash_core::{
         CancelHint, PendingCompletion, PreparedToolCall, TimeoutBehavior, ToolActivation,
         ToolArgumentProjectionPolicy, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
-        ToolContract, ToolDefinition, ToolDurableEffects, ToolExecutionGrant, ToolFailureClass,
-        ToolManifest, ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider,
-        ToolResult, ToolScheduling, ToolSourceHandle, ToolTriggerClient,
+        ToolContract, ToolDefinition, ToolExecutionGrant, ToolFailureClass, ToolManifest,
+        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
+        ToolScheduling, ToolSourceHandle, ToolTriggerClient,
     };
     pub use lash_core::{
         PLUGIN_TOOL_SOURCE_ID, ToolId, ToolRestoreReport, ToolState, ToolStateEntry,

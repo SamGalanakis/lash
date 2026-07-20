@@ -32,7 +32,7 @@ impl<'run> ToolDispatchClient<'run> {
                 .into_iter()
                 .map(|_| {
                     ToolInvocationReply::error(serde_json::json!(
-                        "tool batch dispatch is not available inside a journaled tool attempt"
+                        "nested tool batch dispatch is unavailable inside an atomic tool attempt; decompose the work into process steps"
                     ))
                 })
                 .collect();

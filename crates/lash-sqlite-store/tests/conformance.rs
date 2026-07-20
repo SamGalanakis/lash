@@ -566,7 +566,7 @@ async fn sqlite_effect_controller_satisfies_replay_conformance() {
     ))
     .await
     .expect("durable step controller");
-    lash_core::testing::conformance::effect_controller_durable_steps_replay(
+    lash_core::testing::conformance::effect_controller_journaled_effect_replay(
         &durable_controller,
         || durable_controller.start_replay(),
     )

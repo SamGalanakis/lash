@@ -356,10 +356,6 @@ pub trait AwaitEventResolver: Send + Sync {
         crate::DurabilityTier::Inline
     }
 
-    fn supports_durable_effects(&self) -> bool {
-        false
-    }
-
     async fn await_event_key(
         &self,
         scope: &ExecutionScope,
@@ -753,21 +749,6 @@ struct TestingRuntimeEffectLocalRunner<'run> {
     run: Box<TestingRuntimeEffectLocalRunnerFn<'run>>,
 }
 
-type DurableStepLocalRunnerFn<'run> = dyn FnOnce(
-        serde_json::Value,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<serde_json::Value, RuntimeEffectControllerError>>
-                + Send
-                + 'run,
-        >,
-    > + Send
-    + 'run;
-
-struct DurableStepLocalRunner<'run> {
-    run: Box<DurableStepLocalRunnerFn<'run>>,
-}
-
 enum RuntimeEffectLocalExecutorState<'run> {
     Unavailable,
     SleepOnly {
@@ -859,20 +840,6 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 registry,
                 process_work_driver,
             }),
-        }
-    }
-
-    pub fn durable_step<F, Fut>(run: F) -> Self
-    where
-        F: FnOnce(serde_json::Value) -> Fut + Send + 'run,
-        Fut: Future<Output = Result<serde_json::Value, RuntimeError>> + Send + 'run,
-    {
-        Self {
-            state: RuntimeEffectLocalExecutorState::Runner(Box::new(DurableStepLocalRunner {
-                run: Box::new(move |input| {
-                    Box::pin(async move { run(input).await.map_err(Into::into) })
-                }),
-            })),
         }
     }
 
@@ -1033,28 +1000,6 @@ impl RuntimeEffectLocalRunner for TestingRuntimeEffectLocalRunner<'_> {
         envelope: RuntimeEffectEnvelope,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         (self.run)(envelope).await
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimeEffectLocalRunner for DurableStepLocalRunner<'_> {
-    async fn execute(
-        self: Box<Self>,
-        envelope: RuntimeEffectEnvelope,
-    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-        match envelope.command {
-            RuntimeEffectCommand::DurableStep { input, .. } => {
-                let value = (self.run)(input).await?;
-                Ok(RuntimeEffectOutcome::DurableStep { value })
-            }
-            command => Err(RuntimeEffectControllerError::new(
-                "runtime_effect_local_executor_mismatch",
-                format!(
-                    "local durable step executor cannot execute {} command",
-                    command.kind().as_str()
-                ),
-            )),
-        }
     }
 }
 
@@ -1326,19 +1271,14 @@ async fn sleep_with_cancellation(
 
 /// Default in-process effect controller.
 ///
-/// The inline controller executes local runners in process, provides in-memory
-/// await-event resolution, and exposes durable-tool-effect semantics for local
-/// runs. It does not make in-flight effects crash durable; workflow adapters
-/// provide that by recording outcomes in their own history.
+/// The inline controller executes local runners in process and provides
+/// in-memory await-event resolution. It does not make in-flight effects crash
+/// durable; workflow adapters provide that by recording outcomes in history.
 #[derive(Clone, Default)]
 pub struct InlineRuntimeEffectController;
 
 #[async_trait::async_trait]
 impl AwaitEventResolver for InlineRuntimeEffectController {
-    fn supports_durable_effects(&self) -> bool {
-        true
-    }
-
     async fn await_event_key(
         &self,
         scope: &ExecutionScope,
@@ -1442,10 +1382,6 @@ impl Default for InlineEffectHost {
 impl AwaitEventResolver for InlineEffectHost {
     fn durability_tier(&self) -> crate::DurabilityTier {
         self.controller.durability_tier()
-    }
-
-    fn supports_durable_effects(&self) -> bool {
-        self.controller.supports_durable_effects()
     }
 
     async fn await_event_key(

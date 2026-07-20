@@ -84,10 +84,6 @@ impl AwaitEventResolver for PostgresEffectHost {
         DurabilityTier::Durable
     }
 
-
-    fn supports_durable_effects(&self) -> bool {
-        true
-    }
 }
 
 impl EffectHost for PostgresEffectHost {
@@ -491,10 +487,6 @@ impl AwaitEventResolver for PostgresRuntimeEffectController {
         DurabilityTier::Durable
     }
 
-
-    fn supports_durable_effects(&self) -> bool {
-        true
-    }
 }
 
 #[async_trait::async_trait]

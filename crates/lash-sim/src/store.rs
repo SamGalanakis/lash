@@ -814,7 +814,7 @@ impl ModelStore {
             "replay_count": replay_count,
             "replayed": replayed,
             "runtime_effect": {
-                "kind": "durable_step",
+                "kind": "tool_attempt",
                 "effect_id": effect_id,
                 "replay_key": durable_key,
                 "controller": "abstract_model_projection",

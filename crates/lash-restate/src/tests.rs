@@ -257,7 +257,7 @@ async fn restate_handler_controller_satisfies_concurrent_replay_conformance() {
     let durable_context = Arc::new(ReplayableRecordingContext::default());
     let durable_controller = RestateRuntimeEffectController::new(Arc::clone(&durable_context));
     let durable_replay_context = Arc::clone(&durable_context);
-    lash_core::testing::conformance::effect_controller_durable_steps_replay(
+    lash_core::testing::conformance::effect_controller_journaled_effect_replay(
         &durable_controller,
         move || durable_replay_context.start_replay(),
     )
@@ -355,6 +355,15 @@ fn prepared_tool_call() -> lash_core::PreparedToolCall {
         None,
         serde_json::Value::Null,
     )
+}
+
+fn legacy_durable_step_command() -> RuntimeEffectCommand {
+    serde_json::from_value(serde_json::json!({
+        "type": "durable_step",
+        "step_id": "step",
+        "input": { "x": 1 }
+    }))
+    .expect("legacy DurableStep command remains readable for one release")
 }
 
 fn prepared_tool_call_with(call_id: &str, tool_name: &str) -> lash_core::PreparedToolCall {
@@ -981,10 +990,7 @@ fn restate_command_execution_plan_is_explicit_for_every_command() {
             RestateEffectExecution::JournaledRun,
         ),
         (
-            RuntimeEffectCommand::DurableStep {
-                step_id: "step".to_string(),
-                input: serde_json::json!({ "x": 1 }),
-            },
+            legacy_durable_step_command(),
             RestateEffectExecution::JournaledRun,
         ),
     ];
@@ -1741,10 +1747,12 @@ async fn restate_controller_executes_atomic_effect_inside_run() {
     let err = host
         .execute_effect(
             RuntimeEffectEnvelope::new(
-                runtime_invocation(RuntimeEffectKind::DurableStep, "step"),
-                RuntimeEffectCommand::DurableStep {
-                    step_id: "step".to_string(),
-                    input: serde_json::json!({ "value": 2 }),
+                runtime_invocation(RuntimeEffectKind::ToolAttempt, "step"),
+                RuntimeEffectCommand::ToolAttempt {
+                    call: prepared_tool_call(),
+                    execution_grant: None,
+                    attempt: 1,
+                    max_attempts: 1,
                 },
             ),
             RuntimeEffectLocalExecutor::unavailable(),
@@ -1755,7 +1763,7 @@ async fn restate_controller_executes_atomic_effect_inside_run() {
     assert_eq!(err.code, "runtime_effect_local_executor_unavailable");
     assert_eq!(
         context.runs.lock().expect("runs lock").as_slice(),
-        &["lash:session:turn:1:0:durable_step:step".to_string()]
+        &["lash:session:turn:1:0:tool_attempt:step".to_string()]
     );
     assert!(context.sleeps.lock().expect("sleeps lock").is_empty());
 }
@@ -3298,6 +3306,21 @@ enum RestateSegmentReplayPoint {
     Resume,
 }
 
+fn restate_segment_exec_outcome(ordinal: u64) -> RuntimeEffectOutcome {
+    RuntimeEffectOutcome::ExecCode {
+        result: Ok(lash_core::ExecResponse {
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: None,
+            duration_ms: 0,
+            terminal_finish: Some(serde_json::json!(ordinal)),
+        }),
+    }
+}
+
 #[tokio::test]
 async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants() {
     for replay_point in [
@@ -3350,27 +3373,25 @@ async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants()
                 RuntimeInvocation::effect(
                     lash_core::runtime::RuntimeScope::new(process_id.clone()),
                     format!("matrix-effect-{ordinal}"),
-                    RuntimeEffectKind::DurableStep,
+                    RuntimeEffectKind::ExecCode,
                     format!("matrix:{process_id}:{ordinal}"),
                 ),
-                RuntimeEffectCommand::DurableStep {
-                    step_id: format!("matrix-effect-{ordinal}"),
-                    input: serde_json::json!({"ordinal": ordinal}),
+                RuntimeEffectCommand::ExecCode {
+                    language: "lashlang".to_string(),
+                    code: format!("finish {ordinal}"),
                 },
             );
             let first_calls = Arc::clone(&local_calls);
             let first_effect = controller
                 .execute_effect(
                     envelope.clone(),
-                    RuntimeEffectLocalExecutor::durable_step(move |input| async move {
+                    RuntimeEffectLocalExecutor::testing(move |_| async move {
                         first_calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(input)
+                        Ok(restate_segment_exec_outcome(ordinal))
                     }),
                 )
                 .await
-                .expect("first matrix effect")
-                .into_durable_step()
-                .expect("first matrix durable-step outcome");
+                .expect("first matrix effect");
             let progress = lash_core::SegmentProgress {
                 effects_executed: 1,
                 journaled_bytes_estimate: None,
@@ -3384,16 +3405,18 @@ async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants()
             let replay_effect = controller
                 .execute_effect(
                     envelope,
-                    RuntimeEffectLocalExecutor::durable_step(move |input| async move {
+                    RuntimeEffectLocalExecutor::testing(move |_| async move {
                         replay_calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(input)
+                        Ok(restate_segment_exec_outcome(ordinal))
                     }),
                 )
                 .await
-                .expect("replayed matrix effect")
-                .into_durable_step()
-                .expect("replayed matrix durable-step outcome");
-            assert_eq!(replay_effect, first_effect, "replay effect identity");
+                .expect("replayed matrix effect");
+            assert_eq!(
+                serde_json::to_value(&replay_effect).expect("serialize replay effect"),
+                serde_json::to_value(&first_effect).expect("serialize first effect"),
+                "replay effect identity"
+            );
             assert_eq!(
                 local_calls.load(Ordering::SeqCst),
                 1,

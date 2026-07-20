@@ -142,6 +142,7 @@ struct AgentScenarioSetup {
     scripted_provider_responses: Vec<String>,
     tool_provider: Option<Arc<dyn ToolProvider>>,
     install_subagents: bool,
+    install_llm_tools: bool,
     max_turns: Option<usize>,
 }
 
@@ -151,6 +152,7 @@ impl AgentScenarioSetup {
             scripted_provider_responses,
             tool_provider: None,
             install_subagents: false,
+            install_llm_tools: false,
             max_turns: None,
         }
     }
@@ -167,6 +169,11 @@ impl AgentScenarioSetup {
 
     fn install_subagents(mut self, install_subagents: bool) -> Self {
         self.install_subagents = install_subagents;
+        self
+    }
+
+    fn install_llm_tools(mut self) -> Self {
+        self.install_llm_tools = true;
         self
     }
 
@@ -196,6 +203,9 @@ impl AgentScenarioSetup {
         }
         if self.install_subagents {
             builder = builder.plugin(subagents_plugin());
+        }
+        if self.install_llm_tools {
+            builder = builder.plugin(Arc::new(lash_llm_tools::LlmToolsPluginFactory::default()));
         }
         if let Some(max_turns) = self.max_turns {
             builder = builder.max_turns(max_turns);
@@ -583,7 +593,6 @@ impl AgentSessionTurnProcessScenario {
 
 struct AgentDurableInputSuspensionScenario {
     session_id: &'static str,
-    awaited_custom_key: &'static str,
     request_id: &'static str,
 }
 
@@ -591,7 +600,6 @@ impl Default for AgentDurableInputSuspensionScenario {
     fn default() -> Self {
         Self {
             session_id: "agent-scenario-durable-input-request",
-            awaited_custom_key: "mock-input-request:request-1",
             request_id: "request-1",
         }
     }
@@ -668,10 +676,9 @@ finish result.answer"#,
         assert!(
             matches!(
                 key.wait,
-                lash_core::AwaitEventWaitIdentity::Custom { ref key }
-                    if key == self.awaited_custom_key
+                lash_core::AwaitEventWaitIdentity::ToolCompletion { .. }
             ),
-            "durable input tool should use a custom await key: {:?}",
+            "durable input tool should use a tool-completion await key: {:?}",
             key.wait
         );
         key
@@ -697,7 +704,10 @@ finish result.answer"#,
         runtime: &AgentScenarioRuntime,
         key: lash_core::AwaitEventKey,
     ) -> Result<()> {
-        let answer = serde_json::json!({ "answer": "approved" });
+        let answer = serde_json::json!({
+            "request_id": self.request_id,
+            "answer": "approved"
+        });
         let outcome = runtime
             .core
             .completions()
@@ -716,7 +726,7 @@ finish result.answer"#,
             turn_output.final_value(),
             Some(&serde_json::json!("approved"))
         );
-        assert_eq!(tools.step_count(), 2);
+        assert_eq!(tools.attempt_count(), 1);
     }
 
     async fn assert_agent_contracts(&self, runtime: &AgentScenarioRuntime) -> Result<()> {
@@ -765,6 +775,104 @@ pub(super) async fn run_agent_session_turn_process_scenario() -> Result<()> {
 
 pub(super) async fn run_agent_durable_input_request_scenario() -> Result<()> {
     AgentDurableInputSuspensionScenario::default().run().await
+}
+
+pub(super) async fn run_agent_process_llm_query_scenario() -> Result<()> {
+    let runtime = AgentScenarioSetup::new(vec![
+        lashlang_block(
+            r#"
+process enrich(event: { email: str }) {
+  enriched = await llm.query({
+    task: "Classify the supplied email",
+    inputs: { event: event },
+    output: Type { category: str, confidence: float }
+  })?
+  finish enriched
+}
+handle = start enrich(event: { email: "hello@example.com" })
+finish (await handle)?"#,
+        ),
+        r#"{"kind":"value","value":{"category":"personal","confidence":0.98},"error":null}"#
+            .to_string(),
+    ])
+    .install_llm_tools()
+    .build()?;
+    let session = runtime
+        .core
+        .session("agent-scenario-process-llm-query")
+        .open()
+        .await?;
+    let result = session
+        .turn(TurnInput::text("Enrich the email in a durable process."))
+        .run()
+        .await?;
+    assert_eq!(
+        result.final_value(),
+        Some(&serde_json::json!({
+            "category": "personal",
+            "confidence": 0.98
+        }))
+    );
+    let requests = runtime.prompt_captures_snapshot();
+    assert_eq!(requests.len(), 2, "outer turn plus one llm_query call");
+    assert!(requests[1].stream_events.is_none());
+    assert!(matches!(
+        requests[1].output_spec,
+        Some(lash_core::llm::types::LlmOutputSpec::JsonSchema(_))
+    ));
+    Ok(())
+}
+
+pub(super) async fn run_agent_direct_completion_attempt_retry_scenario() -> Result<()> {
+    let runtime = AgentScenarioSetup::new(vec![
+        lashlang_block(
+            r#"
+process retry_direct(tools: Tools) {
+  value = await tools.retrying_direct({})?
+  finish value
+}
+handle = start retry_direct(tools: tools)
+finish (await handle)?"#,
+        ),
+        "first-provider-result".to_string(),
+        "second-provider-result".to_string(),
+    ])
+    .tool_provider(Arc::new(RetryingDirectTools))
+    .build()?;
+    let session = runtime
+        .core
+        .session("agent-scenario-direct-completion-attempt-retry")
+        .open()
+        .await?;
+    let result = session
+        .turn(TurnInput::text(
+            "Retry the complete atomic tool attempt once.",
+        ))
+        .run()
+        .await?;
+    assert_eq!(
+        result.final_value(),
+        Some(&serde_json::json!("second-provider-result"))
+    );
+    let requests = runtime.prompt_captures_snapshot();
+    assert_eq!(
+        requests.len(),
+        3,
+        "outer turn plus one provider call for each of two tool attempts"
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| format!("{:?}", message.blocks).contains("attempt 1"))
+    );
+    assert!(
+        requests[2]
+            .messages
+            .iter()
+            .any(|message| format!("{:?}", message.blocks).contains("attempt 2"))
+    );
+    Ok(())
 }
 
 fn scripted_provider(

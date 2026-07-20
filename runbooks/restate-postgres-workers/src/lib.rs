@@ -154,6 +154,7 @@ pub enum TurnScenario {
     SignalSuspend,
     SignalProcess,
     AsyncCompletion,
+    ProcessLlmQuery,
     DurableInputRequest,
     ParentDurableInputAfterChild,
     ToolBatch,
@@ -336,7 +337,7 @@ pub async fn ensure_e2e_schema(pool: &PgPool) -> Result<()> {
     .context("create e2e tool events table")?;
     sqlx::query(
         r#"
-        CREATE TABLE IF NOT EXISTS lash_e2e_durable_step_counts (
+        CREATE TABLE IF NOT EXISTS lash_e2e_tool_attempt_counts (
             workflow_id TEXT NOT NULL,
             step_id TEXT NOT NULL,
             count BIGINT NOT NULL,
@@ -348,7 +349,7 @@ pub async fn ensure_e2e_schema(pool: &PgPool) -> Result<()> {
     )
     .execute(&mut *tx)
     .await
-    .context("create e2e durable step counts table")?;
+    .context("create e2e tool attempt counts table")?;
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS lash_e2e_turn_events (
@@ -375,7 +376,7 @@ pub async fn reset_e2e_rows(pool: &PgPool) -> Result<()> {
         "DELETE FROM lash_e2e_worker_events",
         "DELETE FROM lash_e2e_failover_markers",
         "DELETE FROM lash_e2e_harness_signals",
-        "DELETE FROM lash_e2e_durable_step_counts",
+        "DELETE FROM lash_e2e_tool_attempt_counts",
         "DELETE FROM lash_e2e_provider_calls",
         "DELETE FROM lash_e2e_tool_events",
         "DELETE FROM lash_e2e_turn_events",
@@ -633,6 +634,7 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
         // handlers, so an ambient local queue pump would race those handlers
         // and cannot legally execute their effects.
         .disable_queued_work_driver()
+        .plugin(Arc::new(lash_llm_tools::LlmToolsPluginFactory::default()))
         .plugin(Arc::new(E2ePluginFactory {
             pool: config.storage.pool().clone(),
             worker_id: config.worker_id.clone(),
@@ -890,7 +892,7 @@ fn e2e_tool_provider(
             e2e_tool_definition(
                 "tool:crash_once",
                 "crash_once",
-                "Crash one worker once for a requested workflow, after previous durable effects replay.",
+                "Crash one worker once for a requested workflow, after previous atomic attempts replay.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1291,53 +1293,20 @@ impl E2eTools {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("input?")
             .to_string();
-        let durable = match call.context.durable_effects() {
-            Ok(durable) => durable,
-            Err(err) => return ToolResult::err_fmt(err),
-        };
-        let create_pool = self.pool.clone();
-        let create_workflow_id = workflow_id.clone();
-        let create_worker_id = self.worker_id.clone();
-        let opened = match durable
-            .run_json(
-                "create",
-                serde_json::json!({
-                    "workflow_id": workflow_id,
-                    "question": question,
-                }),
-                move |input| {
-                    let pool = create_pool.clone();
-                    let workflow_id = create_workflow_id.clone();
-                    let worker_id = create_worker_id.clone();
-                    async move {
-                        record_durable_step(&pool, &workflow_id, "create", &worker_id)
-                            .await
-                            .map_err(|err| {
-                                lash_core::RuntimeError::new(
-                                    "e2e_durable_step",
-                                    format!("record create durable step: {err}"),
-                                )
-                            })?;
-                        Ok(serde_json::json!({
-                            "request_id": format!("{workflow_id}:request-1"),
-                            "question": input["question"].clone(),
-                            "worker_id": worker_id,
-                        }))
-                    }
-                },
-            )
-            .await
-        {
-            Ok(value) => value,
-            Err(err) => return ToolResult::err_fmt(err),
-        };
-        let key = match durable
-            .external_event_key(format!("e2e-durable-input:{workflow_id}:request-1"))
-            .await
-        {
+        let key = match call.context.completion_key().await {
             Ok(key) => key,
             Err(err) => return ToolResult::err_fmt(err),
         };
+        let opened = serde_json::json!({
+            "request_id": format!("{workflow_id}:request-1"),
+            "question": question,
+            "worker_id": self.worker_id,
+        });
+        if let Err(err) =
+            record_tool_attempt(&self.pool, &workflow_id, "attempt", &self.worker_id).await
+        {
+            return ToolResult::err_fmt(err);
+        }
         let call_id = call.context.tool_call_id().map(ToOwned::to_owned);
         let args = call.args.to_owned();
         let key_json = serde_json::to_value(&key).unwrap_or(serde_json::Value::Null);
@@ -1354,72 +1323,28 @@ impl E2eTools {
             }),
         )
         .await;
-        if let Err(err) = durable
-            .emit_process_event(
-                "process.yield",
-                serde_json::json!({
-                    "type": "work.input_request.opened",
-                    "workflow_id": workflow_id,
-                    "request_id": opened["request_id"].clone(),
-                    "await_key_id": key.key_id,
-                }),
-            )
+        let process_event = lash_core::ProcessEventAppendRequest::new(
+            "process.yield",
+            serde_json::json!({
+                "type": "work.input_request.opened",
+                "workflow_id": workflow_id,
+                "request_id": opened["request_id"].clone(),
+                "await_key_id": key.key_id,
+            }),
+        )
+        .with_replay_key(format!(
+            "tool:{}:input-request-opened",
+            call_id.as_deref().unwrap_or("unknown")
+        ));
+        if let Err(err) = call
+            .context
+            .process_events()
+            .emit_request(process_event)
             .await
         {
             return ToolResult::err_fmt(err);
         }
-        let resolved = match durable.await_event_json(key).await {
-            Ok(value) => value,
-            Err(err) => return ToolResult::err_fmt(err),
-        };
-        let complete_pool = self.pool.clone();
-        let complete_workflow_id = workflow_id.clone();
-        let complete_worker_id = self.worker_id.clone();
-        let completed = match durable
-            .run_json(
-                "complete",
-                serde_json::json!({
-                    "workflow_id": workflow_id,
-                    "request_id": opened["request_id"].clone(),
-                    "answer": resolved["answer"].clone(),
-                }),
-                move |input| {
-                    let pool = complete_pool.clone();
-                    let workflow_id = complete_workflow_id.clone();
-                    let worker_id = complete_worker_id.clone();
-                    async move {
-                        record_durable_step(&pool, &workflow_id, "complete", &worker_id)
-                            .await
-                            .map_err(|err| {
-                                lash_core::RuntimeError::new(
-                                    "e2e_durable_step",
-                                    format!("record complete durable step: {err}"),
-                                )
-                            })?;
-                        Ok(serde_json::json!({
-                            "request_id": input["request_id"].clone(),
-                            "answer": input["answer"].clone(),
-                            "worker_id": worker_id,
-                        }))
-                    }
-                },
-            )
-            .await
-        {
-            Ok(value) => value,
-            Err(err) => return ToolResult::err_fmt(err),
-        };
-        let _ = record_tool_event(
-            &self.pool,
-            &workflow_id,
-            &self.worker_id,
-            call.name,
-            call_id.as_deref(),
-            args,
-            completed.clone(),
-        )
-        .await;
-        ToolResult::ok(completed)
+        ToolResult::pending(lash_core::PendingCompletion::new())
     }
 
     /// Foreground (turn-scoped) durable wait used to exercise the Restate
@@ -1433,14 +1358,7 @@ impl E2eTools {
     /// terminal result.
     async fn durable_wait_probe(&self, call: ToolCall<'_>) -> ToolResult {
         let workflow_id = workflow_id_from_args(call.context.session_id(), call.args);
-        let durable = match call.context.durable_effects() {
-            Ok(durable) => durable,
-            Err(err) => return ToolResult::err_fmt(err),
-        };
-        let key = match durable
-            .external_event_key(format!("e2e-durable-wait:{workflow_id}"))
-            .await
-        {
+        let key = match call.context.completion_key().await {
             Ok(key) => key,
             Err(err) => return ToolResult::err_fmt(err),
         };
@@ -1461,54 +1379,11 @@ impl E2eTools {
             }),
         )
         .await;
-        match durable.await_event_json(key).await {
-            Ok(value) => {
-                let answer = value
-                    .get("answer")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let result = serde_json::json!({
-                    "cancelled": false,
-                    "answer": answer,
-                    "worker_id": self.worker_id,
-                });
-                let _ = record_tool_event(
-                    &self.pool,
-                    &workflow_id,
-                    &self.worker_id,
-                    call.name,
-                    call_id.as_deref(),
-                    args,
-                    result.clone(),
-                )
-                .await;
-                ToolResult::ok(result)
-            }
-            Err(err) if err.code.as_str() == "durable_effect_event_cancelled" => {
-                let result = serde_json::json!({
-                    "cancelled": true,
-                    "answer": "",
-                    "worker_id": self.worker_id,
-                });
-                let _ = record_tool_event(
-                    &self.pool,
-                    &workflow_id,
-                    &self.worker_id,
-                    "durable_wait_probe.cancelled",
-                    call_id.as_deref(),
-                    args,
-                    result.clone(),
-                )
-                .await;
-                ToolResult::ok(result)
-            }
-            Err(err) => ToolResult::err_fmt(err),
-        }
+        ToolResult::pending(lash_core::PendingCompletion::new())
     }
 }
 
-async fn record_durable_step(
+async fn record_tool_attempt(
     pool: &PgPool,
     workflow_id: &str,
     step_id: &str,
@@ -1516,12 +1391,12 @@ async fn record_durable_step(
 ) -> Result<i64> {
     let count = sqlx::query_scalar::<_, i64>(
         r#"
-        INSERT INTO lash_e2e_durable_step_counts (
+        INSERT INTO lash_e2e_tool_attempt_counts (
             workflow_id, step_id, count, last_worker_id, updated_at_ms
         )
         VALUES ($1, $2, 1, $3, $4)
         ON CONFLICT (workflow_id, step_id) DO UPDATE
-        SET count = lash_e2e_durable_step_counts.count + 1,
+        SET count = lash_e2e_tool_attempt_counts.count + 1,
             last_worker_id = EXCLUDED.last_worker_id,
             updated_at_ms = EXCLUDED.updated_at_ms
         RETURNING count
@@ -1533,7 +1408,7 @@ async fn record_durable_step(
     .bind(current_epoch_ms() as i64)
     .fetch_one(pool)
     .await
-    .with_context(|| format!("record durable step `{step_id}` for `{workflow_id}`"))?;
+    .with_context(|| format!("record tool attempt `{step_id}` for `{workflow_id}`"))?;
     Ok(count)
 }
 

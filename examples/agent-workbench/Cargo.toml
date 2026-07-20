@@ -44,6 +44,7 @@ uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 lash-lashlang-runtime = { workspace = true }
+lash-llm-tools = { workspace = true }
 lash = { workspace = true, features = ["rlm", "testing"] }
 lash-core = { workspace = true }
 lash-remote-protocol = { workspace = true, features = ["core-conversions"] }

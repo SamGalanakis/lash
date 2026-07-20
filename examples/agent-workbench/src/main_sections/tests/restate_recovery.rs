@@ -1,5 +1,101 @@
 #[test]
 #[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
+fn live_restate_process_llm_query_with_typed_output_succeeds() {
+    run_async_test_on_stack_budget_multi_thread("workbench-process-llm-query-e2e", 4, || {
+        live_restate_process_llm_query_with_typed_output_succeeds_inner()
+    });
+}
+
+async fn live_restate_process_llm_query_with_typed_output_succeeds_inner() {
+    let ingress_url = std::env::var("RESTATE_INGRESS_URL")
+        .expect("RESTATE_INGRESS_URL must be set by the workbench Restate E2E recipe");
+    let admin_url =
+        std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:19071".to_string());
+    let endpoint_bind: SocketAddr = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:19081".to_string())
+        .parse()
+        .expect("valid workbench E2E endpoint bind");
+    let endpoint_url = std::env::var("AGENT_WORKBENCH_E2E_ENDPOINT_URL")
+        .unwrap_or_else(|_| format!("http://{endpoint_bind}"));
+    let data_dir = std::env::temp_dir().join(format!(
+        "agent-workbench-process-llm-query-e2e-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&data_dir).expect("create process llm_query E2E data dir");
+    let provider_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider_calls_for_provider = Arc::clone(&provider_calls);
+    let provider = lash::testing::TestProvider::builder()
+        .kind("workbench-process-llm-query-e2e")
+        .complete(move |request| {
+            let call = provider_calls_for_provider
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                match call {
+                    0 => Ok(text_response(
+                        r#"<lashlang>
+process enrich(event: { email: str }) {
+  enriched = await llm.query({
+    task: "Classify the supplied email",
+    inputs: { event: event },
+    output: Type { category: str, confidence: float }
+  })?
+  finish enriched
+}
+handle = start enrich(event: { email: "hello@example.com" })
+finish (await handle)?
+</lashlang>"#,
+                    )),
+                    1 => {
+                        assert!(request.stream_events.is_none());
+                        assert!(matches!(
+                            request.output_spec,
+                            Some(lash_core::llm::types::LlmOutputSpec::JsonSchema(_))
+                        ));
+                        Ok(text_response(
+                            r#"{"kind":"value","value":{"category":"personal","confidence":0.98},"error":null}"#,
+                        ))
+                    }
+                    other => panic!("unexpected process llm_query provider call {other}"),
+                }
+            }
+        })
+        .build()
+        .into_handle();
+    let harness = live_workbench_restate_state_with_provider(
+        &data_dir,
+        ingress_url,
+        provider,
+        WorkbenchSessionIds::fresh(),
+        ActiveTurns::default(),
+    )
+    .await;
+    restate::spawn_restate_endpoint(
+        endpoint_bind,
+        harness.state.clone(),
+        harness.process_deployment,
+        harness.process_worker,
+    );
+    wait_for_endpoint_socket(endpoint_bind).await;
+    register_restate_deployment(&admin_url, &endpoint_url).await;
+
+    let invocation = run_workbench_turn_via_restate(
+        &harness.state,
+        "Run the typed process llm_query repro.",
+    )
+    .await;
+    wait_for_restate_invocation_success(&harness.state, &invocation, Duration::from_secs(30)).await;
+    wait_for_workbench_message(&harness.state, "personal", Duration::from_secs(30)).await;
+    assert_eq!(
+        provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "outer turn plus exactly one in-attempt llm_query provider call"
+    );
+    println!("workbench process-llm-query gate passed: typed-output; provider-calls=2");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+#[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
 fn live_restate_ingress_owner_restart_resumes_and_remains_cancellable() {
     if std::env::var_os("AGENT_WORKBENCH_RECOVERY_E2E_CHILD").is_some() {
         run_async_test_on_stack_budget_multi_thread("workbench-recovery-child", 4, || {

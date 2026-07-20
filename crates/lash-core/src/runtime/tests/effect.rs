@@ -213,12 +213,8 @@ impl RuntimeEffectController for RecordingEffectController {
                 resolution: crate::Resolution::Ok(serde_json::json!(null)),
             }),
             RuntimeEffectCommand::DurableStep { step_id, input } => {
-                local_executor
-                    .execute(RuntimeEffectEnvelope::new(
-                        envelope.invocation,
-                        RuntimeEffectCommand::DurableStep { step_id, input },
-                    ))
-                    .await
+                let _ = (step_id, local_executor);
+                Ok(RuntimeEffectOutcome::DurableStep { value: input })
             }
             RuntimeEffectCommand::Direct { request, .. } => {
                 // Both the text-only (`direct_completion`) and full-response

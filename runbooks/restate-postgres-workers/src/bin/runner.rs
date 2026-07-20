@@ -227,6 +227,21 @@ async fn async_main() -> Result<()> {
         wait_for_terminal_result(storage.pool(), &async_request.workflow_id).await?;
     assert_async_completion_response(&async_response)?;
 
+    for (workflow_id, fail_once) in [
+        ("e2e-process-llm-query", false),
+        ("e2e-process-llm-query-replay", true),
+    ] {
+        let request = TurnRequest {
+            workflow_id: workflow_id.to_string(),
+            fail_once,
+            scenario: TurnScenario::ProcessLlmQuery,
+            signal: None,
+        };
+        submit_workflow(&ingress_url, &request).await?;
+        let response = wait_for_terminal_result(storage.pool(), workflow_id).await?;
+        assert_process_llm_query_response(&response)?;
+    }
+
     let durable_input_request = TurnRequest {
         workflow_id: "e2e-durable-input".to_string(),
         fail_once: false,
@@ -239,7 +254,11 @@ async fn async_main() -> Result<()> {
     let durable_resolve = RestateEffectHost::with_ingress_url(ingress_url.clone())
         .resolve_await_event(
             &durable_key,
-            lash_core::Resolution::Ok(json!({ "answer": "durable-approved" })),
+            lash_core::Resolution::Ok(json!({
+                "request_id": "e2e-durable-input:request-1",
+                "answer": "durable-approved",
+                "worker_id": "runner"
+            })),
         )
         .await
         .context("resolve durable input await key")?;
@@ -264,7 +283,11 @@ async fn async_main() -> Result<()> {
     let parent_durable_resolve = RestateEffectHost::with_ingress_url(ingress_url.clone())
         .resolve_await_event(
             &parent_durable_key,
-            lash_core::Resolution::Ok(json!({ "answer": "parent-approved" })),
+            lash_core::Resolution::Ok(json!({
+                "request_id": "e2e-parent-durable-input-after-child:request-1",
+                "answer": "parent-approved",
+                "worker_id": "runner"
+            })),
         )
         .await
         .context("resolve parent durable input await key")?;
@@ -364,7 +387,7 @@ async fn async_main() -> Result<()> {
     assert_frame_switch_provider_order(storage.pool()).await?;
     assert_tool_and_turn_telemetry(storage.pool()).await?;
     assert_tool_batch_side_effects(storage.pool()).await?;
-    assert_durable_input_steps(storage.pool()).await?;
+    assert_durable_input_attempts(storage.pool()).await?;
     assert_trigger_delivery(storage.pool(), &trigger_process_id).await?;
     assert_attachments_round_trip(storage.pool(), &attachment_store, &responses).await?;
     assert_reopened_session_agrees(
@@ -1001,6 +1024,32 @@ fn assert_durable_input_response(response: &TurnResponse) -> Result<()> {
             .and_then(Value::as_str)
             .is_some_and(|request_id| request_id.ends_with(":request-1")),
         "durable input request id mismatch: {}",
+        response.final_value
+    );
+    Ok(())
+}
+
+fn assert_process_llm_query_response(response: &TurnResponse) -> Result<()> {
+    anyhow::ensure!(
+        response.final_text == "process-llm-query-complete",
+        "workflow `{}` process llm_query final mismatch: {}",
+        response.workflow_id,
+        response.final_text
+    );
+    anyhow::ensure!(
+        response.final_value.get("category").and_then(Value::as_str) == Some("personal"),
+        "workflow `{}` process llm_query category mismatch: {}",
+        response.workflow_id,
+        response.final_value
+    );
+    anyhow::ensure!(
+        response
+            .final_value
+            .get("confidence")
+            .and_then(Value::as_f64)
+            == Some(0.98),
+        "workflow `{}` process llm_query confidence mismatch: {}",
+        response.workflow_id,
         response.final_value
     );
     Ok(())
@@ -1925,7 +1974,11 @@ async fn drive_durable_wait_index_scenarios(
     let reregister_resolve = host
         .resolve_await_event(
             &reregister_key,
-            lash_core::Resolution::Ok(json!({ "answer": "post-cancel-approved" })),
+            lash_core::Resolution::Ok(json!({
+                "cancelled": false,
+                "answer": "post-cancel-approved",
+                "worker_id": "runner"
+            })),
         )
         .await
         .context("resolve re-registered durable wait")?;
@@ -2417,7 +2470,11 @@ async fn assert_worker_distribution(pool: &sqlx::PgPool) -> Result<()> {
 }
 
 async fn assert_failover(pool: &sqlx::PgPool) -> Result<()> {
-    for workflow_id in ["e2e-failover", "e2e-tool-batch-failover"] {
+    for workflow_id in [
+        "e2e-failover",
+        "e2e-tool-batch-failover",
+        "e2e-process-llm-query-replay",
+    ] {
         // The crash injector keeps the marker's logical worker unavailable for
         // this workflow even after Compose restarts its container. Completion
         // therefore proves takeover by the healthy peer rather than depending
@@ -2493,6 +2550,20 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
         tool_batch_failover_calls == 1,
         "expected one durable tool-batch failover provider completion, got {tool_batch_failover_calls}"
     );
+    for workflow_id in ["e2e-process-llm-query", "e2e-process-llm-query-replay"] {
+        let direct_calls: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lash_e2e_provider_calls
+             WHERE workflow_id = $1 AND scenario = 'process_llm_query_direct'",
+        )
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("count process llm_query direct calls for `{workflow_id}`"))?;
+        anyhow::ensure!(
+            direct_calls == 1,
+            "workflow `{workflow_id}` invoked the llm_query provider {direct_calls} times; completed-attempt replay must reuse the recorded attempt"
+        );
+    }
     let scenarios: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT scenario FROM lash_e2e_provider_calls ORDER BY scenario",
     )
@@ -2505,6 +2576,8 @@ async fn assert_provider_calls(pool: &sqlx::PgPool) -> Result<()> {
         "durable_wait_probe",
         "kitchen_sink",
         "parent_durable_input_after_child",
+        "process_llm_query",
+        "process_llm_query_direct",
         "queued_wake",
         "trigger_setup",
         "signal_suspend",
@@ -2583,28 +2656,26 @@ async fn assert_tool_and_turn_telemetry(pool: &sqlx::PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn assert_durable_input_steps(pool: &sqlx::PgPool) -> Result<()> {
+async fn assert_durable_input_attempts(pool: &sqlx::PgPool) -> Result<()> {
     for workflow_id in ["e2e-durable-input", "e2e-parent-durable-input-after-child"] {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT step_id, count
-             FROM lash_e2e_durable_step_counts
+             FROM lash_e2e_tool_attempt_counts
              WHERE workflow_id = $1
              ORDER BY step_id",
         )
         .bind(workflow_id)
         .fetch_all(pool)
         .await
-        .with_context(|| format!("load durable input step counts for `{workflow_id}`"))?;
+        .with_context(|| format!("load durable input attempt counts for `{workflow_id}`"))?;
         let counts = rows
             .into_iter()
             .collect::<std::collections::BTreeMap<_, _>>();
-        for step_id in ["complete", "create"] {
-            let count = counts.get(step_id).copied().unwrap_or_default();
-            anyhow::ensure!(
-                count == 1,
-                "workflow `{workflow_id}` durable input step `{step_id}` ran {count} times; counts={counts:?}"
-            );
-        }
+        let count = counts.get("attempt").copied().unwrap_or_default();
+        anyhow::ensure!(
+            count == 1,
+            "workflow `{workflow_id}` durable input attempt ran {count} times; counts={counts:?}"
+        );
     }
     Ok(())
 }

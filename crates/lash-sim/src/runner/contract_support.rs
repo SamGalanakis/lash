@@ -423,7 +423,7 @@ fn contract_app_lookup_definition() -> lash_core::ToolDefinition {
 
 pub(super) struct ContractDurableInputTools {
     key_tx: Mutex<Option<tokio::sync::oneshot::Sender<Result<lash_core::AwaitEventKey, String>>>>,
-    step_count: Mutex<usize>,
+    attempt_count: Mutex<usize>,
 }
 
 impl ContractDurableInputTools {
@@ -432,16 +432,16 @@ impl ContractDurableInputTools {
     ) -> Self {
         Self {
             key_tx: Mutex::new(Some(key_tx)),
-            step_count: Mutex::new(0),
+            attempt_count: Mutex::new(0),
         }
     }
 
-    pub(super) fn step_count(&self) -> usize {
-        *self.step_count.lock().expect("durable step count")
+    pub(super) fn attempt_count(&self) -> usize {
+        *self.attempt_count.lock().expect("atomic attempt count")
     }
 
-    fn increment_step_count(&self) {
-        *self.step_count.lock().expect("durable step count") += 1;
+    fn increment_attempt_count(&self) {
+        *self.attempt_count.lock().expect("atomic attempt count") += 1;
     }
 
     fn send_key_result(&self, result: Result<lash_core::AwaitEventKey, String>) {
@@ -469,94 +469,36 @@ impl lash_core::ToolProvider for ContractDurableInputTools {
                 call.name
             ));
         }
-        let durable = match call.context.durable_effects() {
-            Ok(durable) => durable,
-            Err(err) => {
-                self.send_key_result(Err(err.to_string()));
-                return lash_core::ToolResult::err_fmt(err);
-            }
-        };
         let question = call
             .args
             .get("question")
             .and_then(Value::as_str)
             .unwrap_or("answer")
             .to_string();
-        let opened = match durable
-            .run_json(
-                "create",
-                json!({ "question": question }),
-                |input| async move {
-                    Ok(json!({
-                        "request_id": "request-1",
-                        "question": input["question"].clone(),
-                    }))
-                },
-            )
-            .await
-        {
-            Ok(value) => {
-                self.increment_step_count();
-                value
-            }
-            Err(err) => {
-                self.send_key_result(Err(err.to_string()));
-                return lash_core::ToolResult::err_fmt(err);
-            }
-        };
-        let key = match durable
-            .external_event_key("mock-input-request:request-1")
-            .await
-        {
+        let key = match call.context.completion_key().await {
             Ok(key) => key,
             Err(err) => {
                 self.send_key_result(Err(err.to_string()));
                 return lash_core::ToolResult::err_fmt(err);
             }
         };
-        if let Err(err) = durable
-            .emit_process_event(
-                "process.yield",
-                json!({
-                    "type": "work.input_request.opened",
-                    "request_id": opened["request_id"].clone(),
-                    "question": opened["question"].clone(),
-                    "await_key_id": key.key_id,
-                }),
-            )
-            .await
-        {
+        self.increment_attempt_count();
+        let event = lash_core::ProcessEventAppendRequest::new(
+            "process.yield",
+            json!({
+                "type": "work.input_request.opened",
+                "request_id": "request-1",
+                "question": question,
+                "await_key_id": key.key_id,
+            }),
+        )
+        .with_replay_key("mock-input-request:request-1");
+        if let Err(err) = call.context.process_events().emit_request(event).await {
             self.send_key_result(Err(err.to_string()));
             return lash_core::ToolResult::err_fmt(err);
         }
-        self.send_key_result(Ok(key.clone()));
-
-        let resolved = match durable.await_event_json(key).await {
-            Ok(value) => value,
-            Err(err) => return lash_core::ToolResult::err_fmt(err),
-        };
-        match durable
-            .run_json(
-                "complete",
-                json!({
-                    "request_id": opened["request_id"].clone(),
-                    "answer": resolved["answer"].clone(),
-                }),
-                |input| async move {
-                    Ok(json!({
-                        "request_id": input["request_id"].clone(),
-                        "answer": input["answer"].clone(),
-                    }))
-                },
-            )
-            .await
-        {
-            Ok(value) => {
-                self.increment_step_count();
-                lash_core::ToolResult::ok(value)
-            }
-            Err(err) => lash_core::ToolResult::err_fmt(err),
-        }
+        self.send_key_result(Ok(key));
+        lash_core::ToolResult::pending(lash_core::PendingCompletion::new())
     }
 }
 

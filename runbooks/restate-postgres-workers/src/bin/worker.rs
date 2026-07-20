@@ -500,6 +500,7 @@ impl AppState {
                 TurnScenario::SignalSuspend => "signal-suspend-started",
                 TurnScenario::SignalProcess => "signal-sent",
                 TurnScenario::AsyncCompletion => EXPECTED_ASYNC_TEXT,
+                TurnScenario::ProcessLlmQuery => "process-llm-query-complete",
                 TurnScenario::DurableInputRequest => EXPECTED_DURABLE_INPUT_TEXT,
                 TurnScenario::ParentDurableInputAfterChild => EXPECTED_PARENT_DURABLE_INPUT_TEXT,
                 TurnScenario::ToolBatch => {
@@ -656,6 +657,10 @@ fn prompt_for_request(request: &TurnRequest) -> String {
         TurnScenario::AsyncCompletion => format!(
             "Run the E2E async host tool completion scenario. workflow_id={} async_completion=true",
             request.workflow_id
+        ),
+        TurnScenario::ProcessLlmQuery => format!(
+            "Run the process llm_query scenario. workflow_id={} process_llm_query=true fail_once={}",
+            request.workflow_id, request.fail_once
         ),
         TurnScenario::DurableInputRequest => format!(
             "Run the E2E durable input request scenario. workflow_id={} durable_input_request=true",
