@@ -14,6 +14,10 @@ fn main() -> AnyhowResult<()> {
 async fn async_main() -> AnyhowResult<()> {
     let _ = dotenvy::dotenv();
 
+    let dev_provider_scenario = failure_provider::DevProviderScenario::from_environment()?;
+    let api_key = std::env::var(OPENROUTER_API_KEY_ENV).unwrap_or_default();
+    validate_provider_credentials(dev_provider_scenario, &api_key)?;
+
     let addr: SocketAddr = std::env::var("AGENT_WORKBENCH_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3030".to_string())
         .parse()
@@ -52,11 +56,6 @@ async fn async_main() -> AnyhowResult<()> {
         Arc::new(JsonlTraceSink::new(lashlang_execution_path.clone())) as Arc<dyn TraceSink>,
     ])) as Arc<dyn TraceSink>;
 
-    let dev_provider_scenario = failure_provider::DevProviderScenario::from_environment()?;
-    let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
-    if api_key.trim().is_empty() && dev_provider_scenario.is_none() {
-        eprintln!("warning: OPENROUTER_API_KEY is empty; turns will fail until it is set");
-    }
     let tavily_api_key = std::env::var("TAVILY_API_KEY").unwrap_or_default();
     if tavily_api_key.trim().is_empty() {
         eprintln!("warning: TAVILY_API_KEY is empty; web tools will return configuration errors");
@@ -288,4 +287,44 @@ async fn async_main() -> AnyhowResult<()> {
         .context("bind listener")?;
     axum::serve(listener, app).await.context("serve")?;
     Ok(())
+}
+
+fn validate_provider_credentials(
+    dev_provider_scenario: Option<failure_provider::DevProviderScenario>,
+    openrouter_api_key: &str,
+) -> AnyhowResult<()> {
+    if dev_provider_scenario.is_none() && openrouter_api_key.trim().is_empty() {
+        return Err(anyhow!(
+            "agent-workbench: {OPENROUTER_API_KEY_ENV} is not set and no dev provider scenario is active — refusing to start (set the key or {})",
+            failure_provider::DEV_PROVIDER_SCENARIO_ENV
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn startup_refuses_without_openrouter_key_or_dev_provider_scenario() {
+        let error = validate_provider_credentials(None, "   ")
+            .expect_err("missing OpenRouter credentials must refuse startup");
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("agent-workbench: OPENROUTER_API_KEY is not set"),
+            "unexpected startup refusal: {error:#}"
+        );
+    }
+
+    #[test]
+    fn startup_allows_dev_provider_scenario_without_openrouter_key() {
+        validate_provider_credentials(
+            Some(failure_provider::DevProviderScenario::AuthFailureOnce),
+            "",
+        )
+        .expect("a dev provider scenario supports keyless startup");
+    }
 }
