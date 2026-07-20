@@ -9,7 +9,9 @@ use futures_util::Stream;
 use tokio::sync::broadcast;
 use tokio_util::sync::ReusableBoxFuture;
 
-use crate::runtime::{LashRuntime, RuntimeSessionState};
+use crate::runtime::LashRuntime;
+#[cfg(test)]
+use crate::runtime::RuntimeSessionState;
 
 const SESSION_CURSOR_PREFIX: &str = "lashsc1:";
 const DEFAULT_LIVE_REPLAY_CAPACITY: usize = 2048;
@@ -31,9 +33,15 @@ impl SessionRevision {
     }
 
     pub(super) fn from_runtime(runtime: &LashRuntime) -> Self {
-        Self::from_state(&runtime.export_persisted_state())
+        Self(
+            runtime
+                .state
+                .head_revision
+                .unwrap_or(runtime.state.turn_index as u64),
+        )
     }
 
+    #[cfg(test)]
     pub(super) fn from_state(state: &RuntimeSessionState) -> Self {
         Self(state.head_revision.unwrap_or(state.turn_index as u64))
     }
