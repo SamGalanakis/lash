@@ -17,7 +17,16 @@ export LASH_E2E_BIN_DIR="${CARGO_TARGET_DIR:-$repo/target}/debug"
 cleanup() {
   status=$?
   if [ "$status" -ne 0 ]; then
-    "${compose[@]}" logs --no-color >&2 || true
+    echo "distributed workers E2E failed with status $status; dumping compose diagnostics" >&2
+    "${compose[@]}" ps -a >&2 || true
+    while IFS= read -r container_id; do
+      [ -n "$container_id" ] || continue
+      service="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$container_id" 2>/dev/null || echo unknown)"
+      echo "===== service=$service container=$container_id logs =====" >&2
+      docker logs --timestamps "$container_id" >&2 || true
+      echo "===== service=$service container=$container_id processes =====" >&2
+      docker top "$container_id" -eo pid,ppid,stat,wchan:28,etime,cmd >&2 || true
+    done < <("${compose[@]}" ps -a -q 2>/dev/null || true)
   fi
   if [ "${LASH_E2E_KEEP:-0}" != "1" ]; then
     "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
