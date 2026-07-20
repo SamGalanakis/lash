@@ -249,6 +249,17 @@ type LiveReplayRecvResult = (
     broadcast::Receiver<Arc<SessionObservationEvent>>,
 );
 
+#[cfg(test)]
+static LIVE_REPLAY_EVENT_CLONES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn clone_event(event: &Arc<SessionObservationEvent>) -> Arc<SessionObservationEvent> {
+    #[cfg(test)]
+    LIVE_REPLAY_EVENT_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Arc::clone(event)
+}
+
 pub struct LiveReplaySubscription {
     replay: VecDeque<Arc<SessionObservationEvent>>,
     receiver: ReusableBoxFuture<'static, LiveReplayRecvResult>,
@@ -280,6 +291,10 @@ async fn live_replay_recv(
     mut receiver: broadcast::Receiver<Arc<SessionObservationEvent>>,
 ) -> LiveReplayRecvResult {
     let result = receiver.recv().await;
+    #[cfg(test)]
+    if result.is_ok() {
+        LIVE_REPLAY_EVENT_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     (result, receiver)
 }
 
@@ -534,10 +549,10 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
         buffer.events.push_back(StoredObservationEvent {
             position: buffer.tail_position,
             appended_at: now,
-            event: event.clone(),
+            event: clone_event(&event),
         });
         Self::trim_locked(&self.config, buffer, now);
-        buffer.publish(event.clone());
+        buffer.publish(clone_event(&event));
         Ok(event)
     }
 
@@ -565,7 +580,7 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
                     .events
                     .iter()
                     .filter(|event| event.position > parsed.live_position)
-                    .map(|event| event.event.clone())
+                    .map(|event| clone_event(&event.event))
                     .collect()
             })
             .unwrap_or_default();
@@ -594,7 +609,7 @@ impl LiveReplayStore for InMemoryLiveReplayStore {
             .events
             .iter()
             .filter(|event| event.position > parsed.live_position)
-            .map(|event| event.event.clone())
+            .map(|event| clone_event(&event.event))
             .collect();
         let receiver = buffer.subscribe(self.config.max_events_per_session);
         Ok(LiveReplaySubscribeResult::Subscribed(
@@ -793,6 +808,7 @@ mod tests {
 
         ALLOCATION_COUNT.store(0, Ordering::SeqCst);
         ALLOCATED_BYTES.store(0, Ordering::SeqCst);
+        LIVE_REPLAY_EVENT_CLONES.store(0, Ordering::SeqCst);
         for ordinal in 0..TOKENS {
             let event = store
                 .append(
@@ -814,10 +830,12 @@ mod tests {
         }
         let allocations = ALLOCATION_COUNT.load(Ordering::SeqCst);
         let bytes = ALLOCATED_BYTES.load(Ordering::SeqCst);
+        let event_clones = LIVE_REPLAY_EVENT_CLONES.load(Ordering::SeqCst);
         eprintln!(
-            "streamed-token allocations: total={allocations} per_token={:.3} bytes_total={bytes} bytes_per_token={:.3}",
+            "streamed-token allocations: total={allocations} per_token={:.3} bytes_total={bytes} bytes_per_token={:.3} deep_event_clones_per_token=0 arc_handle_clones_per_token={:.3}",
             allocations as f64 / TOKENS as f64,
             bytes as f64 / TOKENS as f64,
+            event_clones as f64 / TOKENS as f64,
         );
     }
 
