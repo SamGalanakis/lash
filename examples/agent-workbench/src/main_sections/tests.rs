@@ -31,6 +31,30 @@ mod tests {
         .expect("runtime thread")
     }
 
+    #[test]
+    fn session_event_registry_isolates_channels_and_recreates_after_removal() {
+        let registry = SessionEventRegistry::new(4);
+        let mut session_a = registry.subscribe("session-a");
+        let mut session_b = registry.subscribe("session-b");
+
+        registry.publish("session-a", StreamItem::Done);
+        assert!(matches!(session_a.try_recv(), Ok(StreamItem::Done)));
+        assert!(matches!(
+            session_b.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        registry.remove("session-a");
+        assert!(!registry.contains("session-a"));
+        let mut replacement_a = registry.subscribe("session-a");
+        registry.publish("session-a", StreamItem::Done);
+        assert!(matches!(replacement_a.try_recv(), Ok(StreamItem::Done)));
+        assert!(matches!(
+            session_a.try_recv(),
+            Err(broadcast::error::TryRecvError::Closed)
+        ));
+    }
+
     pub(super) fn explicit_durable_test_facets(
         data_dir: &std::path::Path,
     ) -> lash::LashCoreBuilder {
@@ -412,8 +436,7 @@ mod tests {
             .into_handle();
         let model =
             lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
-        let (event_tx, _) = broadcast::channel(16);
-        let mut events = event_tx.subscribe();
+        let event_tx = SessionEventRegistry::new(16);
         let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
@@ -449,15 +472,13 @@ mod tests {
             mail_world: mail::MailWorld::new(),
             active_turns: ActiveTurns::default(),
         };
+        let mut events = state.event_tx.subscribe(&state.current_session_id());
 
         state.publish(StreamItem::Done);
 
         assert!(matches!(
             events.try_recv(),
-            Ok(SessionStreamItem {
-                item: StreamItem::Done,
-                ..
-            })
+            Ok(StreamItem::Done)
         ));
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -672,8 +693,7 @@ finish "gap source"
             .into_handle();
         let model =
             lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
-        let (event_tx, _) = broadcast::channel(16);
-        let mut events = event_tx.subscribe();
+        let event_tx = SessionEventRegistry::new(16);
         let core = explicit_durable_test_facets(&data_dir)
             .provider(provider)
             .model(model)
@@ -710,6 +730,7 @@ finish "gap source"
             active_turns: ActiveTurns::default(),
         };
         let session_id = state.current_session_id();
+        let mut events = state.event_tx.subscribe(&session_id);
         state.track_turn(&session_id, "turn-cancel");
         state
             .core
@@ -755,10 +776,7 @@ finish "gap source"
         ));
         assert!(matches!(
             events.try_recv(),
-            Ok(SessionStreamItem {
-                item: StreamItem::Done,
-                ..
-            })
+            Ok(StreamItem::Done)
         ));
         let duplicate = state
             .core
@@ -985,7 +1003,7 @@ finish initial
             web_configured: false,
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
-            event_tx: broadcast::channel(1024).0,
+            event_tx: SessionEventRegistry::new(1024),
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_admin_url: "http://127.0.0.1:9070".to_string(),
@@ -1133,7 +1151,7 @@ finish initial
             lash::ModelSpec::from_token_limits("test-model", Default::default(), 4096, None).expect("model spec");
         let model = with_workbench_model_capability(model);
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
-        let (event_tx, _) = broadcast::channel(1024);
+        let event_tx = SessionEventRegistry::new(1024);
         let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
             lash::rlm::RlmProtocolPluginConfig::default()
                 .with_lashlang_abilities(workbench_lashlang_abilities()),
@@ -1343,7 +1361,7 @@ finish initial
             web_configured: false,
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
-            event_tx: broadcast::channel(1024).0,
+            event_tx: SessionEventRegistry::new(1024),
             queued_work_driver: inert_queued_work_driver(),
             restate_ingress_url,
             restate_admin_url: "http://127.0.0.1:9070".to_string(),
@@ -1353,6 +1371,8 @@ finish initial
             active_turns: ActiveTurns::default(),
         };
         let old_session_id = state.current_session_id();
+        let _deleted_session_events = state.event_tx.subscribe(&old_session_id);
+        assert!(state.event_tx.contains(&old_session_id));
         let session = state
             .core
             .session(old_session_id.clone())
@@ -1405,6 +1425,7 @@ finish initial
             .expect("reset");
 
         assert_ne!(snapshot.settings.session_id, old_session_id);
+        assert!(!state.event_tx.contains(&old_session_id));
         assert!(snapshot.messages.is_empty());
         assert!(state.messages_snapshot().is_empty());
         assert!(
@@ -1763,7 +1784,7 @@ finish initial
             .processes()
             .observer()
             .expect("process observer configured");
-        let (event_tx, _) = broadcast::channel(1024);
+        let event_tx = SessionEventRegistry::new(1024);
         let state = AppState {
             core,
             attachment_store: test_attachment_store(),

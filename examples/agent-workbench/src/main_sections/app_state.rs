@@ -49,10 +49,7 @@ impl AppState {
     }
 
     fn publish_for_session(&self, session_id: &str, item: StreamItem) {
-        let _ = self.event_tx.send(SessionStreamItem {
-            session_id: session_id.to_string(),
-            item,
-        });
+        self.event_tx.publish(session_id, item);
     }
 
     #[cfg(test)]

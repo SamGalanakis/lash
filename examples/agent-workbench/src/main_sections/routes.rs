@@ -173,7 +173,7 @@ async fn session_events(
             .map_err(|err| AppError::bad_request(format!("invalid session cursor: {err}")))?,
         None => observable.current_observation().cursor,
     };
-    let mut product_events = state.event_tx.subscribe();
+    let mut product_events = state.event_tx.subscribe(&session_id);
     let (tx, rx) = mpsc::channel::<StreamItem>(64);
     let observation_tx = tx.clone();
     tokio::spawn(async move {
@@ -182,12 +182,11 @@ async fn session_events(
     tokio::spawn(async move {
         loop {
             match product_events.recv().await {
-                Ok(item) if item.session_id == session_id => {
-                    if tx.send(item.item).await.is_err() {
+                Ok(item) => {
+                    if tx.send(item).await.is_err() {
                         break;
                     }
                 }
-                Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(count)) => {
                     let _ = tx
                         .send(StreamItem::Error {
@@ -674,6 +673,7 @@ async fn reset_chat(
         },
     )
     .await?;
+    state.event_tx.remove(&old_session_id);
     let new_session_id = if query.is_explicit() {
         old_session_id.clone()
     } else {

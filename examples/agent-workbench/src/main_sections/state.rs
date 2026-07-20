@@ -11,7 +11,7 @@ struct AppState {
     web_configured: bool,
     trace_sink: Option<Arc<dyn TraceSink>>,
     lashlang_execution: Arc<TraceLashlangGraphStore>,
-    event_tx: broadcast::Sender<SessionStreamItem>,
+    event_tx: SessionEventRegistry,
     queued_work_driver: lash::runtime::QueuedWorkDriver,
     restate_ingress_url: String,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -205,10 +205,50 @@ enum StreamItem {
     Done,
 }
 
-#[derive(Clone, Debug)]
-struct SessionStreamItem {
-    session_id: String,
-    item: StreamItem,
+#[derive(Clone)]
+struct SessionEventRegistry {
+    senders: Arc<Mutex<HashMap<String, broadcast::Sender<StreamItem>>>>,
+    channel_capacity: usize,
+}
+
+impl SessionEventRegistry {
+    fn new(channel_capacity: usize) -> Self {
+        Self {
+            senders: Arc::new(Mutex::new(HashMap::new())),
+            channel_capacity: channel_capacity.max(1),
+        }
+    }
+
+    fn sender(&self, session_id: &str) -> broadcast::Sender<StreamItem> {
+        let mut senders = self.senders.lock().expect("session event registry lock");
+        senders
+            .entry(session_id.to_string())
+            .or_insert_with(|| broadcast::channel(self.channel_capacity).0)
+            .clone()
+    }
+
+    fn subscribe(&self, session_id: &str) -> broadcast::Receiver<StreamItem> {
+        self.sender(session_id).subscribe()
+    }
+
+    fn publish(&self, session_id: &str, item: StreamItem) {
+        let _ = self.sender(session_id).send(item);
+    }
+
+    fn remove(&self, session_id: &str) {
+        self.senders
+            .lock()
+            .expect("session event registry lock")
+            .remove(session_id);
+    }
+
+    #[cfg(test)]
+    fn contains(&self, session_id: &str) -> bool {
+        self.senders
+            .lock()
+            .expect("session event registry lock")
+            .contains_key(session_id)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
