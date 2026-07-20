@@ -351,17 +351,31 @@ impl TriggerStore for PostgresTriggerStore {
         };
         let occurrence: TriggerOccurrenceRecord =
             serde_json::from_str(&occurrence_json).map_err(process_decode_error)?;
-        let rows = sqlx::query(
+        let mut subscription_query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "SELECT subscription_id, record_json FROM lash_trigger_subscriptions
-             WHERE enabled = TRUE AND source_type = $1 AND source_key = $2
-             ORDER BY registrant_scope_id ASC, handle ASC",
-        )
-        .bind(&occurrence.source_type)
-        .bind(&occurrence.source_key)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
-        let mut deliveries = Vec::new();
+             WHERE enabled = TRUE AND source_type = ",
+        );
+        subscription_query
+            .push_bind(&occurrence.source_type)
+            .push(" AND source_key = ")
+            .push_bind(&occurrence.source_key);
+        if let Some(session_id) = occurrence.session_id.as_deref() {
+            let scope_id = format!("session:{session_id}");
+            let frame_pattern = format!("{}/frame:%", escape_postgres_like(&scope_id));
+            subscription_query
+                .push(" AND (registrant_scope_id = ")
+                .push_bind(scope_id)
+                .push(" OR registrant_scope_id LIKE ")
+                .push_bind(frame_pattern)
+                .push(" ESCAPE '\\')");
+        }
+        subscription_query.push(" ORDER BY registrant_scope_id ASC, handle ASC");
+        let rows = subscription_query
+            .build()
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(plugin_sqlx_error)?;
+        let mut planned = Vec::new();
         for row in rows {
             let subscription_id: String = row.get(0);
             let json: String = row.get(1);
@@ -377,49 +391,91 @@ impl TriggerStore for PostgresTriggerStore {
                     continue;
                 }
             };
-            if occurrence.session_id.as_deref().is_some_and(|session_id| {
-                subscription.registrant_session_id() != Some(session_id)
-            }) {
-                continue;
-            }
             let process_id = lash_core::deterministic_delivery_process_id(
                 &occurrence.occurrence_id,
                 &subscription.subscription_id,
             )?;
             let created_at_ms = current_epoch_ms();
-            let inserted = sqlx::query(
-                "INSERT INTO lash_trigger_deliveries (
-                    occurrence_id, subscription_id, process_id, created_at_ms
-                 )
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(&occurrence.occurrence_id)
-            .bind(&subscription.subscription_id)
-            .bind(&process_id)
-            .bind(created_at_ms as i64)
-            .execute(&mut *tx)
-            .await
-            .map_err(plugin_sqlx_error)?
-            .rows_affected();
-            let stored_created_at_ms: i64 = sqlx::query_scalar(
-                "SELECT created_at_ms FROM lash_trigger_deliveries
-                 WHERE occurrence_id = $1 AND subscription_id = $2",
-            )
-            .bind(&occurrence.occurrence_id)
-            .bind(&subscription.subscription_id)
-            .fetch_one(&mut *tx)
+            planned.push((subscription, process_id, created_at_ms));
+        }
+        if planned.is_empty() {
+            tx.commit().await.map_err(plugin_sqlx_error)?;
+            return Ok(Vec::new());
+        }
+
+        let mut insert = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO lash_trigger_deliveries (
+                occurrence_id, subscription_id, process_id, created_at_ms
+             ) ",
+        );
+        insert.push_values(&planned, |mut row, (subscription, process_id, created_at_ms)| {
+            row.push_bind(&occurrence.occurrence_id)
+                .push_bind(&subscription.subscription_id)
+                .push_bind(process_id)
+                .push_bind(*created_at_ms as i64);
+        });
+        insert.push(" ON CONFLICT DO NOTHING RETURNING subscription_id, created_at_ms");
+        let inserted_rows = insert
+            .build()
+            .fetch_all(&mut *tx)
             .await
             .map_err(plugin_sqlx_error)?;
+        let mut created_at_by_subscription = std::collections::BTreeMap::new();
+        for row in inserted_rows {
+            created_at_by_subscription.insert(row.get::<String, _>(0), row.get::<i64, _>(1));
+        }
+        let inserted_subscription_ids = created_at_by_subscription
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let conflicted = planned
+            .iter()
+            .filter(|(subscription, _, _)| {
+                !inserted_subscription_ids.contains(&subscription.subscription_id)
+            })
+            .collect::<Vec<_>>();
+        if !conflicted.is_empty() {
+            let mut select = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                "SELECT subscription_id, created_at_ms FROM lash_trigger_deliveries
+                 WHERE (occurrence_id, subscription_id) IN ",
+            );
+            select.push_tuples(conflicted, |mut row, (subscription, _, _)| {
+                row.push_bind(&occurrence.occurrence_id)
+                    .push_bind(&subscription.subscription_id);
+            });
+            for row in select
+                .build()
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(plugin_sqlx_error)?
+            {
+                created_at_by_subscription
+                    .insert(row.get::<String, _>(0), row.get::<i64, _>(1));
+            }
+        }
+
+        let mut deliveries = Vec::with_capacity(planned.len());
+        for (subscription, process_id, _) in planned {
+            let inserted = inserted_subscription_ids.contains(&subscription.subscription_id);
+            let stored_created_at_ms = created_at_by_subscription
+                .get(&subscription.subscription_id)
+                .copied()
+                .ok_or_else(|| {
+                    PluginError::Session(format!(
+                        "trigger delivery `{}/{}` disappeared during reservation",
+                        occurrence.occurrence_id, subscription.subscription_id
+                    ))
+                })?;
             deliveries.push(TriggerDeliveryReservation {
                 occurrence: occurrence.clone(),
                 subscription,
                 process_id,
                 created_at_ms: stored_created_at_ms as u64,
-                reservation_status: if inserted == 0 {
-                    lash_core::TriggerDeliveryReservationStatus::AlreadyReserved
-                } else {
+                reservation_status: if inserted {
                     lash_core::TriggerDeliveryReservationStatus::Reserved
+                } else {
+                    lash_core::TriggerDeliveryReservationStatus::AlreadyReserved
                 },
             });
         }
