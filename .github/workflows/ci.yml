@@ -120,7 +120,7 @@ jobs:
   # --no-fail-fast so one failure never hides the rest (the alpha.82 lesson).
   test-shard:
     name: Test shard ${{ matrix.shard }}/3
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
     strategy:
       fail-fast: false
@@ -434,7 +434,7 @@ jobs:
 
   linux-release-cache:
     name: Build Linux release cache
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
     steps:
       - name: Check out repository
@@ -523,7 +523,7 @@ jobs:
 
   restate-postgres-workers:
     name: Restate + Postgres + MinIO Workers
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # The harness has grown to 24 workflows + turn-control gates; 30 minutes
     # was hit on 2026-07-20 (job-timeout shows as 'cancelled').
     timeout-minutes: 45
