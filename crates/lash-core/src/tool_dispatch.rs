@@ -18,10 +18,7 @@ pub(crate) use context::{
     ToolPreparationOutcome, ToolTriggerOutcomeBuffer,
 };
 #[cfg(test)]
-pub(crate) use execution::{
-    dispatch_granted_prepared_tool_call_launch_with_execution_context,
-    dispatch_prepared_tool_call_launch_with_execution_context,
-};
+pub(crate) use execution::coordinate_prepared_tool_call_launch_with_execution_context;
 pub(crate) use execution::{
     execute_prepared_tool_attempt_effect, finalize_tool_result_with_execution_context,
 };

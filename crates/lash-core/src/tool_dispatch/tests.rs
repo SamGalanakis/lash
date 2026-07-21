@@ -730,8 +730,13 @@ fn hidden_member_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispat
 }
 
 fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContext<'static> {
+    exact_dispatch_context_with_plugins(test_plugins(provider))
+}
+
+fn exact_dispatch_context_with_plugins(
+    plugins: Arc<PluginSession>,
+) -> ToolDispatchContext<'static> {
     let (event_tx, _event_rx) = mpsc::channel(8);
-    let plugins = test_plugins(Arc::clone(&provider));
     let tools = plugins.tools();
     let tool_catalog = plugins
         .resolved_tool_catalog("session")
@@ -789,6 +794,44 @@ fn retry_dispatch_context(
         observed_attempts,
         retry_after_ms: Some(0),
     }))
+}
+
+fn retry_dispatch_context_with_after_observations(
+    attempts: Arc<AtomicUsize>,
+    observed_attempts: SharedAttemptObservations,
+    observed_retries: Arc<std::sync::Mutex<Vec<ToolRetryDisposition>>>,
+) -> ToolDispatchContext<'static> {
+    let provider: Arc<dyn ToolProvider> = Arc::new(RetryProbeTools {
+        definition: retry_tool("retry_probe", ToolRetryPolicy::safe(2, 0, 0)),
+        attempts,
+        successes_after: usize::MAX,
+        cancel_on_first: false,
+        observed_attempts,
+        retry_after_ms: Some(0),
+    });
+    let hook: crate::plugin::AfterToolCallHook = Arc::new(move |ctx| {
+        let observed_retries = Arc::clone(&observed_retries);
+        Box::pin(async move {
+            if let Some(output) = ctx.result.as_done_output()
+                && let ToolCallOutcome::Failure(failure) = &output.outcome
+            {
+                observed_retries
+                    .lock()
+                    .expect("observed retries")
+                    .push(failure.retry.clone());
+            }
+            Ok(Vec::new())
+        })
+    });
+    let plugins = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
+        "retry_probe_tools",
+        crate::PluginSpec::new()
+            .with_tool_provider(provider)
+            .with_after_tool_call(hook),
+    ))])
+    .build_session("root", None)
+    .expect("plugin session");
+    exact_dispatch_context_with_plugins(plugins)
 }
 
 fn pending_probe_tool(retry_policy: ToolRetryPolicy) -> crate::ToolDefinition {
@@ -965,7 +1008,7 @@ async fn pending_tool_without_completion_key_is_runtime_failure() {
     let prepared = pending_prepared_call();
     let tool_context = tool_context_for_prepared(&context, &prepared);
 
-    let launch = dispatch_prepared_tool_call_launch_with_execution_context(
+    let launch = coordinate_prepared_tool_call_launch_with_execution_context(
         &context,
         prepared,
         None,
@@ -995,7 +1038,7 @@ async fn retry_policy_stops_after_pending_launch() {
     let prepared = pending_prepared_call();
     let tool_context = tool_context_for_prepared(&context, &prepared);
 
-    let launch = dispatch_prepared_tool_call_launch_with_execution_context(
+    let launch = coordinate_prepared_tool_call_launch_with_execution_context(
         &context,
         prepared,
         None,
@@ -1027,7 +1070,7 @@ async fn after_tool_hook_runs_only_for_completed_tool_results() {
     let prepared = pending_prepared_call();
     let tool_context = tool_context_for_prepared(&pending_context, &prepared);
 
-    let launch = dispatch_prepared_tool_call_launch_with_execution_context(
+    let launch = coordinate_prepared_tool_call_launch_with_execution_context(
         &pending_context,
         prepared,
         None,
@@ -1052,7 +1095,7 @@ async fn after_tool_hook_runs_only_for_completed_tool_results() {
     let prepared = pending_prepared_call();
     let tool_context = tool_context_for_prepared(&done_context, &prepared);
 
-    let launch = dispatch_prepared_tool_call_launch_with_execution_context(
+    let launch = coordinate_prepared_tool_call_launch_with_execution_context(
         &done_context,
         prepared,
         None,
@@ -1174,11 +1217,10 @@ async fn explicit_execution_grant_runs_non_catalog_tool_with_binding() {
         .prepared_call(&prepared)
         .tool_execution_binding(grant.execution_binding.clone())
         .build();
-    let launch = dispatch_granted_prepared_tool_call_launch_with_execution_context(
+    let launch = coordinate_prepared_tool_call_launch_with_execution_context(
         &context,
-        &grant,
         prepared,
-        None,
+        Some(Box::new(grant)),
         tool_context,
     )
     .await;
@@ -1299,6 +1341,41 @@ async fn safe_retry_policy_retries_safe_failure_and_stops_on_success() {
     );
 }
 
+#[tokio::test]
+async fn scalar_after_tool_hook_runs_once_per_retry_attempt_before_exhaustion() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed_attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_retries = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let outcome = dispatch_tool_call(
+        &retry_dispatch_context_with_after_observations(
+            Arc::clone(&attempts),
+            observed_attempts,
+            Arc::clone(&observed_retries),
+        ),
+        "retry_probe".to_string(),
+        json!({ "value": "ok" }),
+        None,
+    )
+    .await;
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *observed_retries.lock().expect("observed retries"),
+        vec![
+            ToolRetryDisposition::Safe { after_ms: Some(0) },
+            ToolRetryDisposition::Safe { after_ms: Some(0) },
+        ],
+        "the after hook runs for each finalized attempt, before exhaustion is marked"
+    );
+    let ToolCallOutcome::Failure(failure) = outcome.record.output.outcome else {
+        panic!("expected exhausted failure");
+    };
+    assert_eq!(
+        failure.retry,
+        ToolRetryDisposition::Exhausted { attempts: 2 }
+    );
+}
+
 #[derive(Default)]
 struct SleepRecordingEffectController {
     sleeps: Arc<std::sync::Mutex<Vec<crate::RuntimeInvocation>>>,
@@ -1311,13 +1388,17 @@ impl crate::RuntimeEffectController for SleepRecordingEffectController {
     async fn execute_effect(
         &self,
         envelope: crate::RuntimeEffectEnvelope,
-        _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        local_executor: crate::RuntimeEffectLocalExecutor<'_>,
     ) -> Result<crate::RuntimeEffectOutcome, crate::RuntimeEffectControllerError> {
-        self.sleeps
-            .lock()
-            .expect("sleep records")
-            .push(envelope.invocation);
-        Ok(crate::RuntimeEffectOutcome::Sleep)
+        if matches!(&envelope.command, crate::RuntimeEffectCommand::Sleep { .. }) {
+            self.sleeps
+                .lock()
+                .expect("sleep records")
+                .push(envelope.invocation);
+            Ok(crate::RuntimeEffectOutcome::Sleep)
+        } else {
+            local_executor.execute(envelope).await
+        }
     }
 }
 
@@ -1330,12 +1411,16 @@ impl crate::RuntimeEffectController for FailingSleepEffectController {
     async fn execute_effect(
         &self,
         envelope: crate::RuntimeEffectEnvelope,
-        _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        local_executor: crate::RuntimeEffectLocalExecutor<'_>,
     ) -> Result<crate::RuntimeEffectOutcome, crate::RuntimeEffectControllerError> {
-        Err(crate::RuntimeEffectControllerError::new(
-            "test_sleep_rejected",
-            format!("rejected {}", envelope.command.kind().as_str()),
-        ))
+        if matches!(&envelope.command, crate::RuntimeEffectCommand::Sleep { .. }) {
+            Err(crate::RuntimeEffectControllerError::new(
+                "test_sleep_rejected",
+                format!("rejected {}", envelope.command.kind().as_str()),
+            ))
+        } else {
+            local_executor.execute(envelope).await
+        }
     }
 }
 
@@ -1513,7 +1598,7 @@ async fn retry_context_has_stable_replay_key_across_attempts() {
 }
 
 #[tokio::test]
-async fn idempotent_retry_policy_requires_stable_key() {
+async fn idempotent_retry_policy_uses_journaled_attempts_without_provider_replay_key() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let outcome = dispatch_tool_call(
@@ -1531,8 +1616,13 @@ async fn idempotent_retry_policy_requires_stable_key() {
     .await;
 
     assert!(!outcome.record.output.is_success());
-    assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert_eq!(observed.lock().expect("observed")[0].1, 1);
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    let observed = observed.lock().expect("observed");
+    assert!(
+        observed
+            .iter()
+            .all(|(_, max_attempts, replay_key)| *max_attempts == 3 && replay_key.is_none())
+    );
 }
 
 #[tokio::test]

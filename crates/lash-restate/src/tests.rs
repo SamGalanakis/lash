@@ -16,6 +16,7 @@ use std::sync::{Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 
 mod endpoint_protocol;
+mod process_tool_replay;
 use endpoint_protocol::invoke_process_workflow_endpoint;
 
 struct PanicsWhenPolledAfterReady {
