@@ -208,7 +208,7 @@ fn spawn_renewal_task(
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let renew_every = timings.renew_interval();
-    tokio::spawn(async move {
+    crate::task::spawn(async move {
         loop {
             clock.sleep(renew_every).await;
             if released.load(Ordering::Acquire) {

@@ -627,7 +627,7 @@ async fn event_streams_filter_order_and_wait_without_leaking_old_events(
     );
 
     let waiter_awaiter = awaiter.clone();
-    let waiter = tokio::spawn(async move {
+    let waiter = crate::task::spawn(async move {
         waiter_awaiter
             .await_event("proc-stream", "producer.future", 3)
             .await

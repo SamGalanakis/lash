@@ -92,7 +92,8 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
             crate::PluginError::Session("process run context requires a tool catalog".to_string())
         })?;
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionStreamEvent>(64);
-        let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+        let event_drain =
+            crate::task::spawn(async move { while event_rx.recv().await.is_some() {} });
         let services = Arc::new(self.services.clone());
         let scoped_effect_controller = self.scoped_effect_controller.ok_or_else(|| {
             crate::PluginError::Session(

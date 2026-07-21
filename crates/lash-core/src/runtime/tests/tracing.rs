@@ -1,4 +1,103 @@
 use super::*;
+use ::tracing::Instrument;
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{Layer, Registry};
+
+#[derive(Clone, Debug, Default)]
+struct SpanCapture {
+    spans: Arc<Mutex<Vec<CapturedSpan>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CapturedSpan {
+    name: String,
+    parent: Option<String>,
+}
+
+impl SpanCapture {
+    fn snapshot(&self) -> Vec<CapturedSpan> {
+        self.spans.lock().expect("lock captured spans").clone()
+    }
+}
+
+impl<S> Layer<S> for SpanCapture
+where
+    S: ::tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        _attrs: &::tracing::span::Attributes<'_>,
+        id: &::tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let span = ctx.span(id).expect("new span present in registry");
+        let captured = CapturedSpan {
+            name: span.metadata().name().to_string(),
+            parent: span
+                .parent()
+                .map(|parent| parent.metadata().name().to_string()),
+        };
+        self.spans
+            .lock()
+            .expect("lock captured spans")
+            .push(captured);
+    }
+}
+
+#[tokio::test]
+async fn provider_spans_are_children_of_the_turn_span() {
+    let provider = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(|_request| async {
+            let provider_span = ::tracing::info_span!("provider.complete");
+            drop(provider_span);
+            Ok(LlmResponse {
+                full_text: "done".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "done".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            })
+        })
+        .build();
+    let mut runtime = standard_runtime_with_transport(provider).await;
+    let capture = SpanCapture::default();
+    let subscriber = Registry::default().with(capture.clone());
+    ::tracing::subscriber::set_global_default(subscriber).expect("install capture subscriber");
+    let turn_span = ::tracing::info_span!("runtime.turn");
+
+    runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+            named_turn_scope("root", "provider-span-parentage"),
+        )
+        .instrument(turn_span)
+        .await
+        .expect("turn");
+
+    let spans = capture.snapshot();
+    assert_eq!(
+        spans
+            .iter()
+            .find(|span| span.name == "provider.complete")
+            .and_then(|span| span.parent.as_deref()),
+        Some("runtime.turn"),
+        "provider span must inherit the turn span; captured spans: {spans:?}"
+    );
+}
 
 #[tokio::test]
 async fn standard_runtime_emits_single_tool_call_trace_pair_per_call() {

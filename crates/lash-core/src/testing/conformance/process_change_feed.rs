@@ -25,7 +25,7 @@ pub(super) async fn process_change_feed_never_misses_concurrent_terminal_writers
     let reader_expected_ids = expected_ids.clone();
     let reader_start = Arc::clone(&start_barrier);
     let reader_done = Arc::clone(&writers_done);
-    let reader = tokio::spawn(async move {
+    let reader = crate::task::spawn(async move {
         reader_start.wait().await;
         let mut cursor = ProcessChangeCursor::initial();
         let mut terminal_observations = BTreeMap::<String, usize>::new();
@@ -66,7 +66,7 @@ pub(super) async fn process_change_feed_never_misses_concurrent_terminal_writers
         let writer_registry = Arc::clone(&registry);
         let writer_start = Arc::clone(&start_barrier);
         let process_id = format!("proc-change-concurrent-{writer_index:02}");
-        writer_handles.push(tokio::spawn(async move {
+        writer_handles.push(crate::task::spawn(async move {
             writer_start.wait().await;
             writer_registry
                 .register_process(

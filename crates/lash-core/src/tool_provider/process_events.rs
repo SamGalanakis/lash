@@ -61,7 +61,7 @@ pub(crate) async fn enqueue_wake_delivery(
     if let Some(driver) = queued_work_driver {
         let driver = driver.clone();
         let target_session_id = target_session_id.clone();
-        tokio::spawn(async move {
+        crate::task::spawn(async move {
             driver
                 .claim_and_run_pending(Some(&target_session_id), "process_wake")
                 .await

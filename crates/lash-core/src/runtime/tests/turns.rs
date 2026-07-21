@@ -1331,7 +1331,7 @@ async fn active_input_after_last_call_is_first_admitted_on_next_turn() {
         release: Arc::clone(&release),
     }));
 
-    let first_turn = tokio::spawn(async move {
+    let first_turn = crate::task::spawn(async move {
         runtime
             .run_turn_assembled(
                 TurnInput::text("first turn input"),
@@ -1725,7 +1725,7 @@ async fn process_wake_claimed_at_checkpoint_is_completed_when_turn_is_cancelled(
     .await;
     let cancel = CancellationToken::new();
     let cancel_after_wake_started = cancel.clone();
-    let canceller = tokio::spawn(async move {
+    let canceller = crate::task::spawn(async move {
         wake_started_rx
             .await
             .expect("wake provider call should start");
@@ -3025,7 +3025,7 @@ async fn cancelled_provider_stream_does_not_commit_partial_output() {
     let turn_cancel = cancel.clone();
     let turn_events = RecordingTurnEvents::default();
     let turn_events_for_task = turn_events.clone();
-    let turn = tokio::spawn(async move {
+    let turn = crate::task::spawn(async move {
         runtime
             .stream_turn(
                 TurnInput::text("cancel after partial stream"),
@@ -3406,7 +3406,7 @@ async fn lease_loss_stops_foreground_turn_before_final_commit() {
     )
     .await;
 
-    let turn = tokio::spawn(async move {
+    let turn = crate::task::spawn(async move {
         runtime
             .run_turn_assembled(
                 TurnInput::text("lease can be lost"),

@@ -647,7 +647,7 @@ mod tests {
             .await
             .expect("tool key");
         let tool_host = host.clone();
-        let tool_wait = tokio::spawn(async move {
+        let tool_wait = crate::task::spawn(async move {
             tool_host
                 .await_await_event(&tool_key, CancellationToken::new(), None)
                 .await

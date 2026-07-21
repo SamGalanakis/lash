@@ -238,7 +238,7 @@ impl RuntimeTurnDriver<'_> {
         };
 
         let mut call_provider = self.policy.provider().clone();
-        let mut llm_task = tokio::spawn(async move {
+        let mut llm_task = crate::task::spawn(async move {
             let result = call_provider.complete(llm_request).await;
             (result, call_provider)
         });

@@ -193,7 +193,7 @@ async fn exact_scope_and_session_sweep_isolation(host: Arc<dyn EffectHost>) {
     );
     let waiter_host = Arc::clone(&host);
     let waiter_active = Arc::clone(&active);
-    let cancel_wait = tokio::spawn(async move {
+    let cancel_wait = crate::task::spawn(async move {
         waiter_active
             .await_cancel(waiter_host.as_ref(), CancellationToken::new())
             .await
@@ -208,7 +208,7 @@ async fn exact_scope_and_session_sweep_isolation(host: Arc<dyn EffectHost>) {
         .await
         .expect("tool key");
     let tool_host = Arc::clone(&host);
-    let tool_wait = tokio::spawn(async move {
+    let tool_wait = crate::task::spawn(async move {
         tool_host
             .await_await_event(&tool_key, CancellationToken::new(), None)
             .await
@@ -271,7 +271,7 @@ async fn session_deletion_revokes_control_promises(host: Arc<dyn EffectHost>) {
     let waiter_driver = driver.clone();
     let waiter_address = address.clone();
     let terminal_wait =
-        tokio::spawn(async move { waiter_driver.await_terminal(&waiter_address).await });
+        crate::task::spawn(async move { waiter_driver.await_terminal(&waiter_address).await });
     tokio::task::yield_now().await;
     host.revoke_await_events_for_session(&address.session_id)
         .await

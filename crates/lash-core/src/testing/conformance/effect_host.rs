@@ -556,7 +556,7 @@ async fn effect_host_await_event_session_cancel_resolves_outstanding_waits(
 
     let waiter_host = Arc::clone(&host);
     let waiter_key = key.clone();
-    let waiter = tokio::spawn(async move {
+    let waiter = crate::task::spawn(async move {
         waiter_host
             .await_await_event(
                 &waiter_key,
@@ -918,7 +918,7 @@ async fn lease_fencing_renews_long_running_lease(backend: &EffectLeaseFencingBac
     let first_controller = Arc::clone(&first.controller);
     let first_envelope = envelope.clone();
     let first_release = Arc::clone(&release);
-    let first_task = tokio::spawn(async move {
+    let first_task = crate::task::spawn(async move {
         first_controller
             .execute_effect(
                 first_envelope,
@@ -983,7 +983,7 @@ async fn lease_fencing_reports_lease_lost_when_stolen(
     let owner = Arc::clone(&controller.controller);
     let owner_envelope = envelope.clone();
     let owner_release = Arc::clone(&never_release);
-    let owner_task = tokio::spawn(async move {
+    let owner_task = crate::task::spawn(async move {
         owner
             .execute_effect(
                 owner_envelope,
@@ -1030,7 +1030,7 @@ async fn lease_fencing_rejects_finalize_after_expiry(
     let owner = Arc::clone(&controller.controller);
     let owner_envelope = envelope.clone();
     let owner_release = Arc::clone(&release);
-    let owner_task = tokio::spawn(async move {
+    let owner_task = crate::task::spawn(async move {
         owner
             .execute_effect(
                 owner_envelope,
@@ -1098,7 +1098,7 @@ async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingB
     let owner = Arc::clone(&vanished.controller);
     let owner_envelope = envelope.clone();
     let owner_release = Arc::clone(&never_release);
-    let owner_task = tokio::spawn(async move {
+    let owner_task = crate::task::spawn(async move {
         owner
             .execute_effect(
                 owner_envelope,

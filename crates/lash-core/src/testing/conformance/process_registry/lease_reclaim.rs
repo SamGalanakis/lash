@@ -95,7 +95,7 @@ pub(super) async fn process_lease_reclaim_contract(registry: Arc<dyn ProcessRegi
         local_process_lease_owner("race-left", "host-a", "boot-a", pid, "race-left-start");
     let right_claimant =
         local_process_lease_owner("race-right", "host-a", "boot-a", pid, "race-right-start");
-    let left = tokio::spawn(async move {
+    let left = crate::task::spawn(async move {
         left_barrier.wait().await;
         left_registry
             .reclaim_process_lease(
@@ -106,7 +106,7 @@ pub(super) async fn process_lease_reclaim_contract(registry: Arc<dyn ProcessRegi
             )
             .await
     });
-    let right = tokio::spawn(async move {
+    let right = crate::task::spawn(async move {
         right_barrier.wait().await;
         right_registry
             .reclaim_process_lease(
