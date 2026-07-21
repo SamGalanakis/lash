@@ -149,7 +149,6 @@ impl ProviderHandle {
     ) -> Result<ProviderCompletion, ProviderCompletionError> {
         let reliability = self.options().reliability;
         let attempts = reliability.retry.attempts();
-        let observe_execution = matches!(self.kind(), "openai" | "openai-compatible");
         let mut attempt = 0;
         let call_id = LlmCallId(uuid::Uuid::new_v4().to_string());
         let mut records = Vec::new();
@@ -175,17 +174,11 @@ impl ProviderHandle {
                         retry_budget_consumed: true,
                         retry_decision: None,
                         error: None,
-                        evidence: observe_execution
-                            .then(|| response.execution_evidence.clone())
-                            .flatten(),
-                        usage: observe_execution
-                            .then(|| {
-                                response
-                                    .provider_usage
-                                    .as_ref()
-                                    .map(|_| response.usage.clone())
-                            })
-                            .flatten(),
+                        evidence: response.execution_evidence.clone(),
+                        usage: response
+                            .provider_usage
+                            .as_ref()
+                            .map(|_| response.usage.clone()),
                     });
                     return Ok(ProviderCompletion {
                         response,
@@ -224,7 +217,6 @@ impl ProviderHandle {
                                 started_at,
                                 clock.now().saturating_duration_since(started),
                                 &failure,
-                                observe_execution,
                                 false,
                                 Some(RetryDecision {
                                     scheduled: true,
@@ -266,7 +258,6 @@ impl ProviderHandle {
                             started_at,
                             clock.now().saturating_duration_since(started),
                             &failure,
-                            observe_execution,
                             true,
                             Some(RetryDecision {
                                 scheduled: false,
@@ -291,7 +282,6 @@ impl ProviderHandle {
                         started_at,
                         clock.now().saturating_duration_since(started),
                         &failure,
-                        observe_execution,
                         true,
                         Some(RetryDecision {
                             scheduled: true,
@@ -378,14 +368,14 @@ fn failure_attempt_record(
     started_at: u64,
     duration: Duration,
     failure: &LlmTransportError,
-    observe_execution: bool,
     retry_budget_consumed: bool,
     retry_decision: Option<RetryDecision>,
 ) -> AttemptRecord {
     let partial = failure.partial_response.as_deref();
-    let provider_request_id = observe_execution
-        .then(|| header_value(&failure.headers, "x-request-id"))
-        .flatten();
+    // Providers that do not send this header simply report nothing, which is
+    // the honest result. Header-name variance across vendors (Anthropic uses
+    // `request-id`) is a separate concern.
+    let provider_request_id = header_value(&failure.headers, "x-request-id");
     let mut evidence = partial.and_then(|response| response.execution_evidence.clone());
     if let Some(provider_request_id) = provider_request_id.clone() {
         evidence
