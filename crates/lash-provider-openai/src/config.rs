@@ -11,6 +11,12 @@ pub enum OpenAiCompatMaxTokensField {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct ProviderRoutingPrefs {
+    pub require_parameters: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct OpenAiCompat {
     /// Clean-EOF policy for this endpoint. Model capability data, when set on
     /// a request, takes precedence over this endpoint default.
@@ -38,6 +44,8 @@ pub struct OpenAiCompat {
     pub developer_role: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_capabilities: Option<ProviderSchemaCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_routing: Option<ProviderRoutingPrefs>,
     /// Response header names (case-insensitive) to capture into
     /// `LlmResponse.response_metadata` as `header:<lowercased-name>` entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,6 +64,10 @@ impl OpenAiCompat {
             reasoning_format: Some(ReasoningWireFormat::openrouter()),
             cache_session_affinity: Some(true),
             stream_termination: Some(StreamTermination::RequireTerminalEvidence),
+            provider_routing: Some(ProviderRoutingPrefs {
+                require_parameters: true,
+            }),
+            response_metadata_body_paths: Some(vec!["/provider".into()]),
             ..Self::default()
         }
     }
@@ -75,6 +87,7 @@ pub(crate) struct OpenAiResolvedCompat {
     pub(crate) streaming_usage: bool,
     pub(crate) developer_role: bool,
     pub(crate) schema_capabilities: ProviderSchemaCapabilities,
+    pub(crate) provider_routing: Option<ProviderRoutingPrefs>,
     pub(crate) response_metadata_headers: Vec<String>,
     pub(crate) response_metadata_body_paths: Vec<String>,
 }
@@ -128,6 +141,7 @@ impl OpenAiCompatibleProvider {
             streaming_usage: !local,
             developer_role: direct_openai,
             schema_capabilities: ProviderSchemaCapabilities::openai(false),
+            provider_routing: None,
             response_metadata_headers: Vec::new(),
             response_metadata_body_paths: Vec::new(),
         };
@@ -177,6 +191,11 @@ impl OpenAiCompatibleProvider {
                 .schema_capabilities
                 .clone()
                 .unwrap_or_else(|| ProviderSchemaCapabilities::openai(strict_tools)),
+            provider_routing: self
+                .compat
+                .provider_routing
+                .clone()
+                .or(defaults.provider_routing),
             response_metadata_headers: self
                 .compat
                 .response_metadata_headers

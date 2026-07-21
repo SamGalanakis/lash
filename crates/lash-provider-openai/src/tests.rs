@@ -621,6 +621,56 @@ fn chat_body_uses_messages_and_not_responses_input() {
 }
 
 #[test]
+fn openrouter_chat_body_requires_supported_parameters_with_json_schema_output() {
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "extract")]);
+    req.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
+        name: "extraction".to_string(),
+        schema: json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        })
+        .into(),
+        strict: true,
+    }));
+
+    let body = openrouter_provider()
+        .build_chat_request_body(&req, false)
+        .unwrap();
+
+    assert_eq!(body["provider"], json!({ "require_parameters": true }));
+    assert_eq!(body["response_format"]["type"], "json_schema");
+    assert_eq!(body["response_format"]["json_schema"]["name"], "extraction");
+}
+
+#[test]
+fn openrouter_chat_body_requires_supported_parameters_without_output_spec() {
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    let body = openrouter_provider()
+        .build_chat_request_body(&req, false)
+        .unwrap();
+
+    assert_eq!(body["provider"], json!({ "require_parameters": true }));
+    assert!(body.get("response_format").is_none());
+}
+
+#[test]
+fn default_compat_and_direct_openai_bodies_omit_provider_routing() {
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    let default_compat_body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .build_chat_request_body(&req, false)
+        .unwrap();
+    let direct_openai_body = OpenAiProvider::new("key")
+        .build_responses_request_body(&req, false)
+        .unwrap();
+
+    assert!(default_compat_body.get("provider").is_none());
+    assert!(direct_openai_body.get("provider").is_none());
+}
+
+#[test]
 fn chat_body_emits_reasoning_from_capability_variant() {
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model = "openrouter/custom-model".to_string();
@@ -1212,6 +1262,9 @@ fn openai_compat_config_serializes_when_non_default() {
     let provider = openrouter_provider().with_compat(OpenAiCompat {
         max_tokens_field: Some(OpenAiCompatMaxTokensField::MaxCompletionTokens),
         streaming_usage: Some(false),
+        provider_routing: Some(ProviderRoutingPrefs {
+            require_parameters: true,
+        }),
         response_metadata_headers: Some(vec!["X-Opper-Cost".to_string()]),
         response_metadata_body_paths: Some(vec!["/cost".to_string()]),
         ..OpenAiCompat::default()
@@ -1224,6 +1277,10 @@ fn openai_compat_config_serializes_when_non_default() {
         json!("max_completion_tokens")
     );
     assert_eq!(config["compat"]["streaming_usage"], false);
+    assert_eq!(
+        config["compat"]["provider_routing"],
+        json!({ "require_parameters": true })
+    );
     assert_eq!(
         config["compat"]["response_metadata_headers"],
         json!(["X-Opper-Cost"])
@@ -1242,9 +1299,42 @@ fn openai_compat_config_serializes_when_non_default() {
         json!(["X-Opper-Cost"])
     );
     assert_eq!(
+        serialized["compat"]["provider_routing"],
+        json!({ "require_parameters": true })
+    );
+    assert_eq!(
         serialized["compat"]["response_metadata_body_paths"],
         json!(["/cost"])
     );
+}
+
+#[test]
+fn provider_routing_config_rejects_unknown_sibling_keys() {
+    let nested_error = OpenAiCompatibleProviderFactory
+        .deserialize(json!({
+            "api_key": "key",
+            "base_url": "https://proxy.example/v1",
+            "compat": {
+                "provider_routing": {
+                    "require_parameters": true,
+                    "unknown_preference": true
+                }
+            }
+        }))
+        .expect_err("unknown provider routing preference must be rejected");
+    assert!(nested_error.contains("unknown_preference"));
+
+    let compat_error = OpenAiCompatibleProviderFactory
+        .deserialize(json!({
+            "api_key": "key",
+            "base_url": "https://proxy.example/v1",
+            "compat": {
+                "provider_routing": { "require_parameters": true },
+                "unknown_compat_policy": true
+            }
+        }))
+        .expect_err("unknown compat policy must still be rejected");
+    assert!(compat_error.contains("unknown_compat_policy"));
 }
 
 #[test]
@@ -1362,6 +1452,16 @@ fn openai_compat_resolver_covers_openrouter_local_and_session_affinity() {
     );
     assert!(openrouter_caps.streaming_usage);
     assert!(openrouter_caps.cache_session_affinity);
+    assert_eq!(
+        openrouter_caps.provider_routing,
+        Some(ProviderRoutingPrefs {
+            require_parameters: true,
+        })
+    );
+    assert_eq!(
+        openrouter_caps.response_metadata_body_paths,
+        vec!["/provider"]
+    );
 
     let local = OpenAiCompatibleProvider::new("key", "http://localhost:11434/v1");
     let local_caps = local.resolved_compat(CompletionEndpoint::ChatCompletions);
@@ -1369,6 +1469,7 @@ fn openai_compat_resolver_covers_openrouter_local_and_session_affinity() {
     assert!(!local_caps.request_fields);
     assert!(!local_caps.streaming_usage);
     assert!(!local_caps.cache_session_affinity);
+    assert_eq!(local_caps.provider_routing, None);
 }
 
 #[test]
