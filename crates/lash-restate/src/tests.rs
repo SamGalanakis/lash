@@ -57,16 +57,24 @@ fn restate_context_futures_are_structurally_safe_after_ready() {
     assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
 }
 
-#[test]
-fn restate_context_futures_are_not_repolled_after_sdk_error_wake() {
-    let mut future = Box::pin(guard_restate_context_future(
-        PanicsWhenPolledAfterErrorWake { polled: false },
-    ));
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
+#[tokio::test]
+async fn restate_context_future_sdk_error_wake_fails_attempt_instead_of_parking() {
+    let guarded = guard_restate_context_future(PanicsWhenPolledAfterErrorWake { polled: false });
+    let mut attempt = tokio::spawn(async move {
+        tokio::select! {
+            _ = guarded => {}
+            _ = std::future::pending::<()>() => {}
+        }
+    });
 
-    assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
-    assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+    let outcome = tokio::time::timeout(Duration::from_millis(100), &mut attempt).await;
+    if outcome.is_err() {
+        attempt.abort();
+    }
+    assert!(
+        matches!(outcome, Ok(Err(ref error)) if error.is_panic()),
+        "an SDK error wake must fail the handler attempt instead of parking it: {outcome:?}"
+    );
 }
 
 #[test]

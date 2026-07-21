@@ -111,8 +111,9 @@ pub use restate_sdk;
 /// it marks the handler failed, synchronously wakes the task, and returns
 /// `Pending`. Its inner `Map` is already complete in that second shape and
 /// panics if select teardown polls it again, so an ordinary `FutureExt::fuse`
-/// cannot guard it. Stop polling after either `Ready` or that synchronous
-/// error wake; the SDK's outer handler-state future consumes the recorded error.
+/// cannot guard it. Stop polling after `Ready`; if the future synchronously
+/// wakes and returns `Pending`, fail the handler attempt immediately so an
+/// entry-scoped SDK error cannot be left recorded behind a parked outer future.
 struct RestateContextFuture<F> {
     future: Option<Pin<Box<F>>>,
 }
@@ -138,8 +139,12 @@ where
         let result = future.as_mut().poll(&mut tracked_context);
         tracker.polling.store(false, Ordering::Release);
 
-        if result.is_ready() || tracker.woke_during_poll.load(Ordering::Acquire) {
+        if result.is_ready() {
             self.future = None;
+        } else if tracker.woke_during_poll.load(Ordering::Acquire) {
+            panic!(
+                "Restate context future returned Pending after a synchronous wake; failing the handler attempt"
+            );
         }
         result
     }
