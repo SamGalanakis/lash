@@ -63,15 +63,30 @@ impl RuntimeSessionServices {
                 self.current.host.queued_work_driver.clone(),
             )
             .build();
-        let launch = Box::pin(
-            crate::tool_dispatch::dispatch_prepared_tool_call_launch_with_execution_context(
-                dispatch.as_ref(),
-                call,
-                None,
-                tool_context,
-            ),
+        let retry_policy =
+            crate::tool_dispatch::resolve_callable_manifest_by_id(dispatch.as_ref(), &call.tool_id)
+                .map(|manifest| manifest.retry_policy)
+                .unwrap_or(crate::ToolRetryPolicy::Never);
+        let coordinated = crate::tool_dispatch::coordinate_tool_invocation(
+            dispatch.as_ref(),
+            call,
+            None,
+            retry_policy,
+            crate::tool_dispatch::ToolAttemptEffectIdentity::Process {
+                parent: await_parent_invocation.clone(),
+                process_id: registration.id.clone(),
+            },
+            Some(await_cancellation.clone()),
+            || {
+                crate::RuntimeEffectLocalExecutor::prepared_tool_attempt(
+                    Arc::clone(&dispatch),
+                    tool_context.clone(),
+                )
+            },
         )
         .await;
+        drop(tool_context);
+        let launch = coordinated.launch;
         let output = match launch {
             crate::tool_dispatch::ToolCallLaunch::Done(outcome) => outcome.record.output,
             crate::tool_dispatch::ToolCallLaunch::Pending(pending) => {

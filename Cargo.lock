@@ -1492,6 +1492,7 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -2259,6 +2260,7 @@ dependencies = [
  "lash-core",
  "lash-http-transport",
  "lash-lashlang-runtime",
+ "lash-protocol-rlm",
  "lash-protocol-standard",
  "lash-sqlite-store",
  "lashlang",

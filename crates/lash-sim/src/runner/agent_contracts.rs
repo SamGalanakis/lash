@@ -756,7 +756,22 @@ async fn facade_agent_durable_input_execution() -> Result<Value, FixedScriptRunn
     let (key_tx, mut key_rx) =
         tokio::sync::oneshot::channel::<Result<lash_core::AwaitEventKey, String>>();
     let tools = Arc::new(ContractDurableInputTools::new(key_tx));
-    let (core, graph_store) = agent_process_contract_core(
+    facade_agent_durable_input_execution_with(
+        Arc::clone(&tools),
+        tools as Arc<dyn lash_core::ToolProvider>,
+        Arc::new(lash::durability::InlineEffectHost::default()),
+        &mut key_rx,
+    )
+    .await
+}
+
+async fn facade_agent_durable_input_execution_with(
+    tools: Arc<ContractDurableInputTools>,
+    registered_tools: Arc<dyn lash_core::ToolProvider>,
+    effect_host: Arc<dyn lash_core::EffectHost>,
+    key_rx: &mut tokio::sync::oneshot::Receiver<Result<lash_core::AwaitEventKey, String>>,
+) -> Result<Value, FixedScriptRunnerError> {
+    let (core, graph_store) = agent_process_contract_core_with_effect_host(
         "lash_runtime agent durable input",
         vec![
             r#"<lashlang>
@@ -772,7 +787,8 @@ finish result.answer
 finish { recovered: true }
 </lashlang>"#,
         ],
-        Some(Arc::clone(&tools) as Arc<dyn lash_core::ToolProvider>),
+        Some(registered_tools),
+        effect_host,
     )?;
     let session = core
         .session("sim-agent-durable-input-contract")
@@ -791,7 +807,7 @@ finish { recovered: true }
             .await
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))
     });
-    let key = wait_for_contract_durable_input_key(&mut key_rx, &turn).await?;
+    let key = wait_for_contract_durable_input_key(key_rx, &turn).await?;
     let completed_before_resolution = events.tool_completed_count().await;
     let suspended_before_resolution = !turn.is_finished() && completed_before_resolution == 0;
     let await_tool_call_id_present = match &key.wait {
@@ -844,12 +860,20 @@ finish { recovered: true }
     .await
 }
 
-fn agent_process_contract_core(
+fn agent_process_contract_core_with_effect_host(
     provider_kind: &'static str,
     provider_responses: Vec<&'static str>,
     tools: Option<Arc<dyn lash_core::ToolProvider>>,
+    effect_host: Arc<dyn lash_core::EffectHost>,
 ) -> Result<(lash::LashCore, Arc<lash::tracing::TraceLashlangGraphStore>), FixedScriptRunnerError> {
-    agent_process_contract_core_with_options(provider_kind, provider_responses, tools, false, None)
+    agent_process_contract_core_with_options_and_effect_host(
+        provider_kind,
+        provider_responses,
+        tools,
+        false,
+        None,
+        effect_host,
+    )
 }
 
 fn agent_process_contract_core_with_options(
@@ -859,6 +883,28 @@ fn agent_process_contract_core_with_options(
     install_subagents: bool,
     max_turns: Option<usize>,
 ) -> Result<(lash::LashCore, Arc<lash::tracing::TraceLashlangGraphStore>), FixedScriptRunnerError> {
+    agent_process_contract_core_with_options_and_effect_host(
+        provider_kind,
+        provider_responses,
+        tools,
+        install_subagents,
+        max_turns,
+        Arc::new(lash::durability::InlineEffectHost::default()),
+    )
+}
+
+// Full specification of the simulator's facade-level process harness. The
+// effect host is injectable so boundary tests can observe the same production
+// execution path without creating a parallel runner.
+#[allow(clippy::too_many_arguments)]
+fn agent_process_contract_core_with_options_and_effect_host(
+    provider_kind: &'static str,
+    provider_responses: Vec<&'static str>,
+    tools: Option<Arc<dyn lash_core::ToolProvider>>,
+    install_subagents: bool,
+    max_turns: Option<usize>,
+    effect_host: Arc<dyn lash_core::EffectHost>,
+) -> Result<(lash::LashCore, Arc<lash::tracing::TraceLashlangGraphStore>), FixedScriptRunnerError> {
     let graph_store = Arc::new(lash::tracing::TraceLashlangGraphStore::default());
     let factory = lash_protocol_rlm::RlmProtocolPluginFactory::new(
         lash_protocol_rlm::RlmProtocolPluginConfig::default(),
@@ -866,7 +912,7 @@ fn agent_process_contract_core_with_options(
     )
     .with_lashlang_execution_sink(Arc::clone(&graph_store) as Arc<dyn lash::tracing::TraceSink>);
     let mut builder = lash::LashCore::rlm_builder(factory)
-        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .effect_host(effect_host)
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -1342,3 +1388,7 @@ fn normalize_contract_tool_output(value: Value) -> Value {
             .is_some_and(|path| !path.is_empty()),
     })
 }
+
+#[cfg(test)]
+#[path = "agent_contracts_effect_boundary_tests.rs"]
+mod effect_boundary_tests;

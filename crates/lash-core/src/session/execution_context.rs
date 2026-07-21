@@ -99,15 +99,6 @@ impl RuntimeExecutionTracing {
 }
 
 impl<'run> RuntimeExecutionContext<'run> {
-    pub(crate) fn drain_tool_trigger_outcomes(
-        &self,
-    ) -> Result<Vec<crate::tool_dispatch::ToolTriggerEffectOutcome>, crate::PluginError> {
-        self.dispatch
-            .trigger_outcomes
-            .drain()
-            .map_err(crate::PluginError::Session)
-    }
-
     pub(super) fn process_scope(
         &self,
         parent_invocation: Option<crate::RuntimeInvocation>,

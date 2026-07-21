@@ -10,208 +10,63 @@ use super::context::{
     runtime_failure,
 };
 use super::directives::apply_after_tool_directives;
-use super::retry::{
-    execute_granted_tool_attempt, execute_granted_tool_call, execute_tool_attempt,
-    execute_tool_call,
-};
+use super::retry::{execute_granted_tool_attempt, execute_tool_attempt};
 
 #[cfg(test)]
 pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     prepared: PreparedToolCall,
-    progress: Option<&ProgressSender>,
+    _progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolDispatchOutcome {
-    dispatch_prepared_tool_call_launch_with_execution_context(
+    coordinate_prepared_tool_call_launch_with_execution_context(
         context,
         prepared,
-        progress,
+        None,
         tool_context,
     )
     .await
     .into_done_or_runtime_failure()
 }
 
-pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'run>(
+#[cfg(test)]
+pub(crate) async fn coordinate_prepared_tool_call_launch_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     prepared: PreparedToolCall,
-    progress: Option<&ProgressSender>,
+    execution_grant: Option<Box<crate::ToolExecutionGrant>>,
     tool_context: ToolContext<'run>,
 ) -> ToolCallLaunch {
-    let prepared_tool_name = prepared.tool_name.clone();
-    let args = prepared.args.clone();
-    let Some(manifest) =
-        super::preparation::resolve_callable_manifest_by_id(context, &prepared.tool_id)
-    else {
-        return launch_done(outcome(
-            prepared_tool_name,
-            args,
-            runtime_failure(
-                ToolFailureClass::Unavailable,
-                "tool_unavailable",
-                "Tool is unavailable in this session",
-            ),
-            0,
-        ));
-    };
-    let tool_name = manifest.name.clone();
-
-    let tool_start = context.clock.now();
-    let tool_context = tool_context.with_prepared_payload(prepared.prepared_payload.clone());
-    let completion_context = tool_context.clone();
-    let result = Box::pin(execute_tool_call(
+    let retry_policy = execution_grant
+        .as_ref()
+        .map(|grant| grant.manifest.retry_policy)
+        .or_else(|| {
+            super::preparation::resolve_callable_manifest_by_id(context, &prepared.tool_id)
+                .map(|manifest| manifest.retry_policy)
+        })
+        .unwrap_or(crate::ToolRetryPolicy::Never);
+    let cancellation = tool_context.cancellation_token().cloned();
+    let dispatch = Arc::new(context.clone());
+    super::coordinate_tool_invocation(
         context,
-        &manifest,
-        &prepared,
-        progress,
-        tool_context,
-    ))
-    .await;
-    let duration_ms = context.clock.now().duration_since(tool_start).as_millis() as u64;
-    let result = match result {
-        ToolResult::Done(_) => result,
-        ToolResult::Pending(pending) => {
-            let key = match completion_context.take_completion_key() {
-                Ok(Some(key)) => key,
-                Ok(None) => {
-                    return launch_done(outcome(
-                        tool_name,
-                        args,
-                        runtime_failure(
-                            ToolFailureClass::Internal,
-                            "pending_tool_missing_completion_key",
-                            "tool returned Pending without first obtaining a completion key",
-                        ),
-                        duration_ms,
-                    ));
-                }
-                Err(err) => {
-                    return launch_done(outcome(
-                        tool_name,
-                        args,
-                        runtime_failure(
-                            ToolFailureClass::Internal,
-                            "pending_tool_completion_key_failed",
-                            err.to_string(),
-                        ),
-                        duration_ms,
-                    ));
-                }
-            };
-            return ToolCallLaunch::Pending(PendingToolDispatchOutcome {
-                tool_name,
-                args,
-                key,
-                pending,
-                duration_ms,
-            });
-        }
-    };
-
-    let result = finalize_tool_result_with_execution_context(
-        context,
-        &tool_name,
-        &args,
-        result,
-        duration_ms,
+        prepared,
+        execution_grant,
+        retry_policy,
+        super::ToolAttemptEffectIdentity::Scalar {
+            parent: context.parent_invocation.clone(),
+        },
+        cancellation,
+        || {
+            crate::RuntimeEffectLocalExecutor::prepared_tool_attempt(
+                Arc::clone(&dispatch),
+                tool_context.clone(),
+            )
+        },
     )
-    .await;
-
-    launch_done(outcome(tool_name, args, result, duration_ms))
+    .await
+    .launch
 }
 
-pub(crate) async fn dispatch_granted_prepared_tool_call_launch_with_execution_context<'run>(
-    context: &ToolDispatchContext<'run>,
-    grant: &crate::ToolExecutionGrant,
-    prepared: PreparedToolCall,
-    progress: Option<&ProgressSender>,
-    tool_context: ToolContext<'run>,
-) -> ToolCallLaunch {
-    let tool_name = grant.manifest.name.clone();
-    let args = prepared.args.clone();
-    if prepared.tool_id != grant.manifest.id {
-        return launch_done(outcome(
-            tool_name,
-            args,
-            runtime_failure(
-                ToolFailureClass::Internal,
-                "granted_tool_id_mismatch",
-                format!(
-                    "Prepared granted tool id `{}` does not match grant id `{}`",
-                    prepared.tool_id, grant.manifest.id
-                ),
-            ),
-            0,
-        ));
-    }
-
-    let tool_start = context.clock.now();
-    let tool_context = tool_context
-        .with_prepared_payload(prepared.prepared_payload.clone())
-        .with_tool_execution_binding(grant.execution_binding.clone());
-    let completion_context = tool_context.clone();
-    let result = Box::pin(execute_granted_tool_call(
-        context,
-        grant,
-        &prepared,
-        progress,
-        tool_context,
-    ))
-    .await;
-    let duration_ms = context.clock.now().duration_since(tool_start).as_millis() as u64;
-    let result = match result {
-        ToolResult::Done(_) => result,
-        ToolResult::Pending(pending) => {
-            let key = match completion_context.take_completion_key() {
-                Ok(Some(key)) => key,
-                Ok(None) => {
-                    return launch_done(outcome(
-                        tool_name,
-                        args,
-                        runtime_failure(
-                            ToolFailureClass::Internal,
-                            "pending_tool_missing_completion_key",
-                            "tool returned Pending without first obtaining a completion key",
-                        ),
-                        duration_ms,
-                    ));
-                }
-                Err(err) => {
-                    return launch_done(outcome(
-                        tool_name,
-                        args,
-                        runtime_failure(
-                            ToolFailureClass::Internal,
-                            "pending_tool_completion_key_failed",
-                            err.to_string(),
-                        ),
-                        duration_ms,
-                    ));
-                }
-            };
-            return ToolCallLaunch::Pending(PendingToolDispatchOutcome {
-                tool_name,
-                args,
-                key,
-                pending,
-                duration_ms,
-            });
-        }
-    };
-
-    let result = finalize_tool_result_with_execution_context(
-        context,
-        &tool_name,
-        &args,
-        result,
-        duration_ms,
-    )
-    .await;
-
-    launch_done(outcome(tool_name, args, result, duration_ms))
-}
-
-pub(crate) async fn dispatch_prepared_tool_attempt_launch_with_execution_context<'run>(
+pub(super) async fn dispatch_prepared_tool_attempt_launch_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     prepared: PreparedToolCall,
     attempt: u32,
@@ -303,7 +158,7 @@ pub(crate) async fn dispatch_prepared_tool_attempt_launch_with_execution_context
     launch_done(outcome(tool_name, args, result, duration_ms))
 }
 
-pub(crate) async fn dispatch_granted_prepared_tool_attempt_launch_with_execution_context<'run>(
+pub(super) async fn dispatch_granted_prepared_tool_attempt_launch_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     grant: &crate::ToolExecutionGrant,
     prepared: PreparedToolCall,
@@ -396,6 +251,55 @@ pub(crate) async fn dispatch_granted_prepared_tool_attempt_launch_with_execution
     .await;
 
     launch_done(outcome(tool_name, args, result, duration_ms))
+}
+
+pub(crate) async fn execute_prepared_tool_attempt_effect<'run>(
+    context: &ToolDispatchContext<'run>,
+    prepared: PreparedToolCall,
+    execution_grant: Option<Box<crate::ToolExecutionGrant>>,
+    attempt: u32,
+    max_attempts: u32,
+    tool_context: ToolContext<'run>,
+) -> Result<crate::ToolAttemptEffectOutcome, crate::RuntimeEffectControllerError> {
+    let call_id = prepared.call_id.clone();
+    let launch = if let Some(grant) = execution_grant.as_ref() {
+        dispatch_granted_prepared_tool_attempt_launch_with_execution_context(
+            context,
+            grant,
+            prepared,
+            attempt,
+            max_attempts,
+            None,
+            tool_context,
+        )
+        .await
+    } else {
+        dispatch_prepared_tool_attempt_launch_with_execution_context(
+            context,
+            prepared,
+            attempt,
+            max_attempts,
+            None,
+            tool_context,
+        )
+        .await
+    };
+    let launch = match launch {
+        ToolCallLaunch::Done(outcome) => {
+            let mut record = outcome.record;
+            record.call_id = Some(call_id);
+            crate::ToolAttemptLaunch::Done { record }
+        }
+        ToolCallLaunch::Pending(pending) => crate::ToolAttemptLaunch::Pending {
+            key: pending.key,
+            pending: pending.pending,
+            duration_ms: pending.duration_ms,
+        },
+    };
+    let triggers = context.trigger_outcomes.drain().map_err(|err| {
+        crate::RuntimeEffectControllerError::new("tool_trigger_outcome_drain", err)
+    })?;
+    Ok(crate::ToolAttemptEffectOutcome { launch, triggers })
 }
 
 pub(crate) async fn finalize_tool_result_with_execution_context(
