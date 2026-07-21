@@ -1402,16 +1402,10 @@ fn openai_compat_resolver_covers_openrouter_local_and_session_affinity() {
     );
     assert!(openrouter_caps.streaming_usage);
     assert!(openrouter_caps.cache_session_affinity);
-    assert_eq!(
-        openrouter_caps.provider_routing,
-        Some(ProviderRoutingPrefs {
-            require_parameters: true,
-        })
-    );
-    assert_eq!(
-        openrouter_caps.response_metadata_body_paths,
-        vec!["/provider"]
-    );
+    // Endpoint facts only: restricted routing and response-metadata capture
+    // are host decisions, so the preset resolves neither.
+    assert_eq!(openrouter_caps.provider_routing, None);
+    assert!(openrouter_caps.response_metadata_body_paths.is_empty());
 
     let local = OpenAiCompatibleProvider::new("key", "http://localhost:11434/v1");
     let local_caps = local.resolved_compat(CompletionEndpoint::ChatCompletions);

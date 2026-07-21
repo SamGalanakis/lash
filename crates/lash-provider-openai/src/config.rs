@@ -70,15 +70,16 @@ pub struct OpenAiCompat {
 
 impl OpenAiCompat {
     /// Explicit endpoint capabilities for OpenRouter and compatible proxies.
+    ///
+    /// Carries facts about the endpoint's wire dialect, not preferences about
+    /// how to use it. `provider_routing` is deliberately absent: restricting
+    /// the routing pool trades cost, latency and availability against contract
+    /// enforcement, and that trade belongs to the host.
     pub fn openrouter() -> Self {
         Self {
             reasoning_format: Some(ReasoningWireFormat::openrouter()),
             cache_session_affinity: Some(true),
             stream_termination: Some(StreamTermination::RequireTerminalEvidence),
-            provider_routing: Some(ProviderRoutingPrefs {
-                require_parameters: true,
-            }),
-            response_metadata_body_paths: Some(vec!["/provider".into()]),
             ..Self::default()
         }
     }

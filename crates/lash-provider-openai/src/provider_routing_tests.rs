@@ -2,6 +2,18 @@
 
 use super::*;
 
+/// A host that has declared the endpoint is OpenRouter *and* opted into
+/// parameter-honoring routing. The preset alone does not opt in: that trade is
+/// the host's to make.
+fn host_configured_routing_provider() -> OpenAiCompatibleProvider {
+    OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL).with_compat(OpenAiCompat {
+        provider_routing: Some(ProviderRoutingPrefs {
+            require_parameters: true,
+        }),
+        ..OpenAiCompat::openrouter()
+    })
+}
+
 #[test]
 fn openrouter_chat_body_requires_supported_parameters_with_json_schema_output() {
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "extract")]);
@@ -16,7 +28,7 @@ fn openrouter_chat_body_requires_supported_parameters_with_json_schema_output() 
         strict: true,
     }));
 
-    let body = openrouter_provider()
+    let body = host_configured_routing_provider()
         .build_chat_request_body(&req, false)
         .unwrap();
 
@@ -29,7 +41,7 @@ fn openrouter_chat_body_requires_supported_parameters_with_json_schema_output() 
 fn openrouter_chat_body_requires_supported_parameters_without_output_spec() {
     let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
 
-    let body = openrouter_provider()
+    let body = host_configured_routing_provider()
         .build_chat_request_body(&req, false)
         .unwrap();
 
@@ -61,10 +73,15 @@ fn declared_empty_provider_routing_emits_require_parameters_false() {
 }
 
 #[test]
-fn default_compat_and_direct_openai_bodies_omit_provider_routing() {
+fn default_compat_preset_and_direct_openai_bodies_omit_provider_routing() {
     let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
 
     let default_compat_body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .build_chat_request_body(&req, false)
+        .unwrap();
+    // The OpenRouter preset states endpoint facts; opting into restricted
+    // routing is a host decision, so the preset alone emits nothing.
+    let preset_body = openrouter_provider()
         .build_chat_request_body(&req, false)
         .unwrap();
     let direct_openai_body = OpenAiProvider::new("key")
@@ -72,5 +89,6 @@ fn default_compat_and_direct_openai_bodies_omit_provider_routing() {
         .unwrap();
 
     assert!(default_compat_body.get("provider").is_none());
+    assert!(preset_body.get("provider").is_none());
     assert!(direct_openai_body.get("provider").is_none());
 }
