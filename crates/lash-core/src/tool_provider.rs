@@ -205,6 +205,7 @@ impl<'run> ToolContextBuilder<'run> {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn tool_execution_binding(mut self, binding: serde_json::Value) -> Self {
         self.tool_execution_binding = binding;
         self
@@ -584,6 +585,17 @@ impl<'run> ToolContext<'run> {
 
     pub(crate) fn with_tool_execution_binding(mut self, binding: serde_json::Value) -> Self {
         self.tool_execution_binding = binding;
+        self
+    }
+
+    pub(crate) fn with_attempt_dispatch(
+        mut self,
+        dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'run>>,
+        parent_invocation: crate::RuntimeInvocation,
+    ) -> Self {
+        self.effect_controller = dispatch.effect_controller.clone();
+        self.runtime_dispatch = Some(dispatch);
+        self.parent_invocation = Some(parent_invocation);
         self
     }
 

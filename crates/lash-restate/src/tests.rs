@@ -1,8 +1,7 @@
 //! Tests for the Restate adapter (extracted from lib.rs).
 
 use super::*;
-use bytes::{BufMut, Bytes, BytesMut};
-use http_body_util::{BodyExt, Empty, Full};
+use http_body_util::{BodyExt, Empty};
 use lash_core::{ProcessInput, ProcessRegistration};
 use lash_http_transport::{HttpResponse, HttpResponseBody, HttpTransport, HttpTransportError};
 use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
@@ -15,6 +14,9 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
+
+mod endpoint_protocol;
+use endpoint_protocol::invoke_process_workflow_endpoint;
 
 struct PanicsWhenPolledAfterReady {
     completed: bool,
@@ -829,98 +831,6 @@ impl lash_core::StoreMaintenance for CommitRetryStore {
     }
 }
 
-const RESTATE_INVOCATION_CONTENT_TYPE: &str = "application/vnd.restate.invocation.v6";
-
-fn encode_restate_message(message_type: u16, payload: Vec<u8>) -> Bytes {
-    let mut encoded = BytesMut::with_capacity(8 + payload.len());
-    let header = ((message_type as u64) << 48) | payload.len() as u64;
-    encoded.put_u64(header);
-    encoded.extend_from_slice(&payload);
-    encoded.freeze()
-}
-
-fn put_varint(buf: &mut BytesMut, mut value: u64) {
-    while value >= 0x80 {
-        buf.put_u8(((value as u8) & 0x7f) | 0x80);
-        value >>= 7;
-    }
-    buf.put_u8(value as u8);
-}
-
-fn put_field_key(buf: &mut BytesMut, field_number: u32, wire_type: u8) {
-    put_varint(buf, ((field_number as u64) << 3) | wire_type as u64);
-}
-
-fn put_varint_field(buf: &mut BytesMut, field_number: u32, value: u64) {
-    put_field_key(buf, field_number, 0);
-    put_varint(buf, value);
-}
-
-fn put_len_field(buf: &mut BytesMut, field_number: u32, value: &[u8]) {
-    put_field_key(buf, field_number, 2);
-    put_varint(buf, value.len() as u64);
-    buf.extend_from_slice(value);
-}
-
-fn encode_start_message(workflow_key: &str) -> Bytes {
-    let mut payload = BytesMut::new();
-    put_len_field(&mut payload, 1, workflow_key.as_bytes());
-    put_len_field(&mut payload, 2, workflow_key.as_bytes());
-    put_varint_field(&mut payload, 3, 1);
-    put_len_field(&mut payload, 6, workflow_key.as_bytes());
-    encode_restate_message(0x0000, payload.to_vec())
-}
-
-fn encode_input_command(payload: &[u8]) -> Bytes {
-    let mut value = BytesMut::new();
-    put_len_field(&mut value, 1, payload);
-
-    let mut command = BytesMut::new();
-    put_len_field(&mut command, 14, &value);
-    encode_restate_message(0x0400, command.to_vec())
-}
-
-fn encode_invocation_body<T: serde::Serialize>(
-    workflow_key: &str,
-    input: &T,
-) -> Result<Bytes, TerminalError> {
-    let input = serde_json::to_vec(input).map_err(TerminalError::from_error)?;
-    let start = encode_start_message(workflow_key);
-    let input = encode_input_command(&input);
-    let mut body = BytesMut::with_capacity(start.len() + input.len());
-    body.extend_from_slice(&start);
-    body.extend_from_slice(&input);
-    Ok(body.freeze())
-}
-
-async fn invoke_process_workflow_endpoint<T: serde::Serialize>(
-    endpoint: &Endpoint,
-    handler: &str,
-    workflow_key: &str,
-    input: &T,
-) -> Result<Bytes, TerminalError> {
-    let response = endpoint.handle(
-        http::Request::builder()
-            .uri(format!("/invoke/LashProcessWorkflow/{handler}"))
-            .header(http::header::CONTENT_TYPE, RESTATE_INVOCATION_CONTENT_TYPE)
-            .body(Full::new(encode_invocation_body(workflow_key, input)?))
-            .expect("workflow invocation request"),
-    );
-    let status = response.status();
-    if !status.is_success() {
-        return Err(TerminalError::new_with_code(
-            status.as_u16(),
-            format!("workflow endpoint invocation returned status {status}"),
-        ));
-    }
-    response
-        .into_body()
-        .collect()
-        .await
-        .map(|body| body.to_bytes())
-        .map_err(|err| TerminalError::new(format!("workflow endpoint body failed: {err}")))
-}
-
 #[test]
 fn restate_command_execution_plan_is_explicit_for_every_command() {
     let cases = vec![
@@ -1190,6 +1100,8 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
             .push(execution_context.clone());
         Box::pin(async move {
             if let Some(endpoint) = endpoint {
+                let complete_runs =
+                    matches!(registration.input.as_ref(), ProcessInput::ToolCall { .. });
                 invoke_process_workflow_endpoint(
                     &endpoint,
                     "run",
@@ -1199,6 +1111,7 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
                         execution_context,
                         segment_ordinal: 0,
                     },
+                    complete_runs,
                 )
                 .await?;
             }
@@ -1221,7 +1134,7 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
             .push((request.process_id.clone(), request.reason.clone()));
         Box::pin(async move {
             if let Some(endpoint) = endpoint {
-                invoke_process_workflow_endpoint(&endpoint, "cancel", &process_id, &request)
+                invoke_process_workflow_endpoint(&endpoint, "cancel", &process_id, &request, false)
                     .await?;
             }
             Ok(())

@@ -10,10 +10,9 @@ use super::context::{
     runtime_failure,
 };
 use super::directives::apply_after_tool_directives;
-use super::retry::{
-    execute_granted_tool_attempt, execute_granted_tool_call, execute_tool_attempt,
-    execute_tool_call,
-};
+use super::retry::{execute_granted_tool_attempt, execute_tool_attempt};
+#[cfg(test)]
+use super::retry::{execute_granted_tool_call, execute_tool_call};
 
 #[cfg(test)]
 pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
@@ -32,6 +31,7 @@ pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
     .into_done_or_runtime_failure()
 }
 
+#[cfg(test)]
 pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     prepared: PreparedToolCall,
@@ -120,6 +120,7 @@ pub(crate) async fn dispatch_prepared_tool_call_launch_with_execution_context<'r
     launch_done(outcome(tool_name, args, result, duration_ms))
 }
 
+#[cfg(test)]
 pub(crate) async fn dispatch_granted_prepared_tool_call_launch_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     grant: &crate::ToolExecutionGrant,
@@ -211,7 +212,7 @@ pub(crate) async fn dispatch_granted_prepared_tool_call_launch_with_execution_co
     launch_done(outcome(tool_name, args, result, duration_ms))
 }
 
-pub(crate) async fn dispatch_prepared_tool_attempt_launch_with_execution_context<'run>(
+pub(super) async fn dispatch_prepared_tool_attempt_launch_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     prepared: PreparedToolCall,
     attempt: u32,
@@ -303,7 +304,7 @@ pub(crate) async fn dispatch_prepared_tool_attempt_launch_with_execution_context
     launch_done(outcome(tool_name, args, result, duration_ms))
 }
 
-pub(crate) async fn dispatch_granted_prepared_tool_attempt_launch_with_execution_context<'run>(
+pub(super) async fn dispatch_granted_prepared_tool_attempt_launch_with_execution_context<'run>(
     context: &ToolDispatchContext<'run>,
     grant: &crate::ToolExecutionGrant,
     prepared: PreparedToolCall,
@@ -396,6 +397,55 @@ pub(crate) async fn dispatch_granted_prepared_tool_attempt_launch_with_execution
     .await;
 
     launch_done(outcome(tool_name, args, result, duration_ms))
+}
+
+pub(crate) async fn execute_prepared_tool_attempt_effect<'run>(
+    context: &ToolDispatchContext<'run>,
+    prepared: PreparedToolCall,
+    execution_grant: Option<Box<crate::ToolExecutionGrant>>,
+    attempt: u32,
+    max_attempts: u32,
+    tool_context: ToolContext<'run>,
+) -> Result<crate::ToolAttemptEffectOutcome, crate::RuntimeEffectControllerError> {
+    let call_id = prepared.call_id.clone();
+    let launch = if let Some(grant) = execution_grant.as_ref() {
+        dispatch_granted_prepared_tool_attempt_launch_with_execution_context(
+            context,
+            grant,
+            prepared,
+            attempt,
+            max_attempts,
+            None,
+            tool_context,
+        )
+        .await
+    } else {
+        dispatch_prepared_tool_attempt_launch_with_execution_context(
+            context,
+            prepared,
+            attempt,
+            max_attempts,
+            None,
+            tool_context,
+        )
+        .await
+    };
+    let launch = match launch {
+        ToolCallLaunch::Done(outcome) => {
+            let mut record = outcome.record;
+            record.call_id = Some(call_id);
+            crate::ToolAttemptLaunch::Done { record }
+        }
+        ToolCallLaunch::Pending(pending) => crate::ToolAttemptLaunch::Pending {
+            key: pending.key,
+            pending: pending.pending,
+            duration_ms: pending.duration_ms,
+        },
+    };
+    let triggers = context.trigger_outcomes.drain().map_err(|err| {
+        crate::RuntimeEffectControllerError::new("tool_trigger_outcome_drain", err)
+    })?;
+    Ok(crate::ToolAttemptEffectOutcome { launch, triggers })
 }
 
 pub(crate) async fn finalize_tool_result_with_execution_context(

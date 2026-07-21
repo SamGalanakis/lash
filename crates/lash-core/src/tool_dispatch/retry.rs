@@ -1,12 +1,16 @@
+#[cfg(test)]
 use std::sync::Arc;
 
 use crate::{
-    PreparedToolCall, ProgressSender, ToolCallOutcome, ToolContext, ToolFailure, ToolFailureClass,
-    ToolManifest, ToolResult, ToolRetryDisposition, ToolRetryPolicy,
+    PreparedToolCall, ProgressSender, ToolCallOutcome, ToolContext, ToolManifest, ToolResult,
+    ToolRetryDisposition, ToolRetryPolicy,
 };
+#[cfg(test)]
+use crate::{ToolFailure, ToolFailureClass};
 
 use super::context::ToolDispatchContext;
 
+#[cfg(test)]
 pub(super) async fn execute_tool_call<'run>(
     context: &ToolDispatchContext<'run>,
     manifest: &ToolManifest,
@@ -66,6 +70,7 @@ pub(super) async fn execute_tool_call<'run>(
     .await
 }
 
+#[cfg(test)]
 pub(super) async fn execute_granted_tool_call<'run>(
     context: &ToolDispatchContext<'run>,
     grant: &crate::ToolExecutionGrant,
@@ -193,6 +198,7 @@ async fn execute_granted_once<'run>(
         .await
 }
 
+#[cfg(test)]
 async fn sleep_before_retry(
     context: &ToolDispatchContext<'_>,
     tool_context: &ToolContext<'_>,
@@ -264,6 +270,7 @@ async fn sleep_before_retry(
     }
 }
 
+#[cfg(test)]
 fn derive_retry_replay_key(tool_context: &ToolContext<'_>, tool_name: &str) -> Option<String> {
     tool_context.tool_call_id().map(|call_id| {
         format!(

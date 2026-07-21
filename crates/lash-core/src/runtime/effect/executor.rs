@@ -725,6 +725,11 @@ struct LocalToolBatchEffectRunner<'run> {
     child_trace_hooks: HashMap<String, crate::ToolChildExecutionTraceHook>,
 }
 
+struct LocalPreparedToolAttemptEffectRunner<'run> {
+    dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'run>>,
+    tool_context: crate::ToolContext<'run>,
+}
+
 #[async_trait::async_trait]
 trait RuntimeEffectLocalRunner: Send {
     async fn execute(
@@ -904,6 +909,20 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
+    pub(crate) fn prepared_tool_attempt(
+        dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'run>>,
+        tool_context: crate::ToolContext<'run>,
+    ) -> Self {
+        Self {
+            state: RuntimeEffectLocalExecutorState::Runner(Box::new(
+                LocalPreparedToolAttemptEffectRunner {
+                    dispatch,
+                    tool_context,
+                },
+            )),
+        }
+    }
+
     pub async fn execute(
         self,
         envelope: RuntimeEffectEnvelope,
@@ -1056,6 +1075,47 @@ impl RuntimeEffectLocalRunner for LocalToolBatchEffectRunner<'_> {
                 ),
             )),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectLocalRunner for LocalPreparedToolAttemptEffectRunner<'_> {
+    async fn execute(
+        self: Box<Self>,
+        envelope: RuntimeEffectEnvelope,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        let RuntimeEffectCommand::ToolAttempt {
+            call,
+            execution_grant,
+            attempt,
+            max_attempts,
+        } = envelope.command
+        else {
+            return Err(RuntimeEffectControllerError::new(
+                "runtime_effect_local_executor_mismatch",
+                "prepared tool attempt executor requires a tool_attempt command",
+            ));
+        };
+        let mut dispatch = (*self.dispatch).clone();
+        dispatch.parent_invocation = Some(envelope.invocation.clone());
+        dispatch.trigger_outcomes = crate::tool_dispatch::ToolTriggerOutcomeBuffer::default();
+        let dispatch = Arc::new(dispatch);
+        let tool_context = self
+            .tool_context
+            .with_attempt_dispatch(Arc::clone(&dispatch), envelope.invocation);
+        let outcome = crate::tool_dispatch::execute_prepared_tool_attempt_effect(
+            dispatch.as_ref(),
+            call,
+            execution_grant,
+            attempt,
+            max_attempts,
+            tool_context,
+        )
+        .await?;
+        Ok(RuntimeEffectOutcome::ToolAttempt {
+            launch: outcome.launch,
+            triggers: outcome.triggers,
+        })
     }
 }
 
