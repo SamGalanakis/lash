@@ -761,7 +761,8 @@ process parent(tools: Tools, workflow_id: str) {{
   child = (await child_handle)?
   input = await tools.durable_input_request({{
     workflow_id: workflow_id,
-    question: "approve parent durable input?"
+    question: "approve parent durable input?",
+    attach_after_resolution: true
   }})?
   finish {{
     child: child.child,

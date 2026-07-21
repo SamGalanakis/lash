@@ -74,6 +74,17 @@ LASH_MINIO_PREFIX="conformance/restate-postgres-workers-$$" \
 "${compose[@]}" --profile runner run --rm runner 2>&1 | tee -a "$test_output" &
 runner_job=$!
 
+if [ "${LASH_E2E_WAKE_RCA_ONLY:-0}" = "1" ]; then
+  wait "$runner_job"
+  "${compose[@]}" logs --no-color 2>&1 | tee -a "$test_output"
+  if grep -Fn 'panicked at' "$test_output" >&2; then
+    echo "panic gate: FAILED ('panicked at' found in Restate/Postgres workers E2E output)" >&2
+    exit 1
+  fi
+  echo "panic gate: clean (no 'panicked at' lines in Restate/Postgres workers E2E output)"
+  exit 0
+fi
+
 deadline=$((SECONDS + 240))
 until signal_ready="$(
   "${compose[@]}" exec -T postgres \

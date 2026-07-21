@@ -57,16 +57,24 @@ fn restate_context_futures_are_structurally_safe_after_ready() {
     assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
 }
 
-#[test]
-fn restate_context_futures_are_not_repolled_after_sdk_error_wake() {
-    let mut future = Box::pin(guard_restate_context_future(
-        PanicsWhenPolledAfterErrorWake { polled: false },
-    ));
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
+#[tokio::test]
+async fn restate_context_future_sdk_error_wake_fails_attempt_instead_of_parking() {
+    let guarded = guard_restate_context_future(PanicsWhenPolledAfterErrorWake { polled: false });
+    let mut attempt = tokio::spawn(async move {
+        tokio::select! {
+            _ = guarded => {}
+            _ = std::future::pending::<()>() => {}
+        }
+    });
 
-    assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
-    assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+    let outcome = tokio::time::timeout(Duration::from_millis(100), &mut attempt).await;
+    if outcome.is_err() {
+        attempt.abort();
+    }
+    assert!(
+        matches!(outcome, Ok(Err(ref error)) if error.is_panic()),
+        "an SDK error wake must fail the handler attempt instead of parking it: {outcome:?}"
+    );
 }
 
 #[test]
@@ -2025,6 +2033,10 @@ async fn restate_routes_every_execution_scope_to_an_exact_durable_wait_address()
         .expect("scope wait key");
         let address = RestateDurableWaitAddress::for_key(&key);
         assert!(addresses.insert(address.workflow_key.clone()));
+        assert!(
+            !address.index_key().contains('/'),
+            "wait-index object keys must remain one ingress path segment"
+        );
         let resolution = Resolution::Ok(serde_json::json!({ "scope": index }));
         assert_eq!(
             host.resolve_await_event(&key, resolution.clone())
@@ -2234,6 +2246,44 @@ async fn restate_effect_host_without_ingress_refuses_session_mutation() {
         .await
         .expect_err("deployment host without ingress cannot revoke Restate state");
     assert_eq!(err.code.as_str(), "restate_await_event_ingress_required");
+}
+
+#[tokio::test]
+async fn restate_effect_host_awaits_resolution_with_one_causally_linked_call() {
+    let expected = Resolution::Ok(serde_json::json!({ "answer": "approved" }));
+    let scripted = Arc::new(ScriptedHttpTransport::new([HttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        body: HttpResponseBody::buffered(
+            serde_json::to_string(&expected).expect("encode resolution"),
+        ),
+    }]));
+    let host = RestateEffectHost::with_ingress_url(RestateConnection::with_transport(
+        "https://restate.example",
+        scripted.clone(),
+    ));
+    let key = restate_await_event_key(
+        &ExecutionScope::turn("single-call-session", "single-call-turn"),
+        AwaitEventWaitIdentity::Custom {
+            key: "single-call-wait".to_string(),
+        },
+    )
+    .expect("single-call wait key");
+
+    let resolution = host
+        .await_await_event(&key, tokio_util::sync::CancellationToken::new(), None)
+        .await
+        .expect("await resolution through ingress");
+
+    assert_eq!(resolution, expected);
+    let requests = scripted.requests();
+    assert_eq!(requests.len(), 1, "durable wait must use one invocation");
+    assert!(
+        requests[0].url.contains("/LashDurableWaitWorkflow/")
+            && requests[0].url.ends_with("/await_resolution"),
+        "durable wait must call await_resolution directly: {}",
+        requests[0].url
+    );
 }
 
 fn replay_test_policy(session_id: &str) -> lash_core::SessionPolicy {
@@ -4972,12 +5022,16 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
     );
     assert!(wait_workflow_discovery.handlers.iter().any(|handler| {
         handler.name.to_string() == "await_resolution"
-            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("WORKFLOW")
-    }));
-    assert!(wait_workflow_discovery.handlers.iter().any(|handler| {
-        handler.name.to_string() == "observe"
             && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
     }));
+    assert_eq!(wait_workflow_discovery.handlers.len(), 5);
+    assert!(
+        wait_workflow_discovery
+            .handlers
+            .iter()
+            .all(|handler| handler.name.to_string() != "observe"),
+        "the superseded observe handoff must not remain registered"
+    );
     assert!(wait_workflow_discovery.handlers.iter().any(|handler| {
         handler.name.to_string() == "resolve"
             && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
