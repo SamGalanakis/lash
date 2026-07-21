@@ -3,7 +3,6 @@ use std::sync::{Arc, LazyLock};
 
 use lash_core::llm::types::LlmRequest;
 use lash_core::provider::{ReasoningDisableEncoding, ReasoningEncoding, ReasoningSelection};
-use lash_llm_transport::util::emit_provider_trace;
 use lash_llm_transport::{LlmHttpTransport, ReqwestLlmHttpTransport};
 
 use crate::reasoning::ReasoningWireIntent;
@@ -48,24 +47,6 @@ pub(crate) fn reasoning_intent(req: &LlmRequest) -> Option<ReasoningWireIntent> 
 
 pub(crate) static DEFAULT_HTTP_TRANSPORT: LazyLock<Arc<dyn LlmHttpTransport>> =
     LazyLock::new(|| Arc::new(ReqwestLlmHttpTransport::new()));
-
-pub(crate) fn emit_provider_request_trace(
-    provider_trace: Option<&lash_core::llm::types::LlmProviderTraceSender>,
-    endpoint: &str,
-    body: &Value,
-) {
-    if provider_trace.is_none() {
-        return;
-    }
-    let raw = json!({
-        "type": "openai_compatible.request_body",
-        "endpoint": endpoint,
-        "body": body,
-    });
-    if let Ok(raw) = serde_json::to_string(&raw) {
-        emit_provider_trace(provider_trace, "openai_compatible", &raw);
-    }
-}
 
 pub(crate) fn has_response_content(parts: &[lash_core::llm::types::LlmOutputPart]) -> bool {
     parts.iter().any(|part| match part {

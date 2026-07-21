@@ -27,7 +27,7 @@ pub(crate) use lash_core::provider::{
 pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 pub(crate) use lash_llm_transport::timeouts::response_start_timeout;
 pub(crate) use lash_llm_transport::util::{
-    OPENAI_IMAGE_MIMES, emit_provider_trace, extract_error_detail,
+    OPENAI_IMAGE_MIMES, emit_provider_request_trace, emit_provider_trace, extract_error_detail,
 };
 pub(crate) use lash_llm_transport::{
     LlmHttpBody, LlmHttpMethod, LlmHttpRequest, LlmHttpTransport, first_header_value,

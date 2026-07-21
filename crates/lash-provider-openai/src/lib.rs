@@ -7,6 +7,8 @@ mod config;
 mod driver;
 mod factory;
 mod provider;
+#[cfg(test)]
+mod provider_trace_tests;
 mod reasoning;
 mod response_metadata;
 mod responses;

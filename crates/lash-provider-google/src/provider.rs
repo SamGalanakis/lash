@@ -31,6 +31,12 @@ impl GoogleOAuthProvider {
         } else {
             "generateContent"
         };
+        emit_provider_request_trace(
+            provider_trace.as_ref(),
+            "google",
+            method,
+            &request_body_bytes,
+        );
         let mut url = Self::method_url(method);
         if stream_events.is_some() {
             url.push_str("?alt=sse");

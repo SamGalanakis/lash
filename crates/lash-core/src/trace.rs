@@ -126,7 +126,9 @@ fn assign_span_identity(context: &mut TraceContext, event: &TraceEvent) {
             let self_id = call_id.as_deref().map(tool_node_id);
             set_span(context, self_id, turn_node);
         }
-        TraceEvent::ProviderStreamEvent { .. } | TraceEvent::RuntimeStreamEvent { .. } => {
+        TraceEvent::ProviderRequest { .. }
+        | TraceEvent::ProviderStreamEvent { .. }
+        | TraceEvent::RuntimeStreamEvent { .. } => {
             let parent = context
                 .llm_call_id
                 .as_deref()

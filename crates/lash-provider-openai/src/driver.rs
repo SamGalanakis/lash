@@ -101,13 +101,14 @@ pub(crate) async fn complete(
                 .collect(),
         );
     }
-    emit_provider_request_trace(
-        provider_trace.as_ref(),
-        endpoint.request_trace_name(),
-        &body,
-    );
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| LlmTransportError::new(format!("{}: {e}", endpoint.serialize_error())))?;
+    emit_provider_request_trace(
+        provider_trace.as_ref(),
+        "openai_compatible",
+        endpoint.request_trace_name(),
+        &body_bytes,
+    );
     let request_body = bytes::Bytes::from(body_bytes);
     let request_body_for_error = String::from_utf8_lossy(&request_body).into_owned();
     let url = format!(
@@ -252,6 +253,7 @@ pub(crate) async fn complete(
             .get_or_insert_with(ExecutionEvidence::default)
             .provider_request_id = Some(provider_request_id);
     }
+    response.request_body = Some(request_body_for_error);
     response.response_metadata = capture.into_map();
     Ok(response)
 }

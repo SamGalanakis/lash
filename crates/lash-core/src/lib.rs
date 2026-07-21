@@ -323,9 +323,9 @@ pub use lash_trace::otel::{OtelTraceOptions, OtelTraceSink};
 pub use lash_trace::{
     JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceContext,
     TraceError, TraceEvent, TraceLabelMetadata, TraceLevel, TraceLlmMessage, TraceLlmRequest,
-    TraceLlmResponse, TracePromptComponent, TraceProviderStreamEvent, TraceRecord,
-    TraceRuntimeScope, TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceSink, TraceSinkError,
-    TraceTokenUsage, TraceToolSpec,
+    TraceLlmResponse, TracePromptComponent, TraceProviderRequestEvent, TraceProviderStreamEvent,
+    TraceRecord, TraceRuntimeScope, TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceSink,
+    TraceSinkError, TraceTokenUsage, TraceToolSpec,
 };
 pub use llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 pub use model::{ModelLimits, ModelSpec};

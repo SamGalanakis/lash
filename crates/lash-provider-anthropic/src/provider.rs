@@ -58,6 +58,12 @@ impl Provider for AnthropicProvider {
             LlmTransportError::new(format!("Failed to serialize Anthropic body: {err}"))
                 .with_kind(ProviderFailureKind::Validation)
         })?;
+        emit_provider_request_trace(
+            provider_trace.as_ref(),
+            "anthropic",
+            "messages",
+            &request_body_bytes,
+        );
         let request_body = Some(String::from_utf8_lossy(&request_body_bytes).into_owned());
 
         // `fine-grained-tool-streaming-2025-05-14` streams partial JSON so we

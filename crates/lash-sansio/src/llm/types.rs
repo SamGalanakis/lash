@@ -479,6 +479,27 @@ pub struct LlmProviderTraceEvent {
     pub raw: String,
 }
 
+const PROVIDER_REQUEST_EVENT_PREFIX: &str = "\0lash.provider_request:";
+
+impl LlmProviderTraceEvent {
+    /// Construct an internal trace message for an outbound provider request.
+    ///
+    /// Request traces share the provider trace channel with response events,
+    /// while the reserved event-name prefix lets the runtime persist them as
+    /// a distinct durable trace event without wrapping or changing `raw`.
+    pub fn request(provider: &'static str, endpoint: &str, body: String) -> Self {
+        Self {
+            provider,
+            event_name: format!("{PROVIDER_REQUEST_EVENT_PREFIX}{endpoint}"),
+            raw: body,
+        }
+    }
+
+    pub fn request_endpoint(&self) -> Option<&str> {
+        self.event_name.strip_prefix(PROVIDER_REQUEST_EVENT_PREFIX)
+    }
+}
+
 #[derive(Clone)]
 pub struct LlmProviderTraceSender(Arc<dyn Fn(LlmProviderTraceEvent) + Send + Sync>);
 
