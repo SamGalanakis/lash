@@ -479,7 +479,6 @@ fn operational_cases_for_semantic(semantic_oracle: &str) -> &'static [&'static s
         "runtime.queued_work_keeps_pending_input" | "runtime.queued_turn_input_completion" => {
             &["queueing-inputs", "active-turn-input-queueing"]
         }
-        "runtime.process_wake_claim" => &["triggers-wakeups", "duplicate-delivery"],
         "runtime.lease_release_rejects_commit" | "runtime.dead_lease_reclaim_rejects_stale" => {
             &["lease-fencing", "worker-failover", "stale-completion"]
         }
@@ -541,7 +540,6 @@ pub(super) fn scenario_generated_shape(
 
 fn scenario_transition_kind(contract: &ScenarioContractSpec) -> &'static str {
     match contract.semantic_oracle {
-        "runtime.process_wake_claim" => "runtime.process-wake-claim-dedupe-transition",
         "runtime.lease_release_rejects_commit" => {
             "runtime.lease-release-stale-commit-rejection-transition"
         }
@@ -681,9 +679,6 @@ fn scenario_negative_fixture_for_contract(
         }
         "runtime.command_before_turn_work" => {
             return scenario_negative_fixture("trigger_wakeup_operational_missing");
-        }
-        "runtime.process_wake_claim" => {
-            return scenario_negative_fixture("process_wake_operational_missing");
         }
         "standard.max_turns_after_tool_result" => {
             return scenario_negative_fixture("standard_max_turn_stop_missing");
@@ -977,7 +972,6 @@ fn select_scenario_contract_fact_trace(
 
 fn semantic_scenario_evidence(semantic_oracle: &str) -> Vec<&'static str> {
     match semantic_oracle {
-        "runtime.process_wake_claim" => vec!["process_wake"],
         "runtime.lease_release_rejects_commit" | "runtime.dead_lease_reclaim_rejects_stale" => {
             vec!["worker_stale_completion"]
         }

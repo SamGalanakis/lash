@@ -266,8 +266,6 @@ pub async fn effect_controller_segmentation_vector(controller: &dyn RuntimeEffec
         segmented_successors.len(),
         "each segment ordinal has exactly one successor"
     );
-    let terminal_deliveries = 1;
-    assert_eq!(terminal_deliveries, 1, "the lineage has one real terminal");
 }
 
 /// Run journaled-effect replay checks for controllers with an explicit replay mode.

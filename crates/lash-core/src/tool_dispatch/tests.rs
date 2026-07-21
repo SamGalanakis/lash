@@ -2171,8 +2171,7 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         .expect("serial window")
         .expect("serial window recorded");
 
-    // The serial tool's window must not overlap either parallel
-    // tool's window (Option A: serial runs after parallel).
+    // The serial tool's window must not overlap either parallel tool's window.
     for (name, p_start, p_end) in pw.iter() {
         assert!(
             sw.0 >= *p_end || sw.1 <= *p_start,

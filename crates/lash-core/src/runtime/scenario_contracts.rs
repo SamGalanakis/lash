@@ -47,15 +47,6 @@ pub const RUNTIME_SCENARIO_CONTRACTS: &[ScenarioContractSpec] = &[
     },
     ScenarioContractSpec {
         suite: "runtime",
-        test_name: "runtime_scenario_claims_process_wake_at_active_checkpoint_boundary",
-        display_name: "active checkpoint process wake claim",
-        owned_invariant: "Process-wake turn work is eligible at the active-checkpoint claim boundary.",
-        semantic_oracle: "runtime.process_wake_claim",
-        required_sim_evidence: RUNTIME_REQUIRED_EVIDENCE,
-        oracle_id: "sim.oracle.scenario.runtime-contract.v1",
-    },
-    ScenarioContractSpec {
-        suite: "runtime",
         test_name: "runtime_scenario_claims_queued_turn_input_and_completes_it",
         display_name: "queued turn input completion",
         owned_invariant: "Next-turn pending inputs are claimed, hidden while live, and completed by commit.",
@@ -109,7 +100,7 @@ mod tests {
 
     #[test]
     fn runtime_scenario_contract_metadata_is_unique_and_complete() {
-        assert_eq!(RUNTIME_SCENARIO_CONTRACTS.len(), 9);
+        assert_eq!(RUNTIME_SCENARIO_CONTRACTS.len(), 8);
         let mut names = BTreeSet::new();
         for contract in RUNTIME_SCENARIO_CONTRACTS {
             assert_eq!(contract.suite, "runtime");

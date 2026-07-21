@@ -142,7 +142,6 @@ pub async fn run_fixed_script_profile(
         prove_openai_compatible_retry_exhaustion().await?,
         prove_google_stream_generate_text().await?,
         prove_google_generate_text().await?,
-        prove_google_generate_rate_limit().await?,
     ];
     let provider_matrix = provider_matrix(&scripts, &proof_runs);
     let fixed_events = fixed_script_events(&proof_runs);

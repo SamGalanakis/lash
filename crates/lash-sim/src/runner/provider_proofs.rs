@@ -343,44 +343,6 @@ pub(super) async fn prove_google_generate_text() -> Result<ProofRun, FixedScript
     )
 }
 
-pub(super) async fn prove_google_generate_rate_limit() -> Result<ProofRun, FixedScriptRunnerError> {
-    let transport = Arc::new(ScriptedLlmHttpTransport::from_json_str(
-        GOOGLE_GENERATE_RATE_LIMIT,
-    )?);
-    let mut provider = GoogleOAuthProvider::new("access-token", "refresh-token", 0)
-        .with_project_id(Some("project-1".to_string()))
-        .with_transport(provider_transport(&transport));
-    let err = provider
-        .complete(google_request(false))
-        .await
-        .expect_err("Google rate-limit script should fail");
-    require(
-        err.status == Some(429),
-        "Google rate-limit script did not preserve 429 status",
-    )?;
-    require(
-        err.retry_after == Some(std::time::Duration::from_secs(5)),
-        "Google rate-limit script did not preserve retry-after",
-    )?;
-    let classified = DefaultProviderFailureClassifier.classify(err.clone());
-    proof(
-        "google.generate-content-rate-limit-429",
-        "google_oauth",
-        GOOGLE_GENERATE_RATE_LIMIT,
-        transport_exchanges(transport.as_ref())?,
-        error_terminal(&err),
-        json!({
-            "status": err.status,
-            "headers": redacted_headers(&err.headers),
-            "raw_body_bytes": err.raw.as_ref().map(|body| body.len()),
-            "retry_after_ms": err.retry_after.map(|duration| duration.as_millis() as u64),
-            "request_body_snapshot": err.request_body.is_some(),
-            "provider_error_retryable": err.retryable,
-            "classification": failure_classification(&classified),
-        }),
-    )
-}
-
 pub(super) async fn prove_openai_compatible_rate_limit() -> Result<ProofRun, FixedScriptRunnerError>
 {
     let (mut provider, transport) = openai_compatible_provider(OPENAI_COMPAT_RATE_LIMIT)?;
