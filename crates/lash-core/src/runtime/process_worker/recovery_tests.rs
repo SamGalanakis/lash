@@ -1,12 +1,213 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::*;
 use crate::{
-    AbandonRequest, DurabilityTier, LeaseOwnerIdentity, LeaseOwnerLiveness, ProcessInput,
-    ProcessListFilter, ProcessRegistration, ProcessStarted, ProcessStatus,
+    AbandonRequest, DurabilityTier, LeaseOwnerIdentity, LeaseOwnerLiveness, ProcessExecutionEnvRef,
+    ProcessInput, ProcessListFilter, ProcessRegistration, ProcessStarted, ProcessStatus,
     TestLocalProcessRegistry, TriggerStore,
 };
+
+const TEST_PROCESS_EXECUTION_CONCURRENCY: usize = 4;
+
+#[test]
+fn process_execution_concurrency_validates_semaphore_bounds() {
+    DurableProcessWorkerConfig::validate_process_execution_concurrency(1)
+        .expect("one process is a valid execution budget");
+    assert!(DurableProcessWorkerConfig::validate_process_execution_concurrency(0).is_err());
+    assert!(
+        DurableProcessWorkerConfig::validate_process_execution_concurrency(
+            tokio::sync::Semaphore::MAX_PERMITS + 1,
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn dispatcher_unwind_clears_running_latch_and_notifies() {
+    let scheduler = Arc::new(ProcessExecutionScheduler::new(
+        ProcessExecutionConcurrency::new(1).expect("valid test concurrency"),
+    ));
+    scheduler.state.lock().await.dispatcher_running = true;
+    let task_scheduler = Arc::clone(&scheduler);
+    let task = crate::task::spawn(async move {
+        let _guard = ProcessExecutionDispatcherGuard::new(task_scheduler);
+        panic!("test dispatcher unwind");
+    });
+
+    assert!(task.await.expect_err("dispatcher task panics").is_panic());
+    tokio::time::timeout(Duration::from_secs(1), scheduler.changed.notified())
+        .await
+        .expect("unwind cleanup notifies dispatcher waiters");
+    assert!(
+        !scheduler.state.lock().await.dispatcher_running,
+        "a later drive pass must be able to start a replacement dispatcher"
+    );
+}
+
+struct TestSessionStoreFactory;
+
+#[async_trait::async_trait]
+impl SessionStoreFactory for TestSessionStoreFactory {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Inline
+    }
+
+    async fn create_store(
+        &self,
+        _request: &crate::SessionStoreCreateRequest,
+    ) -> Result<Arc<dyn crate::RuntimePersistence>, String> {
+        Ok(Arc::new(InMemorySessionStore::default()))
+    }
+
+    async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct LateBoundProcessRunHandle {
+    worker: OnceLock<DurableProcessWorker>,
+    enabled: AtomicBool,
+}
+
+impl LateBoundProcessRunHandle {
+    async fn enable_and_drive(&self) -> Result<(), PluginError> {
+        self.enabled.store(true, Ordering::SeqCst);
+        self.worker
+            .get()
+            .expect("test process worker is bound before execution")
+            .drive_pending_processes()
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ProcessRunHandle for LateBoundProcessRunHandle {
+    async fn claim_and_run_pending(&self) -> Result<(), PluginError> {
+        if !self.enabled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.worker
+            .get()
+            .expect("test process worker is bound before execution")
+            .drive_pending_processes()
+            .await
+    }
+}
+
+async fn worker_with_engine(
+    concurrency: usize,
+    engine: Arc<dyn crate::ProcessEngine>,
+    run_handle: Arc<LateBoundProcessRunHandle>,
+) -> (
+    DurableProcessWorker,
+    Arc<dyn ProcessRegistry>,
+    Arc<LateBoundProcessRunHandle>,
+    ProcessExecutionEnvRef,
+) {
+    let raw_registry: Arc<dyn ProcessRegistry> = Arc::new(TestLocalProcessRegistry::default());
+    let driver = crate::ProcessWorkDriver::new(
+        Arc::clone(&raw_registry),
+        Arc::clone(&run_handle) as Arc<dyn crate::ProcessRunHandle>,
+    );
+    let registry = driver.process_registry();
+    let mut runtime_host = RuntimeHostConfig::in_memory();
+    runtime_host.process_engines = crate::ProcessEngineRegistry::new().with_engine(engine);
+    let policy = crate::SessionPolicy {
+        provider_id: "test".to_string(),
+        model: crate::ModelSpec::from_token_limits("test-model", Default::default(), 16_384, None)
+            .expect("valid model spec"),
+        ..crate::SessionPolicy::default()
+    };
+    let env_ref = crate::persist_process_execution_env(
+        runtime_host.durability.process_env_store.as_ref(),
+        &crate::ProcessExecutionEnvSpec::new(crate::PluginOptions::default(), policy.clone()),
+    )
+    .await
+    .expect("persist process env");
+    let worker = DurableProcessWorker::new(
+        DurableProcessWorkerConfig::new(
+            Arc::new(PluginHost::new(Vec::new())),
+            runtime_host,
+            Arc::new(TestSessionStoreFactory),
+            Arc::clone(&registry),
+        )
+        .with_session_policy(policy)
+        .with_process_execution_concurrency(concurrency)
+        .expect("valid test process execution concurrency")
+        .with_change_hub(driver.change_hub())
+        .with_process_work_driver(driver)
+        .with_lease_owner(local_owner("engine-worker", "host-a", "engine-start")),
+    );
+    run_handle
+        .worker
+        .set(worker.clone())
+        .unwrap_or_else(|_| panic!("test process worker is bound exactly once"));
+    (worker, registry, run_handle, env_ref)
+}
+
+fn engine_registration(
+    id: impl Into<String>,
+    kind: &str,
+    env_ref: ProcessExecutionEnvRef,
+    payload: serde_json::Value,
+) -> ProcessRegistration {
+    ProcessRegistration::new(
+        id,
+        ProcessInput::Engine {
+            kind: kind.to_string(),
+            payload,
+        },
+        RecoveryDisposition::Rerunnable,
+        crate::ProcessProvenance::host(),
+    )
+    .with_execution_env_ref(Some(env_ref))
+}
+
+async fn terminal_count(registry: &Arc<dyn ProcessRegistry>) -> usize {
+    registry
+        .list_processes(&ProcessListFilter {
+            status: crate::ProcessStatusFilter::Any,
+            ..ProcessListFilter::default()
+        })
+        .await
+        .expect("list processes")
+        .into_iter()
+        .filter(ProcessRecord::is_terminal)
+        .count()
+}
+
+async fn wait_for_terminal_count(
+    registry: &Arc<dyn ProcessRegistry>,
+    expected: usize,
+    description: &str,
+) {
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        while terminal_count(registry).await < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if result.is_err() {
+        let records = registry
+            .list_processes(&ProcessListFilter {
+                status: crate::ProcessStatusFilter::Any,
+                ..ProcessListFilter::default()
+            })
+            .await
+            .expect("list timed-out processes");
+        panic!(
+            "timed out waiting for {description}: {}",
+            records
+                .iter()
+                .map(|record| format!("{}={}", record.id, record.status.label()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
 
 fn inline_worker(
     registry: Arc<dyn ProcessRegistry>,
@@ -214,6 +415,523 @@ impl crate::ProcessEngine for BoundaryThenTerminalEngine {
             }))
         }
     }
+}
+
+struct ProductionChainState {
+    roots: usize,
+    root_runs: AtomicUsize,
+    roots_ready_to_park: AtomicUsize,
+    first_children_started: AtomicUsize,
+    active_work: AtomicUsize,
+    max_active_work: AtomicUsize,
+    all_roots_running: tokio::sync::Notify,
+    all_roots_ready_to_park: tokio::sync::Notify,
+    run_handle: Arc<LateBoundProcessRunHandle>,
+}
+
+struct ProductionChainEngine {
+    state: Arc<ProductionChainState>,
+}
+
+struct NestedProcessEngine {
+    runs: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::ProcessEngine for NestedProcessEngine {
+    fn kind(&self) -> &'static str {
+        "nested-process-test"
+    }
+
+    async fn run(
+        &self,
+        _context: crate::ProcessEngineRunContext<'_>,
+        _payload: serde_json::Value,
+    ) -> crate::ProcessRunOutcome {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        crate::ProcessRunOutcome::Terminal(Box::new(ProcessAwaitOutput::Success {
+            value: serde_json::json!({ "nested": "done" }),
+            control: None,
+        }))
+    }
+}
+
+struct NestedProcessWaitTool;
+
+impl NestedProcessWaitTool {
+    fn definition() -> crate::ToolDefinition {
+        crate::ToolDefinition::raw(
+            "tool:await_nested_process",
+            "await_nested_process",
+            "Start and await a nested test process.",
+            crate::ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for NestedProcessWaitTool {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        vec![Self::definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == "await_nested_process").then(|| Arc::new(Self::definition().contract()))
+    }
+
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        assert!(
+            PROCESS_EXECUTION_PERMIT.try_with(|_| ()).is_ok(),
+            "production child turn must inherit the outer process execution permit"
+        );
+        let process_id = "nested-process";
+        let request = crate::ProcessStartRequest::new(
+            process_id,
+            ProcessInput::Engine {
+                kind: "nested-process-test".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            RecoveryDisposition::Rerunnable,
+            crate::ProcessOriginator::host(),
+        )
+        .with_grant(Some(crate::ProcessStartGrant {
+            session_scope: crate::SessionScope::new("request-descriptor"),
+            descriptor: crate::ProcessHandleDescriptor::new(Some("test"), Some("nested process")),
+        }));
+        if let Err(err) = call.context.processes().start(request).await {
+            return crate::ToolResult::err_fmt(format_args!(
+                "failed to start nested process: {err}"
+            ));
+        }
+        match call.context.processes().await_process(process_id).await {
+            Ok(ProcessAwaitOutput::Success { .. }) => {
+                crate::ToolResult::ok(serde_json::json!({ "nested": "done" }))
+            }
+            Ok(other) => crate::ToolResult::err_fmt(format_args!(
+                "nested process returned non-success output: {other:?}"
+            )),
+            Err(err) => {
+                crate::ToolResult::err_fmt(format_args!("failed to await nested process: {err}"))
+            }
+        }
+    }
+}
+
+impl ProductionChainEngine {
+    async fn wait_for(counter: &AtomicUsize, expected: usize, notify: &tokio::sync::Notify) {
+        while counter.load(Ordering::SeqCst) < expected {
+            notify.notified().await;
+        }
+    }
+
+    fn success(process_id: String) -> crate::ProcessRunOutcome {
+        crate::ProcessAwaitOutput::Success {
+            value: serde_json::json!({ "completed": process_id }),
+            control: None,
+        }
+        .into()
+    }
+
+    fn begin_work(&self) {
+        let active = self.state.active_work.fetch_add(1, Ordering::SeqCst) + 1;
+        self.state
+            .max_active_work
+            .fetch_max(active, Ordering::SeqCst);
+    }
+
+    fn end_work(&self) {
+        self.state.active_work.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ProcessEngine for ProductionChainEngine {
+    fn kind(&self) -> &'static str {
+        "production-chain-test"
+    }
+
+    async fn run(
+        &self,
+        context: crate::ProcessEngineRunContext<'_>,
+        payload: serde_json::Value,
+    ) -> crate::ProcessRunOutcome {
+        let process_id = context.registration().id.clone();
+        let role = payload["role"].as_str().expect("chain role");
+        let roots = payload["roots"].as_u64().expect("root count") as usize;
+        let nodes = payload["nodes"].as_u64().expect("node count") as usize;
+        let nested_wait_task = payload["nested_wait_task"].as_bool().unwrap_or(false);
+        let catalog = context.resolved_tool_catalog().expect("tool catalog");
+        let registry = context.registry();
+        let runtime = context
+            .into_runtime_context(catalog)
+            .expect("engine runtime context");
+        let (runtime, runtime_guard) = runtime.into_parts();
+
+        if role == "launcher" {
+            for root in 0..roots {
+                let registration = ProcessRegistration::session_start_draft(
+                    format!("10-root-{root:03}"),
+                    ProcessInput::Engine {
+                        kind: self.kind().to_string(),
+                        payload: serde_json::json!({
+                            "role": "node",
+                            "root": root,
+                            "level": 0,
+                            "roots": roots,
+                            "nodes": nodes,
+                            "nested_wait_task": nested_wait_task,
+                        }),
+                    },
+                    RecoveryDisposition::Rerunnable,
+                );
+                let reply = runtime
+                    .start_child_process(registration, "test-chain", None)
+                    .await;
+                assert!(
+                    reply.output.is_success(),
+                    "production root start failed: {:?}",
+                    reply.output
+                );
+            }
+            self.state
+                .run_handle
+                .enable_and_drive()
+                .await
+                .expect("drive production roots");
+            drop(runtime);
+            runtime_guard.shutdown().await;
+            return Self::success(process_id);
+        }
+
+        self.begin_work();
+        let root = payload["root"].as_u64().expect("root index") as usize;
+        let level = payload["level"].as_u64().expect("chain level") as usize;
+        if level == 0 {
+            let running = self.state.root_runs.fetch_add(1, Ordering::SeqCst) + 1;
+            if running == self.state.roots {
+                self.state.all_roots_running.notify_waiters();
+            }
+            Self::wait_for(
+                &self.state.root_runs,
+                self.state.roots,
+                &self.state.all_roots_running,
+            )
+            .await;
+        } else if level == 1 {
+            assert_eq!(
+                self.state.roots_ready_to_park.load(Ordering::SeqCst),
+                self.state.roots,
+                "a child ran before every saturated root reached its process wait"
+            );
+            self.state
+                .first_children_started
+                .fetch_add(1, Ordering::SeqCst);
+        }
+
+        if level + 1 < nodes {
+            let child_level = level + 1;
+            let child_id = format!("{}-node-{root:03}-{child_level:02}", 20 + child_level);
+            let registration = ProcessRegistration::session_start_draft(
+                child_id.clone(),
+                ProcessInput::Engine {
+                    kind: self.kind().to_string(),
+                    payload: serde_json::json!({
+                        "role": "node",
+                        "root": root,
+                        "level": child_level,
+                        "roots": roots,
+                        "nodes": nodes,
+                        "nested_wait_task": nested_wait_task,
+                    }),
+                },
+                RecoveryDisposition::Rerunnable,
+            );
+            let reply = runtime
+                .start_child_process(registration, "test-chain", None)
+                .await;
+            assert!(
+                reply.output.is_success(),
+                "production child start failed: {:?}",
+                reply.output
+            );
+            if level == 0 {
+                let ready = self
+                    .state
+                    .roots_ready_to_park
+                    .fetch_add(1, Ordering::SeqCst)
+                    + 1;
+                if ready == self.state.roots {
+                    self.state.all_roots_ready_to_park.notify_waiters();
+                }
+                Self::wait_for(
+                    &self.state.roots_ready_to_park,
+                    self.state.roots,
+                    &self.state.all_roots_ready_to_park,
+                )
+                .await;
+            }
+            self.end_work();
+            if nested_wait_task && level == 0 {
+                let awaiter = crate::ProcessAwaiter::polling(registry);
+                let wait_child_id = child_id.clone();
+                crate::task::spawn(inherit_process_execution_permit(async move {
+                    awaiter.await_terminal(&wait_child_id).await
+                }))
+                .await
+                .expect("nested child-turn task joins")
+                .expect("nested child-turn task observes child terminal");
+            } else {
+                crate::ProcessAwaiter::polling(registry)
+                    .await_terminal(&child_id)
+                    .await
+                    .expect("parent observes production-started child terminal");
+            }
+            self.begin_work();
+        }
+        drop(runtime);
+        runtime_guard.shutdown().await;
+        self.end_work();
+        Self::success(process_id)
+    }
+}
+
+async fn run_production_chain(
+    concurrency: usize,
+    roots: usize,
+    nodes: usize,
+    nested_wait_task: bool,
+) {
+    let run_handle = Arc::new(LateBoundProcessRunHandle::default());
+    let state = Arc::new(ProductionChainState {
+        roots,
+        root_runs: AtomicUsize::new(0),
+        roots_ready_to_park: AtomicUsize::new(0),
+        first_children_started: AtomicUsize::new(0),
+        active_work: AtomicUsize::new(0),
+        max_active_work: AtomicUsize::new(0),
+        all_roots_running: tokio::sync::Notify::new(),
+        all_roots_ready_to_park: tokio::sync::Notify::new(),
+        run_handle: Arc::clone(&run_handle),
+    });
+    let engine = Arc::new(ProductionChainEngine {
+        state: Arc::clone(&state),
+    });
+    let (worker, registry, _, env_ref) =
+        worker_with_engine(concurrency, engine, Arc::clone(&run_handle)).await;
+    registry
+        .register_process(engine_registration(
+            "00-chain-launcher",
+            "production-chain-test",
+            env_ref,
+            serde_json::json!({
+                "role": "launcher",
+                "roots": roots,
+                "nodes": nodes,
+                "nested_wait_task": nested_wait_task,
+            }),
+        ))
+        .await
+        .expect("seed chain launcher");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        worker
+            .drive_pending_processes()
+            .await
+            .expect("drive chain launcher");
+        wait_for_terminal_count(
+            &registry,
+            1 + roots * nodes,
+            "production-started process chain",
+        )
+        .await;
+    })
+    .await
+    .expect("production process chain completes without starvation");
+    assert_eq!(state.root_runs.load(Ordering::SeqCst), roots);
+    assert!(
+        state.max_active_work.load(Ordering::SeqCst) <= concurrency,
+        "inline process execution exceeded its configured concurrency"
+    );
+    if nodes > 1 {
+        assert_eq!(state.first_children_started.load(Ordering::SeqCst), roots);
+    }
+    let records = registry
+        .list_processes(&ProcessListFilter {
+            status: crate::ProcessStatusFilter::Any,
+            ..ProcessListFilter::default()
+        })
+        .await
+        .expect("list production chain");
+    for record in records
+        .iter()
+        .filter(|record| record.id != "00-chain-launcher")
+    {
+        assert!(
+            !matches!(
+                record.provenance.caused_by,
+                Some(crate::CausalRef::Process { .. })
+            ),
+            "production control path must not manufacture process causal refs: {}",
+            record.id
+        );
+    }
+}
+
+#[tokio::test]
+async fn saturated_fanout_releases_parked_parents_for_children() {
+    run_production_chain(
+        TEST_PROCESS_EXECUTION_CONCURRENCY,
+        TEST_PROCESS_EXECUTION_CONCURRENCY,
+        2,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn concurrency_one_parent_child_chain_completes() {
+    run_production_chain(1, 1, 2, false).await;
+}
+
+#[tokio::test]
+async fn saturated_depth_three_chain_completes() {
+    run_production_chain(1, 1, 3, false).await;
+}
+
+#[tokio::test]
+async fn managed_child_turn_process_wait_releases_outer_run_permit() {
+    // Managed child turns cross a fresh Tokio task stack through the same
+    // inherited permit scope used here. The wait must park the outer process's
+    // only slot so its production-started child can execute.
+    run_production_chain(1, 1, 2, true).await;
+}
+
+#[tokio::test]
+async fn session_turn_process_child_awaits_nested_process_at_concurrency_one() {
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&provider_calls);
+    let provider = crate::testing::TestProvider::builder()
+        .kind("test")
+        .complete(move |_request| {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                let response = match call {
+                    0 => crate::llm::types::LlmResponse {
+                        parts: vec![crate::llm::types::LlmOutputPart::ToolCall {
+                            call_id: "await-nested-call".to_string(),
+                            tool_name: "await_nested_process".to_string(),
+                            input_json: "{}".to_string(),
+                            replay: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..Default::default()
+                    },
+                    1 => crate::llm::types::LlmResponse {
+                        full_text: "child turn complete".to_string(),
+                        parts: vec![crate::llm::types::LlmOutputPart::Text {
+                            text: "child turn complete".to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..Default::default()
+                    },
+                    other => panic!("unexpected provider call {other}"),
+                };
+                Ok(response)
+            }
+        })
+        .build()
+        .into_handle();
+    let nested_runs = Arc::new(AtomicUsize::new(0));
+    let nested_engine = Arc::new(NestedProcessEngine {
+        runs: Arc::clone(&nested_runs),
+    });
+    let run_handle = Arc::new(LateBoundProcessRunHandle::default());
+    let raw_registry: Arc<dyn ProcessRegistry> = Arc::new(TestLocalProcessRegistry::default());
+    let driver = crate::ProcessWorkDriver::new(
+        Arc::clone(&raw_registry),
+        Arc::clone(&run_handle) as Arc<dyn crate::ProcessRunHandle>,
+    );
+    let registry = driver.process_registry();
+    let mut runtime_host = RuntimeHostConfig::in_memory();
+    runtime_host.process_engines = crate::ProcessEngineRegistry::new().with_engine(nested_engine);
+    runtime_host.providers.provider_resolver =
+        Arc::new(crate::SingleProviderResolver::new(provider));
+    let policy = crate::SessionPolicy {
+        provider_id: "test".to_string(),
+        model: crate::ModelSpec::from_token_limits("test-model", Default::default(), 16_384, None)
+            .expect("valid model spec"),
+        ..crate::SessionPolicy::default()
+    };
+    let mut plugin_factories = crate::testing::test_standard_protocol_factories();
+    plugin_factories.push(Arc::new(crate::plugin::StaticPluginFactory::new(
+        "nested-process-wait-tool",
+        crate::PluginSpec::new().with_tool_provider(Arc::new(NestedProcessWaitTool)),
+    )));
+    let worker = DurableProcessWorker::new(
+        DurableProcessWorkerConfig::new(
+            Arc::new(PluginHost::new(plugin_factories)),
+            runtime_host,
+            Arc::new(TestSessionStoreFactory),
+            Arc::clone(&registry),
+        )
+        .with_session_policy(policy.clone())
+        .with_process_execution_concurrency(1)
+        .expect("valid test process execution concurrency")
+        .with_change_hub(driver.change_hub())
+        .with_process_work_driver(driver)
+        .with_lease_owner(local_owner(
+            "session-turn-worker",
+            "host-a",
+            "session-turn-start",
+        )),
+    );
+    run_handle
+        .worker
+        .set(worker)
+        .unwrap_or_else(|_| panic!("test process worker is bound exactly once"));
+    let outer_process_id = "outer-session-turn";
+    let child_request = crate::SessionCreateRequest::child(
+        format!("process-session-turn:{outer_process_id}"),
+        crate::SessionStartPoint::Empty,
+        policy,
+        crate::PluginOptions::default(),
+        "nested-wait-test",
+    )
+    .with_session_id("nested-wait-child");
+    registry
+        .register_process(ProcessRegistration::new(
+            outer_process_id,
+            ProcessInput::SessionTurn {
+                create_request: Box::new(child_request),
+                turn_input: Box::new(crate::TurnInput::text("await nested process")),
+                output_contract: crate::ToolOutputContract::Static,
+            },
+            RecoveryDisposition::Rerunnable,
+            crate::ProcessProvenance::host(),
+        ))
+        .await
+        .expect("register production session-turn process");
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        run_handle
+            .enable_and_drive()
+            .await
+            .expect("drive production session-turn process");
+        wait_for_terminal_count(&registry, 2, "session-turn process and its nested process").await;
+    })
+    .await
+    .expect("production SessionTurn path completes without permit starvation");
+    let outer = crate::ProcessAwaiter::polling(Arc::clone(&registry))
+        .await_terminal(outer_process_id)
+        .await
+        .expect("outer session-turn process is terminal");
+    assert!(
+        matches!(outer, ProcessAwaitOutput::Success { .. }),
+        "outer session-turn process must succeed: {outer:?}"
+    );
+    assert_eq!(nested_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

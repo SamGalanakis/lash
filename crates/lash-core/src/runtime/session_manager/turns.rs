@@ -64,13 +64,17 @@ impl ManagedSessionCapability {
                 // gets a fresh Tokio task stack here. Future turn-path growth
                 // belongs behind this boundary, rather than in new boxes at
                 // whichever recursive poll site happens to overflow next.
-                let task = crate::task::spawn(run_managed_session_turn(
-                    runtime,
-                    input,
-                    cancel,
-                    scoped_effect_controller,
-                    sink.clone(),
-                ));
+                let task = crate::task::spawn(
+                    crate::runtime::process_worker::inherit_process_execution_permit(
+                        run_managed_session_turn(
+                            runtime,
+                            input,
+                            cancel,
+                            scoped_effect_controller,
+                            sink.clone(),
+                        ),
+                    ),
+                );
                 let mut abort_on_drop = AbortTaskOnDrop::new(task.abort_handle());
                 let joined = task.await;
                 abort_on_drop.disarm();

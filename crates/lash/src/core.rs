@@ -18,6 +18,8 @@ pub struct LashCore {
     /// registry is wired). Threaded to every plugin host so core can install the
     /// same plugin-contributed process engines when it rebuilds a runtime.
     pub(crate) process_lifecycle_available: bool,
+    /// Per-worker bound used when this core constructs an inline process worker.
+    pub(crate) process_execution_concurrency: usize,
     /// Shared resolution of host-owned work drivers. Shared across `LashCore`
     /// clones so inline process and queued drivers are constructed at most once.
     pub(crate) work_driver: Arc<InlineWorkDriverSlot>,
@@ -628,7 +630,8 @@ impl LashCore {
             process_registry,
         )
         .with_session_policy(self.policy.clone())
-        .with_residency(self.env.residency);
+        .with_residency(self.env.residency)
+        .with_process_execution_concurrency(self.process_execution_concurrency)?;
         if let Some(trigger_store) = self.env.trigger_store.as_ref() {
             config = config.with_trigger_store(Arc::clone(trigger_store));
         }
@@ -679,6 +682,8 @@ pub struct LashCoreBuilder {
     // Single source of truth for process lifecycle support and process-work
     // consumption.
     process_work_source: ProcessWorkSource,
+    // Per-worker bound for the default inline process executor.
+    process_execution_concurrency: Option<usize>,
     // Optional host-facing best-effort feed of appended process events,
     // installed on the inline process-registry decorator at build time.
     process_event_sink: Option<Arc<dyn lash_core::ProcessEventSink>>,
@@ -747,6 +752,19 @@ impl LashCoreBuilder {
         process_env_store: Arc<dyn ProcessExecutionEnvStore>,
     ) -> Self {
         self.process_env_store = Some(process_env_store);
+        self
+    }
+
+    /// Set the number of processes each default inline worker may execute at
+    /// once. A running process releases its slot while parked on another
+    /// process or external completion and reacquires it before resuming.
+    ///
+    /// This is a per-worker bound: two workers sharing one process registry may
+    /// execute up to twice this number. The default is
+    /// [`DEFAULT_PROCESS_EXECUTION_CONCURRENCY`](lash_core::DEFAULT_PROCESS_EXECUTION_CONCURRENCY).
+    /// Invalid values are reported by [`build`](Self::build).
+    pub fn process_execution_concurrency(mut self, concurrency: usize) -> Self {
+        self.process_execution_concurrency = Some(concurrency);
         self
     }
 
@@ -1014,6 +1032,12 @@ impl LashCoreBuilder {
     }
 
     pub fn build(mut self) -> Result<LashCore> {
+        let process_execution_concurrency = self
+            .process_execution_concurrency
+            .unwrap_or(lash_core::DEFAULT_PROCESS_EXECUTION_CONCURRENCY);
+        DurableProcessWorkerConfig::validate_process_execution_concurrency(
+            process_execution_concurrency,
+        )?;
         let protocol_factory = self.protocol_factory.clone();
         if protocol_factory.is_none() && self.plugin_host.is_none() {
             return Err(EmbedError::MissingProtocolPlugin);
@@ -1121,6 +1145,7 @@ impl LashCoreBuilder {
             &policy,
             self.residency.unwrap_or_default(),
             self.trigger_store.as_ref(),
+            process_execution_concurrency,
         )?;
 
         let live_replay_clock = Arc::clone(&core.clock);
@@ -1176,6 +1201,7 @@ impl LashCoreBuilder {
             live_replay_store,
             protocol_factory,
             process_lifecycle_available,
+            process_execution_concurrency,
             work_driver: Arc::new(InlineWorkDriverSlot::new(work_driver)),
         })
     }
@@ -1200,6 +1226,7 @@ impl LashCoreBuilder {
         policy: &SessionPolicy,
         residency: lash_core::Residency,
         trigger_store: Option<&Arc<dyn lash_core::TriggerStore>>,
+        process_execution_concurrency: usize,
     ) -> Result<ProcessWorkDriverSetup> {
         let (process_registry, process_change_hub) = match process_work_source {
             ProcessWorkSource::None => return Ok(ProcessWorkDriverSetup::None),
@@ -1236,7 +1263,8 @@ impl LashCoreBuilder {
             )))
         }))
         .with_residency(residency)
-        .with_turn_phase_probe_slot(phase_probe_slot);
+        .with_turn_phase_probe_slot(phase_probe_slot)
+        .with_process_execution_concurrency(process_execution_concurrency)?;
         if let Some(hub) = process_change_hub {
             config = config.with_change_hub(hub);
         }

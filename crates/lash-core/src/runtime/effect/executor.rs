@@ -1406,14 +1406,22 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
             }
             RuntimeEffectCommand::Process { command } => {
                 let execution = local_executor.into_process()?;
-                let result = crate::task::spawn(async move { execution.execute(*command).await })
-                    .await
-                    .map_err(|err| {
-                        RuntimeEffectControllerError::new(
-                            "runtime_effect_process_task_join",
-                            format!("inline process effect task failed: {err}"),
-                        )
-                    })??;
+                if matches!(command.as_ref(), ProcessCommand::Await { .. }) {
+                    let result = execution.execute(*command).await?;
+                    return Ok(RuntimeEffectOutcome::Process { result });
+                }
+                let result = crate::task::spawn(
+                    crate::runtime::process_worker::inherit_process_execution_permit(async move {
+                        execution.execute(*command).await
+                    }),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeEffectControllerError::new(
+                        "runtime_effect_process_task_join",
+                        format!("inline process effect task failed: {err}"),
+                    )
+                })??;
                 Ok(RuntimeEffectOutcome::Process { result })
             }
             _ => local_executor.execute(envelope).await,

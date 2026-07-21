@@ -41,9 +41,9 @@ The in-process `DurableProcessWorker`, the SQLite and Postgres stores, and
 the inline drivers together form the reference substrate lash ships so the
 batteries-included path works without an engine. There, lash *is* the
 substrate, so it redrives after restart — and its execution budget (the
-inline process execution concurrency bound, née "recovery concurrency") is
-that driver's scheduling policy, not a lash-level recovery semantic. Design
-pressure on the reference substrate must not leak into the contracts.
+inline process execution concurrency bound) is that driver's scheduling
+policy, not a lash-level recovery semantic. Design pressure on the reference
+substrate must not leak into the contracts.
 
 ## Conformance is the contract
 

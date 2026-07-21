@@ -199,10 +199,13 @@ A generalization of code that already existed for turns — not a new subsystem:
 - **`ProcessRegistry::list_non_terminal()`** — the worklist query: the
   non-terminal rows *are* the durable work queue, alongside the claim / renew /
   complete lease ops.
-- **`DurableProcessWorker::drive_pending_processes`** — one lease-protected
-  drive: it lists non-terminal processes, claims each lease (skipping any held
-  live by another owner), re-checks terminality after claiming, then recovers
-  each row by its declared `RecoveryDisposition` (ADR 0019). A `Rerunnable` row —
+- **`DurableProcessWorker::drive_pending_processes`** — the sole inline
+  process executor. Live tool starts, subagent fan-outs, trigger deliveries,
+  admin starts, session-open work, and crash recovery all enter this same
+  lease-protected drive. It lists the full non-terminal worklist, claims each
+  lease (skipping any held live by another owner), re-checks terminality after
+  claiming, then handles each row by its declared `RecoveryDisposition` (ADR
+  0019). A `Rerunnable` row —
   or a not-yet-started `OwnerBound` one, since a first execution is not a
   re-execution — is run on the worker's wired controller while renewing the lease
   across the execution, then atomically validates the current fence, writes its
@@ -212,6 +215,12 @@ A generalization of code that already existed for turns — not a new subsystem:
   non-terminal. An `ExternallyOwned` row is never claimed. Idempotent by
   `process_id`: terminal processes are never on the worklist, and a process that
   became terminal between the list and the claim is detected and skipped.
+  Inline execution is bounded per worker by
+  `process_execution_concurrency` (default 64, minimum 1). A run holds a slot
+  for its own work, including provider streaming and tool I/O, releases it while
+  parked on another process or external completion, and reacquires before it
+  resumes. Two workers over one registry therefore have twice the configured
+  aggregate capacity.
 - **`ProcessWorkDriver` (`claim_and_run_pending`)** — the seam that *drives*
   `drive_pending_processes` promptly: invoked directly after a successful start
   and once on session open (`drive_process_on_open`), the latter folding in what

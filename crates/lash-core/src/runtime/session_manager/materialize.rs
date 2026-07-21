@@ -29,6 +29,13 @@ pub(in crate::runtime::session_manager) async fn materialize_session_create_plan
     .await
     .map_err(|err| crate::PluginError::Session(err.to_string()))?;
 
+    // Managed children execute on the current host, so preserve its work
+    // drivers just as live runtime assembly does. The registry alone can
+    // record nested work, but without its driver a child turn can await a row
+    // that no local worker is ever asked to run.
+    runtime.host.process_work_driver = current.host.process_work_driver.clone();
+    runtime.host.queued_work_driver = current.host.queued_work_driver.clone();
+
     runtime.configure_protocol_on_materialize(
         &plan.protocol_request.plugin_options,
         plan.protocol_request.relation.parent_session_id().is_none(),

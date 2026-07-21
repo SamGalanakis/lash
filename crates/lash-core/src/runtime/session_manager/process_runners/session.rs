@@ -75,18 +75,21 @@ impl RuntimeSessionServices {
         };
         let mut turn = Box::pin(self.managed.start_turn(&self.current, &self.usage, request));
         let outcome = tokio::select! {
-            _ = cancellation.cancelled() => {
-                let _ = self
-                    .managed
-                    .close_session(&self.current, &self.usage, &child_session_id)
-                    .await;
-                return crate::ProcessAwaitOutput::from_tool_output(
-                    crate::ToolCallOutput::cancelled(
-                        crate::ToolCancellation::runtime("background session turn was cancelled"),
-                    ),
-                );
-            }
-            outcome = turn.as_mut() => outcome,
+            _ = cancellation.cancelled() => None,
+            outcome = turn.as_mut() => Some(outcome),
+        };
+        let Some(outcome) = outcome else {
+            // Dropping the managed-turn future aborts its inherited task-local
+            // execution before this outer process reacquires the shared slot.
+            drop(turn);
+            crate::runtime::process_worker::ensure_process_execution_permit().await;
+            let _ = self
+                .managed
+                .close_session(&self.current, &self.usage, &child_session_id)
+                .await;
+            return crate::ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::cancelled(
+                crate::ToolCancellation::runtime("background session turn was cancelled"),
+            ));
         };
         let _ = self
             .managed

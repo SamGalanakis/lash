@@ -120,10 +120,13 @@ impl ProcessWorkDriver {
         if let Some(output) = record.status.await_output() {
             return Ok(output.clone());
         }
-        if let Some(attach) = self.attach.as_ref() {
-            return attach.await_terminal(process_id).await;
-        }
-        self.awaiter.await_terminal(process_id).await
+        crate::runtime::process_worker::release_process_execution_permit_while(async {
+            if let Some(attach) = self.attach.as_ref() {
+                return attach.await_terminal(process_id).await;
+            }
+            self.awaiter.await_terminal(process_id).await
+        })
+        .await
     }
 
     /// Wait for the first event of `event_type` on `process_id` with a sequence
@@ -140,9 +143,11 @@ impl ProcessWorkDriver {
         event_type: &str,
         after_sequence: u64,
     ) -> Result<ProcessEvent, PluginError> {
-        self.awaiter
-            .await_event(process_id, event_type, after_sequence)
-            .await
+        crate::runtime::process_worker::release_process_execution_permit_while(
+            self.awaiter
+                .await_event(process_id, event_type, after_sequence),
+        )
+        .await
     }
 
     pub async fn claim_and_run_pending(&self, reason: &str) -> Result<(), PluginError> {
