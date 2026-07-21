@@ -88,10 +88,14 @@ impl ProviderFailureClassifier for DefaultProviderFailureClassifier {
             failure.retryable = false;
             failure.terminal_reason = LlmTerminalReason::ContextOverflow;
         }
+        // Hard exhaustion only. A bare "quota" match is too broad: Google
+        // phrases ordinary per-minute throttling as "Quota exceeded for quota
+        // metric ... per minute", which arrives as a retryable 429 and must
+        // stay retryable — downgrading it also loses the throttle-deference
+        // path, which requires `Quota` + `retryable: true`.
         if haystack.contains("insufficient_quota")
             || haystack.contains("usage_limit_reached")
             || haystack.contains("usage_not_included")
-            || haystack.contains("quota")
         {
             failure.kind = ProviderFailureKind::Quota;
             failure.retryable = false;
