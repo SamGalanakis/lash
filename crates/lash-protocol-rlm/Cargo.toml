@@ -21,7 +21,7 @@ lash-rlm-types = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-jsonschema = { workspace = true }
+jsonschema = { workspace = true, default-features = false }
 tokio = { workspace = true, features = ["rt", "sync"] }
 tempfile = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
