@@ -7,10 +7,10 @@
 # codegen exceeds the ~14GB that remains, which surfaces as `No space left on
 # device` and linker Bus errors mid-shard.
 #
-# The jobs now run on Blacksmith runners, whose image does not necessarily
-# carry those toolchains; every removal below is failure-tolerant, so this
-# degrades to a no-op rather than breaking. Once Blacksmith disk headroom is
-# measured, this can likely be dropped from the jobs that call it.
+# Callers now span both runner fleets: the long jobs moved to Blacksmith,
+# whose image does not necessarily carry those toolchains. Every removal below
+# is failure-tolerant, so it still does its work on GitHub-hosted runners and
+# degrades to a no-op elsewhere.
 set -euo pipefail
 
 echo "before:"; df -h / | tail -1

@@ -35,7 +35,7 @@ jobs:
   # sharded out to the test-shard matrix below.
   test-doc:
     name: Test docs + build cache
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
@@ -165,7 +165,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
@@ -215,7 +215,7 @@ jobs:
 
   confidence-fast:
     name: Confidence fast (${{ matrix.shard }})
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
@@ -266,7 +266,7 @@ jobs:
 
   confidence-fast-summary:
     name: Confidence fast summary
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: always()
     needs:
       - confidence-fast
@@ -303,7 +303,7 @@ jobs:
 
   postgres-store:
     name: Test Postgres store
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
 
     services:
       postgres:
@@ -356,7 +356,7 @@ jobs:
 
   stack-budget:
     name: Stack budget
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
@@ -391,7 +391,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: blacksmith-16vcpu-ubuntu-2404
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             # No linking happens under `cargo check`, but build scripts still
             # cc-compile target C code, so the cross gcc is required.
@@ -469,7 +469,7 @@ jobs:
 
   functional-e2e:
     name: Functional E2E (${{ matrix.name }})
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false

@@ -23,7 +23,7 @@ env:
 jobs:
   perf-guard-full:
     name: Perf Guard Full
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
