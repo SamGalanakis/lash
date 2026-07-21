@@ -9,6 +9,20 @@ pub enum OpenAiCompatMaxTokensField {
     Omit,
 }
 
+/// Gateway provider-routing preferences, emitted as the request's top-level
+/// `provider` object. Endpoints that do not implement provider routing must
+/// leave this unset.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProviderRoutingPrefs {
+    /// Route only to upstream backends that support every parameter in the
+    /// request. Gateways otherwise silently drop parameters an upstream does
+    /// not implement — a dropped `response_format` yields free-written JSON
+    /// under a nominal `finish_reason: "stop"`, so the structured-output
+    /// contract fails only at parse time.
+    pub require_parameters: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OpenAiCompat {
@@ -38,6 +52,11 @@ pub struct OpenAiCompat {
     pub developer_role: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_capabilities: Option<ProviderSchemaCapabilities>,
+    /// Provider-routing preferences for gateway endpoints. Emitted whenever
+    /// set, not only for schema'd requests: any parameter this adapter sends
+    /// is one the caller relies on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_routing: Option<ProviderRoutingPrefs>,
     /// Response header names (case-insensitive) to capture into
     /// `LlmResponse.response_metadata` as `header:<lowercased-name>` entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +70,11 @@ pub struct OpenAiCompat {
 
 impl OpenAiCompat {
     /// Explicit endpoint capabilities for OpenRouter and compatible proxies.
+    ///
+    /// Carries facts about the endpoint's wire dialect, not preferences about
+    /// how to use it. `provider_routing` is deliberately absent: restricting
+    /// the routing pool trades cost, latency and availability against contract
+    /// enforcement, and that trade belongs to the host.
     pub fn openrouter() -> Self {
         Self {
             reasoning_format: Some(ReasoningWireFormat::openrouter()),
@@ -75,6 +99,7 @@ pub(crate) struct OpenAiResolvedCompat {
     pub(crate) streaming_usage: bool,
     pub(crate) developer_role: bool,
     pub(crate) schema_capabilities: ProviderSchemaCapabilities,
+    pub(crate) provider_routing: Option<ProviderRoutingPrefs>,
     pub(crate) response_metadata_headers: Vec<String>,
     pub(crate) response_metadata_body_paths: Vec<String>,
 }
@@ -128,6 +153,7 @@ impl OpenAiCompatibleProvider {
             streaming_usage: !local,
             developer_role: direct_openai,
             schema_capabilities: ProviderSchemaCapabilities::openai(false),
+            provider_routing: None,
             response_metadata_headers: Vec::new(),
             response_metadata_body_paths: Vec::new(),
         };
@@ -177,6 +203,11 @@ impl OpenAiCompatibleProvider {
                 .schema_capabilities
                 .clone()
                 .unwrap_or_else(|| ProviderSchemaCapabilities::openai(strict_tools)),
+            provider_routing: self
+                .compat
+                .provider_routing
+                .clone()
+                .or(defaults.provider_routing),
             response_metadata_headers: self
                 .compat
                 .response_metadata_headers

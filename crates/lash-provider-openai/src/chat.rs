@@ -350,6 +350,9 @@ impl OpenAiCompatibleProvider {
             "messages": messages,
             "stream": stream,
         });
+        if let Some(provider_routing) = compat.provider_routing {
+            body["provider"] = json!(provider_routing);
+        }
         apply_max_tokens_field(&mut body, compat.max_tokens_field, policy.max_output_tokens);
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
