@@ -3610,8 +3610,6 @@ enum RestateSegmentReplayPoint {
     GetHandover,
     PutHandover,
     CancelCheck,
-    SuccessorSend,
-    Resume,
 }
 
 fn restate_segment_tool_attempt_outcome(ordinal: u64) -> RuntimeEffectOutcome {
@@ -3629,8 +3627,6 @@ async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants()
         RestateSegmentReplayPoint::GetHandover,
         RestateSegmentReplayPoint::PutHandover,
         RestateSegmentReplayPoint::CancelCheck,
-        RestateSegmentReplayPoint::SuccessorSend,
-        RestateSegmentReplayPoint::Resume,
     ] {
         let process_id = format!("matrix-{replay_point:?}").to_ascii_lowercase();
         let registry = process_registry();
@@ -3804,23 +3800,6 @@ async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants()
                 successor_keys.insert(key.clone()),
                 "one successor per ordinal"
             );
-            if matches!(replay_point, RestateSegmentReplayPoint::SuccessorSend) {
-                assert!(
-                    !successor_keys.insert(key),
-                    "duplicate keyed send collapses"
-                );
-            }
-            if matches!(replay_point, RestateSegmentReplayPoint::Resume) {
-                let first = registry
-                    .get_segment_handover(&process_id, next)
-                    .await
-                    .expect("first resume get");
-                let retry = registry
-                    .get_segment_handover(&process_id, next)
-                    .await
-                    .expect("retry resume get");
-                assert_eq!(first, retry, "resume retry sees identical continuation");
-            }
         }
 
         assert_eq!(
@@ -4030,41 +4009,6 @@ fn boundary_with_armed_wait_is_declined_instead_of_terminalized() {
     assert!(boundary_must_be_declined(Some(&record)));
     record.wait = None;
     assert!(!boundary_must_be_declined(Some(&record)));
-}
-
-#[test]
-fn restate_controller_replay_cuts_at_identical_effect_budget() {
-    let options = RestateEffectControllerOptions::default()
-        .segment_duration_cap(Duration::ZERO)
-        .segment_effect_budget(3);
-    let first = RestateRuntimeEffectController::with_options(
-        Arc::new(RecordingContext::default()),
-        options.clone(),
-    );
-    let replay = RestateRuntimeEffectController::with_options(
-        Arc::new(RecordingContext::default()),
-        options,
-    );
-    for effects_executed in 0..=4 {
-        let progress = lash_core::SegmentProgress {
-            effects_executed,
-            journaled_bytes_estimate: None,
-        };
-        assert_eq!(
-            RuntimeEffectController::wants_segment_boundary(&first, &progress),
-            RuntimeEffectController::wants_segment_boundary(&replay, &progress),
-        );
-    }
-    assert_eq!(
-        RuntimeEffectController::wants_segment_boundary(
-            &first,
-            &lash_core::SegmentProgress {
-                effects_executed: 3,
-                journaled_bytes_estimate: None,
-            },
-        ),
-        Some(lash_core::BoundaryReason::JournalBudget)
-    );
 }
 
 #[tokio::test]

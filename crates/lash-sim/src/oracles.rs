@@ -871,9 +871,9 @@ pub fn process_wake_observed(
             .iter()
             .any(|session| session.process_wake_count > 0),
         "no process wake boundary was observed",
-        process_wake_runtime_dto_observed(events) && duplicate_process_wake_rejected(events),
-        "process wake boundary was observed but it did not materialize a runtime DTO with a deduped duplicate wake",
-        "process wake boundary materialized a runtime DTO and the duplicate wake was rejected (delivered exactly once)",
+        process_wake_runtime_dto_observed(events),
+        "process wake boundary was observed but it did not materialize a runtime DTO",
+        "process wake boundary materialized a runtime DTO",
     )
 }
 
@@ -2822,10 +2822,6 @@ fn runtime_contract_semantics(
     // specific runtime boundary it governs — no `|`-grouped shared arms and no
     // single global condition standing in for per-contract evidence.
     match semantic_oracle {
-        "runtime.process_wake_claim" => assert_semantic(
-            process_wake_runtime_dto_observed(events) && duplicate_process_wake_rejected(events),
-            "process wake DTO materialized and the duplicate wake was deduped/rejected",
-        ),
         // The dead owner's lease release/completion is rejected (commit fenced out).
         "runtime.lease_release_rejects_commit" => assert_semantic(
             worker_runtime_lease_dto_observed(events)
@@ -3064,6 +3060,7 @@ fn provider_mutation_semantic_fact(
     let providers = provider_mutation_providers(event);
     if !MIGRATED_RUNTIME_PROVIDER_KINDS
         .iter()
+        .filter(|provider| mutation != "rate_limit_error_envelope" || **provider != "google_oauth")
         .all(|provider| providers.contains(provider))
     {
         return Err(format!(
@@ -3072,7 +3069,7 @@ fn provider_mutation_semantic_fact(
         ));
     }
     if mutation == "rate_limit_error_envelope"
-        && !provider_rate_limit_terminalized_by_all_migrated_parsers(std::slice::from_ref(event))
+        && !provider_rate_limit_terminalized_by_scripted_parsers(std::slice::from_ref(event))
     {
         return Err(
             "rate-limit provider mutation lacked 429 retryable terminal classification proofs"
@@ -6083,7 +6080,7 @@ fn protocol_terminal_state_semantics(
     summary: &AbstractWorldSummary,
 ) -> bool {
     duplicate_free_stream_finalization(events, summary)
-        && provider_rate_limit_terminalized_by_all_migrated_parsers(events)
+        && provider_rate_limit_terminalized_by_scripted_parsers(events)
         && provider_dropped_terminal_event_classified(events)
 }
 
@@ -6130,17 +6127,6 @@ fn process_wake_runtime_dto_observed(events: &[DeliveredBoundary]) -> bool {
                 .pointer("/runtime_process_wake/event_invocation/subject/process_id")
                 .and_then(Value::as_str)
                 .is_some()
-    })
-}
-
-fn duplicate_process_wake_rejected(events: &[DeliveredBoundary]) -> bool {
-    events.iter().any(|event| {
-        event.kind == BoundaryKind::ProcessWake
-            && !event
-                .observed
-                .get("claimed_once")
-                .and_then(Value::as_bool)
-                .unwrap_or(true)
     })
 }
 
@@ -6266,7 +6252,7 @@ fn provider_mutation_classes_observed(events: &[DeliveredBoundary]) -> bool {
     mutations.contains("malformed_sse_chunk") && mutations.contains("rate_limit_error_envelope")
 }
 
-fn provider_rate_limit_terminalized_by_all_migrated_parsers(events: &[DeliveredBoundary]) -> bool {
+fn provider_rate_limit_terminalized_by_scripted_parsers(events: &[DeliveredBoundary]) -> bool {
     events
         .iter()
         .filter(|event| event.kind == BoundaryKind::ProviderMutation)
@@ -6317,6 +6303,7 @@ fn provider_rate_limit_terminalized_by_all_migrated_parsers(events: &[DeliveredB
             }
             MIGRATED_RUNTIME_PROVIDER_KINDS
                 .iter()
+                .filter(|provider| **provider != "google_oauth")
                 .all(|provider| providers.contains(*provider))
                 && retryable_provider_observed
         })

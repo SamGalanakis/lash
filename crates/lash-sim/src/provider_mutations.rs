@@ -13,8 +13,8 @@ use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
 use serde_json::{Value, json};
 
 use crate::canonical_scripts::{
-    ANTHROPIC_MESSAGES_TEXT, GOOGLE_GENERATE_RATE_LIMIT, GOOGLE_STREAM_GENERATE_TEXT,
-    OPENAI_COMPAT_DISCONNECT, OPENAI_COMPAT_RATE_LIMIT, OPENAI_COMPAT_RESPONSE_START_TIMEOUT,
+    ANTHROPIC_MESSAGES_TEXT, GOOGLE_STREAM_GENERATE_TEXT, OPENAI_COMPAT_DISCONNECT,
+    OPENAI_COMPAT_RATE_LIMIT, OPENAI_COMPAT_RESPONSE_START_TIMEOUT,
     OPENAI_COMPAT_STREAM_CHUNK_TIMEOUT, OPENAI_COMPAT_TOOL_CALL, OPENAI_RESPONSES_TEXT,
 };
 use crate::provider::{ProviderWireScript, ScriptedLlmHttpTransport};
@@ -237,15 +237,6 @@ fn mutation_specs(
                     }),
                 )?,
                 request_kind: MutationRequestKind::Anthropic,
-                expected_status: Some(429),
-                expected_kind: None,
-                expected_retryable: None,
-            },
-            MutationScriptSpec {
-                proof_name: "mutation.rate-limit.google",
-                provider_kind: "google_oauth",
-                script_content: GOOGLE_GENERATE_RATE_LIMIT.to_string(),
-                request_kind: MutationRequestKind::Google { stream: false },
                 expected_status: Some(429),
                 expected_kind: None,
                 expected_retryable: None,

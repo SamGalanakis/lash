@@ -28,8 +28,6 @@ pub(crate) const GOOGLE_STREAM_GENERATE_TEXT: &str =
     include_str!("../provider-scripts/canonical/google.stream-generate-content-text-stream.json");
 pub(crate) const GOOGLE_GENERATE_TEXT: &str =
     include_str!("../provider-scripts/canonical/google.generate-content-text.json");
-pub(crate) const GOOGLE_GENERATE_RATE_LIMIT: &str =
-    include_str!("../provider-scripts/canonical/google.generate-content-rate-limit-429.json");
 
 #[derive(Clone, Copy)]
 pub(crate) struct CanonicalScript {
@@ -57,10 +55,6 @@ pub(crate) const CANONICAL_SCRIPTS: &[CanonicalScript] = &[
     CanonicalScript {
         path: "provider-scripts/canonical/codex.responses-tool-call-stream.json",
         content: CODEX_RESPONSES_TOOL_CALL,
-    },
-    CanonicalScript {
-        path: "provider-scripts/canonical/google.generate-content-rate-limit-429.json",
-        content: GOOGLE_GENERATE_RATE_LIMIT,
     },
     CanonicalScript {
         path: "provider-scripts/canonical/google.generate-content-text.json",

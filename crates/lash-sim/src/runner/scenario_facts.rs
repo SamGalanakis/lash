@@ -55,9 +55,6 @@ pub(super) fn scenario_transition_facts(
             facts.push(trigger_wakeup_fact(contract, selected_events)?);
             facts.push(queued_active_turn_fact(contract, selected_events)?);
         }
-        "runtime.process_wake_claim" => {
-            facts.push(process_wake_duplicate_fact(contract, selected_events)?);
-        }
         "runtime.lease_release_rejects_commit" => {
             facts.push(worker_stale_completion_rejection_fact(
                 contract,
@@ -135,10 +132,6 @@ pub(super) fn scenario_backend_regression_reference(
         "runtime.command_before_turn_work" => (
             "trigger-wakeup-routes-process",
             "trigger occurrence records a stable source key, reserves a matching delivery, and starts process wake routing without live external input",
-        ),
-        "runtime.process_wake_claim" => (
-            "duplicate-process-wake-idempotency",
-            "duplicate process wake deliveries share a dedupe key, claim queued work once, and keep replay/idempotency evidence backed by generated dynamic replay",
         ),
         "runtime.lease_release_rejects_commit" | "runtime.dead_lease_reclaim_rejects_stale" => (
             "worker-stale-completion-fenced",

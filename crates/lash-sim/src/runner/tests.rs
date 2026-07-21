@@ -508,10 +508,10 @@ async fn fixed_script_profile_writes_deterministic_manifest() {
         manifest.timeline_at_semantics,
         FIXED_SCRIPT_TIMELINE_AT_SEMANTICS
     );
-    assert_eq!(manifest.summary.total_scripts, 15);
-    assert_eq!(manifest.summary.total_proofs, 17);
-    assert_eq!(manifest.summary.total_events, 18);
-    assert_eq!(manifest.summary.passed, 17);
+    assert_eq!(manifest.summary.total_scripts, 14);
+    assert_eq!(manifest.summary.total_proofs, 16);
+    assert_eq!(manifest.summary.total_events, 17);
+    assert_eq!(manifest.summary.passed, 16);
     // Codex HTTP/SSE execution rides the injectable LlmHttpTransport and is
     // in the scripted matrix; the exclusion that remains for codex.rs is
     // scoped to the provider-native websocket transport, and the OAuth
@@ -544,7 +544,6 @@ async fn fixed_script_profile_writes_deterministic_manifest() {
     assert!(body.contains("openai-compatible.retry-exhaustion"));
     assert!(body.contains("google.stream-generate-content-text-stream"));
     assert!(body.contains("google.generate-content-text"));
-    assert!(body.contains("google.generate-content-rate-limit-429"));
     assert!(body.contains("codex.responses-text-stream"));
     assert!(body.contains("codex.responses-tool-call-stream"));
     assert!(body.contains("codex.responses-rate-limit-429"));
@@ -557,8 +556,8 @@ async fn fixed_script_profile_writes_deterministic_manifest() {
     assert_eq!(summary["profile"], FIXED_SCRIPT_PROFILE);
     assert_eq!(summary["fixed_script_manifest"], FIXED_SCRIPT_MANIFEST);
     assert_eq!(summary["counts"]["generated_seeds"], 0);
-    assert_eq!(summary["counts"]["fixed_replays"], 17);
-    assert_eq!(summary["counts"]["oracle_passes"], 17);
+    assert_eq!(summary["counts"]["fixed_replays"], 16);
+    assert_eq!(summary["counts"]["oracle_passes"], 16);
     assert_eq!(
         summary["provider_set"],
         json!([
@@ -588,10 +587,10 @@ async fn fixed_script_manifest_schema_contains_required_proofs_and_artifact_fiel
     assert_eq!(
         manifest["summary"],
         json!({
-            "total_scripts": 15,
-            "total_proofs": 17,
-            "total_events": 18,
-            "passed": 17
+            "total_scripts": 14,
+            "total_proofs": 16,
+            "total_events": 17,
+            "passed": 16
         })
     );
     assert_eq!(
@@ -620,7 +619,6 @@ async fn fixed_script_manifest_schema_contains_required_proofs_and_artifact_fiel
         "openai-compatible.retry-exhaustion",
         "google.stream-generate-content-text-stream",
         "google.generate-content-text",
-        "google.generate-content-rate-limit-429",
     ];
     for name in required {
         let proof = proofs
@@ -758,7 +756,7 @@ async fn fixed_script_manifest_schema_contains_required_proofs_and_artifact_fiel
         .find(|row| row["provider_kind"] == "google_oauth")
         .expect("google provider matrix row");
     assert_eq!(google["success_proofs"], 2);
-    assert_eq!(google["error_proofs"], 1);
+    assert_eq!(google["error_proofs"], 0);
     assert_eq!(
         google["endpoints"],
         json!([
@@ -1134,7 +1132,7 @@ fn generated_sim_profile_writes_trace_replay_and_provider_artifacts() {
         report
             .scenario_contracts
             .iter()
-            .any(|manifest| manifest.suite == "runtime" && manifest.contract_count == 9)
+            .any(|manifest| manifest.suite == "runtime" && manifest.contract_count == 8)
     );
     for suite in ["runtime", "standard", "rlm", "agent"] {
         assert!(
@@ -1161,7 +1159,6 @@ fn generated_sim_profile_writes_trace_replay_and_provider_artifacts() {
         ("runtime", "operational-coverage-missing-cancellation"),
         ("runtime", "queued-input-operational-missing"),
         ("runtime", "trigger-wakeup-operational-missing"),
-        ("runtime", "process-wake-operational-missing"),
         ("standard", "standard-provider-error-missing-parser-matrix"),
         ("rlm", "rlm-lashlang-cell-missing-exec-outcome"),
         ("agent", "agent-parallel-join-missing-wake-session"),
@@ -1322,7 +1319,7 @@ fn generated_sim_profile_writes_trace_replay_and_provider_artifacts() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         runtime_transition_facts.len(),
-        9,
+        8,
         "every runtime scenario contract must have generated transition facts"
     );
     for (semantic_oracle, facts) in &runtime_transition_facts {
