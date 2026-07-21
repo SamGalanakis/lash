@@ -210,6 +210,7 @@ const DURABLE_WAIT_PROMISE_KEY: &str = "resolution";
 const LEGACY_DURABLE_WAIT_INDEX_STATE_KEY: &str = "waits";
 const DURABLE_WAIT_INDEX_METADATA_KEY: &str = "wait-index/v1/metadata";
 const DURABLE_WAIT_INDEX_WAIT_PREFIX: &str = "wait-index/v1/wait/";
+const DURABLE_WAIT_INDEX_RESOLUTION_PREFIX: &str = "wait-index/v1/resolution/";
 
 /// Wall-clock epoch milliseconds for terminal evidence written at the Restate
 /// tier (ADR 0019 recovery enforcement). The Restate boundary carries no
@@ -291,7 +292,8 @@ pub struct RestateDurableWaitAddress {
 }
 
 impl RestateDurableWaitAddress {
-    fn for_key(key: &AwaitEventKey) -> Self {
+    /// Derive the exact Restate workflow address for a Lash await-event key.
+    pub fn for_key(key: &AwaitEventKey) -> Self {
         Self {
             workflow_key: format!("{:x}", Sha256::digest(key.key_id.as_bytes())),
             session_id: key.scope.session_id().map(str::to_string),
@@ -301,6 +303,13 @@ impl RestateDurableWaitAddress {
                 RestateDurableWaitClassification::DurableWait
             },
         }
+    }
+
+    /// Return the keyed virtual-object address that owns this wait's index state.
+    pub fn index_key(&self) -> String {
+        self.session_id
+            .clone()
+            .unwrap_or_else(|| format!("unscoped:{}", self.workflow_key))
     }
 }
 
@@ -331,14 +340,21 @@ pub struct RestateDurableWaitIndexRequest {
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct RestateDurableWaitSettleRequest {
+    pub address: RestateDurableWaitAddress,
+    pub resolution: Resolution,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct RestateDurableWaitAwakeableRequest {
     pub address: RestateDurableWaitAddress,
     pub awakeable_id: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub enum RestateDurableWaitRegistration {
     Registered,
+    Resolved(Resolution),
     Revoked,
 }
 
@@ -1285,48 +1301,20 @@ async fn resolve_restate_await_event_via_ingress(
     resolution: Resolution,
 ) -> Result<ResolveOutcome, RuntimeError> {
     let address = RestateDurableWaitAddress::for_key(key);
-    let workflow_key = address.workflow_key.clone();
     let request = RestateDurableWaitResolveRequest {
         address,
         resolution,
     };
-    let outcome = match request.address.session_id.as_deref() {
-        Some(session_id) => {
-            ingress
-                .ingress
-                .call_object_json::<_, ResolveOutcome>(
-                    "LashDurableWaitIndex",
-                    session_id,
-                    "resolve",
-                    &request,
-                )
-                .await
-        }
-        None => {
-            ingress
-                .ingress
-                .send_workflow_json(
-                    "LashDurableWaitWorkflow",
-                    &workflow_key,
-                    "await_resolution",
-                    &RestateDurableWaitAwaitRequest {
-                        address: request.address.clone(),
-                        timeout_ms: None,
-                    },
-                )
-                .await
-                .map_err(|err| RuntimeError::new("restate_await_event_start", err.to_string()))?;
-            ingress
-                .ingress
-                .call_workflow_json::<_, ResolveOutcome>(
-                    "LashDurableWaitWorkflow",
-                    &workflow_key,
-                    "resolve",
-                    &request,
-                )
-                .await
-        }
-    };
+    let index_key = durable_wait_index_object_key(&request.address);
+    let outcome = ingress
+        .ingress
+        .call_object_json::<_, ResolveOutcome>(
+            "LashDurableWaitIndex",
+            &index_key,
+            "resolve",
+            &request,
+        )
+        .await;
     outcome.map_err(|err| RuntimeError::new("restate_await_event_resolve", err.to_string()))
 }
 
@@ -2231,6 +2219,7 @@ where
 /// same exact-address resolution path.
 #[restate_sdk::workflow]
 pub trait LashDurableWaitWorkflow {
+    #[shared]
     async fn await_resolution(
         request: Json<RestateDurableWaitAwaitRequest>,
     ) -> HandlerResult<Json<Resolution>>;
@@ -2260,28 +2249,30 @@ pub struct LashDurableWaitWorkflowImpl;
 impl LashDurableWaitWorkflow for LashDurableWaitWorkflowImpl {
     async fn await_resolution(
         &self,
-        ctx: WorkflowContext<'_>,
+        ctx: SharedWorkflowContext<'_>,
         Json(request): Json<RestateDurableWaitAwaitRequest>,
     ) -> HandlerResult<Json<Resolution>> {
-        if let Some(session_id) = request.address.session_id.as_deref() {
-            let registration: restate_sdk::context::Request<
-                '_,
-                Json<RestateDurableWaitIndexRequest>,
-                Json<RestateDurableWaitRegistration>,
-            > = ContextClient::request(
-                &ctx,
-                RequestTarget::object("LashDurableWaitIndex", session_id, "register"),
-                Json(RestateDurableWaitIndexRequest {
-                    address: request.address.clone(),
-                }),
-            );
-            let Json(registration) = registration.call().await?;
-            if registration == RestateDurableWaitRegistration::Revoked {
-                let payload = serde_json::to_string(&Resolution::Cancelled)
-                    .map_err(TerminalError::from_error)?;
-                ctx.resolve_promise(DURABLE_WAIT_PROMISE_KEY, payload);
+        let index_key = durable_wait_index_object_key(&request.address);
+        let registration: restate_sdk::context::Request<
+            '_,
+            Json<RestateDurableWaitIndexRequest>,
+            Json<RestateDurableWaitRegistration>,
+        > = ContextClient::request(
+            &ctx,
+            RequestTarget::object("LashDurableWaitIndex", index_key.clone(), "register"),
+            Json(RestateDurableWaitIndexRequest {
+                address: request.address.clone(),
+            }),
+        );
+        let Json(registration) = registration.call().await?;
+        match registration {
+            RestateDurableWaitRegistration::Resolved(resolution) => {
+                return Ok(Json(resolution));
+            }
+            RestateDurableWaitRegistration::Revoked => {
                 return Ok(Json(Resolution::Cancelled));
             }
+            RestateDurableWaitRegistration::Registered => {}
         }
 
         let resolution = if let Some(payload) =
@@ -2315,20 +2306,19 @@ impl LashDurableWaitWorkflow for LashDurableWaitWorkflowImpl {
             serde_json::from_str(&payload).map_err(TerminalError::from_error)?
         };
 
-        if let Some(session_id) = request.address.session_id.as_deref() {
-            let settle: restate_sdk::context::Request<
-                '_,
-                Json<RestateDurableWaitIndexRequest>,
-                Json<()>,
-            > = ContextClient::request(
-                &ctx,
-                RequestTarget::object("LashDurableWaitIndex", session_id, "settle"),
-                Json(RestateDurableWaitIndexRequest {
-                    address: request.address,
-                }),
-            );
-            let Json(()) = settle.call().await?;
-        }
+        let settle: restate_sdk::context::Request<
+            '_,
+            Json<RestateDurableWaitSettleRequest>,
+            Json<()>,
+        > = ContextClient::request(
+            &ctx,
+            RequestTarget::object("LashDurableWaitIndex", index_key, "settle"),
+            Json(RestateDurableWaitSettleRequest {
+                address: request.address,
+                resolution: resolution.clone(),
+            }),
+        );
+        let Json(()) = settle.call().await?;
         Ok(Json(resolution))
     }
 
@@ -2410,18 +2400,11 @@ impl LashDurableWaitWorkflow for LashDurableWaitWorkflowImpl {
             },
             result = cancellation => {
                 let _ = result?;
-                let target = match event_address.session_id.clone() {
-                    Some(session_id) => RequestTarget::object(
-                        "LashDurableWaitIndex",
-                        session_id,
-                        "resolve",
-                    ),
-                    None => RequestTarget::workflow(
-                        "LashDurableWaitWorkflow",
-                        event_address.workflow_key.clone(),
-                        "resolve",
-                    ),
-                };
+                let target = RequestTarget::object(
+                    "LashDurableWaitIndex",
+                    durable_wait_index_object_key(&event_address),
+                    "resolve",
+                );
                 let resolve: restate_sdk::context::Request<
                     '_,
                     Json<RestateDurableWaitResolveRequest>,
@@ -2452,7 +2435,7 @@ pub trait LashDurableWaitIndex {
     async fn register(
         request: Json<RestateDurableWaitIndexRequest>,
     ) -> HandlerResult<Json<RestateDurableWaitRegistration>>;
-    async fn settle(request: Json<RestateDurableWaitIndexRequest>) -> HandlerResult<Json<()>>;
+    async fn settle(request: Json<RestateDurableWaitSettleRequest>) -> HandlerResult<Json<()>>;
     async fn register_awakeable(
         request: Json<RestateDurableWaitAwakeableRequest>,
     ) -> HandlerResult<Json<RestateDurableWaitRegistration>>;
@@ -2478,6 +2461,17 @@ fn durable_wait_index_state_key(address: &RestateDurableWaitAddress) -> String {
         "{DURABLE_WAIT_INDEX_WAIT_PREFIX}{classification}/{}",
         address.workflow_key
     )
+}
+
+fn durable_wait_index_resolution_key(address: &RestateDurableWaitAddress) -> String {
+    format!(
+        "{DURABLE_WAIT_INDEX_RESOLUTION_PREFIX}{}",
+        address.workflow_key
+    )
+}
+
+fn durable_wait_index_object_key(address: &RestateDurableWaitAddress) -> String {
+    address.index_key()
 }
 
 fn durable_wait_address_from_state_key(
@@ -2609,6 +2603,12 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         if metadata.revoked {
             return Ok(Json(RestateDurableWaitRegistration::Revoked));
         }
+        if let Some(Json(resolution)) = ctx
+            .get::<Json<Resolution>>(&durable_wait_index_resolution_key(&request.address))
+            .await?
+        {
+            return Ok(Json(RestateDurableWaitRegistration::Resolved(resolution)));
+        }
         ctx.set(
             &durable_wait_index_state_key(&request.address),
             Json(request.address),
@@ -2619,9 +2619,13 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
     async fn settle(
         &self,
         ctx: ObjectContext<'_>,
-        Json(request): Json<RestateDurableWaitIndexRequest>,
+        Json(request): Json<RestateDurableWaitSettleRequest>,
     ) -> HandlerResult<Json<()>> {
         let _metadata = load_durable_wait_index_metadata(&ctx).await?;
+        ctx.set(
+            &durable_wait_index_resolution_key(&request.address),
+            Json(request.resolution),
+        );
         if request.address.classification == RestateDurableWaitClassification::DurableWait {
             ctx.clear(&durable_wait_index_state_key(&request.address));
         }
@@ -2636,6 +2640,13 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         let mut metadata = load_durable_wait_index_metadata(&ctx).await?;
         if metadata.revoked {
             return Ok(Json(RestateDurableWaitRegistration::Revoked));
+        }
+        if let Some(Json(resolution)) = ctx
+            .get::<Json<Resolution>>(&durable_wait_index_resolution_key(&request.address))
+            .await?
+        {
+            ctx.resolve_awakeable(&request.awakeable_id, Json(resolution));
+            return Ok(Json(RestateDurableWaitRegistration::Registered));
         }
         let peek: restate_sdk::context::Request<'_, (), Json<Option<Resolution>>> =
             ContextClient::request(
@@ -2683,24 +2694,10 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         if metadata.revoked {
             return Ok(Json(ResolveOutcome::UnknownOrRevoked));
         }
-        let workflow_key = request.address.workflow_key.clone();
-        let start: restate_sdk::context::Request<
-            '_,
-            Json<RestateDurableWaitAwaitRequest>,
-            Json<Resolution>,
-        > = ContextClient::request(
-            &ctx,
-            RequestTarget::workflow(
-                "LashDurableWaitWorkflow",
-                workflow_key.clone(),
-                "await_resolution",
-            ),
-            Json(RestateDurableWaitAwaitRequest {
-                address: request.address.clone(),
-                timeout_ms: None,
-            }),
-        );
-        let _ = start.send().invocation_id().await?;
+        let resolution_key = durable_wait_index_resolution_key(&request.address);
+        if let Some(Json(terminal)) = ctx.get::<Json<Resolution>>(&resolution_key).await? {
+            return Ok(Json(ResolveOutcome::AlreadyResolved { terminal }));
+        }
         let resolution = request.resolution.clone();
         let resolve: restate_sdk::context::Request<
             '_,
@@ -2708,7 +2705,11 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
             Json<ResolveOutcome>,
         > = ContextClient::request(
             &ctx,
-            RequestTarget::workflow("LashDurableWaitWorkflow", workflow_key, "resolve"),
+            RequestTarget::workflow(
+                "LashDurableWaitWorkflow",
+                request.address.workflow_key.clone(),
+                "resolve",
+            ),
             Json(request.clone()),
         );
         let Json(outcome) = resolve.call().await?;
@@ -2717,6 +2718,7 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
             ResolveOutcome::Accepted => resolution,
             ResolveOutcome::UnknownOrRevoked => return Ok(Json(outcome)),
         };
+        ctx.set(&resolution_key, Json(terminal.clone()));
         let mut retained = Vec::with_capacity(metadata.awakeables.len());
         for entry in std::mem::take(&mut metadata.awakeables) {
             if entry.address == request.address {
@@ -2735,6 +2737,10 @@ impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
         let (waits, _controls) = split_cancellable_waits(load_indexed_waits(&ctx).await?);
         for address in &waits {
             ctx.clear(&durable_wait_index_state_key(address));
+            ctx.set(
+                &durable_wait_index_resolution_key(address),
+                Json(Resolution::Cancelled),
+            );
         }
         resolve_indexed_waits(&ctx, waits).await?;
         Ok(Json(()))
@@ -3260,7 +3266,6 @@ macro_rules! impl_restate_controller_context {
                     'ctx: 'run,
                 {
                     Box::pin(async move {
-                        let workflow_key = request.address.workflow_key.clone();
                         let start: restate_sdk::context::Request<
                             '_,
                             Json<RestateDurableWaitAwaitRequest>,
@@ -3269,7 +3274,7 @@ macro_rules! impl_restate_controller_context {
                             self,
                             RequestTarget::workflow(
                                 "LashDurableWaitWorkflow",
-                                workflow_key.clone(),
+                                request.address.workflow_key.clone(),
                                 "await_resolution",
                             ),
                             Json(request.clone()),
@@ -3282,18 +3287,11 @@ macro_rules! impl_restate_controller_context {
                             },
                             on_cancel => {
                                 let address = request.address;
-                                let target = match address.session_id.clone() {
-                                    Some(session_id) => RequestTarget::object(
-                                        "LashDurableWaitIndex",
-                                        session_id,
-                                        "resolve",
-                                    ),
-                                    None => RequestTarget::workflow(
-                                        "LashDurableWaitWorkflow",
-                                        workflow_key,
-                                        "resolve",
-                                    ),
-                                };
+                                let target = RequestTarget::object(
+                                    "LashDurableWaitIndex",
+                                    durable_wait_index_object_key(&address),
+                                    "resolve",
+                                );
                                 let resolve_request: restate_sdk::context::Request<
                                     '_,
                                     Json<RestateDurableWaitResolveRequest>,
@@ -3421,38 +3419,11 @@ macro_rules! impl_restate_controller_context {
                     'ctx: 'run,
                 {
                     Box::pin(async move {
-                        let workflow_key = request.address.workflow_key.clone();
-                        let target = match request.address.session_id.clone() {
-                            Some(session_id) => RequestTarget::object(
-                                "LashDurableWaitIndex",
-                                session_id,
-                                "resolve",
-                            ),
-                            None => {
-                                let start: restate_sdk::context::Request<
-                                    '_,
-                                    Json<RestateDurableWaitAwaitRequest>,
-                                    Json<Resolution>,
-                                > = ContextClient::request(
-                                    self,
-                                    RequestTarget::workflow(
-                                        "LashDurableWaitWorkflow",
-                                        workflow_key.clone(),
-                                        "await_resolution",
-                                    ),
-                                    Json(RestateDurableWaitAwaitRequest {
-                                        address: request.address.clone(),
-                                        timeout_ms: None,
-                                    }),
-                                );
-                                let _ = start.send().invocation_id().await?;
-                                RequestTarget::workflow(
-                                    "LashDurableWaitWorkflow",
-                                    workflow_key,
-                                    "resolve",
-                                )
-                            }
-                        };
+                        let target = RequestTarget::object(
+                            "LashDurableWaitIndex",
+                            durable_wait_index_object_key(&request.address),
+                            "resolve",
+                        );
                         let resolve: restate_sdk::context::Request<
                             '_,
                             Json<RestateDurableWaitResolveRequest>,

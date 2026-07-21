@@ -2033,6 +2033,10 @@ async fn restate_routes_every_execution_scope_to_an_exact_durable_wait_address()
         .expect("scope wait key");
         let address = RestateDurableWaitAddress::for_key(&key);
         assert!(addresses.insert(address.workflow_key.clone()));
+        assert!(
+            !address.index_key().contains('/'),
+            "wait-index object keys must remain one ingress path segment"
+        );
         let resolution = Resolution::Ok(serde_json::json!({ "scope": index }));
         assert_eq!(
             host.resolve_await_event(&key, resolution.clone())
@@ -5018,7 +5022,7 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
     );
     assert!(wait_workflow_discovery.handlers.iter().any(|handler| {
         handler.name.to_string() == "await_resolution"
-            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("WORKFLOW")
+            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
     }));
     assert_eq!(wait_workflow_discovery.handlers.len(), 5);
     assert!(
