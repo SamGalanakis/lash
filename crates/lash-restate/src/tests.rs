@@ -1053,6 +1053,27 @@ impl RecordingContext {
             .clone()
     }
 
+    fn reset_invocation_state_for_replay_preserving_durable_event(&self, workflow_key: &str) {
+        // Restate replays invocation-local awakeables in journal order. This
+        // in-memory context must discard the prior pass's turn-control and
+        // process-terminal resolutions while retaining external input.
+        let preserved = self
+            .durable_events
+            .lock()
+            .expect("durable events lock")
+            .get(workflow_key)
+            .cloned()
+            .expect("durable event to preserve during replay");
+        let mut events = self.durable_events.lock().expect("durable events lock");
+        events.clear();
+        events.insert(workflow_key.to_string(), preserved);
+        drop(events);
+        self.awaited_events
+            .lock()
+            .expect("awaited events lock")
+            .clear();
+    }
+
     fn resolve_durable_event(&self, request: RestateDurableWaitResolveRequest) -> ResolveOutcome {
         if request
             .address
@@ -1382,6 +1403,7 @@ struct ReplayableRecordingContext {
     records: Mutex<HashMap<String, Vec<u8>>>,
     replaying: AtomicBool,
     events: Arc<RecordingContext>,
+    process_worker: Mutex<Option<DurableProcessWorker>>,
 }
 
 impl ReplayableRecordingContext {
@@ -1391,6 +1413,10 @@ impl ReplayableRecordingContext {
 
     fn runs(&self) -> Vec<String> {
         self.runs.lock().expect("runs lock").clone()
+    }
+
+    fn install_process_worker(&self, worker: DurableProcessWorker) {
+        *self.process_worker.lock().expect("process worker lock") = Some(worker);
     }
 }
 
@@ -1621,13 +1647,41 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
 
     fn start_process_workflow<'run>(
         &'run self,
-        _registration: ProcessRegistration,
-        _execution_context: ProcessExecutionContext,
+        registration: ProcessRegistration,
+        execution_context: ProcessExecutionContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
-        Box::pin(async { Err(TerminalError::new("process workflow start is unsupported")) })
+        let worker = self
+            .process_worker
+            .lock()
+            .expect("process worker lock")
+            .clone();
+        let context = Arc::clone(self);
+        Box::pin(async move {
+            let Some(worker) = worker else {
+                return Err(TerminalError::new("process workflow start is unsupported"));
+            };
+            let process_id = registration.id.clone();
+            let controller = RestateRuntimeEffectController::new(Arc::clone(&context));
+            let scoped_effect_controller = controller
+                .scoped_effect_controller(ExecutionScope::process(&process_id))
+                .map_err(TerminalError::from_error)?;
+            let output = worker
+                .run_process_with_scoped_effect_controller(
+                    registration,
+                    execution_context,
+                    scoped_effect_controller,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .map_err(TerminalError::from_error)?;
+            context
+                .events
+                .resolve_process_terminal(&process_id, &output);
+            Ok(format!("invocation-{process_id}"))
+        })
     }
 
     fn request_process_workflow_cancel<'run>(
@@ -1663,12 +1717,12 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
 
     fn await_process_terminal<'run>(
         &'run self,
-        _process_id: String,
+        process_id: String,
     ) -> Pin<Box<dyn Future<Output = Result<ProcessAwaitOutput, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
-        Box::pin(async { Err(TerminalError::new("process terminal await is unsupported")) })
+        self.events.await_process_terminal(process_id)
     }
 
     fn resolve_event<'run>(
@@ -2316,16 +2370,58 @@ async fn replay_test_runtime(
     host: lash_core::RuntimeHostConfig,
     store: Arc<dyn lash_core::RuntimePersistence>,
 ) -> lash_core::LashRuntime {
-    lash_core::LashRuntime::builder()
+    replay_test_runtime_with_plugins(
+        session_id,
+        policy,
+        initial_state,
+        host,
+        store,
+        lash_core::testing::test_standard_protocol_factories(),
+    )
+    .await
+}
+
+async fn replay_test_runtime_with_plugins(
+    session_id: &str,
+    policy: lash_core::SessionPolicy,
+    initial_state: lash_core::RuntimeSessionState,
+    host: lash_core::RuntimeHostConfig,
+    store: Arc<dyn lash_core::RuntimePersistence>,
+    plugin_factories: Vec<Arc<dyn lash_core::PluginFactory>>,
+) -> lash_core::LashRuntime {
+    replay_test_runtime_with_plugins_and_registry(
+        session_id,
+        policy,
+        initial_state,
+        host,
+        store,
+        plugin_factories,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn replay_test_runtime_with_plugins_and_registry(
+    session_id: &str,
+    policy: lash_core::SessionPolicy,
+    initial_state: lash_core::RuntimeSessionState,
+    host: lash_core::RuntimeHostConfig,
+    store: Arc<dyn lash_core::RuntimePersistence>,
+    plugin_factories: Vec<Arc<dyn lash_core::PluginFactory>>,
+    process_registry: Option<Arc<dyn ProcessRegistry>>,
+) -> lash_core::LashRuntime {
+    let mut builder = lash_core::LashRuntime::builder()
         .with_session_id(session_id)
         .with_policy(policy)
         .with_initial_state(initial_state)
         .with_runtime_host(host)
-        .with_plugin_factories(lash_core::testing::test_standard_protocol_factories())
-        .with_store(store)
-        .build()
-        .await
-        .expect("build replay test runtime")
+        .with_plugin_factories(plugin_factories)
+        .with_store(store);
+    if let Some(process_registry) = process_registry {
+        builder = builder.with_process_registry(process_registry);
+    }
+    builder.build().await.expect("build replay test runtime")
 }
 
 async fn run_restate_replay_turn(
@@ -2441,6 +2537,254 @@ async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
         )
         .expect("count turn commit stamps");
     assert_eq!(rows, 1);
+}
+
+struct ReplayScalarPendingTools {
+    scalar_invocations: Arc<AtomicUsize>,
+    completion_key_tx:
+        Mutex<Option<tokio::sync::oneshot::Sender<Result<lash_core::AwaitEventKey, String>>>>,
+}
+
+impl ReplayScalarPendingTools {
+    fn scalar_definition() -> lash_core::ToolDefinition {
+        lash_core::ToolDefinition::raw(
+            "tool:replay_scalar_counter",
+            "replay_scalar_counter",
+            "Increment a non-idempotent replay probe counter.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "value": {} },
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        )
+        .with_lashlang_binding(LashlangToolBinding::new(["tools"], "replay_scalar_counter"))
+    }
+
+    fn pending_definition() -> lash_core::ToolDefinition {
+        lash_core::ToolDefinition::raw(
+            "tool:replay_pending_input",
+            "replay_pending_input",
+            "Wait for an externally supplied replay-test value.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "answer": {} },
+                "required": ["answer"],
+                "additionalProperties": true
+            }),
+        )
+        .with_lashlang_binding(LashlangToolBinding::new(["tools"], "replay_pending_input"))
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::ToolProvider for ReplayScalarPendingTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![
+            Self::scalar_definition().manifest(),
+            Self::pending_definition().manifest(),
+        ]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        match name {
+            "replay_scalar_counter" => Some(Arc::new(Self::scalar_definition().contract())),
+            "replay_pending_input" => Some(Arc::new(Self::pending_definition().contract())),
+            _ => None,
+        }
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        match call.name {
+            "replay_scalar_counter" => {
+                self.scalar_invocations.fetch_add(1, Ordering::SeqCst);
+                lash_core::ToolResult::ok(serde_json::json!({ "value": "counted" }))
+            }
+            "replay_pending_input" => {
+                let key = match call.context.completion_key().await {
+                    Ok(key) => key,
+                    Err(err) => return lash_core::ToolResult::err_fmt(err),
+                };
+                if let Some(tx) = self
+                    .completion_key_tx
+                    .lock()
+                    .expect("completion key sender")
+                    .take()
+                {
+                    let _ = tx.send(Ok(key));
+                }
+                lash_core::ToolResult::pending(lash_core::PendingCompletion::new())
+            }
+            other => lash_core::ToolResult::err_fmt(format!("unknown replay tool `{other}`")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn restate_replay_does_not_reexecute_scalar_lashlang_tool_before_pending_wait() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_id = "restate-scalar-lashlang-replay";
+    let turn_id = "restate-scalar-lashlang-turn-1";
+    let scalar_invocations = Arc::new(AtomicUsize::new(0));
+    let (completion_key_tx, completion_key_rx) = tokio::sync::oneshot::channel();
+    let tools: Arc<dyn lash_core::ToolProvider> = Arc::new(ReplayScalarPendingTools {
+        scalar_invocations: Arc::clone(&scalar_invocations),
+        completion_key_tx: Mutex::new(Some(completion_key_tx)),
+    });
+    let tool_plugin: Arc<dyn lash_core::PluginFactory> =
+        Arc::new(lash_core::plugin::StaticPluginFactory::new(
+            "restate-scalar-replay-tools",
+            lash_core::PluginSpec::new().with_tool_provider(tools),
+        ));
+    let artifact_store: Arc<dyn lashlang::LashlangArtifactStore> =
+        Arc::new(lashlang::InMemoryLashlangArtifactStore::new());
+    let rlm_plugin: Arc<dyn lash_core::PluginFactory> = Arc::new(
+        lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash_protocol_rlm::RlmProtocolPluginConfig::default(),
+            Arc::clone(&artifact_store),
+        )
+        .with_process_lifecycle(true),
+    );
+    let plugin_factories = vec![rlm_plugin, tool_plugin];
+    let llm_provider_calls = Arc::new(AtomicUsize::new(0));
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("stub")
+        .complete({
+            let llm_provider_calls = Arc::clone(&llm_provider_calls);
+            move |_request| {
+                let llm_provider_calls = Arc::clone(&llm_provider_calls);
+                async move {
+                    llm_provider_calls.fetch_add(1, Ordering::SeqCst);
+                    let source = r#"<lashlang>
+process replay_probe(tools: Tools) {
+  counted = await tools.replay_scalar_counter({})?
+  resumed = await tools.replay_pending_input({})?
+  finish { counted: counted.value, answer: resumed.answer }
+}
+handle = start replay_probe(tools: tools)
+finish (await handle)?
+</lashlang>"#;
+                    Ok(lash_core::LlmResponse {
+                        full_text: source.to_string(),
+                        parts: vec![lash_core::LlmOutputPart::Text {
+                            text: source.to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..lash_core::LlmResponse::default()
+                    })
+                }
+            }
+        })
+        .build()
+        .into_handle();
+    let mut host = lash_core::RuntimeHostConfig::in_memory();
+    host.providers.provider_resolver = Arc::new(lash_core::SingleProviderResolver::new(provider));
+    host.durability.attachment_store = Arc::new(lash_core::SessionAttachmentStore::ephemeral(
+        Arc::new(DurableMemoryAttachmentStore::default()),
+    ));
+    let process_env_store: Arc<dyn lash_core::ProcessExecutionEnvStore> =
+        Arc::new(DurableMemoryProcessEnvStore::default());
+    host.durability.process_env_store = Arc::clone(&process_env_store);
+    host = host.with_process_engine(Arc::new(lash_lashlang_runtime::LashlangProcessEngine::new(
+        Arc::clone(&artifact_store),
+        lash_lashlang_runtime::LashlangSurface::default(),
+    )));
+    let store = Arc::new(
+        lash_sqlite_store::Store::open(&dir.path().join("session.db"))
+            .await
+            .expect("open session store"),
+    );
+    let runtime_store: Arc<dyn lash_core::RuntimePersistence> = store;
+    let policy = replay_test_policy(session_id);
+    let initial_state = replay_test_state(session_id, &policy);
+    let context = Arc::new(ReplayableRecordingContext::default());
+    let process_registry = process_registry();
+    let process_worker = DurableProcessWorker::new(lash_core::DurableProcessWorkerConfig::new(
+        Arc::new(lash_core::PluginHost::new(plugin_factories.clone())),
+        host.clone(),
+        Arc::new(lash_core::InMemorySessionStoreFactory::new()),
+        Arc::clone(&process_registry),
+    ));
+    context.install_process_worker(process_worker);
+
+    let mut first = replay_test_runtime_with_plugins_and_registry(
+        session_id,
+        policy.clone(),
+        initial_state.clone(),
+        host.clone(),
+        Arc::clone(&runtime_store),
+        plugin_factories.clone(),
+        Some(Arc::clone(&process_registry)),
+    )
+    .await;
+    let first_context = Arc::clone(&context);
+    let first_turn = tokio::spawn(async move {
+        run_restate_replay_turn(&mut first, first_context, session_id, turn_id).await
+    });
+    let completion_key = completion_key_rx
+        .await
+        .expect("pending tool must publish its completion key")
+        .expect("pending tool must obtain its completion key");
+    let resolver = RestateRuntimeEffectController::new(Arc::clone(&context));
+    assert_eq!(
+        resolver
+            .resolve_await_event(
+                &completion_key,
+                Resolution::Ok(serde_json::json!({ "answer": "resumed" })),
+            )
+            .await
+            .expect("resolve pending replay-test tool"),
+        ResolveOutcome::Accepted
+    );
+    let first_turn = first_turn.await.expect("first turn task");
+    assert!(matches!(
+        first_turn.outcome,
+        lash_core::TurnOutcome::Finished(_)
+    ));
+    assert_eq!(scalar_invocations.load(Ordering::SeqCst), 1);
+
+    context
+        .events
+        .reset_invocation_state_for_replay_preserving_durable_event(
+            &RestateDurableWaitAddress::for_key(&completion_key).workflow_key,
+        );
+    context.start_replay();
+    let retry_store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(CommitRetryStore {
+        inner: Arc::clone(&runtime_store),
+    });
+    let mut replay = replay_test_runtime_with_plugins_and_registry(
+        session_id,
+        policy,
+        initial_state,
+        host,
+        retry_store,
+        plugin_factories,
+        Some(process_registry),
+    )
+    .await;
+    let replay_turn =
+        run_restate_replay_turn(&mut replay, Arc::clone(&context), session_id, turn_id).await;
+    assert!(matches!(
+        replay_turn.outcome,
+        lash_core::TurnOutcome::Finished(_)
+    ));
+    assert_eq!(llm_provider_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        scalar_invocations.load(Ordering::SeqCst),
+        1,
+        "Restate replay must return the journaled scalar ToolAttempt instead of re-executing the provider"
+    );
 }
 
 #[tokio::test]
