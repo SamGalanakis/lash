@@ -1397,21 +1397,12 @@ impl AwaitEventResolver for RestateEffectHostController {
         };
         let request = restate_durable_wait_request(key, deadline, &lash_core::SystemClock);
         let workflow_key = request.address.workflow_key.clone();
-        ingress
-            .ingress
-            .send_workflow_json(
+        tokio::select! {
+            result = ingress.ingress.call_workflow_json::<_, Resolution>(
                 "LashDurableWaitWorkflow",
                 &workflow_key,
                 "await_resolution",
                 &request,
-            )
-            .await
-            .map_err(|err| RuntimeError::new("restate_await_event_start", err.to_string()))?;
-        tokio::select! {
-            result = ingress.ingress.call_workflow_empty::<Resolution>(
-                "LashDurableWaitWorkflow",
-                &workflow_key,
-                "observe",
             ) => result.map_err(|err| {
                 RuntimeError::new("restate_await_event_await", err.to_string())
             }),
@@ -2245,9 +2236,6 @@ pub trait LashDurableWaitWorkflow {
     ) -> HandlerResult<Json<Resolution>>;
 
     #[shared]
-    async fn observe() -> HandlerResult<Json<Resolution>>;
-
-    #[shared]
     async fn peek() -> HandlerResult<Json<Option<Resolution>>>;
 
     #[shared]
@@ -2341,12 +2329,6 @@ impl LashDurableWaitWorkflow for LashDurableWaitWorkflowImpl {
             );
             let Json(()) = settle.call().await?;
         }
-        Ok(Json(resolution))
-    }
-
-    async fn observe(&self, ctx: SharedWorkflowContext<'_>) -> HandlerResult<Json<Resolution>> {
-        let payload = ctx.promise::<String>(DURABLE_WAIT_PROMISE_KEY).await?;
-        let resolution = serde_json::from_str(&payload).map_err(TerminalError::from_error)?;
         Ok(Json(resolution))
     }
 
@@ -2796,47 +2778,29 @@ impl TurnAttach for RestateTurnAttach {
         )?;
         let durable_address = RestateDurableWaitAddress::for_key(&key);
         let workflow_key = durable_address.workflow_key.clone();
-        let registration = self
+        let resolution = self
             .ingress
-            .call_object_json::<_, RestateDurableWaitRegistration>(
-                "LashDurableWaitIndex",
-                &address.session_id,
-                "register",
-                &RestateDurableWaitIndexRequest {
-                    address: durable_address.clone(),
-                },
-            )
-            .await
-            .map_err(|err| RuntimeError::new("restate_turn_terminal_attach", err.to_string()))?;
-        if registration == RestateDurableWaitRegistration::Revoked {
-            return Err(RuntimeError::new(
-                "turn_control_unknown_or_revoked",
-                format!(
-                    "terminal promise for turn `{}` in session `{}` was revoked",
-                    address.turn_id, address.session_id
-                ),
-            ));
-        }
-        self.ingress
-            .send_workflow_json(
+            .call_workflow_json::<_, Resolution>(
                 "LashDurableWaitWorkflow",
                 &workflow_key,
                 "await_resolution",
                 &RestateDurableWaitAwaitRequest {
-                    address: durable_address.clone(),
+                    address: durable_address,
                     timeout_ms: None,
                 },
             )
             .await
             .map_err(|err| RuntimeError::new("restate_turn_terminal_attach", err.to_string()))?;
-        let resolution = self
-            .ingress
-            .call_workflow_empty::<Resolution>("LashDurableWaitWorkflow", &workflow_key, "observe")
-            .await
-            .map_err(|err| RuntimeError::new("restate_turn_terminal_attach", err.to_string()))?;
         match resolution {
             Resolution::Ok(value) => serde_json::from_value(value)
                 .map_err(|err| RuntimeError::new("restate_turn_terminal_decode", err.to_string())),
+            Resolution::Cancelled => Err(RuntimeError::new(
+                "turn_control_unknown_or_revoked",
+                format!(
+                    "terminal promise for turn `{}` in session `{}` was revoked",
+                    address.turn_id, address.session_id
+                ),
+            )),
             other => Err(RuntimeError::new(
                 "restate_turn_terminal_invalid_resolution",
                 format!(
@@ -3290,7 +3254,7 @@ macro_rules! impl_restate_controller_context {
                 fn await_event<'run>(
                     &'run self,
                     request: RestateDurableWaitAwaitRequest,
-                    cancellation: tokio_util::sync::CancellationToken,
+                    _cancellation: tokio_util::sync::CancellationToken,
                 ) -> Pin<Box<dyn Future<Output = Result<Resolution, TerminalError>> + Send + 'run>>
                 where
                     'ctx: 'run,
@@ -3310,25 +3274,13 @@ macro_rules! impl_restate_controller_context {
                             ),
                             Json(request.clone()),
                         );
-                        let _ = start.send().invocation_id().await?;
-                        let observe: restate_sdk::context::Request<'_, (), Json<Resolution>> =
-                            ContextClient::request(
-                                self,
-                                RequestTarget::workflow(
-                                    "LashDurableWaitWorkflow",
-                                    workflow_key.clone(),
-                                    "observe",
-                                ),
-                                (),
-                            );
-                        let observe = guard_restate_context_future(observe.call());
-                        tokio::pin!(observe);
-                        tokio::select! {
-                            result = &mut observe => {
+                        let call = start.call();
+                        restate_sdk::select! {
+                            result = call => {
                                 let Json(resolution) = result?;
                                 Ok(resolution)
-                            }
-                            _ = cancellation.cancelled() => {
+                            },
+                            on_cancel => {
                                 let address = request.address;
                                 let target = match address.session_id.clone() {
                                     Some(session_id) => RequestTarget::object(
@@ -3403,8 +3355,7 @@ macro_rules! impl_restate_controller_context {
                             ),
                             Json(RestateTurnAwaitEventWaitRequest { event: request }),
                         );
-                        let call = guard_restate_context_future(race.call());
-                        let Json(outcome) = call.await?;
+                        let Json(outcome) = race.call().await?;
                         Ok(outcome)
                     })
                 }
