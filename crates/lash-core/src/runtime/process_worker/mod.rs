@@ -355,7 +355,7 @@ impl DurableProcessWorker {
             // running is skipped on claim conflict) and one failing row never
             // aborts the rest of the sweep.
             let worker = self.clone();
-            tokio::spawn(async move { worker.recover_process(record).await });
+            crate::task::spawn(async move { worker.recover_process(record).await });
         }
         Ok(())
     }
@@ -902,7 +902,7 @@ impl DurableProcessWorker {
                 });
             let process_id = process_id.clone();
             let cancellation = cancellation.clone();
-            tokio::spawn(async move {
+            crate::task::spawn(async move {
                 match awaiter
                     .await_event(&process_id, "process.cancel_requested", 0)
                     .await

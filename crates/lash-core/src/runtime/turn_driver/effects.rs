@@ -236,7 +236,7 @@ impl RuntimeTurnDriver<'_> {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
         let relay_tx = event_tx.clone();
-        let relay_handle = tokio::spawn(async move {
+        let relay_handle = crate::task::spawn(async move {
             let mut sandbox_closed = false;
             let mut session_closed = false;
             let mut turn_closed = false;

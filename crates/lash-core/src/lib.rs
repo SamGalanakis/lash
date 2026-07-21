@@ -25,6 +25,7 @@ pub mod session_graph;
 pub mod session_model;
 mod stable_hash;
 pub mod store;
+pub mod task;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tool_dispatch;

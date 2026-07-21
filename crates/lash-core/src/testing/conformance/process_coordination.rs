@@ -23,7 +23,8 @@ pub(super) async fn awaiter_cross_task_completion_resolves_promptly(
         .await
         .expect("register");
     let awaiter = crate::ProcessAwaiter::new(Arc::clone(&registry), hub);
-    let waiter = tokio::spawn(async move { awaiter.await_terminal("proc-await-cross-task").await });
+    let waiter =
+        crate::task::spawn(async move { awaiter.await_terminal("proc-await-cross-task").await });
 
     // Complete from this task through the decorated handle so the hub bumps; the
     // waiter may still be between its subscribe and first read, which the awaiter
@@ -93,7 +94,7 @@ pub(super) async fn awaiter_await_event_never_returns_events_at_or_before_cursor
     // Cursor at the latest sequence (2): no event at or before it may resolve, so
     // the wait stays pending until a later matching event arrives.
     let waiter_awaiter = awaiter.clone();
-    let mut waiter = tokio::spawn(async move {
+    let mut waiter = crate::task::spawn(async move {
         waiter_awaiter
             .await_event("proc-await-cursor", "signal.ping", 2)
             .await

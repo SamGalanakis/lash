@@ -43,3 +43,7 @@ hmac = { workspace = true }
 [dev-dependencies]
 proptest = "1"
 tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints.clippy]
+disallowed_methods = "deny"

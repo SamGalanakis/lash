@@ -744,11 +744,11 @@ async fn concurrent_head_revision_cas_applies_exactly_once(store: Arc<dyn Runtim
     let right_barrier = Arc::clone(&barrier);
     let left_commit = make_commit("cas-left");
     let right_commit = make_commit("cas-right");
-    let left = tokio::spawn(async move {
+    let left = crate::task::spawn(async move {
         left_barrier.wait().await;
         left_store.commit_runtime_state(left_commit).await
     });
-    let right = tokio::spawn(async move {
+    let right = crate::task::spawn(async move {
         right_barrier.wait().await;
         right_store.commit_runtime_state(right_commit).await
     });
@@ -1173,13 +1173,13 @@ async fn session_execution_lease_reclaim_contract(store: Arc<dyn RuntimePersiste
         pid,
         "race-right-start",
     );
-    let left = tokio::spawn(async move {
+    let left = crate::task::spawn(async move {
         left_barrier.wait().await;
         left_store
             .reclaim_session_execution_lease("reclaim-race", &left_claimant, &left_fence, 60_000)
             .await
     });
-    let right = tokio::spawn(async move {
+    let right = crate::task::spawn(async move {
         right_barrier.wait().await;
         right_store
             .reclaim_session_execution_lease("reclaim-race", &right_claimant, &right_fence, 60_000)
@@ -1643,7 +1643,7 @@ async fn concurrent_queue_and_turn_input_claims_have_one_owner(store: Arc<dyn Ru
     let right_barrier = Arc::clone(&queue_barrier);
     let left_fence = lease.fence();
     let right_fence = lease.fence();
-    let left_queue = tokio::spawn(async move {
+    let left_queue = crate::task::spawn(async move {
         left_barrier.wait().await;
         left_store
             .claim_ready_queued_work(
@@ -1655,7 +1655,7 @@ async fn concurrent_queue_and_turn_input_claims_have_one_owner(store: Arc<dyn Ru
             )
             .await
     });
-    let right_queue = tokio::spawn(async move {
+    let right_queue = crate::task::spawn(async move {
         right_barrier.wait().await;
         right_store
             .claim_ready_queued_work(
@@ -1702,13 +1702,13 @@ async fn concurrent_queue_and_turn_input_claims_have_one_owner(store: Arc<dyn Ru
     let right_barrier = Arc::clone(&input_barrier);
     let left_fence = lease.fence();
     let right_fence = lease.fence();
-    let left_input = tokio::spawn(async move {
+    let left_input = crate::task::spawn(async move {
         left_barrier.wait().await;
         left_store
             .claim_next_turn_inputs(session_id, &left_fence, &lease_owner("input-left"), 1)
             .await
     });
-    let right_input = tokio::spawn(async move {
+    let right_input = crate::task::spawn(async move {
         right_barrier.wait().await;
         right_store
             .claim_next_turn_inputs(session_id, &right_fence, &lease_owner("input-right"), 1)
@@ -4467,12 +4467,12 @@ async fn session_execution_lease_first_claim_excludes_concurrent_reopen_handles(
     let open_owner = lease_owner("owner-a");
     let reopen_owner = lease_owner("owner-b");
 
-    let open_claim = tokio::spawn(async move {
+    let open_claim = crate::task::spawn(async move {
         open_barrier.wait().await;
         open.try_claim_session_execution_lease("first-claim-race", &open_owner, 60_000)
             .await
     });
-    let reopen_claim = tokio::spawn(async move {
+    let reopen_claim = crate::task::spawn(async move {
         reopen_barrier.wait().await;
         reopen
             .try_claim_session_execution_lease("first-claim-race", &reopen_owner, 60_000)

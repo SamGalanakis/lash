@@ -874,7 +874,7 @@ mod tests {
             .await
             .expect("register");
         let writer = Arc::clone(&registry);
-        tokio::spawn(async move {
+        crate::task::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
             writer
                 .complete_process(
@@ -905,7 +905,7 @@ mod tests {
             .await
             .expect("register");
         let awaiter = ProcessAwaiter::new(Arc::clone(&registry), hub);
-        let waiter = tokio::spawn(async move { awaiter.await_terminal("proc").await });
+        let waiter = crate::task::spawn(async move { awaiter.await_terminal("proc").await });
         registry
             .complete_process(
                 "proc",
@@ -1172,7 +1172,7 @@ mod tests {
         for _ in 0..WAITERS {
             let awaiter = ProcessAwaiter::new(Arc::clone(&registry), hub.clone());
             let barrier = Arc::clone(&barrier);
-            waiters.push(tokio::spawn(async move {
+            waiters.push(crate::task::spawn(async move {
                 barrier.wait().await;
                 awaiter.await_terminal("proc").await
             }));

@@ -17,7 +17,7 @@ impl RuntimeTurnDriver<'_> {
         let (tool_event_tx, mut tool_event_rx) =
             tokio::sync::mpsc::channel::<SessionStreamEvent>(64);
         let runtime_event_tx = event_tx.clone();
-        let tool_event_forwarder = tokio::spawn(async move {
+        let tool_event_forwarder = crate::task::spawn(async move {
             while let Some(event) = tool_event_rx.recv().await {
                 send_session_event(&runtime_event_tx, event).await;
             }
@@ -173,13 +173,13 @@ impl RuntimeTurnDriver<'_> {
             tokio::sync::mpsc::channel::<SessionStreamEvent>(64);
         let (turn_event_tx, mut turn_event_rx) = tokio::sync::mpsc::channel::<TurnActivity>(64);
         let runtime_event_tx = event_tx.clone();
-        let tool_event_forwarder = tokio::spawn(async move {
+        let tool_event_forwarder = crate::task::spawn(async move {
             while let Some(event) = tool_event_rx.recv().await {
                 send_session_event(&runtime_event_tx, event).await;
             }
         });
         let runtime_event_tx = event_tx.clone();
-        let turn_event_forwarder = tokio::spawn(async move {
+        let turn_event_forwarder = crate::task::spawn(async move {
             while let Some(event) = turn_event_rx.recv().await {
                 let _ = runtime_event_tx.send(RuntimeStreamEvent::Turn(event)).await;
             }

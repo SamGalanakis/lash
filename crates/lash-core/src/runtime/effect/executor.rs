@@ -1406,7 +1406,7 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
             }
             RuntimeEffectCommand::Process { command } => {
                 let execution = local_executor.into_process()?;
-                let result = tokio::task::spawn(async move { execution.execute(*command).await })
+                let result = crate::task::spawn(async move { execution.execute(*command).await })
                     .await
                     .map_err(|err| {
                         RuntimeEffectControllerError::new(

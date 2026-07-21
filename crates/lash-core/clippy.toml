@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "tokio::spawn", reason = "use lash_core::task::spawn so tasks inherit the caller's tracing context" },
+    { path = "tokio::task::spawn", reason = "use lash_core::task::spawn so tasks inherit the caller's tracing context" },
+]

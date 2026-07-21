@@ -39,7 +39,8 @@ impl ManagedSessionCapability {
                 relay: usage.child_usage_event_relay.clone(),
             }),
         };
-        let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+        let event_drain =
+            crate::task::spawn(async move { while event_rx.recv().await.is_some() {} });
         {
             let mut turns = self.turns.lock().await;
             if turns
@@ -63,7 +64,7 @@ impl ManagedSessionCapability {
                 // gets a fresh Tokio task stack here. Future turn-path growth
                 // belongs behind this boundary, rather than in new boxes at
                 // whichever recursive poll site happens to overflow next.
-                let task = tokio::spawn(run_managed_session_turn(
+                let task = crate::task::spawn(run_managed_session_turn(
                     runtime,
                     input,
                     cancel,

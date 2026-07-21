@@ -110,7 +110,7 @@ async fn in_memory_claim_validation_serializes_takeover_before_mutation() {
     let stale_claim_store = Arc::clone(&store);
     let stale_claim_owner = stale_owner.clone();
     let stale_claim_fence = stale_lease.fence();
-    let stale_claim = tokio::spawn(async move {
+    let stale_claim = crate::task::spawn(async move {
         stale_claim_store
             .claim_ready_queued_work(
                 session_id,
@@ -438,7 +438,7 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
     let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
     let cancel = CancellationToken::new();
     let cancel_trigger = cancel.clone();
-    tokio::spawn(async move {
+    crate::task::spawn(async move {
         // Give the turn time to spawn the slow tool before we cancel.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         cancel_trigger.cancel();

@@ -2264,7 +2264,7 @@ async fn run_turn_effect_loop(
     let cancel_watcher = shared_cancel_controller.map(|controller| {
         let turn_control = Arc::clone(&turn_control);
         let cancellation = cancellation.clone();
-        tokio::spawn(async move {
+        crate::task::spawn(async move {
             if await_turn_cancellation_with_retry(|| {
                 turn_control.await_cancel(controller.as_ref(), CancellationToken::new())
             })
