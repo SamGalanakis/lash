@@ -647,6 +647,80 @@ async fn provider_handle_retries_retryable_failures_in_shared_executor() {
     assert_eq!(completion.call_record.attempts[2].evidence, None);
 }
 
+/// A non-OpenAI provider kind that reports both usage and execution evidence
+/// on a successful call, the way Anthropic, Google and Codex do.
+#[derive(Clone, Debug)]
+struct ReportingProvider;
+
+#[async_trait::async_trait]
+impl Provider for ReportingProvider {
+    fn kind(&self) -> &'static str {
+        "reporting-vendor"
+    }
+
+    fn options(&self) -> ProviderOptions {
+        ProviderOptions {
+            reliability: ProviderReliability::default().max_attempts(1),
+            ..ProviderOptions::default()
+        }
+    }
+
+    fn set_options(&mut self, _options: ProviderOptions) {}
+
+    fn serialize_config(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        Ok(LlmResponse {
+            full_text: "ok".to_string(),
+            usage: LlmUsage {
+                input_tokens: 11,
+                output_tokens: 5,
+                ..LlmUsage::default()
+            },
+            provider_usage: Some(serde_json::json!({ "input": 11, "output": 5 })),
+            execution_evidence: Some(crate::ExecutionEvidence {
+                served_model: Some("vendor-model-1".to_string()),
+                ..crate::ExecutionEvidence::default()
+            }),
+            ..LlmResponse::default()
+        })
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
+        Box::new(self.clone())
+    }
+}
+
+// The ledger records what the provider reported, whatever its kind. Gating it
+// on a provider-kind allowlist made an absent value mean "not allowlisted"
+// rather than "not reported", which is the distinction ADR 0031 rests on.
+#[tokio::test]
+async fn provider_handle_records_usage_and_evidence_for_any_provider_kind() {
+    let mut handle = ProviderHandle::new(ProviderComponents::new(Box::new(ReportingProvider)));
+
+    let completion = handle
+        .complete(empty_request())
+        .await
+        .expect("reporting provider succeeds");
+
+    let attempt = &completion.call_record.attempts[0];
+    assert_eq!(
+        attempt.usage.as_ref().map(|usage| usage.input_tokens),
+        Some(11),
+        "usage reported by a non-OpenAI provider must reach the ledger"
+    );
+    assert_eq!(
+        attempt
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.served_model.as_deref()),
+        Some("vendor-model-1"),
+        "execution evidence reported by a non-OpenAI provider must reach the ledger"
+    );
+}
+
 #[tokio::test]
 async fn provider_handle_stops_on_non_retryable_failure() {
     let attempts = Arc::new(AtomicUsize::new(0));
