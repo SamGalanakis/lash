@@ -9,9 +9,17 @@ pub enum OpenAiCompatMaxTokensField {
     Omit,
 }
 
+/// Gateway provider-routing preferences, emitted as the request's top-level
+/// `provider` object. Endpoints that do not implement provider routing must
+/// leave this unset.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderRoutingPrefs {
+    /// Route only to upstream backends that support every parameter in the
+    /// request. Gateways otherwise silently drop parameters an upstream does
+    /// not implement — a dropped `response_format` yields free-written JSON
+    /// under a nominal `finish_reason: "stop"`, so the structured-output
+    /// contract fails only at parse time.
     pub require_parameters: bool,
 }
 
@@ -44,6 +52,9 @@ pub struct OpenAiCompat {
     pub developer_role: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_capabilities: Option<ProviderSchemaCapabilities>,
+    /// Provider-routing preferences for gateway endpoints. Emitted whenever
+    /// set, not only for schema'd requests: any parameter this adapter sends
+    /// is one the caller relies on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_routing: Option<ProviderRoutingPrefs>,
     /// Response header names (case-insensitive) to capture into

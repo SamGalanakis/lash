@@ -73,7 +73,7 @@
             </article>
             <article class="panel">
               <h3><code>openai-compatible</code></h3>
-              <p>Generic Chat Completions. Requires <code>base_url</code>. Converts <code>LlmRequest</code> to a <code>messages</code> array, emits Chat Completions <code>tools</code>, and maps structured output to <code>response_format</code>. Endpoint behavior is host-supplied through <code>OpenAiCompat</code>; <code>OpenAiCompat::openrouter()</code> explicitly enables OpenRouter reasoning format and session affinity for OpenRouter itself or a compatible proxy. The provider never infers those capabilities from <code>base_url</code>.</p>
+              <p>Generic Chat Completions. Requires <code>base_url</code>. Converts <code>LlmRequest</code> to a <code>messages</code> array, emits Chat Completions <code>tools</code>, and maps structured output to <code>response_format</code>. Endpoint behavior is host-supplied through <code>OpenAiCompat</code>; <code>OpenAiCompat::openrouter()</code> explicitly enables OpenRouter reasoning format, session affinity, parameter-honoring provider routing, and <code>/provider</code> response-metadata capture, for OpenRouter itself or a compatible proxy. The provider never infers those capabilities from <code>base_url</code>.</p>
             </article>
           </div>
         </div>
@@ -96,6 +96,7 @@
           </ol>
           <p>The Anthropic dialect uses all three canonical placements. The Gemini dialect emits exactly one marker: the explicit text breakpoint when present, otherwise the last user/assistant text content. Internal breakpoint markers are always removed from the wire request.</p>
           <p>Session affinity is separate endpoint capability data. Set <code>OpenAiCompat.cache_session_affinity</code> (or explicitly select <code>OpenAiCompat::openrouter()</code>) to emit the bounded body <code>session_id</code> and call-specific <code>x-client-request-id</code>. It is disabled by default, including when <code>base_url</code> happens to equal the canonical OpenRouter URL.</p>
+          <p>Provider routing is likewise endpoint capability data. Set <code>OpenAiCompat.provider_routing</code> (or select <code>OpenAiCompat::openrouter()</code>) to emit the top-level <code>provider</code> object. With <code>require_parameters</code>, the gateway routes only to upstream backends supporting every parameter sent, rather than silently dropping the ones an upstream does not implement — a dropped <code>response_format</code> otherwise yields free-written JSON under a nominal <code>finish_reason: "stop"</code>. It is emitted on every request under the preset, not only schema'd ones, and is disabled by default including at the canonical OpenRouter URL.</p>
         </div>
 
         <div class="section">
