@@ -860,6 +860,32 @@ fn default_failure_classifier_keeps_quota_exhaustion_non_retryable() {
     }
 }
 
+// Per-minute throttling reads as "quota" at several providers but is exactly
+// the case the retry ladder exists for. Treating it as exhaustion both fails
+// the turn and skips throttle deference, which needs `Quota` + retryable.
+#[test]
+fn default_failure_classifier_keeps_rate_throttling_retryable() {
+    let classifier = DefaultProviderFailureClassifier;
+    for message in [
+        "Quota exceeded for quota metric 'Generate requests per model per minute' \
+         and limit 'GenerateRequestsPerDayPerProjectPerModel' of service \
+         'generativelanguage.googleapis.com'",
+        "Resource has been exhausted (e.g. check quota).",
+        "429 RESOURCE_EXHAUSTED: Quota exceeded for aiplatform.googleapis.com",
+    ] {
+        let failure = classifier.classify(ProviderFailure::new(message).with_status(429));
+        assert_eq!(
+            failure.kind,
+            ProviderFailureKind::Quota,
+            "throttling stays Quota: {message}"
+        );
+        assert!(
+            failure.retryable,
+            "per-minute throttling must stay retryable: {message}"
+        );
+    }
+}
+
 #[test]
 fn default_failure_classifier_marks_context_overflow() {
     let classifier = DefaultProviderFailureClassifier;
