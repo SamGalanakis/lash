@@ -7,6 +7,11 @@ use lash_trace::{
 
 use super::*;
 
+/// Largest exact provider request body retained as structured JSON in a trace.
+/// Larger bodies keep their byte length and wire-byte digest without inflating
+/// each JSONL record and optional OpenTelemetry payload attribute.
+pub(crate) const MAX_PROVIDER_REQUEST_BODY_JSON_BYTES: usize = 2_048;
+
 /// Result of running stream hooks over a visible chunk. Carries both
 /// the (possibly rewritten) text and an `abort_requested` flag that the
 /// LLM runner uses to break the stream early when a plugin has decided
@@ -639,14 +644,25 @@ impl RuntimeTurnDriver<'_> {
                     .saturating_duration_since(created_at)
                     .as_millis() as u64;
                 if let Some(endpoint) = provider_event.request_endpoint() {
+                    let body_len = provider_event.raw.len();
+                    let (body_json, body_json_omitted_reason) =
+                        if body_len > MAX_PROVIDER_REQUEST_BODY_JSON_BYTES {
+                            (None, Some("size_limit".to_string()))
+                        } else {
+                            match serde_json::from_str(&provider_event.raw) {
+                                Ok(body_json) => (Some(body_json), None),
+                                Err(_) => (None, Some("invalid_json".to_string())),
+                            }
+                        };
                     let event = TraceProviderRequestEvent {
                         provider: provider_event.provider.to_string(),
                         sequence,
                         elapsed_ms,
                         endpoint: endpoint.to_string(),
-                        body_len: provider_event.raw.len(),
+                        body_len,
                         body_sha256: lash_trace::sha256_hex(provider_event.raw.as_bytes()),
-                        body_json: serde_json::from_str(&provider_event.raw).ok(),
+                        body_json,
+                        body_json_omitted_reason,
                     };
                     crate::trace::emit_trace(
                         &sink,

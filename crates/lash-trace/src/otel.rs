@@ -497,6 +497,11 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
                 "lash.request.body_json",
                 &event.body_json,
             );
+            push_opt(
+                &mut attrs,
+                "lash.request.body_json_omitted_reason",
+                &event.body_json_omitted_reason,
+            );
         }
         TraceEvent::ProviderStreamEvent { event } => {
             attrs.push(KeyValue::new("lash.provider.name", event.provider.clone()));

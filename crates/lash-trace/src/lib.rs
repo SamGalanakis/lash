@@ -429,9 +429,14 @@ pub struct TraceProviderRequestEvent {
     pub elapsed_ms: u64,
     pub endpoint: String,
     pub body_len: usize,
+    /// SHA-256 of the exact serialized wire bytes. `body_json` is a parsed
+    /// structured view whose re-serialization may not reproduce these bytes.
     pub body_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_json: Option<Value>,
+    /// Why `body_json` is absent when the request body itself was observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_json_omitted_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

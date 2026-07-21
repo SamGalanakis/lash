@@ -253,6 +253,10 @@ pub(crate) async fn complete(
             .get_or_insert_with(ExecutionEvidence::default)
             .provider_request_id = Some(provider_request_id);
     }
+    // Keep successful responses aligned with Anthropic and Google: hosts may
+    // consume this public diagnostic through `LlmDebug`. This also means the
+    // exact body is serialized in durable effect outcomes; that journal-size
+    // cost is accepted deliberately for the existing cross-provider contract.
     response.request_body = Some(request_body_for_error);
     response.response_metadata = capture.into_map();
     Ok(response)

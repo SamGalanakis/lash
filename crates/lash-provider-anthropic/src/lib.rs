@@ -3,6 +3,8 @@
 mod config;
 mod policy;
 mod provider;
+#[cfg(test)]
+mod provider_trace_tests;
 mod request;
 mod stream;
 mod support;

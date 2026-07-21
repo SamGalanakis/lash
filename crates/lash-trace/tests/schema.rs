@@ -122,6 +122,7 @@ fn event_samples() -> Vec<TraceEvent> {
                 body_len: 13,
                 body_sha256: "abcd".to_string(),
                 body_json: Some(json!({ "model": "m" })),
+                body_json_omitted_reason: None,
             },
         },
         TraceEvent::ProviderStreamEvent {

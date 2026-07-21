@@ -391,6 +391,16 @@ async fn extended_runtime_trace_records_provider_request_and_stream_events() {
                     })
                     .to_string(),
                 ));
+                tx.send(LlmProviderTraceEvent::request(
+                    "codex",
+                    "chat/completions",
+                    r#"{"model":"small"}"#.to_string(),
+                ));
+                tx.send(LlmProviderTraceEvent::request(
+                    "codex",
+                    "invalid",
+                    "not-json".to_string(),
+                ));
                 tx.send(LlmProviderTraceEvent {
                     provider: "codex",
                     event_name: "response.output_item.done".to_string(),
@@ -473,8 +483,12 @@ async fn extended_runtime_trace_records_provider_request_and_stream_events() {
         .iter()
         .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("provider_request"))
         .collect::<Vec<_>>();
-    assert_eq!(provider_requests.len(), 1, "provider traces: {entries:?}");
-    let request_event = &provider_requests[0]["event"];
+    assert_eq!(provider_requests.len(), 3, "provider traces: {entries:?}");
+    let request_event = provider_requests
+        .iter()
+        .find(|entry| entry["event"]["endpoint"] == "responses")
+        .expect("large provider request")["event"]
+        .clone();
     let expected_body = serde_json::json!({
         "model": "mock-model",
         "input": "x".repeat(3_000),
@@ -482,12 +496,37 @@ async fn extended_runtime_trace_records_provider_request_and_stream_events() {
     let expected_serialized = expected_body.to_string();
     assert_eq!(request_event["provider"], "codex");
     assert_eq!(request_event["endpoint"], "responses");
-    assert_eq!(request_event["body_json"], expected_body);
+    assert!(request_event.get("body_json").is_none());
+    assert_eq!(request_event["body_json_omitted_reason"], "size_limit");
     assert_eq!(request_event["body_len"], expected_serialized.len());
     assert!(request_event["body_len"].as_u64().unwrap() > 2_048);
     assert_eq!(
         request_event["body_sha256"],
         lash_trace::sha256_hex(expected_serialized.as_bytes())
+    );
+    let small_request = provider_requests
+        .iter()
+        .find(|entry| entry["event"]["endpoint"] == "chat/completions")
+        .expect("small provider request");
+    assert_eq!(small_request["event"]["body_json"]["model"], "small");
+    assert!(
+        small_request["event"]
+            .get("body_json_omitted_reason")
+            .is_none()
+    );
+    let invalid_request = provider_requests
+        .iter()
+        .find(|entry| entry["event"]["endpoint"] == "invalid")
+        .expect("invalid provider request");
+    assert!(invalid_request["event"].get("body_json").is_none());
+    assert_eq!(
+        invalid_request["event"]["body_json_omitted_reason"],
+        "invalid_json"
+    );
+    assert_eq!(invalid_request["event"]["body_len"], "not-json".len());
+    assert_eq!(
+        invalid_request["event"]["body_sha256"],
+        lash_trace::sha256_hex(b"not-json")
     );
     assert_eq!(
         provider_events.len(),

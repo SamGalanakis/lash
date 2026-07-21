@@ -1,14 +1,12 @@
 use std::sync::{Arc, Mutex};
 
-use crate::OpenAiCompatibleProvider;
+use crate::GoogleOAuthProvider;
 use async_trait::async_trait;
 use lash_core::LlmTransportError;
-use lash_core::llm::types::{
-    LlmMessage, LlmProviderTraceEvent, LlmProviderTraceSender, LlmRequest, LlmRequestScope,
-    LlmRole, LlmToolChoice,
-};
-use lash_core::provider::{ModelCapability, Provider};
+use lash_core::llm::types::{LlmProviderTraceEvent, LlmProviderTraceSender};
+use lash_core::provider::StreamTermination;
 use lash_llm_transport::{LlmHttpBody, LlmHttpRequest, LlmHttpResponse, LlmHttpTransport};
+use serde_json::json;
 
 const SECRET_SENTINEL: &str = "sk-super-secret-do-not-log";
 
@@ -19,17 +17,10 @@ struct RecordingTransport {
 }
 
 impl RecordingTransport {
-    fn success() -> Self {
+    fn new(status: u16) -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
-            status: 200,
-        }
-    }
-
-    fn error() -> Self {
-        Self {
-            requests: Mutex::new(Vec::new()),
-            status: 500,
+            status,
         }
     }
 }
@@ -43,7 +34,7 @@ impl LlmHttpTransport for RecordingTransport {
     ) -> Result<LlmHttpResponse, LlmTransportError> {
         self.requests.lock().expect("request lock").push(request);
         let body = if self.status == 200 {
-            r#"{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#
+            r#"{"response":{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"done"}]}}]}}"#
         } else {
             r#"{"error":{"message":"provider unavailable"}}"#
         };
@@ -75,41 +66,30 @@ fn assert_auth_material_absent(event: &LlmProviderTraceEvent) {
     }
 }
 
-fn request() -> LlmRequest {
-    LlmRequest {
-        model: "test-model".to_string(),
-        messages: vec![LlmMessage::text(
-            LlmRole::User,
-            format!("large prompt: {}", "x".repeat(3_000)),
-        )],
-        attachments: Vec::new(),
-        tools: Arc::new(Vec::new()),
-        tool_choice: LlmToolChoice::Auto,
-        model_variant: Default::default(),
-        model_capability: ModelCapability::default(),
-        generation: Default::default(),
-        scope: LlmRequestScope::new("session", "frame", "request"),
-        output_spec: None,
-        stream_events: None,
-        provider_trace: None,
-    }
-}
-
 #[tokio::test]
-async fn extended_provider_trace_captures_exact_serialized_chat_body() {
-    let transport = Arc::new(RecordingTransport::success());
-    let mut provider = OpenAiCompatibleProvider::new(SECRET_SENTINEL, "https://example.test/v1")
+async fn extended_provider_trace_captures_exact_serialized_google_body_without_auth() {
+    let request = json!({
+        "model": "gemini-test",
+        "contents": [{"role": "user", "parts": [{"text": "x".repeat(3_000)}]}],
+    });
+    let transport = Arc::new(RecordingTransport::new(200));
+    let provider = GoogleOAuthProvider::new(SECRET_SENTINEL, "refresh-secret", 0)
         .with_transport(transport.clone());
-    let mut req = request();
-
     let events = Arc::new(Mutex::new(Vec::<LlmProviderTraceEvent>::new()));
     let event_sink = Arc::clone(&events);
-    req.provider_trace = Some(LlmProviderTraceSender::new(move |event| {
-        event_sink.lock().expect("event lock").push(event);
-    }));
 
-    let response = provider.complete(req).await.expect("completion succeeds");
-
+    let response = provider
+        .execute_request(
+            SECRET_SENTINEL,
+            request.clone(),
+            None,
+            Some(LlmProviderTraceSender::new(move |event| {
+                event_sink.lock().expect("event lock").push(event);
+            })),
+            StreamTermination::EofTolerated,
+        )
+        .await
+        .expect("completion succeeds");
     let request_event = events
         .lock()
         .expect("event lock")
@@ -117,9 +97,8 @@ async fn extended_provider_trace_captures_exact_serialized_chat_body() {
         .find(|event| event.request_endpoint().is_some())
         .cloned()
         .expect("provider request trace");
-    assert_eq!(request_event.provider, "openai_compatible");
-    assert_eq!(request_event.request_endpoint(), Some("chat/completions"));
-    assert!(request_event.raw.len() > 2_048);
+    assert_eq!(request_event.provider, "google");
+    assert_eq!(request_event.request_endpoint(), Some("generateContent"));
     assert_auth_material_absent(&request_event);
 
     let traced_body = {
@@ -133,33 +112,21 @@ async fn extended_provider_trace_captures_exact_serialized_chat_body() {
         Some(request_event.raw.as_str())
     );
 
-    let untraced_transport = Arc::new(RecordingTransport::success());
-    let mut untraced_provider =
-        OpenAiCompatibleProvider::new(SECRET_SENTINEL, "https://example.test/v1")
-            .with_transport(untraced_transport.clone());
-    untraced_provider
-        .complete(request())
-        .await
-        .expect("untraced completion succeeds");
-    let untraced_body = {
-        let untraced_requests = untraced_transport.requests.lock().expect("request lock");
-        untraced_requests[0].body.clone()
-    };
-    assert_eq!(untraced_body, traced_body);
-
-    let error_transport = Arc::new(RecordingTransport::error());
-    let mut error_provider =
-        OpenAiCompatibleProvider::new(SECRET_SENTINEL, "https://example.test/v1")
-            .with_transport(error_transport);
-    let mut error_req = request();
+    let error_transport = Arc::new(RecordingTransport::new(500));
+    let error_provider = GoogleOAuthProvider::new(SECRET_SENTINEL, "refresh-secret", 0)
+        .with_transport(error_transport);
     let error_events = Arc::new(Mutex::new(Vec::<LlmProviderTraceEvent>::new()));
     let error_event_sink = Arc::clone(&error_events);
-    error_req.provider_trace = Some(LlmProviderTraceSender::new(move |event| {
-        error_event_sink.lock().expect("event lock").push(event);
-    }));
-
     let error = error_provider
-        .complete(error_req)
+        .execute_request(
+            SECRET_SENTINEL,
+            request,
+            None,
+            Some(LlmProviderTraceSender::new(move |event| {
+                error_event_sink.lock().expect("event lock").push(event);
+            })),
+            StreamTermination::EofTolerated,
+        )
         .await
         .expect_err("provider error is returned");
     let error_event = error_events

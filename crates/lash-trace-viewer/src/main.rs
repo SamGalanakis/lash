@@ -1294,6 +1294,7 @@ mod tests {
                     body_len: 13,
                     body_sha256: "sha".to_string(),
                     body_json: Some(serde_json::json!({"model": "m"})),
+                    body_json_omitted_reason: None,
                 },
             },
             TraceEvent::ProviderStreamEvent {
