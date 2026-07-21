@@ -32,3 +32,19 @@ must opt into endpoint compatibility, and each cacheable model route must carry 
 An omitted field now means unsupported, not unknown-and-guessed. This preserves the useful
 old wire behavior when the host supplies the equivalent data while making proxies, catalogs,
 remote workers, tests, and future model launches deterministic under the same ADR 0026 seam.
+
+## Addendum: general compatibility fields are host-supplied data
+
+The same decision applies beyond cache capabilities. The OpenAI-compatible provider used to
+classify a base URL as local when it contained `localhost`, `127.0.0.1`, `0.0.0.0`, or
+`ollama`, then silently disabled optional request fields, response storage, and streaming usage.
+That heuristic made the URL spelling, rather than the endpoint's declared wire contract, decide
+request behavior. Proxies and LAN hosts could therefore receive the wrong request shape without
+any configuration error.
+
+The URL heuristic is deleted. `OpenAiCompat::local()` is the explicit host-selected preset that
+sets `request_fields`, `store`, and `streaming_usage` to `false`, and it works for every base URL.
+Without that preset (or the equivalent individual fields), all three remain enabled even for a
+localhost URL. A strict local server can therefore reject an undeclared field loudly, and the
+host fixes the mismatch by selecting the preset. The direct OpenAI equality retained by ADR 0037
+is unchanged and remains the sole URL-derived compatibility choice.
