@@ -1,14 +1,18 @@
 use anyhow::{Context, Result};
+use axum::{
+    Json as AxumJson, Router, extract::State, http::StatusCode, routing::get, routing::post,
+};
 use lash::durability::DurableProcessWorker;
 use lash::observe::SessionResume;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput};
+use lash_core::AwaitEventResolver as _;
 use lash_core::{
     ExecutionScope, LeaseOwnerIdentity, ProcessEventAppendRequest, TurnOutcome, TurnStop,
 };
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{
     LashDurableWaitIndex, LashDurableWaitIndexImpl, LashDurableWaitWorkflow,
-    LashDurableWaitWorkflowImpl, LashProcessWorkflow, RestateProcessDeployment,
+    LashDurableWaitWorkflowImpl, LashProcessWorkflow, RestateEffectHost, RestateProcessDeployment,
     RestateRuntimeEffectController,
 };
 use restate_sdk::errors::{HandlerResult, TerminalError};
@@ -22,13 +26,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lash_restate_postgres_workers_e2e::{
-    DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT,
-    EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
-    EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, HealthResponse, TurnRequest,
-    TurnResponse, TurnScenario, build_e2e_core, default_session_child_originator_scope_pattern,
-    default_session_originator_scope_id, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
-    process_registry_from_storage, record_terminal_result, record_turn_activity,
-    record_worker_event, required_env, s3_store_from_env, turn_session_id,
+    DEFAULT_SESSION_ID, DirectDurableWaitAwaitRequest, DirectDurableWaitAwaitResponse,
+    DirectDurableWaitResolveRequest, DirectDurableWaitResolveResponse, EXPECTED_ASYNC_TEXT,
+    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_FRAME_SWITCH_CANCEL_TEXT,
+    EXPECTED_FRAME_SWITCH_TEXT, EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT,
+    HealthResponse, TurnRequest, TurnResponse, TurnScenario, build_e2e_core,
+    default_session_child_originator_scope_pattern, default_session_originator_scope_id,
+    e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env, process_registry_from_storage,
+    record_terminal_result, record_turn_activity, record_worker_event, required_env,
+    s3_store_from_env, turn_session_id,
 };
 
 fn terminal_error(err: impl Display) -> TerminalError {
@@ -629,6 +635,45 @@ impl AppState {
     }
 }
 
+async fn direct_health(State(state): State<AppState>) -> AxumJson<HealthResponse> {
+    AxumJson(HealthResponse {
+        worker_id: state.worker_id,
+        ok: true,
+    })
+}
+
+async fn direct_resolve_durable_wait(
+    State(state): State<AppState>,
+    AxumJson(request): AxumJson<DirectDurableWaitResolveRequest>,
+) -> Result<AxumJson<DirectDurableWaitResolveResponse>, (StatusCode, String)> {
+    let outcome = RestateEffectHost::with_ingress_url(state.restate_ingress_url)
+        .resolve_await_event(&request.key, request.resolution)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(AxumJson(DirectDurableWaitResolveResponse {
+        worker_id: state.worker_id,
+        outcome,
+    }))
+}
+
+async fn direct_await_durable_wait(
+    State(state): State<AppState>,
+    AxumJson(request): AxumJson<DirectDurableWaitAwaitRequest>,
+) -> Result<AxumJson<DirectDurableWaitAwaitResponse>, (StatusCode, String)> {
+    let resolution = RestateEffectHost::with_ingress_url(state.restate_ingress_url)
+        .await_await_event(
+            &request.key,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(AxumJson(DirectDurableWaitAwaitResponse {
+        worker_id: state.worker_id,
+        resolution,
+    }))
+}
+
 fn prompt_for_request(request: &TurnRequest) -> String {
     match request.scenario {
         TurnScenario::KitchenSink => format!(
@@ -931,6 +976,23 @@ async fn async_main() -> Result<()> {
     let addr: SocketAddr = format!("0.0.0.0:{port}")
         .parse()
         .context("parse worker addr")?;
+    let control_port = env("WORKER_CONTROL_PORT", "18101");
+    let control_addr: SocketAddr = format!("0.0.0.0:{control_port}")
+        .parse()
+        .context("parse worker control addr")?;
+    let control_listener = tokio::net::TcpListener::bind(control_addr)
+        .await
+        .context("bind worker control endpoint")?;
+    let control_router = Router::new()
+        .route("/health", get(direct_health))
+        .route("/await-durable-wait", post(direct_await_durable_wait))
+        .route("/resolve-durable-wait", post(direct_resolve_durable_wait))
+        .with_state(state.clone());
+    tokio::spawn(async move {
+        if let Err(err) = axum::serve(control_listener, control_router).await {
+            tracing::error!(error = %err, "worker control endpoint exited");
+        }
+    });
     let endpoint = Endpoint::builder()
         .bind(E2eTurnWorkflowImpl::new(state).serve())
         .bind(process_workflow.serve())

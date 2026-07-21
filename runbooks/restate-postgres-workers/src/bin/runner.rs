@@ -12,11 +12,13 @@ use lash_restate::{
     RestateInvocationId, RestateInvocationStatus, RestateProcessDeployment, RestateTurnDeployment,
 };
 use lash_restate_postgres_workers_e2e::{
-    ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, EXPECTED_ASYNC_TEXT,
-    EXPECTED_DURABLE_INPUT_TEXT, EXPECTED_FINAL_TEXT, EXPECTED_FRAME_SWITCH_CANCEL_TEXT,
-    EXPECTED_FRAME_SWITCH_TEXT, EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT,
-    EXPECTED_TOOL_BATCH_TEXT, ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse,
-    TurnScenario, build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
+    ATTACHMENT_MIME, BUTTON_SOURCE_TYPE, DEFAULT_SESSION_ID, DirectDurableWaitAwaitRequest,
+    DirectDurableWaitAwaitResponse, DirectDurableWaitResolveRequest,
+    DirectDurableWaitResolveResponse, EXPECTED_ASYNC_TEXT, EXPECTED_DURABLE_INPUT_TEXT,
+    EXPECTED_FINAL_TEXT, EXPECTED_FRAME_SWITCH_CANCEL_TEXT, EXPECTED_FRAME_SWITCH_TEXT,
+    EXPECTED_PARENT_DURABLE_INPUT_TEXT, EXPECTED_SEGMENT_LOOP_TEXT, EXPECTED_TOOL_BATCH_TEXT,
+    ProcessSignalRequest, TURN_WORKFLOW_NAME, TurnRequest, TurnResponse, TurnScenario,
+    build_e2e_core, e2e_tokio_thread_stack_bytes, ensure_e2e_schema, env,
     expected_attachment_bytes, process_registry_from_storage, record_terminal_result,
     reset_e2e_rows, s3_store_from_env, turn_session_id,
 };
@@ -248,19 +250,20 @@ async fn async_main() -> Result<()> {
         signal: None,
     };
     submit_workflow(&ingress_url, &durable_input_request).await?;
-    let durable_key =
+    let (durable_key, durable_waiter_worker) =
         wait_for_durable_input_key(storage.pool(), &durable_input_request.workflow_id).await?;
-    let durable_resolve = RestateEffectHost::with_ingress_url(ingress_url.clone())
-        .resolve_await_event(
-            &durable_key,
-            lash_core::Resolution::Ok(json!({
-                "request_id": "e2e-durable-input:request-1",
-                "answer": "durable-approved",
-                "worker_id": "runner"
-            })),
-        )
-        .await
-        .context("resolve durable input await key")?;
+    wait_for_durable_wait_attached(&admin_url, &durable_key).await?;
+    let durable_resolve = resolve_durable_wait_from_peer_worker(
+        &durable_waiter_worker,
+        &durable_key,
+        lash_core::Resolution::Ok(json!({
+            "request_id": "e2e-durable-input:request-1",
+            "answer": "durable-approved",
+            "worker_id": "peer-worker"
+        })),
+    )
+    .await
+    .context("resolve attached durable input await key from peer worker")?;
     anyhow::ensure!(
         matches!(durable_resolve, lash_core::ResolveOutcome::Accepted),
         "durable input resolve was not accepted: {durable_resolve:?}"
@@ -276,27 +279,47 @@ async fn async_main() -> Result<()> {
         signal: None,
     };
     submit_workflow(&ingress_url, &parent_durable_input_request).await?;
-    let parent_durable_key =
+    let (parent_durable_key, parent_waiter_worker) =
         wait_for_durable_input_key(storage.pool(), &parent_durable_input_request.workflow_id)
             .await?;
-    let parent_durable_resolve = RestateEffectHost::with_ingress_url(ingress_url.clone())
-        .resolve_await_event(
-            &parent_durable_key,
-            lash_core::Resolution::Ok(json!({
-                "request_id": "e2e-parent-durable-input-after-child:request-1",
-                "answer": "parent-approved",
-                "worker_id": "runner"
-            })),
-        )
-        .await
-        .context("resolve parent durable input await key")?;
+    let parent_durable_resolve = resolve_durable_wait_from_peer_worker(
+        &parent_waiter_worker,
+        &parent_durable_key,
+        lash_core::Resolution::Ok(json!({
+            "request_id": "e2e-parent-durable-input-after-child:request-1",
+            "answer": "parent-approved",
+            "worker_id": "peer-worker"
+        })),
+    )
+    .await
+    .context("resolve parent durable input before waiter attachment from peer worker")?;
     anyhow::ensure!(
         matches!(parent_durable_resolve, lash_core::ResolveOutcome::Accepted),
         "parent durable input resolve was not accepted: {parent_durable_resolve:?}"
     );
+    record_harness_signal(
+        storage.pool(),
+        &format!(
+            "durable-input-attach:{}",
+            parent_durable_input_request.workflow_id
+        ),
+    )
+    .await?;
     let parent_durable_response =
         wait_for_terminal_result(storage.pool(), &parent_durable_input_request.workflow_id).await?;
     assert_parent_durable_input_response(&parent_durable_response)?;
+    run_engine_promise_conformance(&admin_url, &ingress_url).await?;
+    println!(
+        "durable-wait wake gates passed: waiter-before-resolution; resolution-before-waiter; peer-worker resolution across failover"
+    );
+    if std::env::var("LASH_E2E_WAKE_RCA_ONLY").as_deref() == Ok("1") {
+        assert_durable_input_attempts(storage.pool()).await?;
+        println!(
+            "wake RCA soak passed: failover; queued-drain; waiter-before-resolution; resolution-before-waiter"
+        );
+        watchdog.abort();
+        return Ok(());
+    }
     assert_no_active_lash_restate_invocations(&admin_url).await?;
     assert_no_problem_lash_restate_invocations(&admin_url).await?;
 
@@ -471,6 +494,292 @@ async fn dump_runner_stall_diagnostics(pool: &sqlx::PgPool, admin_url: &str) {
         Ok(events) => eprintln!("workers-e2e STALL recent worker events:\n{events:#?}"),
         Err(err) => eprintln!("workers-e2e STALL worker-event query failed: {err:#}"),
     }
+}
+
+async fn dump_workflow_timeout_diagnostics(pool: &sqlx::PgPool, workflow_id: &str) {
+    let session_id = turn_session_id(workflow_id);
+    let admin_url = env("RESTATE_ADMIN_URL", "http://restate:9070");
+    let ingress_url = env("RESTATE_INGRESS_URL", "http://restate:8080");
+    eprintln!(
+        "workers-e2e TIMEOUT SNAPSHOT workflow={workflow_id} session={session_id} (captured before 180s exit)"
+    );
+
+    let recorded_wait_rows = sqlx::query_as::<_, (String, String, String, String, String, i64)>(
+        "SELECT workflow_id, worker_id, tool_name, args_json, result_json, created_at_ms
+         FROM lash_e2e_tool_events
+         WHERE workflow_id = $1 AND tool_name = 'durable_input_request.opened'
+         ORDER BY event_id",
+    )
+    .bind(workflow_id)
+    .fetch_all(pool)
+    .await;
+    let mut recorded_wait_keys = Vec::new();
+    match &recorded_wait_rows {
+        Ok(rows) => {
+            eprintln!("workers-e2e TIMEOUT recorded await keys:\n{rows:#?}");
+            for (_, _, _, _, result_json, _) in rows {
+                let key = serde_json::from_str::<Value>(result_json)
+                    .ok()
+                    .and_then(|value| value.get("await_key").cloned())
+                    .and_then(|value| serde_json::from_value::<AwaitEventKey>(value).ok());
+                if let Some(key) = key {
+                    recorded_wait_keys.push(key);
+                }
+            }
+        }
+        Err(err) => eprintln!("workers-e2e TIMEOUT await-key query failed: {err:#}"),
+    }
+
+    let process_ids = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT process_id
+         FROM lash_process_events
+         WHERE event_json LIKE $1
+         ORDER BY process_id",
+    )
+    .bind(format!("%{workflow_id}%"))
+    .fetch_all(pool)
+    .await;
+    let mut process_ids = match process_ids {
+        Ok(process_ids) => process_ids,
+        Err(err) => {
+            eprintln!("workers-e2e TIMEOUT process-id query failed: {err:#}");
+            Vec::new()
+        }
+    };
+    for key in &recorded_wait_keys {
+        if let ExecutionScope::Process { process_id } = &key.scope {
+            process_ids.push(process_id.clone());
+        }
+    }
+    process_ids.sort();
+    process_ids.dedup();
+
+    if !process_ids.is_empty() {
+        match sqlx::query_as::<_, (String, String, i64, i64, String)>(
+            "SELECT process_id, status, created_at_ms, updated_at_ms, record_json
+             FROM lash_processes
+             WHERE process_id = ANY($1)
+             ORDER BY process_id",
+        )
+        .bind(&process_ids)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => eprintln!("workers-e2e TIMEOUT process state:\n{rows:#?}"),
+            Err(err) => eprintln!("workers-e2e TIMEOUT process-state query failed: {err:#}"),
+        }
+        match sqlx::query_as::<_, (String, i64, String, i64, String)>(
+            "SELECT process_id, sequence, event_type, occurred_at_ms, event_json
+             FROM lash_process_events
+             WHERE process_id = ANY($1)
+             ORDER BY process_id, sequence",
+        )
+        .bind(&process_ids)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => eprintln!("workers-e2e TIMEOUT process events:\n{rows:#?}"),
+            Err(err) => eprintln!("workers-e2e TIMEOUT process-event query failed: {err:#}"),
+        }
+        match sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                i64,
+                i64,
+                i64,
+            ),
+        >(
+            "SELECT process_id, lease_owner_id, lease_owner_incarnation_id, lease_token,
+                    lease_fencing_token, lease_claimed_at_ms, lease_expires_at_ms
+             FROM lash_process_leases
+             WHERE process_id = ANY($1)
+             ORDER BY process_id",
+        )
+        .bind(&process_ids)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => eprintln!("workers-e2e TIMEOUT process lease rows:\n{rows:#?}"),
+            Err(err) => eprintln!("workers-e2e TIMEOUT process-lease query failed: {err:#}"),
+        }
+    } else {
+        eprintln!("workers-e2e TIMEOUT process state/events: no matching process ids");
+    }
+
+    match sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+        ),
+    >(
+        "SELECT session_id, lease_owner_id, lease_owner_incarnation_id, lease_token,
+                lease_fencing_token, lease_claimed_at_ms, lease_expires_at_ms
+         FROM lash_session_execution_leases
+         WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => eprintln!("workers-e2e TIMEOUT session lease row:\n{rows:#?}"),
+        Err(err) => eprintln!("workers-e2e TIMEOUT session-lease query failed: {err:#}"),
+    }
+
+    let admin = RestateAdminClient::new(admin_url);
+    let mut invocation_predicates = vec![
+        format!(
+            "(target_service_name = {} AND target_service_key = {})",
+            sql_string_literal(TURN_WORKFLOW_NAME),
+            sql_string_literal(workflow_id)
+        ),
+        format!(
+            "(target_service_name = 'LashDurableWaitIndex' AND target_service_key = {})",
+            sql_string_literal(session_id)
+        ),
+    ];
+    invocation_predicates.extend(process_ids.iter().map(|process_id| {
+        format!(
+            "(target_service_name = 'LashProcessWorkflow' AND target_service_key = {})",
+            sql_string_literal(process_id)
+        )
+    }));
+    for key in &recorded_wait_keys {
+        let address = lash_restate::RestateDurableWaitAddress::for_key(key);
+        invocation_predicates.push(format!(
+            "(target_service_name = 'LashDurableWaitWorkflow' AND target_service_key = {})",
+            sql_string_literal(&address.workflow_key)
+        ));
+        invocation_predicates.push(format!(
+            "(target_service_name = 'LashDurableWaitIndex' AND target_service_key = {})",
+            sql_string_literal(&address.index_key())
+        ));
+    }
+    let invocations = admin
+        .query_json::<RestateInvocationStatus>(&format!(
+            "SELECT id, target, target_service_name, target_service_key, target_handler_name, status, completion_result, completion_failure \
+             FROM sys_invocation \
+             WHERE {} \
+             ORDER BY modified_at DESC",
+            invocation_predicates.join(" OR ")
+        ))
+        .await;
+    match &invocations {
+        Ok(rows) => {
+            eprintln!("workers-e2e TIMEOUT Restate relevant session invocations:\n{rows:#?}")
+        }
+        Err(err) => eprintln!("workers-e2e TIMEOUT Restate invocation query failed: {err:#}"),
+    }
+
+    let mut state_predicates = vec![format!(
+        "(service_name = 'LashDurableWaitIndex' AND service_key = {})",
+        sql_string_literal(session_id)
+    )];
+    for key in &recorded_wait_keys {
+        let address = lash_restate::RestateDurableWaitAddress::for_key(key);
+        state_predicates.push(format!(
+            "(service_name = 'LashDurableWaitWorkflow' AND service_key = {})",
+            sql_string_literal(&address.workflow_key)
+        ));
+        state_predicates.push(format!(
+            "(service_name = 'LashDurableWaitIndex' AND service_key = {})",
+            sql_string_literal(&address.index_key())
+        ));
+    }
+    match admin
+        .query_json::<Value>(&format!(
+            "SELECT service_name, service_key, key, value_utf8 \
+             FROM state \
+             WHERE {} \
+             ORDER BY service_name, service_key, key",
+            state_predicates.join(" OR ")
+        ))
+        .await
+    {
+        Ok(rows) => eprintln!("workers-e2e TIMEOUT durable-wait workflow/index state:\n{rows:#?}"),
+        Err(err) => eprintln!("workers-e2e TIMEOUT Restate state query failed: {err:#}"),
+    }
+
+    let wait_host = RestateEffectHost::with_ingress_url(ingress_url);
+    let mut completed_promise_keys = BTreeSet::new();
+    for key in &recorded_wait_keys {
+        let workflow_key = lash_restate::RestateDurableWaitAddress::for_key(key).workflow_key;
+        match wait_host.peek_await_event(key).await {
+            Ok(Some(resolution)) => {
+                completed_promise_keys.insert(workflow_key.clone());
+                eprintln!(
+                    "workers-e2e TIMEOUT durable promise key={workflow_key} completed={resolution:?}"
+                );
+            }
+            Ok(None) => {
+                eprintln!("workers-e2e TIMEOUT durable promise key={workflow_key} pending")
+            }
+            Err(err) => eprintln!(
+                "workers-e2e TIMEOUT durable promise key={workflow_key} peek failed: {err:#}"
+            ),
+        }
+    }
+
+    let discriminator = invocations.as_ref().ok().map(|rows| {
+        let wait_rows = rows
+            .iter()
+            .filter(|row| {
+                row.target_service_name == "LashDurableWaitWorkflow"
+                    && row.target_handler_name == "await_resolution"
+                    && row
+                        .target_service_key
+                        .as_ref()
+                        .is_some_and(|key| {
+                            recorded_wait_keys.iter().any(|recorded| {
+                                lash_restate::RestateDurableWaitAddress::for_key(recorded)
+                                    .workflow_key
+                                    == *key
+                            })
+                        })
+            })
+            .collect::<Vec<_>>();
+        let parent_running_or_backing_off = rows.iter().any(|row| {
+            (row.target_service_name == TURN_WORKFLOW_NAME
+                && row.target_service_key.as_deref() == Some(workflow_id)
+                || row.target_service_name == "LashProcessWorkflow"
+                    && process_ids
+                        .iter()
+                        .any(|process_id| row.target_service_key.as_deref() == Some(process_id)))
+                && matches!(row.status.as_str(), "ready" | "running" | "backing-off")
+        });
+        let callees_completed = !wait_rows.is_empty()
+            && wait_rows
+                .iter()
+                .all(|row| row.status == "completed" && row.completion_result.as_deref() == Some("success"));
+        let suspended_on_completed_promise = wait_rows.iter().any(|row| {
+            row.status == "suspended"
+                && row
+                    .target_service_key
+                    .as_ref()
+                    .is_some_and(|key| completed_promise_keys.contains(key))
+        });
+
+        if callees_completed && parent_running_or_backing_off {
+            "GUARD-HANG: await_resolution callees Completed while the parent is running/backing-off"
+        } else if suspended_on_completed_promise {
+            "PROMISE-STRANDING: await_resolution callee is suspended on a promise that peek reports completed"
+        } else {
+            "INCONCLUSIVE: invocation/promise state matches neither ratified RCA discriminator"
+        }
+    });
+    eprintln!(
+        "workers-e2e TIMEOUT DISCRIMINATOR: {}",
+        discriminator.unwrap_or("INCONCLUSIVE: Restate invocation query unavailable")
+    );
 }
 
 fn reset_trace_dir(dir: &Path) -> Result<()> {
@@ -781,6 +1090,7 @@ async fn wait_for_terminal_result(pool: &sqlx::PgPool, workflow_id: &str) -> Res
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    dump_workflow_timeout_diagnostics(pool, workflow_id).await;
     anyhow::bail!("timed out waiting for `{workflow_id}`")
 }
 
@@ -807,6 +1117,7 @@ async fn wait_for_terminal_results(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    dump_workflow_timeout_diagnostics(pool, "aggregate-terminal-results").await;
     anyhow::bail!("timed out waiting for {expected} completed workflows")
 }
 
@@ -1303,11 +1614,11 @@ async fn assert_frame_switch_provider_order(pool: &sqlx::PgPool) -> Result<()> {
 async fn wait_for_durable_input_key(
     pool: &sqlx::PgPool,
     workflow_id: &str,
-) -> Result<AwaitEventKey> {
+) -> Result<(AwaitEventKey, String)> {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
-        let row: Option<String> = sqlx::query_scalar(
-            "SELECT result_json
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT worker_id, result_json
              FROM lash_e2e_tool_events
              WHERE workflow_id = $1 AND tool_name = 'durable_input_request.opened'
              ORDER BY event_id DESC
@@ -1317,7 +1628,7 @@ async fn wait_for_durable_input_key(
         .fetch_optional(pool)
         .await
         .with_context(|| format!("load durable input key for `{workflow_id}`"))?;
-        if let Some(result_json) = row {
+        if let Some((worker_id, result_json)) = row {
             let value: Value = serde_json::from_str(&result_json)
                 .with_context(|| format!("decode durable input key row for `{workflow_id}`"))?;
             let key_value = value
@@ -1326,11 +1637,203 @@ async fn wait_for_durable_input_key(
                 .context("durable input key row missing await_key")?;
             let key: AwaitEventKey =
                 serde_json::from_value(key_value).context("decode durable input AwaitEventKey")?;
-            return Ok(key);
+            return Ok((key, worker_id));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     anyhow::bail!("timed out waiting for durable input key for `{workflow_id}`")
+}
+
+async fn wait_for_durable_wait_suspended(admin_url: &str, key: &AwaitEventKey) -> Result<()> {
+    let workflow_key = lash_restate::RestateDurableWaitAddress::for_key(key).workflow_key;
+    let admin = RestateAdminClient::new(admin_url.to_string());
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut last_status = None;
+    while Instant::now() < deadline {
+        last_status = admin
+            .workflow_invocation_status(
+                "LashDurableWaitWorkflow",
+                &workflow_key,
+                "await_resolution",
+            )
+            .await
+            .context("query durable wait invocation before peer resolution")?;
+        if last_status
+            .as_ref()
+            .is_some_and(|status| status.status == "suspended")
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!(
+        "durable wait `{workflow_key}` did not suspend before peer resolution; last status={last_status:?}"
+    )
+}
+
+async fn wait_for_durable_wait_attached(admin_url: &str, key: &AwaitEventKey) -> Result<()> {
+    let workflow_key = lash_restate::RestateDurableWaitAddress::for_key(key).workflow_key;
+    let admin = RestateAdminClient::new(admin_url.to_string());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last_status = None;
+    while Instant::now() < deadline {
+        last_status = admin
+            .workflow_invocation_status(
+                "LashDurableWaitWorkflow",
+                &workflow_key,
+                "await_resolution",
+            )
+            .await
+            .context("query durable wait invocation before peer resolution")?;
+        if last_status.is_some() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!(
+        "durable wait `{workflow_key}` did not attach before peer resolution; last status={last_status:?}"
+    )
+}
+
+async fn engine_conformance_key(host: &RestateEffectHost, ordering: &str) -> Result<AwaitEventKey> {
+    host.await_event_key(
+        &ExecutionScope::runtime_operation(format!("workers-e2e-promise-conformance-{ordering}")),
+        AwaitEventWaitIdentity::Custom {
+            key: ordering.to_string(),
+        },
+    )
+    .await
+    .with_context(|| format!("build `{ordering}` engine conformance key"))
+}
+
+async fn await_durable_wait_on_worker(
+    worker_id: &str,
+    key: AwaitEventKey,
+) -> Result<DirectDurableWaitAwaitResponse> {
+    reqwest::Client::new()
+        .post(format!("http://{worker_id}:18101/await-durable-wait"))
+        .json(&DirectDurableWaitAwaitRequest { key })
+        .send()
+        .await
+        .with_context(|| format!("call `{worker_id}` durable-wait await control endpoint"))?
+        .error_for_status()
+        .with_context(|| format!("`{worker_id}` durable-wait await status"))?
+        .json::<DirectDurableWaitAwaitResponse>()
+        .await
+        .with_context(|| format!("decode `{worker_id}` durable-wait await response"))
+}
+
+async fn run_engine_promise_conformance(admin_url: &str, ingress_url: &str) -> Result<()> {
+    let key_host = RestateEffectHost::with_ingress_url(ingress_url.to_string());
+    let attached_key = engine_conformance_key(&key_host, "waiter-before-resolution").await?;
+    let attached_expected = Resolution::Ok(json!({ "ordering": "waiter-before-resolution" }));
+    let attached_wait_key = attached_key.clone();
+    let attached_waiter =
+        tokio::spawn(
+            async move { await_durable_wait_on_worker("worker-a", attached_wait_key).await },
+        );
+    wait_for_durable_wait_suspended(admin_url, &attached_key).await?;
+    let attached_outcome =
+        resolve_durable_wait_from_peer_worker("worker-a", &attached_key, attached_expected.clone())
+            .await?;
+    anyhow::ensure!(
+        matches!(attached_outcome, lash_core::ResolveOutcome::Accepted),
+        "engine conformance attached resolution was not accepted: {attached_outcome:?}"
+    );
+    let attached_response = tokio::time::timeout(Duration::from_secs(30), attached_waiter)
+        .await
+        .context("attached engine conformance waiter did not wake")?
+        .context("join attached engine conformance waiter")??;
+    anyhow::ensure!(
+        attached_response.worker_id == "worker-a"
+            && attached_response.resolution == attached_expected,
+        "attached engine conformance response mismatch: {attached_response:?}"
+    );
+
+    let pre_resolved_key = engine_conformance_key(&key_host, "resolution-before-waiter").await?;
+    let pre_resolved_expected = Resolution::Ok(json!({ "ordering": "resolution-before-waiter" }));
+    let pre_resolved_outcome = resolve_durable_wait_from_peer_worker(
+        "worker-a",
+        &pre_resolved_key,
+        pre_resolved_expected.clone(),
+    )
+    .await?;
+    anyhow::ensure!(
+        matches!(pre_resolved_outcome, lash_core::ResolveOutcome::Accepted),
+        "engine conformance pre-resolution was not accepted: {pre_resolved_outcome:?}"
+    );
+    let pre_resolved_response = tokio::time::timeout(
+        Duration::from_secs(30),
+        await_durable_wait_on_worker("worker-a", pre_resolved_key),
+    )
+    .await
+    .context("pre-resolved engine conformance waiter did not return")??;
+    anyhow::ensure!(
+        pre_resolved_response.worker_id == "worker-a"
+            && pre_resolved_response.resolution == pre_resolved_expected,
+        "pre-resolved engine conformance response mismatch: {pre_resolved_response:?}"
+    );
+    println!(
+        "promise engine conformance passed: suspended waiter=worker-a; resolver=worker-b; waiter-before-resolution; resolution-before-waiter"
+    );
+    Ok(())
+}
+
+async fn resolve_durable_wait_from_peer_worker(
+    waiter_worker_id: &str,
+    key: &AwaitEventKey,
+    resolution: Resolution,
+) -> Result<lash_core::ResolveOutcome> {
+    let resolver_worker_id = match waiter_worker_id {
+        "worker-a" => "worker-b",
+        "worker-b" => "worker-a",
+        other => anyhow::bail!("durable waiter ran on unexpected worker `{other}`"),
+    };
+    wait_for_worker_control_healthy(resolver_worker_id).await?;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{resolver_worker_id}:18101/resolve-durable-wait"
+        ))
+        .json(&DirectDurableWaitResolveRequest {
+            key: key.clone(),
+            resolution,
+        })
+        .send()
+        .await
+        .with_context(|| format!("ask `{resolver_worker_id}` to resolve durable wait"))?
+        .error_for_status()
+        .with_context(|| format!("`{resolver_worker_id}` durable-wait resolve status"))?
+        .json::<DirectDurableWaitResolveResponse>()
+        .await
+        .with_context(|| format!("decode `{resolver_worker_id}` durable-wait resolve response"))?;
+    anyhow::ensure!(
+        response.worker_id == resolver_worker_id,
+        "durable wait resolved on `{}` instead of peer `{resolver_worker_id}`",
+        response.worker_id
+    );
+    eprintln!(
+        "promise conformance: waiter={waiter_worker_id} resolver={} outcome={:?}",
+        response.worker_id, response.outcome
+    );
+    Ok(response.outcome)
+}
+
+async fn wait_for_worker_control_healthy(worker_id: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let url = format!("http://{worker_id}:18101/health");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => last_error = Some(format!("HTTP {}", response.status())),
+            Err(err) => last_error = Some(err.to_string()),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!(
+        "worker control endpoint `{worker_id}` did not recover before peer resolution; last error={last_error:?}"
+    )
 }
 
 async fn drive_turn_control_scenarios(storage: &PostgresStorage, ingress_url: &str) -> Result<()> {

@@ -50,6 +50,29 @@ pub const EXPECTED_WAKE_TEXT: &str = "wake-consumed";
 pub const EXPECTED_ASYNC_TEXT: &str = "async-completion-complete";
 pub const EXPECTED_DURABLE_INPUT_TEXT: &str = "durable-input-complete";
 pub const EXPECTED_PARENT_DURABLE_INPUT_TEXT: &str = "parent-durable-input-complete";
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct DirectDurableWaitResolveRequest {
+    pub key: lash_core::AwaitEventKey,
+    pub resolution: lash_core::Resolution,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct DirectDurableWaitAwaitRequest {
+    pub key: lash_core::AwaitEventKey,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct DirectDurableWaitAwaitResponse {
+    pub worker_id: String,
+    pub resolution: lash_core::Resolution,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct DirectDurableWaitResolveResponse {
+    pub worker_id: String,
+    pub outcome: lash_core::ResolveOutcome,
+}
 pub const EXPECTED_TOOL_BATCH_TEXT: &str = "tool-batch-complete";
 pub const EXPECTED_SEGMENT_LOOP_TEXT: &str = "segment-loop-complete";
 pub const EXPECTED_FRAME_SWITCH_TEXT: &str = "frame-switch-complete";
@@ -918,7 +941,8 @@ fn e2e_tool_provider(
                     "type": "object",
                     "properties": {
                         "workflow_id": { "type": "string" },
-                        "question": { "type": "string" }
+                        "question": { "type": "string" },
+                        "attach_after_resolution": { "type": "boolean" }
                     },
                     "required": ["workflow_id", "question"],
                     "additionalProperties": false
@@ -1316,6 +1340,36 @@ impl E2eTools {
             .await
         {
             return ToolResult::err_fmt(err);
+        }
+        if args
+            .get("attach_after_resolution")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            let signal_name = format!("durable-input-attach:{workflow_id}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                match sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM lash_e2e_harness_signals WHERE signal_name = $1
+                    )",
+                )
+                .bind(&signal_name)
+                .fetch_one(&self.pool)
+                .await
+                {
+                    Ok(true) => break,
+                    Ok(false) if std::time::Instant::now() < deadline => {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    Ok(false) => {
+                        return ToolResult::err(serde_json::json!(format!(
+                            "timed out waiting for harness signal `{signal_name}`"
+                        )));
+                    }
+                    Err(err) => return ToolResult::err_fmt(err),
+                }
+            }
         }
         ToolResult::pending(lash_core::PendingCompletion::new())
     }
