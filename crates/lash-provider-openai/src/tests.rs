@@ -90,6 +90,27 @@ fn openrouter_preset_requires_terminal_evidence() {
     );
 }
 
+#[test]
+fn local_compat_preset_has_exact_local_field_set() {
+    assert_eq!(
+        OpenAiCompat::local(),
+        OpenAiCompat {
+            request_fields: Some(false),
+            store: Some(false),
+            streaming_usage: Some(false),
+            ..OpenAiCompat::default()
+        }
+    );
+}
+
+#[test]
+fn developer_role_compat_field_is_rejected() {
+    let error = serde_json::from_value::<OpenAiCompat>(json!({ "developer_role": true }))
+        .expect_err("developer_role must be rejected as an unknown field");
+
+    assert!(error.to_string().contains("unknown field `developer_role`"));
+}
+
 fn enable_cache_control(req: &mut LlmRequest, dialect: CacheControlDialect) {
     req.model_capability.cache_control = Some(dialect);
 }
@@ -1393,7 +1414,7 @@ fn custom_reasoning_format_serializes_but_cannot_be_deserialized() {
 }
 
 #[test]
-fn openai_compat_resolver_covers_openrouter_local_and_session_affinity() {
+fn openai_compat_resolver_covers_openrouter_and_session_affinity() {
     let openrouter = openrouter_provider();
     let openrouter_caps = openrouter.resolved_compat(CompletionEndpoint::ChatCompletions);
     assert_eq!(
@@ -1406,14 +1427,27 @@ fn openai_compat_resolver_covers_openrouter_local_and_session_affinity() {
     // are host decisions, so the preset resolves neither.
     assert_eq!(openrouter_caps.provider_routing, None);
     assert!(openrouter_caps.response_metadata_body_paths.is_empty());
+}
 
-    let local = OpenAiCompatibleProvider::new("key", "http://localhost:11434/v1");
-    let local_caps = local.resolved_compat(CompletionEndpoint::ChatCompletions);
-    assert_eq!(local_caps.reasoning_format, ReasoningWireFormat::none());
-    assert!(!local_caps.request_fields);
-    assert!(!local_caps.streaming_usage);
-    assert!(!local_caps.cache_session_affinity);
-    assert_eq!(local_caps.provider_routing, None);
+#[test]
+fn localhost_without_local_preset_keeps_optional_request_fields() {
+    let compat = OpenAiCompatibleProvider::new("key", "http://localhost:11434/v1")
+        .resolved_compat(CompletionEndpoint::ChatCompletions);
+
+    assert!(compat.request_fields);
+    assert!(compat.store);
+    assert!(compat.streaming_usage);
+}
+
+#[test]
+fn non_local_url_with_local_preset_omits_optional_request_fields() {
+    let compat = OpenAiCompatibleProvider::new("key", "https://gpu-box.example/v1")
+        .with_compat(OpenAiCompat::local())
+        .resolved_compat(CompletionEndpoint::ChatCompletions);
+
+    assert!(!compat.request_fields);
+    assert!(!compat.store);
+    assert!(!compat.streaming_usage);
 }
 
 #[test]
@@ -1451,7 +1485,7 @@ fn chat_body_honors_compat_max_token_field_streaming_usage_and_strict_tools() {
 }
 
 #[test]
-fn local_openai_compatible_suppresses_optional_openai_fields() {
+fn local_preset_suppresses_optional_openai_fields() {
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model_variant = lash_core::provider::ReasoningSelection::Effort("medium".to_string());
     req.model_capability = reasoning_capability();
@@ -1462,7 +1496,8 @@ fn local_openai_compatible_suppresses_optional_openai_fields() {
         output_schema: json!({}).into(),
     }]);
 
-    let local = OpenAiCompatibleProvider::new("key", "http://localhost:11434/v1");
+    let local = OpenAiCompatibleProvider::new("key", "https://gpu-box.example/v1")
+        .with_compat(OpenAiCompat::local());
     let chat = local.build_chat_request_body(&req, true).unwrap();
     assert!(chat.get("stream_options").is_none());
     assert!(chat.get("parallel_tool_calls").is_none());

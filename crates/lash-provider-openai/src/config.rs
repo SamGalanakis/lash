@@ -49,8 +49,6 @@ pub struct OpenAiCompat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streaming_usage: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub developer_role: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_capabilities: Option<ProviderSchemaCapabilities>,
     /// Provider-routing preferences for gateway endpoints. Emitted whenever
     /// set, not only for schema'd requests: any parameter this adapter sends
@@ -69,6 +67,16 @@ pub struct OpenAiCompat {
 }
 
 impl OpenAiCompat {
+    /// Explicit endpoint capabilities for local OpenAI-compatible servers.
+    pub fn local() -> Self {
+        Self {
+            request_fields: Some(false),
+            store: Some(false),
+            streaming_usage: Some(false),
+            ..Self::default()
+        }
+    }
+
     /// Explicit endpoint capabilities for OpenRouter and compatible proxies.
     ///
     /// Carries facts about the endpoint's wire dialect, not preferences about
@@ -97,7 +105,6 @@ pub(crate) struct OpenAiResolvedCompat {
     pub(crate) strict_tools: bool,
     pub(crate) store: bool,
     pub(crate) streaming_usage: bool,
-    pub(crate) developer_role: bool,
     pub(crate) schema_capabilities: ProviderSchemaCapabilities,
     pub(crate) provider_routing: Option<ProviderRoutingPrefs>,
     pub(crate) response_metadata_headers: Vec<String>,
@@ -119,19 +126,11 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiCompatibleProvider {
-    pub(crate) fn local_style_base_url(base_url: &str) -> bool {
-        let normalized = base_url.trim().to_ascii_lowercase();
-        normalized.contains("localhost")
-            || normalized.contains("127.0.0.1")
-            || normalized.contains("0.0.0.0")
-            || normalized.contains("ollama")
-    }
-
     pub(crate) fn resolved_compat(&self, endpoint: CompletionEndpoint) -> OpenAiResolvedCompat {
-        let local = Self::local_style_base_url(&self.base_url);
+        // ADR 0037 ratifies this exact direct-OpenAI equality as the sole
+        // URL-derived compatibility choice.
         let direct_openai = self.base_url.trim_end_matches('/') == OPENAI_BASE_URL;
 
-        let request_fields = !local;
         let max_tokens_field = match endpoint {
             CompletionEndpoint::Responses => OpenAiCompatMaxTokensField::MaxOutputTokens,
             CompletionEndpoint::ChatCompletions => OpenAiCompatMaxTokensField::MaxTokens,
@@ -142,16 +141,15 @@ impl OpenAiCompatibleProvider {
         };
         let defaults = OpenAiResolvedCompat {
             stream_termination: StreamTermination::RequireTerminalEvidence,
-            request_fields,
+            request_fields: true,
             max_tokens_field,
             reasoning_format,
             cache_session_affinity: false,
             prompt_cache_key: false,
             prompt_cache_retention: false,
             strict_tools: false,
-            store: !local,
-            streaming_usage: !local,
-            developer_role: direct_openai,
+            store: true,
+            streaming_usage: true,
             schema_capabilities: ProviderSchemaCapabilities::openai(false),
             provider_routing: None,
             response_metadata_headers: Vec::new(),
@@ -194,10 +192,6 @@ impl OpenAiCompatibleProvider {
                 .compat
                 .streaming_usage
                 .unwrap_or(defaults.streaming_usage),
-            developer_role: self
-                .compat
-                .developer_role
-                .unwrap_or(defaults.developer_role),
             schema_capabilities: self
                 .compat
                 .schema_capabilities
