@@ -35,7 +35,7 @@ use lash_llm_transport::{
 };
 use lash_provider_auth::{
     Credential, CredentialCallError, CredentialError, CredentialErrorKind, CredentialExecuteError,
-    CredentialManager, CredentialRefresher, Lease, RefreshCause,
+    CredentialManager, CredentialRefresher, Lease, RefreshCause, classify_oauth_refresh_error,
 };
 
 pub mod oauth;
@@ -189,31 +189,13 @@ impl CredentialRefresher<CodexCredential> for CodexCredentialRefresher {
     ) -> Result<CodexCredential, CredentialError> {
         let tokens = oauth::refresh_tokens(&current.refresh_token)
             .await
-            .map_err(credential_error_from_oauth)?;
+            .map_err(classify_oauth_refresh_error)?;
         Ok(CodexCredential {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
             expires_at: tokens.expires_at,
             account_id: tokens.account_id.or_else(|| current.account_id.clone()),
         })
-    }
-}
-
-fn credential_error_from_oauth(error: lash_provider_auth::OAuthError) -> CredentialError {
-    let detail = error.to_string().to_ascii_lowercase();
-    if detail.contains("invalid_grant") || detail.contains("invalid grant") {
-        CredentialError::invalid_grant()
-    } else if matches!(
-        error,
-        lash_provider_auth::OAuthError::Http(_)
-            | lash_provider_auth::OAuthError::TokenEndpoint {
-                status: 408 | 429 | 500..=599,
-                ..
-            }
-    ) {
-        CredentialError::transient()
-    } else {
-        CredentialError::new(CredentialErrorKind::Other, false)
     }
 }
 
