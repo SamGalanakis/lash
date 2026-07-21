@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
+use lash_core::{ToolCall, ToolDefinition, ToolResult};
 
 use lash_tool_support::{
     StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, display_relative,
@@ -58,7 +58,6 @@ fn write_tool_definition() -> ToolDefinition {
             "write",
             &["write_file"],
         ))
-        .with_scheduling(ToolScheduling::Serial)
 }
 
 fn write_file(args: WriteArgs) -> ToolResult {

@@ -25,7 +25,7 @@ use lash_core::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin,
 };
-use lash_core::{PromptContribution, ToolCall, ToolDefinition, ToolResult, ToolScheduling};
+use lash_core::{PromptContribution, ToolCall, ToolDefinition, ToolResult};
 use lash_tool_support::{
     LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
 };
@@ -142,7 +142,6 @@ fn update_plan_tool_definition() -> ToolDefinition {
                     .into(),
             ])
             .with_lashlang_binding(LashlangToolBinding::new(["plan"], "update"))
-            .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) -> ToolResult {

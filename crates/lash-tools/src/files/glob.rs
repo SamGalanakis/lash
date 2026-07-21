@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
+use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy};
 
 use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, OptionalUsizeArg, StaticToolExecute, StaticToolProvider,
@@ -141,7 +141,6 @@ fn glob_tool_definition() -> ToolDefinition {
                 "glob",
                 &["find_files"],
             ))
-            .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
 

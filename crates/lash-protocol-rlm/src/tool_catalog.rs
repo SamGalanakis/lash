@@ -43,9 +43,7 @@ fn validate_rlm_lashlang_bindings(ctx: &ToolCatalogContext) -> Result<(), Plugin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{
-        ToolCatalogBuildInput, ToolContract, ToolDefinition, ToolScheduling, build_tool_catalog,
-    };
+    use lash_core::{ToolCatalogBuildInput, ToolContract, ToolDefinition, build_tool_catalog};
     use lash_lashlang_runtime::{LashlangSurface, LashlangToolBinding, ToolDefinitionLashlangExt};
     use serde_json::json;
     use std::sync::Arc;
@@ -60,7 +58,6 @@ mod tests {
                 ToolContract::default_input_schema(),
                 json!({ "type": "string" }),
             )
-            .with_scheduling(ToolScheduling::Parallel)
             .with_lashlang_binding(LashlangToolBinding::new(["web"], "fetch")),
             ToolDefinition::raw(
                 "tool:test/read_file",
@@ -69,7 +66,6 @@ mod tests {
                 ToolContract::default_input_schema(),
                 json!({ "type": "string" }),
             )
-            .with_scheduling(ToolScheduling::Parallel)
             .with_lashlang_binding(LashlangToolBinding::new(["files"], "read")),
         ];
         let contracts: std::collections::BTreeMap<_, _> = tools
@@ -113,8 +109,7 @@ mod tests {
             "Update plan",
             ToolContract::default_input_schema(),
             json!({ "type": "string" }),
-        )
-        .with_scheduling(ToolScheduling::Parallel);
+        );
 
         let err = rlm_tool_catalog(ToolCatalogContext {
             session_id: "session".to_string(),
@@ -159,7 +154,6 @@ mod tests {
             }),
             json!({ "type": "string" }),
         )
-        .with_scheduling(ToolScheduling::Parallel)
         .with_lashlang_binding(LashlangToolBinding::new(["plan"], "update"));
 
         let contracts: std::collections::BTreeMap<_, _> = [update_plan.clone()]

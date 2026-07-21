@@ -83,13 +83,12 @@ mod tests {
     };
     use crate::turn_driver::{TurnDriverConfig, TurnDriverPreamble};
     use crate::{
-        PromptBuildInput, PromptContribution, PromptContributionSet, ToolDefinition,
-        ToolScheduling, build_prompt, default_prompt_template, prompt_template_fingerprint,
-        prompt_text_fingerprint,
+        PromptBuildInput, PromptContribution, PromptContributionSet, ToolDefinition, build_prompt,
+        default_prompt_template, prompt_template_fingerprint, prompt_text_fingerprint,
     };
 
     fn tool(name: &str) -> ToolDefinition {
-        let mut definition = ToolDefinition::raw(
+        ToolDefinition::raw(
             format!("tool:{name}"),
             name,
             format!("Tool {name}"),
@@ -99,9 +98,7 @@ mod tests {
                 "required": ["path"]
             }),
             serde_json::json!({ "type": "string" }),
-        );
-        definition.manifest.scheduling = ToolScheduling::Parallel;
-        definition
+        )
     }
 
     /// Minimal no-op driver so the turn-machine test can build a

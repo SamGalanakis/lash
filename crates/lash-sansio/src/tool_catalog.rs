@@ -240,7 +240,7 @@ fn apply_contribution(catalog: &mut ToolCatalog, contribution: ToolCatalogContri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ToolActivation, ToolScheduling};
+    use crate::ToolActivation;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn tool(name: &str) -> ToolDefinition {
@@ -256,7 +256,6 @@ mod tests {
             serde_json::json!({ "type": "string" }),
         );
         definition.manifest.activation = ToolActivation::Always;
-        definition.manifest.scheduling = ToolScheduling::Parallel;
         definition
     }
 

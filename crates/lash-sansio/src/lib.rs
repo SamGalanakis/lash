@@ -62,7 +62,7 @@ pub use tool_catalog::{
 pub use tool_contract::{
     CompactToolContract, LashSchema, ModelTool, ToolActivation, ToolArgumentProjectionPolicy,
     ToolContract, ToolDefinition, ToolId, ToolManifest, ToolOutputContract, ToolRetryPolicy,
-    ToolScheduling, schema_for, validate_tool_input,
+    schema_for, validate_tool_input,
 };
 pub use tool_output::{
     ModelToolReturn, ModelToolReturnPart, ToolCallOutcome, ToolCallOutput, ToolCallRecord,

@@ -13,8 +13,8 @@ use lash_core::llm::types::{
 use lash_core::testing::TestProvider;
 use lash_core::{
     AwaitEventResolver, DirectJsonSchema, DirectRequest, Resolution, ToolContract, ToolDefinition,
-    ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
-    TriggerOccurrenceRequest, empty_trigger_source_key,
+    ToolManifest, ToolOutputContract, ToolProvider, ToolResult, TriggerOccurrenceRequest,
+    empty_trigger_source_key,
 };
 #[cfg(test)]
 use lash_lashlang_runtime::tool_lashlang_binding;
@@ -428,7 +428,6 @@ fn benchmark_mail_tool_definition(account: &str, operation: &str) -> ToolDefinit
     .with_lashlang_binding(
         LashlangToolBinding::new(["inbox", account], operation).with_authority_type("Inbox"),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 async fn execute_benchmark_echo(call: lash_core::ToolCall<'_>) -> ToolResult {
@@ -523,7 +522,6 @@ fn benchmark_echo_tool_definition() -> ToolDefinition {
     .with_lashlang_binding(
         LashlangToolBinding::new(["tools"], "benchmark_echo").with_authority_type("Tools"),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn benchmark_slow_tool_definition() -> ToolDefinition {
@@ -552,7 +550,6 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
     .with_lashlang_binding(
         LashlangToolBinding::new(["tools"], "benchmark_slow").with_authority_type("Tools"),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn benchmark_async_tool_definition() -> ToolDefinition {
@@ -583,7 +580,6 @@ fn benchmark_async_tool_definition() -> ToolDefinition {
     .with_lashlang_binding(
         LashlangToolBinding::new(["tools"], "benchmark_async").with_authority_type("Tools"),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn benchmark_oblique_tool_definitions() -> Vec<ToolDefinition> {
@@ -629,7 +625,6 @@ fn benchmark_oblique_search_tool_definition() -> ToolDefinition {
     .with_lashlang_binding(
         LashlangToolBinding::new(["obliq"], "search").with_authority_type("Obliq"),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn benchmark_oblique_judge_tool_definition() -> ToolDefinition {
@@ -670,7 +665,6 @@ fn benchmark_oblique_judge_tool_definition() -> ToolDefinition {
     .with_lashlang_binding(
         LashlangToolBinding::new(["obliq"], "judge_candidates").with_authority_type("Obliq"),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn benchmark_oblique_list_handles_tool_definition() -> ToolDefinition {
@@ -697,7 +691,6 @@ fn benchmark_oblique_list_handles_tool_definition() -> ToolDefinition {
     .with_lashlang_binding(
         LashlangToolBinding::new(["obliq"], "list_async_handles").with_authority_type("Obliq"),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn oblique_search_output_schema() -> serde_json::Value {
@@ -921,8 +914,7 @@ fn gmail_like_tool_definition(index: usize, name: &str) -> ToolDefinition {
             .trim_start_matches("GMAIL_")
             .to_ascii_lowercase()
             .replace('_', " ")]),
-    )
-    .with_scheduling(ToolScheduling::Parallel);
+    );
 
     if index.is_multiple_of(7) {
         definition.contract.output_contract = ToolOutputContract::from_input_schema(

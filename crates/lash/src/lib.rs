@@ -111,7 +111,7 @@ pub mod tools {
         ToolArgumentProjectionPolicy, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
         ToolContract, ToolDefinition, ToolExecutionGrant, ToolFailureClass, ToolManifest,
         ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
-        ToolScheduling, ToolSourceHandle, ToolTriggerClient,
+        ToolSourceHandle, ToolTriggerClient,
     };
     pub use lash_core::{
         PLUGIN_TOOL_SOURCE_ID, ToolId, ToolRestoreReport, ToolState, ToolStateEntry,
@@ -291,7 +291,7 @@ pub mod remote {
         };
         pub use lash_remote_protocol::tools::{
             RemoteToolActivation, RemoteToolArgumentProjectionPolicy, RemoteToolGrant,
-            RemoteToolOutputContract, RemoteToolRetryPolicy, RemoteToolScheduling,
+            RemoteToolOutputContract, RemoteToolRetryPolicy,
         };
     }
 

@@ -824,7 +824,6 @@ mod tests {
             }),
             serde_json::json!({ "type": "string" }),
         )
-        .with_scheduling(lash_core::ToolScheduling::Parallel)
     }
 
     #[async_trait::async_trait]

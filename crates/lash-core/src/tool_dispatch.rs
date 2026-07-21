@@ -9,8 +9,6 @@ mod scheduling;
 mod tests;
 
 pub use context::{ToolDispatchContext, ToolTriggerEffectOutcome};
-#[cfg(test)]
-pub(crate) use scheduling::{ParallelToolCallSpec, dispatch_parallel_tool_calls};
 
 pub(crate) use attempt_coordinator::{ToolAttemptEffectIdentity, coordinate_tool_invocation};
 pub(crate) use context::{
@@ -32,4 +30,4 @@ pub(crate) use preparation::{
     resolve_tool_argument_projection_policy,
 };
 pub(crate) use retry::{mark_retry_exhausted, retry_after_ms};
-pub(crate) use scheduling::{resolve_tool_scheduling, schedule_tool_batch};
+pub(crate) use scheduling::schedule_tool_batch;

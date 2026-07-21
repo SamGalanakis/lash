@@ -991,7 +991,6 @@ mod test_protocol_fakes {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
-        .with_scheduling(crate::ToolScheduling::Parallel)
     }
 
     /// Minimal batch executor used by lash's own tests (mirrors the

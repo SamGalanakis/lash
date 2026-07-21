@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
+use lash_core::{ToolCall, ToolDefinition, ToolResult};
 
 use lash_tool_support::{
     StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, object_schema,
@@ -141,7 +141,6 @@ fn web_search_tool_definition() -> ToolDefinition {
                 "search",
                 &["web_search"],
             ))
-            .with_scheduling(ToolScheduling::Parallel)
 }
 
 #[cfg(test)]

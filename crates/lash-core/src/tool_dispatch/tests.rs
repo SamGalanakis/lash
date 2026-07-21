@@ -3,7 +3,7 @@ use crate::plugin::{PluginHost, PluginSession, StaticPluginFactory};
 use crate::runtime::RuntimeEffectControllerHandle;
 use crate::{
     ToolCall, ToolCallOutcome, ToolContext, ToolProvider, ToolResult, ToolRetryDisposition,
-    ToolRetryPolicy, ToolScheduling,
+    ToolRetryPolicy,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -18,7 +18,7 @@ type SharedExecutionWindows = Arc<std::sync::Mutex<Vec<ExecutionWindow>>>;
 type AttemptObservation = (u32, u32, Option<String>);
 type SharedAttemptObservations = Arc<std::sync::Mutex<Vec<AttemptObservation>>>;
 
-fn test_tool(name: &str, scheduling: ToolScheduling) -> crate::ToolDefinition {
+fn test_tool(name: &str) -> crate::ToolDefinition {
     crate::ToolDefinition::raw(
         format!("tool:{name}"),
         name,
@@ -26,7 +26,6 @@ fn test_tool(name: &str, scheduling: ToolScheduling) -> crate::ToolDefinition {
         crate::ToolDefinition::default_input_schema(),
         json!({ "type": "string" }),
     )
-    .with_scheduling(scheduling)
 }
 
 fn beta_tool() -> crate::ToolDefinition {
@@ -44,7 +43,6 @@ fn beta_tool() -> crate::ToolDefinition {
         }),
         json!({ "type": "string" }),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn named_beta_tool(name: &str) -> crate::ToolDefinition {
@@ -62,7 +60,6 @@ fn named_beta_tool(name: &str) -> crate::ToolDefinition {
         }),
         json!({ "type": "string" }),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn manifests(definitions: Vec<crate::ToolDefinition>) -> Vec<crate::ToolManifest> {
@@ -86,35 +83,31 @@ fn contract_from(
 struct ScheduledProbe {
     index: usize,
     name: &'static str,
-    scheduling: ToolScheduling,
     delay: Duration,
 }
 
 #[tokio::test]
-async fn scheduler_runs_parallel_bucket_then_serial_and_preserves_order() {
+async fn scheduler_runs_every_item_concurrently_and_preserves_order() {
     let windows: SharedExecutionWindows = Arc::new(std::sync::Mutex::new(Vec::new()));
     let probes = vec![
         ScheduledProbe {
             index: 0,
-            name: "parallel_slow",
-            scheduling: ToolScheduling::Parallel,
+            name: "slow",
             delay: Duration::from_millis(40),
         },
         ScheduledProbe {
             index: 1,
-            name: "serial",
-            scheduling: ToolScheduling::Serial,
+            name: "formerly_serial",
             delay: Duration::from_millis(10),
         },
         ScheduledProbe {
             index: 2,
-            name: "parallel_fast",
-            scheduling: ToolScheduling::Parallel,
+            name: "fast",
             delay: Duration::from_millis(5),
         },
     ];
 
-    let outputs = schedule_tool_batch(probes, |probe| probe.index, |probe| probe.scheduling, {
+    let outputs = schedule_tool_batch(probes, |probe| probe.index, {
         let windows = Arc::clone(&windows);
         move |probe| {
             let windows = Arc::clone(&windows);
@@ -132,29 +125,29 @@ async fn scheduler_runs_parallel_bucket_then_serial_and_preserves_order() {
     })
     .await;
 
-    assert_eq!(outputs, ["parallel_slow", "serial", "parallel_fast"]);
+    assert_eq!(outputs, ["slow", "formerly_serial", "fast"]);
 
     let recorded = windows.lock().expect("windows").clone();
-    let parallel_slow = recorded
+    let slow = recorded
         .iter()
-        .find(|(name, _, _)| *name == "parallel_slow")
-        .expect("parallel_slow");
-    let parallel_fast = recorded
+        .find(|(name, _, _)| *name == "slow")
+        .expect("slow");
+    let fast = recorded
         .iter()
-        .find(|(name, _, _)| *name == "parallel_fast")
-        .expect("parallel_fast");
-    let serial = recorded
+        .find(|(name, _, _)| *name == "fast")
+        .expect("fast");
+    let formerly_serial = recorded
         .iter()
-        .find(|(name, _, _)| *name == "serial")
-        .expect("serial");
+        .find(|(name, _, _)| *name == "formerly_serial")
+        .expect("formerly_serial");
 
     assert!(
-        parallel_fast.1 < parallel_slow.2,
-        "parallel tools should overlap even when completion order differs"
+        fast.1 < slow.2,
+        "fast and slow calls should overlap even when completion order differs"
     );
     assert!(
-        serial.1 >= parallel_slow.2 && serial.1 >= parallel_fast.2,
-        "serial tool should start after the parallel bucket completes"
+        formerly_serial.1 < slow.2,
+        "a call from a tool that was formerly marked serial should overlap its peers"
     );
 }
 
@@ -163,17 +156,11 @@ struct MockTools;
 #[async_trait::async_trait]
 impl ToolProvider for MockTools {
     fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
-        manifests(vec![
-            test_tool("alpha", ToolScheduling::Parallel),
-            beta_tool(),
-        ])
+        manifests(vec![test_tool("alpha"), beta_tool()])
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
-        contract_from(
-            vec![test_tool("alpha", ToolScheduling::Parallel), beta_tool()],
-            name,
-        )
+        contract_from(vec![test_tool("alpha"), beta_tool()], name)
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -238,20 +225,11 @@ impl ToolProvider for PendingProbeTools {
 #[async_trait::async_trait]
 impl ToolProvider for ParallelProbeTools {
     fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
-        manifests(vec![
-            test_tool("probe_a", ToolScheduling::Parallel),
-            test_tool("probe_b", ToolScheduling::Parallel),
-        ])
+        manifests(vec![test_tool("probe_a"), test_tool("probe_b")])
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
-        contract_from(
-            vec![
-                test_tool("probe_a", ToolScheduling::Parallel),
-                test_tool("probe_b", ToolScheduling::Parallel),
-            ],
-            name,
-        )
+        contract_from(vec![test_tool("probe_a"), test_tool("probe_b")], name)
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -774,9 +752,7 @@ fn exact_dispatch_context_with_plugins(
 }
 
 fn retry_tool(name: &str, retry_policy: ToolRetryPolicy) -> crate::ToolDefinition {
-    named_beta_tool(name)
-        .with_scheduling(ToolScheduling::Parallel)
-        .with_retry_policy(retry_policy)
+    named_beta_tool(name).with_retry_policy(retry_policy)
 }
 
 fn retry_dispatch_context(
@@ -835,9 +811,7 @@ fn retry_dispatch_context_with_after_observations(
 }
 
 fn pending_probe_tool(retry_policy: ToolRetryPolicy) -> crate::ToolDefinition {
-    named_beta_tool("pending_probe")
-        .with_scheduling(ToolScheduling::Parallel)
-        .with_retry_policy(retry_policy)
+    named_beta_tool("pending_probe").with_retry_policy(retry_policy)
 }
 
 fn pending_dispatch_context(
@@ -1749,437 +1723,4 @@ async fn batch_does_not_run_child_tools_without_runtime_execution_context() {
             .iter()
             .all(|item| item.get("success").and_then(|value| value.as_bool()) == Some(false))
     );
-}
-
-/// A tool provider whose tools are marked [`ToolScheduling::Serial`]
-/// and log (start, end) instants around a sleep into a shared `Mutex`.
-struct SerialProbeTools {
-    /// (tool_name, start_instant, end_instant)
-    log: Arc<std::sync::Mutex<Vec<(String, Instant, Instant)>>>,
-}
-
-#[async_trait::async_trait]
-impl ToolProvider for SerialProbeTools {
-    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
-        manifests(vec![
-            test_tool("serial_a", ToolScheduling::Serial),
-            test_tool("serial_b", ToolScheduling::Serial),
-        ])
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
-        contract_from(
-            vec![
-                test_tool("serial_a", ToolScheduling::Serial),
-                test_tool("serial_b", ToolScheduling::Serial),
-            ],
-            name,
-        )
-    }
-
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let start = Instant::now();
-        // Sleep long enough that if the two tools *were* dispatched
-        // concurrently, their windows would overlap by a detectable
-        // margin.
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        let end = Instant::now();
-        self.log
-            .lock()
-            .expect("serial probe log")
-            .push((call.name.to_string(), start, end));
-        ToolResult::ok(json!(call.name))
-    }
-}
-
-fn serial_dispatch_context(
-    log: Arc<std::sync::Mutex<Vec<(String, Instant, Instant)>>>,
-) -> ToolDispatchContext<'static> {
-    let (event_tx, _event_rx) = mpsc::channel(8);
-    let plugins = test_plugins(Arc::new(SerialProbeTools { log }));
-    let tools = plugins.tools();
-    let tool_catalog = plugins
-        .resolved_tool_catalog("session")
-        .expect("tool catalog");
-    ToolDispatchContext {
-        plugins,
-        tools,
-        tool_catalog,
-        sessions: Arc::new(MockSessionManager::default()),
-        session_lifecycle: Arc::new(MockSessionManager::default()),
-        session_graph: Arc::new(MockSessionManager::default()),
-        processes: Arc::new(crate::UnavailableProcessService),
-        process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        trigger_router: None,
-        effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
-        )),
-        direct_completions: crate::DirectCompletionClient::unavailable(
-            "direct completions are unavailable in this test context",
-        ),
-        parent_invocation: None,
-        execution_env_spec: crate::ProcessExecutionEnvSpec::new(
-            crate::PluginOptions::default(),
-            crate::SessionPolicy::default(),
-        ),
-        session_id: "session".to_string(),
-        agent_frame_id: String::new(),
-        event_tx,
-        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
-        turn_context: crate::TurnContext::default(),
-        clock: std::sync::Arc::new(crate::SystemClock),
-    }
-}
-
-/// Two Serial tools in the same batch must not interleave: the second
-/// call's start instant must be at or after the first call's end
-/// instant.
-#[tokio::test]
-async fn serial_tools_do_not_interleave() {
-    let log: Arc<std::sync::Mutex<Vec<(String, Instant, Instant)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let context = Arc::new(serial_dispatch_context(Arc::clone(&log)));
-
-    let specs = vec![
-        ParallelToolCallSpec {
-            index: 0,
-            tool_name: "serial_a".to_string(),
-            args: json!({}),
-        },
-        ParallelToolCallSpec {
-            index: 1,
-            tool_name: "serial_b".to_string(),
-            args: json!({}),
-        },
-    ];
-
-    let outcomes = dispatch_parallel_tool_calls(context, specs, None).await;
-
-    assert_eq!(outcomes.len(), 2);
-    assert!(
-        outcomes
-            .iter()
-            .all(|outcome| outcome.record.output.is_success())
-    );
-    // Outcomes are sorted by original index.
-    assert_eq!(outcomes[0].index, 0);
-    assert_eq!(outcomes[1].index, 1);
-    assert_eq!(outcomes[0].record.tool, "serial_a");
-    assert_eq!(outcomes[1].record.tool, "serial_b");
-
-    let entries = log.lock().expect("log").clone();
-    assert_eq!(entries.len(), 2, "both serial tools must have executed");
-    // Sort entries by start time so we compare the first-to-run vs
-    // second-to-run regardless of which tool happened to go first.
-    let mut sorted = entries;
-    sorted.sort_by_key(|(_, start, _)| *start);
-    let (first_name, _first_start, first_end) = &sorted[0];
-    let (second_name, second_start, _second_end) = &sorted[1];
-    assert_ne!(first_name, second_name, "both tools should have run");
-    assert!(
-        second_start >= first_end,
-        "serial tool ranges must not overlap: first ended at {:?}, second started at {:?}",
-        first_end,
-        second_start,
-    );
-}
-
-struct SerialRetryProbeTools {
-    log: Arc<std::sync::Mutex<Vec<(String, Instant, Instant)>>>,
-    attempts_a: Arc<AtomicUsize>,
-    attempts_b: Arc<AtomicUsize>,
-}
-
-#[async_trait::async_trait]
-impl ToolProvider for SerialRetryProbeTools {
-    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
-        manifests(vec![
-            test_tool("serial_retry_a", ToolScheduling::Serial)
-                .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
-            test_tool("serial_retry_b", ToolScheduling::Serial)
-                .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
-        ])
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
-        contract_from(
-            vec![
-                test_tool("serial_retry_a", ToolScheduling::Serial)
-                    .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
-                test_tool("serial_retry_b", ToolScheduling::Serial)
-                    .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
-            ],
-            name,
-        )
-    }
-
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let start = Instant::now();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let end = Instant::now();
-        self.log
-            .lock()
-            .expect("serial retry log")
-            .push((call.name.to_string(), start, end));
-
-        let attempt = match call.name {
-            "serial_retry_a" => self.attempts_a.fetch_add(1, Ordering::SeqCst) + 1,
-            "serial_retry_b" => self.attempts_b.fetch_add(1, Ordering::SeqCst) + 1,
-            _ => 1,
-        };
-        if attempt == 1 {
-            ToolResult::retryable_failure(
-                crate::ToolFailureClass::External,
-                "transient",
-                "transient failure",
-                Some(0),
-            )
-        } else {
-            ToolResult::ok(json!(call.name))
-        }
-    }
-}
-
-#[tokio::test]
-async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
-    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let attempts_a = Arc::new(AtomicUsize::new(0));
-    let attempts_b = Arc::new(AtomicUsize::new(0));
-    let provider = Arc::new(SerialRetryProbeTools {
-        log: Arc::clone(&log),
-        attempts_a: Arc::clone(&attempts_a),
-        attempts_b: Arc::clone(&attempts_b),
-    });
-    let (event_tx, _event_rx) = mpsc::channel(8);
-    let plugins = test_plugins(provider);
-    let tools = plugins.tools();
-    let tool_catalog = plugins
-        .resolved_tool_catalog("session")
-        .expect("tool catalog");
-    let context = Arc::new(ToolDispatchContext {
-        plugins,
-        tools,
-        tool_catalog,
-        sessions: Arc::new(MockSessionManager::default()),
-        session_lifecycle: Arc::new(MockSessionManager::default()),
-        session_graph: Arc::new(MockSessionManager::default()),
-        processes: Arc::new(crate::UnavailableProcessService),
-        process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        trigger_router: None,
-        effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
-        )),
-        direct_completions: crate::DirectCompletionClient::unavailable(
-            "direct completions are unavailable in this test context",
-        ),
-        parent_invocation: None,
-        execution_env_spec: crate::ProcessExecutionEnvSpec::new(
-            crate::PluginOptions::default(),
-            crate::SessionPolicy::default(),
-        ),
-        session_id: "session".to_string(),
-        agent_frame_id: String::new(),
-        event_tx,
-        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
-        turn_context: crate::TurnContext::default(),
-        clock: std::sync::Arc::new(crate::SystemClock),
-    });
-
-    let outcomes = dispatch_parallel_tool_calls(
-        context,
-        vec![
-            ParallelToolCallSpec {
-                index: 0,
-                tool_name: "serial_retry_a".to_string(),
-                args: json!({}),
-            },
-            ParallelToolCallSpec {
-                index: 1,
-                tool_name: "serial_retry_b".to_string(),
-                args: json!({}),
-            },
-        ],
-        None,
-    )
-    .await;
-
-    assert!(
-        outcomes
-            .iter()
-            .all(|outcome| outcome.record.output.is_success())
-    );
-    assert_eq!(attempts_a.load(Ordering::SeqCst), 2);
-    assert_eq!(attempts_b.load(Ordering::SeqCst), 2);
-
-    let mut entries = log.lock().expect("serial retry log").clone();
-    entries.sort_by_key(|(_, start, _)| *start);
-    assert_eq!(entries.len(), 4);
-    for window in entries.windows(2) {
-        assert!(
-            window[1].1 >= window[0].2,
-            "serial retry windows must not overlap: {:?} then {:?}",
-            window[0],
-            window[1],
-        );
-    }
-}
-
-/// When a batch contains a mix of parallel and serial tools, the
-/// parallel-safe ones should still run concurrently with each other
-/// (verified via a Barrier), and the serial one should run separately
-/// without interleaving with any parallel peer's window.
-#[tokio::test]
-async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
-    struct MixedTools {
-        barrier: Arc<Barrier>,
-        serial_window: Arc<std::sync::Mutex<Option<(Instant, Instant)>>>,
-        parallel_windows: Arc<std::sync::Mutex<Vec<(String, Instant, Instant)>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ToolProvider for MixedTools {
-        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
-            manifests(vec![
-                test_tool("par_a", ToolScheduling::Parallel),
-                test_tool("par_b", ToolScheduling::Parallel),
-                test_tool("ser", ToolScheduling::Serial),
-            ])
-        }
-
-        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
-            contract_from(
-                vec![
-                    test_tool("par_a", ToolScheduling::Parallel),
-                    test_tool("par_b", ToolScheduling::Parallel),
-                    test_tool("ser", ToolScheduling::Serial),
-                ],
-                name,
-            )
-        }
-
-        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-            let name = call.name;
-            if name == "ser" {
-                let start = Instant::now();
-                tokio::time::sleep(Duration::from_millis(30)).await;
-                let end = Instant::now();
-                *self.serial_window.lock().expect("serial window") = Some((start, end));
-                ToolResult::ok(json!(name))
-            } else {
-                let start = Instant::now();
-                // Block until both parallel tools have reached this
-                // barrier — proves they're running concurrently.
-                let waited = timeout(Duration::from_millis(200), self.barrier.wait()).await;
-                let end = Instant::now();
-                self.parallel_windows
-                    .lock()
-                    .expect("parallel windows")
-                    .push((name.to_string(), start, end));
-                match waited {
-                    Ok(_) => ToolResult::ok(json!(name)),
-                    Err(_) => ToolResult::err_fmt(format!("{name} did not overlap with peer")),
-                }
-            }
-        }
-    }
-
-    let barrier = Arc::new(Barrier::new(2));
-    let serial_window = Arc::new(std::sync::Mutex::new(None));
-    let parallel_windows = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (event_tx, _event_rx) = mpsc::channel(8);
-    let provider = Arc::new(MixedTools {
-        barrier: Arc::clone(&barrier),
-        serial_window: Arc::clone(&serial_window),
-        parallel_windows: Arc::clone(&parallel_windows),
-    });
-    let plugins = test_plugins(provider);
-    let tools = plugins.tools();
-    let tool_catalog = plugins
-        .resolved_tool_catalog("session")
-        .expect("tool catalog");
-    let context = Arc::new(ToolDispatchContext {
-        plugins,
-        tools,
-        tool_catalog,
-        sessions: Arc::new(MockSessionManager::default()),
-        session_lifecycle: Arc::new(MockSessionManager::default()),
-        session_graph: Arc::new(MockSessionManager::default()),
-        processes: Arc::new(crate::UnavailableProcessService),
-        process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
-        trigger_router: None,
-        effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
-        )),
-        direct_completions: crate::DirectCompletionClient::unavailable(
-            "direct completions are unavailable in this test context",
-        ),
-        parent_invocation: None,
-        execution_env_spec: crate::ProcessExecutionEnvSpec::new(
-            crate::PluginOptions::default(),
-            crate::SessionPolicy::default(),
-        ),
-        session_id: "session".to_string(),
-        agent_frame_id: String::new(),
-        event_tx,
-        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-        trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
-        attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
-        turn_context: crate::TurnContext::default(),
-        clock: std::sync::Arc::new(crate::SystemClock),
-    });
-
-    let specs = vec![
-        ParallelToolCallSpec {
-            index: 0,
-            tool_name: "par_a".to_string(),
-            args: json!({}),
-        },
-        ParallelToolCallSpec {
-            index: 1,
-            tool_name: "ser".to_string(),
-            args: json!({}),
-        },
-        ParallelToolCallSpec {
-            index: 2,
-            tool_name: "par_b".to_string(),
-            args: json!({}),
-        },
-    ];
-
-    let outcomes = dispatch_parallel_tool_calls(context, specs, None).await;
-
-    assert_eq!(outcomes.len(), 3);
-    assert!(
-        outcomes
-            .iter()
-            .all(|outcome| outcome.record.output.is_success()),
-        "all tools should succeed: {:?}",
-        outcomes
-            .iter()
-            .map(|outcome| (&outcome.record.tool, outcome.record.output.is_success()))
-            .collect::<Vec<_>>()
-    );
-
-    let pw = parallel_windows.lock().expect("parallel windows");
-    assert_eq!(pw.len(), 2);
-    let sw = serial_window
-        .lock()
-        .expect("serial window")
-        .expect("serial window recorded");
-
-    // The serial tool's window must not overlap either parallel tool's window.
-    for (name, p_start, p_end) in pw.iter() {
-        assert!(
-            sw.0 >= *p_end || sw.1 <= *p_start,
-            "serial window {:?} overlaps parallel window {} {:?}..{:?}",
-            sw,
-            name,
-            p_start,
-            p_end,
-        );
-    }
 }

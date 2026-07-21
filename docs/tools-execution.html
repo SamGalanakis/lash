@@ -21,26 +21,26 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">tool<span class="slash">/</span>execution</h1>
-    <p class="opener__lede">Scheduling, completion modes, atomic-attempt semantics, and output projection for tools that need more than a simple inline <code>ToolResult::ok(...)</code>.</p>
+    <p class="opener__lede">Concurrent batches, completion modes, atomic-attempt semantics, and output projection for tools that need more than a simple inline <code>ToolResult::ok(...)</code>.</p>
   </section>
 
   <main class="body" id="content">
         <div class="section" id="tool-execution-modes">
           <div class="section-header">
-            <h2>Tool Execution Modes</h2>
-            <p>When the model emits multiple tool calls in one assistant turn, the runtime can dispatch them concurrently or one-at-a-time. The choice is declared per tool via <code>ToolDefinition::with_scheduling</code>; the runtime groups the batch and runs each group accordingly.</p>
+            <h2>Concurrent Tool Batches</h2>
+            <p>When the model emits multiple tool calls in one assistant turn, the runtime dispatches every call concurrently. Results are reported in the model's emission order even when calls finish in a different order.</p>
           </div>
           <div class="two-col">
             <article class="panel">
-              <h3><code>ToolScheduling::Parallel</code> (default)</h3>
-              <p>The tool's <code>execute()</code> may run concurrently with other parallel tools from the same batch. The dispatcher schedules them through <code>FuturesUnordered</code> and collects results as each completes. Right for pure reads, network fetches, file scans: anything safe to interleave.</p>
+              <h3>Batch dispatch</h3>
+              <p>Every tool's <code>execute()</code> may run concurrently with every other call from the same batch. The dispatcher collects calls as they complete, then restores source order for the reported results.</p>
             </article>
             <article class="panel">
-              <h3><code>ToolScheduling::Serial</code></h3>
-              <p>The tool blocks the batch: the runtime runs serial tools one at a time in the order the model emitted them, and only after all parallel tools in the batch have finished. Right for tools that mutate shared state (write to a file, update a database, advance a state machine) where overlapping calls would corrupt outcomes.</p>
+              <h3>Resource ownership</h3>
+              <p>A tool that owns an exclusive resource is responsible for coordinating access inside <code>execute()</code>. Batch dispatch does not infer resource conflicts from the tool name.</p>
             </article>
           </div>
-          <pre data-lang="rust" data-snippet="plugins_tools#serial-tool"><code>use lash::tools::{ToolDefinition, ToolScheduling};
+          <pre data-lang="rust" data-snippet="plugins_tools#batched-tool"><code>use lash::tools::ToolDefinition;
 
 ToolDefinition::raw(
     "tool:write_file",
@@ -48,9 +48,8 @@ ToolDefinition::raw(
     "Replace a file's contents.",
     input_schema,
     output_schema,
-)
-.with_scheduling(ToolScheduling::Serial)</code></pre>
-          <p>Mixing parallel and serial tools in one batch is supported and common: a read-heavy plan emitting five <code>read_file</code> calls plus one <code>write_file</code> gets the reads concurrently and the write afterward. There is no model-visible distinction; the model sees the same JSON tool list regardless of dispatch mode.</p>
+)</code></pre>
+          <p>A batch containing several reads and writes starts all of them concurrently. If ordering matters for a resource, expose that ordering through the tool's own execution contract instead of relying on batch position.</p>
         </div>
 
         <div class="section" id="tool-completion-modes">

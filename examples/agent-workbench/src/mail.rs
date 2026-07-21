@@ -24,7 +24,7 @@ use crate::MAIL_RECEIVED_SOURCE_TYPE;
 use async_trait::async_trait;
 use lash::tools::{
     LashlangToolBinding, ToolCall, ToolContract, ToolDefinition, ToolDefinitionLashlangExt,
-    ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+    ToolManifest, ToolProvider, ToolResult,
 };
 use lash::triggers::{TriggerOccurrenceRequest, empty_trigger_source_key};
 use serde::{Deserialize, Serialize};
@@ -333,7 +333,6 @@ fn definition_for(slug: &str, display_name: &str, operation: &str) -> ToolDefini
     .with_lashlang_binding(
         LashlangToolBinding::new(["inbox", slug], operation).with_authority_type("Inbox"),
     )
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 /// Dynamic provider: one `Inbox` authority per account, three operations each.

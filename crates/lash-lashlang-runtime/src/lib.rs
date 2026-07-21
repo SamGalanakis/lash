@@ -1476,7 +1476,6 @@ mod tests {
             examples: Vec::new(),
             activation: None,
             argument_projection: None,
-            scheduling: None,
             retry_policy: None,
             bindings: Default::default(),
         }
