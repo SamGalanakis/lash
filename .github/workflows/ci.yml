@@ -35,7 +35,7 @@ jobs:
   # sharded out to the test-shard matrix below.
   test-doc:
     name: Test docs + build cache
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - name: Check out repository
@@ -120,7 +120,7 @@ jobs:
   # --no-fail-fast so one failure never hides the rest (the alpha.82 lesson).
   test-shard:
     name: Test shard ${{ matrix.shard }}/3
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     strategy:
       fail-fast: false
@@ -165,7 +165,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - name: Check out repository
@@ -215,7 +215,7 @@ jobs:
 
   confidence-fast:
     name: Confidence fast (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     strategy:
       fail-fast: false
@@ -266,7 +266,7 @@ jobs:
 
   confidence-fast-summary:
     name: Confidence fast summary
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     if: always()
     needs:
       - confidence-fast
@@ -303,7 +303,7 @@ jobs:
 
   postgres-store:
     name: Test Postgres store
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     services:
       postgres:
@@ -356,7 +356,7 @@ jobs:
 
   stack-budget:
     name: Stack budget
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - name: Check out repository
@@ -391,7 +391,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: blacksmith-16vcpu-ubuntu-2404
             target: aarch64-unknown-linux-gnu
             # No linking happens under `cargo check`, but build scripts still
             # cc-compile target C code, so the cross gcc is required.
@@ -434,7 +434,7 @@ jobs:
 
   linux-release-cache:
     name: Build Linux release cache
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - name: Check out repository
@@ -469,7 +469,7 @@ jobs:
 
   functional-e2e:
     name: Functional E2E (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     strategy:
       fail-fast: false
@@ -523,7 +523,7 @@ jobs:
 
   restate-postgres-workers:
     name: Restate + Postgres + MinIO Workers
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     # The harness has grown to 24 workflows + turn-control gates; 30 minutes
     # was hit on 2026-07-20 (job-timeout shows as 'cancelled').
     timeout-minutes: 45

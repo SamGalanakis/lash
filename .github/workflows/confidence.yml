@@ -31,7 +31,7 @@ env:
 jobs:
   confidence:
     name: Confidence ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'full' }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 360
     env:
       # The full lane's sim search seed space is partitioned across this job
@@ -72,7 +72,7 @@ jobs:
   sim-search:
     name: Sim search shard ${{ matrix.shard }}/9
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 120
     strategy:
       fail-fast: false
