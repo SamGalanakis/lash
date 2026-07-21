@@ -3,6 +3,18 @@ description: >-
   Install sccache with the GitHub Actions cache backend and route rustc through
   it, so the heavy compile that rust-cache's read-only restorers (the Test
   shards, cross builds) cannot save is cached across shards and runs.
+  Optionally link through mold, because sccache caches compilation but never
+  the link step.
+
+inputs:
+  link-with-mold:
+    description: >-
+      Install mold and add it to RUSTFLAGS. Leave off for any job whose cargo
+      cache is shared with a workflow that does not also use this action —
+      RUSTFLAGS is part of the build fingerprint, so a mismatch rebuilds
+      everything the cache just restored.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -24,3 +36,16 @@ runs:
           echo "RUSTC_WRAPPER=sccache"
           echo "CARGO_INCREMENTAL=0"
         } >> "$GITHUB_ENV"
+
+    - name: Install mold
+      if: inputs.link-with-mold == 'true'
+      uses: rui314/setup-mold@v1
+
+    - name: Link through mold
+      if: inputs.link-with-mold == 'true'
+      shell: bash
+      run: |
+        # Linking is what sccache cannot help with: a compilation cache hit
+        # still pays full link cost, and the workspace links a lot of test
+        # binaries.
+        echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"

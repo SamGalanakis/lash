@@ -118,6 +118,11 @@ jobs:
   # writes; sccache absorbs the workspace test-binary codegen that rust-cache's
   # read-only restore cannot save, sharing it across the shards and runs.
   # --no-fail-fast so one failure never hides the rest (the alpha.82 lesson).
+
+      - name: Report sccache stats
+        if: always()
+        run: sccache --show-stats
+
   test-shard:
     name: Test shard ${{ matrix.shard }}/3
     runs-on: ubuntu-latest
@@ -162,6 +167,10 @@ jobs:
           # shellcheck disable=SC2086
           cargo nextest run --workspace --locked ${LASH_CI_FEATURES} \
             --no-fail-fast --partition count:${{ matrix.shard }}/3
+
+      - name: Report sccache stats
+        if: always()
+        run: sccache --show-stats
 
   lint:
     name: Lint
@@ -263,6 +272,10 @@ jobs:
           name: confidence-fast-${{ matrix.shard }}
           path: target/confidence/fast/${{ matrix.shard }}
           if-no-files-found: warn
+
+      - name: Report sccache stats
+        if: always()
+        run: sccache --show-stats
 
   confidence-fast-summary:
     name: Confidence fast summary
@@ -435,6 +448,12 @@ jobs:
   linux-release-cache:
     name: Build Linux release cache
     runs-on: ubuntu-latest
+    # Warms the release-profile cache that release.yml and perf.yml restore on
+    # main. A cache written by a pull-request run is scoped to that PR's merge
+    # ref and can only be restored by re-runs of the same pull request, so on a
+    # PR this spends the longest job on the board building a cache no other
+    # workflow can read. Cache warming belongs on main.
+    if: github.event_name != 'pull_request'
 
     steps:
       - name: Check out repository
@@ -463,9 +482,18 @@ jobs:
 
       - name: Setup sccache
         uses: ./.github/actions/setup-sccache
+        with:
+          # perf.yml restores this same `linux-release` cache and does not use
+          # this action, so linking differently here would refingerprint the
+          # graph and make perf rebuild everything it restored.
+          link-with-mold: "false"
 
       - name: Build release workspace
         run: cargo build --locked --release --workspace --target x86_64-unknown-linux-gnu
+
+      - name: Report sccache stats
+        if: always()
+        run: sccache --show-stats
 
   functional-e2e:
     name: Functional E2E (${{ matrix.name }})
