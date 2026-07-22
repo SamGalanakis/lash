@@ -19,6 +19,8 @@ use crate::store::RuntimePersistence;
 mod attachments;
 mod maintenance;
 mod queued_work;
+#[cfg(test)]
+mod test_support;
 
 #[derive(Clone)]
 struct InMemoryQueuedBatch {
@@ -168,6 +170,14 @@ pub struct InMemorySessionStore {
     checkpoint_probe_count: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     checkpoint_write_transaction_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    fail_next_session_execution_lease_renewal: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    session_execution_lease_renewal_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    abandoned_queued_work_claim_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    abandoned_turn_input_claim_count: std::sync::atomic::AtomicUsize,
 }
 
 impl InMemorySessionStore {
@@ -203,6 +213,14 @@ impl InMemorySessionStore {
             checkpoint_probe_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             checkpoint_write_transaction_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            fail_next_session_execution_lease_renewal: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            session_execution_lease_renewal_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            abandoned_queued_work_claim_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            abandoned_turn_input_claim_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1112,6 +1130,19 @@ impl crate::store::SessionExecutionLeaseStore for InMemorySessionStore {
         fence: &crate::SessionExecutionLeaseFence,
         lease_ttl_ms: u64,
     ) -> Result<crate::SessionExecutionLease, crate::store::StoreError> {
+        #[cfg(test)]
+        {
+            self.session_execution_lease_renewal_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self
+                .fail_next_session_execution_lease_renewal
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(crate::store::StoreError::Backend(
+                    "injected session execution lease renewal rejection".to_string(),
+                ));
+            }
+        }
         let _transaction = self
             .write_transaction
             .lock()
@@ -1383,6 +1414,9 @@ impl crate::store::TurnInputStore for InMemorySessionStore {
                 && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
                 && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
             {
+                #[cfg(test)]
+                self.abandoned_turn_input_claim_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if matches!(entry.input.state, crate::TurnInputState::Accepted) {
                     match &claim.mode {
                         crate::TurnInputClaimMode::ActiveTurn { .. } => {
