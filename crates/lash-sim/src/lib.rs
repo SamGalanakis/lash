@@ -4,6 +4,7 @@
 mod cache_regression;
 mod canonical_scripts;
 mod clock;
+mod lease;
 
 pub mod artifacts;
 pub mod backend_contention;

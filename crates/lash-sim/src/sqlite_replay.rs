@@ -659,26 +659,15 @@ impl SqliteRuntimeReplayWorld {
             .exchanges()
             .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?
             .len();
-        // Yield-bounded completion poll instead of a wall-clock timeout: if the
-        // turn drifted onto an unscheduled provider exchange (e.g. the SQLite
-        // store re-executed an extra exchange) it can never finish, so we
-        // terminate deterministically rather than letting the runtime hang.
-        let mut polls = 0u64;
-        while !active_turn.handle.is_finished() {
-            if polls >= crate::runner::MAX_TURN_FINISH_POLL_YIELDS {
-                return Err(SqliteReplayError::Assertion(format!(
-                    "provider boundary `{}` did not finish within {} yields after {release_count} scheduled releases and {exchange_count} provider exchanges (turn parked on an unscheduled provider exchange)",
-                    event.boundary_id,
-                    crate::runner::MAX_TURN_FINISH_POLL_YIELDS
-                )));
-            }
-            polls += 1;
-            tokio::task::yield_now().await;
-        }
         active_turn
             .handle
             .await
-            .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?
+            .map_err(|err| {
+                SqliteReplayError::Runtime(format!(
+                    "provider boundary `{}` failed after {release_count} scheduled releases and {exchange_count} provider exchanges: {err}",
+                    event.boundary_id
+                ))
+            })?
             .map_err(SqliteReplayError::Runtime)
     }
 }
@@ -954,6 +943,7 @@ async fn runtime_core_for_scripts(
         )))
         .process_env_store(process_env_store)
         .store_factory(store_factory)
+        .lease_timings(crate::lease::sim_runtime_lease_timings())
         .provider(provider_handle)
         .model(model)
         .build()

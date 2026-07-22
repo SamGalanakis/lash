@@ -10,6 +10,7 @@ pub(super) async fn prove_runtime_facade_turn() -> Result<RuntimeFacadeProof, Fi
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     let core = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lease_timings(crate::lease::sim_runtime_lease_timings())
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -121,6 +122,7 @@ pub(super) async fn run_live_turn_facts(
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
     let core = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lease_timings(crate::lease::sim_runtime_lease_timings())
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -177,33 +179,18 @@ pub(super) async fn run_live_turn_facts(
         .collect::<Vec<_>>();
     let mut scheduler = BoundaryScheduler::with_events(seed, release_boundaries);
 
-    // Observe the turn live and parked on the first gate before any release.
-    let mut turn_was_live_parked = false;
-    let mut polls = 0u64;
-    loop {
-        if schedule.is_blocked(0, 0) {
-            turn_was_live_parked = true;
-            break;
-        }
-        if turn.is_finished() || polls >= MAX_PROVIDER_EVENT_POLL_YIELDS {
-            break;
-        }
-        polls += 1;
-        tokio::task::yield_now().await;
-    }
+    // The first release gate is an explicit schedule boundary. Once the turn
+    // reports that it is blocked there, it cannot finish before delivery.
+    schedule.wait_until_blocked(0, 0).await;
+    let turn_was_live_parked = !turn.is_finished();
 
-    // Deliver each release boundary through the BoundaryScheduler; release the gate
-    // it names (bounded so it can never hang once the turn terminalizes).
+    // Deliver each release boundary through the BoundaryScheduler and release
+    // the gate it names.
     loop {
         if turn.is_finished() {
             break;
         }
         let Some(delivered) = scheduler.deliver_next(Value::Null) else {
-            let mut idle = 0u64;
-            while !turn.is_finished() && idle < MAX_PROVIDER_EVENT_POLL_YIELDS {
-                idle += 1;
-                tokio::task::yield_now().await;
-            }
             break;
         };
         let event = delivered.as_event();
@@ -282,6 +269,7 @@ pub(super) async fn prove_pending_tool_completion_through_turn()
     let events = Arc::new(RuntimeProofRecordingEvents::default());
     let core = lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lease_timings(crate::lease::sim_runtime_lease_timings())
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -321,9 +309,6 @@ pub(super) async fn prove_pending_tool_completion_through_turn()
     let key = key_rx.await.map_err(|_| {
         FixedScriptRunnerError::Runtime("pending tool did not send completion key".to_string())
     })?;
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
     let completed_before = events.tool_completed_count().await;
     let suspended_before_completion = !turn.is_finished() && completed_before == 0;
     require(
@@ -514,6 +499,7 @@ pub(super) async fn prove_final_value_semantic_channel()
     );
     let core = lash::LashCore::rlm_builder(factory)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lease_timings(crate::lease::sim_runtime_lease_timings())
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),

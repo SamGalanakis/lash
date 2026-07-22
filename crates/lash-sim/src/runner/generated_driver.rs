@@ -71,7 +71,6 @@ pub(super) async fn drive_generated_workload(
             world
                 .schedule_parked_suspend_resolutions(&mut scheduler, suspend_ready_at)
                 .await?;
-            world.sample_live_turn_highwater();
             // Spin until the live turn finishes and lands its completion (lowering
             // `min_pending_at` below the barrier), or it is gone. The provider
             // release deliveries that unblock the turn run on later iterations
@@ -92,7 +91,6 @@ pub(super) async fn drive_generated_workload(
             world
                 .schedule_parked_suspend_resolutions(&mut scheduler, suspend_ready_at)
                 .await?;
-            world.sample_live_turn_highwater();
             if world.active_provider_turn_count() > 0 || world.pending_suspend_turn_count() > 0 {
                 continue;
             }
@@ -114,8 +112,8 @@ pub(super) async fn drive_generated_workload(
             &mut scheduler,
             &delivered,
             world,
-        )?;
-        world.sample_live_turn_highwater();
+        )
+        .await?;
         world
             .schedule_finished_provider_turns(&mut scheduler)
             .await?;
@@ -123,7 +121,6 @@ pub(super) async fn drive_generated_workload(
         world
             .schedule_parked_suspend_resolutions(&mut scheduler, suspend_ready_at)
             .await?;
-        world.sample_live_turn_highwater();
         log.push(delivered);
     }
     if !completion_queue.is_empty() {
@@ -138,18 +135,6 @@ pub(super) async fn drive_generated_workload(
     let mut events = log.into_vec();
     append_contract_execution_boundaries(&mut events, &mut store, workload.seed).await?;
     let final_summary = store.summary();
-    // The event-derived interleaving highwater is the canonical, replay-stable
-    // measure (recomputed identically from `events` on every backend). The
-    // runtime world tracks the spawned-future highwater, which can only be equal
-    // or larger; a smaller runtime measure would mean the bookkeeping lost a live
-    // turn, so assert the bound holds before trusting either number.
-    let event_peak = peak_concurrent_live_turns(&events);
-    if event_peak > world.peak_concurrent_live_turns {
-        return Err(FixedScriptRunnerError::Assertion(format!(
-            "event-derived interleaving highwater {event_peak} exceeded the runtime-observed live turn highwater {}",
-            world.peak_concurrent_live_turns
-        )));
-    }
     Ok((events, final_summary))
 }
 
@@ -441,7 +426,7 @@ pub(super) async fn run_generated_workload(
         durable_effect_exactly_once(&final_summary),
         worker_stale_completion_rejected(&final_summary),
         worker_failover_continues_work(&events),
-        healthy_long_turn_renewal(&events),
+        healthy_long_turn_liveness(&events),
         lease_time_monotonic(&events),
         generated_suspend_resume(&events),
         generated_final_value_semantic_channel(&events),

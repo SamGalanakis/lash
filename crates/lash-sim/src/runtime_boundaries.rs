@@ -1480,17 +1480,9 @@ async fn lifecycle_process_fact(
     expected_holder: Option<&LeaseOwnerIdentity>,
     sweep_owner: &LeaseOwnerIdentity,
 ) -> Result<Value, RuntimeBoundaryError> {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        awaiter.await_terminal(id),
-    )
-    .await
-    .map_err(|_| {
-        RuntimeBoundaryError::new(format!(
-            "process `{id}` did not reach a terminal within bound"
-        ))
-    })?
-    .map_err(|err| RuntimeBoundaryError::new(format!("await terminal for `{id}` failed: {err}")))?;
+    let output = awaiter.await_terminal(id).await.map_err(|err| {
+        RuntimeBoundaryError::new(format!("await terminal for `{id}` failed: {err}"))
+    })?;
     let record = registry.get_process(id).await.ok_or_else(|| {
         RuntimeBoundaryError::new(format!("process `{id}` vanished after terminal"))
     })?;

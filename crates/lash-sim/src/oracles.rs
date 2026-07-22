@@ -1256,7 +1256,7 @@ pub fn worker_stale_completion_rejected(summary: &AbstractWorldSummary) -> Oracl
 
 pub const WORKER_FAILOVER_CONTINUATION_ORACLE: &str =
     "sim.oracle.worker-failover-continues-work.v1";
-pub const HEALTHY_LONG_TURN_RENEWAL_ORACLE: &str = "sim.oracle.healthy-long-turn-renewal.v1";
+pub const HEALTHY_LONG_TURN_LIVENESS_ORACLE: &str = "sim.oracle.healthy-long-turn-liveness.v1";
 
 /// Real worker FAILOVER CONTINUATION: a second worker incarnation reclaimed the
 /// crashed first owner's session-execution lease at a strictly higher fencing
@@ -1284,9 +1284,9 @@ pub fn worker_failover_continues_work(events: &[DeliveredBoundary]) -> OracleVer
     )
 }
 
-/// A generated provider turn remained live and committed while the shared
-/// schedule clock crossed several complete session-lease TTL windows.
-pub fn healthy_long_turn_renewal(events: &[DeliveredBoundary]) -> OracleVerdict {
+/// A generated provider turn remained live and committed while its delivered
+/// schedule crossed several production-sized lease TTL windows.
+pub fn healthy_long_turn_liveness(events: &[DeliveredBoundary]) -> OracleVerdict {
     let healthy = events
         .iter()
         .filter(|event| event.kind == BoundaryKind::Provider)
@@ -1294,27 +1294,22 @@ pub fn healthy_long_turn_renewal(events: &[DeliveredBoundary]) -> OracleVerdict 
             event.observed.get("success").and_then(Value::as_bool) == Some(true)
                 && event
                     .observed
-                    .pointer("/sim_clock/elapsed_ms")
+                    .pointer("/sim_clock/scheduled_elapsed_ms")
                     .and_then(Value::as_u64)
                     .is_some_and(|elapsed| elapsed >= 3 * 30_000)
-                && event
-                    .observed
-                    .pointer("/sim_clock/completed_sleeps_during_turn")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|renewals| renewals >= 3)
         });
     if let Some(event) = healthy {
         return OracleVerdict::passed(
-            HEALTHY_LONG_TURN_RENEWAL_ORACLE,
+            HEALTHY_LONG_TURN_LIVENESS_ORACLE,
             format!(
-                "provider turn `{}` committed after the shared virtual clock crossed at least three lease TTL windows and woke repeated renewal sleeps",
+                "provider turn `{}` committed after its delivered schedule crossed at least three production lease TTL windows",
                 event.boundary_id
             ),
         );
     }
     OracleVerdict::failed(
-        HEALTHY_LONG_TURN_RENEWAL_ORACLE,
-        "no successful generated provider turn crossed three lease TTL windows with repeated virtual-clock renewal wakes",
+        HEALTHY_LONG_TURN_LIVENESS_ORACLE,
+        "no successful generated provider turn crossed three production lease TTL windows in the delivered schedule",
     )
 }
 
@@ -7746,6 +7741,72 @@ mod tests {
         assert!(
             !worker_stale_completion_rejected(&stale_writer_won).is_passed(),
             "the oracle must inspect the semantic terminal writer"
+        );
+    }
+
+    #[test]
+    fn deliberate_expiry_oracles_remain_failure_capable() {
+        let lease_event = |sequence, token| {
+            delivered_with_payload(
+                sequence,
+                &format!("session-001:lease-time:{sequence:03}"),
+                "session-001",
+                BoundaryKind::LeaseTime,
+                json!({"tick": sequence * 30_000}),
+                json!({
+                    "runtime_lease_probe": {
+                        "session_execution_lease_fencing_token": token,
+                        "real_lease_store": true,
+                    }
+                }),
+            )
+        };
+        assert!(lease_time_monotonic(&[lease_event(0, 1), lease_event(1, 2)]).is_passed());
+        assert!(
+            !lease_time_monotonic(&[lease_event(0, 1), lease_event(1, 1)]).is_passed(),
+            "lease-time-monotonic must fire when a real store reissues a fence"
+        );
+
+        let worker_event = delivered_with_payload(
+            0,
+            "worker-001:worker:001",
+            "worker-001",
+            BoundaryKind::Worker,
+            json!({"session": "session-001"}),
+            json!({
+                "stale_completion_rejected": true,
+                "runtime_active_lease": {"fencing_token": 2},
+                "runtime_stale_completion": {"fencing_token": 1},
+            }),
+        );
+        let fenced = AbstractWorldSummary::with_digest(
+            1,
+            1,
+            vec![],
+            vec![],
+            vec![WorkerAbstractSummary {
+                worker_alias: "worker-001".to_string(),
+                session_alias: "session-001".to_string(),
+                active_incarnation_id: "worker-001:incarnation-002".to_string(),
+                active_fencing_token: 2,
+                lease_owner_changes: 1,
+                stale_completion_rejections: 1,
+                process_stale_completion_rejected: true,
+                process_stale_output_absent: true,
+                process_terminal_writer: "successor".to_string(),
+                process_terminal_event_count: 1,
+            }],
+        );
+        assert!(
+            mini_runtime_stale_lease_commit_rejected(std::slice::from_ref(&worker_event), &fenced)
+                .is_passed()
+        );
+
+        let mut unfenced = worker_event;
+        unfenced.observed["stale_completion_rejected"] = json!(false);
+        assert!(
+            !mini_runtime_stale_lease_commit_rejected(&[unfenced], &fenced).is_passed(),
+            "stale-lease-commit-rejected must fire when the stale writer is not rejected"
         );
     }
 

@@ -328,10 +328,6 @@ async fn runtime_completion_serialization_mutation_guard() {
         "serialization guard must exercise more than one provider turn"
     );
     assert_eq!(
-        world.peak_concurrent_live_turns, 1,
-        "serialized generated replay must initialize RuntimeCompletionState with serialize_provider_turns=true"
-    );
-    assert_eq!(
         peak_concurrent_live_turns(&events),
         1,
         "delivered evidence must not show overlapping provider turns under serialized replay"

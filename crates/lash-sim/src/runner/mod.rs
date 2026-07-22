@@ -51,7 +51,7 @@ use crate::oracles::{
     cancellation_observed, combine_oracles, cross_session_isolation, durable_effect_exactly_once,
     exec_code_observed, generated_final_value_semantic_channel,
     generated_runtime_provider_matrix as generated_runtime_provider_matrix_oracle,
-    generated_suspend_resume, healthy_long_turn_renewal, ingress_sessions_opened,
+    generated_suspend_resume, healthy_long_turn_liveness, ingress_sessions_opened,
     lease_time_monotonic, live_provider_failure_coverage, observer_convergence,
     observer_reconnect_observed, operational_coverage, peak_concurrent_live_turns,
     pending_tool_completion, process_never_double_started, process_wake_at_most_once,
@@ -94,15 +94,6 @@ use crate::trace::{
     AbstractWorldSummary, OracleStatus, OracleVerdict, SimulationTrace, TraceEventLine,
     TraceIoError, write_event_lines, write_replay_report, write_trace,
 };
-
-/// Deterministic yield budgets that bound provider-event release polling and
-/// turn-completion polling. These replace wall-clock timeouts: a turn that
-/// drifts so it never reaches a gate (or never finishes) terminates the poll
-/// after a fixed number of cooperative yields instead of hanging the runtime.
-/// The budgets are large enough that no in-order, single-exchange-per-turn
-/// generated turn ever reaches them.
-pub(crate) const MAX_PROVIDER_EVENT_POLL_YIELDS: u64 = 200_000;
-pub(crate) const MAX_TURN_FINISH_POLL_YIELDS: u64 = 2_000_000;
 
 pub const FIXED_SCRIPT_PROFILE: &str = "tiny-fixed-provider-scripts";
 pub const FIXED_SCRIPT_EVENTS: &str = "events.jsonl";

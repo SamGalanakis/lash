@@ -149,7 +149,7 @@ fn is_scheduler_owned_runtime_completion(kind: BoundaryKind) -> bool {
     )
 }
 
-pub(super) fn register_ready_runtime_completions(
+pub(super) async fn register_ready_runtime_completions(
     queue: &mut RuntimeCompletionQueue,
     state: &mut RuntimeCompletionState,
     scheduler: &mut BoundaryScheduler,
@@ -169,7 +169,9 @@ pub(super) fn register_ready_runtime_completions(
             let actor_alias = event.actor_alias.clone();
             let (_pending, completion_event) =
                 queue.register_pending_event(event, registered_after, family, units);
-            world.start_provider_turn(turn_event, completion_event, scheduler)?;
+            world
+                .start_provider_turn(turn_event, completion_event, scheduler)
+                .await?;
             state.provider_started(&actor_alias);
         } else {
             queue.register(scheduler, event, registered_after, family, units);

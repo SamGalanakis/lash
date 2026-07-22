@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use lash_core::SessionStoreFactory;
 use lash_postgres_store::PostgresStorage;
@@ -699,17 +698,17 @@ impl PostgresRuntimeReplayWorld {
             .exchanges()
             .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?
             .len();
-        tokio::time::timeout(Duration::from_secs(5), active_turn.handle)
+        active_turn
+            .handle
             .await
-            .map_err(|_| {
-                PostgresReplayError::Assertion(format!(
-                    "provider boundary `{}` timed out waiting for in-flight turn completion after {} scheduled releases and {} provider exchanges",
+            .map_err(|err| {
+                PostgresReplayError::Runtime(format!(
+                    "provider boundary `{}` failed after {} scheduled releases and {} provider exchanges: {err}",
                     event.boundary_id,
                     release_count,
                     exchange_count
                 ))
             })?
-            .map_err(|err| PostgresReplayError::Runtime(err.to_string()))?
             .map_err(PostgresReplayError::Runtime)
     }
 }
@@ -979,6 +978,7 @@ fn runtime_core_for_scripts(
         )))
         .process_env_store(process_env_store)
         .store_factory(store_factory)
+        .lease_timings(crate::lease::sim_runtime_lease_timings())
         .provider(provider_handle)
         .model(model)
         .build()

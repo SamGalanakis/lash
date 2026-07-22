@@ -85,14 +85,17 @@ a property of the model, it should be renamed to say so rather than deleted.
 
 The current clock advances virtual time and then yields a fixed number of times
 hoping background tasks registered. That is not determinism, and it is the
-mechanism behind at least one dismissed lease signal. Full deterministic
-simulation is **not rejected here**: madsim documents retrofit by dependency
-substitution, and lash is unusually well positioned for it — `lash-core` holds
-no `reqwest`/`hyper`/`sqlx`, external interaction sits behind traits, and time
-is already behind an injected `Clock`. Real SQLite threads, Postgres, Restate
-and genuine multithreaded races would stay outside an initial lane. The decision
-is to run a 2–3 day compile-and-enumerate spike and then decide, not to rule it
-out.
+mechanism behind at least one dismissed lease signal. Lash-sim is a scenario
+generator over real execution, not a determinism harness. The
+compile-and-enumerate spike is cancelled — not because the clock's one timing
+signal proved ambiguous (that ambiguity was the broken clock's own artifact),
+but on coverage grounds: the escapes this document opens with cluster at
+real-substrate seams — SQLite threads, Postgres, Restate, live providers — and
+an in-process deterministic lane cannot reach any of them, which the spike's
+own scoping already conceded. Determinism would buy exhaustive interleavings
+over the part of the system that escapes least. Rare in-process interleaving
+bugs are therefore accepted as out of scope for lash-sim; if one escapes to
+production, this is the decision to revisit first.
 
 ## Deletions
 

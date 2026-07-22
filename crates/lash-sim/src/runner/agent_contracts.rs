@@ -596,6 +596,7 @@ async fn facade_final_value_execution_inner(
     );
     let mut builder = lash::LashCore::rlm_builder(factory)
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lease_timings(crate::lease::sim_runtime_lease_timings())
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -807,7 +808,7 @@ finish { recovered: true }
             .await
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))
     });
-    let key = wait_for_contract_durable_input_key(key_rx, &turn).await?;
+    let key = wait_for_contract_durable_input_key(key_rx).await?;
     let completed_before_resolution = events.tool_completed_count().await;
     let suspended_before_resolution = !turn.is_finished() && completed_before_resolution == 0;
     let await_tool_call_id_present = match &key.wait {
@@ -913,6 +914,7 @@ fn agent_process_contract_core_with_options_and_effect_host(
     .with_lashlang_execution_sink(Arc::clone(&graph_store) as Arc<dyn lash::tracing::TraceSink>);
     let mut builder = lash::LashCore::rlm_builder(factory)
         .effect_host(effect_host)
+        .lease_timings(crate::lease::sim_runtime_lease_timings())
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),
@@ -957,30 +959,14 @@ fn agent_contract_subagents_plugin() -> Arc<dyn lash_core::PluginFactory> {
 
 async fn wait_for_contract_durable_input_key(
     key_rx: &mut tokio::sync::oneshot::Receiver<Result<lash_core::AwaitEventKey, String>>,
-    turn: &tokio::task::JoinHandle<Result<lash::TurnResult, FixedScriptRunnerError>>,
 ) -> Result<lash_core::AwaitEventKey, FixedScriptRunnerError> {
-    for _ in 0..MAX_PROVIDER_EVENT_POLL_YIELDS {
-        match key_rx.try_recv() {
-            Ok(Ok(key)) => return Ok(key),
-            Ok(Err(err)) => return Err(FixedScriptRunnerError::Runtime(err)),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                if turn.is_finished() {
-                    return Err(FixedScriptRunnerError::Assertion(
-                        "durable input turn completed before publishing await key".to_string(),
-                    ));
-                }
-                tokio::task::yield_now().await;
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                return Err(FixedScriptRunnerError::Assertion(
-                    "durable input tool dropped await-key sender".to_string(),
-                ));
-            }
-        }
+    match key_rx.await {
+        Ok(Ok(key)) => Ok(key),
+        Ok(Err(err)) => Err(FixedScriptRunnerError::Runtime(err)),
+        Err(_) => Err(FixedScriptRunnerError::Assertion(
+            "durable input tool dropped await-key sender".to_string(),
+        )),
     }
-    Err(FixedScriptRunnerError::Assertion(
-        "durable input tool did not publish await key within bounded scheduler yields".to_string(),
-    ))
 }
 
 // Assembles the contract proof from a completed turn; the runtime handles,
