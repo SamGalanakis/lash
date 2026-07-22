@@ -1,0 +1,24 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "openai.chat-structured-refusal",
+  "provider_kind": "openai-compatible",
+  "endpoint": { "method": "POST", "path": "/chat/completions" },
+  "request_match": {
+    "body": {
+      "model": { "equals": "gpt-4o-2024-08-06" },
+      "stream": { "equals": false },
+      "response_format.type": { "equals": "json_schema" }
+    },
+    "headers": { "authorization": { "present": true } }
+  },
+  "timeline": [
+    { "at": 0, "event": "response_start", "status": 200, "headers": [{ "name": "content-type", "value": "application/json" }] },
+    { "at": 0, "event": "body", "data": "{\"id\":\"chatcmpl-9nYAG9LPNonX8DAyrkwYfemr3C8HC\",\"object\":\"chat.completion\",\"created\":1721596428,\"model\":\"gpt-4o-2024-08-06\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"refusal\":\"I'm sorry, I cannot assist with that request.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":81,\"completion_tokens\":11,\"total_tokens\":92,\"completion_tokens_details\":{\"reasoning_tokens\":0,\"accepted_prediction_tokens\":0,\"rejected_prediction_tokens\":0}},\"system_fingerprint\":\"fp_3407719c7f\"}" },
+    { "at": 0, "event": "end" }
+  ],
+  "provenance": {
+    "kind": "provider_documentation",
+    "source": "https://developers.openai.com/api/docs/guides/structured-outputs",
+    "notes": "Verbatim Chat Completions structured-output refusal example."
+  }
+}

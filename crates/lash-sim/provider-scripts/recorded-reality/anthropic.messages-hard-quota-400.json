@@ -1,0 +1,22 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "anthropic.messages-hard-quota-400",
+  "provider_kind": "anthropic",
+  "endpoint": { "method": "POST", "path": "/v1/messages" },
+  "request_match": {
+    "body": { "model": { "equals": "claude-sonnet-4-20250514" } },
+    "headers": { "x-api-key": { "present": true } }
+  },
+  "timeline": [{
+    "at": 0,
+    "event": "http_error",
+    "status": 400,
+    "headers": [{ "name": "content-type", "value": "application/json" }],
+    "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.\"}}"
+  }],
+  "provenance": {
+    "kind": "real_world_report",
+    "source": "https://github.com/anthropics/claude-code/issues/867",
+    "notes": "Verbatim 400 response body emitted by the Anthropic API."
+  }
+}

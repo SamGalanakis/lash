@@ -401,7 +401,7 @@ impl OpenAiCompatibleProvider {
     }
 
     fn chat_message_text(message: &Value) -> String {
-        match message.get("content") {
+        let content = match message.get("content") {
             Some(Value::String(text)) => text.clone(),
             Some(Value::Array(parts)) => parts
                 .iter()
@@ -411,6 +411,15 @@ impl OpenAiCompatibleProvider {
                 })
                 .collect::<String>(),
             _ => String::new(),
+        };
+        if content.is_empty() {
+            message
+                .get("refusal")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            content
         }
     }
 

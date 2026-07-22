@@ -176,10 +176,19 @@ pub fn openai_terminal_reason_from_chat_value(
     value: &Value,
     parts: &[LlmOutputPart],
 ) -> LlmTerminalReason {
-    let finish = value
+    let first_choice = value
         .get("choices")
         .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
+        .and_then(|choices| choices.first());
+    if first_choice
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("refusal"))
+        .and_then(Value::as_str)
+        .is_some_and(|refusal| !refusal.is_empty())
+    {
+        return LlmTerminalReason::ContentFilter;
+    }
+    let finish = first_choice
         .and_then(|choice| choice.get("finish_reason"))
         .and_then(Value::as_str)
         .unwrap_or("");
@@ -245,15 +254,59 @@ pub fn http_error_envelope(
     raw_body: impl Into<String>,
     request_body: Option<String>,
 ) -> LlmTransportError {
+    let raw_body = raw_body.into();
     let mut err = LlmTransportError::new(message)
         .with_kind(ProviderFailureKind::Http)
         .with_status(status)
         .with_headers(headers)
-        .with_raw(raw_body);
+        .with_raw(raw_body.clone());
+    if err.retry_after.is_none()
+        && let Some(retry_after) = retry_after_from_error_body(&raw_body)
+    {
+        err = err.with_retry_after(retry_after);
+    }
     if let Some(request_body) = request_body {
         err = err.with_request_body(request_body);
     }
     err
+}
+
+fn retry_after_from_error_body(raw_body: &str) -> Option<std::time::Duration> {
+    let value = serde_json::from_str::<serde_json::Value>(raw_body).ok()?;
+    find_json_string(&value, "retryDelay").and_then(parse_provider_duration)
+}
+
+fn find_json_string<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    match value {
+        serde_json::Value::Object(fields) => fields
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                fields
+                    .values()
+                    .find_map(|value| find_json_string(value, key))
+            }),
+        serde_json::Value::Array(items) => {
+            items.iter().find_map(|value| find_json_string(value, key))
+        }
+        _ => None,
+    }
+}
+
+fn parse_provider_duration(value: &str) -> Option<std::time::Duration> {
+    if let Some(milliseconds) = value.strip_suffix("ms") {
+        return milliseconds
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .and_then(|value| std::time::Duration::try_from_secs_f64(value / 1_000.0).ok());
+    }
+    value
+        .strip_suffix('s')?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .and_then(|value| std::time::Duration::try_from_secs_f64(value).ok())
 }
 
 /// Append the `options` tail to a provider's `serialize_config` map: emit the
@@ -380,6 +433,18 @@ mod tests {
             ),
             LlmTerminalReason::ContentFilter
         );
+        assert_eq!(
+            openai_terminal_reason_from_chat_value(
+                &serde_json::json!({
+                    "choices": [{
+                        "message": {"refusal": ""},
+                        "finish_reason": "stop"
+                    }]
+                }),
+                &[],
+            ),
+            LlmTerminalReason::Stop
+        );
     }
 
     #[test]
@@ -404,6 +469,30 @@ mod tests {
 
         let without_request_body = http_error_envelope("failed", 500, Vec::new(), "boom", None);
         assert_eq!(without_request_body.request_body, None);
+    }
+
+    #[test]
+    fn http_error_envelope_reads_google_retry_info_when_header_is_absent() {
+        let err = http_error_envelope(
+            "Gemini request failed with 429",
+            429,
+            Vec::new(),
+            r#"{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"55s"}]}}"#,
+            None,
+        );
+        assert_eq!(err.retry_after, Some(std::time::Duration::from_secs(55)));
+    }
+
+    #[test]
+    fn http_error_envelope_ignores_overflowing_provider_retry_delay() {
+        let err = http_error_envelope(
+            "Provider request failed with 429",
+            429,
+            Vec::new(),
+            r#"{"error":{"details":[{"retryDelay":"1e300s"}]}}"#,
+            None,
+        );
+        assert_eq!(err.retry_after, None);
     }
 
     #[test]

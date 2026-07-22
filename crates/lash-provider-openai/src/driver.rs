@@ -345,7 +345,19 @@ fn complete_buffered_responses(
         .with_partial_response(partial));
     }
     let parts = state.response_parts();
-    if !has_response_content(&parts) {
+    let terminal_reason = state
+        .final_response
+        .as_ref()
+        .map(|value| terminal_reason_from_responses_value(value, &parts))
+        .unwrap_or_else(|| terminal_reason_from_parts(&parts));
+    if !has_response_content(&parts)
+        && !matches!(
+            terminal_reason,
+            LlmTerminalReason::OutputLimit
+                | LlmTerminalReason::ContentFilter
+                | LlmTerminalReason::Cancelled
+        )
+    {
         return Err(empty_response_error(text));
     }
     if let Some(tx) = &stream_events {
@@ -365,11 +377,6 @@ fn complete_buffered_responses(
             tx.send(LlmStreamEvent::Delta(state.full_text.clone()));
         }
     }
-    let terminal_reason = state
-        .final_response
-        .as_ref()
-        .map(|value| terminal_reason_from_responses_value(value, &parts))
-        .unwrap_or_else(|| terminal_reason_from_parts(&parts));
     Ok(LlmResponse {
         full_text: state.full_text,
         parts,
@@ -575,7 +582,19 @@ async fn drive_streaming_responses(
     }
 
     let parts = state.response_parts();
-    if !has_response_content(&parts) {
+    let terminal_reason = state
+        .final_response
+        .as_ref()
+        .map(|value| terminal_reason_from_responses_value(value, &parts))
+        .unwrap_or_else(|| terminal_reason_from_parts(&parts));
+    if !has_response_content(&parts)
+        && !matches!(
+            terminal_reason,
+            LlmTerminalReason::OutputLimit
+                | LlmTerminalReason::ContentFilter
+                | LlmTerminalReason::Cancelled
+        )
+    {
         return Err(empty_response_error(
             state
                 .final_response
@@ -584,11 +603,6 @@ async fn drive_streaming_responses(
                 .unwrap_or_default(),
         ));
     }
-    let terminal_reason = state
-        .final_response
-        .as_ref()
-        .map(|value| terminal_reason_from_responses_value(value, &parts))
-        .unwrap_or_else(|| terminal_reason_from_parts(&parts));
     Ok(LlmResponse {
         full_text: state.full_text,
         parts,

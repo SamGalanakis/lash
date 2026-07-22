@@ -1,0 +1,22 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "openai.chat-per-minute-429",
+  "provider_kind": "openai-compatible",
+  "endpoint": { "method": "POST", "path": "/chat/completions" },
+  "request_match": {
+    "body": { "model": { "equals": "gpt-5.4" }, "stream": { "equals": false } },
+    "headers": { "authorization": { "present": true } }
+  },
+  "timeline": [{
+    "at": 0,
+    "event": "http_error",
+    "status": 429,
+    "headers": [{ "name": "content-type", "value": "application/json" }],
+    "body": "{\"error\":{\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached for o4-mini in organization REDACTED on tokens per min (TPM): Limit 200000, Used 160193, Requested 51963. Please try again in 3.646s. Visit https://platform.openai.com/account/rate-limits to learn more.\",\"param\":null}}"
+  }],
+  "provenance": {
+    "kind": "real_world_report",
+    "source": "https://github.com/openai/codex/issues/451",
+    "notes": "Verbatim redacted error object reported by the OpenAI Codex client; JSON envelope added around the reported error object."
+  }
+}

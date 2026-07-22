@@ -1,0 +1,22 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "google.generate-content-hard-quota-429",
+  "provider_kind": "google_oauth",
+  "endpoint": { "method": "POST", "path": "/v1internal:generateContent" },
+  "request_match": {
+    "body": { "model": { "equals": "gemini-3.1-pro-preview" } },
+    "headers": { "authorization": { "present": true } }
+  },
+  "timeline": [{
+    "at": 0,
+    "event": "http_error",
+    "status": 429,
+    "headers": [{ "name": "content-type", "value": "application/json" }],
+    "body": "{\"error\":{\"code\":429,\"message\":\"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits.\",\"status\":\"RESOURCE_EXHAUSTED\"}}"
+  }],
+  "provenance": {
+    "kind": "real_world_report",
+    "source": "https://discuss.ai.google.dev/t/resource-exhausted-receiving-429-error-despite-staying-within-free-token-rpd-rpm-limits/106355",
+    "notes": "Verbatim response body from an unresolved report of RESOURCE_EXHAUSTED despite reported use within free-tier limits; provider and model request matching are replay harness metadata."
+  }
+}

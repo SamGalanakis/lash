@@ -2378,6 +2378,7 @@ dependencies = [
  "lash-protocol-rlm",
  "lash-protocol-standard",
  "lash-provider-anthropic",
+ "lash-provider-auth",
  "lash-provider-google",
  "lash-provider-openai",
  "lash-rlm-types",
