@@ -51,6 +51,7 @@ Thumbs.db
 /.agent-workbench.schema*-backup-*/
 /.claude/
 /CLAUDE.md
+/AGENTS.md
 /skills/harness-opt/
 /.tmp/
 /tmp/
