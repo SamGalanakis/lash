@@ -239,6 +239,9 @@ where
                     self.emit_instant(record, "lash.provider_request", None);
                 }
             }
+            TraceEvent::EffectEnvelopeDiff { .. } => {
+                self.emit_instant(record, "lash.effect_envelope_diff", None)
+            }
             TraceEvent::ProviderStreamEvent { .. } => {
                 if !self.add_llm_event(record, "lash.provider_stream_event") {
                     self.emit_instant(record, "lash.provider_stream_event", None);
@@ -501,6 +504,26 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
                 &mut attrs,
                 "lash.request.body_json_omitted_reason",
                 &event.body_json_omitted_reason,
+            );
+        }
+        TraceEvent::EffectEnvelopeDiff { event } => {
+            attrs.push(KeyValue::new(
+                "lash.effect_envelope.recorded_hash",
+                event.recorded_envelope_hash.clone(),
+            ));
+            attrs.push(KeyValue::new(
+                "lash.effect_envelope.reconstructed_hash",
+                event.reconstructed_envelope_hash.clone(),
+            ));
+            attrs.push(KeyValue::new(
+                "lash.effect_envelope.divergent_path_count",
+                event.divergent_paths.len() as i64,
+            ));
+            push_payload_json(
+                &mut attrs,
+                options,
+                "lash.effect_envelope.divergent_paths_json",
+                &event.divergent_paths,
             );
         }
         TraceEvent::ProviderStreamEvent { event } => {
@@ -1016,6 +1039,7 @@ fn event_type(event: &TraceEvent) -> &'static str {
         TraceEvent::LlmCallCompleted { .. } => "llm_call_completed",
         TraceEvent::LlmCallFailed { .. } => "llm_call_failed",
         TraceEvent::ProviderRequest { .. } => "provider_request",
+        TraceEvent::EffectEnvelopeDiff { .. } => "effect_envelope_diff",
         TraceEvent::ProviderStreamEvent { .. } => "provider_stream_event",
         TraceEvent::RuntimeStreamEvent { .. } => "runtime_stream_event",
         TraceEvent::LashlangExecution { .. } => "lashlang_execution",
@@ -1030,7 +1054,7 @@ fn event_type(event: &TraceEvent) -> &'static str {
 
 fn is_error_event(event: &TraceEvent) -> bool {
     match event {
-        TraceEvent::LlmCallFailed { .. } => true,
+        TraceEvent::LlmCallFailed { .. } | TraceEvent::EffectEnvelopeDiff { .. } => true,
         TraceEvent::ToolCallStarted { .. } => false,
         TraceEvent::ToolCallCompleted { output, .. } => !output.is_success(),
         TraceEvent::TurnCompleted { status, .. } => status == "failed",
@@ -1045,6 +1069,10 @@ fn error_status(record: &TraceRecord) -> Status {
             Status::error(format!("tool call failed: {name}"))
         }
         TraceEvent::TurnCompleted { status, .. } => Status::error(status.clone()),
+        TraceEvent::EffectEnvelopeDiff { event } => Status::error(format!(
+            "effect envelope hash mismatch at {} paths",
+            event.divergent_paths.len()
+        )),
         _ => Status::error("lash trace event failed"),
     }
 }

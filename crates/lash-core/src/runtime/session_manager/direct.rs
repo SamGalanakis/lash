@@ -250,9 +250,18 @@ impl DirectCompletionCapability {
             request,
             usage_source,
         } = plan;
+        let tracing = &current.host.core.tracing;
+        let replay_trace = crate::RuntimeEffectReplayTrace::gated(
+            tracing.trace_level,
+            tracing.trace_sink.as_ref(),
+            tracing.trace_context.clone(),
+            crate::trace::trace_context_from_invocation(&envelope.invocation),
+            Arc::clone(&current.host.core.clock),
+        );
         let local_executor = crate::RuntimeEffectLocalExecutor::direct(
             provider,
             Arc::clone(&current.host.core.durability.attachment_store),
+            replay_trace,
         );
         let outcome = match context.position {
             DirectExecutionPosition::Independent => {

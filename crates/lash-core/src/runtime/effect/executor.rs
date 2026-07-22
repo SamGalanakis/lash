@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod controller_error;
 mod scoped;
+
+pub use controller_error::RuntimeEffectControllerError;
 
 use crate::LlmRequest as CoreLlmRequest;
 use crate::ProcessRecord;
@@ -552,55 +555,6 @@ impl<'run> RuntimeEffectControllerHandle<'run> {
     }
 }
 
-#[derive(Clone, Debug, thiserror::Error, Serialize, Deserialize)]
-#[error("{code}: {message}")]
-pub struct RuntimeEffectControllerError {
-    pub code: String,
-    pub message: String,
-}
-
-impl RuntimeEffectControllerError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-
-    pub(super) fn wrong_outcome(expected: RuntimeEffectKind, actual: RuntimeEffectKind) -> Self {
-        Self::new(
-            "runtime_effect_wrong_outcome",
-            format!(
-                "expected {} outcome, got {}",
-                expected.as_str(),
-                actual.as_str()
-            ),
-        )
-    }
-
-    pub(crate) fn into_runtime_error(self) -> RuntimeError {
-        RuntimeError::new(self.code, self.message)
-    }
-}
-
-impl From<RuntimeError> for RuntimeEffectControllerError {
-    fn from(err: RuntimeError) -> Self {
-        Self::new(err.code.as_str(), err.message)
-    }
-}
-
-impl From<PluginError> for RuntimeEffectControllerError {
-    fn from(err: PluginError) -> Self {
-        Self::new("plugin", err.to_string())
-    }
-}
-
-impl From<crate::StoreError> for RuntimeEffectControllerError {
-    fn from(err: crate::StoreError) -> Self {
-        Self::new("runtime_store", err.to_string())
-    }
-}
-
 // =============================================================================
 // Local executor (per-effect borrowed runner state)
 // =============================================================================
@@ -779,12 +733,14 @@ enum RuntimeEffectLocalExecutorState<'run> {
 /// work still crosses the same `execute_effect` boundary as durable controllers.
 pub struct RuntimeEffectLocalExecutor<'run> {
     state: RuntimeEffectLocalExecutorState<'run>,
+    replay_trace: Option<super::RuntimeEffectReplayTrace>,
 }
 
 impl<'run> RuntimeEffectLocalExecutor<'run> {
     pub fn unavailable() -> Self {
         Self {
             state: RuntimeEffectLocalExecutorState::Unavailable,
+            replay_trace: None,
         }
     }
 
@@ -799,6 +755,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 clock,
                 observe_turn_cancel: true,
             },
+            replay_trace: None,
         }
     }
 
@@ -818,6 +775,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 clock,
                 observe_turn_cancel: true,
             },
+            replay_trace: None,
         }
     }
 
@@ -846,6 +804,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 registry,
                 process_work_driver,
             }),
+            replay_trace: None,
         }
     }
 
@@ -863,6 +822,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                     run: Box::new(move |envelope| Box::pin(run(envelope))),
                 },
             )),
+            replay_trace: None,
         }
     }
 
@@ -875,6 +835,13 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
     where
         'scope: 'run,
     {
+        let replay_trace = super::RuntimeEffectReplayTrace::gated(
+            driver.host.core.tracing.trace_level,
+            driver.host.core.tracing.trace_sink.as_ref(),
+            driver.host.core.tracing.trace_context.clone(),
+            driver.trace_context(machine.protocol_iteration()),
+            Arc::clone(&driver.host.core.clock),
+        );
         Self {
             state: RuntimeEffectLocalExecutorState::Runner(Box::new(LocalTurnEffectRunner {
                 driver,
@@ -882,18 +849,21 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 event_tx,
                 cancellation,
             })),
+            replay_trace,
         }
     }
 
     pub(in crate::runtime) fn direct(
         provider: ProviderHandle,
         attachment_store: Arc<crate::SessionAttachmentStore>,
+        replay_trace: Option<super::RuntimeEffectReplayTrace>,
     ) -> Self {
         Self {
             state: RuntimeEffectLocalExecutorState::Runner(Box::new(LocalDirectEffectRunner {
                 provider,
                 attachment_store,
             })),
+            replay_trace,
         }
     }
 
@@ -901,11 +871,13 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         context: crate::RuntimeExecutionContext<'run>,
         child_trace_hooks: HashMap<String, crate::ToolChildExecutionTraceHook>,
     ) -> Self {
+        let replay_trace = context.replay_validation_trace();
         Self {
             state: RuntimeEffectLocalExecutorState::Runner(Box::new(LocalToolBatchEffectRunner {
                 context,
                 child_trace_hooks,
             })),
+            replay_trace,
         }
     }
 
@@ -913,6 +885,7 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'run>>,
         tool_context: crate::ToolContext<'run>,
     ) -> Self {
+        let replay_trace = tool_context.replay_validation_trace();
         Self {
             state: RuntimeEffectLocalExecutorState::Runner(Box::new(
                 LocalPreparedToolAttemptEffectRunner {
@@ -920,7 +893,12 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                     tool_context,
                 },
             )),
+            replay_trace,
         }
+    }
+
+    pub fn replay_validation_trace(&self) -> Option<&super::RuntimeEffectReplayTrace> {
+        self.replay_trace.as_ref()
     }
 
     pub async fn execute(

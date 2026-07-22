@@ -308,6 +308,12 @@ impl<'run> ToolContextBuilder<'run> {
 }
 
 impl<'run> ToolContext<'run> {
+    pub(crate) fn replay_validation_trace(&self) -> Option<crate::RuntimeEffectReplayTrace> {
+        self.runtime_execution_context
+            .as_ref()
+            .and_then(crate::RuntimeExecutionContext::replay_validation_trace)
+    }
+
     #[cfg(any(test, feature = "testing"))]
     #[expect(
         clippy::too_many_arguments,

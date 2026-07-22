@@ -9,7 +9,8 @@
 use std::collections::BTreeSet;
 
 use lash_trace::{
-    TraceContext, TraceError, TraceEvent, TraceLashlangExecutionEvent,
+    TraceContext, TraceEffectEnvelopeDiffEntry, TraceEffectEnvelopeDiffEvent,
+    TraceEffectEnvelopeDiffValue, TraceError, TraceEvent, TraceLashlangExecutionEvent,
     TraceLashlangExecutionIdentity, TraceLashlangStatus, TraceLlmRequest, TraceLlmResponse,
     TraceProviderRequestEvent, TraceProviderStreamEvent, TraceRecord, TraceRuntimeScope,
     TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceTokenUsage, TraceToolCallOutcome,
@@ -125,6 +126,22 @@ fn event_samples() -> Vec<TraceEvent> {
                 body_json_omitted_reason: None,
             },
         },
+        TraceEvent::EffectEnvelopeDiff {
+            event: TraceEffectEnvelopeDiffEvent {
+                recorded_envelope_hash: "old".to_string(),
+                reconstructed_envelope_hash: "new".to_string(),
+                divergent_paths: vec![TraceEffectEnvelopeDiffEntry {
+                    path: "command.input.value".to_string(),
+                    recorded: TraceEffectEnvelopeDiffValue::Present {
+                        json_len: 1,
+                        json_sha256: "one".to_string(),
+                        value_json: Some(json!(1)),
+                        value_json_omitted_reason: None,
+                    },
+                    reconstructed: TraceEffectEnvelopeDiffValue::Missing,
+                }],
+            },
+        },
         TraceEvent::ProviderStreamEvent {
             event: TraceProviderStreamEvent {
                 provider: "test".to_string(),
@@ -204,6 +221,7 @@ const ALL_TRACE_EVENT_KINDS: &[&str] = &[
     "llm_call_completed",
     "llm_call_failed",
     "provider_request",
+    "effect_envelope_diff",
     "provider_stream_event",
     "runtime_stream_event",
     "tool_call_started",

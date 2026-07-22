@@ -98,16 +98,17 @@ pub(crate) use causal::tool_retry_sleep_invocation;
 pub use clock::{Clock, SystemClock};
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
-    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, BoundaryReason, CausalRef,
-    EffectHost, ExecutionScope, ExternalCompletionError, InlineEffectHost,
-    InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec, ProcessCommand,
-    ProcessEffectOutcome, Resolution, ResolveOutcome, RuntimeAwaitEventOptions,
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, BoundaryReason,
+    CanonicalRuntimeEffectEnvelope, CausalRef, EffectHost, ExecutionScope, ExternalCompletionError,
+    InlineEffectHost, InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec,
+    ProcessCommand, ProcessEffectOutcome, Resolution, ResolveOutcome, RuntimeAwaitEventOptions,
     RuntimeDirectLlmOutcome, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeLlmCallOutcome,
-    RuntimeReplay, RuntimeScope, RuntimeSleepOptions, RuntimeSubject, ScopedEffectController,
-    SegmentProgress, ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome,
-    ToolCallLaunch,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEffectReplayMismatchSummary,
+    RuntimeEffectReplayTrace, RuntimeInvocation, RuntimeLlmCallOutcome, RuntimeReplay,
+    RuntimeScope, RuntimeSleepOptions, RuntimeSubject, ScopedEffectController, SegmentProgress,
+    ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome, ToolCallLaunch,
+    validate_replayed_effect_envelope,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};

@@ -343,6 +343,15 @@ fn interpret_typed(event: &TraceEvent, raw: &Value) -> (String, String, bool) {
             // is the one place the viewer compares it as a string.
             status == "failed",
         ),
+        TraceEvent::EffectEnvelopeDiff { event } => (
+            "effect envelope mismatch".to_string(),
+            format!(
+                "{} divergent paths\n{}",
+                event.divergent_paths.len(),
+                json_compact(&event.divergent_paths)
+            ),
+            true,
+        ),
         TraceEvent::Custom { name, payload } => (name.clone(), json_compact(payload), false),
         TraceEvent::PromptBuilt {
             prompt_chars,
