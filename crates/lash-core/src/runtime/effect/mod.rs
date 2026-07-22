@@ -2,6 +2,7 @@ mod await_events;
 mod envelope;
 mod executor;
 mod outcome;
+mod validation;
 
 pub use envelope::{
     LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome,
@@ -18,6 +19,10 @@ pub use executor::{
     ScopedEffectController, SegmentProgress,
 };
 pub use lash_sansio::CausalRef;
+pub use validation::{
+    CanonicalRuntimeEffectEnvelope, RuntimeEffectReplayMismatchSummary, RuntimeEffectReplayTrace,
+    validate_replayed_effect_envelope,
+};
 
 pub(crate) use executor::{ProcessRunner, RuntimeEffectControllerHandle};
 pub(crate) use outcome::{

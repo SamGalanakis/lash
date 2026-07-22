@@ -76,15 +76,16 @@ use std::time::Duration;
 
 use lash_core::{
     AbandonEvidence, AbandonWriter, AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity,
-    DurabilityTier, DurableProcessWorker, EffectHost, ExecutionScope, PluginError, ProcessAttach,
-    ProcessAwaitOutput, ProcessCommand, ProcessCompletionAuthority, ProcessEffectOutcome,
-    ProcessEventSink, ProcessExecutionContext, ProcessExternalRef, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessWorkDriver, RecoveryDisposition,
-    Resolution, ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
-    RuntimeInvocation, RuntimeSleepOptions, ScopedEffectController, TurnAddress, TurnAttach,
-    TurnTerminal, TurnWorkDriver, watch_process_registry_with_sink,
+    CanonicalRuntimeEffectEnvelope, DurabilityTier, DurableProcessWorker, EffectHost,
+    ExecutionScope, PluginError, ProcessAttach, ProcessAwaitOutput, ProcessCommand,
+    ProcessCompletionAuthority, ProcessEffectOutcome, ProcessEventSink, ProcessExecutionContext,
+    ProcessExternalRef, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
+    ProcessWorkDriver, RecoveryDisposition, Resolution, ResolveOutcome, RuntimeAwaitEventOptions,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeError, RuntimeInvocation, RuntimeSleepOptions, ScopedEffectController, TurnAddress,
+    TurnAttach, TurnTerminal, TurnWorkDriver, validate_replayed_effect_envelope,
+    watch_process_registry_with_sink,
 };
 use lash_http_transport::{
     HttpMethod, HttpRequest, HttpResponse, HttpTransport, HttpTransportError, ReqwestClient,
@@ -513,7 +514,7 @@ fn restate_await_event_turn_cancel_wait_request(
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 struct RecordedRuntimeEffect {
-    envelope_hash: String,
+    envelope: CanonicalRuntimeEffectEnvelope,
     outcome: Result<RuntimeEffectOutcome, RuntimeEffectControllerError>,
 }
 
@@ -3734,14 +3735,15 @@ where
                 }
             }
             RestateEffectExecution::JournaledRun => {
-                let current_hash = envelope.stable_hash()?;
+                let reconstructed_envelope = envelope.canonical_form()?;
+                let replay_trace = local_executor.replay_validation_trace().cloned();
                 let invocation = envelope.invocation.clone();
-                let recorded_hash = current_hash.clone();
+                let recorded_envelope = reconstructed_envelope.clone();
                 let recorded = self
                     .record_effect(invocation, async move {
                         let outcome = local_executor.execute(envelope).await;
                         RecordedRuntimeEffect {
-                            envelope_hash: recorded_hash,
+                            envelope: recorded_envelope,
                             outcome,
                         }
                     })
@@ -3752,7 +3754,11 @@ where
                             err.to_string(),
                         )
                     })?;
-                validate_recorded_effect_hash(recorded, &current_hash)?
+                validate_recorded_effect_envelope(
+                    recorded,
+                    &reconstructed_envelope,
+                    replay_trace.as_ref(),
+                )?
             }
         }
     }
@@ -3970,20 +3976,18 @@ fn restate_effect_name(invocation: &RuntimeInvocation) -> String {
     }
 }
 
-fn validate_recorded_effect_hash(
+fn validate_recorded_effect_envelope(
     recorded: RecordedRuntimeEffect,
-    current_hash: &str,
+    reconstructed: &CanonicalRuntimeEffectEnvelope,
+    trace: Option<&lash_core::RuntimeEffectReplayTrace>,
 ) -> Result<Result<RuntimeEffectOutcome, RuntimeEffectControllerError>, RuntimeEffectControllerError>
 {
-    if recorded.envelope_hash != current_hash {
-        return Err(RuntimeEffectControllerError::new(
-            "restate_effect_hash_mismatch",
-            format!(
-                "recorded runtime effect hash {} did not match current envelope hash {}",
-                recorded.envelope_hash, current_hash
-            ),
-        ));
-    }
+    validate_replayed_effect_envelope(
+        &recorded.envelope,
+        reconstructed,
+        "restate_effect_hash_mismatch",
+        trace,
+    )?;
     Ok(recorded.outcome)
 }
 

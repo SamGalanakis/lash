@@ -18,6 +18,17 @@ impl Write for Sha256Writer {
     }
 }
 
+pub(crate) fn stable_json_string<T>(value: &T) -> Result<String, serde_json::Error>
+where
+    T: Serialize + ?Sized,
+{
+    serde_json::to_string(value)
+}
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
 pub(crate) fn stable_json_sha256_hex<T>(value: &T) -> Result<String, serde_json::Error>
 where
     T: Serialize + ?Sized,

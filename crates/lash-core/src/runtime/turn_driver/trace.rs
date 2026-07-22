@@ -1,7 +1,10 @@
 use super::*;
 
 impl RuntimeTurnDriver<'_> {
-    pub(super) fn trace_context(&self, protocol_iteration: usize) -> lash_trace::TraceContext {
+    pub(in crate::runtime) fn trace_context(
+        &self,
+        protocol_iteration: usize,
+    ) -> lash_trace::TraceContext {
         lash_trace::TraceContext::default()
             .for_session(self.session_id.clone())
             .for_turn_index(self.turn_index)
@@ -39,6 +42,7 @@ impl RuntimeTurnDriver<'_> {
         tracing.trace_sink.as_ref().map(|sink| {
             crate::RuntimeExecutionTracing::new(
                 std::sync::Arc::clone(sink),
+                tracing.trace_level,
                 tracing.trace_context.clone(),
                 self.trace_context(protocol_iteration),
             )

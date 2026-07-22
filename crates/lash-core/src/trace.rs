@@ -137,6 +137,7 @@ fn assign_span_identity(context: &mut TraceContext, event: &TraceEvent) {
             set_span(context, None, parent);
         }
         TraceEvent::PromptBuilt { .. }
+        | TraceEvent::EffectEnvelopeDiff { .. }
         | TraceEvent::ProtocolStep { .. }
         | TraceEvent::TokenUsage { .. } => set_span(context, None, turn_node),
         // Events that already carry their own node identity in the payload, and

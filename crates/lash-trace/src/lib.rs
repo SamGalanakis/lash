@@ -211,6 +211,9 @@ pub enum TraceEvent {
     ProviderRequest {
         event: TraceProviderRequestEvent,
     },
+    EffectEnvelopeDiff {
+        event: TraceEffectEnvelopeDiffEvent,
+    },
     ProviderStreamEvent {
         event: TraceProviderStreamEvent,
     },
@@ -268,6 +271,7 @@ impl TraceEvent {
             Self::LlmCallCompleted { .. } => "llm_call_completed",
             Self::LlmCallFailed { .. } => "llm_call_failed",
             Self::ProviderRequest { .. } => "provider_request",
+            Self::EffectEnvelopeDiff { .. } => "effect_envelope_diff",
             Self::ProviderStreamEvent { .. } => "provider_stream_event",
             Self::RuntimeStreamEvent { .. } => "runtime_stream_event",
             Self::ToolCallStarted { .. } => "tool_call_started",
@@ -437,6 +441,41 @@ pub struct TraceProviderRequestEvent {
     /// Why `body_json` is absent when the request body itself was observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_json_omitted_reason: Option<String>,
+}
+
+/// Structural differences between the canonical envelopes on a failed durable
+/// replay validation. This event may contain prompt and tool-result values and
+/// must therefore only be emitted through the extended-trace gate.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TraceEffectEnvelopeDiffEvent {
+    pub recorded_envelope_hash: String,
+    pub reconstructed_envelope_hash: String,
+    pub divergent_paths: Vec<TraceEffectEnvelopeDiffEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TraceEffectEnvelopeDiffEntry {
+    pub path: String,
+    pub recorded: TraceEffectEnvelopeDiffValue,
+    pub reconstructed: TraceEffectEnvelopeDiffValue,
+}
+
+/// One side of a divergent canonical-envelope value.
+///
+/// Large values are omitted whole. Their exact serialized length and digest
+/// remain available, but no prefix is retained.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TraceEffectEnvelopeDiffValue {
+    Missing,
+    Present {
+        json_len: usize,
+        json_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value_json: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value_json_omitted_reason: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

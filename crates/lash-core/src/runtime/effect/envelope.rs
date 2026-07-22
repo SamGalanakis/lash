@@ -229,12 +229,13 @@ impl RuntimeEffectEnvelope {
     }
 
     pub fn stable_hash(&self) -> Result<String, RuntimeEffectControllerError> {
-        crate::stable_hash::stable_json_sha256_hex(self).map_err(|err| {
-            RuntimeEffectControllerError::new(
-                "runtime_effect_envelope_hash",
-                format!("failed to serialize runtime effect envelope: {err}"),
-            )
-        })
+        Ok(self.canonical_form()?.hash().to_string())
+    }
+
+    pub fn canonical_form(
+        &self,
+    ) -> Result<super::CanonicalRuntimeEffectEnvelope, RuntimeEffectControllerError> {
+        super::CanonicalRuntimeEffectEnvelope::capture(self)
     }
 }
 

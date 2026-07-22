@@ -322,6 +322,7 @@ pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostTurnProtocol>;
 pub use lash_trace::otel::{OtelTraceOptions, OtelTraceSink};
 pub use lash_trace::{
     JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceContext,
+    TraceEffectEnvelopeDiffEntry, TraceEffectEnvelopeDiffEvent, TraceEffectEnvelopeDiffValue,
     TraceError, TraceEvent, TraceLabelMetadata, TraceLevel, TraceLlmMessage, TraceLlmRequest,
     TraceLlmResponse, TracePromptComponent, TraceProviderRequestEvent, TraceProviderStreamEvent,
     TraceRecord, TraceRuntimeScope, TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceSink,
@@ -439,11 +440,13 @@ pub use session_model::{
 // lash-restate's workflows) and their integration tests. Kept on the public
 // surface; the rest of the runtime block above stays crate-internal.
 pub use runtime::{
-    LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, ProcessEventSemanticsSpec,
-    RuntimeAwaitEventOptions, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeSessionState,
-    RuntimeSleepOptions, ToolAttemptEffectOutcome, ToolAttemptLaunch, ToolBatchEffectOutcome,
+    CanonicalRuntimeEffectEnvelope, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome,
+    ProcessEventSemanticsSpec, RuntimeAwaitEventOptions, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeEffectReplayMismatchSummary, RuntimeEffectReplayTrace, RuntimeInvocation,
+    RuntimeSessionState, RuntimeSleepOptions, ToolAttemptEffectOutcome, ToolAttemptLaunch,
+    ToolBatchEffectOutcome, validate_replayed_effect_envelope,
 };
 pub use schemars::JsonSchema;
 pub(crate) use session::RuntimeExecutionTracing;

@@ -314,28 +314,57 @@ fn restate_handler_controller_disallows_concurrent_effect_calls() {
 
 #[test]
 fn recorded_runtime_effect_hash_mismatch_fails_explicitly() {
+    let recorded_envelope = test_sleep_envelope(1)
+        .canonical_form()
+        .expect("recorded envelope");
+    let reconstructed = test_sleep_envelope(2)
+        .canonical_form()
+        .expect("reconstructed envelope");
     let recorded = RecordedRuntimeEffect {
-        envelope_hash: "old".to_string(),
+        envelope: recorded_envelope,
         outcome: Ok(RuntimeEffectOutcome::Sleep),
     };
 
-    let err = validate_recorded_effect_hash(recorded, "new").expect_err("hash mismatch");
+    let err = validate_recorded_effect_envelope(recorded, &reconstructed, None)
+        .expect_err("hash mismatch");
 
     assert_eq!(err.code, "restate_effect_hash_mismatch");
+    assert_eq!(
+        err.summary.expect("mismatch summary"),
+        lash_core::RuntimeEffectReplayMismatchSummary {
+            divergent_path_count: 1,
+            first_divergent_paths: vec!["command.duration_ms".to_string()],
+        }
+    );
 }
 
 #[test]
 fn recorded_runtime_effect_hash_match_returns_replayed_outcome() {
+    let envelope = test_sleep_envelope(1)
+        .canonical_form()
+        .expect("canonical envelope");
     let recorded = RecordedRuntimeEffect {
-        envelope_hash: "same".to_string(),
+        envelope: envelope.clone(),
         outcome: Ok(RuntimeEffectOutcome::Sleep),
     };
 
-    let outcome = validate_recorded_effect_hash(recorded, "same")
+    let outcome = validate_recorded_effect_envelope(recorded, &envelope, None)
         .expect("hash match")
         .expect("replayed outcome");
 
     assert!(matches!(outcome, RuntimeEffectOutcome::Sleep));
+}
+
+fn test_sleep_envelope(duration_ms: u64) -> RuntimeEffectEnvelope {
+    RuntimeEffectEnvelope::new(
+        RuntimeInvocation::effect(
+            lash_core::runtime::RuntimeScope::for_turn("session", "turn", 0, 0),
+            "sleep:test",
+            RuntimeEffectKind::Sleep,
+            "sleep:test",
+        ),
+        RuntimeEffectCommand::Sleep { duration_ms },
+    )
 }
 
 fn llm_spec() -> lash_core::LlmRequestSpec {
