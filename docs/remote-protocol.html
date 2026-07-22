@@ -32,7 +32,7 @@
     </div>
     <aside class="contract">
       <strong>Contract</strong>
-      <p>Every top-level remote envelope carries <code>protocol_version</code>. Current code uses <code>REMOTE_PROTOCOL_VERSION == 13</code>; call <code>validate()</code> or <code>ensure_protocol_version(...)</code> before executing a received envelope. Version 13 adds optional <code>session_id</code> scoping to trigger occurrence requests so older peers cannot silently ignore the scope and over-deliver across sessions. Version 12 added the <code>model_attempt_reset</code> turn activity, whose correlation-id lists retract prose and reasoning from a superseded provider attempt. Remote consumers use exact-version negotiation, so each semantic wire expansion receives its own protocol version.</p>
+      <p>Every top-level remote envelope carries <code>protocol_version</code>. Current code uses <code>REMOTE_PROTOCOL_VERSION == 14</code>; call <code>validate()</code> or <code>ensure_protocol_version(...)</code> before executing a received envelope. Version 14 replaces image-only attachment DTOs and blob maps with the generic MIME-tagged <code>RemoteAttachmentSource</code> union; it deliberately does not decode the version 13 shape. Version 13 added optional <code>session_id</code> scoping to trigger occurrence requests. Remote consumers use exact-version negotiation, so each semantic wire expansion receives its own protocol version.</p>
     </aside>
   </div>
 
@@ -75,7 +75,6 @@ let request = RemoteTurnRequest {
         items: vec![RemoteInputItem::Text {
             text: "Summarize this task.".to_string(),
         }],
-        image_blobs_base64: Default::default(),
         protocol_turn_options: None,
         trace_turn_id: Some(trace_turn_id.clone()),
         prompt_layer: None,
@@ -204,7 +203,7 @@ request.validate()?;</code></pre>
       <div class="listing__row"><div class="listing__label">version</div><div class="listing__body"><p>Top-level envelopes reject unsupported <code>protocol_version</code>; nested turn input/activity versions must match the parent envelope where applicable.</p></div></div>
       <div class="listing__row"><div class="listing__label">required ids</div><div class="listing__body"><p>Remote turn requests/results require non-empty <code>session_id</code> and <code>turn_id</code>. LLM requests/responses require non-empty <code>request_id</code>. Model intents require non-empty <code>model</code>.</p></div></div>
       <div class="listing__row"><div class="listing__label">messages</div><div class="listing__body"><p>LLM messages must contain at least one content block. Tool-call blocks require <code>call_id</code> and <code>tool_name</code>; tool-result blocks require <code>call_id</code>.</p></div></div>
-      <div class="listing__row"><div class="listing__label">attachments</div><div class="listing__body"><p>Attachments require a non-empty MIME type. Attachment references require non-empty <code>id</code> and <code>mime</code>. Image blobs require non-empty ids and base64 payloads.</p></div></div>
+      <div class="listing__row"><div class="listing__label">attachments</div><div class="listing__body"><p>Inline and external-URL sources require a non-empty MIME type; stored references require non-empty <code>id</code> and <code>media_type</code>; provider-file sources require a provider/account scope and id.</p></div></div>
       <div class="listing__row"><div class="listing__label">generation</div><div class="listing__body"><p><code>RemoteGenerationOptions.output_token_cap</code> must be greater than zero when present. Temperature and top-p are strings so provider-specific precision can round-trip.</p></div></div>
       <div class="listing__row"><div class="listing__label">triggers</div><div class="listing__body"><p>Trigger occurrence requests require non-empty <code>source_type</code>, <code>source_key</code>, and <code>idempotency_key</code>. Trigger subscription filters validate any supplied <code>RemoteProcessDefinitionIdentity</code> target. Trigger filters and emit reports validate protocol version but leave authorization and tenant scoping to the boundary host.</p></div></div>
       <div class="listing__row"><div class="listing__label">process env</div><div class="listing__body"><p>Process start environments are closed: <code>env_spec</code> accepts only <code>plugin_options</code> and <code>policy</code>. Unknown fields, including old product metadata such as <code>tool_grants</code> or <code>resolved_tool_bindings</code> under <code>env_spec</code>, fail deserialization. Model limits must be positive when supplied.</p></div></div>
@@ -212,7 +211,7 @@ request.validate()?;</code></pre>
     </div>
     <aside class="gotcha">
       <strong>Gotcha</strong>
-      <p>Validation cannot prove that an <code>ImageAttachment.attachment_index</code> points at an existing attachment or that a remote caller is authorized for a session. Check those at the boundary that has the attachment list and caller identity.</p>
+      <p>Validation cannot prove that an <code>Attachment</code> content block's index points at an existing source or that a remote caller is authorized for a session. Check those at the boundary that has the attachment list and caller identity.</p>
     </aside>
   </div>
 

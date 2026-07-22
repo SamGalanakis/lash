@@ -285,7 +285,7 @@ impl Drop for RuntimeNamedPhase {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Text { text: String },
-    ImageRef { id: String },
+    Attachment { source: crate::AttachmentSource },
 }
 
 impl InputItem {
@@ -293,8 +293,8 @@ impl InputItem {
         Self::Text { text: text.into() }
     }
 
-    pub fn image_ref(id: impl Into<String>) -> Self {
-        Self::ImageRef { id: id.into() }
+    pub fn attachment(source: crate::AttachmentSource) -> Self {
+        Self::Attachment { source }
     }
 }
 
@@ -302,8 +302,6 @@ impl InputItem {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnInput {
     pub items: Vec<InputItem>,
-    #[serde(default)]
-    pub image_blobs: HashMap<String, Vec<u8>>,
     /// Per-turn override for protocol-owned turn options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_turn_options: Option<crate::ProtocolTurnOptions>,
@@ -329,7 +327,6 @@ impl TurnInput {
     pub fn items(items: impl IntoIterator<Item = InputItem>) -> Self {
         Self {
             items: items.into_iter().collect(),
-            image_blobs: HashMap::new(),
             protocol_turn_options: None,
             trace_turn_id: None,
             protocol_extension: None,
@@ -337,28 +334,8 @@ impl TurnInput {
         }
     }
 
-    pub fn with_image_blob(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {
-        self.image_blobs.insert(id.into(), bytes);
-        self
-    }
-
-    pub fn with_image_blobs<I, K>(mut self, image_blobs: I) -> Self
-    where
-        I: IntoIterator<Item = (K, Vec<u8>)>,
-        K: Into<String>,
-    {
-        self.image_blobs.extend(
-            image_blobs
-                .into_iter()
-                .map(|(id, bytes)| (id.into(), bytes)),
-        );
-        self
-    }
-
-    pub fn with_image_ref(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {
-        let id = id.into();
-        self.items.push(InputItem::image_ref(id.clone()));
-        self.image_blobs.insert(id, bytes);
+    pub fn with_attachment(mut self, source: crate::AttachmentSource) -> Self {
+        self.items.push(InputItem::attachment(source));
         self
     }
 
@@ -583,7 +560,7 @@ pub trait ProtocolSessionExtension: Send + Sync {
 #[derive(Clone, Debug)]
 pub(super) enum NormalizedItem {
     Text(String),
-    Image(crate::AttachmentRef),
+    Attachment(crate::AttachmentSource),
 }
 
 /// Canonical assistant output payload.

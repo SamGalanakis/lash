@@ -144,6 +144,28 @@ impl RuntimeTurnDriver<'_> {
                 return Ok(());
             }
         };
+        for result in &results {
+            let producer = crate::AttachmentProducer::Tool {
+                tool_name: result.tool_name.clone(),
+            };
+            for source in result.output.attachments() {
+                if let Err(err) = self
+                    .host
+                    .core
+                    .attachment_source_policy
+                    .authorize(&producer, &source)
+                {
+                    self.fail_or_abort_runtime_effect_controller(
+                        machine,
+                        crate::RuntimeEffectControllerError::new(
+                            "attachment_source_policy_denied",
+                            err.to_string(),
+                        ),
+                    )?;
+                    return Ok(());
+                }
+            }
+        }
         machine.handle_response(Response::ToolResults { id, results });
         Ok(())
     }

@@ -364,7 +364,6 @@ async fn run_once_trace_jsonl(
             items: vec![InputItem::Text {
                 text: benchmark_prompt(scenario, turn_index),
             }],
-            image_blobs: Default::default(),
             protocol_turn_options: None,
             trace_turn_id: None,
             protocol_extension: None,

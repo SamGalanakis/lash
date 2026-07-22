@@ -1,4 +1,4 @@
-//! Turn input envelopes: items, image blobs, per-turn protocol options, and
+//! Turn input envelopes: MIME-generic items, per-turn protocol options, and
 //! the turn request.
 
 use std::collections::HashMap;
@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::llm::RemoteAttachmentSource;
 use crate::prompt::RemotePromptLayer;
 use crate::registry_errors::{RemoteProtocolError, require_non_empty};
 use crate::tools::RemoteToolGrant;
@@ -47,8 +48,6 @@ pub struct RemoteTurnInput {
     pub protocol_version: u32,
     #[serde(default)]
     pub items: Vec<RemoteInputItem>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub image_blobs_base64: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_turn_options: Option<RemoteProtocolTurnOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,7 +61,6 @@ impl RemoteTurnInput {
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             items: vec![RemoteInputItem::Text { text: text.into() }],
-            image_blobs_base64: HashMap::new(),
             protocol_turn_options: None,
             trace_turn_id: None,
             prompt_layer: None,
@@ -71,18 +69,9 @@ impl RemoteTurnInput {
 
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
-        for item in &self.items {
-            if let RemoteInputItem::ImageRef { id } = item {
-                require_non_empty("RemoteInputItem::ImageRef", "id", id)?;
-            }
-        }
-        for (id, blob) in &self.image_blobs_base64 {
-            require_non_empty("RemoteTurnInput", "image_blobs_base64 key", id)?;
-            if blob.trim().is_empty() {
-                return Err(RemoteProtocolError::InvalidImageBlob {
-                    id: id.clone(),
-                    message: "base64 payload cannot be empty".to_string(),
-                });
+        for (index, item) in self.items.iter().enumerate() {
+            if let RemoteInputItem::Attachment { source } = item {
+                source.validate(index)?;
             }
         }
         Ok(())
@@ -93,7 +82,7 @@ impl RemoteTurnInput {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RemoteInputItem {
     Text { text: String },
-    ImageRef { id: String },
+    Attachment { source: RemoteAttachmentSource },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

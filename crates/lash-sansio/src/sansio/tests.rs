@@ -68,10 +68,9 @@ fn assistant_done(text: impl Into<String>) -> TurnOutcome {
 fn test_attachment_ref(byte_len: u64) -> crate::AttachmentRef {
     crate::AttachmentRef {
         id: crate::AttachmentId::new("att-test"),
-        media_type: crate::MediaType::Image(crate::ImageMediaType::Png),
+        media_type: crate::MediaType::parse("image/png").unwrap(),
         byte_len,
-        width: None,
-        height: None,
+        type_metadata: None,
         label: None,
     }
 }
@@ -613,10 +612,10 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
         parts: vec![
             Part {
                 id: "m0.p0".to_string(),
-                kind: PartKind::Image,
+                kind: PartKind::Attachment,
                 content: String::new(),
                 attachment: Some(PartAttachment {
-                    reference: test_attachment_ref(3),
+                    source: crate::llm::types::AttachmentSource::stored(test_attachment_ref(3)),
                 }),
                 tool_call_id: None,
                 tool_name: None,
@@ -651,7 +650,7 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
     assert!(request.messages.iter().any(|msg| {
         msg.blocks
             .iter()
-            .any(|block| matches!(block, LlmContentBlock::Image { attachment_idx: 0 }))
+            .any(|block| matches!(block, LlmContentBlock::Attachment { attachment_idx: 0 }))
     }));
     assert!(request.messages.iter().any(|msg| {
         msg.blocks.iter().any(|block| match block {

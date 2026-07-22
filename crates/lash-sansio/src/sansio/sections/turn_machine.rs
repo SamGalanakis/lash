@@ -499,7 +499,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
             .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
         {
             let message_id = self.next_synthetic_message_id("checkpoint");
-            let mut parts = if message.parts.is_empty() {
+            let mut parts = if message.parts.is_empty() && !message.content.is_empty() {
                 vec![Part {
                     id: format!("{message_id}.p0"),
                     kind: PartKind::Text,
@@ -515,6 +515,18 @@ impl<M: TurnProtocol> TurnMachine<M> {
             } else {
                 message.parts.clone()
             };
+            parts.extend(message.attachments.iter().cloned().map(|source| Part {
+                id: String::new(),
+                kind: PartKind::Attachment,
+                content: String::new(),
+                attachment: Some(crate::PartAttachment { source }),
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }));
             reassign_part_ids(&message_id, &mut parts);
             appended.push(Message {
                 id: message_id.clone(),

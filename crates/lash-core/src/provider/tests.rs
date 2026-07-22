@@ -368,6 +368,7 @@ fn empty_request() -> LlmRequest {
         model: "model".to_string(),
         messages: Vec::new(),
         attachments: Vec::new(),
+        resolved_stored: Default::default(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
         model_variant: Default::default(),

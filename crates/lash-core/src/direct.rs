@@ -1,6 +1,6 @@
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputSpec,
+    AttachmentSource, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputSpec,
     LlmRequest, LlmRequestScope, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason,
     LlmToolChoice,
 };
@@ -20,7 +20,7 @@ pub enum DirectRole {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DirectPart {
     Text(String),
-    Image(usize),
+    Attachment(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -54,7 +54,7 @@ pub struct DirectRequest {
     #[serde(default)]
     pub messages: Vec<DirectMessage>,
     #[serde(default)]
-    pub attachments: Vec<LlmAttachment>,
+    pub attachments: Vec<AttachmentSource>,
     #[serde(default)]
     pub output: DirectOutputSpec,
     #[serde(default)]
@@ -349,8 +349,8 @@ pub(crate) fn build_llm_request(
                         });
                     }
                 }
-                DirectPart::Image(idx) => {
-                    blocks.push(LlmContentBlock::Image {
+                DirectPart::Attachment(idx) => {
+                    blocks.push(LlmContentBlock::Attachment {
                         attachment_idx: idx,
                     });
                 }
@@ -381,6 +381,7 @@ pub(crate) fn build_llm_request(
         model,
         messages: llm_messages,
         attachments,
+        resolved_stored: Default::default(),
         tools: Vec::new().into(),
         tool_choice: LlmToolChoice::None,
         model_variant,
@@ -753,7 +754,7 @@ mod tests {
                 },
                 DirectMessage {
                     role: DirectRole::Assistant,
-                    parts: vec![DirectPart::Image(2)],
+                    parts: vec![DirectPart::Attachment(2)],
                 },
             ],
             attachments: Vec::new(),
@@ -784,7 +785,7 @@ mod tests {
         assert_eq!(llm_request.messages[1].role, LlmRole::Assistant);
         assert!(matches!(
             &llm_request.messages[1].blocks[0],
-            LlmContentBlock::Image { attachment_idx: 2 }
+            LlmContentBlock::Attachment { attachment_idx: 2 }
         ));
     }
 

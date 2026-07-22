@@ -263,7 +263,9 @@ fn attachment_put_executor(
             })?;
         *captured_id.lock().expect("capture attachment id") = Some(reference.id.clone());
         let output = if typed {
-            crate::ToolCallOutput::success(crate::ToolValue::Attachment(reference))
+            crate::ToolCallOutput::success(crate::ToolValue::Attachment(
+                crate::AttachmentSource::stored(reference),
+            ))
         } else {
             crate::ToolCallOutput::success(serde_json::json!({
                 "attachment_id": reference.id.as_str()
@@ -318,13 +320,13 @@ fn tool_attempt_outcome(
 ) -> crate::RuntimeEffectOutcome {
     crate::RuntimeEffectOutcome::ToolAttempt {
         launch: Box::new(crate::ToolAttemptLaunch::Done {
-            record: crate::ToolCallRecord {
+            record: Box::new(crate::ToolCallRecord {
                 call_id: Some(call_id.to_string()),
                 tool: call_id.to_string(),
                 args: serde_json::json!({}),
                 output,
                 duration_ms: 0,
-            },
+            }),
         }),
         triggers: Vec::new(),
     }
@@ -360,7 +362,7 @@ fn assert_typed_outcome(outcome: &crate::RuntimeEffectOutcome, id: &crate::Attac
             .output
             .attachments()
             .into_iter()
-            .map(|reference| reference.id)
+            .filter_map(|source| source.stored_ref().map(|reference| reference.id.clone()))
             .collect::<Vec<_>>(),
         vec![id.clone()]
     );
@@ -552,9 +554,8 @@ fn session_request(session_id: &str) -> crate::SessionStoreCreateRequest {
 
 fn attachment_meta(label: &str) -> crate::AttachmentCreateMeta {
     crate::AttachmentCreateMeta::new(
-        crate::MediaType::Image(crate::ImageMediaType::Png),
-        Some(1),
-        Some(1),
+        crate::MediaType::parse("image/png").unwrap(),
+        Some(crate::AttachmentTypeMetadata::image(Some(1), Some(1))),
         Some(format!("{label}.png")),
     )
 }

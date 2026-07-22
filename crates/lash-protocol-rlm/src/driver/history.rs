@@ -42,7 +42,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use lash_core::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole};
+use lash_core::llm::types::{AttachmentSource, LlmContentBlock, LlmMessage, LlmRole};
 use lash_core::{BorrowedChronologicalEntry, BorrowedChronologicalPayload, head_tail_truncate};
 use lash_rlm_types::{RlmAttachmentRef, RlmImageRef};
 use lashlang::{Value as FlowValue, ValueProjectionContext};
@@ -84,7 +84,7 @@ struct PendingProse {
 
 pub(super) fn build_rlm_history_messages_from_turn(
     input: RlmHistoryRenderInput<'_>,
-    attachments: &mut Vec<LlmAttachment>,
+    attachments: &mut Vec<AttachmentSource>,
 ) -> Vec<LlmMessage> {
     let mut messages = render_history_messages(&input, attachments);
     let saw_history = !messages.is_empty();
@@ -124,7 +124,7 @@ pub(super) fn build_rlm_history_messages_from_turn(
 /// assistant cell message + a user observation message, with prose folded in.
 pub(super) fn render_history_messages(
     input: &RlmHistoryRenderInput<'_>,
-    attachments: &mut Vec<LlmAttachment>,
+    attachments: &mut Vec<AttachmentSource>,
 ) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
     let chronological =
@@ -189,13 +189,16 @@ pub(super) fn render_history_messages(
                 let image_refs = step
                     .images
                     .iter()
-                    .map(|image| RlmImageRef {
-                        id: image.id.to_string(),
-                        media_type: image.media_type,
-                        width: image.width,
-                        height: image.height,
-                        bytes: image.byte_len as usize,
-                        label: image.label.clone(),
+                    .map(|image| {
+                        let (width, height) = image_dimensions(image);
+                        RlmImageRef {
+                            id: image.id.to_string(),
+                            media_type: image.media_type.clone(),
+                            width,
+                            height,
+                            bytes: image.byte_len as usize,
+                            label: image.label.clone(),
+                        }
                     })
                     .collect::<Vec<_>>();
                 let obs_text = step_output_text(
@@ -337,7 +340,7 @@ fn mark_last_history_text_cache_breakpoint(messages: &mut [LlmMessage]) {
 
 fn append_borrowed_entry_image_blocks(
     entry: BorrowedChronologicalEntry<'_>,
-    attachments: &mut Vec<LlmAttachment>,
+    attachments: &mut Vec<AttachmentSource>,
     blocks: &mut Vec<LlmContentBlock>,
 ) {
     match entry.payload {
@@ -347,8 +350,8 @@ fn append_borrowed_entry_image_blocks(
                     continue;
                 };
                 let attachment_idx = attachments.len();
-                attachments.push(LlmAttachment::reference(attachment.reference.clone()));
-                blocks.push(LlmContentBlock::Image { attachment_idx });
+                attachments.push(attachment.source.clone());
+                blocks.push(LlmContentBlock::Attachment { attachment_idx });
             }
         }
         BorrowedChronologicalPayload::ProtocolEvent(event) => {
@@ -357,8 +360,8 @@ fn append_borrowed_entry_image_blocks(
             {
                 for image in &entry.images {
                     let attachment_idx = attachments.len();
-                    attachments.push(LlmAttachment::reference(image.clone()));
-                    blocks.push(LlmContentBlock::Image { attachment_idx });
+                    attachments.push(AttachmentSource::stored(image.clone()));
+                    blocks.push(LlmContentBlock::Attachment { attachment_idx });
                 }
             }
         }
@@ -462,14 +465,51 @@ fn message_attachment_refs(parts: &[lash_core::Part]) -> Vec<RlmAttachmentRef> {
         .iter()
         .filter_map(|part| {
             let attachment = part.attachment.as_ref()?;
+            let (media_type, label, source, reference) = attachment_summary(&attachment.source);
             Some(RlmAttachmentRef {
                 id: part.id.clone(),
-                media_type: attachment.reference.media_type,
-                label: attachment.reference.label.clone(),
-                reference: attachment.reference.id.to_string(),
+                media_type,
+                label,
+                source,
+                reference,
             })
         })
         .collect()
+}
+
+fn attachment_summary(
+    source: &AttachmentSource,
+) -> (Option<lash_core::MediaType>, Option<String>, String, String) {
+    match source {
+        AttachmentSource::Inline { media_type, .. } => (
+            Some(media_type.clone()),
+            None,
+            "inline".to_string(),
+            "transient".to_string(),
+        ),
+        AttachmentSource::Stored { attachment_ref } => (
+            Some(attachment_ref.media_type.clone()),
+            attachment_ref.label.clone(),
+            "stored".to_string(),
+            attachment_ref.id.to_string(),
+        ),
+        AttachmentSource::ExternalUrl { media_type, url } => (
+            Some(media_type.clone()),
+            None,
+            "external_url".to_string(),
+            url.clone(),
+        ),
+        AttachmentSource::ProviderFile { id, .. } => {
+            (None, None, "provider_file".to_string(), id.clone())
+        }
+    }
+}
+
+fn image_dimensions(image: &lash_core::AttachmentRef) -> (Option<u32>, Option<u32>) {
+    match image.type_metadata.as_ref() {
+        Some(lash_core::AttachmentTypeMetadata::Image { width, height }) => (*width, *height),
+        None => (None, None),
+    }
 }
 
 fn message_history_text_parts(parts: &[lash_core::Part]) -> String {

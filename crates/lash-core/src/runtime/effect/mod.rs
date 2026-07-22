@@ -38,7 +38,7 @@ mod tests {
     use super::*;
     use crate::LlmRequest as CoreLlmRequest;
     use crate::llm::types::{
-        LlmAttachment, LlmEventSender, LlmMessage, LlmProviderTraceSender, LlmToolChoice,
+        AttachmentSource, LlmEventSender, LlmMessage, LlmProviderTraceSender, LlmToolChoice,
     };
     use std::sync::Arc;
 
@@ -48,7 +48,11 @@ mod tests {
         let llm_request = CoreLlmRequest {
             model: "model".to_string(),
             messages: vec![LlmMessage::text(crate::llm::types::LlmRole::User, "hello")],
-            attachments: vec![LlmAttachment::bytes("image/png", vec![1, 2, 3, 4])],
+            attachments: vec![AttachmentSource::inline(
+                crate::MediaType::parse("image/png").unwrap(),
+                vec![1, 2, 3, 4],
+            )],
+            resolved_stored: Default::default(),
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::None,
             model_variant: crate::ReasoningSelection::Effort("fast".to_string()),
@@ -74,8 +78,10 @@ mod tests {
         let decoded: LlmRequestSpec = serde_json::from_str(&encoded).expect("decode llm spec");
         let live = decoded.into_request(None, None);
         assert_eq!(live.model, "model");
-        assert!(live.attachments[0].data.is_empty());
-        assert!(live.attachments[0].reference.is_some());
+        assert!(matches!(
+            live.attachments[0],
+            AttachmentSource::Stored { .. }
+        ));
         assert!(live.stream_events.is_none());
         assert!(live.provider_trace.is_none());
 
@@ -269,13 +275,13 @@ mod tests {
     fn tool_batch_outcome_rejects_wrong_effect_kind() {
         let error = RuntimeEffectOutcome::ToolAttempt {
             launch: Box::new(ToolAttemptLaunch::Done {
-                record: crate::ToolCallRecord {
+                record: Box::new(crate::ToolCallRecord {
                     call_id: Some("call-1".to_string()),
                     tool: "echo".to_string(),
                     args: serde_json::json!({"value": "call-1"}),
                     output: crate::ToolCallOutput::success(serde_json::json!({"done": "call-1"})),
                     duration_ms: 7,
-                },
+                }),
             }),
             triggers: Vec::new(),
         }

@@ -174,7 +174,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Normalize host input before prompt work.</h3>
-                <p><code>InputItem::Text</code> and <code>InputItem::ImageRef</code> become typed message parts and attachment references; host file and dir mentions are resolved into text markers before they reach the runtime.</p>
+                <p><code>InputItem::Text</code> and <code>InputItem::Attachment</code> become typed message parts; inline attachments normalize to Lash-owned refs while borrowed URL/provider-file sources remain borrowed.</p>
               </div>
             </li>
             <li>

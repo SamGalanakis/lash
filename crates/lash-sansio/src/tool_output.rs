@@ -5,12 +5,12 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Number, Value};
 
-use crate::AttachmentRef;
+use crate::llm::types::AttachmentSource;
 
 const TAG_KEY: &str = "$lash_tool_value";
 const ATTACHMENT_TAG: &str = "attachment";
 const OBJECT_TAG: &str = "object";
-const REF_KEY: &str = "ref";
+const SOURCE_KEY: &str = "source";
 const ENTRIES_KEY: &str = "entries";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ impl ToolCallOutput {
         }
     }
 
-    pub fn attachments(&self) -> Vec<AttachmentRef> {
+    pub fn attachments(&self) -> Vec<AttachmentSource> {
         match &self.outcome {
             ToolCallOutcome::Success(value) => value.attachments(),
             ToolCallOutcome::Failure(failure) => failure
@@ -98,6 +98,28 @@ impl ToolCallOutput {
                 .as_ref()
                 .map(ToolValue::attachments)
                 .unwrap_or_default(),
+        }
+    }
+
+    pub fn replace_attachment_source(
+        &mut self,
+        previous: &AttachmentSource,
+        replacement: &AttachmentSource,
+    ) {
+        match &mut self.outcome {
+            ToolCallOutcome::Success(value) => {
+                value.replace_attachment_source(previous, replacement)
+            }
+            ToolCallOutcome::Failure(failure) => {
+                if let Some(raw) = failure.raw.as_mut() {
+                    raw.replace_attachment_source(previous, replacement);
+                }
+            }
+            ToolCallOutcome::Cancelled(cancellation) => {
+                if let Some(raw) = cancellation.raw.as_mut() {
+                    raw.replace_attachment_source(previous, replacement);
+                }
+            }
         }
     }
 }
@@ -140,7 +162,7 @@ pub enum ToolValue {
     String(String),
     Array(Vec<ToolValue>),
     Object(BTreeMap<String, ToolValue>),
-    Attachment(AttachmentRef),
+    Attachment(AttachmentSource),
 }
 
 impl ToolValue {
@@ -151,7 +173,7 @@ impl ToolValue {
             Self::Number(value) => Value::Number(value.clone()),
             Self::String(value) => Value::String(value.clone()),
             Self::Array(values) => Value::Array(values.iter().map(Self::to_json_value).collect()),
-            Self::Attachment(reference) => tagged_attachment_json(reference),
+            Self::Attachment(source) => tagged_attachment_json(source),
             Self::Object(entries) => object_tool_value_to_json(entries),
         }
     }
@@ -165,7 +187,7 @@ impl ToolValue {
             Self::Array(values) => {
                 Value::Array(values.into_iter().map(Self::into_json_value).collect())
             }
-            Self::Attachment(reference) => tagged_attachment_json(&reference),
+            Self::Attachment(source) => tagged_attachment_json(&source),
             Self::Object(entries) => object_tool_value_into_json(entries),
         }
     }
@@ -174,7 +196,7 @@ impl ToolValue {
         serde_json::from_value(value)
     }
 
-    pub fn attachments(&self) -> Vec<AttachmentRef> {
+    pub fn attachments(&self) -> Vec<AttachmentSource> {
         let mut attachments = Vec::new();
         self.collect_attachments(&mut attachments);
         attachments
@@ -194,7 +216,7 @@ impl ToolValue {
         parts
     }
 
-    fn collect_attachments(&self, attachments: &mut Vec<AttachmentRef>) {
+    fn collect_attachments(&self, attachments: &mut Vec<AttachmentSource>) {
         match self {
             Self::Attachment(reference) => attachments.push(reference.clone()),
             Self::Array(values) => {
@@ -208,6 +230,31 @@ impl ToolValue {
                 }
             }
             Self::Null | Self::Bool(_) | Self::Number(_) | Self::String(_) => {}
+        }
+    }
+
+    fn replace_attachment_source(
+        &mut self,
+        previous: &AttachmentSource,
+        replacement: &AttachmentSource,
+    ) {
+        match self {
+            Self::Attachment(source) if source == previous => *source = replacement.clone(),
+            Self::Array(values) => {
+                for value in values {
+                    value.replace_attachment_source(previous, replacement);
+                }
+            }
+            Self::Object(entries) => {
+                for value in entries.values_mut() {
+                    value.replace_attachment_source(previous, replacement);
+                }
+            }
+            Self::Null
+            | Self::Bool(_)
+            | Self::Number(_)
+            | Self::String(_)
+            | Self::Attachment(_) => {}
         }
     }
 
@@ -252,15 +299,15 @@ impl ToolValue {
     }
 }
 
-fn tagged_attachment_json(reference: &AttachmentRef) -> Value {
+fn tagged_attachment_json(source: &AttachmentSource) -> Value {
     let mut map = Map::with_capacity(2);
     map.insert(
         TAG_KEY.to_string(),
         Value::String(ATTACHMENT_TAG.to_string()),
     );
     map.insert(
-        REF_KEY.to_string(),
-        serde_json::to_value(reference).unwrap_or(Value::Null),
+        SOURCE_KEY.to_string(),
+        serde_json::to_value(source).unwrap_or(Value::Null),
     );
     Value::Object(map)
 }
@@ -338,10 +385,10 @@ impl Serialize for ToolValue {
             Self::Number(value) => value.serialize(serializer),
             Self::String(value) => serializer.serialize_str(value),
             Self::Array(values) => values.serialize(serializer),
-            Self::Attachment(reference) => {
+            Self::Attachment(source) => {
                 let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry(TAG_KEY, ATTACHMENT_TAG)?;
-                map.serialize_entry(REF_KEY, reference)?;
+                map.serialize_entry(SOURCE_KEY, source)?;
                 map.end()
             }
             Self::Object(entries) => {
@@ -449,14 +496,14 @@ fn decode_object(mut map: Map<String, Value>) -> serde_json::Result<ToolValue> {
         .ok_or_else(|| serde_json::Error::custom("reserved tool value tag must be a string"))?;
     match tag {
         ATTACHMENT_TAG => {
-            if map.len() != 2 || !map.contains_key(REF_KEY) {
+            if map.len() != 2 || !map.contains_key(SOURCE_KEY) {
                 return Err(serde_json::Error::custom("malformed attachment tool value"));
             }
-            let reference = serde_json::from_value(
-                map.remove(REF_KEY)
-                    .ok_or_else(|| serde_json::Error::custom("missing attachment ref"))?,
+            let source = serde_json::from_value(
+                map.remove(SOURCE_KEY)
+                    .ok_or_else(|| serde_json::Error::custom("missing attachment source"))?,
             )?;
-            Ok(ToolValue::Attachment(reference))
+            Ok(ToolValue::Attachment(source))
         }
         OBJECT_TAG => {
             if map.len() != 2 || !map.contains_key(ENTRIES_KEY) {
@@ -649,7 +696,7 @@ impl ModelToolReturn {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelToolReturnPart {
     Text { text: String },
-    Attachment(AttachmentRef),
+    Attachment(AttachmentSource),
 }
 
 impl ModelToolReturnPart {
@@ -719,28 +766,29 @@ fn format_cancellation_message(cancellation: &ToolCancellation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AttachmentId, AttachmentMeta, ImageMediaType, MediaType};
+    use crate::{AttachmentId, AttachmentMeta, AttachmentTypeMetadata, MediaType};
 
-    fn image_ref(id: &str) -> AttachmentRef {
-        AttachmentMeta::new(
-            AttachmentId::new(id),
-            MediaType::Image(ImageMediaType::Png),
-            3,
-            Some(1),
-            Some(1),
-            Some("tiny".to_string()),
+    fn attachment_source(id: &str) -> AttachmentSource {
+        AttachmentSource::stored(
+            AttachmentMeta::new(
+                AttachmentId::new(id),
+                MediaType::parse("image/png").unwrap(),
+                3,
+                Some(AttachmentTypeMetadata::image(Some(1), Some(1))),
+                Some("tiny".to_string()),
+            )
+            .as_ref(),
         )
-        .as_ref()
     }
 
     #[test]
     fn tool_value_serializes_nested_attachments() {
-        let value = ToolValue::Array(vec![ToolValue::Attachment(image_ref("img"))]);
+        let value = ToolValue::Array(vec![ToolValue::Attachment(attachment_source("img"))]);
 
         let json = serde_json::to_value(&value).unwrap();
 
         assert_eq!(json[0][TAG_KEY], ATTACHMENT_TAG);
-        assert_eq!(json[0][REF_KEY]["id"], "img");
+        assert_eq!(json[0][SOURCE_KEY]["attachment_ref"]["id"], "img");
         assert_eq!(serde_json::from_value::<ToolValue>(json).unwrap(), value);
     }
 
@@ -763,7 +811,7 @@ mod tests {
         let value = ToolValue::Object(BTreeMap::from([
             (
                 "attachment".to_string(),
-                ToolValue::Attachment(image_ref("img")),
+                ToolValue::Attachment(attachment_source("img")),
             ),
             (
                 TAG_KEY.to_string(),
@@ -788,7 +836,7 @@ mod tests {
     fn tool_value_model_parts_preserve_attachment_position() {
         let value = ToolValue::Array(vec![
             ToolValue::String("before".into()),
-            ToolValue::Attachment(image_ref("img")),
+            ToolValue::Attachment(attachment_source("img")),
             ToolValue::String("after".into()),
         ]);
 
@@ -796,7 +844,7 @@ mod tests {
             value.model_parts(),
             vec![
                 ModelToolReturnPart::text("[\"before\","),
-                ModelToolReturnPart::Attachment(image_ref("img")),
+                ModelToolReturnPart::Attachment(attachment_source("img")),
                 ModelToolReturnPart::text(",\"after\"]"),
             ]
         );
@@ -804,7 +852,7 @@ mod tests {
 
     #[test]
     fn tool_output_failure_projects_raw_attachments_after_failure_text() {
-        let attachment = image_ref("img");
+        let attachment = attachment_source("img");
         let output = ToolCallOutput::failure(ToolFailure {
             class: ToolFailureClass::Execution,
             code: "boom".into(),

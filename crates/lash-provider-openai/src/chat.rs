@@ -26,12 +26,50 @@ impl OpenAiCompatibleProvider {
         }
     }
 
-    fn chat_image_part(att: &LlmAttachment) -> Value {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+    fn validate_chat_attachments(req: &LlmRequest) -> Result<(), LlmTransportError> {
+        for source in &req.attachments {
+            let supported = source
+                .media_type()
+                .is_some_and(|mime| OPENAI_IMAGE_MIMES.contains(&mime.as_str()))
+                && !matches!(source, AttachmentSource::ProviderFile { .. });
+            if !supported {
+                let accepted_by = known_attachment_acceptors(source);
+                return Err(unsupported_attachment_capability(
+                    "OpenAI Chat Completions",
+                    source,
+                    &accepted_by,
+                ));
+            }
+            if matches!(source, AttachmentSource::Stored { .. })
+                && req.attachment_bytes(source).is_none()
+            {
+                return Err(LlmTransportError::new(
+                    "OpenAI Chat Completions could not materialize a stored attachment because session-guard resolution did not provide its bytes",
+                )
+                .with_kind(ProviderFailureKind::Validation)
+                .with_code("stored_attachment_not_resolved"));
+            }
+        }
+        Ok(())
+    }
+
+    fn chat_attachment_part(req: &LlmRequest, source: &AttachmentSource) -> Value {
+        let media_type = source.media_type().expect("validated image source");
+        let url = match source {
+            AttachmentSource::ExternalUrl { url, .. } => url.clone(),
+            AttachmentSource::Inline { .. } | AttachmentSource::Stored { .. } => {
+                let bytes = req
+                    .attachment_bytes(source)
+                    .expect("validated attachment bytes");
+                let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                format!("data:{media_type};base64,{b64}")
+            }
+            AttachmentSource::ProviderFile { .. } => unreachable!(),
+        };
         json!({
             "type": "image_url",
             "image_url": {
-                "url": format!("data:{};base64,{}", att.mime, b64),
+                "url": url,
             },
         })
     }
@@ -60,11 +98,11 @@ impl OpenAiCompatibleProvider {
                         }
                         text_parts.push(part);
                     }
-                    LlmContentBlock::Image { attachment_idx }
+                    LlmContentBlock::Attachment { attachment_idx }
                         if matches!(msg.role, LlmRole::User) =>
                     {
                         if let Some(att) = req.attachments.get(*attachment_idx) {
-                            text_parts.push(Self::chat_image_part(att));
+                            text_parts.push(Self::chat_attachment_part(req, att));
                         }
                     }
                     LlmContentBlock::ToolCall {
@@ -108,7 +146,7 @@ impl OpenAiCompatibleProvider {
                         }
                         messages.push(tool_message);
                     }
-                    LlmContentBlock::Reasoning { .. } | LlmContentBlock::Image { .. } => {}
+                    LlmContentBlock::Reasoning { .. } | LlmContentBlock::Attachment { .. } => {}
                     LlmContentBlock::Text { .. } | LlmContentBlock::ToolCall { .. } => {}
                 }
             }
@@ -332,7 +370,7 @@ impl OpenAiCompatibleProvider {
         req: &LlmRequest,
         stream: bool,
     ) -> Result<(Value, CacheBreakpointDiagnostics), LlmTransportError> {
-        validate_image_attachments(req, OPENAI_IMAGE_MIMES, "OpenAI")?;
+        Self::validate_chat_attachments(req)?;
         let compat = self.resolved_compat(CompletionEndpoint::ChatCompletions);
         let mut messages = Self::build_chat_messages(req);
         let mut tools =

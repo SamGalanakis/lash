@@ -127,7 +127,7 @@ pub(crate) fn format_message_for_observer(node: &impl ObservedMessageNode) -> St
             PartKind::Code => format!("```{}\n```", part.content),
             PartKind::ToolCall => format!("[tool call] {}", part.content),
             PartKind::ToolResult => format!("[tool result] {}", part.content),
-            PartKind::Image => "[image]".to_string(),
+            PartKind::Attachment => "[attachment]".to_string(),
             // Reasoning parts are excluded from observational memory —
             // chain-of-thought is display-only and not durable context.
             PartKind::Reasoning => String::new(),

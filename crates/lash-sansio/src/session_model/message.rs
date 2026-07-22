@@ -1,6 +1,5 @@
-use crate::AttachmentRef;
 use crate::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, ProviderReasoningReplay,
+    AttachmentSource, LlmContentBlock, LlmMessage, LlmRole, ProviderReasoningReplay,
     ProviderReplayMeta, ResponseTextMeta,
 };
 use std::collections::HashSet;
@@ -92,7 +91,7 @@ pub struct Part {
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PartKind {
     Text,
-    Image,
+    Attachment,
     Code,
     Output,
     Error,
@@ -112,7 +111,7 @@ pub enum PartKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartAttachment {
-    pub reference: AttachmentRef,
+    pub source: AttachmentSource,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -139,20 +138,21 @@ impl Part {
         if matches!(self.kind, PartKind::Reasoning) {
             return 0;
         }
-        if matches!(self.kind, PartKind::Image) {
+        if matches!(self.kind, PartKind::Attachment) {
             return self
                 .attachment
                 .as_ref()
-                .map(|attachment| attachment.reference.id.as_str().len())
+                .and_then(|attachment| attachment.source.stored_ref())
+                .map(|attachment_ref| attachment_ref.id.as_str().len())
                 .unwrap_or_else(|| self.render().len());
         }
         self.render().len()
     }
 
     pub(crate) fn render(&self) -> String {
-        if matches!(self.kind, PartKind::Image) {
+        if matches!(self.kind, PartKind::Attachment) {
             return if self.attachment.is_some() || self.content.trim().is_empty() {
-                "[Image attached]".to_string()
+                "[Attachment]".to_string()
             } else {
                 self.content.clone()
             };
@@ -197,7 +197,7 @@ fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
             PartKind::Output => format!("<output>\n{}\n</output>", rendered),
             PartKind::Error => format!("<error>\n{}\n</error>", rendered),
             PartKind::Text
-            | PartKind::Image
+            | PartKind::Attachment
             | PartKind::Prose
             | PartKind::ToolCall
             | PartKind::ToolResult
@@ -206,7 +206,9 @@ fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
         MessageRole::Assistant => match part.kind {
             PartKind::Code => rendered,
             PartKind::ToolCall => render_assistant_tool_call(part, &rendered),
-            PartKind::Prose | PartKind::Text | PartKind::Image | PartKind::ToolResult => rendered,
+            PartKind::Prose | PartKind::Text | PartKind::Attachment | PartKind::ToolResult => {
+                rendered
+            }
             PartKind::Reasoning => rendered,
             _ => rendered,
         },
@@ -224,15 +226,15 @@ fn render_assistant_tool_call(part: &Part, rendered: &str) -> String {
     }
 }
 
-fn attachment_from_part(part: &Part) -> Option<LlmAttachment> {
-    if !matches!(part.kind, PartKind::Image) {
+fn attachment_from_part(part: &Part) -> Option<AttachmentSource> {
+    if !matches!(part.kind, PartKind::Attachment) {
         return None;
     }
     let attachment = part.attachment.as_ref()?;
-    Some(LlmAttachment::reference(attachment.reference.clone()))
+    Some(attachment.source.clone())
 }
 
-fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachment>) -> String {
+fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<AttachmentSource>) -> String {
     let mut out = Vec::new();
     for part in msg.parts.iter() {
         // Reasoning items are display-only from the transcript's point of
@@ -243,7 +245,7 @@ fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachm
         }
         if let Some(attachment) = attachment_from_part(part) {
             attachments.push(attachment);
-            out.push("[Image attached]".to_string());
+            out.push("[Attachment]".to_string());
             continue;
         }
         let rendered = render_part_for_chat(msg.role, part);
@@ -257,7 +259,7 @@ fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachm
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RenderedPrompt {
     pub messages: Vec<LlmMessage>,
-    pub attachments: Vec<LlmAttachment>,
+    pub attachments: Vec<AttachmentSource>,
 }
 
 /// Memoized render of a `MessageSequence`'s `base`. Shared across the
@@ -714,7 +716,7 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                     {
                         let attachment_idx = rendered.attachments.len();
                         rendered.attachments.push(attachment);
-                        blocks.push(LlmContentBlock::Image { attachment_idx });
+                        blocks.push(LlmContentBlock::Attachment { attachment_idx });
                         continue;
                     }
 
@@ -764,6 +766,7 @@ fn llm_role_for_message(role: MessageRole) -> LlmRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AttachmentRef;
 
     fn part(kind: PartKind, content: &str) -> Part {
         Part {
@@ -783,21 +786,20 @@ mod tests {
     fn test_attachment_ref(byte_len: u64) -> AttachmentRef {
         AttachmentRef {
             id: crate::AttachmentId::new("att-test"),
-            media_type: crate::MediaType::Image(crate::ImageMediaType::Png),
+            media_type: crate::MediaType::parse("image/png").unwrap(),
             byte_len,
-            width: None,
-            height: None,
+            type_metadata: None,
             label: None,
         }
     }
 
-    fn image_part(bytes: &[u8]) -> Part {
+    fn attachment_part(bytes: &[u8]) -> Part {
         Part {
             id: "p0".to_string(),
-            kind: PartKind::Image,
+            kind: PartKind::Attachment,
             content: String::new(),
             attachment: Some(PartAttachment {
-                reference: test_attachment_ref(bytes.len() as u64),
+                source: AttachmentSource::stored(test_attachment_ref(bytes.len() as u64)),
             }),
             tool_call_id: None,
             tool_name: None,
@@ -894,7 +896,11 @@ mod tests {
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::User,
-                parts: vec![part(PartKind::Text, "show this"), image_part(&[1, 2, 3])].into(),
+                parts: vec![
+                    part(PartKind::Text, "show this"),
+                    attachment_part(&[1, 2, 3]),
+                ]
+                .into(),
                 origin: None,
             },
             Message {
@@ -947,7 +953,7 @@ mod tests {
         ));
         assert!(matches!(
             rendered.messages[1].blocks[1],
-            LlmContentBlock::Image { attachment_idx: 0 }
+            LlmContentBlock::Attachment { attachment_idx: 0 }
         ));
         assert_eq!(rendered.attachments.len(), 1);
         assert!(matches!(
@@ -1024,17 +1030,17 @@ mod tests {
     }
 
     #[test]
-    fn render_transcript_prompt_collects_images() {
+    fn render_transcript_prompt_collects_attachments() {
         let msgs = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::User,
-            parts: vec![image_part(&[9, 8, 7])].into(),
+            parts: vec![attachment_part(&[9, 8, 7])].into(),
             origin: None,
         }];
 
         let rendered = render_transcript_prompt(&msgs);
         let text = block_text(&rendered.messages[0], 0);
-        assert!(text.contains("[Image attached]"));
+        assert!(text.contains("[Attachment]"));
         assert_eq!(rendered.attachments.len(), 1);
     }
 

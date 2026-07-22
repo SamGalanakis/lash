@@ -19,6 +19,7 @@ pub struct RuntimeHostConfig {
     pub prompt: RuntimePromptConfig,
     pub control: RuntimeControlConfig,
     pub tracing: RuntimeTracingConfig,
+    pub attachment_source_policy: Arc<dyn crate::AttachmentSourcePolicy>,
     /// Injected time source. Durable timestamps and timeout/backoff logic read
     /// this rather than the OS clock directly, so replay is reproducible and
     /// tests can drive time. Defaults to [`SystemClock`](super::SystemClock).
@@ -106,6 +107,7 @@ impl RuntimeHostConfig {
                 trace_level: TraceLevel::Standard,
                 trace_context: TraceContext::default(),
             },
+            attachment_source_policy: Arc::new(crate::OpenAttachmentSourcePolicy),
             clock: Arc::new(super::SystemClock),
         }
     }
@@ -115,6 +117,14 @@ impl RuntimeHostConfig {
     /// [`SystemClock`](super::SystemClock).
     pub fn with_clock(mut self, clock: Arc<dyn super::Clock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    pub fn with_attachment_source_policy(
+        mut self,
+        policy: Arc<dyn crate::AttachmentSourcePolicy>,
+    ) -> Self {
+        self.attachment_source_policy = policy;
         self
     }
 

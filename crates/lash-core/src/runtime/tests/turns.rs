@@ -31,16 +31,15 @@ impl crate::ToolProvider for AttachmentPutTool {
             .put(
                 b"turn-owned-tool-attachment".to_vec(),
                 crate::AttachmentCreateMeta::new(
-                    crate::MediaType::Image(crate::ImageMediaType::Png),
-                    Some(1),
-                    Some(1),
+                    crate::MediaType::parse("image/png").unwrap(),
+                    Some(crate::AttachmentTypeMetadata::image(Some(1), Some(1))),
                     Some("turn-owned.png".to_string()),
                 ),
             )
             .await
             .expect("tool attachment put");
         crate::ToolResult::from_output(crate::ToolCallOutput::success(
-            crate::ToolValue::Attachment(reference),
+            crate::ToolValue::Attachment(crate::AttachmentSource::stored(reference)),
         ))
     }
 }
@@ -748,7 +747,6 @@ async fn turn_provider_override_does_not_persist_into_session_policy_or_agent_fr
                 items: vec![InputItem::Text {
                     text: "use override".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -810,7 +808,6 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -862,7 +859,6 @@ async fn normal_turn_stores_effective_user_text_in_state() {
                 items: vec![InputItem::Text {
                     text: "/yolopush\n\n<skill>\nbody\n</skill>".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -930,7 +926,6 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -980,7 +975,6 @@ async fn provider_failure_surfaces_typed_kind_and_retryability_on_turn_issue() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1034,7 +1028,6 @@ async fn assembled_turn_reports_turn_timing_from_injected_clock() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1096,7 +1089,6 @@ async fn queued_checkpoint_input_commits_before_continuing_standard_turn() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1173,7 +1165,10 @@ async fn queued_checkpoint_input_preserves_images() {
         "root",
         "image-attachment-turn",
         None,
-        TurnInput::text("see image").with_image_ref("test-image", vec![1, 2, 3]),
+        TurnInput::text("see image").with_attachment(crate::AttachmentSource::inline(
+            crate::MediaType::parse("image/png").unwrap(),
+            vec![1, 2, 3],
+        )),
     )
     .await;
 
@@ -1183,7 +1178,6 @@ async fn queued_checkpoint_input_preserves_images() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1202,7 +1196,7 @@ async fn queued_checkpoint_input_preserves_images() {
             && message
                 .blocks
                 .iter()
-                .any(|block| matches!(block, crate::llm::types::LlmContentBlock::Image { .. }))
+                .any(|block| matches!(block, crate::llm::types::LlmContentBlock::Attachment { .. }))
     }));
 }
 
@@ -1270,7 +1264,6 @@ async fn checkpoint_hook_can_inject_messages() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1339,7 +1332,6 @@ async fn queued_checkpoint_input_accepts_and_persists_one_normal_user_message() 
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -2352,14 +2344,36 @@ async fn mid_chain_cancellation_commits_one_cancelled_terminal_and_settles_hando
 
 #[tokio::test]
 async fn claimed_normalization_failure_commits_and_settles_input() {
+    #[derive(Debug)]
+    struct DenyClaimedAttachments;
+
+    impl crate::AttachmentSourcePolicy for DenyClaimedAttachments {
+        fn authorize(
+            &self,
+            producer: &crate::AttachmentProducer,
+            _source: &crate::AttachmentSource,
+        ) -> Result<(), crate::AttachmentSourcePolicyError> {
+            Err(crate::AttachmentSourcePolicyError {
+                producer: producer.clone(),
+                reason: "claimed attachment denied for test".to_string(),
+            })
+        }
+    }
+
     let (mut runtime, store) =
         standard_runtime_with_transport_and_queue_store(mock_provider(Vec::new())).await;
+    runtime.host.core.attachment_source_policy = Arc::new(DenyClaimedAttachments);
     let inbound = crate::store::TurnInputStore::enqueue_pending_turn_input(
         store.as_ref(),
         crate::PendingTurnInputDraft::new(
             "root",
             crate::TurnInputIngress::NextTurn,
-            TurnInput::items([InputItem::image_ref("missing-image")]),
+            TurnInput::items([InputItem::attachment(
+                crate::AttachmentSource::external_url(
+                    crate::MediaType::parse("application/pdf").unwrap(),
+                    "https://example.test/denied.pdf",
+                ),
+            )]),
         ),
     )
     .await
@@ -4345,7 +4359,6 @@ async fn session_manager_can_run_child_session_turn() {
             items: vec![InputItem::Text {
                 text: "hello".to_string(),
             }],
-            image_blobs: HashMap::new(),
             protocol_turn_options: None,
             trace_turn_id: None,
             protocol_extension: None,
@@ -4462,7 +4475,6 @@ async fn child_relation_does_not_replace_active_session() {
                 items: vec![InputItem::Text {
                     text: "parent turn".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -4544,7 +4556,6 @@ async fn runtime_can_activate_managed_child_session() {
             items: vec![InputItem::Text {
                 text: "old manager should not own activated child".to_string(),
             }],
-            image_blobs: HashMap::new(),
             protocol_turn_options: None,
             trace_turn_id: None,
             protocol_extension: None,
@@ -4684,7 +4695,6 @@ async fn turn_driver_normalizes_alias_effort_into_outgoing_request() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -4759,7 +4769,6 @@ async fn turn_driver_rejects_unsupported_effort_before_provider_call() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,

@@ -953,9 +953,8 @@ async fn drive_frame_switch_crash_process(storage: &PostgresStorage) -> Result<T
 async fn wait_for_minio(store: &impl lash::persistence::AttachmentStore) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(90);
     let meta = lash_core::AttachmentCreateMeta::new(
-        lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
-        Some(1),
-        Some(1),
+        lash_core::MediaType::parse("image/png").unwrap(),
+        Some(lash_core::AttachmentTypeMetadata::image(Some(1), Some(1))),
         Some("runner-health.png".to_string()),
     );
     let mut last_error = None;

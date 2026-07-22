@@ -37,6 +37,7 @@ impl<'run> RuntimeTurnDriver<'run> {
                 self.turn_context.clone(),
                 execution_env_spec,
                 self.checkpoint_messages.clone(),
+                Arc::clone(&self.host.core.attachment_source_policy),
             )
             .map(|context| context.with_turn_phase_probe(self.turn_phase_probe.clone()))
     }

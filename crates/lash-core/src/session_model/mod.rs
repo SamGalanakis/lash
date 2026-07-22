@@ -66,7 +66,7 @@ pub(crate) fn plugin_message_to_message(plugin_message: &PluginMessage) -> Messa
         .filter(|id| !id.is_empty())
         .map(str::to_string)
         .unwrap_or_else(fresh_message_id);
-    let mut parts = if plugin_message.parts.is_empty() {
+    let mut parts = if plugin_message.parts.is_empty() && !plugin_message.content.is_empty() {
         vec![Part {
             id: format!("{message_id}.p0"),
             kind: PartKind::Text,
@@ -82,6 +82,24 @@ pub(crate) fn plugin_message_to_message(plugin_message: &PluginMessage) -> Messa
     } else {
         plugin_message.parts.clone()
     };
+    parts.extend(
+        plugin_message
+            .attachments
+            .iter()
+            .cloned()
+            .map(|source| Part {
+                id: String::new(),
+                kind: PartKind::Attachment,
+                content: String::new(),
+                attachment: Some(message::PartAttachment { source }),
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }),
+    );
     reassign_part_ids(&message_id, &mut parts);
     Message {
         id: message_id,

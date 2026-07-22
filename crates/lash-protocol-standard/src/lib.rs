@@ -685,12 +685,12 @@ fn append_model_return_parts(parts: &mut Vec<Part>, model_return: lash_core::Mod
                     response_meta: None,
                 });
             }
-            lash_core::ModelToolReturnPart::Attachment(reference) => {
+            lash_core::ModelToolReturnPart::Attachment(source) => {
                 parts.push(Part {
                     id: String::new(),
-                    kind: PartKind::Image,
+                    kind: PartKind::Attachment,
                     content: String::new(),
-                    attachment: Some(PartAttachment { reference }),
+                    attachment: Some(PartAttachment { source }),
                     tool_call_id: Some(model_return.call_id.clone()),
                     tool_name: Some(model_return.tool_name.clone()),
                     tool_replay: None,
@@ -711,23 +711,24 @@ fn conversation_event(message: Message) -> SessionHistoryRecord {
 mod tests {
     use super::*;
     use lash_core::{
-        AttachmentId, AttachmentMeta, ImageMediaType, MediaType, ModelToolReturn, ToolCallOutput,
-        ToolValue,
+        AttachmentId, AttachmentMeta, AttachmentSource, AttachmentTypeMetadata, MediaType,
+        ModelToolReturn, ToolCallOutput, ToolValue,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Barrier;
     use tokio::time::{Duration, timeout};
 
-    fn image_ref(id: &str) -> lash_core::AttachmentRef {
-        AttachmentMeta::new(
-            AttachmentId::new(id),
-            MediaType::Image(ImageMediaType::Png),
-            4,
-            Some(1),
-            Some(1),
-            Some("tiny".to_string()),
+    fn attachment_source(id: &str) -> AttachmentSource {
+        AttachmentSource::stored(
+            AttachmentMeta::new(
+                AttachmentId::new(id),
+                MediaType::parse("image/png").unwrap(),
+                4,
+                Some(AttachmentTypeMetadata::image(Some(1), Some(1))),
+                Some("tiny".to_string()),
+            )
+            .as_ref(),
         )
-        .as_ref()
     }
 
     #[test]
@@ -1047,8 +1048,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_attachment_round_trips_to_part_kind_image() {
-        let attachment = image_ref("att-1");
+    fn tool_attachment_round_trips_to_generic_part() {
+        let attachment = attachment_source("att-1");
         let output = ToolCallOutput::success(ToolValue::Attachment(attachment.clone()));
         let model_return =
             ModelToolReturn::from_output("call-9".to_string(), "screenshot".to_string(), &output);
@@ -1058,17 +1059,17 @@ mod tests {
 
         assert_eq!(parts.len(), 1, "single attachment yields single part");
         let part = &parts[0];
-        assert!(matches!(part.kind, PartKind::Image));
+        assert!(matches!(part.kind, PartKind::Attachment));
         assert_eq!(part.content, "");
         assert_eq!(part.tool_call_id.as_deref(), Some("call-9"));
         assert_eq!(part.tool_name.as_deref(), Some("screenshot"));
         let part_attachment = part.attachment.as_ref().expect("attachment present");
-        assert_eq!(part_attachment.reference.id, attachment.id);
+        assert_eq!(part_attachment.source, attachment);
     }
 
     #[test]
     fn tool_text_and_attachment_round_trip_preserves_order() {
-        let attachment = image_ref("att-2");
+        let attachment = attachment_source("att-2");
         let output = ToolCallOutput::success(ToolValue::Array(vec![
             ToolValue::String("before".into()),
             ToolValue::Attachment(attachment.clone()),
@@ -1082,18 +1083,17 @@ mod tests {
 
         // The array projection emits compact JSON text fragments around the
         // attachment, preserving in-order position.
-        assert_eq!(parts.len(), 3, "text + image + text yields three parts");
+        assert_eq!(
+            parts.len(),
+            3,
+            "text + attachment + text yields three parts"
+        );
         assert!(matches!(parts[0].kind, PartKind::ToolResult));
         assert!(parts[0].content.starts_with("[\"before\""));
-        assert!(matches!(parts[1].kind, PartKind::Image));
+        assert!(matches!(parts[1].kind, PartKind::Attachment));
         assert_eq!(
-            parts[1]
-                .attachment
-                .as_ref()
-                .expect("attachment")
-                .reference
-                .id,
-            attachment.id
+            parts[1].attachment.as_ref().expect("attachment").source,
+            attachment
         );
         assert!(matches!(parts[2].kind, PartKind::ToolResult));
         assert!(parts[2].content.ends_with("\"after\"]"));

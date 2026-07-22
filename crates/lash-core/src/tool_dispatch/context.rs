@@ -92,6 +92,7 @@ pub struct ToolDispatchContext<'run> {
     pub(crate) checkpoint_messages: CheckpointMessageBuffer,
     pub(crate) trigger_outcomes: ToolTriggerOutcomeBuffer,
     pub attachment_store: Arc<crate::SessionAttachmentStore>,
+    pub attachment_source_policy: Arc<dyn crate::AttachmentSourcePolicy>,
     pub turn_context: crate::TurnContext,
     pub clock: Arc<dyn crate::Clock>,
 }

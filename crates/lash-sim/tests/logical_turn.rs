@@ -162,6 +162,20 @@ fn standard_core(
     tools: Arc<dyn ToolProvider>,
     trace: Arc<RecordingTraceSink>,
 ) -> lash::LashCore {
+    standard_core_with_attachment_policy(
+        provider,
+        tools,
+        trace,
+        Arc::new(lash_core::OpenAttachmentSourcePolicy),
+    )
+}
+
+fn standard_core_with_attachment_policy(
+    provider: lash_core::ProviderHandle,
+    tools: Arc<dyn ToolProvider>,
+    trace: Arc<RecordingTraceSink>,
+    attachment_source_policy: Arc<dyn lash_core::AttachmentSourcePolicy>,
+) -> lash::LashCore {
     lash::LashCore::standard_builder()
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
@@ -176,6 +190,11 @@ fn standard_core(
         .tools(tools)
         .trace_sink(trace)
         .disable_queued_work_driver()
+        .advanced()
+        .runtime_host_config(
+            lash_core::RuntimeHostConfig::in_memory()
+                .with_attachment_source_policy(attachment_source_policy),
+        )
         .build()
         .expect("build logical-turn sim core")
 }
@@ -460,6 +479,22 @@ impl ToolProvider for BoundedSwitchTools {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn claims_settle_for_finish_cancel_error_and_chain_bound() {
+    #[derive(Debug)]
+    struct DenyAttachments;
+
+    impl lash_core::AttachmentSourcePolicy for DenyAttachments {
+        fn authorize(
+            &self,
+            producer: &lash_core::AttachmentProducer,
+            _source: &lash_core::AttachmentSource,
+        ) -> Result<(), lash_core::AttachmentSourcePolicyError> {
+            Err(lash_core::AttachmentSourcePolicyError {
+                producer: producer.clone(),
+                reason: "attachment denied for logical-turn settlement test".to_string(),
+            })
+        }
+    }
+
     let finish_trace = Arc::new(RecordingTraceSink::default());
     let finish_provider = lash_core::testing::TestProvider::builder()
         .kind("logical-turn-finish")
@@ -542,14 +577,24 @@ async fn claims_settle_for_finish_cancel_error_and_chain_bound() {
         .complete(|_| async { panic!("normalization errors must not call the provider") })
         .build()
         .into_handle();
-    let error_core = standard_core(error_provider, Arc::new(NoTools), error_trace.clone());
+    let error_core = standard_core_with_attachment_policy(
+        error_provider,
+        Arc::new(NoTools),
+        error_trace.clone(),
+        Arc::new(DenyAttachments),
+    );
     let error_session = error_core
         .session("logical-turn-error")
         .open_fresh()
         .await
         .expect("open error session");
     error_session
-        .enqueue(TurnInput::items([InputItem::image_ref("missing-image")]))
+        .enqueue(TurnInput::items([InputItem::attachment(
+            lash_core::AttachmentSource::external_url(
+                lash_core::MediaType::parse("application/pdf").unwrap(),
+                "https://example.test/denied.pdf",
+            ),
+        )]))
         .send()
         .await
         .expect("enqueue invalid input");

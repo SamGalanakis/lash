@@ -709,14 +709,21 @@ fn render_model_return_parts(parts: &[ModelToolReturnPart]) -> String {
     for part in parts {
         match part {
             ModelToolReturnPart::Text { text } => rendered.push_str(text),
-            ModelToolReturnPart::Attachment(reference) => {
+            ModelToolReturnPart::Attachment(source) => {
                 rendered.push_str("[Attachment: ");
-                rendered.push_str(
-                    reference
-                        .label
-                        .as_deref()
-                        .unwrap_or_else(|| reference.id.as_str()),
-                );
+                match source {
+                    lash_core::AttachmentSource::Stored { attachment_ref } => rendered.push_str(
+                        attachment_ref
+                            .label
+                            .as_deref()
+                            .unwrap_or_else(|| attachment_ref.id.as_str()),
+                    ),
+                    lash_core::AttachmentSource::Inline { media_type, .. } => {
+                        rendered.push_str(media_type.as_str())
+                    }
+                    lash_core::AttachmentSource::ExternalUrl { url, .. } => rendered.push_str(url),
+                    lash_core::AttachmentSource::ProviderFile { id, .. } => rendered.push_str(id),
+                }
                 rendered.push(']');
             }
         }

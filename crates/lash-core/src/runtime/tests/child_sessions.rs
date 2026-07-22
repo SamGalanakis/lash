@@ -96,9 +96,8 @@ impl crate::ToolProvider for AttachmentWritingTool {
             .put(
                 vec![4, 2, 4, 2],
                 crate::AttachmentCreateMeta::new(
-                    crate::MediaType::Image(crate::ImageMediaType::Png),
-                    Some(2),
-                    Some(2),
+                    crate::MediaType::parse("image/png").unwrap(),
+                    Some(crate::AttachmentTypeMetadata::image(Some(2), Some(2))),
                     Some("child.png".to_string()),
                 ),
             )
@@ -557,7 +556,6 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 items: vec![InputItem::Text {
                     text: "run child".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -793,7 +791,6 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 items: vec![InputItem::Text {
                     text: "run child".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,

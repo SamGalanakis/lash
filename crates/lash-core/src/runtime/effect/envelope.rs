@@ -4,17 +4,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::CheckpointKind;
 use crate::llm::types::{
-    LlmAttachment, LlmEventSender, LlmMessage, LlmOutputSpec, LlmProviderTraceSender,
+    AttachmentSource, LlmEventSender, LlmMessage, LlmOutputSpec, LlmProviderTraceSender,
     LlmToolChoice, LlmToolSpec,
 };
 use crate::runtime::ProcessHandleGrantEntry;
 use crate::sansio::{CompletedToolCall, ExecutionEnvironmentSync, LlmCallError};
 use crate::tool_dispatch::ToolTriggerEffectOutcome;
 use crate::{
-    AttachmentCreateMeta, AttachmentRef, CausalRef, CheckpointDelivery, ExecResponse,
-    LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
-    ProcessExecutionContext, ProcessListMode, ProcessRecord, ProcessRegistration,
-    ProcessStartGrant, SessionScope,
+    AttachmentCreateMeta, CausalRef, CheckpointDelivery, ExecResponse,
+    LlmRequest as CoreLlmRequest, LlmResponse, ProcessAwaitOutput, ProcessExecutionContext,
+    ProcessListMode, ProcessRecord, ProcessRegistration, ProcessStartGrant, SessionScope,
 };
 
 use super::executor::RuntimeEffectControllerError;
@@ -577,7 +576,7 @@ pub enum ToolCallLaunch {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ToolAttemptLaunch {
     Done {
-        record: crate::ToolCallRecord,
+        record: Box<crate::ToolCallRecord>,
     },
     Pending {
         key: crate::AwaitEventKey,
@@ -662,18 +661,11 @@ pub enum RuntimeEffectOutcome {
 
 /// Serializable attachment data for runtime effect envelopes.
 ///
-/// Effect envelopes carry attachment references only. Local executors resolve
-/// bytes from the configured attachment store when a provider request is
-/// actually executed.
+/// Inline sources are normalized to `Stored` before this durable shape is
+/// created. Borrowed sources round-trip without entering Lash storage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmAttachmentSpec {
-    pub reference: AttachmentRef,
-}
-
-impl LlmAttachmentSpec {
-    fn into_attachment(self) -> LlmAttachment {
-        LlmAttachment::reference(self.reference)
-    }
+    pub source: AttachmentSource,
 }
 
 /// Serializable LLM request data. Live stream and provider-trace callbacks are
@@ -726,8 +718,9 @@ impl LlmRequestSpec {
             attachments: self
                 .attachments
                 .into_iter()
-                .map(LlmAttachmentSpec::into_attachment)
+                .map(|spec| spec.source)
                 .collect(),
+            resolved_stored: Default::default(),
             tools: self.tools,
             tool_choice: self.tool_choice,
             model_variant: self.model_variant,
@@ -742,7 +735,7 @@ impl LlmRequestSpec {
 }
 
 async fn attachment_specs_from_attachments(
-    attachments: &[LlmAttachment],
+    attachments: &[AttachmentSource],
     attachment_store: &crate::SessionAttachmentStore,
 ) -> Result<Vec<LlmAttachmentSpec>, RuntimeEffectControllerError> {
     let mut specs = Vec::with_capacity(attachments.len());
@@ -753,42 +746,30 @@ async fn attachment_specs_from_attachments(
 }
 
 async fn attachment_spec_from_attachment(
-    attachment: &LlmAttachment,
+    attachment: &AttachmentSource,
     attachment_store: &crate::SessionAttachmentStore,
 ) -> Result<LlmAttachmentSpec, RuntimeEffectControllerError> {
-    if let Some(reference) = attachment.reference.as_ref() {
-        return Ok(LlmAttachmentSpec {
-            reference: reference.clone(),
-        });
-    }
-    if attachment.data.is_empty() {
-        return Err(RuntimeEffectControllerError::new(
-            "runtime_effect_attachment_missing_reference",
-            "runtime effect attachment has neither a durable reference nor inline bytes",
-        ));
-    }
-    let media_type = MediaType::from_mime(&attachment.mime).ok_or_else(|| {
-        RuntimeEffectControllerError::new(
-            "runtime_effect_attachment_media_type",
-            format!(
-                "attachment media type `{}` cannot be represented durably",
-                attachment.mime
-            ),
-        )
-    })?;
-    let reference = attachment_store
-        .put(
-            attachment.data.clone(),
-            AttachmentCreateMeta::new(media_type, None, None, None),
-        )
-        .await
-        .map_err(|err| {
-            RuntimeEffectControllerError::new(
-                "runtime_effect_attachment_store",
-                format!("failed to store attachment before runtime effect invocation: {err}"),
-            )
-        })?;
-    Ok(LlmAttachmentSpec { reference })
+    let source = match attachment {
+        AttachmentSource::Inline { media_type, bytes } => {
+            let attachment_ref = attachment_store
+                .put(
+                    bytes.clone(),
+                    AttachmentCreateMeta::new(media_type.clone(), None, None),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeEffectControllerError::new(
+                        "runtime_effect_attachment_store",
+                        format!(
+                            "failed to store attachment before runtime effect invocation: {err}"
+                        ),
+                    )
+                })?;
+            AttachmentSource::stored(attachment_ref)
+        }
+        durable => durable.clone(),
+    };
+    Ok(LlmAttachmentSpec { source })
 }
 
 impl RuntimeEffectOutcome {

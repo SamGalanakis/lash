@@ -6,8 +6,8 @@ use lash_trace::{
 };
 
 use crate::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmMessage, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmRole,
-    LlmToolChoice, LlmUsage,
+    AttachmentSource, LlmContentBlock, LlmMessage, LlmOutputPart, LlmOutputSpec, LlmRequest,
+    LlmRole, LlmToolChoice, LlmUsage,
 };
 use crate::session_model::TokenUsage;
 use crate::{ToolCallOutcome, ToolCallOutput};
@@ -323,7 +323,7 @@ fn trace_content_block(block: &LlmContentBlock) -> TraceContentBlock {
             text: text.to_string(),
             cache_breakpoint: *cache_breakpoint,
         },
-        LlmContentBlock::Image { attachment_idx } => TraceContentBlock::Image {
+        LlmContentBlock::Attachment { attachment_idx } => TraceContentBlock::Attachment {
             attachment_idx: *attachment_idx,
         },
         LlmContentBlock::ToolCall {
@@ -363,12 +363,19 @@ fn trace_content_block(block: &LlmContentBlock) -> TraceContentBlock {
     }
 }
 
-fn trace_attachment(attachment: &LlmAttachment) -> TraceAttachment {
+fn trace_attachment(attachment: &AttachmentSource) -> TraceAttachment {
+    let bytes = match attachment {
+        AttachmentSource::Inline { bytes, .. } => Some(bytes.as_slice()),
+        AttachmentSource::Stored { .. }
+        | AttachmentSource::ExternalUrl { .. }
+        | AttachmentSource::ProviderFile { .. } => None,
+    };
     TraceAttachment {
-        mime: attachment.mime.clone(),
+        source: crate::llm::transport::source_kind(attachment).to_string(),
+        mime: attachment.media_type().map(ToString::to_string),
         filename: None,
-        bytes_sha256: Some(sha256_hex(&attachment.data)),
-        bytes_len: Some(attachment.data.len()),
+        bytes_sha256: bytes.map(sha256_hex),
+        bytes_len: bytes.map(<[u8]>::len),
     }
 }
 

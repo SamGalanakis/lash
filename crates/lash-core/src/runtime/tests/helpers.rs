@@ -729,7 +729,6 @@ impl crate::ToolProvider for ChildSessionTool {
                     items: vec![InputItem::Text {
                         text: "child turn".to_string(),
                     }],
-                    image_blobs: HashMap::new(),
                     protocol_turn_options: None,
                     trace_turn_id: None,
                     protocol_extension: None,

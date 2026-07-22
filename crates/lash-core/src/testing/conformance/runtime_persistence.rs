@@ -532,6 +532,10 @@ fn pending_next_turn_input_draft(session_id: &str, text: &str) -> crate::Pending
     )
 }
 
+fn inline_png(bytes: Vec<u8>) -> crate::AttachmentSource {
+    crate::AttachmentSource::inline(crate::MediaType::parse("image/png").unwrap(), bytes)
+}
+
 fn pending_active_turn_input_draft(
     session_id: &str,
     turn_id: &str,
@@ -548,7 +552,7 @@ fn pending_active_turn_input_draft(
 fn pending_input_text(input: &crate::PendingTurnInput) -> Option<&str> {
     match input.input.items.first()? {
         crate::InputItem::Text { text } => Some(text.as_str()),
-        crate::InputItem::ImageRef { .. } => None,
+        crate::InputItem::Attachment { .. } => None,
     }
 }
 
@@ -3561,7 +3565,7 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
             crate::PendingTurnInputDraft::new(
                 "root",
                 crate::TurnInputIngress::NextTurn,
-                crate::TurnInput::text("first next").with_image_ref("next-image", vec![1, 2, 3]),
+                crate::TurnInput::text("first next").with_attachment(inline_png(vec![1, 2, 3])),
             )
             .with_source_key("next:first"),
         )
@@ -3585,13 +3589,16 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
             .collect::<Vec<_>>(),
         vec![first.input_id.as_str(), second.input_id.as_str()]
     );
-    assert!(
+    assert!(matches!(
         claim
             .materialize_for_turn()
-            .image_blobs
-            .contains_key("next-image"),
-        "claimed next-turn input must preserve image blobs"
-    );
+            .items
+            .iter()
+            .find(|item| matches!(item, crate::InputItem::Attachment { .. })),
+        Some(crate::InputItem::Attachment {
+            source: crate::AttachmentSource::Inline { bytes, .. }
+        }) if bytes == &[1, 2, 3]
+    ));
     match store
         .cancel_pending_turn_input("root", &first.input_id)
         .await
@@ -3693,7 +3700,7 @@ async fn pending_turn_input_claims_reclaim_complete_and_fence(store: Arc<dyn Run
             crate::PendingTurnInputDraft::new(
                 "root",
                 crate::TurnInputIngress::NextTurn,
-                crate::TurnInput::text("first next").with_image_ref("next-image", vec![1, 2, 3]),
+                crate::TurnInput::text("first next").with_attachment(inline_png(vec![1, 2, 3])),
             )
             .with_source_key("next:first"),
         )
@@ -3951,7 +3958,7 @@ async fn pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(
                     crate::TurnInputCheckpointBoundary::AfterWork,
                 ),
                 crate::TurnInput::text("accepted active")
-                    .with_image_ref("accepted-active-image", vec![9, 8, 7]),
+                    .with_attachment(inline_png(vec![9, 8, 7])),
             )
             .with_source_key("active:accepted"),
         )
@@ -4007,13 +4014,12 @@ async fn pending_active_turn_inputs_defer_unaccepted_once_on_interrupt(
         vec![accepted.input_id.as_str()],
         "AfterWork claims must include matching active inputs admitted at that boundary in order"
     );
-    assert!(
-        claim
-            .materialize_for_turn()
-            .image_blobs
-            .contains_key("accepted-active-image"),
-        "accepted active claim must preserve image blobs"
-    );
+    assert!(matches!(
+        claim.materialize_for_turn().items.last(),
+        Some(crate::InputItem::Attachment {
+            source: crate::AttachmentSource::Inline { bytes, .. }
+        }) if bytes == &[9, 8, 7]
+    ));
 
     let state = RuntimeSessionState {
         session_id: "root".to_string(),

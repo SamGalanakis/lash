@@ -14,17 +14,34 @@ impl AnthropicProvider {
         }
     }
 
-    fn image_block_value(req: &LlmRequest, attachment_idx: usize) -> Option<Value> {
-        let att = req.attachments.get(attachment_idx)?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-        Some(json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": att.mime,
-                "data": b64,
+    fn attachment_block_value(req: &LlmRequest, attachment_idx: usize) -> Option<Value> {
+        let source = req.attachments.get(attachment_idx)?;
+        if let AttachmentSource::ProviderFile { id, .. } = source {
+            return Some(json!({
+                "type": "document",
+                "source": {"type": "file", "file_id": id},
+            }));
+        }
+        let media_type = source.media_type()?;
+        let block_type = if media_type.is_image() {
+            "image"
+        } else {
+            "document"
+        };
+        let wire_source = match source {
+            AttachmentSource::ExternalUrl { url, .. } => json!({"type": "url", "url": url}),
+            AttachmentSource::Inline { .. } | AttachmentSource::Stored { .. } => {
+                let bytes = req.attachment_bytes(source)?;
+                let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                json!({
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                })
             }
-        }))
+            AttachmentSource::ProviderFile { .. } => unreachable!(),
+        };
+        Some(json!({"type": block_type, "source": wire_source}))
     }
 
     fn text_block_value(text: &str, cache_breakpoint: bool) -> Value {
@@ -53,9 +70,9 @@ impl AnthropicProvider {
                 }
                 Some(Self::text_block_value(text, *cache_breakpoint))
             }
-            LlmContentBlock::Image { attachment_idx } => Some(
-                Self::image_block_value(req, *attachment_idx)
-                    .unwrap_or_else(|| Self::text_block_value("[Image attached]", false)),
+            LlmContentBlock::Attachment { attachment_idx } => Some(
+                Self::attachment_block_value(req, *attachment_idx)
+                    .unwrap_or_else(|| Self::text_block_value("[Attachment]", false)),
             ),
             LlmContentBlock::ToolCall {
                 call_id,
@@ -332,7 +349,35 @@ impl AnthropicProvider {
     }
 
     pub(crate) fn build_request_body(&self, req: &LlmRequest) -> Result<Value, LlmTransportError> {
-        validate_image_attachments(req, OPENAI_IMAGE_MIMES, "Anthropic")?;
+        for source in &req.attachments {
+            let supported = match source {
+                AttachmentSource::ProviderFile { provider_scope, .. } => {
+                    provider_scope.provider.eq_ignore_ascii_case("anthropic")
+                }
+                source => source.media_type().is_some_and(|mime| {
+                    ANTHROPIC_IMAGE_MIMES.contains(&mime.as_str())
+                        || mime.as_str() == "application/pdf"
+                }),
+            };
+            if !supported {
+                let accepted_by = known_attachment_acceptors(source);
+                return Err(unsupported_attachment_capability(
+                    "Anthropic Messages",
+                    source,
+                    &accepted_by,
+                ));
+            }
+            if matches!(source, AttachmentSource::Stored { .. })
+                && req.attachment_bytes(source).is_none()
+            {
+                let mime = source.media_type().expect("stored source MIME");
+                return Err(LlmTransportError::new(format!(
+                    "Anthropic Messages could not materialize stored attachment MIME `{mime}` because session-guard resolution did not provide its bytes"
+                ))
+                .with_kind(ProviderFailureKind::Validation)
+                .with_code("stored_attachment_not_resolved"));
+            }
+        }
         let (system_text, mut messages) = self.build_messages(req);
         let mut tools = self.build_tools(req)?;
 

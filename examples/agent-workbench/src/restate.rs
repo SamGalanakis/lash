@@ -712,7 +712,10 @@ pub(crate) async fn workbench_turn_input(
             .get(&lash_core::AttachmentId::new(attachment_id))
             .await
             .map_err(AppError::internal)?;
-        input = input.with_image_ref(attachment_id, stored.bytes);
+        input = input.with_attachment(lash_core::AttachmentSource::inline(
+            lash_core::MediaType::parse("image/png").expect("workbench uploads only PNG"),
+            stored.bytes,
+        ));
     }
     Ok(input)
 }

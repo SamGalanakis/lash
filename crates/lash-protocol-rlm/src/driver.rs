@@ -304,6 +304,7 @@ impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
             model: ctx.config.model.clone(),
             messages,
             attachments,
+            resolved_stored: Default::default(),
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::None,
             model_variant: ctx.config.model_variant.clone(),
@@ -738,10 +739,9 @@ mod tests {
     fn committed_transcript_supersedes_terminal_step_by_turn_provenance() {
         let terminal_image = lash_core::AttachmentRef {
             id: lash_core::AttachmentId::new("terminal-image"),
-            media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
+            media_type: lash_core::MediaType::parse("image/png").unwrap(),
             byte_len: 3,
-            width: Some(1),
-            height: Some(1),
+            type_metadata: Some(lash_core::AttachmentTypeMetadata::image(Some(1), Some(1))),
             label: Some("terminal.png".to_string()),
         };
         let events = [
@@ -1158,10 +1158,9 @@ mod tests {
                 output: vec![r#"{"type":"image","id":"img"}"#.to_string()],
                 images: vec![lash_core::AttachmentRef {
                     id: lash_core::AttachmentId::new("img-ref"),
-                    media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
+                    media_type: lash_core::MediaType::parse("image/png").unwrap(),
                     byte_len: 3,
-                    width: Some(1),
-                    height: Some(1),
+                    type_metadata: Some(lash_core::AttachmentTypeMetadata::image(Some(1), Some(1))),
                     label: Some("img.png".to_string()),
                 }],
                 error: None,
@@ -1188,22 +1187,19 @@ mod tests {
         );
 
         assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0].mime, "image/png");
-        assert!(attachments[0].data.is_empty());
-        assert_eq!(
-            attachments[0]
-                .reference
-                .as_ref()
-                .map(|reference| reference.id.as_str()),
-            Some("img-ref")
-        );
+        assert!(matches!(
+            &attachments[0],
+            lash_core::AttachmentSource::Stored { attachment_ref }
+                if attachment_ref.id.as_str() == "img-ref"
+                    && attachment_ref.media_type.as_str() == "image/png"
+        ));
         // The printed image rides the user observation message for the step.
         assert!(messages.iter().any(|message| {
             matches!(message.role, LlmRole::User)
                 && message
                     .blocks
                     .iter()
-                    .any(|block| matches!(block, LlmContentBlock::Image { attachment_idx: 0 }))
+                    .any(|block| matches!(block, LlmContentBlock::Attachment { attachment_idx: 0 }))
         }));
     }
 

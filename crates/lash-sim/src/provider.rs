@@ -1730,6 +1730,7 @@ mod tests {
             model: "openai/gpt-5.4".to_string(),
             messages: vec![LlmMessage::text(LlmRole::User, "lookup x")],
             attachments: Vec::new(),
+            resolved_stored: Default::default(),
             tools: Arc::new(vec![LlmToolSpec {
                 name: "lookup".to_string(),
                 description: "Lookup".to_string(),
@@ -1762,6 +1763,7 @@ mod tests {
             model: "gpt-5.4".to_string(),
             messages: vec![LlmMessage::text(LlmRole::User, "answer directly")],
             attachments: Vec::new(),
+            resolved_stored: Default::default(),
             tools: Arc::new(Vec::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: Default::default(),

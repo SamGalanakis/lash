@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use lash_core::testing::conformance::{
     ReopenableProcessRegistry, ReopenableRuntimePersistence, ReopenableTriggerStore,
@@ -12,11 +12,9 @@ use lash_postgres_store::{
     PostgresEffectReplayOptions, PostgresRuntimeEffectController, PostgresStorage,
 };
 
-/// All backend suites share one database and `reset()` truncates every `lash_*`
-/// table between cases, so they must not touch it concurrently. This guard
-/// serializes them intrinsically — correctness no longer depends on the test
-/// harness being invoked with `--test-threads=1`.
-static DB_GUARD: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+mod support;
+
+use support::SharedDatabaseLock;
 
 fn database_url() -> Option<String> {
     std::env::var("LASH_POSTGRES_DATABASE_URL").ok()
@@ -34,13 +32,13 @@ fn sync_await<T: Send + 'static>(
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
 }
 
-async fn storage() -> Option<PostgresStorage> {
+async fn storage() -> Option<(SharedDatabaseLock, PostgresStorage)> {
     let url = database_url()?;
-    Some(
-        PostgresStorage::connect(&url)
-            .await
-            .expect("connect postgres"),
-    )
+    let database_lock = SharedDatabaseLock::acquire(&url).await;
+    let storage = PostgresStorage::connect(&url)
+        .await
+        .expect("connect postgres");
+    Some((database_lock, storage))
 }
 
 async fn reset(storage: &PostgresStorage) {
@@ -80,8 +78,7 @@ async fn reset(storage: &PostgresStorage) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_runtime_persistence_satisfies_conformance_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!("skipping Postgres conformance: LASH_POSTGRES_DATABASE_URL is not set");
         return;
     };
@@ -100,8 +97,7 @@ async fn postgres_runtime_persistence_satisfies_conformance_when_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_artifact_store_satisfies_conformance_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!(
             "skipping Postgres artifact-store conformance: LASH_POSTGRES_DATABASE_URL is not set"
         );
@@ -129,8 +125,7 @@ async fn postgres_artifact_store_satisfies_conformance_when_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_session_store_factory_satisfies_conformance_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!(
             "skipping Postgres session-store-factory conformance: LASH_POSTGRES_DATABASE_URL is not set"
         );
@@ -152,8 +147,7 @@ async fn postgres_session_store_factory_satisfies_conformance_when_configured() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_attachment_owner_cold_replay_conformance_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!(
             "skipping Postgres attachment-owner conformance: LASH_POSTGRES_DATABASE_URL is not set"
         );
@@ -207,8 +201,7 @@ async fn postgres_attachment_owner_cold_replay_conformance_when_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_process_prune_deletes_owned_session_stores_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!(
             "skipping Postgres process-owned session prune conformance: LASH_POSTGRES_DATABASE_URL is not set"
         );
@@ -225,8 +218,7 @@ async fn postgres_process_prune_deletes_owned_session_stores_when_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_turn_commit_stamps_use_injected_store_clock_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!(
             "skipping Postgres injected commit clock regression: LASH_POSTGRES_DATABASE_URL is not set"
         );
@@ -311,8 +303,7 @@ async fn postgres_turn_commit_stamps_use_injected_store_clock_when_configured() 
 // the mismatch error, so a pre-cutover database can never be adopted post-bump.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!("skipping Postgres from_pool gate test: LASH_POSTGRES_DATABASE_URL is not set");
         return;
     };
@@ -349,8 +340,7 @@ async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_runtime_effect_controller_satisfies_conformance_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!(
             "skipping Postgres runtime-effect conformance: LASH_POSTGRES_DATABASE_URL is not set"
         );
@@ -387,8 +377,7 @@ async fn postgres_runtime_effect_controller_satisfies_conformance_when_configure
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_effect_controller_satisfies_lease_fencing_conformance_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!(
             "skipping Postgres effect lease-fencing conformance: LASH_POSTGRES_DATABASE_URL is not set"
         );
@@ -469,8 +458,7 @@ fn epoch_ms_for_test() -> u64 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_process_registry_satisfies_conformance_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!("skipping Postgres process conformance: LASH_POSTGRES_DATABASE_URL is not set");
         return;
     };
@@ -489,8 +477,7 @@ async fn postgres_process_registry_satisfies_conformance_when_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_trigger_store_satisfies_conformance_when_configured() {
-    let _db_guard = DB_GUARD.lock().await;
-    let Some(storage) = storage().await else {
+    let Some((_database_lock, storage)) = storage().await else {
         eprintln!("skipping Postgres trigger conformance: LASH_POSTGRES_DATABASE_URL is not set");
         return;
     };

@@ -146,15 +146,16 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
                 tool: "attachment_tool".to_string(),
                 args: serde_json::json!({}),
                 output: lash_core::ToolCallOutput::success(lash_core::ToolValue::Attachment(
-                    lash_core::AttachmentMeta::new(
-                        lash_core::AttachmentId::new("replayed-attachment"),
-                        lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
-                        3,
-                        Some(1),
-                        Some(1),
-                        Some("replayed".to_string()),
-                    )
-                    .as_ref(),
+                    lash_core::AttachmentSource::stored(
+                        lash_core::AttachmentMeta::new(
+                            lash_core::AttachmentId::new("replayed-attachment"),
+                            lash_core::MediaType::parse("image/png").unwrap(),
+                            3,
+                            Some(lash_core::AttachmentTypeMetadata::image(Some(1), Some(1))),
+                            Some("replayed".to_string()),
+                        )
+                        .as_ref(),
+                    ),
                 )),
                 duration_ms: 1,
             }],
@@ -182,7 +183,10 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
     assert_eq!(replayed_tool_call.0.as_deref(), Some("replayed-call"));
     assert_eq!(replayed_tool_call.1, "attachment_tool");
     assert_eq!(
-        replayed_tool_call.2.attachments()[0].id,
+        replayed_tool_call.2.attachments()[0]
+            .stored_ref()
+            .expect("stored attachment")
+            .id,
         lash_core::AttachmentId::new("replayed-attachment")
     );
     let trajectory = machine_trajectory(&restored);

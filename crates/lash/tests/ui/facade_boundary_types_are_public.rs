@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash::direct::{
-    DirectLlmClient, DirectLlmError, DirectLlmResult, DirectRequest, LlmAttachment, LlmEventSender,
-    LlmOutputPart, LlmUsage,
+    AttachmentSource, DirectLlmClient, DirectLlmError, DirectLlmResult, DirectRequest,
+    LlmEventSender, LlmOutputPart, LlmUsage,
 };
 use lash::durability::RuntimeHostConfig;
 use lash::messages::MessageRole;
@@ -364,7 +364,7 @@ async fn direct_response_type_is_nameable(
 }
 
 fn direct_payload_types_are_nameable(
-    attachment: LlmAttachment,
+    attachment: AttachmentSource,
     event_sender: LlmEventSender,
     output: LlmOutputPart,
     usage: LlmUsage,

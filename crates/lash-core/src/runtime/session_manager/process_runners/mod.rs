@@ -132,6 +132,9 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
             attachment_store: Arc::clone(
                 &self.services.current.host.core.durability.attachment_store,
             ),
+            attachment_source_policy: Arc::clone(
+                &self.services.current.host.core.attachment_source_policy,
+            ),
             turn_context: crate::TurnContext::default(),
             clock: Arc::clone(&self.services.current.host.core.clock),
         });

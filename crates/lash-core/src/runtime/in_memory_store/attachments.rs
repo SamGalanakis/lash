@@ -7,6 +7,39 @@
 
 use super::InMemorySessionStore;
 
+impl InMemorySessionStore {
+    pub(super) fn commit_turn_attachment_intents(
+        &self,
+        completed: &crate::store::RuntimeTurnCommitStamp,
+    ) {
+        let now = self.clock.timestamp_ms();
+        for entry in self
+            .attachment_manifest
+            .lock()
+            .expect("lock attachment manifest")
+            .values_mut()
+        {
+            if entry.session_id == completed.session_id
+                && entry.owner_kind == Some(crate::AttachmentOwnerKind::Turn)
+                && entry.owner_id.as_deref() == Some(completed.turn_id.as_str())
+                && entry.committed_at_epoch_ms.is_none()
+            {
+                entry.committed_at_epoch_ms = Some(now);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attachment_manifest_entries(&self) -> Vec<crate::AttachmentManifestEntry> {
+        self.attachment_manifest
+            .lock()
+            .expect("lock attachment manifest")
+            .values()
+            .cloned()
+            .collect()
+    }
+}
+
 impl crate::AttachmentManifest for InMemorySessionStore {
     fn record_intent(
         &self,

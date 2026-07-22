@@ -70,7 +70,7 @@ use crate::{
     TurnEvent,
 };
 use crate::{AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier};
-use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
+use lash_sansio::{AttachmentCreateMeta, AttachmentTypeMetadata, MediaType};
 
 #[cfg(test)]
 mod tests {

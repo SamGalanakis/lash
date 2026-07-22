@@ -1,5 +1,5 @@
 use super::*;
-use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
+use crate::llm::types::{AttachmentSource, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
 use crate::plugin::{ProtocolDriverPlugin, ProtocolSessionPlugin};
 
 #[derive(Clone, Debug)]
@@ -545,7 +545,6 @@ async fn standard_turn_llm_and_checkpoint_effects_cross_controller_once() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1443,7 +1442,6 @@ async fn tool_attempt_effect_crosses_controller_per_child_attempt_and_runs_local
                 items: vec![InputItem::Text {
                     text: "use the tool".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1541,7 +1539,6 @@ async fn tool_batch_serializes_child_attempts_when_controller_disallows_concurre
                 items: vec![InputItem::Text {
                     text: "use the tool".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1593,7 +1590,6 @@ async fn exec_and_execution_environment_effects_cross_controller_once() {
                 items: vec![InputItem::Text {
                     text: "run code".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1644,7 +1640,6 @@ async fn start_exec_without_code_executor_stops_as_runtime_error() {
                 items: vec![InputItem::Text {
                     text: "run code".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1901,6 +1896,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
             }],
         )],
         attachments: Vec::new(),
+        resolved_stored: Default::default(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
         model_variant: Default::default(),
@@ -1948,9 +1944,13 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
         model: "mock-model".to_string(),
         messages: vec![LlmMessage::new(
             LlmRole::User,
-            vec![LlmContentBlock::Image { attachment_idx: 0 }],
+            vec![LlmContentBlock::Attachment { attachment_idx: 0 }],
         )],
-        attachments: vec![LlmAttachment::bytes("image/png", image_bytes)],
+        attachments: vec![AttachmentSource::inline(
+            crate::MediaType::parse("image/png").unwrap(),
+            image_bytes,
+        )],
+        resolved_stored: Default::default(),
         tools: Arc::new(Vec::new()),
         tool_choice: LlmToolChoice::None,
         model_variant: Default::default(),

@@ -96,7 +96,7 @@ pub struct RemoteLlmRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<RemoteLlmMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<RemoteLlmAttachment>,
+    pub attachments: Vec<RemoteAttachmentSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<RemoteLlmToolSpec>,
     #[serde(default)]
@@ -394,7 +394,7 @@ pub enum RemoteLlmContentBlock {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cache_breakpoint: bool,
     },
-    ImageAttachment {
+    Attachment {
         attachment_index: usize,
     },
     ToolCall {
@@ -429,7 +429,7 @@ impl RemoteLlmContentBlock {
             Self::ToolResult { call_id, .. } => {
                 require_non_empty("RemoteLlmContentBlock::ToolResult", "call_id", call_id)
             }
-            Self::Text { .. } | Self::ImageAttachment { .. } | Self::Reasoning { .. } => Ok(()),
+            Self::Text { .. } | Self::Attachment { .. } | Self::Reasoning { .. } => Ok(()),
         }
     }
 }
@@ -473,53 +473,139 @@ pub struct RemoteProviderReasoningReplay {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteLlmAttachment {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    pub mime: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_base64: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reference: Option<RemoteAttachmentRef>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub metadata: HashMap<String, String>,
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RemoteAttachmentSource {
+    Inline {
+        media_type: String,
+        data_base64: String,
+    },
+    Stored {
+        attachment_ref: RemoteAttachmentRef,
+    },
+    ExternalUrl {
+        media_type: String,
+        url: String,
+    },
+    ProviderFile {
+        provider_scope: RemoteProviderFileScope,
+        id: String,
+    },
 }
 
-impl RemoteLlmAttachment {
-    fn validate(&self, index: usize) -> Result<(), RemoteProtocolError> {
-        if self.mime.trim().is_empty() {
-            return Err(RemoteProtocolError::InvalidEnvelope {
-                type_name: "RemoteLlmAttachment",
-                message: format!("attachment at index {index} requires a non-empty mime"),
-            });
+impl RemoteAttachmentSource {
+    pub(crate) fn validate(&self, _index: usize) -> Result<(), RemoteProtocolError> {
+        match self {
+            Self::Inline {
+                media_type,
+                data_base64,
+            } => {
+                require_non_empty("RemoteAttachmentSource::Inline", "media_type", media_type)?;
+                validate_media_type("RemoteAttachmentSource::Inline", media_type)?;
+                require_non_empty("RemoteAttachmentSource::Inline", "data_base64", data_base64)
+            }
+            Self::Stored { attachment_ref } => attachment_ref.validate(),
+            Self::ExternalUrl { media_type, url } => {
+                require_non_empty(
+                    "RemoteAttachmentSource::ExternalUrl",
+                    "media_type",
+                    media_type,
+                )?;
+                validate_media_type("RemoteAttachmentSource::ExternalUrl", media_type)?;
+                require_non_empty("RemoteAttachmentSource::ExternalUrl", "url", url)
+            }
+            Self::ProviderFile { provider_scope, id } => {
+                provider_scope.validate()?;
+                require_non_empty("RemoteAttachmentSource::ProviderFile", "id", id)
+            }
         }
-        if let Some(reference) = &self.reference {
-            reference.validate()?;
-        }
-        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteProviderFileScope {
+    pub provider: String,
+    pub credential_scope: String,
+}
+
+impl RemoteProviderFileScope {
+    fn validate(&self) -> Result<(), RemoteProtocolError> {
+        require_non_empty("RemoteProviderFileScope", "provider", &self.provider)?;
+        require_non_empty(
+            "RemoteProviderFileScope",
+            "credential_scope",
+            &self.credential_scope,
+        )
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteAttachmentRef {
     pub id: String,
-    pub mime: String,
+    pub media_type: String,
     pub byte_len: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<u32>,
+    pub type_metadata: Option<RemoteAttachmentTypeMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub metadata: HashMap<String, String>,
 }
 
 impl RemoteAttachmentRef {
     pub(crate) fn validate(&self) -> Result<(), RemoteProtocolError> {
         require_non_empty("RemoteAttachmentRef", "id", &self.id)?;
-        require_non_empty("RemoteAttachmentRef", "mime", &self.mime)
+        require_non_empty("RemoteAttachmentRef", "media_type", &self.media_type)?;
+        validate_media_type("RemoteAttachmentRef", &self.media_type)
     }
+}
+
+fn validate_media_type(type_name: &'static str, value: &str) -> Result<(), RemoteProtocolError> {
+    let mut pieces = value.split('/');
+    let type_token = pieces.next().unwrap_or_default();
+    let subtype_token = pieces.next().unwrap_or_default();
+    if pieces.next().is_some()
+        || !is_media_type_token(type_token)
+        || !is_media_type_token(subtype_token)
+    {
+        return Err(RemoteProtocolError::InvalidEnvelope {
+            type_name,
+            message: format!("media_type `{value}` must be a syntactically valid type/subtype"),
+        });
+    }
+    Ok(())
+}
+
+fn is_media_type_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RemoteAttachmentTypeMetadata {
+    Image {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

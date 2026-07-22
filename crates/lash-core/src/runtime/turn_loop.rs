@@ -1351,7 +1351,6 @@ impl LashRuntime {
             .map(crate::TurnInputClaim::materialize_for_turn);
         if let Some(work) = pending_turn_input.as_ref()
             && input.items.is_empty()
-            && input.image_blobs.is_empty()
         {
             input = work.clone();
             if input.trace_turn_id.is_none() {
@@ -1360,7 +1359,6 @@ impl LashRuntime {
         }
         if let Some(work) = queued_turn_work.as_ref()
             && input.items.is_empty()
-            && input.image_blobs.is_empty()
         {
             input = work.input.clone();
             if input.trace_turn_id.is_none() {
@@ -1387,10 +1385,7 @@ impl LashRuntime {
                 })?;
         }
         let previous_prompt_usage = self.state.last_prompt_usage.clone();
-        let normalized = match self
-            .normalize_input_items(&input.items, &input.image_blobs)
-            .await
-        {
+        let normalized = match self.normalize_input_items(&input.items).await {
             Ok(items) => items,
             Err(e) => {
                 self.state.last_prompt_usage = None;
@@ -1529,14 +1524,12 @@ impl LashRuntime {
                         response_meta: None,
                     });
                 }
-                NormalizedItem::Image(reference) => {
+                NormalizedItem::Attachment(source) => {
                     user_parts.push(Part {
                         id: format!("{}.p{}", user_id, user_parts.len()),
-                        kind: PartKind::Image,
+                        kind: PartKind::Attachment,
                         content: String::new(),
-                        attachment: Some(crate::session_model::message::PartAttachment {
-                            reference,
-                        }),
+                        attachment: Some(crate::session_model::message::PartAttachment { source }),
                         tool_call_id: None,
                         tool_name: None,
                         tool_replay: None,
@@ -2207,12 +2200,11 @@ impl LashRuntime {
     async fn normalize_input_items(
         &self,
         items: &[InputItem],
-        image_blobs: &HashMap<String, Vec<u8>>,
     ) -> Result<Vec<NormalizedItem>, String> {
         normalize_input_items(
             items,
-            image_blobs,
             self.host.core.durability.attachment_store.as_ref(),
+            self.host.core.attachment_source_policy.as_ref(),
         )
         .await
     }

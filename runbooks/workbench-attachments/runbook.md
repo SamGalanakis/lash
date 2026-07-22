@@ -8,12 +8,11 @@
 turn, deliver that exact content-addressed attachment to the model, and retrieve identical
 bytes after replacing the web process.
 
-**Contract cited.** Lash's current host turn contract is image-specific:
-[`TurnInput::with_image_ref`](../../crates/lash-core/src/runtime/mod.rs) adds an
-`InputItem::ImageRef` plus matching `image_blobs`; runtime
-[`normalize_input_items`](../../crates/lash-core/src/runtime/io.rs) persists those bytes and
-projects the resulting `AttachmentRef` into the provider request. The workbench therefore
-accepts PNG only; generic document upload would claim a contract Lash does not expose.
+**Contract cited.** Lash's host turn contract accepts MIME-tagged attachment sources.
+The workbench deliberately remains PNG-only: it creates an inline `image/png` source,
+runtime [`normalize_input_items`](../../crates/lash-core/src/runtime/io.rs) persists those
+bytes, and the provider adapter materializes the resulting stored source. Generic document
+support is available in Lash but is not enabled by this workbench surface.
 
 **Real tokens.** The referenced turn uses OpenRouter. Judge attachment plumbing and
 cross-surface identity, not the quality of the model's image description.

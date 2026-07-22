@@ -16,7 +16,8 @@ pub mod turn_driver;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use attachment::{
-    AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType,
+    AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef, AttachmentTypeMetadata,
+    InvalidMediaType, MediaType,
 };
 pub use causal::CausalRef;
 pub use llm::capability::{

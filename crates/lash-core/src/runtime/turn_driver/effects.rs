@@ -114,7 +114,10 @@ impl RuntimeTurnDriver<'_> {
         if let Some(claim) = turn_input_claim {
             let accepted_turn_inputs = claim.accepted_turn_inputs();
             let materialized = claim
-                .materialize_for_checkpoint(self.host.core.durability.attachment_store.as_ref())
+                .materialize_for_checkpoint(
+                    self.host.core.durability.attachment_store.as_ref(),
+                    self.host.core.attachment_source_policy.as_ref(),
+                )
                 .await
                 .map_err(|err| {
                     RuntimeError::new(
@@ -197,6 +200,19 @@ impl RuntimeTurnDriver<'_> {
         if let Some(abort) = applied.abort {
             return Err(RuntimeError::new(abort.code, abort.message));
         }
+
+        normalize_plugin_message_attachments(
+            &mut committed,
+            self.host.core.durability.attachment_store.as_ref(),
+            self.host.core.attachment_source_policy.as_ref(),
+        )
+        .await?;
+        normalize_plugin_message_attachments(
+            &mut transient_messages,
+            self.host.core.durability.attachment_store.as_ref(),
+            self.host.core.attachment_source_policy.as_ref(),
+        )
+        .await?;
 
         if !committed.is_empty() {
             send_session_event(
@@ -309,4 +325,55 @@ impl RuntimeTurnDriver<'_> {
         let _ = relay_handle.await;
         result
     }
+}
+
+async fn normalize_plugin_message_attachments(
+    messages: &mut [crate::PluginMessage],
+    attachment_store: &crate::SessionAttachmentStore,
+    policy: &dyn crate::AttachmentSourcePolicy,
+) -> Result<(), RuntimeError> {
+    for message in messages {
+        for source in &mut message.attachments {
+            normalize_plugin_attachment_source(source, attachment_store, policy).await?;
+        }
+        for part in &mut message.parts {
+            if let Some(attachment) = part.attachment.as_mut() {
+                normalize_plugin_attachment_source(
+                    &mut attachment.source,
+                    attachment_store,
+                    policy,
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn normalize_plugin_attachment_source(
+    source: &mut crate::AttachmentSource,
+    attachment_store: &crate::SessionAttachmentStore,
+    policy: &dyn crate::AttachmentSourcePolicy,
+) -> Result<(), RuntimeError> {
+    policy
+        .authorize(&crate::AttachmentProducer::Host, source)
+        .map_err(|err| RuntimeError::new(RuntimeErrorCode::PluginCheckpoint, err.to_string()))?;
+    if let crate::AttachmentSource::Inline { media_type, bytes } = source {
+        let attachment_ref = attachment_store
+            .put(
+                bytes.clone(),
+                crate::AttachmentCreateMeta::new(media_type.clone(), None, None),
+            )
+            .await
+            .map_err(|err| {
+                RuntimeError::new(
+                    RuntimeErrorCode::DurableStoreRequired {
+                        facet: crate::DurableStoreFacet::AttachmentStore,
+                    },
+                    format!("failed to store inline checkpoint attachment: {err}"),
+                )
+            })?;
+        *source = crate::AttachmentSource::stored(attachment_ref);
+    }
+    Ok(())
 }

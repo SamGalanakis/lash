@@ -1966,7 +1966,7 @@ async fn restate_positional_replay_records_tool_attempt_as_one_command() {
                     local_runs.fetch_add(1, Ordering::SeqCst);
                     Ok(RuntimeEffectOutcome::ToolAttempt {
                         launch: Box::new(lash_core::ToolAttemptLaunch::Done {
-                            record: completed_tool_record("call-fast", "fast_tool"),
+                            record: Box::new(completed_tool_record("call-fast", "fast_tool")),
                         }),
                         triggers: Vec::new(),
                     })
@@ -3826,7 +3826,10 @@ enum RestateSegmentReplayPoint {
 fn restate_segment_tool_attempt_outcome(ordinal: u64) -> RuntimeEffectOutcome {
     RuntimeEffectOutcome::ToolAttempt {
         launch: Box::new(lash_core::ToolAttemptLaunch::Done {
-            record: completed_tool_record(&format!("matrix-call-{ordinal}"), "matrix_tool"),
+            record: Box::new(completed_tool_record(
+                &format!("matrix-call-{ordinal}"),
+                "matrix_tool",
+            )),
         }),
         triggers: Vec::new(),
     }

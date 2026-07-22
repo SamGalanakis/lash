@@ -369,7 +369,7 @@ pub enum TraceContentBlock {
         #[serde(default, skip_serializing_if = "is_false")]
         cache_breakpoint: bool,
     },
-    Image {
+    Attachment {
         attachment_idx: usize,
     },
     ToolCall {
@@ -399,7 +399,9 @@ fn is_false(value: &bool) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TraceAttachment {
-    pub mime: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

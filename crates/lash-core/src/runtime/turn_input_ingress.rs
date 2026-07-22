@@ -306,11 +306,16 @@ impl TurnInputClaim {
     pub async fn materialize_for_checkpoint(
         &self,
         attachment_store: &crate::SessionAttachmentStore,
+        attachment_source_policy: &dyn crate::AttachmentSourcePolicy,
     ) -> Result<QueuedCheckpointTurnInput, String> {
         let mut messages = Vec::new();
         for input in &self.inputs {
-            if let Some(message) =
-                committed_message_from_pending_input(input, attachment_store).await?
+            if let Some(message) = committed_message_from_pending_input(
+                input,
+                attachment_store,
+                attachment_source_policy,
+            )
+            .await?
             {
                 messages.push(message);
             }
@@ -323,12 +328,10 @@ impl TurnInputClaim {
 
     pub fn materialize_for_turn(&self) -> TurnInput {
         let mut input_items = Vec::new();
-        let mut image_blobs = std::collections::HashMap::new();
         let mut protocol_turn_options = None;
         let mut trace_turn_id = None;
         for pending in &self.inputs {
             input_items.extend(pending.input.items.clone());
-            image_blobs.extend(pending.input.image_blobs.clone());
             if protocol_turn_options.is_none() {
                 protocol_turn_options = pending.input.protocol_turn_options.clone();
             }
@@ -338,7 +341,6 @@ impl TurnInputClaim {
         }
         TurnInput {
             items: input_items,
-            image_blobs,
             protocol_turn_options,
             trace_turn_id,
             protocol_extension: None,
@@ -363,21 +365,17 @@ pub(crate) fn source_key_display_id(source: &str) -> String {
 
 pub(crate) fn plugin_message_from_turn_input(input: &TurnInput) -> Option<PluginMessage> {
     let mut text = Vec::new();
-    let mut images = Vec::new();
+    let mut attachments = Vec::new();
     for item in &input.items {
         match item {
             crate::InputItem::Text { text: item_text } if !item_text.is_empty() => {
                 text.push(item_text.clone());
             }
             crate::InputItem::Text { .. } => {}
-            crate::InputItem::ImageRef { id } => {
-                if let Some(bytes) = input.image_blobs.get(id).cloned() {
-                    images.push(bytes);
-                }
-            }
+            crate::InputItem::Attachment { source } => attachments.push(source.clone()),
         }
     }
-    if text.is_empty() && images.is_empty() {
+    if text.is_empty() && attachments.is_empty() {
         return None;
     }
     Some(PluginMessage {
@@ -386,18 +384,19 @@ pub(crate) fn plugin_message_from_turn_input(input: &TurnInput) -> Option<Plugin
         content: text.join("\n"),
         origin: None,
         parts: Vec::new(),
-        images,
+        attachments,
     })
 }
 
 async fn committed_message_from_pending_input(
     pending: &PendingTurnInput,
     attachment_store: &crate::SessionAttachmentStore,
+    attachment_source_policy: &dyn crate::AttachmentSourcePolicy,
 ) -> Result<Option<crate::Message>, String> {
     let normalized = super::io::normalize_input_items(
         &pending.input.items,
-        &pending.input.image_blobs,
         attachment_store,
+        attachment_source_policy,
     )
     .await?;
     let message_id = format!("m_ingress_{}", pending.input_id);
@@ -420,13 +419,13 @@ async fn committed_message_from_pending_input(
                 });
             }
             super::NormalizedItem::Text(_) => {}
-            super::NormalizedItem::Image(reference) => {
+            super::NormalizedItem::Attachment(source) => {
                 let part_id = format!("{message_id}.p{}", parts.len());
                 parts.push(crate::Part {
                     id: part_id,
-                    kind: crate::PartKind::Image,
+                    kind: crate::PartKind::Attachment,
                     content: String::new(),
-                    attachment: Some(crate::session_model::message::PartAttachment { reference }),
+                    attachment: Some(crate::session_model::message::PartAttachment { source }),
                     tool_call_id: None,
                     tool_name: None,
                     tool_replay: None,

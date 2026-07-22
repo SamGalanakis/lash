@@ -205,6 +205,14 @@ impl DirectCompletionCapability {
     ) -> Result<DirectEffectPlan, crate::PluginError> {
         let current = context.current;
         let usage_source = usage_source.to_string();
+        for source in &request.attachments {
+            current
+                .host
+                .core
+                .attachment_source_policy
+                .authorize(&crate::AttachmentProducer::Host, source)
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        }
         let request_spec = crate::LlmRequestSpec::from_request(
             &request,
             current.host.core.durability.attachment_store.as_ref(),

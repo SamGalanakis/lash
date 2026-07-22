@@ -193,8 +193,7 @@ impl AttachmentStore for S3AttachmentStore {
             lash_core::attachments::content_id(&bytes),
             meta.media_type,
             bytes.len() as u64,
-            meta.width,
-            meta.height,
+            meta.type_metadata,
             meta.label,
         );
         put_at_path(&*self.store, self.content_path(&meta.id)?, bytes, meta).await
@@ -323,7 +322,7 @@ fn endpoint_uses_http(endpoint: &str) -> bool {
 mod tests {
     use super::*;
     use lash_core::testing::conformance::ReopenableAttachmentStore;
-    use lash_core::{ImageMediaType, MediaType};
+    use lash_core::{AttachmentTypeMetadata, MediaType};
 
     #[test]
     fn normalizes_prefixes() {
@@ -401,9 +400,8 @@ mod tests {
         };
         let store = S3AttachmentStore::from_config(config).expect("store");
         let meta = AttachmentCreateMeta::new(
-            MediaType::Image(ImageMediaType::Png),
-            Some(1),
-            Some(1),
+            MediaType::parse("image/png").unwrap(),
+            Some(AttachmentTypeMetadata::image(Some(1), Some(1))),
             Some("pixel".to_string()),
         );
         let first = store
@@ -422,9 +420,8 @@ mod tests {
         };
         let store = S3AttachmentStore::from_config(config).expect("store");
         let meta = AttachmentCreateMeta::new(
-            MediaType::Image(ImageMediaType::Png),
-            Some(1),
-            Some(1),
+            MediaType::parse("image/png").unwrap(),
+            Some(AttachmentTypeMetadata::image(Some(1), Some(1))),
             Some("pixel".to_string()),
         );
         let reference = store.put(vec![4, 5, 6, 7], meta).await.expect("put");

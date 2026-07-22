@@ -21,7 +21,9 @@ use std::time::Duration;
 use base64::Engine;
 use http::{HeaderName, HeaderValue};
 use rmcp::ServiceError;
-use rmcp::model::{CallToolRequestParams, ClientInfo, Content, Implementation, RawContent};
+use rmcp::model::{
+    CallToolRequestParams, ClientInfo, Content, Implementation, RawContent, ResourceContents,
+};
 use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::child_process::TokioChildProcess;
 use rmcp::transport::streamable_http_client::{
@@ -273,7 +275,10 @@ impl McpConnectionPool {
         .await;
 
         match response {
-            Ok(Ok(result)) => tool_result_from_rmcp(result, context).await,
+            Ok(Ok(result)) => {
+                tool_result_from_rmcp(result, context, entry.config.binary_content_attachments())
+                    .await
+            }
             Ok(Err(err)) => {
                 if is_connection_loss(&err) {
                     entry.mark_disconnected().await;
@@ -593,6 +598,7 @@ fn import_tools(
 async fn tool_result_from_rmcp(
     result: rmcp::model::CallToolResult,
     context: &ToolContext<'_>,
+    binary_content_attachments: bool,
 ) -> ToolResult {
     let is_error = result.is_error.unwrap_or(false);
 
@@ -607,35 +613,66 @@ async fn tool_result_from_rmcp(
                 content_items.push(ToolValue::String(text.text));
             }
             RawContent::Image(image) => {
-                let data = match base64::engine::general_purpose::STANDARD.decode(image.data) {
-                    Ok(bytes) => bytes,
-                    Err(err) => {
-                        return ToolResult::err_fmt(McpError::Decode(err));
-                    }
-                };
-                let Some(media_type) = MediaType::from_mime(&image.mime_type) else {
-                    return ToolResult::err_fmt(format!(
-                        "Unsupported MCP image MIME type: {}",
-                        image.mime_type
-                    ));
-                };
-                let reference = match context
-                    .attachments()
-                    .put(
-                        data,
-                        AttachmentCreateMeta::new(media_type, None, None, Some("MCP image".into())),
-                    )
-                    .await
-                {
-                    Ok(reference) => reference,
-                    Err(err) => {
-                        return ToolResult::err_fmt(format!(
-                            "Failed to store MCP image attachment: {err}"
+                let reference =
+                    match store_mcp_attachment(context, &image.data, &image.mime_type, "MCP image")
+                        .await
+                    {
+                        Ok(reference) => reference,
+                        Err(result) => return result,
+                    };
+                has_attachments = true;
+                content_items.push(ToolValue::Attachment(lash_core::AttachmentSource::stored(
+                    reference,
+                )));
+            }
+            RawContent::Audio(audio) if binary_content_attachments => {
+                let reference =
+                    match store_mcp_attachment(context, &audio.data, &audio.mime_type, "MCP audio")
+                        .await
+                    {
+                        Ok(reference) => reference,
+                        Err(result) => return result,
+                    };
+                has_attachments = true;
+                content_items.push(ToolValue::Attachment(lash_core::AttachmentSource::stored(
+                    reference,
+                )));
+            }
+            RawContent::Resource(resource) if binary_content_attachments => {
+                match resource.resource {
+                    ResourceContents::BlobResourceContents {
+                        uri,
+                        mime_type,
+                        blob,
+                        ..
+                    } => {
+                        let Some(mime_type) = mime_type else {
+                            return ToolResult::err_fmt(
+                                "MCP binary resource attachment is missing its MIME type",
+                            );
+                        };
+                        let reference = match store_mcp_attachment(
+                            context,
+                            &blob,
+                            &mime_type,
+                            &format!("MCP resource {uri}"),
+                        )
+                        .await
+                        {
+                            Ok(reference) => reference,
+                            Err(result) => return result,
+                        };
+                        has_attachments = true;
+                        content_items.push(ToolValue::Attachment(
+                            lash_core::AttachmentSource::stored(reference),
                         ));
                     }
-                };
-                has_attachments = true;
-                content_items.push(ToolValue::Attachment(reference));
+                    text_resource => {
+                        if let Ok(value) = serde_json::to_value(text_resource) {
+                            content_items.push(ToolValue::from(value));
+                        }
+                    }
+                }
             }
             other => {
                 if let Ok(value) = serde_json::to_value(&other) {
@@ -681,6 +718,27 @@ async fn tool_result_from_rmcp(
     } else {
         ToolResult::from_output(ToolCallOutput::success(value))
     }
+}
+
+async fn store_mcp_attachment(
+    context: &ToolContext<'_>,
+    encoded: &str,
+    mime_type: &str,
+    label: &str,
+) -> Result<lash_core::AttachmentRef, ToolResult> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|err| ToolResult::err_fmt(McpError::Decode(err)))?;
+    let media_type = MediaType::parse(mime_type)
+        .map_err(|err| ToolResult::err_fmt(format_args!("Invalid MCP attachment MIME: {err}")))?;
+    context
+        .attachments()
+        .put(
+            data,
+            AttachmentCreateMeta::new(media_type, None, Some(label.to_string())),
+        )
+        .await
+        .map_err(|err| ToolResult::err_fmt(format_args!("Failed to store MCP attachment: {err}")))
 }
 
 impl Drop for McpConnectionPool {
@@ -793,6 +851,7 @@ mod tests {
                 cwd: None,
                 startup_timeout_ms: 1_000,
                 call_timeout_ms: 1_000,
+                binary_content_attachments: false,
             },
         );
 
@@ -874,6 +933,7 @@ mod tests {
                 cwd: None,
                 startup_timeout_ms: 10_000,
                 call_timeout_ms: 2_000,
+                binary_content_attachments: false,
             },
         );
 
@@ -944,6 +1004,7 @@ mod tests {
             cwd: None,
             startup_timeout_ms: 750,
             call_timeout_ms: 10_000,
+            binary_content_attachments: false,
         };
 
         let entry = McpEntry::new("hangs".to_string(), config);
@@ -1025,6 +1086,7 @@ mod tests {
                 cwd: None,
                 startup_timeout_ms: 10_000,
                 call_timeout_ms: 5_000,
+                binary_content_attachments: false,
             },
         );
 

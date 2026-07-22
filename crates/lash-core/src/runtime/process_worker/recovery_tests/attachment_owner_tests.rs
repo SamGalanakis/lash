@@ -69,9 +69,8 @@ impl crate::ProcessEngine for AttachmentWritingEngine {
             .put(
                 b"process-attachment-before-nested-turn".to_vec(),
                 crate::AttachmentCreateMeta::new(
-                    crate::MediaType::Image(crate::ImageMediaType::Png),
-                    Some(1),
-                    Some(1),
+                    crate::MediaType::parse("image/png").unwrap(),
+                    Some(crate::AttachmentTypeMetadata::image(Some(1), Some(1))),
                     Some("before.png".to_string()),
                 ),
             )
@@ -118,9 +117,8 @@ impl crate::ProcessEngine for AttachmentWritingEngine {
             .put(
                 b"process-attachment-after-nested-turn".to_vec(),
                 crate::AttachmentCreateMeta::new(
-                    crate::MediaType::Image(crate::ImageMediaType::Png),
-                    Some(1),
-                    Some(1),
+                    crate::MediaType::parse("image/png").unwrap(),
+                    Some(crate::AttachmentTypeMetadata::image(Some(1), Some(1))),
                     Some("after.png".to_string()),
                 ),
             )
@@ -185,9 +183,8 @@ async fn process_runtime_keeps_state_separate_from_parent_bound_attachment_manif
         .put(
             b"parent-bound-process-attachment".to_vec(),
             crate::AttachmentCreateMeta::new(
-                crate::MediaType::Image(crate::ImageMediaType::Png),
-                Some(1),
-                Some(1),
+                crate::MediaType::parse("image/png").unwrap(),
+                Some(crate::AttachmentTypeMetadata::image(Some(1), Some(1))),
                 Some("parent-bound.png".to_string()),
             ),
         )

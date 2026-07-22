@@ -234,13 +234,13 @@ impl RuntimeBoundaryHarness {
                     local_calls_for_executor.fetch_add(1, Ordering::SeqCst);
                     Ok(RuntimeEffectOutcome::ToolAttempt {
                         launch: Box::new(ToolAttemptLaunch::Done {
-                            record: ToolCallRecord {
+                            record: Box::new(ToolCallRecord {
                                 call_id: Some(call_id),
                                 tool: "sim_opaque_effect".to_string(),
                                 args: Value::Null,
                                 output: ToolCallOutput::success(scripted_result),
                                 duration_ms: 0,
-                            },
+                            }),
                         }),
                         triggers: Vec::new(),
                     })
@@ -346,13 +346,13 @@ impl RuntimeBoundaryHarness {
                     local_calls_for_executor.fetch_add(1, Ordering::SeqCst);
                     Ok(RuntimeEffectOutcome::ToolAttempt {
                         launch: Box::new(ToolAttemptLaunch::Done {
-                            record: ToolCallRecord {
+                            record: Box::new(ToolCallRecord {
                                 call_id: Some(call_id_for_executor),
                                 tool: tool_name_for_executor,
                                 args,
                                 output: ToolCallOutput::success(output_for_executor),
                                 duration_ms: 0,
-                            },
+                            }),
                         }),
                         triggers: Vec::new(),
                     })

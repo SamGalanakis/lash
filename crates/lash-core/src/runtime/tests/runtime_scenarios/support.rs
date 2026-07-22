@@ -657,7 +657,7 @@ pub(crate) fn pending_active_turn_input_draft(
 pub(crate) fn pending_input_text(input: &PendingTurnInput) -> Option<&str> {
     match input.input.items.first()? {
         InputItem::Text { text } => Some(text.as_str()),
-        InputItem::ImageRef { .. } => None,
+        InputItem::Attachment { .. } => None,
     }
 }
 

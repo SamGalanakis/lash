@@ -1256,7 +1256,7 @@ fn first_message_search_text(message: &Message) -> String {
         .iter()
         .filter_map(|part| match part.kind {
             crate::PartKind::ToolCall | crate::PartKind::ToolResult => None,
-            crate::PartKind::Image => Some("[Image attached]".to_string()),
+            crate::PartKind::Attachment => Some("[Attachment]".to_string()),
             _ => (!part.content.trim().is_empty()).then(|| part.content.clone()),
         })
         .collect::<Vec<_>>()

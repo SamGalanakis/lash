@@ -11,6 +11,41 @@ use sha2::{Digest, Sha256};
 
 use crate::store::{AttachmentIntent, AttachmentManifest, StoreError};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttachmentProducer {
+    Host,
+    TurnIngress,
+    Tool { tool_name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("attachment source policy denied {producer:?}: {reason}")]
+pub struct AttachmentSourcePolicyError {
+    pub producer: AttachmentProducer,
+    pub reason: String,
+}
+
+pub trait AttachmentSourcePolicy: Send + Sync {
+    fn authorize(
+        &self,
+        producer: &AttachmentProducer,
+        source: &crate::AttachmentSource,
+    ) -> Result<(), AttachmentSourcePolicyError>;
+}
+
+#[derive(Debug, Default)]
+pub struct OpenAttachmentSourcePolicy;
+
+impl AttachmentSourcePolicy for OpenAttachmentSourcePolicy {
+    fn authorize(
+        &self,
+        _producer: &AttachmentProducer,
+        _source: &crate::AttachmentSource,
+    ) -> Result<(), AttachmentSourcePolicyError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AttachmentStoreError {
     #[error("attachment `{0}` was not found")]
@@ -778,8 +813,7 @@ fn stored_meta(bytes: &[u8], meta: AttachmentCreateMeta) -> AttachmentMeta {
         content_id(bytes),
         meta.media_type,
         bytes.len() as u64,
-        meta.width,
-        meta.height,
+        meta.type_metadata,
         meta.label,
     )
 }
@@ -788,16 +822,17 @@ pub async fn resolve_llm_request_attachments(
     mut request: crate::llm::types::LlmRequest,
     store: &SessionAttachmentStore,
 ) -> Result<crate::llm::types::LlmRequest, AttachmentStoreError> {
-    for attachment in &mut request.attachments {
-        let Some(reference) = attachment.reference.as_ref() else {
+    for attachment in &request.attachments {
+        let crate::AttachmentSource::Stored { attachment_ref } = attachment else {
             continue;
         };
-        if !attachment.data.is_empty() {
+        if request.resolved_stored.contains_key(&attachment_ref.id) {
             continue;
         }
-        let stored = store.get(&reference.id).await?;
-        attachment.mime = reference.canonical_mime().to_string();
-        attachment.data = stored.bytes;
+        let stored = store.get(&attachment_ref.id).await?;
+        request
+            .resolved_stored
+            .insert(attachment_ref.id.clone(), stored.bytes);
     }
     Ok(request)
 }
@@ -805,7 +840,7 @@ pub async fn resolve_llm_request_attachments(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_sansio::{ImageMediaType, MediaType};
+    use lash_sansio::{AttachmentTypeMetadata, MediaType};
 
     #[derive(Default)]
     struct RecordingManifest {
@@ -926,9 +961,8 @@ mod tests {
 
     fn meta() -> AttachmentCreateMeta {
         AttachmentCreateMeta::new(
-            MediaType::Image(ImageMediaType::Png),
-            Some(1),
-            Some(1),
+            MediaType::parse("image/png").unwrap(),
+            Some(AttachmentTypeMetadata::image(Some(1), Some(1))),
             Some("pixel".to_string()),
         )
     }

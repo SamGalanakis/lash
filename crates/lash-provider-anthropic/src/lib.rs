@@ -18,9 +18,9 @@ mod tests {
     use crate::stream::StreamState;
     use crate::{AnthropicProvider, DEFAULT_BASE_URL};
     use lash_core::llm::types::{
-        LlmAttachment, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputPart,
-        LlmOutputSpec, LlmRequest, LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice,
-        LlmToolSpec, LlmUsage,
+        AttachmentSource, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage,
+        LlmOutputPart, LlmOutputSpec, LlmRequest, LlmRole, LlmStreamEvent, LlmTerminalReason,
+        LlmToolChoice, LlmToolSpec, LlmUsage,
     };
     use lash_core::provider::{
         CacheRetention, ModelCapability, Provider, ProviderOptions, ReasoningCapability,
@@ -100,6 +100,7 @@ mod tests {
             model: "claude-sonnet-4-6".to_string(),
             messages,
             attachments: Vec::new(),
+            resolved_stored: Default::default(),
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: Default::default(),
@@ -247,10 +248,13 @@ mod tests {
                     response_meta: None,
                     cache_breakpoint: false,
                 },
-                LlmContentBlock::Image { attachment_idx: 0 },
+                LlmContentBlock::Attachment { attachment_idx: 0 },
             ],
         )]);
-        req.attachments = vec![LlmAttachment::bytes("image/png", png_bytes.clone())];
+        req.attachments = vec![AttachmentSource::inline(
+            lash_core::MediaType::parse("image/png").unwrap(),
+            png_bytes.clone(),
+        )];
 
         let body = provider.build_request_body(&req).expect("body");
 
@@ -268,19 +272,44 @@ mod tests {
     }
 
     #[test]
+    fn external_pdf_serializes_as_document_url_block() {
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::new(
+            LlmRole::User,
+            vec![LlmContentBlock::Attachment { attachment_idx: 0 }],
+        )]);
+        req.attachments = vec![AttachmentSource::external_url(
+            lash_core::MediaType::parse("application/pdf").unwrap(),
+            "https://example.test/report.pdf",
+        )];
+
+        let body = provider.build_request_body(&req).expect("body");
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["type"], "document");
+        assert_eq!(block["source"]["type"], "url");
+        assert_eq!(block["source"]["url"], "https://example.test/report.pdf");
+    }
+
+    #[test]
     fn unsupported_image_mime_is_rejected_at_request_boundary() {
         let provider = AnthropicProvider::new("key");
         let mut req = request(vec![LlmMessage::new(
             LlmRole::User,
-            vec![LlmContentBlock::Image { attachment_idx: 0 }],
+            vec![LlmContentBlock::Attachment { attachment_idx: 0 }],
         )]);
-        req.attachments = vec![LlmAttachment::bytes("image/bmp", vec![0x42, 0x4D])];
+        req.attachments = vec![AttachmentSource::inline(
+            lash_core::MediaType::parse("image/bmp").unwrap(),
+            vec![0x42, 0x4D],
+        )];
 
         let err = provider
             .build_request_body(&req)
             .expect_err("bmp should be rejected before wire");
 
-        assert_eq!(err.code.as_deref(), Some("unsupported_image_format"));
+        assert_eq!(
+            err.code.as_deref(),
+            Some("unsupported_attachment_capability")
+        );
         assert!(err.message.contains("Anthropic"));
         assert!(err.message.contains("image/bmp"));
     }

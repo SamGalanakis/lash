@@ -143,7 +143,8 @@ pub mod tools {
 
 pub mod direct {
     pub use lash_core::llm::types::{
-        LlmAttachment, LlmEventSender, LlmOutputPart, LlmStreamEvent, LlmTerminalReason, LlmUsage,
+        AttachmentSource, LlmEventSender, LlmOutputPart, LlmStreamEvent, LlmTerminalReason,
+        LlmUsage, ProviderFileScope,
     };
     pub use lash_core::{
         DirectCompletion, DirectJsonSchema, DirectLlmClient, DirectLlmCompletion, DirectLlmError,
@@ -226,11 +227,12 @@ pub mod remote {
     /// output specs, and provider metadata.
     pub mod llm {
         pub use lash_remote_protocol::llm::{
-            RemoteAttachmentRef, RemoteDiagnostic, RemoteExecutionEvidence,
-            RemoteGenerationOptions, RemoteLlmAttachment, RemoteLlmContentBlock, RemoteLlmMessage,
-            RemoteLlmOutputPart, RemoteLlmOutputSpec, RemoteLlmRequest, RemoteLlmRequestScope,
-            RemoteLlmResponse, RemoteLlmRole, RemoteLlmTerminalReason, RemoteLlmToolChoice,
-            RemoteLlmToolSpec, RemoteModelCapability, RemoteModelIntent, RemoteProviderFailureKind,
+            RemoteAttachmentRef, RemoteAttachmentSource, RemoteAttachmentTypeMetadata,
+            RemoteDiagnostic, RemoteExecutionEvidence, RemoteGenerationOptions,
+            RemoteLlmContentBlock, RemoteLlmMessage, RemoteLlmOutputPart, RemoteLlmOutputSpec,
+            RemoteLlmRequest, RemoteLlmRequestScope, RemoteLlmResponse, RemoteLlmRole,
+            RemoteLlmTerminalReason, RemoteLlmToolChoice, RemoteLlmToolSpec, RemoteModelCapability,
+            RemoteModelIntent, RemoteProviderFailureKind, RemoteProviderFileScope,
             RemoteProviderMetadata, RemoteProviderReasoningReplay, RemoteProviderReplayMeta,
             RemoteReasoningCapability, RemoteReasoningDisableEncoding, RemoteReasoningEncoding,
             RemoteReasoningSelection, RemoteResponseTextMeta, RemoteSchemaProjectionOverride,

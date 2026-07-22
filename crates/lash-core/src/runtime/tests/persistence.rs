@@ -239,7 +239,6 @@ async fn standard_runtime_assembles_stream_only_text_response() {
                 items: vec![InputItem::Text {
                     text: "hi".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -301,7 +300,6 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
                 items: vec![InputItem::Text {
                     text: "continue".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -365,7 +363,6 @@ async fn standard_runtime_text_part_reconciles_without_streaming_duplicate() {
                 items: vec![InputItem::Text {
                     text: "continue".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -451,7 +448,6 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
                 items: vec![InputItem::Text {
                     text: "trigger slow tool".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -533,7 +529,6 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
                 items: vec![InputItem::Text {
                     text: "run terminal tools".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -632,7 +627,6 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
                 items: vec![InputItem::Text {
                     text: "run failing terminal tool".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -710,7 +704,6 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
                 items: vec![InputItem::Text {
                     text: "run the tool".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -762,7 +755,6 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
                 items: vec![InputItem::Text {
                     text: "hi".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -825,7 +817,6 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -880,7 +871,6 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,

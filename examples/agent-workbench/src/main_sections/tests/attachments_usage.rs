@@ -179,13 +179,11 @@ async fn run_attachment_usage_gate(
         let requests = provider_requests.lock().expect("provider request lock");
         assert_eq!(requests.len(), 1, "gate must make exactly one LLM call");
         assert_eq!(requests[0].attachments.len(), 1);
-        assert_eq!(requests[0].attachments[0].mime, "image/png");
-        assert_eq!(requests[0].attachments[0].data, png_bytes);
+        let source = &requests[0].attachments[0];
+        assert_eq!(source.media_type().map(lash_core::MediaType::as_str), Some("image/png"));
+        assert_eq!(requests[0].attachment_bytes(source), Some(png_bytes.as_slice()));
         assert_eq!(
-            requests[0].attachments[0]
-                .reference
-                .as_ref()
-                .map(|reference| &reference.id),
+            source.stored_ref().map(|reference| &reference.id),
             Some(&uploaded.attachment.id)
         );
     }

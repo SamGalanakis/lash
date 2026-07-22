@@ -366,6 +366,10 @@ include!("postgres/trigger_store.rs");
 include!("postgres/artifact_store.rs");
 
 #[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod postgres_test_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -375,6 +379,8 @@ mod tests {
             eprintln!("skipping Postgres checkpoint counter: database URL is not set");
             return;
         };
+        let _database_lock =
+            postgres_test_support::SharedDatabaseLock::acquire(&database_url).await;
         let storage = PostgresStorage::connect(&database_url)
             .await
             .expect("connect checkpoint counter storage");

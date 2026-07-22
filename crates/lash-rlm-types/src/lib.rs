@@ -52,9 +52,11 @@ pub enum RlmHistoryRole {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RlmAttachmentRef {
     pub id: String,
-    pub media_type: lash_sansio::MediaType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<lash_sansio::MediaType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    pub source: String,
     pub reference: String,
 }
 

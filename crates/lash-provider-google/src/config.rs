@@ -20,7 +20,8 @@ pub(crate) static DEFAULT_HTTP_TRANSPORT: LazyLock<Arc<dyn LlmHttpTransport>> =
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct UploadedAttachmentCacheKey {
-    pub(crate) project_id: String,
+    pub(crate) provider: &'static str,
+    pub(crate) credential_scope: String,
     pub(crate) mime: String,
     pub(crate) hash: String,
 }

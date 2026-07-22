@@ -640,13 +640,19 @@ fn committed_attachment_ids(
     let mut attachment_ids = BTreeSet::new();
     for call in tool_calls {
         for attachment in call.output.attachments() {
-            attachment_ids.insert(attachment.id);
+            if let Some(attachment_ref) = attachment.stored_ref() {
+                attachment_ids.insert(attachment_ref.id.clone());
+            }
         }
     }
     for message in state.read_model().messages.iter() {
         for part in message.parts.iter() {
-            if let Some(attachment) = &part.attachment {
-                attachment_ids.insert(attachment.reference.id.clone());
+            if let Some(attachment_ref) = part
+                .attachment
+                .as_ref()
+                .and_then(|attachment| attachment.source.stored_ref())
+            {
+                attachment_ids.insert(attachment_ref.id.clone());
             }
         }
     }
@@ -728,7 +734,7 @@ fn message_rendered_text(message: &Message) -> String {
         .filter(|part| {
             matches!(
                 part.kind,
-                PartKind::Prose | PartKind::Text | PartKind::Image | PartKind::ToolResult
+                PartKind::Prose | PartKind::Text | PartKind::Attachment | PartKind::ToolResult
             )
         })
         .map(|part| part.content.as_str())
@@ -794,13 +800,12 @@ mod tests {
         }
     }
 
-    fn image_ref(id: &str) -> crate::AttachmentRef {
+    fn attachment_ref(id: &str) -> crate::AttachmentRef {
         crate::AttachmentMeta::new(
             crate::AttachmentId::new(id),
-            crate::MediaType::Image(crate::ImageMediaType::Png),
+            crate::MediaType::parse("image/png").unwrap(),
             3,
-            Some(1),
-            Some(1),
+            Some(crate::AttachmentTypeMetadata::image(Some(1), Some(1))),
             Some("tiny".to_string()),
         )
         .as_ref()
@@ -1293,7 +1298,6 @@ mod tests {
             })
             .await
             .expect("progress boundary");
-
         assert!(!boundary.persisted);
         assert_eq!(boundary.protocol_events.len(), 1);
         assert_eq!(pipeline.state().turn_index, 1);
@@ -1340,20 +1344,19 @@ mod tests {
             0
         );
     }
-
     #[test]
     fn committed_attachment_ids_merge_tool_outputs_with_message_refs() {
-        let tool_ref = image_ref("tool-output");
+        let tool_ref = attachment_ref("tool-output");
         let mut state = RuntimeSessionState::default();
         let message = crate::Message {
             id: "message".to_string(),
             role: crate::MessageRole::User,
             parts: std::sync::Arc::new(vec![crate::Part {
                 id: "message.p0".to_string(),
-                kind: crate::PartKind::Image,
+                kind: crate::PartKind::Attachment,
                 content: String::new(),
                 attachment: Some(crate::session_model::message::PartAttachment {
-                    reference: image_ref("message-ref"),
+                    source: crate::AttachmentSource::stored(attachment_ref("message-ref")),
                 }),
                 tool_call_id: None,
                 tool_name: None,
@@ -1369,12 +1372,12 @@ mod tests {
             call_id: Some("call-1".to_string()),
             tool: "make_attachment".to_string(),
             args: serde_json::json!({}),
-            output: crate::ToolCallOutput::success(crate::ToolValue::Attachment(tool_ref)),
+            output: crate::ToolCallOutput::success(crate::ToolValue::Attachment(
+                crate::AttachmentSource::stored(tool_ref),
+            )),
             duration_ms: 1,
         }];
-
         let ids = committed_attachment_ids(&state, &tool_calls);
-
         assert_eq!(
             ids,
             vec![
@@ -1383,7 +1386,6 @@ mod tests {
             ]
         );
     }
-
     #[tokio::test]
     async fn replayed_exec_tool_output_is_a_gc_root_without_pending_or_message_refs() {
         let backend = crate::InMemoryAttachmentStore::new();
@@ -1391,9 +1393,8 @@ mod tests {
             &backend,
             vec![1, 2, 3],
             crate::AttachmentCreateMeta::new(
-                crate::MediaType::Image(crate::ImageMediaType::Png),
-                Some(1),
-                Some(1),
+                crate::MediaType::parse("image/png").unwrap(),
+                Some(crate::AttachmentTypeMetadata::image(Some(1), Some(1))),
                 Some("replayed-only".to_string()),
             ),
         )
@@ -1404,11 +1405,10 @@ mod tests {
             tool: "executor_state_only".to_string(),
             args: serde_json::json!({}),
             output: crate::ToolCallOutput::success(crate::ToolValue::Attachment(
-                attachment.clone(),
+                crate::AttachmentSource::stored(attachment.clone()),
             )),
             duration_ms: 1,
         }];
-
         let committed = committed_attachment_ids(&RuntimeSessionState::default(), &tool_calls);
         assert_eq!(committed, vec![attachment.id.clone()]);
 

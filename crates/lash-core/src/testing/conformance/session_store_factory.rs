@@ -150,15 +150,13 @@ pub async fn attachment_ownership_isolation_with_store(
         b_request.session_id.clone(),
     );
     let png = AttachmentCreateMeta::new(
-        MediaType::Image(ImageMediaType::Png),
-        Some(10),
-        Some(20),
+        MediaType::parse("image/png").unwrap(),
+        Some(AttachmentTypeMetadata::image(Some(10), Some(20))),
         Some("a.png".to_string()),
     );
     let jpeg = AttachmentCreateMeta::new(
-        MediaType::Image(ImageMediaType::Jpeg),
-        Some(30),
-        Some(40),
+        MediaType::parse("image/jpeg").unwrap(),
+        Some(AttachmentTypeMetadata::image(Some(30), Some(40))),
         Some("b.jpg".to_string()),
     );
 
@@ -194,8 +192,8 @@ pub async fn attachment_ownership_isolation_with_store(
         .await
         .expect("put identical bytes for b");
     assert_eq!(a_ref.id, b_ref.id, "identical bytes share one content id");
-    assert_eq!(a_ref.canonical_mime(), "image/png");
-    assert_eq!(b_ref.canonical_mime(), "image/jpeg");
+    assert_eq!(a_ref.media_type.as_str(), "image/png");
+    assert_eq!(b_ref.media_type.as_str(), "image/jpeg");
     assert_eq!(a_ref.label.as_deref(), Some("a.png"));
     assert_eq!(b_ref.label.as_deref(), Some("b.jpg"));
     session_b

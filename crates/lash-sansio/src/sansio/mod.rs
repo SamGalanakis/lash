@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::llm::types::{
-    LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason, LlmToolChoice,
+    AttachmentSource, LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason, LlmToolChoice,
     LlmToolSpec, ProviderReplayMeta,
 };
 use crate::session_model::message::MessageOrigin;

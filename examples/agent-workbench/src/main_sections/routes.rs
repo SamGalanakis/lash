@@ -65,12 +65,12 @@ async fn upload_attachment(
             "attachment name must be at most 200 characters",
         ));
     }
-    let media_type = lash_core::MediaType::from_mime(&request.mime).ok_or_else(|| {
+    let media_type = lash_core::MediaType::parse(&request.mime).map_err(|_| {
         AppError::bad_request(
             "the workbench turn contract currently accepts PNG image attachments only",
         )
     })?;
-    if media_type.canonical_mime() != "image/png" {
+    if media_type.as_str() != "image/png" {
         return Err(AppError::bad_request(
             "the workbench turn contract currently accepts PNG image attachments only",
         ));
@@ -91,7 +91,7 @@ async fn upload_attachment(
         .attachment_store
         .put(
             bytes,
-            lash_core::AttachmentCreateMeta::new(media_type, None, None, Some(name.to_string())),
+            lash_core::AttachmentCreateMeta::new(media_type, None, Some(name.to_string())),
         )
         .await
         .map_err(AppError::internal)?;
@@ -100,7 +100,7 @@ async fn upload_attachment(
         "api.attachment.uploaded",
         json!({
             "attachment_id": attachment.id,
-            "mime": attachment.canonical_mime(),
+            "mime": attachment.media_type.as_str(),
             "byte_len": attachment.byte_len,
             "name": name,
         }),

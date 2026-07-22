@@ -535,8 +535,8 @@ async fn normalize_items_merges_adjacent_text_items() {
     ];
     let out = normalize_input_items(
         &items,
-        &HashMap::new(),
         &crate::SessionAttachmentStore::in_memory(),
+        &crate::OpenAttachmentSourcePolicy,
     )
     .await
     .expect("normalized");
@@ -547,4 +547,46 @@ async fn normalize_items_merges_adjacent_text_items() {
         }
         _ => panic!("expected merged text item"),
     }
+}
+
+#[derive(Debug)]
+struct DenyBorrowedIngress;
+
+impl crate::AttachmentSourcePolicy for DenyBorrowedIngress {
+    fn authorize(
+        &self,
+        producer: &crate::AttachmentProducer,
+        source: &crate::AttachmentSource,
+    ) -> Result<(), crate::AttachmentSourcePolicyError> {
+        if matches!(producer, crate::AttachmentProducer::TurnIngress)
+            && matches!(source, crate::AttachmentSource::ExternalUrl { .. })
+        {
+            return Err(crate::AttachmentSourcePolicyError {
+                producer: producer.clone(),
+                reason: "borrowed ingress disabled".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn attachment_source_policy_can_deny_borrowed_turn_ingress() {
+    let items = vec![InputItem::Attachment {
+        source: crate::AttachmentSource::external_url(
+            crate::MediaType::parse("application/pdf").unwrap(),
+            "https://example.test/document.pdf",
+        ),
+    }];
+
+    let error = normalize_input_items(
+        &items,
+        &crate::SessionAttachmentStore::in_memory(),
+        &DenyBorrowedIngress,
+    )
+    .await
+    .expect_err("policy denial must stop ingress");
+
+    assert!(error.contains("TurnIngress"));
+    assert!(error.contains("borrowed ingress disabled"));
 }
