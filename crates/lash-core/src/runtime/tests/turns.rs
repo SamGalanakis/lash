@@ -396,6 +396,25 @@ impl crate::runtime::RuntimeTurnPhaseProbe for PauseAtFinalizeTurn {
     fn end(&self, _phase: crate::runtime::RuntimeTurnPhase) {}
 }
 
+struct PauseAfterEffectLoop {
+    entered: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+}
+
+impl crate::runtime::RuntimeTurnPhaseProbe for PauseAfterEffectLoop {
+    fn begin(&self, _phase: crate::runtime::RuntimeTurnPhase) {}
+
+    fn end(&self, phase: crate::runtime::RuntimeTurnPhase) {
+        if phase != crate::runtime::RuntimeTurnPhase::EffectLoop {
+            return;
+        }
+        self.entered.store(true, Ordering::SeqCst);
+        while !self.release.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+    }
+}
+
 impl ExpireLeaseAfterRetainedCommit {
     fn new(clock: Arc<ManualClock>) -> Self {
         Self {
@@ -3452,6 +3471,265 @@ async fn lease_loss_stops_foreground_turn_before_final_commit() {
     )
     .await
     .expect("release stolen session execution lease");
+}
+
+#[tokio::test]
+async fn renewal_failure_mid_turn_surfaces_lease_lost_and_abandons_claims() {
+    let lease_ttl = std::time::Duration::from_millis(120);
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store_clock: Arc<dyn crate::Clock> = clock.clone();
+    let store = Arc::new(RecordingStore::with_clock(store_clock));
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_calls = Arc::clone(&calls);
+    let (provider_stalled_tx, provider_stalled_rx) = tokio::sync::oneshot::channel::<()>();
+    let provider_stalled_tx = Arc::new(Mutex::new(Some(provider_stalled_tx)));
+    let captured_provider_stalled_tx = Arc::clone(&provider_stalled_tx);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_request| {
+            let captured_calls = Arc::clone(&captured_calls);
+            let captured_provider_stalled_tx = Arc::clone(&captured_provider_stalled_tx);
+            async move {
+                if captured_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Ok(LlmResponse {
+                        full_text: "reach the active-turn checkpoint".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "reach the active-turn checkpoint".to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    });
+                }
+                if let Some(tx) = captured_provider_stalled_tx
+                    .lock()
+                    .expect("provider stalled sender")
+                    .take()
+                {
+                    let _ = tx.send(());
+                }
+                std::future::pending::<Result<LlmResponse, _>>().await
+            }
+        })
+        .build();
+    let host_clock: Arc<dyn crate::Clock> = clock.clone();
+    let mut config = crate::RuntimeHostConfig::in_memory()
+        .with_clock(host_clock)
+        .with_lease_timings(crate::LeaseTimings::from_ttl(lease_ttl).expect("valid timings"));
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        transport.clone().into_handle(),
+    ));
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        crate::EmbeddedRuntimeHost::new(config),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+
+    enqueue_idle_turn_input(store.as_ref(), "root", "input held when the lease is lost").await;
+    let registry = runtime
+        .host
+        .process_registry
+        .as_ref()
+        .expect("process registry")
+        .clone();
+    let target_scope = crate::SessionScope::new("root");
+    registry
+        .register_process(
+            crate::ProcessRegistration::new(
+                "lease-loss-claimed-wake",
+                crate::ProcessInput::External {
+                    metadata: serde_json::Value::Null,
+                },
+                crate::RecoveryDisposition::ExternallyOwned,
+                crate::ProcessProvenance::session(target_scope.clone()),
+            )
+            .with_extra_event_types([process_wake_event_type()]),
+        )
+        .await
+        .expect("register wake process");
+    append_process_wake_to_queue(
+        registry.as_ref(),
+        store.as_ref(),
+        "lease-loss-claimed-wake",
+        crate::ProcessEventAppendRequest::new(
+            "process.wake",
+            json!({
+                "text": "queued work held when the lease is lost",
+                "value": { "status": "lease lost" }
+            }),
+        )
+        .with_wake_target_scope(target_scope),
+    )
+    .await;
+
+    let turn = crate::task::spawn(async move {
+        runtime
+            .stream_next_queued_work(TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "renewal-failure-mid-turn"),
+            ))
+            .await
+    });
+    provider_stalled_rx
+        .await
+        .expect("provider should stall after both ingress claims are held");
+    let renewals_before_loss = store.session_execution_lease_renewal_count();
+
+    clock.advance_ms(lease_ttl.as_millis() as u64 + 1);
+    let successor = lease_owner("renewal-failure-successor");
+    let successor_lease =
+        crate::store::SessionExecutionLeaseStore::try_claim_session_execution_lease(
+            store.as_ref(),
+            "root",
+            &successor,
+            60_000,
+        )
+        .await
+        .expect("claim expired session execution lease")
+        .acquired()
+        .expect("expired lease should be acquired by successor");
+
+    let err = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+        .await
+        .expect("lease-lost turn should finish")
+        .expect("lease-lost turn task")
+        .expect_err("mid-turn renewal failure must reject the turn");
+    assert!(
+        store.session_execution_lease_renewal_count() > renewals_before_loss,
+        "the live renewal task must observe the expired predecessor fence"
+    );
+    assert_eq!(err.code, crate::RuntimeErrorCode::SessionExecutionLeaseLost);
+    assert_eq!(
+        store.abandoned_claim_counts(),
+        (1, 1),
+        "lease loss must abandon both queued-work and turn-input claims"
+    );
+
+    crate::store::SessionExecutionLeaseStore::release_session_execution_lease(
+        store.as_ref(),
+        &successor_lease.completion(),
+    )
+    .await
+    .expect("release successor lease");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancellation_sealed_before_renewal_failure_remains_evidence_bearing_cancelled() {
+    let lease_ttl = std::time::Duration::from_millis(120);
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let (provider_started_tx, provider_started_rx) = tokio::sync::oneshot::channel::<()>();
+    let provider_started_tx = Arc::new(Mutex::new(Some(provider_started_tx)));
+    let captured_provider_started_tx = Arc::clone(&provider_started_tx);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_request| {
+            let captured_provider_started_tx = Arc::clone(&captured_provider_started_tx);
+            async move {
+                if let Some(tx) = captured_provider_started_tx
+                    .lock()
+                    .expect("provider started sender")
+                    .take()
+                {
+                    let _ = tx.send(());
+                }
+                std::future::pending::<Result<LlmResponse, _>>().await
+            }
+        })
+        .build();
+    let mut config = crate::RuntimeHostConfig::in_memory()
+        .with_lease_timings(crate::LeaseTimings::from_ttl(lease_ttl).expect("valid timings"));
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        transport.clone().into_handle(),
+    ));
+    let turn_driver = crate::TurnWorkDriver::new(Arc::clone(&config.control.effect_host));
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        crate::EmbeddedRuntimeHost::new(config),
+        runtime_store,
+    )
+    .await;
+    let effect_loop_ended = Arc::new(AtomicBool::new(false));
+    let release_effect_loop = Arc::new(AtomicBool::new(false));
+    runtime.set_turn_phase_probe(Arc::new(PauseAfterEffectLoop {
+        entered: Arc::clone(&effect_loop_ended),
+        release: Arc::clone(&release_effect_loop),
+    }));
+
+    let turn_id = "cancel-before-renewal-failure";
+    let turn = crate::task::spawn(async move {
+        runtime
+            .run_turn_assembled(
+                TurnInput::text("cancel before the lease renewal fails"),
+                CancellationToken::new(),
+                named_turn_scope("root", turn_id),
+            )
+            .await
+    });
+    provider_started_rx
+        .await
+        .expect("provider should start after lease acquisition");
+    let receipt = turn_driver
+        .request_cancel(
+            crate::TurnCancelRequest::new(
+                crate::TurnAddress::new("root", turn_id),
+                "cancel-before-loss-request",
+                Some("test-user".to_string()),
+            )
+            .with_reason("user stopped the turn"),
+        )
+        .await
+        .expect("seal user cancellation");
+    assert!(matches!(
+        receipt.outcome,
+        crate::TurnCancelOutcome::Requested(ref evidence)
+            if evidence.request_id == "cancel-before-loss-request"
+    ));
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !effect_loop_ended.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("turn should observe cancellation before finalization");
+    let renewals_before_failure = store.session_execution_lease_renewal_count();
+    store.fail_next_session_execution_lease_renewal();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while store.session_execution_lease_renewal_count() == renewals_before_failure {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("renewal task should receive the injected store rejection");
+    release_effect_loop.store(true, Ordering::SeqCst);
+
+    let assembled = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+        .await
+        .expect("cancelled turn should finish")
+        .expect("cancelled turn task")
+        .expect("sealed cancellation should commit despite later renewal rejection");
+    assert!(matches!(
+        assembled.outcome,
+        TurnOutcome::Stopped(TurnStop::Cancelled)
+    ));
+    assert_eq!(
+        assembled.cancellation,
+        Some(crate::TurnCancellationEvidence {
+            request_id: "cancel-before-loss-request".to_string(),
+            origin: Some("test-user".to_string()),
+            reason: Some("user stopped the turn".to_string()),
+        })
+    );
 }
 
 #[tokio::test]

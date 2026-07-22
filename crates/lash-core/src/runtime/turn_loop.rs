@@ -410,7 +410,12 @@ impl LashRuntime {
         if cancellation.is_some() {
             cancel_state.cancel();
         }
-        let interrupted = cancel_state.is_cancelled();
+        // Interruption derives from sealed evidence, never the raw token: a
+        // lease-loss wakeup cancels the token without evidence and must not
+        // become a Cancelled outcome. When a durable cancel races a lease
+        // loss, the fenced final commit is the arbiter — a turn that cannot
+        // commit surfaces lease loss even if the gate already resolved.
+        let interrupted = cancellation.is_some();
 
         turn_pipeline.finalize_turn_read_state(new_messages, interrupted);
         if assembler.token_usage.total() > 0 {

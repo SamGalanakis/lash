@@ -210,6 +210,9 @@ impl crate::store::QueuedWorkStore for InMemorySessionStore {
                 && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
                 && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
             {
+                #[cfg(test)]
+                self.abandoned_queued_work_claim_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 entry.claim_id = None;
                 entry.claim_token = None;
                 entry.claim_owner = None;
