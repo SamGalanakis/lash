@@ -223,21 +223,24 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_lash_runtime_effect_replay_lease
             ON lash_runtime_effect_replay(status, lease_expires_at_ms);
 
-        CREATE SEQUENCE IF NOT EXISTS lash_trigger_subscription_seq;
         CREATE TABLE IF NOT EXISTS lash_trigger_subscriptions (
             subscription_id TEXT PRIMARY KEY,
-            registrant_scope_id TEXT NOT NULL,
-            handle TEXT NOT NULL,
+            owner_scope TEXT NOT NULL,
+            subscription_key TEXT NOT NULL,
+            incarnation TEXT NOT NULL,
+            revision BIGINT NOT NULL,
+            definition_hash TEXT NOT NULL,
             source_type TEXT NOT NULL,
             source_key TEXT NOT NULL,
             enabled BOOLEAN NOT NULL,
+            tombstoned BOOLEAN NOT NULL,
             created_at_ms BIGINT NOT NULL,
             updated_at_ms BIGINT NOT NULL,
             record_json TEXT NOT NULL,
-            UNIQUE(registrant_scope_id, handle)
+            UNIQUE(owner_scope, subscription_key)
         );
         CREATE INDEX IF NOT EXISTS idx_lash_trigger_subscriptions_registrant
-            ON lash_trigger_subscriptions(registrant_scope_id, handle);
+            ON lash_trigger_subscriptions(owner_scope, subscription_key);
         CREATE INDEX IF NOT EXISTS idx_lash_trigger_subscriptions_source
             ON lash_trigger_subscriptions(source_type, source_key, enabled);
 
@@ -255,10 +258,19 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
 
         CREATE TABLE IF NOT EXISTS lash_trigger_deliveries (
             occurrence_id TEXT NOT NULL REFERENCES lash_trigger_occurrences(occurrence_id) ON DELETE CASCADE,
-            subscription_id TEXT NOT NULL REFERENCES lash_trigger_subscriptions(subscription_id) ON DELETE CASCADE,
+            subscription_id TEXT NOT NULL,
             process_id TEXT NOT NULL,
+            subscription_incarnation TEXT NOT NULL,
+            subscription_revision BIGINT NOT NULL,
+            subscription_snapshot_json TEXT NOT NULL,
             created_at_ms BIGINT NOT NULL,
             PRIMARY KEY (occurrence_id, subscription_id)
+        );
+        CREATE TABLE IF NOT EXISTS lash_trigger_mutation_receipts (
+            operation_id TEXT PRIMARY KEY,
+            request_hash TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at_ms BIGINT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_lash_trigger_deliveries_subscription
             ON lash_trigger_deliveries(subscription_id);

@@ -39,7 +39,7 @@ use lash_core::{
 };
 use lash_core::{
     PluginError, TriggerDeliveryReservation, TriggerOccurrenceRecord, TriggerOccurrenceRequest,
-    TriggerStore, TriggerSubscriptionDraft, TriggerSubscriptionFilter, TriggerSubscriptionRecord,
+    TriggerStore, TriggerSubscriptionFilter, TriggerSubscriptionRecord,
 };
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
@@ -64,7 +64,7 @@ const SCHEMA_COMPONENT: &str = "lash-postgres-store";
 // `claim_expires_at_ms` columns with a single `claim_session_lease_generation`
 // pinning the session-execution-lease generation the claim was taken under. This
 // is a reject-and-recreate boundary; pre-12 databases are rejected at open.
-const SCHEMA_VERSION: i32 = 13;
+const SCHEMA_VERSION: i32 = 14;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]

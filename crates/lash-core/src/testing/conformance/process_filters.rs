@@ -25,6 +25,8 @@ pub(super) async fn list_processes_filters_by_enriched_fields(registry: Arc<dyn 
                     CausalRef::TriggerOccurrence {
                         occurrence_id: "occurrence-target".to_string(),
                         subscription_id: Some("subscription-target".to_string()),
+                        subscription_incarnation: None,
+                        subscription_revision: None,
                     },
                 ))),
         )

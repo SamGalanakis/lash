@@ -130,14 +130,18 @@ pub use tool_registry::{
 };
 pub use tool_result::{CancelHint, PendingCompletion, TimeoutBehavior, ToolResult};
 pub use triggers::{
-    InMemoryTriggerStore, TriggerDeliveryEmitOutcome, TriggerDeliveryEmitReport,
-    TriggerDeliveryReservation, TriggerDeliveryReservationStatus, TriggerEmitReport, TriggerEvent,
-    TriggerEventCatalog, TriggerEventKey, TriggerEventType, TriggerInputBinding,
-    TriggerOccurrenceFilter, TriggerOccurrenceRecord, TriggerOccurrenceRequest,
-    TriggerRegistration, TriggerRouter, TriggerStore, TriggerSubscriptionDraft,
-    TriggerSubscriptionFilter, TriggerSubscriptionRecord, TriggerTargetSummary,
-    default_trigger_source_key, deterministic_delivery_process_id, deterministic_occurrence_id,
-    empty_trigger_source_key, trigger_event_type, trigger_occurrence_request_hash,
+    InMemoryTriggerStore, TriggerCommand, TriggerCommandOutcome, TriggerDeliveryEmitOutcome,
+    TriggerDeliveryEmitReport, TriggerDeliveryReservation, TriggerDeliveryReservationStatus,
+    TriggerEffectResult, TriggerEmitReport, TriggerEvent, TriggerEventCatalog, TriggerEventKey,
+    TriggerEventType, TriggerIngressResult, TriggerInputBinding, TriggerMutationDisposition,
+    TriggerMutationReceipt, TriggerOccurrenceFilter, TriggerOccurrenceRecord,
+    TriggerOccurrenceRequest, TriggerOperationError, TriggerOwnerScope, TriggerRegistration,
+    TriggerRouter, TriggerStore, TriggerSubscriptionDraft, TriggerSubscriptionFilter,
+    TriggerSubscriptionRecord, TriggerTargetSummary, default_trigger_source_key,
+    derived_subscription_key, deterministic_delivery_process_id, deterministic_occurrence_id,
+    deterministic_subscription_id, empty_trigger_source_key, evaluate_trigger_mutation,
+    trigger_command_hash, trigger_event_type, trigger_occurrence_request_hash,
+    trigger_operation_receipt_id, trigger_subscription_definition_hash, validate_subscription_key,
     validate_trigger_occurrence_request,
 };
 pub const PROTOCOL_TURN_OPTIONS_SCHEMA_VERSION: u32 = 1;

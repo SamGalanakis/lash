@@ -1268,7 +1268,7 @@ async fn sync_cron_jobs_with_context(
                     "cron.restate.sync_invalid",
                     json!({
                         "reason": reason,
-                        "handle": registration.handle,
+                        "subscription_key": registration.subscription_key,
                         "error": err,
                     }),
                 );

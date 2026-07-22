@@ -235,6 +235,44 @@ mod tests {
     }
 
     #[test]
+    fn trigger_mutation_rejects_non_literal_subscription_key() {
+        let program = crate::parse(
+            r#"
+            key = "daily-digest"
+            await triggers.disable({ subscription_key: key, expected_revision: 1 })?
+            finish true
+            "#,
+        )
+        .expect("parse module");
+        let error = LinkedModule::link(program, full_host_environment())
+            .expect_err("trigger keys must be literals");
+        assert!(matches!(
+            error,
+            LinkError::InvalidTriggerSubscriptionKey { .. }
+        ));
+    }
+
+    #[test]
+    fn trigger_mutation_rejects_reserved_subscription_key_prefix() {
+        let program = crate::parse(
+            r#"
+            await triggers.delete({
+              subscription_key: "lash.internal/manager",
+              expected_revision: 1
+            })?
+            finish true
+            "#,
+        )
+        .expect("parse module");
+        let error = LinkedModule::link(program, full_host_environment())
+            .expect_err("internal trigger prefix is reserved");
+        assert!(matches!(
+            error,
+            LinkError::InvalidTriggerSubscriptionKey { .. }
+        ));
+    }
+
+    #[test]
     fn linked_module_accepts_restate_board_process_with_imported_schemas() {
         let mut catalog = LashlangHostCatalog::new();
         let read_input = crate::json_schema_to_type_expr(&serde_json::json!({
@@ -594,11 +632,15 @@ mod tests {
               source: source,
               target: scan,
               inputs: { tick: trigger.event },
-              name: "scan"
+              name: "scan",
+              subscription_key: "scan"
             })?
             registrations = await triggers.list({ target: scan })?
-            cancelled = await triggers.cancel({ handle: handle })?
-            finish { handle: handle, registrations: registrations, cancelled: cancelled }
+            disabled = await triggers.disable({
+              subscription_key: "scan",
+              expected_revision: registrations[0].revision
+            })?
+            finish { handle: handle, registrations: registrations, disabled: disabled }
             "#,
         )
         .expect("parse trigger registry program");
@@ -641,6 +683,70 @@ mod tests {
         .expect("parse fixed authority mapping");
         LinkedModule::link(fixed_authority, full_host_environment())
             .expect("fixed resource inputs should satisfy process authority params");
+    }
+
+    #[test]
+    fn linked_module_rejects_colliding_default_trigger_keys() {
+        let program = crate::parse(
+            r#"
+            process scan(tick: timer.Tick) {
+              finish tick.fired_at
+            }
+            first = timer.Schedule({ expr: "0 8 * * *" })
+            second = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: first,
+              target: scan,
+              inputs: { tick: trigger.event }
+            })?
+            await triggers.register({
+              source: second,
+              target: scan,
+              inputs: { tick: trigger.event }
+            })?
+            "#,
+        )
+        .expect("parse duplicate default registrations");
+
+        let error = LinkedModule::link(program, full_host_environment())
+            .expect_err("duplicate derived keys must fail linking");
+        assert!(matches!(
+            &error,
+            LinkError::DuplicateDerivedTriggerSubscriptionKey {
+                process,
+                source_type,
+                ..
+            } if process == "scan" && source_type == "timer.Schedule"
+        ));
+        assert!(error.to_string().contains("explicit literal subscription_key"));
+    }
+
+    #[test]
+    fn linked_module_allows_explicit_keys_for_default_key_collision_shape() {
+        let program = crate::parse(
+            r#"
+            process scan(tick: timer.Tick) {
+              finish tick.fired_at
+            }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event },
+              subscription_key: "morning-scan-primary"
+            })?
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event },
+              subscription_key: "morning-scan-secondary"
+            })?
+            "#,
+        )
+        .expect("parse explicit duplicate-shape registrations");
+
+        LinkedModule::link(program, full_host_environment())
+            .expect("explicit literal keys disambiguate registration sites");
     }
 
     #[test]

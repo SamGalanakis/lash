@@ -1,59 +1,62 @@
-//! [`TriggerStore`](crate::TriggerStore) conformance: trigger
-//! subscriptions and idempotent occurrence reservations.
+//! [`TriggerStore`](crate::TriggerStore) conformance for keyed, revisioned
+//! subscriptions and atomic occurrence reservation.
 
 use super::*;
 
-// ---------------------------------------------------------------------------
-// TriggerStore conformance
-// ---------------------------------------------------------------------------
-
-/// Run the full [`TriggerStore`](crate::TriggerStore) conformance suite
-/// against the backend produced by `make`. `make` must return a fresh, empty
-/// store on each call.
 pub async fn trigger_store<F>(make: F, expected_tier: DurabilityTier)
 where
     F: Fn() -> Arc<dyn crate::TriggerStore>,
 {
     trigger_store_reports_declared_tier(make(), expected_tier);
-    trigger_source_key_is_stable(make()).await;
-    trigger_store_registers_and_runs_individual_lifecycle(make()).await;
-    trigger_store_lists_agent_frame_registrations_by_session(make()).await;
-    trigger_store_handles_host_scoped_lifecycle(make()).await;
-    trigger_store_scopes_occurrence_delivery_to_one_session(make()).await;
-    trigger_store_records_and_reserves_idempotently(make()).await;
+    trigger_source_key_and_derived_subscription_key_are_stable();
+    same_owner_key_definition_is_idempotent(make()).await;
+    changed_register_conflicts_and_update_is_cas(make()).await;
+    committed_mutation_receipt_survives_later_revision(make()).await;
+    conflicting_mutation_receipt_survives_later_revision(make()).await;
+    list_operations_are_not_receipted(make()).await;
+    mutation_receipts_follow_retention_cutoff(make()).await;
+    reservations_execute_the_reserved_revision(make()).await;
+    disable_preserves_reserved_work_and_requires_explicit_enable(make()).await;
+    delete_tombstones_preserves_history_and_revive_changes_incarnation(make()).await;
+    owner_namespaces_are_exact_and_session_cleanup_is_scoped(make()).await;
+    occurrence_and_reservations_are_atomic_and_idempotent(make()).await;
 }
 
-/// Run the full [`TriggerStore`](crate::TriggerStore) suite plus durable
-/// reopen checks.
 pub async fn trigger_store_reopenable<F>(make: F, expected_tier: DurabilityTier)
 where
     F: Fn() -> ReopenableTriggerStore,
 {
     trigger_store(|| make().open, expected_tier).await;
-    trigger_store_survives_reopen(make()).await;
+    same_identity_and_receipt_survive_store_reopen(make()).await;
 }
 
-fn sample_trigger_subscription_draft(
+fn owner(session_id: &str) -> crate::TriggerOwnerScope {
+    crate::TriggerOwnerScope::session(session_id)
+}
+
+fn actor(session_id: &str) -> crate::ProcessOriginator {
+    crate::ProcessOriginator::session(crate::SessionScope::new(session_id))
+}
+
+fn sample_draft(
     session_id: &str,
+    subscription_key: &str,
     source_key: &str,
     process_name: &str,
 ) -> crate::TriggerSubscriptionDraft {
     let mut inputs = BTreeMap::new();
     inputs.insert("event".to_string(), crate::TriggerInputBinding::Event);
-    let registrant_scope = crate::SessionScope::new(session_id);
     crate::TriggerSubscriptionDraft {
-        registrant: crate::ProcessOriginator::session(registrant_scope.clone()),
+        subscription_key: subscription_key.to_string(),
         env_ref: crate::ProcessExecutionEnvRef::new(format!("process-env:{session_id}")),
-        wake_target: Some(registrant_scope),
+        wake_target: Some(crate::SessionScope::new(session_id)),
         name: Some(process_name.to_string()),
         source_type: "ui.button.pressed".to_string(),
         source_key: source_key.to_string(),
-        source: serde_json::json!({}),
+        source: serde_json::json!({ "button": "Blue" }),
         payload_schema: crate::LashSchema::new(serde_json::json!({
             "type": "object",
-            "properties": {
-                "button": { "type": "string" }
-            },
+            "properties": { "button": { "type": "string" } },
             "required": ["button"],
             "additionalProperties": false
         })),
@@ -70,23 +73,90 @@ fn sample_trigger_subscription_draft(
     }
 }
 
-fn sample_host_trigger_subscription_draft(
-    originator: crate::ProcessOriginator,
-    source_key: &str,
-    process_name: &str,
-) -> crate::TriggerSubscriptionDraft {
-    let mut draft = sample_trigger_subscription_draft("host-template", source_key, process_name);
-    draft.registrant = originator;
-    draft.wake_target = None;
-    draft.env_ref = crate::ProcessExecutionEnvRef::new(format!("process-env:{process_name}"));
-    draft
+fn register_command(
+    session_id: &str,
+    draft: crate::TriggerSubscriptionDraft,
+) -> crate::TriggerCommand {
+    crate::TriggerCommand::Register {
+        owner_scope: owner(session_id),
+        actor: actor(session_id),
+        draft,
+    }
 }
 
-fn session_scope_id(session_id: &str) -> String {
-    crate::ProcessOriginator::session(crate::SessionScope::new(session_id)).scope_id()
+fn update_command(
+    session_id: &str,
+    key: &str,
+    draft: crate::TriggerSubscriptionDraft,
+    expected_revision: u64,
+) -> crate::TriggerCommand {
+    crate::TriggerCommand::Update {
+        owner_scope: owner(session_id),
+        actor: actor(session_id),
+        subscription_key: key.to_string(),
+        draft,
+        expected_revision,
+    }
 }
 
-fn button_occurrence_request(
+fn revision_command(
+    session_id: &str,
+    key: &str,
+    expected_revision: u64,
+    verb: &str,
+) -> crate::TriggerCommand {
+    let owner_scope = owner(session_id);
+    let actor = actor(session_id);
+    let subscription_key = key.to_string();
+    match verb {
+        "enable" => crate::TriggerCommand::Enable {
+            owner_scope,
+            actor,
+            subscription_key,
+            expected_revision,
+        },
+        "disable" => crate::TriggerCommand::Disable {
+            owner_scope,
+            actor,
+            subscription_key,
+            expected_revision,
+        },
+        "delete" => crate::TriggerCommand::Delete {
+            owner_scope,
+            actor,
+            subscription_key,
+            expected_revision,
+        },
+        _ => panic!("unknown test trigger verb"),
+    }
+}
+
+async fn execute(
+    store: &Arc<dyn crate::TriggerStore>,
+    operation_id: &str,
+    command: crate::TriggerCommand,
+) -> crate::TriggerEffectResult {
+    store
+        .execute_command(operation_id, command)
+        .await
+        .expect("trigger store command")
+}
+
+async fn mutate(
+    store: &Arc<dyn crate::TriggerStore>,
+    operation_id: &str,
+    command: crate::TriggerCommand,
+) -> crate::TriggerMutationReceipt {
+    match execute(store, operation_id, command)
+        .await
+        .expect("trigger mutation outcome")
+    {
+        crate::TriggerCommandOutcome::Mutation { receipt } => *receipt,
+        crate::TriggerCommandOutcome::List { .. } => panic!("expected mutation receipt"),
+    }
+}
+
+fn button_occurrence(
     source_key: impl Into<String>,
     idempotency_key: impl Into<String>,
 ) -> crate::TriggerOccurrenceRequest {
@@ -96,542 +166,527 @@ fn button_occurrence_request(
         serde_json::json!({ "button": "Blue" }),
         idempotency_key,
     )
-    .with_source(serde_json::json!({}))
+    .with_source(serde_json::json!({ "button": "Blue" }))
 }
 
 fn trigger_store_reports_declared_tier(
     store: Arc<dyn crate::TriggerStore>,
     expected: DurabilityTier,
 ) {
-    assert_eq!(
-        store.durability_tier(),
-        expected,
-        "durability tier must match the backend"
+    assert_eq!(store.durability_tier(), expected);
+}
+
+fn trigger_source_key_and_derived_subscription_key_are_stable() {
+    let source = serde_json::json!({ "button": "Blue" });
+    let first = crate::default_trigger_source_key("ui.button.pressed", &source).unwrap();
+    let second = crate::default_trigger_source_key("ui.button.pressed", &source).unwrap();
+    assert_eq!(first, second);
+    let key_a = crate::derived_subscription_key("worker", "ui.button.pressed", &first).unwrap();
+    let key_b = crate::derived_subscription_key("worker", "ui.button.pressed", &second).unwrap();
+    assert_eq!(key_a, key_b);
+    assert_ne!(
+        crate::deterministic_subscription_id(&owner("session-a"), "ab:c").unwrap(),
+        crate::deterministic_subscription_id(&owner("session-a"), "a:bc").unwrap()
     );
 }
 
-async fn trigger_source_key_is_stable(store: Arc<dyn crate::TriggerStore>) {
-    let source = serde_json::json!({ "button": "Blue" });
-    let first = store
-        .source_key_for_subscription("ui.button.pressed", &source)
+async fn same_owner_key_definition_is_idempotent(store: Arc<dyn crate::TriggerStore>) {
+    let draft = sample_draft("session-a", "button-blue", "blue", "worker");
+    let first = mutate(
+        &store,
+        "register-first",
+        register_command("session-a", draft.clone()),
+    )
+    .await;
+    let second = mutate(
+        &store,
+        "register-second",
+        register_command("session-a", draft),
+    )
+    .await;
+    assert_eq!(first.subscription_id, second.subscription_id);
+    assert_eq!(first.incarnation, second.incarnation);
+    assert_eq!(first.revision, 1);
+    assert_eq!(second.revision, 1);
+    assert_eq!(
+        second.disposition,
+        crate::TriggerMutationDisposition::Unchanged
+    );
+    let rows = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
         .await
-        .expect("first source key");
-    let second = store
-        .source_key_for_subscription("ui.button.pressed", &source)
-        .await
-        .expect("second source key");
-    assert_eq!(first, second, "source keys must be stable");
-    assert!(!first.is_empty(), "source keys must be non-empty");
+        .unwrap();
+    assert_eq!(rows.len(), 1);
 }
 
-async fn trigger_store_registers_and_runs_individual_lifecycle(
+async fn changed_register_conflicts_and_update_is_cas(store: Arc<dyn crate::TriggerStore>) {
+    let key = "cas-key";
+    let original = sample_draft("session-a", key, "v1", "worker");
+    let created = mutate(
+        &store,
+        "cas-register",
+        register_command("session-a", original),
+    )
+    .await;
+    let requested = sample_draft("session-a", key, "v2", "worker");
+    let conflict = execute(
+        &store,
+        "cas-register-different",
+        register_command("session-a", requested.clone()),
+    )
+    .await
+    .expect_err("register must not upsert");
+    match conflict {
+        crate::TriggerOperationError::Conflict {
+            existing_revision,
+            existing_definition_hash,
+            requested_definition_hash,
+            ..
+        } => {
+            assert_eq!(existing_revision, Some(1));
+            assert_eq!(existing_definition_hash, Some(created.definition_hash));
+            assert!(requested_definition_hash.is_some());
+        }
+        error => panic!("unexpected error: {error}"),
+    }
+
+    let store_a = Arc::clone(&store);
+    let store_b = Arc::clone(&store);
+    let left = update_command("session-a", key, requested, 1);
+    let right = update_command(
+        "session-a",
+        key,
+        sample_draft("session-a", key, "v3", "worker"),
+        1,
+    );
+    let (left, right) = tokio::join!(
+        execute(&store_a, "cas-left", left),
+        execute(&store_b, "cas-right", right)
+    );
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+    assert_eq!(usize::from(left.is_err()) + usize::from(right.is_err()), 1);
+}
+
+async fn committed_mutation_receipt_survives_later_revision(store: Arc<dyn crate::TriggerStore>) {
+    let key = "receipt-key";
+    mutate(
+        &store,
+        "receipt-register",
+        register_command("session-a", sample_draft("session-a", key, "v1", "worker")),
+    )
+    .await;
+    let update = update_command(
+        "session-a",
+        key,
+        sample_draft("session-a", key, "v2", "worker"),
+        1,
+    );
+    let committed = mutate(&store, "receipt-update", update.clone()).await;
+    assert_eq!(committed.revision, 2);
+    mutate(
+        &store,
+        "receipt-disable",
+        revision_command("session-a", key, 2, "disable"),
+    )
+    .await;
+    let retried = mutate(&store, "receipt-update", update).await;
+    assert_eq!(
+        retried, committed,
+        "retry must return the historical receipt"
+    );
+    let current = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
+        .await
+        .unwrap();
+    assert_eq!(current[0].revision, 3);
+    assert!(!current[0].enabled);
+}
+
+async fn conflicting_mutation_receipt_survives_later_revision(store: Arc<dyn crate::TriggerStore>) {
+    let key = "conflict-receipt-key";
+    mutate(
+        &store,
+        "conflict-receipt-register",
+        register_command("session-a", sample_draft("session-a", key, "v1", "worker")),
+    )
+    .await;
+    let conflicting = revision_command("session-a", key, 99, "disable");
+    let original = execute(&store, "conflict-receipt-disable", conflicting.clone())
+        .await
+        .expect_err("stale disable conflicts");
+    mutate(
+        &store,
+        "conflict-receipt-valid-disable",
+        revision_command("session-a", key, 1, "disable"),
+    )
+    .await;
+    let retried = execute(&store, "conflict-receipt-disable", conflicting)
+        .await
+        .expect_err("conflicting retry remains a conflict");
+    assert_eq!(retried, original, "retry returns the original conflict");
+}
+
+async fn list_operations_are_not_receipted(store: Arc<dyn crate::TriggerStore>) {
+    let key = "unreceipted-list-key";
+    mutate(
+        &store,
+        "unreceipted-list-register",
+        register_command("session-a", sample_draft("session-a", key, "v1", "worker")),
+    )
+    .await;
+    let listed_enabled = execute(
+        &store,
+        "reused-list-operation-id",
+        crate::TriggerCommand::List {
+            owner_scope: owner("session-a"),
+            filter: crate::TriggerSubscriptionFilter {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .expect("first list");
+    assert!(matches!(
+        listed_enabled,
+        crate::TriggerCommandOutcome::List { records } if records.len() == 1
+    ));
+    mutate(
+        &store,
+        "unreceipted-list-disable",
+        revision_command("session-a", key, 1, "disable"),
+    )
+    .await;
+    let listed_disabled = execute(
+        &store,
+        "reused-list-operation-id",
+        crate::TriggerCommand::List {
+            owner_scope: owner("session-a"),
+            filter: crate::TriggerSubscriptionFilter {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .expect("second list");
+    assert!(matches!(
+        listed_disabled,
+        crate::TriggerCommandOutcome::List { records } if records.len() == 1
+    ));
+}
+
+async fn mutation_receipts_follow_retention_cutoff(store: Arc<dyn crate::TriggerStore>) {
+    let key = "receipt-retention-key";
+    let command = register_command("session-a", sample_draft("session-a", key, "v1", "worker"));
+    let created = mutate(&store, "receipt-retention-register", command.clone()).await;
+    assert_eq!(
+        created.disposition,
+        crate::TriggerMutationDisposition::Created
+    );
+    assert_eq!(
+        store.prune_mutation_receipts(u64::MAX).await.unwrap(),
+        1,
+        "the retention cutoff removes the aged mutation receipt"
+    );
+    let reevaluated = mutate(&store, "receipt-retention-register", command).await;
+    assert_eq!(
+        reevaluated.disposition,
+        crate::TriggerMutationDisposition::Unchanged,
+        "after retention, the operation is evaluated against current state"
+    );
+}
+
+async fn reservations_execute_the_reserved_revision(store: Arc<dyn crate::TriggerStore>) {
+    let key = "snapshot-key";
+    let source_key = "snapshot-v1";
+    mutate(
+        &store,
+        "snapshot-register",
+        register_command(
+            "session-a",
+            sample_draft("session-a", key, source_key, "worker-v1"),
+        ),
+    )
+    .await;
+    let first = store
+        .ingest_occurrence(button_occurrence(source_key, "snapshot-occurrence-v1"))
+        .await
+        .unwrap();
+    assert_eq!(first.reservations.len(), 1);
+    assert_eq!(first.reservations[0].subscription.revision, 1);
+
+    mutate(
+        &store,
+        "snapshot-update",
+        update_command(
+            "session-a",
+            key,
+            sample_draft("session-a", key, source_key, "worker-v2"),
+            1,
+        ),
+    )
+    .await;
+    let historical = store
+        .list_deliveries_by_occurrence_id(&first.occurrence.occurrence_id)
+        .await
+        .unwrap();
+    assert_eq!(historical[0].subscription.revision, 1);
+    assert_eq!(
+        historical[0].subscription.target_label.as_deref(),
+        Some("worker-v1")
+    );
+
+    let second = store
+        .ingest_occurrence(button_occurrence(source_key, "snapshot-occurrence-v2"))
+        .await
+        .unwrap();
+    assert_eq!(second.reservations[0].subscription.revision, 2);
+    assert_eq!(
+        second.reservations[0].subscription.target_label.as_deref(),
+        Some("worker-v2")
+    );
+    assert_ne!(
+        first.reservations[0].process_id,
+        second.reservations[0].process_id
+    );
+}
+
+async fn disable_preserves_reserved_work_and_requires_explicit_enable(
     store: Arc<dyn crate::TriggerStore>,
 ) {
-    let source_key = store
-        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
+    let key = "disable-key";
+    let source_key = "disable-source";
+    let draft = sample_draft("session-a", key, source_key, "worker");
+    mutate(
+        &store,
+        "disable-register",
+        register_command("session-a", draft.clone()),
+    )
+    .await;
+    let reserved = store
+        .ingest_occurrence(button_occurrence(source_key, "disable-before"))
         .await
-        .expect("source key");
-    let first = store
-        .register_subscription(sample_trigger_subscription_draft(
-            "session-a",
-            &source_key,
-            "first",
-        ))
-        .await
-        .expect("register first subscription");
-    let second = store
-        .register_subscription(sample_trigger_subscription_draft(
-            "session-b",
-            &source_key,
-            "second",
-        ))
-        .await
-        .expect("register second subscription");
-
-    assert!(!first.subscription_id.is_empty());
-    assert!(!first.handle.is_empty());
-    assert_ne!(first.handle, second.handle);
-
-    let by_session = store
-        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
-        .await
-        .expect("list by session");
-    assert_eq!(by_session.len(), 1);
-    assert_eq!(by_session[0].handle, first.handle);
-
-    let mut by_source = crate::TriggerSubscriptionFilter::for_source_type("ui.button.pressed");
-    by_source.source_key = Some(source_key.clone());
-    by_source.enabled = Some(true);
-    let source_matches = store
-        .list_subscriptions(by_source)
-        .await
-        .expect("list by source");
-    assert_eq!(source_matches.len(), 2);
-
-    assert!(
-        !store
-            .cancel_subscription(&session_scope_id("session-b"), &first.handle)
+        .unwrap();
+    let disabled = mutate(
+        &store,
+        "disable-command",
+        revision_command("session-a", key, 1, "disable"),
+    )
+    .await;
+    assert_eq!(disabled.revision, 2);
+    assert_eq!(
+        store
+            .list_deliveries_by_occurrence_id(&reserved.occurrence.occurrence_id)
             .await
-            .expect("wrong-session cancel"),
-        "cancel must be scoped by session"
+            .unwrap()
+            .len(),
+        1
     );
     assert!(
         store
-            .cancel_subscription(&session_scope_id("session-a"), &first.handle)
+            .ingest_occurrence(button_occurrence(source_key, "disable-after"))
             .await
-            .expect("cancel first")
+            .unwrap()
+            .reservations
+            .is_empty()
     );
-
-    let mut disabled_filter = crate::TriggerSubscriptionFilter::for_session("session-a");
-    disabled_filter.handle = Some(first.handle.clone());
-    let disabled = store
-        .list_subscriptions(disabled_filter)
-        .await
-        .expect("list disabled");
-    assert_eq!(disabled.len(), 1);
-    assert!(!disabled[0].enabled);
-
-    assert!(
+    let repeated = mutate(
+        &store,
+        "disable-reregister",
+        register_command("session-a", draft),
+    )
+    .await;
+    assert!(!repeated.enabled);
+    assert_eq!(repeated.revision, 2);
+    mutate(
+        &store,
+        "disable-enable",
+        revision_command("session-a", key, 2, "enable"),
+    )
+    .await;
+    assert_eq!(
         store
-            .set_subscription_enabled(&session_scope_id("session-a"), &first.handle, true)
+            .ingest_occurrence(button_occurrence(source_key, "disable-reenabled"))
             .await
-            .expect("re-enable first")
+            .unwrap()
+            .reservations
+            .len(),
+        1
     );
-    assert!(
-        !store
-            .set_subscription_enabled(&session_scope_id("session-a"), &first.handle, true)
-            .await
-            .expect("idempotently re-enable first")
-    );
-    let enabled = store
-        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
-        .await
-        .expect("list re-enabled subscription");
-    assert_eq!(enabled.len(), 1);
-    assert!(enabled[0].enabled);
+}
 
-    assert!(
-        !store
-            .delete_subscription(&session_scope_id("session-b"), &first.handle)
-            .await
-            .expect("wrong-session delete"),
-        "delete must be scoped by session"
-    );
-    assert!(
-        store
-            .delete_subscription(&session_scope_id("session-a"), &first.handle)
-            .await
-            .expect("delete first")
-    );
+async fn delete_tombstones_preserves_history_and_revive_changes_incarnation(
+    store: Arc<dyn crate::TriggerStore>,
+) {
+    let key = "revive-key";
+    let source_key = "revive-source";
+    let draft = sample_draft("session-a", key, source_key, "worker");
+    let created = mutate(
+        &store,
+        "revive-register",
+        register_command("session-a", draft.clone()),
+    )
+    .await;
+    let ingress = store
+        .ingest_occurrence(button_occurrence(source_key, "revive-occurrence"))
+        .await
+        .unwrap();
+    let deleted = mutate(
+        &store,
+        "revive-delete",
+        revision_command("session-a", key, 1, "delete"),
+    )
+    .await;
+    assert!(deleted.record_snapshot.tombstoned);
     assert!(
         store
             .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
             .await
-            .expect("list after delete")
+            .unwrap()
             .is_empty()
     );
-}
-
-async fn trigger_store_lists_agent_frame_registrations_by_session(
-    store: Arc<dyn crate::TriggerStore>,
-) {
-    let source_key = store
-        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
-        .await
-        .expect("source key");
-    let frame_scope = crate::SessionScope::for_agent_frame("session-a", "frame-a");
-    let mut draft = sample_trigger_subscription_draft("session-a", &source_key, "frame-route");
-    draft.registrant = crate::ProcessOriginator::session(frame_scope.clone());
-    draft.wake_target = Some(frame_scope);
-    let registration = store
-        .register_subscription(draft)
-        .await
-        .expect("register agent-frame subscription");
-
-    let by_session = store
-        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
-        .await
-        .expect("list session-wide registrations");
-    assert_eq!(by_session.len(), 1);
-    assert_eq!(by_session[0].handle, registration.handle);
-
-    let by_root_scope = store
-        .list_subscriptions(crate::TriggerSubscriptionFilter::for_registrant_scope(
-            session_scope_id("session-a"),
-        ))
-        .await
-        .expect("list exact root session scope");
-    assert!(
-        by_root_scope.is_empty(),
-        "exact root session scope must not match agent-frame registrations"
-    );
-
-    let by_frame_scope = store
-        .list_subscriptions(crate::TriggerSubscriptionFilter::for_registrant_scope(
-            registration.registrant_scope_id(),
-        ))
-        .await
-        .expect("list exact agent-frame scope");
-    assert_eq!(by_frame_scope.len(), 1);
-    assert_eq!(by_frame_scope[0].handle, registration.handle);
-
     assert_eq!(
         store
-            .delete_session_subscriptions("session-a")
+            .list_deliveries_by_occurrence_id(&ingress.occurrence.occurrence_id)
             .await
-            .expect("delete session registrations"),
-        1,
-        "session deletion must include agent-frame registrations"
-    );
-
-    let special_session_id = "session-%_\\special";
-    let guard_session_id = "session-abcX\\special";
-    let special_frame_scope = crate::SessionScope::for_agent_frame(special_session_id, "frame-a");
-    let mut special_draft =
-        sample_trigger_subscription_draft(special_session_id, &source_key, "special-frame-route");
-    special_draft.registrant = crate::ProcessOriginator::session(special_frame_scope.clone());
-    special_draft.wake_target = Some(special_frame_scope);
-    store
-        .register_subscription(special_draft)
-        .await
-        .expect("register special-character session subscription");
-
-    let guard_frame_scope = crate::SessionScope::for_agent_frame(guard_session_id, "frame-a");
-    let mut guard_draft =
-        sample_trigger_subscription_draft(guard_session_id, &source_key, "guard-frame-route");
-    guard_draft.registrant = crate::ProcessOriginator::session(guard_frame_scope.clone());
-    guard_draft.wake_target = Some(guard_frame_scope);
-    let guard = store
-        .register_subscription(guard_draft)
-        .await
-        .expect("register wildcard guard subscription");
-
-    assert_eq!(
-        store
-            .delete_session_subscriptions(special_session_id)
-            .await
-            .expect("delete special-character session registrations"),
-        1,
-        "session deletion must treat LIKE metacharacters in session ids literally"
-    );
-    let guard_by_session = store
-        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session(
-            guard_session_id,
-        ))
-        .await
-        .expect("list wildcard guard session registrations");
-    assert_eq!(guard_by_session.len(), 1);
-    assert_eq!(guard_by_session[0].handle, guard.handle);
-}
-
-async fn trigger_store_handles_host_scoped_lifecycle(store: Arc<dyn crate::TriggerStore>) {
-    let source_key = store
-        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
-        .await
-        .expect("source key");
-    let scoped = store
-        .register_subscription(sample_host_trigger_subscription_draft(
-            crate::ProcessOriginator::host_scoped("automation-a"),
-            &source_key,
-            "scoped-host",
-        ))
-        .await
-        .expect("register scoped host subscription");
-    let scopeless = store
-        .register_subscription(sample_host_trigger_subscription_draft(
-            crate::ProcessOriginator::host(),
-            &source_key,
-            "scopeless-host",
-        ))
-        .await
-        .expect("register scopeless host subscription");
-
-    let scoped_matches = store
-        .list_subscriptions(crate::TriggerSubscriptionFilter::for_registrant_scope(
-            "host:automation-a",
-        ))
-        .await
-        .expect("list scoped host subscriptions");
-    assert_eq!(scoped_matches.len(), 1);
-    assert_eq!(scoped_matches[0].handle, scoped.handle);
-
-    let scopeless_matches = store
-        .list_subscriptions(crate::TriggerSubscriptionFilter::for_registrant_scope(
-            "host",
-        ))
-        .await
-        .expect("list scopeless host subscriptions");
-    assert_eq!(scopeless_matches.len(), 1);
-    assert_eq!(scopeless_matches[0].handle, scopeless.handle);
-
-    assert!(
-        !store
-            .cancel_subscription("host", &scoped.handle)
-            .await
-            .expect("wrong-host-scope cancel"),
-        "cancel must be scoped by host scope id"
+            .unwrap()[0]
+            .subscription
+            .incarnation,
+        created.incarnation
     );
     assert!(
-        store
-            .cancel_subscription("host:automation-a", &scoped.handle)
-            .await
-            .expect("cancel scoped host subscription")
-    );
-    assert!(
-        store
-            .cancel_subscription("host", &scopeless.handle)
-            .await
-            .expect("cancel scopeless host subscription")
-    );
-}
-
-async fn trigger_store_scopes_occurrence_delivery_to_one_session(
-    store: Arc<dyn crate::TriggerStore>,
-) {
-    let source_key = store
-        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
-        .await
-        .expect("source key");
-    let session_a = store
-        .register_subscription(sample_trigger_subscription_draft(
-            "session-a",
-            &source_key,
-            "same-name",
-        ))
-        .await
-        .expect("register session A");
-    store
-        .register_subscription(sample_trigger_subscription_draft(
-            "session-b",
-            &source_key,
-            "same-name",
-        ))
-        .await
-        .expect("register session B");
-    let occurrence = store
-        .record_occurrence(
-            button_occurrence_request(&source_key, "session-scoped-occurrence")
-                .for_session("session-a"),
+        execute(
+            &store,
+            "revive-register-after-delete",
+            register_command("session-a", draft.clone())
         )
         .await
-        .expect("record session-scoped occurrence");
-    let deliveries = store
-        .reserve_matching_deliveries(&occurrence.occurrence_id)
-        .await
-        .expect("reserve session-scoped delivery");
-    assert_eq!(deliveries.len(), 1);
-    assert_eq!(
-        deliveries[0].subscription.subscription_id,
-        session_a.subscription_id
+        .is_err()
     );
+    let revived = mutate(
+        &store,
+        "revive-command",
+        crate::TriggerCommand::Revive {
+            owner_scope: owner("session-a"),
+            actor: actor("session-a"),
+            subscription_key: key.to_string(),
+            draft,
+            expected_revision: deleted.revision,
+        },
+    )
+    .await;
+    assert_eq!(revived.subscription_id, created.subscription_id);
+    assert_ne!(revived.incarnation, created.incarnation);
+    assert_eq!(revived.revision, 3);
+}
+
+async fn owner_namespaces_are_exact_and_session_cleanup_is_scoped(
+    store: Arc<dyn crate::TriggerStore>,
+) {
+    let session_draft = sample_draft("root", "shared-key", "session-source", "session-worker");
+    mutate(
+        &store,
+        "scope-session-register",
+        register_command("root", session_draft),
+    )
+    .await;
+    let mut host_draft = sample_draft("host", "shared-key", "host-source", "host-worker");
+    host_draft.wake_target = None;
+    let host_owner = crate::TriggerOwnerScope::host("binding-a").unwrap();
+    let host = mutate(
+        &store,
+        "scope-host-register",
+        crate::TriggerCommand::Register {
+            owner_scope: host_owner.clone(),
+            actor: crate::ProcessOriginator::host_scoped("binding-a"),
+            draft: host_draft,
+        },
+    )
+    .await;
+    assert_ne!(
+        host.subscription_id,
+        crate::deterministic_subscription_id(&owner("root"), "shared-key").unwrap()
+    );
+    let visible_to_session = execute(
+        &store,
+        "scope-session-list",
+        crate::TriggerCommand::List {
+            owner_scope: owner("root"),
+            filter: crate::TriggerSubscriptionFilter::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let crate::TriggerCommandOutcome::List { records } = visible_to_session else {
+        panic!("expected list")
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].owner_scope, owner("root"));
+    assert_eq!(store.delete_session_subscriptions("root").await.unwrap(), 1);
+    let host_rows = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_registrant_scope(
+            host_owner.namespace(),
+        ))
+        .await
+        .unwrap();
     assert_eq!(
-        deliveries[0].subscription.registrant_session_id(),
-        Some("session-a")
+        host_rows.len(),
+        1,
+        "session cleanup must not delete host resources"
     );
 }
 
-async fn trigger_store_records_and_reserves_idempotently(store: Arc<dyn crate::TriggerStore>) {
-    let source_key = store
-        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
-        .await
-        .expect("source key");
-    let subscription = store
-        .register_subscription(sample_trigger_subscription_draft(
+async fn occurrence_and_reservations_are_atomic_and_idempotent(
+    store: Arc<dyn crate::TriggerStore>,
+) {
+    mutate(
+        &store,
+        "atomic-register",
+        register_command(
             "session-a",
-            &source_key,
-            "on_button",
-        ))
-        .await
-        .expect("register subscription");
-
-    let occurrence = store
-        .record_occurrence(button_occurrence_request(
-            source_key.clone(),
-            "button-blue-1",
-        ))
-        .await
-        .expect("record occurrence");
-    assert!(!occurrence.occurrence_id.is_empty());
-    assert_eq!(occurrence.source_type, "ui.button.pressed");
-    assert_eq!(occurrence.source_key, source_key);
-
-    let first = store
-        .reserve_matching_deliveries(&occurrence.occurrence_id)
-        .await
-        .expect("reserve first delivery");
-    assert_eq!(first.len(), 1);
-    assert_eq!(first[0].subscription.handle, subscription.handle);
-    assert_eq!(first[0].occurrence.occurrence_id, occurrence.occurrence_id);
+            sample_draft("session-a", "atomic-key", "atomic-source", "worker"),
+        ),
+    )
+    .await;
+    let request = button_occurrence("atomic-source", "atomic-occurrence");
+    let first = store.ingest_occurrence(request.clone()).await.unwrap();
+    let replay = store.ingest_occurrence(request).await.unwrap();
+    assert_eq!(first.occurrence, replay.occurrence);
+    assert_eq!(first.reservations.len(), 1);
+    assert_eq!(replay.reservations.len(), 1);
     assert_eq!(
-        first[0].reservation_status,
-        crate::TriggerDeliveryReservationStatus::Reserved
+        first.reservations[0].process_id,
+        replay.reservations[0].process_id
     );
     assert_eq!(
-        first[0].process_id,
-        crate::deterministic_delivery_process_id(
-            &occurrence.occurrence_id,
-            &subscription.subscription_id
-        )
-        .expect("deterministic delivery process id")
-    );
-
-    let occurrence_matches = store
-        .list_occurrences({
-            let mut filter =
-                crate::TriggerOccurrenceFilter::for_source("ui.button.pressed", &source_key);
-            filter.occurred_at_start_ms = Some(occurrence.occurred_at_ms);
-            filter.occurred_at_end_ms = Some(occurrence.occurred_at_ms.saturating_add(1));
-            filter
-        })
-        .await
-        .expect("list occurrences");
-    assert_eq!(occurrence_matches, vec![occurrence.clone()]);
-
-    let by_occurrence = store
-        .list_deliveries_by_occurrence_id(&occurrence.occurrence_id)
-        .await
-        .expect("list deliveries by occurrence");
-    assert_eq!(by_occurrence.len(), 1);
-    assert_eq!(by_occurrence[0].process_id, first[0].process_id);
-    let by_subscription = store
-        .list_deliveries_by_subscription_id(&subscription.subscription_id)
-        .await
-        .expect("list deliveries by subscription");
-    assert_eq!(by_subscription.len(), 1);
-    assert_eq!(by_subscription[0].process_id, first[0].process_id);
-    let by_process = store
-        .list_deliveries_by_process_id(&first[0].process_id)
-        .await
-        .expect("list deliveries by process");
-    assert_eq!(by_process.len(), 1);
-    assert_eq!(
-        by_process[0].subscription.subscription_id,
-        subscription.subscription_id
-    );
-
-    let duplicate = store
-        .reserve_matching_deliveries(&occurrence.occurrence_id)
-        .await
-        .expect("reserve duplicate delivery");
-    assert_eq!(duplicate.len(), 1);
-    assert_eq!(
-        duplicate[0].reservation_status,
+        replay.reservations[0].reservation_status,
         crate::TriggerDeliveryReservationStatus::AlreadyReserved
     );
+}
 
-    let replayed = store
-        .record_occurrence(button_occurrence_request(
-            source_key.clone(),
-            "button-blue-1",
-        ))
-        .await
-        .expect("replay occurrence");
-    assert_eq!(replayed.occurrence_id, occurrence.occurrence_id);
-    let replayed_delivery = store
-        .reserve_matching_deliveries(&replayed.occurrence_id)
-        .await
-        .expect("reserve replayed delivery");
-    assert_eq!(replayed_delivery.len(), 1);
+async fn same_identity_and_receipt_survive_store_reopen(factory: ReopenableTriggerStore) {
+    let draft = sample_draft("session-a", "reopen-key", "reopen-source", "worker");
+    let command = register_command("session-a", draft.clone());
+    let first = mutate(&factory.open, "reopen-register", command.clone()).await;
+    drop(factory.open);
+    let replay = mutate(&factory.reopen, "reopen-register", command).await;
+    assert_eq!(replay, first);
+    let repeated = mutate(
+        &factory.reopen,
+        "reopen-register-again",
+        register_command("session-a", draft),
+    )
+    .await;
+    assert_eq!(repeated.subscription_id, first.subscription_id);
+    assert_eq!(repeated.revision, 1);
     assert_eq!(
-        replayed_delivery[0].reservation_status,
-        crate::TriggerDeliveryReservationStatus::AlreadyReserved
-    );
-
-    assert!(
-        store
-            .cancel_subscription(&session_scope_id("session-a"), &subscription.handle)
+        factory
+            .reopen
+            .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
             .await
-            .expect("cancel subscription")
+            .unwrap()
+            .len(),
+        1
     );
-    let disabled = store
-        .record_occurrence(button_occurrence_request(source_key, "button-blue-2"))
-        .await
-        .expect("record disabled occurrence");
-    let disabled_deliveries = store
-        .reserve_matching_deliveries(&disabled.occurrence_id)
-        .await
-        .expect("reserve disabled occurrence");
-    assert!(disabled_deliveries.is_empty());
-}
-
-async fn trigger_store_survives_reopen(factory: ReopenableTriggerStore) {
-    let source_key = factory
-        .open
-        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
-        .await
-        .expect("source key");
-    let subscription = factory
-        .open
-        .register_subscription(sample_trigger_subscription_draft(
-            "session-a",
-            &source_key,
-            "on_button",
-        ))
-        .await
-        .expect("register subscription before reopen");
-    let occurrence = factory
-        .open
-        .record_occurrence(button_occurrence_request(
-            source_key.clone(),
-            "button-blue-1",
-        ))
-        .await
-        .expect("record occurrence before reopen");
-    let first_delivery = factory
-        .open
-        .reserve_matching_deliveries(&occurrence.occurrence_id)
-        .await
-        .expect("reserve before reopen");
-    assert_eq!(first_delivery.len(), 1);
-
-    let reopened_subscriptions = factory
-        .reopen
-        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
-        .await
-        .expect("list subscriptions after reopen");
-    assert_eq!(reopened_subscriptions.len(), 1);
-    assert_eq!(reopened_subscriptions[0].handle, subscription.handle);
-
-    let replayed = factory
-        .reopen
-        .record_occurrence(button_occurrence_request(
-            source_key.clone(),
-            "button-blue-1",
-        ))
-        .await
-        .expect("replay after reopen");
-    assert_eq!(replayed.occurrence_id, occurrence.occurrence_id);
-    let replayed_delivery = factory
-        .reopen
-        .reserve_matching_deliveries(&replayed.occurrence_id)
-        .await
-        .expect("reserve replay after reopen");
-    assert_eq!(replayed_delivery.len(), 1);
-    assert_eq!(
-        replayed_delivery[0].reservation_status,
-        crate::TriggerDeliveryReservationStatus::AlreadyReserved
-    );
-    let reopened_deliveries = factory
-        .reopen
-        .list_deliveries_by_process_id(&first_delivery[0].process_id)
-        .await
-        .expect("list delivery after reopen");
-    assert_eq!(reopened_deliveries.len(), 1);
-    assert_eq!(
-        reopened_deliveries[0].subscription.subscription_id,
-        subscription.subscription_id
-    );
-
-    let next = factory
-        .reopen
-        .record_occurrence(button_occurrence_request(source_key, "button-blue-2"))
-        .await
-        .expect("record new occurrence after reopen");
-    let next_delivery = factory
-        .reopen
-        .reserve_matching_deliveries(&next.occurrence_id)
-        .await
-        .expect("reserve new occurrence after reopen");
-    assert_eq!(next_delivery.len(), 1);
-    assert_eq!(next_delivery[0].subscription.handle, subscription.handle);
 }

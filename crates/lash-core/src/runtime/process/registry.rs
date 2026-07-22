@@ -402,7 +402,9 @@ pub trait ProcessRegistry: Send + Sync {
     /// process change sequence no later than `up_to_change_seq` when supplied,
     /// together with their events, wake acks, handle grants, lease rows, and
     /// trigger-delivery reservations whose deterministic process id points at a
-    /// pruned row.
+    /// pruned row. The same cutoff also prunes trigger-mutation idempotency
+    /// receipts, bounding receipt retention under the host's existing cleanup
+    /// schedule.
     /// Host-scheduled retention: hosts that project results/events into their
     /// own store call this to keep the registry bounded. Non-terminal rows are
     /// never touched. Callers must choose a retention window comfortably longer

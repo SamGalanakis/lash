@@ -341,7 +341,9 @@ fn remote_trigger_dtos_json_round_trip() {
     assert_eq!(decoded.source_key.as_deref(), Some("source-key"));
 
     let registration = RemoteTriggerRegistration {
-        handle: "trigger:1".to_string(),
+        subscription_key: "button-watcher".to_string(),
+        incarnation: "incarnation-1".to_string(),
+        revision: 7,
         source_key: "source-key".to_string(),
         name: Some("button watcher".to_string()),
         source_type: "ui.button.pressed".to_string(),
@@ -372,6 +374,8 @@ fn remote_trigger_dtos_json_round_trip() {
     let cause = RemoteCausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
         subscription_id: Some("subscription:1".to_string()),
+        subscription_incarnation: Some("incarnation:1".to_string()),
+        subscription_revision: Some(4),
     };
     let value = serde_json::to_value(&cause).expect("serialize cause");
     assert_eq!(value["type"], "trigger_occurrence");
@@ -687,9 +691,7 @@ fn remote_process_env_spec_rejects_unknown_product_metadata_fields() {
 fn remote_trigger_subscription_dtos_json_round_trip() {
     let draft = RemoteTriggerSubscriptionDraft {
         protocol_version: REMOTE_PROTOCOL_VERSION,
-        registrant: RemoteProcessOriginator::Session {
-            scope: RemoteSessionScope::new("session"),
-        },
+        subscription_key: "button-watcher".to_string(),
         env_ref:
             "process-env:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .parse()
@@ -722,11 +724,19 @@ fn remote_trigger_subscription_dtos_json_round_trip() {
     assert_eq!(decoded.source_type, "ui.button.pressed");
 
     let record = RemoteTriggerSubscriptionRecord {
-        subscription_id: "subscription:1".to_string(),
-        registrant: draft.registrant.clone(),
+        subscription_id: "trigger-subscription:v1:sha256:test".to_string(),
+        owner_scope: RemoteTriggerOwnerScope::Session {
+            session_id: "session".to_string(),
+        },
+        subscription_key: draft.subscription_key.clone(),
+        incarnation: "incarnation-a".to_string(),
+        revision: 1,
+        definition_hash: "definition-hash-a".to_string(),
+        registrant: RemoteProcessOriginator::Session {
+            scope: RemoteSessionScope::new("session"),
+        },
         env_ref: draft.env_ref.clone(),
         wake_target: draft.wake_target.clone(),
-        handle: "trigger:1".to_string(),
         name: draft.name.clone(),
         source_type: draft.source_type.clone(),
         source_key: draft.source_key.clone(),
@@ -738,6 +748,8 @@ fn remote_trigger_subscription_dtos_json_round_trip() {
         input_template: draft.input_template.clone(),
         target_label: draft.target_label.clone(),
         enabled: true,
+        tombstoned: false,
+        deleted_at_ms: None,
         created_at_ms: 1,
         updated_at_ms: 2,
     };
@@ -760,19 +772,6 @@ fn remote_trigger_subscription_dtos_json_round_trip() {
         subscriptions: vec![record],
     };
     list.validate().expect("valid trigger list");
-    let cancel = RemoteTriggerCancelSubscriptionRequest {
-        protocol_version: REMOTE_PROTOCOL_VERSION,
-        session_id: "session".to_string(),
-        handle: "trigger:1".to_string(),
-    };
-    cancel.validate().expect("valid cancel request");
-    let cancel_result = RemoteTriggerCancelSubscriptionResult {
-        protocol_version: REMOTE_PROTOCOL_VERSION,
-        session_id: "session".to_string(),
-        handle: "trigger:1".to_string(),
-        cancelled: true,
-    };
-    cancel_result.validate().expect("valid cancel result");
 }
 
 #[test]
@@ -940,7 +939,7 @@ fn remote_process_env_persistence_dtos_validate() {
 #[test]
 fn trigger_target_label_must_match_identity_label() {
     let mut draft = RemoteTriggerSubscriptionDraft::for_process(
-        RemoteProcessOriginator::Host { scope: None },
+        "label-test",
         canonical_env_ref().parse().expect("canonical env ref"),
         "ui.button.pressed",
         "source-key",
@@ -982,8 +981,6 @@ fn top_level_protocol_schema_exports_include_versions() {
     assert_schema_has_protocol_version::<RemoteTriggerRegisterSubscriptionRequest>();
     assert_schema_has_protocol_version::<RemoteTriggerRegisterSubscriptionResult>();
     assert_schema_has_protocol_version::<RemoteTriggerListSubscriptionsResponse>();
-    assert_schema_has_protocol_version::<RemoteTriggerCancelSubscriptionRequest>();
-    assert_schema_has_protocol_version::<RemoteTriggerCancelSubscriptionResult>();
     assert_schema_has_protocol_version::<RemoteProcessStartRequest>();
     assert_schema_has_protocol_version::<RemoteProcessStartResult>();
     assert_schema_has_protocol_version::<RemoteProcessWorkSnapshot>();

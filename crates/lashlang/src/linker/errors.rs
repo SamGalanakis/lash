@@ -59,6 +59,18 @@ pub enum LinkError {
     },
     #[error("trigger registration requires {{ source, target, inputs, name? }}")]
     InvalidTriggerRegistration { span: Option<Span> },
+    #[error(
+        "trigger subscription_key must be a non-empty string literal and must not use the reserved `lash.internal/` prefix"
+    )]
+    InvalidTriggerSubscriptionKey { span: Option<Span> },
+    #[error(
+        "multiple trigger registrations derive the same default key for process `{process}` and source `{source_type}`; give each registration an explicit literal subscription_key"
+    )]
+    DuplicateDerivedTriggerSubscriptionKey {
+        process: String,
+        source_type: String,
+        span: Option<Span>,
+    },
     #[error("trigger registration `inputs` must be a literal record")]
     InvalidTriggerInputs { span: Option<Span> },
     #[error("trigger registration input `{input}` is duplicated")]
@@ -77,7 +89,9 @@ pub enum LinkError {
     },
     #[error("trigger registration `inputs` must map at least one param to `trigger.event`")]
     MissingTriggerEventInput { span: Option<Span> },
-    #[error("`trigger.event` is only valid as a direct value inside `triggers.register` inputs")]
+    #[error(
+        "`trigger.event` is only valid as a direct value inside trigger definition `inputs`"
+    )]
     TriggerEventOutsideInputs { span: Option<Span> },
     #[error(
         "`trigger.event` represents the whole event; projections such as `trigger.event.field` are not supported"
@@ -85,8 +99,6 @@ pub enum LinkError {
     TriggerEventProjection { span: Option<Span> },
     #[error("trigger listing requires {{ target }}")]
     InvalidTriggerList { span: Option<Span> },
-    #[error("trigger cancellation requires {{ handle }}")]
-    InvalidTriggerCancel { span: Option<Span> },
     #[error("trigger source type `{source_ty}` is not registered as a TriggerSource")]
     UnknownTriggerEventType {
         source_ty: String,
@@ -186,6 +198,8 @@ impl LinkError {
             | Self::IncompatibleExpectedLiteral { span, .. }
             | Self::IncompatibleProcessReturn { span, .. }
             | Self::InvalidTriggerRegistration { span }
+            | Self::InvalidTriggerSubscriptionKey { span }
+            | Self::DuplicateDerivedTriggerSubscriptionKey { span, .. }
             | Self::InvalidTriggerInputs { span }
             | Self::DuplicateTriggerInput { span, .. }
             | Self::MissingTriggerInput { span, .. }
@@ -194,7 +208,6 @@ impl LinkError {
             | Self::TriggerEventOutsideInputs { span }
             | Self::TriggerEventProjection { span }
             | Self::InvalidTriggerList { span }
-            | Self::InvalidTriggerCancel { span }
             | Self::UnknownTriggerEventType { span, .. }
             | Self::InvalidTriggerTarget { span, .. }
             | Self::TriggerEventMismatch { span, .. }

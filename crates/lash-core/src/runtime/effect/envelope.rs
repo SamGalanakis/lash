@@ -27,6 +27,7 @@ pub enum RuntimeEffectKind {
     Direct,
     ToolAttempt,
     ToolBatch,
+    Trigger,
     Process,
     ExecCode,
     Checkpoint,
@@ -43,6 +44,7 @@ impl RuntimeEffectKind {
             Self::Direct => "direct",
             Self::ToolAttempt => "tool_attempt",
             Self::ToolBatch => "tool_batch",
+            Self::Trigger => "trigger",
             Self::Process => "process",
             Self::ExecCode => "exec_code",
             Self::Checkpoint => "checkpoint",
@@ -130,6 +132,8 @@ impl RuntimeInvocation {
                 Some(CausalRef::TriggerOccurrence {
                     occurrence_id: occurrence_id.clone(),
                     subscription_id: None,
+                    subscription_incarnation: None,
+                    subscription_revision: None,
                 })
             }
             RuntimeSubject::SessionNode { node_id } => Some(CausalRef::SessionNode {
@@ -363,6 +367,9 @@ pub enum RuntimeEffectCommand {
     ToolBatch {
         batch: crate::PreparedToolBatch,
     },
+    Trigger {
+        command: Box<crate::TriggerCommand>,
+    },
     Process {
         command: Box<ProcessCommand>,
     },
@@ -401,6 +408,7 @@ impl RuntimeEffectCommand {
             Self::Direct { .. } => RuntimeEffectKind::Direct,
             Self::ToolAttempt { .. } => RuntimeEffectKind::ToolAttempt,
             Self::ToolBatch { .. } => RuntimeEffectKind::ToolBatch,
+            Self::Trigger { .. } => RuntimeEffectKind::Trigger,
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
@@ -609,6 +617,9 @@ pub enum RuntimeEffectOutcome {
         launches: Vec<ToolCallLaunch>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         triggers: Vec<ToolTriggerEffectOutcome>,
+    },
+    Trigger {
+        result: crate::TriggerEffectResult,
     },
     Process {
         result: ProcessEffectOutcome,
@@ -834,6 +845,16 @@ impl RuntimeEffectOutcome {
         }
     }
 
+    pub fn into_trigger(self) -> Result<crate::TriggerEffectResult, RuntimeEffectControllerError> {
+        match self {
+            Self::Trigger { result } => Ok(result),
+            other => Err(RuntimeEffectControllerError::new(
+                "runtime_effect_wrong_outcome",
+                format!("expected trigger outcome, got {}", other.kind().as_str()),
+            )),
+        }
+    }
+
     pub fn into_exec_code(
         self,
     ) -> Result<Result<ExecResponse, String>, RuntimeEffectControllerError> {
@@ -895,6 +916,7 @@ impl RuntimeEffectOutcome {
             Self::Direct { .. } => RuntimeEffectKind::Direct,
             Self::ToolAttempt { .. } => RuntimeEffectKind::ToolAttempt,
             Self::ToolBatch { .. } => RuntimeEffectKind::ToolBatch,
+            Self::Trigger { .. } => RuntimeEffectKind::Trigger,
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,

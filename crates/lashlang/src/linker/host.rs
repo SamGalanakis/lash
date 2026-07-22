@@ -344,6 +344,7 @@ impl LinkedModule {
         let surface = surface.borrow();
         let mut linker = Linker::new(&program, surface);
         let program = linker.link_program()?;
+        validate_default_trigger_key_collisions(&program)?;
         let requirements = host_requirements_for_program_with_catalog(&program, &surface.resources);
         let artifact =
             ModuleArtifact::from_program_with_requirements(program.clone(), requirements).map_err(

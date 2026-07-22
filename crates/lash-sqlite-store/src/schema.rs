@@ -288,25 +288,25 @@ CREATE TABLE IF NOT EXISTS process_segment_handovers (
 pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 12;
 
 pub(crate) const TRIGGER_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS trigger_subscription_seq (
-    id INTEGER PRIMARY KEY AUTOINCREMENT
-);
-
 CREATE TABLE IF NOT EXISTS trigger_subscriptions (
     subscription_id      TEXT PRIMARY KEY,
-    registrant_scope_id  TEXT NOT NULL,
-    handle               TEXT NOT NULL,
+    owner_scope          TEXT NOT NULL,
+    subscription_key     TEXT NOT NULL,
+    incarnation          TEXT NOT NULL,
+    revision             INTEGER NOT NULL,
+    definition_hash      TEXT NOT NULL,
     source_type          TEXT NOT NULL,
     source_key           TEXT NOT NULL,
     enabled              INTEGER NOT NULL,
+    tombstoned           INTEGER NOT NULL,
     created_at_ms        INTEGER NOT NULL,
     updated_at_ms        INTEGER NOT NULL,
     record_json          TEXT NOT NULL,
-    UNIQUE(registrant_scope_id, handle)
+    UNIQUE(owner_scope, subscription_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_trigger_subscriptions_registrant
-    ON trigger_subscriptions(registrant_scope_id, handle);
+    ON trigger_subscriptions(owner_scope, subscription_key);
 
 CREATE INDEX IF NOT EXISTS idx_trigger_subscriptions_source
     ON trigger_subscriptions(source_type, source_key, enabled);
@@ -328,10 +328,19 @@ CREATE TABLE IF NOT EXISTS trigger_deliveries (
     occurrence_id    TEXT NOT NULL,
     subscription_id  TEXT NOT NULL,
     process_id       TEXT NOT NULL,
+    subscription_incarnation TEXT NOT NULL,
+    subscription_revision INTEGER NOT NULL,
+    subscription_snapshot_json TEXT NOT NULL,
     created_at_ms    INTEGER NOT NULL,
     PRIMARY KEY (occurrence_id, subscription_id),
-    FOREIGN KEY (occurrence_id) REFERENCES trigger_occurrences(occurrence_id) ON DELETE CASCADE,
-    FOREIGN KEY (subscription_id) REFERENCES trigger_subscriptions(subscription_id) ON DELETE CASCADE
+    FOREIGN KEY (occurrence_id) REFERENCES trigger_occurrences(occurrence_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS trigger_mutation_receipts (
+    operation_id    TEXT PRIMARY KEY,
+    request_hash    TEXT NOT NULL,
+    result_json     TEXT NOT NULL,
+    created_at_ms   INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_trigger_deliveries_process
@@ -341,7 +350,10 @@ CREATE INDEX IF NOT EXISTS idx_trigger_deliveries_subscription
     ON trigger_deliveries(subscription_id);
 ";
 
-pub(crate) const TRIGGER_SCHEMA_VERSION: i32 = 1;
+// FIG-504 keyed subscriptions are an alpha reject-and-recreate cutover. Version
+// 2 has no keyless-row compatibility path and preserves revision snapshots in
+// delivery rows instead of cascading them away with a subscription.
+pub(crate) const TRIGGER_SCHEMA_VERSION: i32 = 2;
 
 pub(crate) const EFFECT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS runtime_effect_replay (

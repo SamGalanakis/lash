@@ -184,10 +184,57 @@ impl<'run> RuntimeExecutionContext<'run> {
             .map(crate::TriggerRouter::store)
     }
 
-    pub fn trigger_registration_originator(&self) -> crate::ProcessOriginator {
+    pub fn trigger_actor(&self) -> crate::ProcessOriginator {
         self.process_originator
             .clone()
             .unwrap_or_else(|| crate::ProcessOriginator::session(self.session_scope()))
+    }
+
+    pub fn trigger_owner_scope(&self) -> Result<crate::TriggerOwnerScope, crate::PluginError> {
+        resolve_trigger_owner_scope(&self.session_id, self.process_originator.as_ref())
+    }
+
+    pub async fn execute_trigger_effect(
+        &self,
+        effect_id: String,
+        command: crate::TriggerCommand,
+    ) -> Result<crate::TriggerEffectResult, crate::RuntimeEffectControllerError> {
+        let store = self.trigger_store().ok_or_else(|| {
+            crate::RuntimeEffectControllerError::new(
+                "trigger_store_unavailable",
+                "trigger store is unavailable in this runtime",
+            )
+        })?;
+        let scope = self
+            .parent_invocation
+            .as_ref()
+            .map(|invocation| invocation.scope.clone())
+            .unwrap_or_else(|| crate::RuntimeScope::new(self.session_id.clone()));
+        let invocation = crate::RuntimeInvocation::effect(
+            scope,
+            effect_id.clone(),
+            crate::RuntimeEffectKind::Trigger,
+            effect_id,
+        )
+        .with_caused_by(
+            self.parent_invocation
+                .as_ref()
+                .and_then(crate::RuntimeInvocation::causal_ref),
+        );
+        self.dispatch
+            .effect_controller
+            .controller()
+            .execute_effect(
+                crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::Trigger {
+                        command: Box::new(command),
+                    },
+                ),
+                crate::RuntimeEffectLocalExecutor::triggers(store),
+            )
+            .await?
+            .into_trigger()
     }
 
     pub fn trigger_registration_wake_target(&self) -> Option<crate::SessionScope> {
@@ -726,6 +773,25 @@ impl<'run> RuntimeExecutionContext<'run> {
     }
 }
 
+fn resolve_trigger_owner_scope(
+    root_session_id: &str,
+    originator: Option<&crate::ProcessOriginator>,
+) -> Result<crate::TriggerOwnerScope, crate::PluginError> {
+    match originator {
+        Some(crate::ProcessOriginator::Host {
+            scope: Some(binding_id),
+        }) => crate::TriggerOwnerScope::host(binding_id.clone()),
+        Some(crate::ProcessOriginator::Host { scope: None }) => Err(crate::PluginError::Session(
+            "bare host authority cannot own user trigger subscriptions; use an explicit host binding"
+                .to_string(),
+        )),
+        Some(crate::ProcessOriginator::Session { scope }) => {
+            Ok(crate::TriggerOwnerScope::session(scope.session_id.clone()))
+        }
+        None => Ok(crate::TriggerOwnerScope::session(root_session_id)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +799,39 @@ mod tests {
     use crate::{ToolCall, ToolProvider, ToolResult};
 
     struct NoopTools;
+
+    #[test]
+    fn trigger_owner_scope_uses_root_session_or_explicit_host_binding() {
+        assert_eq!(
+            resolve_trigger_owner_scope("root-session", None).unwrap(),
+            crate::TriggerOwnerScope::session("root-session")
+        );
+        let root = crate::ProcessOriginator::session(crate::SessionScope::new("root-session"));
+        assert_eq!(
+            resolve_trigger_owner_scope("ignored", Some(&root)).unwrap(),
+            crate::TriggerOwnerScope::session("root-session")
+        );
+        let frame = crate::ProcessOriginator::session(crate::SessionScope::for_agent_frame(
+            "root-session",
+            "agent-frame",
+        ));
+        assert_eq!(
+            resolve_trigger_owner_scope("ignored", Some(&frame)).unwrap(),
+            crate::TriggerOwnerScope::session("root-session"),
+            "agent frames inherit the root session namespace"
+        );
+        let named_host = crate::ProcessOriginator::host_scoped("automation-a");
+        assert_eq!(
+            resolve_trigger_owner_scope("ignored", Some(&named_host)).unwrap(),
+            crate::TriggerOwnerScope::host("automation-a").unwrap()
+        );
+        assert!(
+            resolve_trigger_owner_scope("ignored", Some(&crate::ProcessOriginator::host()))
+                .unwrap_err()
+                .to_string()
+                .contains("bare host authority")
+        );
+    }
 
     #[async_trait::async_trait]
     impl ToolProvider for NoopTools {

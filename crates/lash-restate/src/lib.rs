@@ -3959,6 +3959,7 @@ fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExec
         RuntimeEffectCommand::LlmCall { .. }
         | RuntimeEffectCommand::Direct { .. }
         | RuntimeEffectCommand::ToolAttempt { .. }
+        | RuntimeEffectCommand::Trigger { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
         | RuntimeEffectCommand::SyncExecutionEnvironment { .. }
         | RuntimeEffectCommand::DurableStep { .. } => RestateEffectExecution::JournaledRun,

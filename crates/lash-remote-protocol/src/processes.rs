@@ -975,6 +975,7 @@ pub enum RemoteRuntimeEffectKind {
     ToolAttempt,
     ToolBatch,
     Process,
+    Trigger,
     ExecCode,
     Checkpoint,
     SyncExecutionEnvironment,

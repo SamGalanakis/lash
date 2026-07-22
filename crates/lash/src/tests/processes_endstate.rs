@@ -98,7 +98,7 @@ impl LinkedTestProcess {
         env_ref: lash_core::ProcessExecutionEnvRef,
     ) -> lash_core::TriggerSubscriptionDraft {
         lash_core::TriggerSubscriptionDraft {
-            registrant: lash_core::ProcessOriginator::host(),
+            subscription_key: "host-owned-test-trigger".to_string(),
             env_ref,
             wake_target: None,
             name: Some("host-owned-test-trigger".to_string()),
@@ -294,13 +294,19 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
     .await;
 
     let source_type = "timer.tick";
-    let source_key = trigger_store
-        .source_key_for_subscription(source_type, &serde_json::json!({}))
-        .await?;
+    let source_key = lash_core::default_trigger_source_key(source_type, &serde_json::json!({}))?;
     let env_ref = persist_process_env_ref(process_env_store.as_ref()).await;
     trigger_store
-        .register_subscription(process.trigger_draft(source_type, source_key.clone(), env_ref))
-        .await?;
+        .execute_command(
+            "sessionless-trigger-register",
+            lash_core::TriggerCommand::Register {
+                owner_scope: lash_core::TriggerOwnerScope::host("processes-endstate")?,
+                actor: lash_core::ProcessOriginator::host_scoped("processes-endstate"),
+                draft: process.trigger_draft(source_type, source_key.clone(), env_ref),
+            },
+        )
+        .await?
+        .map_err(|err| lash_core::PluginError::Session(err.to_string()))?;
     let report = core
         .triggers()
         .emit(

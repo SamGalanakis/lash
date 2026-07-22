@@ -1,5 +1,5 @@
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use super::*;
@@ -310,42 +310,54 @@ async fn seed_reserved_trigger_delivery(
     let source_type = "ui.button.pressed";
     let source_key =
         crate::empty_trigger_source_key(source_type).expect("empty trigger source key");
-    let subscription = trigger_store
-        .register_subscription(
-            crate::TriggerSubscriptionDraft::for_process(
-                crate::ProcessOriginator::host(),
-                crate::ProcessExecutionEnvRef::new("process-env:test"),
-                source_type,
-                source_key.clone(),
-                ProcessInput::Engine {
-                    kind: "test-engine".to_string(),
-                    payload: serde_json::json!({ "target": "reconcile" }),
-                },
-                crate::ProcessIdentity::new("test-engine"),
-            )
-            .with_payload_schema(crate::LashSchema::any()),
+    let owner_scope = crate::TriggerOwnerScope::host("recovery-test").unwrap();
+    let outcome = trigger_store
+        .execute_command(
+            "recovery-test-register",
+            crate::TriggerCommand::Register {
+                owner_scope,
+                actor: crate::ProcessOriginator::host_scoped("recovery-test"),
+                draft: recovery_test_trigger_draft(source_key.clone()),
+            },
         )
         .await
+        .expect("execute register")
         .expect("register trigger subscription");
-    let occurrence = trigger_store
-        .record_occurrence(crate::TriggerOccurrenceRequest::new(
+    let crate::TriggerCommandOutcome::Mutation { receipt } = outcome else {
+        panic!("expected registration receipt")
+    };
+    let subscription = receipt.record_snapshot;
+    let ingress = trigger_store
+        .ingest_occurrence(crate::TriggerOccurrenceRequest::new(
             source_type,
-            source_key,
+            source_key.clone(),
             serde_json::json!({ "button": "Blue" }),
             "button-blue-reconcile",
         ))
         .await
-        .expect("record trigger occurrence");
-    let deliveries = trigger_store
-        .reserve_matching_deliveries(&occurrence.occurrence_id)
-        .await
-        .expect("reserve trigger delivery");
+        .expect("ingest trigger occurrence");
+    let deliveries = ingress.reservations;
     assert_eq!(deliveries.len(), 1);
     assert_eq!(
         deliveries[0].subscription.subscription_id,
         subscription.subscription_id
     );
     deliveries[0].clone()
+}
+
+fn recovery_test_trigger_draft(source_key: String) -> crate::TriggerSubscriptionDraft {
+    crate::TriggerSubscriptionDraft::for_process(
+        "recovery-test",
+        crate::ProcessExecutionEnvRef::new("process-env:test"),
+        "ui.button.pressed",
+        source_key,
+        ProcessInput::Engine {
+            kind: "test-engine".to_string(),
+            payload: serde_json::json!({ "target": "reconcile" }),
+        },
+        crate::ProcessIdentity::new("test-engine"),
+    )
+    .with_payload_schema(crate::LashSchema::any())
 }
 
 async fn process_count(registry: &Arc<dyn ProcessRegistry>, process_id: &str) -> usize {
@@ -435,6 +447,32 @@ struct ProductionChainEngine {
 
 struct NestedProcessEngine {
     runs: Arc<AtomicUsize>,
+}
+
+struct SnapshotRecordingEngine {
+    payloads: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::ProcessEngine for SnapshotRecordingEngine {
+    fn kind(&self) -> &'static str {
+        "snapshot-recording-test"
+    }
+
+    async fn run(
+        &self,
+        _context: crate::ProcessEngineRunContext<'_>,
+        payload: serde_json::Value,
+    ) -> crate::ProcessRunOutcome {
+        self.payloads
+            .lock()
+            .expect("recorded payloads")
+            .push(payload);
+        crate::ProcessRunOutcome::Terminal(Box::new(ProcessAwaitOutput::Success {
+            value: serde_json::json!({ "recorded": true }),
+            control: None,
+        }))
+    }
 }
 
 #[async_trait::async_trait]
@@ -1046,8 +1084,12 @@ async fn sweep_reconciles_reserved_trigger_delivery_without_process() {
         Some(crate::CausalRef::TriggerOccurrence {
             occurrence_id,
             subscription_id: Some(subscription_id),
+            subscription_incarnation: Some(subscription_incarnation),
+            subscription_revision: Some(subscription_revision),
         }) if occurrence_id == delivery.occurrence.occurrence_id
             && subscription_id == delivery.subscription.subscription_id
+            && subscription_incarnation == delivery.subscription.incarnation
+            && subscription_revision == delivery.subscription.revision
     ));
 
     worker
@@ -1058,6 +1100,185 @@ async fn sweep_reconciles_reserved_trigger_delivery_without_process() {
         process_count(&registry, &delivery.process_id).await,
         1,
         "re-running the sweep must not create a duplicate process row"
+    );
+}
+
+async fn snapshot_recovery_fixture(
+    delete_after_reserve: bool,
+) -> (
+    Arc<dyn ProcessRegistry>,
+    Arc<dyn TriggerStore>,
+    crate::TriggerDeliveryReservation,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+    DurableProcessWorker,
+) {
+    let registry: Arc<dyn ProcessRegistry> = Arc::new(TestLocalProcessRegistry::default());
+    let trigger_store: Arc<dyn TriggerStore> = Arc::new(crate::InMemoryTriggerStore::default());
+    let payloads = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime_host = RuntimeHostConfig::in_memory();
+    runtime_host.process_engines =
+        crate::ProcessEngineRegistry::new().with_engine(Arc::new(SnapshotRecordingEngine {
+            payloads: Arc::clone(&payloads),
+        }));
+    let policy = crate::SessionPolicy {
+        provider_id: "test".to_string(),
+        model: crate::ModelSpec::from_token_limits("test-model", Default::default(), 16_384, None)
+            .expect("valid model spec"),
+        ..crate::SessionPolicy::default()
+    };
+    let env_ref = crate::persist_process_execution_env(
+        runtime_host.durability.process_env_store.as_ref(),
+        &crate::ProcessExecutionEnvSpec::new(crate::PluginOptions::default(), policy.clone()),
+    )
+    .await
+    .expect("persist snapshot recovery process environment");
+    let owner_scope = crate::TriggerOwnerScope::host("snapshot-recovery-test").unwrap();
+    let actor = crate::ProcessOriginator::host_scoped("snapshot-recovery-test");
+    let source_type = "snapshot.recovery";
+    let source_key = crate::empty_trigger_source_key(source_type).unwrap();
+    let draft = |version: &str| {
+        crate::TriggerSubscriptionDraft::for_process(
+            "snapshot-recovery-key",
+            env_ref.clone(),
+            source_type,
+            source_key.clone(),
+            ProcessInput::Engine {
+                kind: "snapshot-recording-test".to_string(),
+                payload: serde_json::json!({ "config": version }),
+            },
+            crate::ProcessIdentity::new("snapshot-recording-test"),
+        )
+        .with_payload_schema(crate::LashSchema::any())
+    };
+    trigger_store
+        .execute_command(
+            "snapshot-register-v1",
+            crate::TriggerCommand::Register {
+                owner_scope: owner_scope.clone(),
+                actor: actor.clone(),
+                draft: draft("v1"),
+            },
+        )
+        .await
+        .expect("register v1 command")
+        .expect("register v1 subscription");
+    let delivery = trigger_store
+        .ingest_occurrence(crate::TriggerOccurrenceRequest::new(
+            source_type,
+            source_key.clone(),
+            serde_json::json!({ "event": "reserved" }),
+            if delete_after_reserve {
+                "snapshot-delete-occurrence"
+            } else {
+                "snapshot-update-occurrence"
+            },
+        ))
+        .await
+        .expect("reserve v1 delivery")
+        .reservations
+        .into_iter()
+        .next()
+        .expect("one reserved v1 delivery");
+    let mutation = if delete_after_reserve {
+        crate::TriggerCommand::Delete {
+            owner_scope,
+            actor,
+            subscription_key: "snapshot-recovery-key".to_string(),
+            expected_revision: 1,
+        }
+    } else {
+        crate::TriggerCommand::Update {
+            owner_scope,
+            actor,
+            subscription_key: "snapshot-recovery-key".to_string(),
+            draft: draft("v2"),
+            expected_revision: 1,
+        }
+    };
+    trigger_store
+        .execute_command("snapshot-post-reserve-mutation", mutation)
+        .await
+        .expect("post-reserve mutation command")
+        .expect("post-reserve mutation");
+    let worker = DurableProcessWorker::new(
+        DurableProcessWorkerConfig::new(
+            Arc::new(PluginHost::new(Vec::new())),
+            runtime_host,
+            Arc::new(TestSessionStoreFactory),
+            Arc::clone(&registry),
+        )
+        .with_session_policy(policy)
+        .with_trigger_store(Arc::clone(&trigger_store))
+        .with_lease_owner(local_owner(
+            "snapshot-recovery-worker",
+            "host-a",
+            "snapshot-recovery-start",
+        )),
+    );
+    (registry, trigger_store, delivery, payloads, worker)
+}
+
+#[tokio::test]
+async fn sweep_recovers_reserved_v1_snapshot_after_v2_update_exactly_once() {
+    let (registry, _trigger_store, delivery, payloads, worker) =
+        snapshot_recovery_fixture(false).await;
+
+    worker.drive_pending_processes().await.expect("recover v1");
+    await_terminal(&registry, &delivery.process_id).await;
+    let terminal = registry
+        .get_process(&delivery.process_id)
+        .await
+        .expect("recovered delivery process");
+    assert!(
+        matches!(terminal.status, ProcessStatus::Completed { .. }),
+        "recovered delivery must complete: {:?}",
+        terminal.status
+    );
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("repeat recovery sweep");
+
+    assert_eq!(delivery.subscription.revision, 1);
+    assert_eq!(
+        payloads.lock().expect("recorded payloads").as_slice(),
+        [serde_json::json!({ "args": {}, "config": "v1" })]
+    );
+}
+
+#[tokio::test]
+async fn sweep_recovers_reserved_v1_snapshot_after_tombstone_exactly_once() {
+    let (registry, trigger_store, delivery, payloads, worker) =
+        snapshot_recovery_fixture(true).await;
+    assert!(
+        trigger_store
+            .list_subscriptions(crate::TriggerSubscriptionFilter::default())
+            .await
+            .expect("list live subscriptions")
+            .is_empty(),
+        "the live subscription is tombstoned before recovery"
+    );
+
+    worker.drive_pending_processes().await.expect("recover v1");
+    await_terminal(&registry, &delivery.process_id).await;
+    let terminal = registry
+        .get_process(&delivery.process_id)
+        .await
+        .expect("recovered delivery process");
+    assert!(
+        matches!(terminal.status, ProcessStatus::Completed { .. }),
+        "recovered delivery must complete: {:?}",
+        terminal.status
+    );
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("repeat recovery sweep");
+
+    assert_eq!(delivery.subscription.revision, 1);
+    assert_eq!(
+        payloads.lock().expect("recorded payloads").as_slice(),
+        [serde_json::json!({ "args": {}, "config": "v1" })]
     );
 }
 
@@ -1116,6 +1337,23 @@ async fn sweep_does_not_reconcile_trigger_delivery_pruned_with_terminal_process(
             .is_empty(),
         "prune removes the delivery row together with the process"
     );
+    let replayed_registration = trigger_store
+        .execute_command(
+            "recovery-test-register",
+            crate::TriggerCommand::Register {
+                owner_scope: crate::TriggerOwnerScope::host("recovery-test").unwrap(),
+                actor: crate::ProcessOriginator::host_scoped("recovery-test"),
+                draft: recovery_test_trigger_draft(delivery.subscription.source_key.clone()),
+            },
+        )
+        .await
+        .expect("retry registration after retention")
+        .expect("registration remains valid");
+    assert!(matches!(
+        replayed_registration,
+        crate::TriggerCommandOutcome::Mutation { receipt }
+            if receipt.disposition == crate::TriggerMutationDisposition::Unchanged
+    ));
 
     worker
         .drive_pending_processes()

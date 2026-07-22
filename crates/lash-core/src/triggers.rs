@@ -5,6 +5,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::plugin::PluginError;
 
+mod memory;
+mod mutation;
+mod router;
+
+pub use memory::InMemoryTriggerStore;
+use memory::{
+    InMemoryTriggerDeliveryRecord, InMemoryTriggerEventState, apply_in_memory_trigger_command,
+};
+pub use mutation::evaluate_trigger_mutation;
+use mutation::{
+    ensure_live_revision, mutate_enabled, subscription_conflict, subscription_record_from_draft,
+};
+pub use router::*;
+use router::{default_enabled, reserve_in_memory_for_occurrence};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerEvent {
     pub resource_type: String,
@@ -315,7 +330,9 @@ impl std::fmt::Display for TriggerEventType {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerRegistration {
-    pub handle: String,
+    pub subscription_key: String,
+    pub incarnation: String,
+    pub revision: u64,
     pub source_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -344,7 +361,7 @@ pub enum TriggerInputBinding {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerSubscriptionDraft {
-    pub registrant: crate::ProcessOriginator,
+    pub subscription_key: String,
     pub env_ref: crate::ProcessExecutionEnvRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target: Option<crate::SessionScope>,
@@ -366,7 +383,7 @@ pub struct TriggerSubscriptionDraft {
 
 impl TriggerSubscriptionDraft {
     pub fn for_process(
-        registrant: crate::ProcessOriginator,
+        subscription_key: impl Into<String>,
         env_ref: crate::ProcessExecutionEnvRef,
         source_type: impl Into<String>,
         source_key: impl Into<String>,
@@ -375,7 +392,7 @@ impl TriggerSubscriptionDraft {
     ) -> Self {
         let target_label = target_identity.label.clone();
         Self {
-            registrant,
+            subscription_key: subscription_key.into(),
             env_ref,
             wake_target: None,
             name: None,
@@ -435,6 +452,7 @@ impl TriggerSubscriptionDraft {
     }
 
     pub fn validate(&self) -> Result<(), PluginError> {
+        validate_subscription_key(&self.subscription_key, false)?;
         validate_trigger_subscription_target_label(
             self.target_label.as_deref(),
             self.target_identity.label.as_deref(),
@@ -442,14 +460,75 @@ impl TriggerSubscriptionDraft {
     }
 }
 
+pub const INTERNAL_TRIGGER_KEY_PREFIX: &str = "lash.internal/";
+
+pub fn validate_subscription_key(key: &str, internal: bool) -> Result<(), PluginError> {
+    if key.trim().is_empty() {
+        return Err(PluginError::Session(
+            "trigger subscription requires subscription_key".to_string(),
+        ));
+    }
+    if !internal && key.starts_with(INTERNAL_TRIGGER_KEY_PREFIX) {
+        return Err(PluginError::Session(format!(
+            "trigger subscription key `{key}` uses reserved prefix `{INTERNAL_TRIGGER_KEY_PREFIX}`"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerOwnerScope {
+    Session { session_id: String },
+    Host { binding_id: String },
+    Platform,
+}
+
+impl TriggerOwnerScope {
+    pub fn session(session_id: impl Into<String>) -> Self {
+        Self::Session {
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn host(binding_id: impl Into<String>) -> Result<Self, PluginError> {
+        let binding_id = binding_id.into();
+        if binding_id.trim().is_empty() {
+            return Err(PluginError::Session(
+                "trigger host owner requires a non-empty binding id".to_string(),
+            ));
+        }
+        Ok(Self::Host { binding_id })
+    }
+
+    pub fn namespace(&self) -> String {
+        match self {
+            Self::Session { session_id } => format!("session:{session_id}"),
+            Self::Host { binding_id } => format!("host:{binding_id}"),
+            Self::Platform => "host".to_string(),
+        }
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Session { session_id } => Some(session_id),
+            Self::Host { .. } | Self::Platform => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerSubscriptionRecord {
     pub subscription_id: String,
+    pub owner_scope: TriggerOwnerScope,
+    pub subscription_key: String,
+    pub incarnation: String,
+    pub revision: u64,
+    pub definition_hash: String,
     pub registrant: crate::ProcessOriginator,
     pub env_ref: crate::ProcessExecutionEnvRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target: Option<crate::SessionScope>,
-    pub handle: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub source_type: String,
@@ -466,20 +545,21 @@ pub struct TriggerSubscriptionRecord {
     pub target_label: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub tombstoned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at_ms: Option<u64>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
 
 impl TriggerSubscriptionRecord {
     pub fn registrant_scope_id(&self) -> String {
-        self.registrant.scope_id()
+        self.owner_scope.namespace()
     }
 
     pub fn registrant_session_id(&self) -> Option<&str> {
-        match &self.registrant {
-            crate::ProcessOriginator::Session { scope } => Some(scope.session_id.as_str()),
-            crate::ProcessOriginator::Host { .. } => None,
-        }
+        self.owner_scope.session_id()
     }
 }
 
@@ -501,7 +581,9 @@ fn validate_trigger_subscription_target_label(
 impl From<&TriggerSubscriptionRecord> for TriggerRegistration {
     fn from(route: &TriggerSubscriptionRecord) -> Self {
         Self {
-            handle: route.handle.clone(),
+            subscription_key: route.subscription_key.clone(),
+            incarnation: route.incarnation.clone(),
+            revision: route.revision,
             source_key: route.source_key.clone(),
             name: route.name.clone(),
             source_type: TriggerEventType::new(route.source_type.clone()),
@@ -524,7 +606,7 @@ pub struct TriggerSubscriptionFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
+    pub subscription_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -571,9 +653,9 @@ impl TriggerSubscriptionFilter {
                 .as_deref()
                 .is_none_or(|session_id| record.registrant_session_id() == Some(session_id))
             && self
-                .handle
+                .subscription_key
                 .as_deref()
-                .is_none_or(|handle| record.handle == handle)
+                .is_none_or(|key| record.subscription_key == key)
             && self
                 .name
                 .as_deref()
@@ -587,11 +669,207 @@ impl TriggerSubscriptionFilter {
                 .as_deref()
                 .is_none_or(|source_key| record.source_key == source_key)
             && self.enabled.is_none_or(|enabled| record.enabled == enabled)
+            && !record.tombstoned
             && self
                 .target
                 .as_ref()
                 .is_none_or(|target| record.target_identity.definition.as_ref() == Some(target))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerMutationDisposition {
+    Created,
+    Unchanged,
+    Updated,
+    Enabled,
+    Disabled,
+    Deleted,
+    Revived,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TriggerMutationReceipt {
+    pub owner_scope: TriggerOwnerScope,
+    pub subscription_key: String,
+    pub subscription_id: String,
+    pub incarnation: String,
+    pub revision: u64,
+    pub definition_hash: String,
+    pub enabled: bool,
+    pub disposition: TriggerMutationDisposition,
+    pub record_snapshot: TriggerSubscriptionRecord,
+}
+
+impl TriggerMutationReceipt {
+    fn from_record(
+        record: TriggerSubscriptionRecord,
+        disposition: TriggerMutationDisposition,
+    ) -> Self {
+        Self {
+            owner_scope: record.owner_scope.clone(),
+            subscription_key: record.subscription_key.clone(),
+            subscription_id: record.subscription_id.clone(),
+            incarnation: record.incarnation.clone(),
+            revision: record.revision,
+            definition_hash: record.definition_hash.clone(),
+            enabled: record.enabled,
+            disposition,
+            record_snapshot: record,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum TriggerCommand {
+    Register {
+        owner_scope: TriggerOwnerScope,
+        actor: crate::ProcessOriginator,
+        draft: TriggerSubscriptionDraft,
+    },
+    List {
+        owner_scope: TriggerOwnerScope,
+        filter: TriggerSubscriptionFilter,
+    },
+    Update {
+        owner_scope: TriggerOwnerScope,
+        actor: crate::ProcessOriginator,
+        subscription_key: String,
+        draft: TriggerSubscriptionDraft,
+        expected_revision: u64,
+    },
+    Enable {
+        owner_scope: TriggerOwnerScope,
+        actor: crate::ProcessOriginator,
+        subscription_key: String,
+        expected_revision: u64,
+    },
+    Disable {
+        owner_scope: TriggerOwnerScope,
+        actor: crate::ProcessOriginator,
+        subscription_key: String,
+        expected_revision: u64,
+    },
+    Delete {
+        owner_scope: TriggerOwnerScope,
+        actor: crate::ProcessOriginator,
+        subscription_key: String,
+        expected_revision: u64,
+    },
+    Revive {
+        owner_scope: TriggerOwnerScope,
+        actor: crate::ProcessOriginator,
+        subscription_key: String,
+        draft: TriggerSubscriptionDraft,
+        expected_revision: u64,
+    },
+}
+
+impl TriggerCommand {
+    pub fn owner_scope(&self) -> &TriggerOwnerScope {
+        match self {
+            Self::Register { owner_scope, .. }
+            | Self::List { owner_scope, .. }
+            | Self::Update { owner_scope, .. }
+            | Self::Enable { owner_scope, .. }
+            | Self::Disable { owner_scope, .. }
+            | Self::Delete { owner_scope, .. }
+            | Self::Revive { owner_scope, .. } => owner_scope,
+        }
+    }
+
+    pub fn subscription_key(&self) -> Option<&str> {
+        match self {
+            Self::Register { draft, .. } => Some(&draft.subscription_key),
+            Self::List { .. } => None,
+            Self::Update {
+                subscription_key, ..
+            }
+            | Self::Enable {
+                subscription_key, ..
+            }
+            | Self::Disable {
+                subscription_key, ..
+            }
+            | Self::Delete {
+                subscription_key, ..
+            }
+            | Self::Revive {
+                subscription_key, ..
+            } => Some(subscription_key),
+        }
+    }
+
+    pub fn is_mutation(&self) -> bool {
+        !matches!(self, Self::List { .. })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerCommandOutcome {
+    Mutation {
+        receipt: Box<TriggerMutationReceipt>,
+    },
+    List {
+        records: Vec<TriggerSubscriptionRecord>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerOperationError {
+    #[error(
+        "trigger subscription conflict for `{subscription_key}`: {reason}; existing revision {existing_revision:?}, existing definition {existing_definition_hash:?}, requested definition {requested_definition_hash:?}"
+    )]
+    Conflict {
+        subscription_key: String,
+        existing_revision: Option<u64>,
+        existing_definition_hash: Option<String>,
+        requested_definition_hash: Option<String>,
+        reason: String,
+    },
+    #[error("trigger subscription request is invalid: {message}")]
+    Invalid { message: String },
+    #[error("trigger subscription operation failed: {message}")]
+    Store { message: String },
+}
+
+impl From<PluginError> for TriggerOperationError {
+    fn from(value: PluginError) -> Self {
+        Self::Store {
+            message: value.to_string(),
+        }
+    }
+}
+
+pub type TriggerEffectResult = Result<TriggerCommandOutcome, TriggerOperationError>;
+
+pub fn trigger_command_hash(command: &TriggerCommand) -> Result<String, PluginError> {
+    crate::stable_hash::stable_json_sha256_hex(command)
+        .map_err(|err| PluginError::Session(format!("failed to hash trigger command: {err}")))
+}
+
+pub fn trigger_operation_receipt_id(
+    owner_scope: &TriggerOwnerScope,
+    operation_id: &str,
+) -> Result<String, PluginError> {
+    let digest = crate::stable_hash::stable_json_sha256_hex(&(
+        "lash.trigger-operation-receipt",
+        1_u8,
+        owner_scope,
+        operation_id,
+    ))
+    .map_err(|err| PluginError::Session(format!("failed to hash trigger operation id: {err}")))?;
+    Ok(format!("trigger-operation:v1:sha256:{digest}"))
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TriggerIngressResult {
+    pub occurrence: TriggerOccurrenceRecord,
+    pub reservations: Vec<TriggerDeliveryReservation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -601,7 +879,7 @@ pub enum TriggerDeliveryReservationStatus {
     AlreadyReserved,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerDeliveryReservation {
     pub occurrence: TriggerOccurrenceRecord,
     pub subscription: TriggerSubscriptionRecord,
@@ -627,75 +905,29 @@ pub trait TriggerStore: Send + Sync {
         crate::DurabilityTier::Inline
     }
 
-    async fn source_key_for_subscription(
+    async fn execute_command(
         &self,
-        source_type: &str,
-        source: &serde_json::Value,
-    ) -> Result<String, PluginError> {
-        default_trigger_source_key(source_type, source)
-    }
-
-    async fn register_subscription(
-        &self,
-        draft: TriggerSubscriptionDraft,
-    ) -> Result<TriggerSubscriptionRecord, PluginError>;
+        operation_id: &str,
+        command: TriggerCommand,
+    ) -> Result<TriggerEffectResult, PluginError>;
 
     async fn list_subscriptions(
         &self,
         filter: TriggerSubscriptionFilter,
     ) -> Result<Vec<TriggerSubscriptionRecord>, PluginError>;
 
-    async fn cancel_subscription(
-        &self,
-        registrant_scope_id: &str,
-        handle: &str,
-    ) -> Result<bool, PluginError>;
-
-    /// Set whether one scoped subscription participates in future delivery
-    /// reservations. Returns whether the stored value changed.
-    async fn set_subscription_enabled(
-        &self,
-        registrant_scope_id: &str,
-        handle: &str,
-        enabled: bool,
-    ) -> Result<bool, PluginError> {
-        if enabled {
-            return Err(PluginError::Session(
-                "re-enabling trigger subscriptions is unsupported by this store".to_string(),
-            ));
-        }
-        self.cancel_subscription(registrant_scope_id, handle).await
-    }
-
-    /// Delete one scoped subscription and its delivery records. Historical
-    /// occurrences remain available because they describe source events.
-    async fn delete_subscription(
-        &self,
-        _registrant_scope_id: &str,
-        _handle: &str,
-    ) -> Result<bool, PluginError> {
-        Err(PluginError::Session(
-            "deleting individual trigger subscriptions is unsupported by this store".to_string(),
-        ))
-    }
-
     async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError>;
 
-    async fn record_occurrence(
+    async fn ingest_occurrence(
         &self,
         request: TriggerOccurrenceRequest,
-    ) -> Result<TriggerOccurrenceRecord, PluginError>;
+    ) -> Result<TriggerIngressResult, PluginError>;
 
     async fn list_occurrences(
         &self,
         filter: TriggerOccurrenceFilter,
     ) -> Result<Vec<TriggerOccurrenceRecord>, PluginError>;
 
-    async fn reserve_matching_deliveries(
-        &self,
-        occurrence_id: &str,
-    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError>;
-
     async fn list_deliveries_by_occurrence_id(
         &self,
         occurrence_id: &str,
@@ -710,875 +942,14 @@ pub trait TriggerStore: Send + Sync {
         &self,
         process_id: &str,
     ) -> Result<Vec<TriggerDeliveryReservation>, PluginError>;
-}
 
-pub struct InMemoryTriggerStore {
-    clock: Arc<dyn crate::Clock>,
-    state: Mutex<InMemoryTriggerEventState>,
-}
+    /// List every reserved delivery snapshot, including deliveries whose live
+    /// subscription has since been updated or tombstoned. Recovery uses this
+    /// direct delivery-table view to close the reserve/start crash window.
+    async fn list_deliveries(&self) -> Result<Vec<TriggerDeliveryReservation>, PluginError>;
 
-impl InMemoryTriggerStore {
-    pub fn new() -> Self {
-        Self::with_clock(Arc::new(crate::SystemClock))
-    }
-
-    pub fn with_clock(clock: Arc<dyn crate::Clock>) -> Self {
-        Self {
-            clock,
-            state: Mutex::new(InMemoryTriggerEventState::default()),
-        }
-    }
-
-    fn list_deliveries(
-        &self,
-        matches: impl Fn(&InMemoryTriggerDeliveryRecord) -> bool,
-    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let mut deliveries = state
-            .deliveries
-            .values()
-            .filter(|delivery| matches(delivery))
-            .map(|delivery| {
-                in_memory_delivery_reservation(
-                    &state,
-                    delivery,
-                    TriggerDeliveryReservationStatus::AlreadyReserved,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        deliveries.sort_by(|left, right| {
-            left.created_at_ms
-                .cmp(&right.created_at_ms)
-                .then_with(|| {
-                    left.occurrence
-                        .occurrence_id
-                        .cmp(&right.occurrence.occurrence_id)
-                })
-                .then_with(|| {
-                    left.subscription
-                        .subscription_id
-                        .cmp(&right.subscription.subscription_id)
-                })
-        });
-        Ok(deliveries)
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn delete_deliveries_by_process_ids(
-        &self,
-        process_ids: &std::collections::HashSet<String>,
-    ) -> Result<usize, PluginError> {
-        if process_ids.is_empty() {
-            return Ok(0);
-        }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let before = state.deliveries.len();
-        state
-            .deliveries
-            .retain(|_, delivery| !process_ids.contains(&delivery.process_id));
-        Ok(before.saturating_sub(state.deliveries.len()))
-    }
-}
-
-impl Default for InMemoryTriggerStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Default)]
-struct InMemoryTriggerEventState {
-    next_subscription_seq: u64,
-    subscriptions: BTreeMap<String, TriggerSubscriptionRecord>,
-    occurrences: BTreeMap<String, TriggerOccurrenceRecord>,
-    occurrence_id_by_idempotency_key: BTreeMap<String, String>,
-    occurrence_hashes: BTreeMap<String, String>,
-    deliveries: BTreeMap<(String, String), InMemoryTriggerDeliveryRecord>,
-}
-
-#[derive(Clone)]
-struct InMemoryTriggerDeliveryRecord {
-    occurrence_id: String,
-    subscription_id: String,
-    process_id: String,
-    created_at_ms: u64,
-}
-
-fn in_memory_delivery_reservation(
-    state: &InMemoryTriggerEventState,
-    delivery: &InMemoryTriggerDeliveryRecord,
-    reservation_status: TriggerDeliveryReservationStatus,
-) -> Result<TriggerDeliveryReservation, PluginError> {
-    let occurrence = state
-        .occurrences
-        .get(&delivery.occurrence_id)
-        .cloned()
-        .ok_or_else(|| {
-            PluginError::Session(format!(
-                "missing trigger occurrence `{}` for delivery",
-                delivery.occurrence_id
-            ))
-        })?;
-    let subscription = state
-        .subscriptions
-        .get(&delivery.subscription_id)
-        .cloned()
-        .ok_or_else(|| {
-            PluginError::Session(format!(
-                "missing trigger subscription `{}` for delivery",
-                delivery.subscription_id
-            ))
-        })?;
-    Ok(TriggerDeliveryReservation {
-        occurrence,
-        subscription,
-        process_id: delivery.process_id.clone(),
-        created_at_ms: delivery.created_at_ms,
-        reservation_status,
-    })
-}
-
-#[async_trait::async_trait]
-impl TriggerStore for InMemoryTriggerStore {
-    async fn register_subscription(
-        &self,
-        draft: TriggerSubscriptionDraft,
-    ) -> Result<TriggerSubscriptionRecord, PluginError> {
-        draft.validate()?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        state.next_subscription_seq = state.next_subscription_seq.saturating_add(1);
-        let handle = format!("trigger:{}", state.next_subscription_seq);
-        let subscription_id = format!("subscription:{}", state.next_subscription_seq);
-        let now = self.clock.timestamp_ms();
-        let record = TriggerSubscriptionRecord {
-            subscription_id: subscription_id.clone(),
-            registrant: draft.registrant,
-            env_ref: draft.env_ref,
-            wake_target: draft.wake_target,
-            handle,
-            name: draft.name,
-            source_type: draft.source_type,
-            source_key: draft.source_key,
-            source: draft.source,
-            payload_schema: draft.payload_schema,
-            target: draft.target,
-            target_identity: draft.target_identity,
-            event_types: draft.event_types,
-            input_template: draft.input_template,
-            target_label: draft.target_label,
-            enabled: true,
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-        state.subscriptions.insert(subscription_id, record.clone());
-        Ok(record)
-    }
-
-    async fn list_subscriptions(
-        &self,
-        filter: TriggerSubscriptionFilter,
-    ) -> Result<Vec<TriggerSubscriptionRecord>, PluginError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let mut records = state
-            .subscriptions
-            .values()
-            .filter(|record| filter.matches(record))
-            .cloned()
-            .collect::<Vec<_>>();
-        records.sort_by(|left, right| {
-            left.registrant_scope_id()
-                .cmp(&right.registrant_scope_id())
-                .then_with(|| left.handle.cmp(&right.handle))
-        });
-        Ok(records)
-    }
-
-    async fn cancel_subscription(
-        &self,
-        registrant_scope_id: &str,
-        handle: &str,
-    ) -> Result<bool, PluginError> {
-        self.set_subscription_enabled(registrant_scope_id, handle, false)
-            .await
-    }
-
-    async fn set_subscription_enabled(
-        &self,
-        registrant_scope_id: &str,
-        handle: &str,
-        enabled: bool,
-    ) -> Result<bool, PluginError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let now = self.clock.timestamp_ms();
-        let Some(record) = state.subscriptions.values_mut().find(|record| {
-            record.registrant_scope_id() == registrant_scope_id && record.handle == handle
-        }) else {
-            return Ok(false);
-        };
-        let changed = record.enabled != enabled;
-        record.enabled = enabled;
-        record.updated_at_ms = now;
-        Ok(changed)
-    }
-
-    async fn delete_subscription(
-        &self,
-        registrant_scope_id: &str,
-        handle: &str,
-    ) -> Result<bool, PluginError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let Some(subscription_id) = state
-            .subscriptions
-            .values()
-            .find(|record| {
-                record.registrant_scope_id() == registrant_scope_id && record.handle == handle
-            })
-            .map(|record| record.subscription_id.clone())
-        else {
-            return Ok(false);
-        };
-        state.subscriptions.remove(&subscription_id);
-        state.deliveries.retain(|(_, delivery_subscription_id), _| {
-            delivery_subscription_id != &subscription_id
-        });
-        Ok(true)
-    }
-
-    async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let before = state.subscriptions.len();
-        state
-            .subscriptions
-            .retain(|_, record| record.registrant_session_id() != Some(session_id));
-        Ok(before.saturating_sub(state.subscriptions.len()))
-    }
-
-    async fn record_occurrence(
-        &self,
-        request: TriggerOccurrenceRequest,
-    ) -> Result<TriggerOccurrenceRecord, PluginError> {
-        validate_trigger_occurrence_request(&request)?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let request_hash = trigger_occurrence_request_hash(&request)?;
-        if let Some(existing_id) = state
-            .occurrence_id_by_idempotency_key
-            .get(&request.idempotency_key)
-            .cloned()
-        {
-            let existing_hash = state
-                .occurrence_hashes
-                .get(&existing_id)
-                .cloned()
-                .unwrap_or_default();
-            if existing_hash != request_hash {
-                return Err(PluginError::Session(format!(
-                    "trigger occurrence idempotency conflict for `{}`",
-                    request.idempotency_key
-                )));
-            }
-            return state.occurrences.get(&existing_id).cloned().ok_or_else(|| {
-                PluginError::Session(format!(
-                    "missing trigger occurrence `{existing_id}` for idempotency key"
-                ))
-            });
-        }
-        let occurrence_id = deterministic_occurrence_id(&request)?;
-        let record = TriggerOccurrenceRecord {
-            occurrence_id: occurrence_id.clone(),
-            source_type: request.source_type,
-            source_key: request.source_key,
-            payload: request.payload,
-            idempotency_key: request.idempotency_key.clone(),
-            source: request.source,
-            session_id: request.session_id,
-            occurred_at_ms: self.clock.timestamp_ms(),
-        };
-        state
-            .occurrence_id_by_idempotency_key
-            .insert(request.idempotency_key, occurrence_id.clone());
-        state
-            .occurrence_hashes
-            .insert(occurrence_id.clone(), request_hash);
-        state.occurrences.insert(occurrence_id, record.clone());
-        Ok(record)
-    }
-
-    async fn list_occurrences(
-        &self,
-        filter: TriggerOccurrenceFilter,
-    ) -> Result<Vec<TriggerOccurrenceRecord>, PluginError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let mut records = state
-            .occurrences
-            .values()
-            .filter(|record| filter.matches(record))
-            .cloned()
-            .collect::<Vec<_>>();
-        records.sort_by(|left, right| {
-            left.occurred_at_ms
-                .cmp(&right.occurred_at_ms)
-                .then_with(|| left.occurrence_id.cmp(&right.occurrence_id))
-        });
-        Ok(records)
-    }
-
-    async fn reserve_matching_deliveries(
-        &self,
-        occurrence_id: &str,
-    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| PluginError::Session("trigger store lock poisoned".to_string()))?;
-        let occurrence = state
-            .occurrences
-            .get(occurrence_id)
-            .cloned()
-            .ok_or_else(|| {
-                PluginError::Session(format!("unknown trigger occurrence `{occurrence_id}`"))
-            })?;
-        let subscriptions = state
-            .subscriptions
-            .values()
-            .filter(|record| {
-                record.enabled
-                    && record.source_type == occurrence.source_type
-                    && record.source_key == occurrence.source_key
-                    && occurrence
-                        .session_id
-                        .as_deref()
-                        .is_none_or(|session_id| record.registrant_session_id() == Some(session_id))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut deliveries = Vec::new();
-        for subscription in subscriptions {
-            let process_id = deterministic_delivery_process_id(
-                &occurrence.occurrence_id,
-                &subscription.subscription_id,
-            )?;
-            let key = (
-                occurrence.occurrence_id.clone(),
-                subscription.subscription_id.clone(),
-            );
-            let (delivery, reservation_status) =
-                if let Some(delivery) = state.deliveries.get(&key).cloned() {
-                    (delivery, TriggerDeliveryReservationStatus::AlreadyReserved)
-                } else {
-                    let delivery = InMemoryTriggerDeliveryRecord {
-                        occurrence_id: occurrence.occurrence_id.clone(),
-                        subscription_id: subscription.subscription_id.clone(),
-                        process_id,
-                        created_at_ms: self.clock.timestamp_ms(),
-                    };
-                    state.deliveries.insert(key, delivery.clone());
-                    (delivery, TriggerDeliveryReservationStatus::Reserved)
-                };
-            deliveries.push(TriggerDeliveryReservation {
-                occurrence: occurrence.clone(),
-                subscription,
-                process_id: delivery.process_id,
-                created_at_ms: delivery.created_at_ms,
-                reservation_status,
-            });
-        }
-        Ok(deliveries)
-    }
-
-    async fn list_deliveries_by_occurrence_id(
-        &self,
-        occurrence_id: &str,
-    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
-        self.list_deliveries(|delivery| delivery.occurrence_id == occurrence_id)
-    }
-
-    async fn list_deliveries_by_subscription_id(
-        &self,
-        subscription_id: &str,
-    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
-        self.list_deliveries(|delivery| delivery.subscription_id == subscription_id)
-    }
-
-    async fn list_deliveries_by_process_id(
-        &self,
-        process_id: &str,
-    ) -> Result<Vec<TriggerDeliveryReservation>, PluginError> {
-        self.list_deliveries(|delivery| delivery.process_id == process_id)
-    }
-}
-
-fn default_enabled() -> bool {
-    true
-}
-
-pub fn default_trigger_source_key(
-    source_type: &str,
-    source: &serde_json::Value,
-) -> Result<String, PluginError> {
-    let digest = crate::stable_hash::stable_json_sha256_hex(&(source_type, source))
-        .map_err(|err| PluginError::Session(format!("failed to hash trigger source key: {err}")))?;
-    Ok(format!("source:{source_type}:sha256:{digest}"))
-}
-
-pub fn empty_trigger_source_key(source_type: &str) -> Result<String, PluginError> {
-    default_trigger_source_key(source_type, &serde_json::json!({}))
-}
-
-pub fn deterministic_occurrence_id(
-    request: &TriggerOccurrenceRequest,
-) -> Result<String, PluginError> {
-    let digest = crate::stable_hash::stable_json_sha256_hex(&(
-        request.source_type.as_str(),
-        request.source_key.as_str(),
-        request.idempotency_key.as_str(),
-    ))
-    .map_err(|err| PluginError::Session(format!("failed to hash trigger occurrence: {err}")))?;
-    Ok(format!("trigger:{digest}"))
-}
-
-pub fn deterministic_delivery_process_id(
-    occurrence_id: &str,
-    subscription_id: &str,
-) -> Result<String, PluginError> {
-    let digest = crate::stable_hash::stable_json_sha256_hex(&(occurrence_id, subscription_id))
-        .map_err(|err| PluginError::Session(format!("failed to hash trigger delivery: {err}")))?;
-    Ok(format!("process:trigger:{digest}"))
-}
-
-#[derive(Clone)]
-pub struct TriggerRouter {
-    store: Arc<dyn TriggerStore>,
-    process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
-    process_work_driver: Option<crate::ProcessWorkDriver>,
-}
-
-impl TriggerRouter {
-    pub fn new(
-        store: Arc<dyn TriggerStore>,
-        process_registry: Option<Arc<dyn crate::ProcessRegistry>>,
-        process_work_driver: Option<crate::ProcessWorkDriver>,
-    ) -> Self {
-        Self {
-            store,
-            process_registry,
-            process_work_driver,
-        }
-    }
-
-    pub fn store(&self) -> Arc<dyn TriggerStore> {
-        Arc::clone(&self.store)
-    }
-
-    pub async fn emit(
-        &self,
-        request: TriggerOccurrenceRequest,
-        effect_controller: &dyn crate::RuntimeEffectController,
-    ) -> Result<TriggerEmitReport, PluginError> {
-        let occurrence = self.store.record_occurrence(request).await?;
-        let reservations = self
-            .store
-            .reserve_matching_deliveries(&occurrence.occurrence_id)
-            .await?;
-        let Some(process_registry) = self.process_registry.as_ref() else {
-            let deliveries = reservations
-                .iter()
-                .map(|reservation| {
-                    let outcome = match reservation.reservation_status {
-                        TriggerDeliveryReservationStatus::Reserved => {
-                            TriggerDeliveryEmitOutcome::Failed {
-                                reason: "trigger delivery requires a process registry".to_string(),
-                            }
-                        }
-                        TriggerDeliveryReservationStatus::AlreadyReserved => {
-                            TriggerDeliveryEmitOutcome::AlreadyReserved
-                        }
-                    };
-                    reservation.emit_report(outcome)
-                })
-                .collect();
-            return Ok(TriggerEmitReport::new(occurrence.occurrence_id, deliveries));
-        };
-        let mut deliveries = Vec::new();
-        let mut started_any = false;
-        for reservation in reservations {
-            if reservation.reservation_status == TriggerDeliveryReservationStatus::AlreadyReserved {
-                deliveries
-                    .push(reservation.emit_report(TriggerDeliveryEmitOutcome::AlreadyReserved));
-                continue;
-            }
-            if let Err(err) = self
-                .start_delivery(
-                    &reservation,
-                    Arc::clone(process_registry),
-                    effect_controller,
-                )
-                .await
-            {
-                deliveries.push(reservation.emit_report(TriggerDeliveryEmitOutcome::Failed {
-                    reason: err.to_string(),
-                }));
-                continue;
-            }
-            started_any = true;
-            deliveries.push(reservation.emit_report(TriggerDeliveryEmitOutcome::Started));
-        }
-        if started_any && let Some(driver) = self.process_work_driver.as_ref() {
-            driver.claim_and_run_pending("trigger_delivery").await?;
-        }
-        Ok(TriggerEmitReport::new(occurrence.occurrence_id, deliveries))
-    }
-
-    pub(crate) async fn start_delivery(
-        &self,
-        reservation: &TriggerDeliveryReservation,
-        process_registry: Arc<dyn crate::ProcessRegistry>,
-        effect_controller: &dyn crate::RuntimeEffectController,
-    ) -> Result<(), PluginError> {
-        let subscription = &reservation.subscription;
-        let occurrence = &reservation.occurrence;
-        subscription
-            .payload_schema
-            .validate(&occurrence.payload)
-            .map_err(|err| {
-                PluginError::Session(format!(
-                    "invalid payload for trigger `{}`: {err}",
-                    subscription.handle
-                ))
-            })?;
-        let args =
-            materialize_trigger_process_args(&subscription.input_template, &occurrence.payload)?;
-        let target = apply_trigger_inputs(subscription.target.clone(), args)?;
-        let originator_scope_id = subscription.registrant_scope_id();
-        let trigger_causal_ref = crate::CausalRef::TriggerOccurrence {
-            occurrence_id: occurrence.occurrence_id.clone(),
-            subscription_id: Some(subscription.subscription_id.clone()),
-        };
-        let trigger_occurrence_invocation = crate::runtime::causal::trigger_occurrence_invocation(
-            &originator_scope_id,
-            &occurrence.occurrence_id,
-        );
-        let registration = crate::ProcessRegistration::new(
-            reservation.process_id.clone(),
-            target.clone(),
-            // Trigger targets are journaled engine/tool rows, idempotent by
-            // process id, so recovery may re-execute them (ADR 0019).
-            crate::RecoveryDisposition::Rerunnable,
-            crate::ProcessProvenance::new(subscription.registrant.clone())
-                .with_caused_by(Some(trigger_causal_ref.clone())),
-        )
-        .with_identity(subscription.target_identity.clone())
-        .with_extra_event_types(subscription.event_types.clone())
-        .with_execution_env_ref(Some(subscription.env_ref.clone()))
-        .with_wake_target(subscription.wake_target.clone());
-        let descriptor_kind = subscription.target_identity.kind.clone();
-        let grant =
-            subscription
-                .wake_target
-                .clone()
-                .map(|session_scope| crate::ProcessStartGrant {
-                    session_scope,
-                    descriptor: crate::ProcessHandleDescriptor::new(
-                        Some(descriptor_kind.as_str()),
-                        subscription.target_label.as_deref(),
-                    ),
-                });
-        let execution_context = crate::ProcessExecutionContext::default()
-            .with_causal_invocation(Some(trigger_occurrence_invocation));
-        let command = crate::ProcessCommand::Start {
-            registration,
-            grant,
-            execution_context: Box::new(execution_context),
-        };
-        let effect_id = command.effect_id();
-        let invocation = crate::RuntimeInvocation::effect(
-            crate::RuntimeScope::new(originator_scope_id),
-            effect_id.clone(),
-            crate::RuntimeEffectKind::Process,
-            format!(
-                "trigger:{}:{}",
-                occurrence.occurrence_id, subscription.subscription_id
-            ),
-        )
-        .with_caused_by(Some(trigger_causal_ref));
-        let outcome = effect_controller
-            .execute_effect(
-                crate::RuntimeEffectEnvelope::new(
-                    invocation,
-                    crate::RuntimeEffectCommand::process(command),
-                ),
-                crate::RuntimeEffectLocalExecutor::processes(
-                    process_registry,
-                    self.process_work_driver.clone(),
-                ),
-            )
-            .await?;
-        match outcome {
-            crate::RuntimeEffectOutcome::Process {
-                result: crate::ProcessEffectOutcome::Start { .. },
-            } => Ok(()),
-            other => Err(PluginError::Session(format!(
-                "trigger process start returned the wrong outcome: {}",
-                other.kind().as_str()
-            ))),
-        }
-    }
-}
-
-fn materialize_trigger_process_args(
-    input_template: &BTreeMap<String, TriggerInputBinding>,
-    event_payload: &serde_json::Value,
-) -> Result<serde_json::Map<String, serde_json::Value>, PluginError> {
-    let mut args = serde_json::Map::new();
-    for (input_name, input) in input_template {
-        let value = match input {
-            TriggerInputBinding::Event => event_payload.clone(),
-            TriggerInputBinding::Fixed { value } => value.clone(),
-        };
-        args.insert(input_name.to_string(), value);
-    }
-    Ok(args)
-}
-
-fn apply_trigger_inputs(
-    mut target: crate::ProcessInput,
-    args: serde_json::Map<String, serde_json::Value>,
-) -> Result<crate::ProcessInput, PluginError> {
-    match &mut target {
-        crate::ProcessInput::Engine { payload, .. } => {
-            let object = payload.as_object_mut().ok_or_else(|| {
-                PluginError::Session(
-                    "trigger engine target payload must be a JSON object".to_string(),
-                )
-            })?;
-            object.insert("args".to_string(), serde_json::Value::Object(args));
-            Ok(target)
-        }
-        other => Err(PluginError::Session(format!(
-            "trigger target must be an engine process, got {}",
-            other.engine_kind()
-        ))),
-    }
-}
-
-pub fn validate_trigger_occurrence_request(
-    request: &TriggerOccurrenceRequest,
-) -> Result<(), PluginError> {
-    if request.source_type.trim().is_empty() {
-        return Err(PluginError::Session(
-            "trigger occurrence requires source_type".to_string(),
-        ));
-    }
-    if request.source_key.trim().is_empty() {
-        return Err(PluginError::Session(
-            "trigger occurrence requires source_key".to_string(),
-        ));
-    }
-    if request.idempotency_key.trim().is_empty() {
-        return Err(PluginError::Session(
-            "trigger occurrence requires idempotency_key".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-pub fn trigger_occurrence_request_hash(
-    request: &TriggerOccurrenceRequest,
-) -> Result<String, PluginError> {
-    crate::stable_hash::stable_json_sha256_hex(&(
-        request.source_type.as_str(),
-        request.source_key.as_str(),
-        &request.payload,
-        &request.source,
-    ))
-    .map_err(|err| PluginError::Session(format!("failed to hash trigger occurrence: {err}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn button_payload_schema() -> crate::LashSchema {
-        crate::LashSchema::any()
-    }
-
-    fn trigger_process_draft(source_key: &str, process_name: &str) -> TriggerSubscriptionDraft {
-        TriggerSubscriptionDraft::for_process(
-            crate::ProcessOriginator::host(),
-            crate::ProcessExecutionEnvRef::new(format!("process-env:{process_name}")),
-            "ui.button.pressed",
-            source_key,
-            crate::ProcessInput::Engine {
-                kind: "test-engine".to_string(),
-                payload: serde_json::json!({ "process": process_name }),
-            },
-            crate::ProcessIdentity::new("test-engine").with_label(Some(process_name)),
-        )
-        .with_payload_schema(crate::LashSchema::any())
-    }
-
-    fn button_occurrence(
-        source_key: impl Into<String>,
-        idempotency_key: impl Into<String>,
-    ) -> TriggerOccurrenceRequest {
-        TriggerOccurrenceRequest::new(
-            "ui.button.pressed",
-            source_key,
-            serde_json::json!({ "button": "Blue" }),
-            idempotency_key,
-        )
-    }
-
-    #[test]
-    fn trigger_catalog_rejects_duplicate_trigger_source_identity() {
-        let mut catalog = TriggerEventCatalog::new();
-        catalog
-            .declare(TriggerEvent::new(
-                "Button",
-                "ui.button",
-                "pressed",
-                button_payload_schema(),
-            ))
-            .expect("first trigger occurrence");
-
-        let err = catalog
-            .declare(TriggerEvent::new(
-                "AlternateButton",
-                "ui.button",
-                "pressed",
-                button_payload_schema(),
-            ))
-            .expect_err("duplicate public source identity should be rejected");
-
-        assert!(err.contains("duplicate trigger source `ui.button.pressed`"));
-    }
-
-    #[tokio::test]
-    async fn trigger_store_rejects_mismatched_target_label() {
-        let store = InMemoryTriggerStore::default();
-        let draft = TriggerSubscriptionDraft::for_process(
-            crate::ProcessOriginator::host(),
-            crate::ProcessExecutionEnvRef::new("process-env:test"),
-            "ui.button.pressed",
-            "source-key",
-            crate::ProcessInput::External {
-                metadata: serde_json::json!({}),
-            },
-            crate::ProcessIdentity::new("external").with_label(Some("expected")),
-        )
-        .with_target_label("other");
-
-        let err = store
-            .register_subscription(draft)
-            .await
-            .expect_err("mismatched target labels should be rejected");
-        assert!(err.to_string().contains("target_label must match"));
-    }
-
-    #[tokio::test]
-    async fn trigger_emit_report_records_started_and_already_reserved_deliveries() {
-        let store = Arc::new(InMemoryTriggerStore::default());
-        let registry: Arc<dyn crate::ProcessRegistry> =
-            Arc::new(crate::TestLocalProcessRegistry::default());
-        let source_key = empty_trigger_source_key("ui.button.pressed").expect("source key");
-        let subscription = store
-            .register_subscription(trigger_process_draft(&source_key, "started"))
-            .await
-            .expect("register subscription");
-        let router = TriggerRouter::new(store, Some(Arc::clone(&registry)), None);
-        let controller = crate::InlineRuntimeEffectController;
-
-        let report = router
-            .emit(
-                button_occurrence(source_key.clone(), "button-blue-report"),
-                &controller,
-            )
-            .await
-            .expect("emit trigger");
-        assert_eq!(report.deliveries.len(), 1);
-        let delivery = &report.deliveries[0];
-        assert_eq!(delivery.occurrence_id, report.occurrence_id);
-        assert_eq!(delivery.subscription_id, subscription.subscription_id);
-        assert_eq!(delivery.outcome, TriggerDeliveryEmitOutcome::Started);
-        let record = registry
-            .get_process(&delivery.process_id)
-            .await
-            .expect("started process record");
-        assert!(matches!(
-            record.provenance.caused_by,
-            Some(crate::CausalRef::TriggerOccurrence {
-                occurrence_id,
-                subscription_id: Some(subscription_id),
-            }) if occurrence_id == report.occurrence_id
-                && subscription_id == subscription.subscription_id
-        ));
-
-        let replay = router
-            .emit(
-                button_occurrence(source_key, "button-blue-report"),
-                &controller,
-            )
-            .await
-            .expect("replay trigger");
-        assert_eq!(replay.deliveries.len(), 1);
-        assert_eq!(
-            replay.deliveries[0].outcome,
-            TriggerDeliveryEmitOutcome::AlreadyReserved
-        );
-        assert_eq!(replay.deliveries[0].process_id, delivery.process_id);
-    }
-
-    #[tokio::test]
-    async fn trigger_emit_report_records_failed_delivery_outcome() {
-        let store = Arc::new(InMemoryTriggerStore::default());
-        let source_key = empty_trigger_source_key("ui.button.pressed").expect("source key");
-        let subscription = store
-            .register_subscription(trigger_process_draft(&source_key, "failed"))
-            .await
-            .expect("register subscription");
-        let router = TriggerRouter::new(store, None, None);
-        let controller = crate::InlineRuntimeEffectController;
-
-        let report = router
-            .emit(
-                button_occurrence(source_key, "button-blue-failed"),
-                &controller,
-            )
-            .await
-            .expect("emit trigger");
-        assert_eq!(report.deliveries.len(), 1);
-        let delivery = &report.deliveries[0];
-        assert_eq!(delivery.subscription_id, subscription.subscription_id);
-        assert!(matches!(
-            &delivery.outcome,
-            TriggerDeliveryEmitOutcome::Failed { reason }
-                if reason.contains("process registry")
-        ));
-    }
+    /// Drop mutation idempotency receipts older than the host's established
+    /// terminal-process retention cutoff. List operations never create these
+    /// receipts.
+    async fn prune_mutation_receipts(&self, cutoff_epoch_ms: u64) -> Result<usize, PluginError>;
 }

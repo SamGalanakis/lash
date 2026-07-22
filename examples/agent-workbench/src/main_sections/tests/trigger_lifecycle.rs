@@ -1,3 +1,5 @@
+    use lash_core::TriggerStore;
+
     #[test]
     fn button_trigger_lifecycle_stays_visible_and_queues_wakes_during_active_turn() {
         run_async_test_on_stack_budget("workbench-button-trigger-lifecycle-test", || {
@@ -82,28 +84,34 @@
                 .expect("trigger process should finish");
         }
 
-        assert!(
-            lash::triggers::TriggerStore::set_subscription_enabled(
-                trigger_store.as_ref(),
-                    &trigger_record.registrant_scope_id(),
-                    &trigger_record.handle,
-                    false,
-                )
-                .await
-                .expect("disable trigger")
-        );
+        trigger_store
+            .execute_command(
+                "workbench-test-disable",
+                lash::triggers::TriggerCommand::Disable {
+                    owner_scope: trigger_record.owner_scope.clone(),
+                    actor: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(&session_id)),
+                    subscription_key: trigger_record.subscription_key.clone(),
+                    expected_revision: trigger_record.revision,
+                },
+            )
+            .await
+            .expect("execute disable")
+            .expect("disable trigger");
         let disabled_report = emit_test_button_trigger(&core, ButtonChoice::Red).await;
         assert!(disabled_report.started_process_ids().is_empty());
-        assert!(
-            lash::triggers::TriggerStore::set_subscription_enabled(
-                trigger_store.as_ref(),
-                    &trigger_record.registrant_scope_id(),
-                    &trigger_record.handle,
-                    true,
-                )
-                .await
-                .expect("re-enable trigger")
-        );
+        trigger_store
+            .execute_command(
+                "workbench-test-enable",
+                lash::triggers::TriggerCommand::Enable {
+                    owner_scope: trigger_record.owner_scope.clone(),
+                    actor: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(&session_id)),
+                    subscription_key: trigger_record.subscription_key.clone(),
+                    expected_revision: trigger_record.revision + 1,
+                },
+            )
+            .await
+            .expect("execute enable")
+            .expect("re-enable trigger");
         let reenabled_report = emit_test_button_trigger(&core, ButtonChoice::Red).await;
         let reenabled_process_id = reenabled_report.started_process_ids()[0].clone();
         tokio::time::timeout(
@@ -113,15 +121,19 @@
         .await
         .expect("re-enabled trigger process should finish promptly")
         .expect("re-enabled trigger process should finish");
-        assert!(
-            lash::triggers::TriggerStore::delete_subscription(
-                trigger_store.as_ref(),
-                    &trigger_record.registrant_scope_id(),
-                    &trigger_record.handle,
-                )
-                .await
-                .expect("delete trigger")
-        );
+        trigger_store
+            .execute_command(
+                "workbench-test-delete",
+                lash::triggers::TriggerCommand::Delete {
+                    owner_scope: trigger_record.owner_scope.clone(),
+                    actor: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(&session_id)),
+                    subscription_key: trigger_record.subscription_key.clone(),
+                    expected_revision: trigger_record.revision + 2,
+                },
+            )
+            .await
+            .expect("execute delete")
+            .expect("delete trigger");
         let deleted_report = emit_test_button_trigger(&core, ButtonChoice::Red).await;
         assert!(deleted_report.started_process_ids().is_empty());
 

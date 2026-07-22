@@ -304,6 +304,20 @@ fn code_execution_context_with_tool_provider_catalog_and_trigger_router(
     tool_catalog: crate::ToolCatalog,
     trigger_router: Option<crate::TriggerRouter>,
 ) -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context_with_tool_provider_catalog_trigger_router_and_effect_controller(
+        provider,
+        tool_catalog,
+        trigger_router,
+        Arc::new(crate::InlineRuntimeEffectController),
+    )
+}
+
+fn code_execution_context_with_tool_provider_catalog_trigger_router_and_effect_controller(
+    provider: Arc<dyn crate::ToolProvider>,
+    tool_catalog: crate::ToolCatalog,
+    trigger_router: Option<crate::TriggerRouter>,
+    effect_controller: Arc<dyn crate::RuntimeEffectController>,
+) -> crate::RuntimeExecutionContext<'static> {
     let plugins = crate::plugin::PluginHost::new(test_code_protocol_factories())
         .build_session("test-session", None)
         .expect("test plugin session");
@@ -324,9 +338,7 @@ fn code_execution_context_with_tool_provider_catalog_and_trigger_router(
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         trigger_router,
-        effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
-        )),
+        effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(effect_controller),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
@@ -388,6 +400,20 @@ pub fn code_execution_context_with_trigger_store(
     code_execution_context_with_tool_catalog_and_trigger_router(
         crate::ToolCatalog::from_tool_definitions(Vec::new()),
         Some(crate::TriggerRouter::new(trigger_store, None, None)),
+    )
+}
+
+/// Build a code-execution context whose trigger operations pass through the
+/// supplied effect controller before reaching `trigger_store`.
+pub fn code_execution_context_with_trigger_store_and_effect_controller(
+    trigger_store: Arc<dyn crate::TriggerStore>,
+    effect_controller: Arc<dyn crate::RuntimeEffectController>,
+) -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context_with_tool_provider_catalog_trigger_router_and_effect_controller(
+        Arc::new(EmptyToolProvider),
+        crate::ToolCatalog::from_tool_definitions(Vec::new()),
+        Some(crate::TriggerRouter::new(trigger_store, None, None)),
+        effect_controller,
     )
 }
 

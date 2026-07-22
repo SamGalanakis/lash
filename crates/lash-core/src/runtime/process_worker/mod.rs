@@ -689,32 +689,9 @@ impl DurableProcessWorker {
     }
 
     async fn reconcile_trigger_deliveries(&self) -> Result<(), PluginError> {
-        let subscriptions = self
-            .config
-            .trigger_store
-            .list_subscriptions(crate::TriggerSubscriptionFilter::default())
-            .await?;
-        if subscriptions.is_empty() {
+        let candidates = self.config.trigger_store.list_deliveries().await?;
+        if candidates.is_empty() {
             return Ok(());
-        }
-        let mut seen = BTreeSet::new();
-        let mut candidates = Vec::new();
-        for subscription in subscriptions {
-            let deliveries = self
-                .config
-                .trigger_store
-                .list_deliveries_by_subscription_id(&subscription.subscription_id)
-                .await?;
-            for delivery in deliveries {
-                let delivery_key = (
-                    delivery.occurrence.occurrence_id.clone(),
-                    delivery.subscription.subscription_id.clone(),
-                );
-                if !seen.insert(delivery_key) {
-                    continue;
-                }
-                candidates.push(delivery);
-            }
         }
         let candidate_process_ids = candidates
             .iter()

@@ -391,7 +391,9 @@ fn trigger_dtos_round_trip_core_values() {
     let mut inputs = BTreeMap::new();
     inputs.insert("event".to_string(), lash_core::TriggerInputBinding::Event);
     let registration = lash_core::TriggerRegistration {
-        handle: "trigger:1".to_string(),
+        subscription_key: "button-watcher".to_string(),
+        incarnation: "incarnation-1".to_string(),
+        revision: 7,
         source_key: "source-key".to_string(),
         name: Some("button watcher".to_string()),
         source_type: lash_core::TriggerEventType::new("ui.button.pressed"),
@@ -414,6 +416,8 @@ fn trigger_dtos_round_trip_core_values() {
     let cause = lash_core::CausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
         subscription_id: Some("subscription:1".to_string()),
+        subscription_incarnation: Some("incarnation:1".to_string()),
+        subscription_revision: Some(4),
     };
     let remote = RemoteCausalRef::from(cause.clone());
     let core = lash_core::CausalRef::from(remote);
@@ -445,7 +449,7 @@ fn trigger_subscription_dtos_round_trip_core_values() {
     let filter = lash_core::TriggerSubscriptionFilter {
         registrant_scope_id: Some("session:session-a".to_string()),
         session_id: None,
-        handle: Some("trigger:1".to_string()),
+        subscription_key: Some("button-watcher".to_string()),
         name: Some("button watcher".to_string()),
         source_type: Some("ui.button.pressed".to_string()),
         source_key: Some("source-key".to_string()),
@@ -481,20 +485,6 @@ fn trigger_subscription_dtos_round_trip_core_values() {
         serde_json::to_value(&core_records[0]).expect("core record json"),
         serde_json::to_value(&record).expect("record json")
     );
-
-    let cancel = RemoteTriggerCancelSubscriptionRequest {
-        protocol_version: REMOTE_PROTOCOL_VERSION,
-        session_id: "session-a".to_string(),
-        handle: "trigger:1".to_string(),
-    };
-    cancel.validate().expect("valid cancel request");
-    let cancel_result = RemoteTriggerCancelSubscriptionResult {
-        protocol_version: REMOTE_PROTOCOL_VERSION,
-        session_id: cancel.session_id.clone(),
-        handle: cancel.handle.clone(),
-        cancelled: true,
-    };
-    cancel_result.validate().expect("valid cancel result");
 }
 
 #[test]
@@ -1126,9 +1116,7 @@ fn trigger_input_template() -> BTreeMap<String, lash_core::TriggerInputBinding> 
 
 fn trigger_subscription_draft() -> lash_core::TriggerSubscriptionDraft {
     lash_core::TriggerSubscriptionDraft {
-        registrant: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(
-            "session-a",
-        )),
+        subscription_key: "button-watcher".to_string(),
         env_ref: lash_core::ProcessExecutionEnvRef::new(
             "process-env:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ),
@@ -1149,11 +1137,17 @@ fn trigger_subscription_draft() -> lash_core::TriggerSubscriptionDraft {
 fn trigger_subscription_record() -> lash_core::TriggerSubscriptionRecord {
     let draft = trigger_subscription_draft();
     lash_core::TriggerSubscriptionRecord {
-        subscription_id: "subscription:1".to_string(),
-        registrant: draft.registrant,
+        subscription_id: "trigger-subscription:v1:sha256:test".to_string(),
+        owner_scope: lash_core::TriggerOwnerScope::session("session-a"),
+        subscription_key: draft.subscription_key,
+        incarnation: "incarnation-a".to_string(),
+        revision: 1,
+        definition_hash: "definition-hash-a".to_string(),
+        registrant: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(
+            "session-a",
+        )),
         env_ref: draft.env_ref,
         wake_target: draft.wake_target,
-        handle: "trigger:1".to_string(),
         name: draft.name,
         source_type: draft.source_type,
         source_key: draft.source_key,
@@ -1165,6 +1159,8 @@ fn trigger_subscription_record() -> lash_core::TriggerSubscriptionRecord {
         input_template: draft.input_template,
         target_label: draft.target_label,
         enabled: true,
+        tombstoned: false,
+        deleted_at_ms: None,
         created_at_ms: 1,
         updated_at_ms: 2,
     }
@@ -1209,6 +1205,8 @@ fn process_record(process_id: &str) -> lash_core::ProcessRecord {
             lash_core::CausalRef::TriggerOccurrence {
                 occurrence_id: "trigger:1".to_string(),
                 subscription_id: None,
+                subscription_incarnation: None,
+                subscription_revision: None,
             },
         )),
     )

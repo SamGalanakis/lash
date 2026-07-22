@@ -285,6 +285,97 @@ pub async fn effect_controller_journaled_effect_replay(
         "call-replay-error",
         "replay_error_tool",
     );
+    let trigger = RuntimeEffectEnvelope::new(
+        RuntimeInvocation::effect(
+            RuntimeScope::new("replay-session"),
+            "replay-trigger-list",
+            RuntimeEffectKind::Trigger,
+            "replay-trigger-list",
+        ),
+        RuntimeEffectCommand::Trigger {
+            command: Box::new(crate::TriggerCommand::List {
+                owner_scope: crate::TriggerOwnerScope::session("replay-session"),
+                filter: crate::TriggerSubscriptionFilter::default(),
+            }),
+        },
+    );
+    let owner_scope = crate::TriggerOwnerScope::session("replay-session");
+    let actor = crate::ProcessOriginator::session(crate::SessionScope::new("replay-session"));
+    let draft = crate::TriggerSubscriptionDraft::for_process(
+        "replay-key",
+        crate::ProcessExecutionEnvRef::new("process-env:replay"),
+        "test.source",
+        "source-key",
+        crate::ProcessInput::Engine {
+            kind: "test".to_string(),
+            payload: serde_json::json!({}),
+        },
+        crate::ProcessIdentity::new("test"),
+    );
+    let trigger_mutations = [
+        (
+            "register",
+            crate::TriggerCommand::Register {
+                owner_scope: owner_scope.clone(),
+                actor: actor.clone(),
+                draft: draft.clone(),
+            },
+        ),
+        (
+            "update",
+            crate::TriggerCommand::Update {
+                owner_scope: owner_scope.clone(),
+                actor: actor.clone(),
+                subscription_key: "replay-key".to_string(),
+                draft,
+                expected_revision: 1,
+            },
+        ),
+        (
+            "enable",
+            crate::TriggerCommand::Enable {
+                owner_scope: owner_scope.clone(),
+                actor: actor.clone(),
+                subscription_key: "replay-key".to_string(),
+                expected_revision: 1,
+            },
+        ),
+        (
+            "disable",
+            crate::TriggerCommand::Disable {
+                owner_scope: owner_scope.clone(),
+                actor: actor.clone(),
+                subscription_key: "replay-key".to_string(),
+                expected_revision: 1,
+            },
+        ),
+        (
+            "delete",
+            crate::TriggerCommand::Delete {
+                owner_scope,
+                actor,
+                subscription_key: "replay-key".to_string(),
+                expected_revision: 1,
+            },
+        ),
+    ]
+    .map(|(operation, command)| {
+        let effect_id = format!("replay-trigger-{operation}");
+        (
+            operation,
+            RuntimeEffectEnvelope::new(
+                RuntimeInvocation::effect(
+                    RuntimeScope::new("replay-session"),
+                    effect_id.clone(),
+                    RuntimeEffectKind::Trigger,
+                    effect_id,
+                ),
+                RuntimeEffectCommand::Trigger {
+                    command: Box::new(command),
+                },
+            ),
+        )
+    });
 
     let first_success = controller
         .execute_effect(
@@ -318,6 +409,42 @@ pub async fn effect_controller_journaled_effect_replay(
         .await
         .expect_err("first journaled-effect error");
     assert_eq!(first_error.code, "journaled_effect_replay_error");
+    let first_trigger = controller
+        .execute_effect(
+            trigger.clone(),
+            RuntimeEffectLocalExecutor::testing(|envelope| async move {
+                assert!(matches!(
+                    envelope.command,
+                    RuntimeEffectCommand::Trigger { .. }
+                ));
+                Ok(RuntimeEffectOutcome::Trigger {
+                    result: Ok(crate::TriggerCommandOutcome::List {
+                        records: Vec::new(),
+                    }),
+                })
+            }),
+        )
+        .await
+        .expect("first typed trigger effect");
+    let mut first_trigger_mutations = Vec::new();
+    for (operation, envelope) in &trigger_mutations {
+        let operation = (*operation).to_string();
+        first_trigger_mutations.push(
+            controller
+                .execute_effect(
+                    envelope.clone(),
+                    RuntimeEffectLocalExecutor::testing(move |_| async move {
+                        Ok(RuntimeEffectOutcome::Trigger {
+                            result: Err(crate::TriggerOperationError::Invalid {
+                                message: format!("recorded {operation} outcome"),
+                            }),
+                        })
+                    }),
+                )
+                .await
+                .expect("first typed trigger mutation effect"),
+        );
+    }
 
     start_replay();
     let local_calls = Arc::new(Mutex::new(Vec::new()));
@@ -341,6 +468,32 @@ pub async fn effect_controller_journaled_effect_replay(
         .await
         .expect_err("replayed journaled-effect error");
     assert_eq!(replay_error.code, "journaled_effect_replay_error");
+    let replay_trigger = controller
+        .execute_effect(
+            trigger,
+            replay_conformance_failing_executor(Arc::clone(&local_calls)),
+        )
+        .await
+        .expect("replayed typed trigger effect");
+    assert_eq!(
+        serde_json::to_value(replay_trigger).expect("serialize replayed trigger outcome"),
+        serde_json::to_value(first_trigger).expect("serialize original trigger outcome")
+    );
+    for ((_, envelope), first_outcome) in trigger_mutations.into_iter().zip(first_trigger_mutations)
+    {
+        let replayed = controller
+            .execute_effect(
+                envelope,
+                replay_conformance_failing_executor(Arc::clone(&local_calls)),
+            )
+            .await
+            .expect("replayed typed trigger mutation effect");
+        assert_eq!(
+            serde_json::to_value(replayed).expect("serialize replayed trigger mutation outcome"),
+            serde_json::to_value(first_outcome)
+                .expect("serialize original trigger mutation outcome")
+        );
+    }
     assert!(
         local_calls.lock().expect("local calls").is_empty(),
         "journaled-effect replay must not invoke local closures"

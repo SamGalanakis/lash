@@ -10,8 +10,10 @@ use tokio_util::sync::CancellationToken;
 
 mod controller_error;
 mod scoped;
+mod trigger;
 
 pub use controller_error::RuntimeEffectControllerError;
+pub use trigger::TriggerLocalExecution;
 
 use crate::LlmRequest as CoreLlmRequest;
 use crate::ProcessRecord;
@@ -723,6 +725,7 @@ enum RuntimeEffectLocalExecutorState<'run> {
         observe_turn_cancel: bool,
     },
     Process(ProcessLocalExecution),
+    Trigger(TriggerLocalExecution),
     Runner(Box<dyn RuntimeEffectLocalRunner + Send + 'run>),
 }
 
@@ -804,6 +807,13 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 registry,
                 process_work_driver,
             }),
+            replay_trace: None,
+        }
+    }
+
+    pub fn triggers(store: Arc<dyn crate::TriggerStore>) -> Self {
+        Self {
+            state: RuntimeEffectLocalExecutorState::Trigger(TriggerLocalExecution { store }),
             replay_trace: None,
         }
     }
@@ -935,6 +945,13 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                     envelope.command.kind().as_str()
                 ),
             )),
+            RuntimeEffectLocalExecutorState::Trigger(_) => Err(RuntimeEffectControllerError::new(
+                "runtime_effect_local_executor_mismatch",
+                format!(
+                    "trigger executor cannot execute {} command directly",
+                    envelope.command.kind().as_str()
+                ),
+            )),
         }
     }
 
@@ -944,6 +961,16 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
             _ => Err(RuntimeEffectControllerError::new(
                 "runtime_effect_local_executor_unavailable",
                 "no process executor is available for process command",
+            )),
+        }
+    }
+
+    pub fn into_trigger(self) -> Result<TriggerLocalExecution, RuntimeEffectControllerError> {
+        match self.state {
+            RuntimeEffectLocalExecutorState::Trigger(execution) => Ok(execution),
+            _ => Err(RuntimeEffectControllerError::new(
+                "runtime_effect_local_executor_unavailable",
+                "no trigger executor is available for trigger command",
             )),
         }
     }
@@ -1401,6 +1428,23 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
                     )
                 })??;
                 Ok(RuntimeEffectOutcome::Process { result })
+            }
+            RuntimeEffectCommand::Trigger { command } => {
+                let operation_id = envelope
+                    .invocation
+                    .effect_id()
+                    .ok_or_else(|| {
+                        RuntimeEffectControllerError::new(
+                            "runtime_effect_invocation_subject",
+                            "trigger effect requires an effect id",
+                        )
+                    })?
+                    .to_string();
+                let result = local_executor
+                    .into_trigger()?
+                    .execute(&operation_id, *command)
+                    .await?;
+                Ok(RuntimeEffectOutcome::Trigger { result })
             }
             _ => local_executor.execute(envelope).await,
         }

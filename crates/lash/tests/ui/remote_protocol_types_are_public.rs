@@ -40,6 +40,8 @@ fn main() {
     let _cause = lash::remote::turn_result::RemoteCausalRef::TriggerOccurrence {
         occurrence_id: "occurrence:1".to_string(),
         subscription_id: None,
+        subscription_incarnation: None,
+        subscription_revision: None,
     };
 
     let _queue = lash::remote::observations::RemoteSessionObservationEventPayload::QueueChanged {

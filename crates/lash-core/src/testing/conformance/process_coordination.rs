@@ -510,6 +510,8 @@ pub(super) async fn prune_respects_filter(registry: Arc<dyn ProcessRegistry>) {
                         .with_caused_by(Some(CausalRef::TriggerOccurrence {
                             occurrence_id: "occurrence-prune".to_string(),
                             subscription_id: Some("subscription-prune".to_string()),
+                            subscription_incarnation: None,
+                            subscription_revision: None,
                         })),
                 )
                 .with_identity(ProcessIdentity::new("prunable-kind")),

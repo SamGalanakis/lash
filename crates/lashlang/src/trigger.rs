@@ -11,14 +11,18 @@ use crate::runtime::{LASH_HOST_DESCRIPTOR_TYPE_KEY, LASH_HOST_DESCRIPTOR_VALUE_K
 
 const TRIGGERS_RESOURCE_TYPE: &str = "Triggers";
 const TRIGGERS_ALIAS: &str = "triggers";
-const TRIGGER_REGISTRATION_TYPE: &str = "TriggerRegistration";
+const TRIGGER_REGISTRATION_TYPE: &str = "lash.TriggerRegistration";
 pub const LASH_TRIGGER_EVENT_KEY: &str = "$lash.trigger.event";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TriggerHostOperation {
     Register,
     List,
-    Cancel,
+    Update,
+    Enable,
+    Disable,
+    Delete,
+    Revive,
 }
 
 impl TriggerHostOperation {
@@ -26,7 +30,11 @@ impl TriggerHostOperation {
         match self {
             Self::Register => "triggers.register",
             Self::List => "triggers.list",
-            Self::Cancel => "triggers.cancel",
+            Self::Update => "triggers.update",
+            Self::Enable => "triggers.enable",
+            Self::Disable => "triggers.disable",
+            Self::Delete => "triggers.delete",
+            Self::Revive => "triggers.revive",
         }
     }
 
@@ -34,18 +42,22 @@ impl TriggerHostOperation {
         match self {
             Self::Register => "register",
             Self::List => "list",
-            Self::Cancel => "cancel",
+            Self::Update => "update",
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+            Self::Delete => "delete",
+            Self::Revive => "revive",
         }
     }
 
     pub fn from_host_operation(operation: &str) -> Option<Self> {
-        [Self::Register, Self::List, Self::Cancel]
+        Self::ALL
             .into_iter()
             .find(|candidate| candidate.host_operation() == operation)
     }
 
     pub fn from_receiver_method(operation: &str) -> Option<Self> {
-        [Self::Register, Self::List, Self::Cancel]
+        Self::ALL
             .into_iter()
             .find(|candidate| candidate.receiver_method() == operation)
     }
@@ -64,6 +76,7 @@ impl TriggerHostOperation {
                 ),
                 required_field("inputs", TypeExpr::Dict),
                 optional_field("name", TypeExpr::Str),
+                optional_field("subscription_key", TypeExpr::Str),
             ]),
             Self::List => TypeExpr::Object(vec![
                 optional_field(
@@ -78,10 +91,25 @@ impl TriggerHostOperation {
                 optional_field("source_type", TypeExpr::Str),
                 optional_field("enabled", TypeExpr::Bool),
             ]),
-            Self::Cancel => TypeExpr::Object(vec![required_field(
-                "handle",
-                TypeExpr::TriggerHandle(Box::new(TypeExpr::Any)),
-            )]),
+            Self::Update | Self::Revive => TypeExpr::Object(vec![
+                required_field("subscription_key", TypeExpr::Str),
+                required_field("expected_revision", TypeExpr::Int),
+                required_field("source", TypeExpr::Dict),
+                required_field(
+                    "target",
+                    TypeExpr::Process {
+                        input: Box::new(TypeExpr::Any),
+                        output: Box::new(TypeExpr::Any),
+                        input_count: 1,
+                    },
+                ),
+                required_field("inputs", TypeExpr::Dict),
+                optional_field("name", TypeExpr::Str),
+            ]),
+            Self::Enable | Self::Disable | Self::Delete => TypeExpr::Object(vec![
+                required_field("subscription_key", TypeExpr::Str),
+                required_field("expected_revision", TypeExpr::Int),
+            ]),
         }
     }
 
@@ -89,9 +117,21 @@ impl TriggerHostOperation {
         match self {
             Self::Register => TypeExpr::TriggerHandle(Box::new(TypeExpr::Any)),
             Self::List => TypeExpr::List(Box::new(TypeExpr::Ref(TRIGGER_REGISTRATION_TYPE.into()))),
-            Self::Cancel => TypeExpr::Bool,
+            Self::Update | Self::Enable | Self::Disable | Self::Delete | Self::Revive => {
+                TypeExpr::TriggerHandle(Box::new(TypeExpr::Any))
+            }
         }
     }
+
+    pub const ALL: [Self; 7] = [
+        Self::Register,
+        Self::List,
+        Self::Update,
+        Self::Enable,
+        Self::Disable,
+        Self::Delete,
+        Self::Revive,
+    ];
 }
 
 pub fn is_trigger_resource_type(resource_type: &str) -> bool {
@@ -99,11 +139,26 @@ pub fn is_trigger_resource_type(resource_type: &str) -> bool {
 }
 
 pub fn add_trigger_resource_operations(catalog: &mut LashlangHostCatalog) {
-    for operation in [
-        TriggerHostOperation::Register,
-        TriggerHostOperation::List,
-        TriggerHostOperation::Cancel,
-    ] {
+    catalog
+        .add_named_data_type(
+            NamedDataType::object(
+                TRIGGER_REGISTRATION_TYPE,
+                vec![
+                    required_field("subscription_key", TypeExpr::Str),
+                    required_field("incarnation", TypeExpr::Str),
+                    required_field("revision", TypeExpr::Int),
+                    required_field("source_key", TypeExpr::Str),
+                    optional_field("name", TypeExpr::Str),
+                    required_field("source_type", TypeExpr::Str),
+                    required_field("source", TypeExpr::Dict),
+                    required_field("target", TypeExpr::Dict),
+                    required_field("enabled", TypeExpr::Bool),
+                ],
+            )
+            .expect("trigger registration is a valid named data type"),
+        )
+        .expect("trigger registration named data type is stable");
+    for operation in TriggerHostOperation::ALL {
         catalog.add_module_operation(
             [TRIGGERS_ALIAS],
             TRIGGERS_RESOURCE_TYPE,
@@ -136,14 +191,11 @@ pub struct TriggerRegistrationCall<'expr> {
     pub target: &'expr Expr,
     pub inputs: &'expr Expr,
     pub name: Option<&'expr Expr>,
+    pub subscription_key: Option<&'expr Expr>,
 }
 
 pub struct TriggerListCall<'expr> {
     pub entries: &'expr [(AstString, Expr)],
-}
-
-pub struct TriggerCancelCall<'expr> {
-    pub handle: &'expr Expr,
 }
 
 pub fn register_call_args(
@@ -155,6 +207,7 @@ pub fn register_call_args(
         target: required_entry(entries, "target").ok_or(TriggerCallShapeError::Registration)?,
         inputs: required_entry(entries, "inputs").ok_or(TriggerCallShapeError::Registration)?,
         name: required_entry(entries, "name"),
+        subscription_key: required_entry(entries, "subscription_key"),
     })
 }
 
@@ -167,13 +220,6 @@ pub fn list_call_args(args: &[Expr]) -> Result<TriggerListCall<'_>, TriggerCallS
         }
     }
     Ok(TriggerListCall { entries })
-}
-
-pub fn cancel_call_args(args: &[Expr]) -> Result<TriggerCancelCall<'_>, TriggerCallShapeError> {
-    let entries = record_entries(args).ok_or(TriggerCallShapeError::Cancel)?;
-    Ok(TriggerCancelCall {
-        handle: required_entry(entries, "handle").ok_or(TriggerCallShapeError::Cancel)?,
-    })
 }
 
 fn record_entries(args: &[Expr]) -> Option<&[(AstString, Expr)]> {
@@ -193,7 +239,6 @@ fn required_entry<'expr>(entries: &'expr [(AstString, Expr)], name: &str) -> Opt
 pub enum TriggerCallShapeError {
     Registration,
     List,
-    Cancel,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -203,6 +248,8 @@ pub struct TriggerRegistrationRequest {
     pub inputs: TriggerInputTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_key: Option<String>,
 }
 
 impl TriggerRegistrationRequest {
@@ -222,6 +269,18 @@ impl TriggerRegistrationRequest {
                 .get("name")
                 .and_then(serde_json::Value::as_str)
                 .map(ToOwned::to_owned),
+            subscription_key: request
+                .get("subscription_key")
+                .map(|value| {
+                    value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                        TriggerRequestDecodeError::InvalidField {
+                            operation: operation.host_operation(),
+                            field: "subscription_key",
+                            message: "expected a string literal".to_string(),
+                        }
+                    })
+                })
+                .transpose()?,
         })
     }
 }
@@ -392,32 +451,6 @@ fn optional_bool_filter(
                 })
         })
         .transpose()
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TriggerCancelRequest {
-    pub handle: String,
-}
-
-impl TriggerCancelRequest {
-    pub fn decode(request: &serde_json::Value) -> Result<Self, TriggerRequestDecodeError> {
-        let value = required_json_field(request, "handle", TriggerHostOperation::Cancel)?;
-        let handle = value
-            .as_str()
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                value
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-            })
-            .ok_or_else(|| TriggerRequestDecodeError::InvalidField {
-                operation: TriggerHostOperation::Cancel.host_operation(),
-                field: "handle",
-                message: "expected trigger handle string or object with `id`".to_string(),
-            })?;
-        Ok(Self { handle })
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

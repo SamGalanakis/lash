@@ -134,11 +134,12 @@ impl TriggerStore for TierTriggerStore {
         self.tier
     }
 
-    async fn register_subscription(
+    async fn execute_command(
         &self,
-        draft: crate::TriggerSubscriptionDraft,
-    ) -> Result<crate::TriggerSubscriptionRecord, PluginError> {
-        self.inner.register_subscription(draft).await
+        operation_id: &str,
+        command: crate::TriggerCommand,
+    ) -> Result<crate::TriggerEffectResult, PluginError> {
+        self.inner.execute_command(operation_id, command).await
     }
 
     async fn list_subscriptions(
@@ -148,25 +149,15 @@ impl TriggerStore for TierTriggerStore {
         self.inner.list_subscriptions(filter).await
     }
 
-    async fn cancel_subscription(
-        &self,
-        registrant_scope_id: &str,
-        handle: &str,
-    ) -> Result<bool, PluginError> {
-        self.inner
-            .cancel_subscription(registrant_scope_id, handle)
-            .await
-    }
-
     async fn delete_session_subscriptions(&self, session_id: &str) -> Result<usize, PluginError> {
         self.inner.delete_session_subscriptions(session_id).await
     }
 
-    async fn record_occurrence(
+    async fn ingest_occurrence(
         &self,
         request: crate::TriggerOccurrenceRequest,
-    ) -> Result<crate::TriggerOccurrenceRecord, PluginError> {
-        self.inner.record_occurrence(request).await
+    ) -> Result<crate::TriggerIngressResult, PluginError> {
+        self.inner.ingest_occurrence(request).await
     }
 
     async fn list_occurrences(
@@ -174,13 +165,6 @@ impl TriggerStore for TierTriggerStore {
         filter: crate::TriggerOccurrenceFilter,
     ) -> Result<Vec<crate::TriggerOccurrenceRecord>, PluginError> {
         self.inner.list_occurrences(filter).await
-    }
-
-    async fn reserve_matching_deliveries(
-        &self,
-        occurrence_id: &str,
-    ) -> Result<Vec<crate::TriggerDeliveryReservation>, PluginError> {
-        self.inner.reserve_matching_deliveries(occurrence_id).await
     }
 
     async fn list_deliveries_by_occurrence_id(
@@ -206,6 +190,14 @@ impl TriggerStore for TierTriggerStore {
         process_id: &str,
     ) -> Result<Vec<crate::TriggerDeliveryReservation>, PluginError> {
         self.inner.list_deliveries_by_process_id(process_id).await
+    }
+
+    async fn list_deliveries(&self) -> Result<Vec<crate::TriggerDeliveryReservation>, PluginError> {
+        self.inner.list_deliveries().await
+    }
+
+    async fn prune_mutation_receipts(&self, cutoff_epoch_ms: u64) -> Result<usize, PluginError> {
+        self.inner.prune_mutation_receipts(cutoff_epoch_ms).await
     }
 }
 
