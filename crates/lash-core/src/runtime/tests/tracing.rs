@@ -383,7 +383,7 @@ async fn extended_runtime_trace_records_provider_request_and_stream_events() {
         .complete(|req| async move {
             if let Some(tx) = req.provider_trace.as_ref() {
                 tx.send(LlmProviderTraceEvent::request(
-                    "codex",
+                    "mock",
                     "responses",
                     serde_json::json!({
                         "model": "mock-model",
@@ -392,17 +392,17 @@ async fn extended_runtime_trace_records_provider_request_and_stream_events() {
                     .to_string(),
                 ));
                 tx.send(LlmProviderTraceEvent::request(
-                    "codex",
+                    "mock",
                     "chat/completions",
                     r#"{"model":"small"}"#.to_string(),
                 ));
                 tx.send(LlmProviderTraceEvent::request(
-                    "codex",
+                    "mock",
                     "invalid",
                     "not-json".to_string(),
                 ));
                 tx.send(LlmProviderTraceEvent {
-                    provider: "codex",
+                    provider: "mock",
                     event_name: "response.output_item.done".to_string(),
                     raw: serde_json::json!({
                         "type": "response.output_item.done",
@@ -412,7 +412,7 @@ async fn extended_runtime_trace_records_provider_request_and_stream_events() {
                     .to_string(),
                 });
                 tx.send(LlmProviderTraceEvent {
-                    provider: "codex",
+                    provider: "mock",
                     event_name: "response.output_item.done".to_string(),
                     raw: serde_json::json!({
                         "type": "response.output_item.done",
@@ -494,7 +494,7 @@ async fn extended_runtime_trace_records_provider_request_and_stream_events() {
         "input": "x".repeat(3_000),
     });
     let expected_serialized = expected_body.to_string();
-    assert_eq!(request_event["provider"], "codex");
+    assert_eq!(request_event["provider"], "mock");
     assert_eq!(request_event["endpoint"], "responses");
     assert!(request_event.get("body_json").is_none());
     assert_eq!(request_event["body_json_omitted_reason"], "size_limit");

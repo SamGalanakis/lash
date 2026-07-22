@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use crate::OpenAiCompatibleProvider;
+use crate::codex::ws_testing::{ScriptedWsAction, spawn_scripted_websocket};
+use crate::{CodexProvider, OpenAiCompatibleProvider};
 use async_trait::async_trait;
 use lash_core::LlmTransportError;
 use lash_core::llm::types::{
@@ -73,6 +74,42 @@ fn assert_auth_material_absent(event: &LlmProviderTraceEvent) {
             "authorization material leaked: {captured}"
         );
     }
+}
+
+fn assert_auth_material_absent_from_error(error: &LlmTransportError) {
+    let captured = format!("{error:?}");
+    assert!(
+        !captured.contains(SECRET_SENTINEL),
+        "secret leaked: {captured}"
+    );
+    let lowercase = captured.to_ascii_lowercase();
+    assert!(
+        !lowercase.contains("authorization") && !lowercase.contains("bearer"),
+        "authorization material leaked: {captured}"
+    );
+}
+
+fn traced_request(
+    events: &Arc<Mutex<Vec<LlmProviderTraceEvent>>>,
+) -> (LlmRequest, Arc<Mutex<Vec<LlmProviderTraceEvent>>>) {
+    let mut req = request();
+    let event_sink = Arc::clone(events);
+    req.provider_trace = Some(LlmProviderTraceSender::new(move |event| {
+        event_sink.lock().expect("event lock").push(event);
+    }));
+    (req, Arc::clone(events))
+}
+
+fn provider_request_event(
+    events: &Arc<Mutex<Vec<LlmProviderTraceEvent>>>,
+) -> LlmProviderTraceEvent {
+    events
+        .lock()
+        .expect("event lock")
+        .iter()
+        .find(|event| event.request_endpoint().is_some())
+        .cloned()
+        .expect("provider request trace")
 }
 
 fn request() -> LlmRequest {
@@ -174,9 +211,69 @@ async fn extended_provider_trace_captures_exact_serialized_chat_body() {
         error.request_body.as_deref(),
         Some(error_event.raw.as_str())
     );
-    let error_capture = format!("{error:?}");
-    assert!(!error_capture.contains(SECRET_SENTINEL));
-    let lowercase = error_capture.to_ascii_lowercase();
-    assert!(!lowercase.contains("authorization"));
-    assert!(!lowercase.contains("bearer"));
+    assert_auth_material_absent_from_error(&error);
+}
+
+#[tokio::test]
+async fn codex_sse_provider_trace_captures_exact_serialized_request_body() {
+    let transport = Arc::new(RecordingTransport::error());
+    let mut provider = CodexProvider::new(SECRET_SENTINEL, "refresh-token", u64::MAX)
+        .force_sse_transport()
+        .with_http_transport(transport.clone());
+    let events = Arc::new(Mutex::new(Vec::<LlmProviderTraceEvent>::new()));
+    let (req, events) = traced_request(&events);
+
+    let error = provider
+        .complete(req)
+        .await
+        .expect_err("provider error is returned");
+
+    let request_event = provider_request_event(&events);
+    assert_eq!(request_event.provider, "codex");
+    assert_eq!(request_event.request_endpoint(), Some("responses"));
+    assert_auth_material_absent(&request_event);
+    assert_auth_material_absent_from_error(&error);
+
+    let observed_body = {
+        let requests = transport.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        requests[0].body.clone()
+    };
+    assert_eq!(request_event.raw.as_bytes(), observed_body.as_ref());
+    assert_eq!(
+        error.request_body.as_deref(),
+        Some(request_event.raw.as_str())
+    );
+}
+
+#[tokio::test]
+async fn codex_websocket_provider_trace_captures_exact_serialized_request_body() {
+    let server = spawn_scripted_websocket(vec![ScriptedWsAction::Error {
+        message: "provider unavailable",
+    }])
+    .await;
+    let mut provider = CodexProvider::new(SECRET_SENTINEL, "refresh-token", u64::MAX)
+        .with_endpoint_urls("http://unused.test/codex/responses", server.url.clone())
+        .force_websocket_transport();
+    let events = Arc::new(Mutex::new(Vec::<LlmProviderTraceEvent>::new()));
+    let (req, events) = traced_request(&events);
+
+    let error = provider
+        .complete(req)
+        .await
+        .expect_err("provider error is returned");
+
+    let request_event = provider_request_event(&events);
+    assert_eq!(request_event.provider, "codex");
+    assert_eq!(request_event.request_endpoint(), Some("responses"));
+    assert_auth_material_absent(&request_event);
+    assert_auth_material_absent_from_error(&error);
+
+    let observed_bodies = server.captured_raw();
+    assert_eq!(observed_bodies.len(), 1);
+    assert_eq!(request_event.raw.as_bytes(), observed_bodies[0]);
+    assert_eq!(
+        error.request_body.as_deref(),
+        Some(request_event.raw.as_str())
+    );
 }
