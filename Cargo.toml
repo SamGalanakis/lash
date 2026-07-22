@@ -108,7 +108,7 @@ clap = "4"
 croner = "3"
 futures-util = "0.3"
 hmac = "0.12"
-jsonschema = "0.18"
+jsonschema = { version = "0.18", default-features = false }
 object_store = { version = "0.13.2", default-features = false }
 pulldown-cmark = "0.13"
 regex = "1"

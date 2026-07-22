@@ -26,5 +26,5 @@ tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
-jsonschema = { workspace = true }
+jsonschema = { workspace = true, default-features = false }
 tokio-util = { workspace = true, features = ["rt"] }

@@ -577,7 +577,11 @@ mod tests {
             .expect_err("empty items must fail canonical validation");
 
         assert!(matches!(err, DirectLlmError::InvalidResponse(_)));
-        assert!(err.to_string().contains("items >= 1"));
+        let error = err.to_string();
+        assert!(
+            error.contains("items") && error.contains("[] has less than 1 item"),
+            "{error}"
+        );
     }
 
     fn reasoning_capability() -> ModelCapability {

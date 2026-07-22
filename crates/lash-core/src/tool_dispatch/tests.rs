@@ -949,7 +949,7 @@ async fn dispatch_rejects_invalid_args_before_provider_execution() {
     assert!(!outcome.record.output.is_success());
     assert_eq!(
         outcome.record.output.value_for_projection()["message"],
-        json!("value: required property missing")
+        json!("\"value\" is a required property")
     );
 }
 
@@ -1240,7 +1240,7 @@ async fn dispatch_rejects_hidden_tool_before_contract_resolution() {
 }
 
 #[tokio::test]
-async fn dispatch_rejects_unknown_mcp_args_before_provider_execution() {
+async fn dispatch_allows_unknown_mcp_args_when_schema_does_not_forbid_them() {
     let executed = Arc::new(AtomicUsize::new(0));
     let outcome = dispatch_tool_call(
         &strict_mcp_dispatch_context(Arc::clone(&executed)),
@@ -1253,12 +1253,8 @@ async fn dispatch_rejects_unknown_mcp_args_before_provider_execution() {
     )
     .await;
 
-    assert!(!outcome.record.output.is_success());
-    assert_eq!(
-        outcome.record.output.value_for_projection()["message"],
-        json!("min_datetime: unexpected property")
-    );
-    assert_eq!(executed.load(Ordering::SeqCst), 0);
+    assert!(outcome.record.output.is_success());
+    assert_eq!(executed.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1688,7 +1684,7 @@ async fn batch_marks_overflow_calls_as_failures() {
         .and_then(|value| value.as_str())
         .expect("string error result");
     assert!(
-        error.contains("tool_calls") && error.contains("items <= 25"),
+        error.contains("tool_calls") && error.contains("has more than 25 items"),
         "{error}",
     );
 }

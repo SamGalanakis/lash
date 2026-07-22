@@ -565,6 +565,29 @@ mod tests {
     }
 
     #[test]
+    fn edit_contract_rejects_malformed_edit_item() {
+        let definition = edit_tool_definition();
+
+        let error = lash_core::validate_tool_input(
+            &definition.contract,
+            &json!({
+                "path": "src/main.rs",
+                "edits": [{
+                    "oldText": "old();",
+                    "newText": "new();",
+                    "unexpected": true
+                }]
+            }),
+        )
+        .unwrap_err();
+
+        assert!(
+            error.contains("Additional properties are not allowed"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn edit_replaces_one_unique_block() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
