@@ -726,22 +726,32 @@ impl RuntimeExecutionContext<'_> {
     ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
         let _phase = self.named_phase("process.await_handle");
         if let Some(cancellation) = cancellation {
-            tokio::select! {
-                result = self.dispatch.processes.await_process(
-                    process_id,
-                    self.process_scope(parent_invocation.clone()),
-                ) => result,
-                _ = cancellation.cancelled() => {
-                    let _ = self.dispatch.processes.cancel(
+            let result = crate::runtime::release_process_execution_permit_while(async {
+                tokio::select! {
+                    result = self.dispatch.processes.await_process(
+                        process_id,
+                        self.process_scope(parent_invocation.clone()),
+                    ) => Some(result),
+                    _ = cancellation.cancelled() => None,
+                }
+            })
+            .await;
+            if let Some(result) = result {
+                result
+            } else {
+                let _ = self
+                    .dispatch
+                    .processes
+                    .cancel(
                         &self.dispatch.session_id,
                         process_id,
                         self.process_scope(parent_invocation.clone()),
-                    ).await;
-                    self.dispatch.processes.await_process(
-                        process_id,
-                        self.process_scope(parent_invocation),
-                    ).await
-                }
+                    )
+                    .await;
+                self.dispatch
+                    .processes
+                    .await_process(process_id, self.process_scope(parent_invocation))
+                    .await
             }
         } else {
             self.dispatch

@@ -328,6 +328,22 @@ impl AwaitEventRegistry {
         deadline: Option<Instant>,
         clock: &dyn crate::Clock,
     ) -> Result<Resolution, RuntimeError> {
+        if let Some(resolution) = self.peek_resolution(key)? {
+            return Ok(resolution);
+        }
+        crate::runtime::process_worker::release_process_execution_permit_while(
+            self.await_resolution_inner(key, cancel, deadline, clock),
+        )
+        .await
+    }
+
+    async fn await_resolution_inner(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<Instant>,
+        clock: &dyn crate::Clock,
+    ) -> Result<Resolution, RuntimeError> {
         let shard = self.shard_for_scope(&key.scope)?;
         loop {
             let notify = {

@@ -218,6 +218,19 @@ impl ProcessAwaiter {
         &self,
         process_id: &str,
     ) -> Result<ProcessAwaitOutput, PluginError> {
+        if let Some(output) = self.read_terminal(process_id).await? {
+            return Ok(output);
+        }
+        crate::runtime::process_worker::release_process_execution_permit_while(
+            self.await_terminal_inner(process_id),
+        )
+        .await
+    }
+
+    async fn await_terminal_inner(
+        &self,
+        process_id: &str,
+    ) -> Result<ProcessAwaitOutput, PluginError> {
         let mut backoff = AWAIT_BACKOFF_MIN;
         if let Some(hub) = self.hub.as_ref() {
             let mut rx = hub.subscribe(process_id);
@@ -255,6 +268,24 @@ impl ProcessAwaiter {
     /// Resolve with the first `event_type` event on `process_id` past
     /// `after_sequence`. Historical matches resolve immediately.
     pub async fn await_event(
+        &self,
+        process_id: &str,
+        event_type: &str,
+        after_sequence: u64,
+    ) -> Result<ProcessEvent, PluginError> {
+        if let Some(event) = self
+            .read_event(process_id, event_type, after_sequence)
+            .await?
+        {
+            return Ok(event);
+        }
+        crate::runtime::process_worker::release_process_execution_permit_while(
+            self.await_event_inner(process_id, event_type, after_sequence),
+        )
+        .await
+    }
+
+    async fn await_event_inner(
         &self,
         process_id: &str,
         event_type: &str,

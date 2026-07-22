@@ -15,6 +15,7 @@ mod observation;
 mod process;
 mod process_work_driver;
 mod process_worker;
+pub(crate) use process_worker::release_process_execution_permit_while;
 mod queued_work_driver;
 pub mod scenario_contracts;
 mod session_api;
@@ -156,7 +157,10 @@ pub use process::{
     watch_process_registry, watch_process_registry_with_sink,
 };
 pub use process_work_driver::{InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver};
-pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig, ProcessDrainReport};
+pub use process_worker::{
+    DEFAULT_PROCESS_EXECUTION_CONCURRENCY, DurableProcessWorker, DurableProcessWorkerConfig,
+    ProcessDrainReport, ProcessExecutionConcurrencyError,
+};
 pub use queued_work_driver::{QueuedWorkDriver, QueuedWorkRunHandle, QueuedWorkRunRequest};
 pub use scenario_contracts::{RUNTIME_SCENARIO_CONTRACTS, ScenarioContractSpec};
 pub use session_manager::DirectCompletionClient;

@@ -419,6 +419,7 @@ pub use runtime::{
     system_time_from_epoch_ms, terminal_append_request, terminal_event_type_name,
     validate_process_signal_name, watch_process_registry, watch_process_registry_with_sink,
 };
+pub use runtime::{DEFAULT_PROCESS_EXECUTION_CONCURRENCY, ProcessExecutionConcurrencyError};
 #[allow(unused_imports)]
 pub(crate) use runtime::{
     LlmAttachmentSpec, ProcessEventSemantics, QueuedCheckpointTurnInput, QueuedCheckpointWork,

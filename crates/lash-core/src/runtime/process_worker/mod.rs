@@ -1,6 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::effect::ProcessRunner;
@@ -12,6 +14,39 @@ use crate::{
     ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
     RecoveryDisposition, SessionStoreFactory,
 };
+
+/// Default maximum number of processes one [`DurableProcessWorker`] executes
+/// inline at once.
+pub const DEFAULT_PROCESS_EXECUTION_CONCURRENCY: usize = 64;
+
+/// Validated per-worker inline process execution concurrency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcessExecutionConcurrency(usize);
+
+impl ProcessExecutionConcurrency {
+    const DEFAULT: Self = Self(DEFAULT_PROCESS_EXECUTION_CONCURRENCY);
+
+    fn new(concurrency: usize) -> Result<Self, ProcessExecutionConcurrencyError> {
+        if !(1..=Semaphore::MAX_PERMITS).contains(&concurrency) {
+            return Err(ProcessExecutionConcurrencyError { concurrency });
+        }
+        Ok(Self(concurrency))
+    }
+
+    fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// Invalid inline process execution concurrency supplied by a host.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "process execution concurrency must be between 1 and {max} (inclusive), got {concurrency}",
+    max = Semaphore::MAX_PERMITS
+)]
+pub struct ProcessExecutionConcurrencyError {
+    concurrency: usize,
+}
 
 /// Deployment-local configuration for rebuilding durable process executions.
 ///
@@ -37,6 +72,11 @@ pub struct DurableProcessWorkerConfig {
     /// instead of silently diverging from the live runtime by keeping the full
     /// graph resident.
     pub residency: crate::Residency,
+    /// Maximum processes this worker executes inline at once. A run holds its
+    /// slot while doing its own work and releases it while parked on work that
+    /// another process or external owner must complete. This is a per-worker
+    /// bound: two workers sharing one registry may execute twice this many.
+    process_execution_concurrency: ProcessExecutionConcurrency,
     /// Owner identity stem this worker derives per-recovery lease owners from.
     ///
     /// Each recovery attempt claims with a unique `(owner_id, incarnation_id)`
@@ -53,6 +93,12 @@ pub struct DurableProcessWorkerConfig {
 }
 
 impl DurableProcessWorkerConfig {
+    pub fn validate_process_execution_concurrency(
+        concurrency: usize,
+    ) -> Result<(), ProcessExecutionConcurrencyError> {
+        ProcessExecutionConcurrency::new(concurrency).map(drop)
+    }
+
     pub fn new(
         plugin_host: Arc<PluginHost>,
         runtime_host: RuntimeHostConfig,
@@ -72,6 +118,7 @@ impl DurableProcessWorkerConfig {
             queued_work_driver: None,
             turn_phase_probe_slot: crate::runtime::RuntimeTurnPhaseProbeSlot::default(),
             residency: crate::Residency::default(),
+            process_execution_concurrency: ProcessExecutionConcurrency::DEFAULT,
             lease_owner: crate::LeaseOwnerIdentity::opaque(
                 format!("durable-process-worker:{}", uuid::Uuid::new_v4()),
                 uuid::Uuid::new_v4().to_string(),
@@ -92,6 +139,22 @@ impl DurableProcessWorkerConfig {
     pub fn with_residency(mut self, residency: crate::Residency) -> Self {
         self.residency = residency;
         self
+    }
+
+    /// Set the maximum processes this worker executes inline at once.
+    ///
+    /// The minimum is one. The maximum is Tokio's semaphore limit. The bound
+    /// applies independently to each worker, not globally to a shared registry.
+    pub fn with_process_execution_concurrency(
+        mut self,
+        concurrency: usize,
+    ) -> Result<Self, ProcessExecutionConcurrencyError> {
+        self.process_execution_concurrency = ProcessExecutionConcurrency::new(concurrency)?;
+        Ok(self)
+    }
+
+    pub fn process_execution_concurrency(&self) -> usize {
+        self.process_execution_concurrency.get()
     }
 
     pub fn with_process_work_driver(mut self, driver: ProcessWorkDriver) -> Self {
@@ -158,6 +221,186 @@ impl DurableProcessWorkerConfig {
 #[derive(Clone)]
 pub struct DurableProcessWorker {
     config: Arc<DurableProcessWorkerConfig>,
+    execution_scheduler: Arc<ProcessExecutionScheduler>,
+}
+
+#[derive(Default)]
+struct ProcessExecutionSchedulerState {
+    pending: VecDeque<ProcessRecord>,
+    scheduled: BTreeSet<String>,
+    rerun: BTreeMap<String, ProcessRecord>,
+    active: usize,
+    dispatcher_running: bool,
+}
+
+struct ProcessExecutionScheduler {
+    permits: Arc<Semaphore>,
+    state: tokio::sync::Mutex<ProcessExecutionSchedulerState>,
+    changed: Arc<tokio::sync::Notify>,
+}
+
+impl ProcessExecutionScheduler {
+    fn new(concurrency: ProcessExecutionConcurrency) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(concurrency.get())),
+            state: tokio::sync::Mutex::new(ProcessExecutionSchedulerState::default()),
+            changed: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+/// Clears the single-dispatcher latch if the fire-and-forget dispatcher
+/// unwinds. Without this guard, one panic permanently leaves queued work with
+/// no task allowed to drain it.
+struct ProcessExecutionDispatcherGuard {
+    scheduler: Arc<ProcessExecutionScheduler>,
+    armed: bool,
+}
+
+impl ProcessExecutionDispatcherGuard {
+    fn new(scheduler: Arc<ProcessExecutionScheduler>) -> Self {
+        Self {
+            scheduler,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProcessExecutionDispatcherGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut state) = self.scheduler.state.try_lock() {
+            state.dispatcher_running = false;
+            self.scheduler.changed.notify_one();
+            return;
+        }
+        let scheduler = Arc::clone(&self.scheduler);
+        crate::task::spawn(async move {
+            scheduler.state.lock().await.dispatcher_running = false;
+            scheduler.changed.notify_one();
+        });
+    }
+}
+
+struct ProcessExecutionTaskCompletion {
+    process_id: String,
+    completed: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+impl Drop for ProcessExecutionTaskCompletion {
+    fn drop(&mut self) {
+        let _ = self.completed.send(self.process_id.clone());
+    }
+}
+
+/// Permit owned by one inline process execution. All clones refer to the same
+/// slot so child-turn and inline-effect task boundaries can park the outer run.
+///
+/// This type assumes one logical thread of execution per process run. Clones
+/// may move that one thread across task boundaries, but must not be awaited by
+/// concurrent branches: while one branch has released the slot, a second
+/// branch would observe no held permit and could resume without reacquiring it.
+/// Intra-run parallel execution must replace this shared-slot protocol before
+/// it is introduced.
+struct ProcessExecutionPermit {
+    semaphore: Arc<Semaphore>,
+    held: std::sync::Mutex<Option<OwnedSemaphorePermit>>,
+    reacquire: tokio::sync::Mutex<()>,
+    dispatcher_changed: Arc<tokio::sync::Notify>,
+}
+
+impl ProcessExecutionPermit {
+    fn new(
+        semaphore: Arc<Semaphore>,
+        permit: OwnedSemaphorePermit,
+        dispatcher_changed: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            semaphore,
+            held: std::sync::Mutex::new(Some(permit)),
+            reacquire: tokio::sync::Mutex::new(()),
+            dispatcher_changed,
+        }
+    }
+
+    async fn ensure_acquired(&self) {
+        if self
+            .held
+            .lock()
+            .expect("process execution permit lock")
+            .is_some()
+        {
+            return;
+        }
+        let _reacquire = self.reacquire.lock().await;
+        if self
+            .held
+            .lock()
+            .expect("process execution permit lock")
+            .is_some()
+        {
+            return;
+        }
+        let permit = Arc::clone(&self.semaphore)
+            .acquire_owned()
+            .await
+            .expect("process execution semaphore remains open");
+        *self.held.lock().expect("process execution permit lock") = Some(permit);
+    }
+
+    async fn release_while<F: Future>(&self, future: F) -> F::Output {
+        let released = self
+            .held
+            .lock()
+            .expect("process execution permit lock")
+            .take();
+        let Some(released) = released else {
+            return future.await;
+        };
+        drop(released);
+        self.dispatcher_changed.notify_one();
+        let output = future.await;
+        self.ensure_acquired().await;
+        output
+    }
+}
+
+tokio::task_local! {
+    static PROCESS_EXECUTION_PERMIT: Arc<ProcessExecutionPermit>;
+}
+
+pub(crate) async fn release_process_execution_permit_while<F: Future>(future: F) -> F::Output {
+    // Engine-scheduled tiers such as Restate never install this task local, so
+    // their direct shared-segment execution follows the unchanged path below.
+    let permit = PROCESS_EXECUTION_PERMIT.try_with(Arc::clone).ok();
+    match permit {
+        Some(permit) => permit.release_while(future).await,
+        None => future.await,
+    }
+}
+
+pub(crate) async fn ensure_process_execution_permit() {
+    if let Ok(permit) = PROCESS_EXECUTION_PERMIT.try_with(Arc::clone) {
+        permit.ensure_acquired().await;
+    }
+}
+
+pub(crate) fn inherit_process_execution_permit<F: Future>(
+    future: F,
+) -> impl Future<Output = F::Output> {
+    let permit = PROCESS_EXECUTION_PERMIT.try_with(Arc::clone).ok();
+    async move {
+        match permit {
+            Some(permit) => PROCESS_EXECUTION_PERMIT.scope(permit, future).await,
+            None => future.await,
+        }
+    }
 }
 
 /// Report from a graceful [owner drain](DurableProcessWorker::drain_owner_bound_work).
@@ -181,13 +424,23 @@ enum RecoverFailure {
 
 impl DurableProcessWorker {
     pub fn new(config: DurableProcessWorkerConfig) -> Self {
+        let execution_scheduler = Arc::new(ProcessExecutionScheduler::new(
+            config.process_execution_concurrency,
+        ));
         Self {
             config: Arc::new(config),
+            execution_scheduler,
         }
     }
 
     pub fn from_shared_config(config: Arc<DurableProcessWorkerConfig>) -> Self {
-        Self { config }
+        let execution_scheduler = Arc::new(ProcessExecutionScheduler::new(
+            config.process_execution_concurrency,
+        ));
+        Self {
+            config,
+            execution_scheduler,
+        }
     }
 
     pub fn config(&self) -> &DurableProcessWorkerConfig {
@@ -315,13 +568,12 @@ impl DurableProcessWorker {
             .await)
     }
 
-    /// Sweep the registry for non-terminal processes and re-execute the ones
-    /// this worker can claim, driving each to a terminal state.
+    /// Queue every non-terminal process this worker can claim and execute the
+    /// runnable rows inline, driving each to a terminal state.
     ///
-    /// This is the crash-recovery counterpart to a worker that ran a process
-    /// from a live turn: a trigger/trigger-started process whose worker
-    /// died mid-flight is left non-terminal in the registry, and a subsequent
-    /// worker reopening that registry must finish it. The sweep:
+    /// This is the sole inline executor for every process start: live tool and
+    /// subagent starts, trigger deliveries, admin starts, session-open passes,
+    /// and crash recovery all enter through this worklist. The drive:
     ///
     /// 1. lists every non-terminal process ([`ProcessRegistry::list_non_terminal`]);
     /// 2. claims the durable single-owner [`ProcessLease`] over each — a process
@@ -331,7 +583,9 @@ impl DurableProcessWorker {
     ///    fenced CAS discipline of
     ///    [`ProcessRegistry::reclaim_process_lease`]; either way a non-terminal
     ///    process is re-run by exactly one owner (lease fencing);
-    /// 3. runs the claimed process on this worker's wired controller, renewing
+    /// 3. queues the full worklist in a worker-scoped scheduler whose shared
+    ///    execution budget spans repeated host-driven passes, then runs claimed
+    ///    processes on this worker's wired controller while renewing
     ///    the lease across the long-running execution so a healthy recovery is
     ///    not swept out from under itself;
     /// 4. atomically writes the terminal outcome and releases the validated lease.
@@ -343,21 +597,95 @@ impl DurableProcessWorker {
     pub async fn drive_pending_processes(&self) -> Result<(), PluginError> {
         self.reconcile_trigger_deliveries().await?;
         let records = self.config.process_registry.list_non_terminal().await?;
-        for record in records {
-            // Run each claimed process on its OWN lease-fenced task. A sequential
-            // drive that awaited each process to terminal would deadlock a process
-            // that blocks awaiting a nested child (`start child` then `await`, or a
-            // subagent fan-out): the one drive task would park inside the parent's
-            // await and never claim the child. Spawning frees the loop so a
-            // subsequent host-driven pass claims and runs the child, and the
-            // per-process `ProcessLease` fences concurrent owners — so spawning a
-            // task per pending row on every drive is idempotent (a row already
-            // running is skipped on claim conflict) and one failing row never
-            // aborts the rest of the sweep.
+        let should_start_dispatcher = {
+            let mut state = self.execution_scheduler.state.lock().await;
+            for record in records {
+                if state.scheduled.insert(record.id.clone()) {
+                    state.pending.push_back(record);
+                } else {
+                    // Coalesce a newer host-driven pass instead of dropping it.
+                    // The row may have gained an Abandon Request or other
+                    // execution-relevant state while its prior attempt was still
+                    // queued or finishing.
+                    state.rerun.insert(record.id.clone(), record);
+                }
+            }
+            if state.dispatcher_running {
+                false
+            } else {
+                state.dispatcher_running = true;
+                true
+            }
+        };
+        self.execution_scheduler.changed.notify_one();
+        if should_start_dispatcher {
             let worker = self.clone();
-            crate::task::spawn(async move { worker.recover_process(record).await });
+            crate::task::spawn(async move { worker.run_process_execution_dispatcher().await });
         }
         Ok(())
+    }
+
+    async fn run_process_execution_dispatcher(&self) {
+        let mut dispatcher_guard =
+            ProcessExecutionDispatcherGuard::new(Arc::clone(&self.execution_scheduler));
+        let (completed_tx, mut completed_rx) = tokio::sync::mpsc::unbounded_channel();
+        loop {
+            while let Some((record, permit)) = self.next_process_execution().await {
+                let worker = self.clone();
+                let completion = ProcessExecutionTaskCompletion {
+                    process_id: record.id.clone(),
+                    completed: completed_tx.clone(),
+                };
+                let execution_permit = Arc::new(ProcessExecutionPermit::new(
+                    Arc::clone(&self.execution_scheduler.permits),
+                    permit,
+                    Arc::clone(&self.execution_scheduler.changed),
+                ));
+                crate::task::spawn(async move {
+                    let _completion = completion;
+                    // Install the execution budget only at the inline worker
+                    // boundary, never in the shared process-segment path.
+                    PROCESS_EXECUTION_PERMIT
+                        .scope(execution_permit, worker.recover_process(record))
+                        .await;
+                });
+            }
+
+            {
+                let mut state = self.execution_scheduler.state.lock().await;
+                if state.pending.is_empty() && state.active == 0 {
+                    state.dispatcher_running = false;
+                    dispatcher_guard.disarm();
+                    return;
+                }
+            }
+
+            tokio::select! {
+                Some(process_id) = completed_rx.recv() => {
+                    let mut state = self.execution_scheduler.state.lock().await;
+                    state.active = state
+                        .active
+                        .checked_sub(1)
+                        .expect("a completed process execution was active");
+                    if let Some(record) = state.rerun.remove(&process_id) {
+                        state.pending.push_back(record);
+                    } else {
+                        state.scheduled.remove(&process_id);
+                    }
+                }
+                _ = self.execution_scheduler.changed.notified() => {}
+            }
+        }
+    }
+
+    async fn next_process_execution(&self) -> Option<(ProcessRecord, OwnedSemaphorePermit)> {
+        let mut state = self.execution_scheduler.state.lock().await;
+        let permit = Arc::clone(&self.execution_scheduler.permits)
+            .try_acquire_owned()
+            .ok()?;
+        let record = state.pending.pop_front()?;
+        state.active += 1;
+        Some((record, permit))
     }
 
     async fn reconcile_trigger_deliveries(&self) -> Result<(), PluginError> {

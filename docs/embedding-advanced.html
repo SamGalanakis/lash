@@ -128,7 +128,7 @@ let core = lash::LashCore::rlm_builder(factory)
           <div class="listing">
             <div class="listing__row">
               <div class="listing__label">inline runner</div>
-              <div class="listing__body"><p>Call <code>.process_registry(...)</code>. The facade builds the default inline <code>DurableProcessWorkerConfig</code> at <code>build()</code> and starts process work from captured execution environments; no origin session has to be reopened for tool or Lashlang process execution.</p></div>
+              <div class="listing__body"><p>Call <code>.process_registry(...)</code>. The facade builds the default inline <code>DurableProcessWorkerConfig</code> at <code>build()</code> and starts process work from captured execution environments; no origin session has to be reopened for tool or Lashlang process execution. <code>.process_execution_concurrency(...)</code> sets the per-worker inline execution bound (default 64, minimum 1). Runs release their slot while parked on another process or external completion and reacquire before resuming. The bound is not registry-global: two workers over one registry can execute twice the configured number.</p></div>
             </div>
             <div class="listing__row">
               <div class="listing__label">external runner</div>

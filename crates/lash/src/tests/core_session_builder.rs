@@ -2330,7 +2330,22 @@ async fn durable_process_worker_config_uses_core_process_registry() -> Result<()
         .expect("process registry must be configured");
     assert!(Arc::ptr_eq(&config.process_registry, &core_registry));
     assert!(Arc::ptr_eq(&config.trigger_store, &trigger_store));
+    assert_eq!(
+        config.process_execution_concurrency(),
+        lash_core::DEFAULT_PROCESS_EXECUTION_CONCURRENCY
+    );
     Ok(())
+}
+
+#[test]
+fn builder_rejects_invalid_process_execution_concurrency() {
+    let err = expect_build_error(
+        explicit_ephemeral_facets(peer_coherence_builder(inline_artifact_store()))
+            .process_execution_concurrency(0)
+            .build(),
+        "zero process execution concurrency must be rejected",
+    );
+    assert!(matches!(err, EmbedError::ProcessExecutionConcurrency(_)));
 }
 
 #[tokio::test]

@@ -38,6 +38,8 @@ pub enum EmbedError {
     ProcessRegistryRequiresStoreFactory,
     #[error("durable process worker config requires a LashCore process registry")]
     MissingProcessRegistry,
+    #[error("invalid process execution configuration: {0}")]
+    ProcessExecutionConcurrency(#[from] lash_core::ProcessExecutionConcurrencyError),
     #[error("session deletion requires a LashCore store factory")]
     MissingSessionStoreFactory,
     #[error("failed to delete process state for session `{session_id}`: {message}")]
@@ -146,6 +148,7 @@ impl EmbedError {
             | Self::DurableProcessRegistryRequiresStoreFactory
             | Self::ProcessRegistryRequiresStoreFactory
             | Self::MissingProcessRegistry
+            | Self::ProcessExecutionConcurrency(_)
             | Self::MissingSessionStoreFactory
             | Self::MissingPluginTurnInput { .. }
             | Self::DurableEffectHostRequiresHandlerContext { .. }
