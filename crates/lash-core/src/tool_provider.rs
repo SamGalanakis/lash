@@ -735,9 +735,8 @@ pub struct PreparedToolBatchCall {
 
 /// Runtime-prepared executable tool batch.
 ///
-/// The vector order is source order. Scheduling may run parallel-safe tools
-/// concurrently, but launches and pending completion consumption are projected
-/// back through this order.
+/// The vector order is source order. Calls run concurrently, but launches and
+/// pending completion consumption are projected back through this order.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedToolBatch {
     pub batch_id: String,

@@ -12,7 +12,7 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, SessionPlugin,
     StaticPluginFactory,
 };
-use lash_core::{ToolCall, ToolDefinition, ToolProvider, ToolResult, ToolScheduling};
+use lash_core::{ToolCall, ToolDefinition, ToolProvider, ToolResult};
 use lash_tool_support::{
     LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
 };
@@ -111,7 +111,6 @@ pub fn process_list_tool_definition() -> ToolDefinition {
         "await processes.list({ definition: on_button })?".into(),
     ])
     .with_lashlang_binding(LashlangToolBinding::new(["processes"], "list"))
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn processes_tool_definitions(include_cancel_process: bool) -> Vec<ToolDefinition> {
@@ -156,7 +155,6 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
         r#"await processes.cancel({ process_id: "subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C" })?"#.into(),
     ])
     .with_lashlang_binding(LashlangToolBinding::new(["processes"], "cancel"))
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 pub async fn execute_process_list_tool_call(

@@ -23,7 +23,7 @@ use lash_core::runtime::ProcessEventSemanticsSpec;
 use lash_core::{
     PreparedToolCall, ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessStartRequest,
     ProgressSender, PromptContribution, SessionScope, SessionToolAccess, ToolCall, ToolDefinition,
-    ToolProvider, ToolResult, ToolScheduling,
+    ToolProvider, ToolResult,
 };
 
 use lash_tool_support::{
@@ -614,8 +614,7 @@ finish probe.exit_code == 0"#.into(),
                 ["shell"],
                 "exec",
                 &["shell", "bash"],
-            ))
-            .with_scheduling(ToolScheduling::Serial),
+            )),
             ToolDefinition::raw(
                 "tool:start_command",
                 "start_command",
@@ -639,8 +638,7 @@ finish probe.exit_code == 0"#.into(),
                 ["shell"],
                 "start",
                 &["long_running_command", "pty"],
-            ))
-            .with_scheduling(ToolScheduling::Serial),
+            )),
             ToolDefinition::raw(
                 "tool:write_stdin",
                 "write_stdin",
@@ -674,8 +672,7 @@ finish probe.exit_code == 0"#.into(),
                 ["shell"],
                 "write",
                 &["send_stdin", "poll_command"],
-            ))
-            .with_scheduling(ToolScheduling::Serial),
+            )),
         ]
     }
 

@@ -1,5 +1,4 @@
-//! Tool grants: schemas, call-path bindings, activation, scheduling, and
-//! retry policies.
+//! Tool grants: schemas, call-path bindings, activation, and retry policies.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -29,8 +28,6 @@ pub struct RemoteToolGrant {
     pub activation: Option<RemoteToolActivation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_projection: Option<RemoteToolArgumentProjectionPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scheduling: Option<RemoteToolScheduling>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_policy: Option<RemoteToolRetryPolicy>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -195,14 +192,6 @@ pub enum RemoteToolActivation {
     #[default]
     Always,
     Internal,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteToolScheduling {
-    #[default]
-    Parallel,
-    Serial,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

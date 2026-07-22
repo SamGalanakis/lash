@@ -438,10 +438,6 @@ impl<'run> RuntimeExecutionContext<'run> {
         self
     }
 
-    pub(crate) fn tool_scheduling(&self, name: &str) -> crate::ToolScheduling {
-        crate::tool_dispatch::resolve_tool_scheduling(&self.dispatch, name)
-    }
-
     pub fn callable_tool_manifest(&self, name: &str) -> Option<crate::ToolManifest> {
         crate::tool_dispatch::resolve_callable_manifest(&self.dispatch, name)
     }

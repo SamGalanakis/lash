@@ -249,60 +249,55 @@ impl RuntimeExecutionContext<'_> {
             }
             return Ok(crate::ToolBatchEffectOutcome { launches, triggers });
         }
-        let child_outcomes = schedule_tool_batch(
-            indexed_tools,
-            |(index, _)| *index,
-            |(_, child)| self.tool_scheduling(&child.call.tool_name),
-            {
-                let context = self.clone();
+        let child_outcomes = schedule_tool_batch(indexed_tools, |(index, _)| *index, {
+            let context = self.clone();
+            let cancellation = cancellation.clone();
+            let tool_cancel = tool_cancel.clone();
+            let child_trace_hooks = std::sync::Arc::clone(&child_trace_hooks);
+            move |(index, child)| {
+                let context = context.clone().with_cancellation_token(tool_cancel.clone());
                 let cancellation = cancellation.clone();
                 let tool_cancel = tool_cancel.clone();
-                let child_trace_hooks = std::sync::Arc::clone(&child_trace_hooks);
-                move |(index, child)| {
-                    let context = context.clone().with_cancellation_token(tool_cancel.clone());
-                    let cancellation = cancellation.clone();
-                    let tool_cancel = tool_cancel.clone();
-                    let parent_invocation = parent_invocation.clone();
-                    let cancelled_tool = child.call.clone();
-                    let child_execution_trace_hook =
-                        child_trace_hooks.get(&child.call.call_id).cloned();
-                    async move {
-                        let tool_call = context.execute_prepared_tool_batch_child(
-                            child,
-                            index,
-                            parent_invocation,
-                            child_execution_trace_hook,
-                        );
-                        tokio::pin!(tool_call);
-                        tokio::select! {
-                            biased;
-                            _ = cancellation.cancelled() => {
-                                tool_cancel.cancel();
-                                let grace = context
-                                    .dispatch
-                                    .clock
-                                    .sleep(std::time::Duration::from_millis(50));
-                                tokio::pin!(grace);
-                                tokio::select! {
-                                    biased;
-                                    outcome = &mut tool_call => outcome,
-                                    _ = &mut grace => CoordinatedToolLaunch {
-                                        launch: cancelled_runtime_tool_call_launch(
-                                            cancelled_tool.call_id,
-                                            cancelled_tool.tool_name,
-                                            cancelled_tool.args,
-                                            cancelled_tool.replay,
-                                        ),
-                                        triggers: Vec::new(),
-                                    },
-                                }
+                let parent_invocation = parent_invocation.clone();
+                let cancelled_tool = child.call.clone();
+                let child_execution_trace_hook =
+                    child_trace_hooks.get(&child.call.call_id).cloned();
+                async move {
+                    let tool_call = context.execute_prepared_tool_batch_child(
+                        child,
+                        index,
+                        parent_invocation,
+                        child_execution_trace_hook,
+                    );
+                    tokio::pin!(tool_call);
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => {
+                            tool_cancel.cancel();
+                            let grace = context
+                                .dispatch
+                                .clock
+                                .sleep(std::time::Duration::from_millis(50));
+                            tokio::pin!(grace);
+                            tokio::select! {
+                                biased;
+                                outcome = &mut tool_call => outcome,
+                                _ = &mut grace => CoordinatedToolLaunch {
+                                    launch: cancelled_runtime_tool_call_launch(
+                                        cancelled_tool.call_id,
+                                        cancelled_tool.tool_name,
+                                        cancelled_tool.args,
+                                        cancelled_tool.replay,
+                                    ),
+                                    triggers: Vec::new(),
+                                },
                             }
-                            outcome = &mut tool_call => outcome,
                         }
+                        outcome = &mut tool_call => outcome,
                     }
                 }
-            },
-        )
+            }
+        })
         .await;
 
         let mut launches = Vec::with_capacity(child_outcomes.len());

@@ -13,7 +13,6 @@ use lash_core::plugin::{
 };
 use lash_core::{
     JsonSchema, PluginMessage, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolResult,
-    ToolScheduling,
 };
 use lash_tool_support::{
     LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
@@ -392,7 +391,6 @@ fn plan_exit_tool_definition() -> ToolDefinition {
     )
     .with_examples(vec!["await plan.exit({})?".into()])
     .with_lashlang_binding(LashlangToolBinding::new(["plan"], "exit"))
-    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn plan_exit_input_schema() -> serde_json::Value {

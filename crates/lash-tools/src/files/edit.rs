@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use unicode_normalization::UnicodeNormalization;
 
-use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
+use lash_core::{ToolCall, ToolDefinition, ToolResult};
 
 use lash_tool_support::{
     StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, compact_diff,
@@ -82,7 +82,6 @@ fn edit_tool_definition() -> ToolDefinition {
             "edit",
             &["replace", "edit_file"],
         ))
-        .with_scheduling(ToolScheduling::Serial)
 }
 
 fn validate_edit_args(args: &EditArgs) -> Result<(), ToolResult> {

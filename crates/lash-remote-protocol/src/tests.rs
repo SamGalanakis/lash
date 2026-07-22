@@ -1026,7 +1026,6 @@ fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
         examples: Vec::new(),
         activation: None,
         argument_projection: None,
-        scheduling: None,
         retry_policy: None,
         bindings: BTreeMap::from([(
             EXAMPLE_BINDING_KEY.to_string(),

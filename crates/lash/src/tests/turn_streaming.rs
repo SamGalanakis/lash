@@ -185,28 +185,19 @@ impl ToolProvider for BlockingAppTools {
 
 struct RuntimeBatchTools {
     barrier: Arc<tokio::sync::Barrier>,
-    parallel_windows: Arc<StdMutex<Vec<(String, std::time::Instant, std::time::Instant)>>>,
-    serial_window: Arc<StdMutex<Option<(std::time::Instant, std::time::Instant)>>>,
+    windows: Arc<StdMutex<Vec<(String, std::time::Instant, std::time::Instant)>>>,
 }
 
 impl RuntimeBatchTools {
     fn new() -> Self {
         Self {
-            barrier: Arc::new(tokio::sync::Barrier::new(2)),
-            parallel_windows: Arc::new(StdMutex::new(Vec::new())),
-            serial_window: Arc::new(StdMutex::new(None)),
+            barrier: Arc::new(tokio::sync::Barrier::new(3)),
+            windows: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
-    fn parallel_windows(&self) -> Vec<(String, std::time::Instant, std::time::Instant)> {
-        self.parallel_windows
-            .lock()
-            .expect("parallel windows")
-            .clone()
-    }
-
-    fn serial_window(&self) -> Option<(std::time::Instant, std::time::Instant)> {
-        *self.serial_window.lock().expect("serial window")
+    fn windows(&self) -> Vec<(String, std::time::Instant, std::time::Instant)> {
+        self.windows.lock().expect("execution windows").clone()
     }
 }
 
@@ -215,26 +206,20 @@ impl ToolProvider for RuntimeBatchTools {
     fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
         vec![
             runtime_batch_tool_definition().manifest(),
-            runtime_probe_tool_definition("par_a", lash_core::ToolScheduling::Parallel).manifest(),
-            runtime_probe_tool_definition("par_b", lash_core::ToolScheduling::Parallel).manifest(),
-            runtime_probe_tool_definition("ser", lash_core::ToolScheduling::Serial).manifest(),
+            runtime_probe_tool_definition("first").manifest(),
+            runtime_probe_tool_definition("formerly_serial").manifest(),
+            runtime_probe_tool_definition("last").manifest(),
         ]
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
         match name {
             "runtime_batch" => Some(Arc::new(runtime_batch_tool_definition().contract())),
-            "par_a" => Some(Arc::new(
-                runtime_probe_tool_definition("par_a", lash_core::ToolScheduling::Parallel)
-                    .contract(),
+            "first" => Some(Arc::new(runtime_probe_tool_definition("first").contract())),
+            "formerly_serial" => Some(Arc::new(
+                runtime_probe_tool_definition("formerly_serial").contract(),
             )),
-            "par_b" => Some(Arc::new(
-                runtime_probe_tool_definition("par_b", lash_core::ToolScheduling::Parallel)
-                    .contract(),
-            )),
-            "ser" => Some(Arc::new(
-                runtime_probe_tool_definition("ser", lash_core::ToolScheduling::Serial).contract(),
-            )),
+            "last" => Some(Arc::new(runtime_probe_tool_definition("last").contract())),
             _ => None,
         }
     }
@@ -242,7 +227,7 @@ impl ToolProvider for RuntimeBatchTools {
     async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
         match call.name {
             "runtime_batch" => execute_runtime_batch_tool(call.context, call.args).await,
-            "par_a" | "par_b" => {
+            "first" | "formerly_serial" | "last" => {
                 let start = std::time::Instant::now();
                 let waited = tokio::time::timeout(
                     std::time::Duration::from_millis(500),
@@ -250,24 +235,18 @@ impl ToolProvider for RuntimeBatchTools {
                 )
                 .await;
                 let end = std::time::Instant::now();
-                self.parallel_windows
-                    .lock()
-                    .expect("parallel windows")
-                    .push((call.name.to_string(), start, end));
+                self.windows.lock().expect("execution windows").push((
+                    call.name.to_string(),
+                    start,
+                    end,
+                ));
                 match waited {
                     Ok(_) => lash_core::ToolResult::ok(serde_json::json!(call.name)),
                     Err(_) => lash_core::ToolResult::err_fmt(format!(
-                        "{} did not overlap with its parallel peer",
+                        "{} did not overlap with the rest of the batch",
                         call.name
                     )),
                 }
-            }
-            "ser" => {
-                let start = std::time::Instant::now();
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                let end = std::time::Instant::now();
-                *self.serial_window.lock().expect("serial window") = Some((start, end));
-                lash_core::ToolResult::ok(serde_json::json!(call.name))
             }
             other => lash_core::ToolResult::err_fmt(format!("Unknown tool: {other}")),
         }
@@ -300,13 +279,9 @@ fn runtime_batch_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_scheduling(lash_core::ToolScheduling::Parallel)
 }
 
-fn runtime_probe_tool_definition(
-    name: &'static str,
-    scheduling: lash_core::ToolScheduling,
-) -> lash_core::ToolDefinition {
+fn runtime_probe_tool_definition(name: &'static str) -> lash_core::ToolDefinition {
     lash_core::ToolDefinition::raw(
         format!("tool:{name}"),
         name,
@@ -314,7 +289,6 @@ fn runtime_probe_tool_definition(
         serde_json::json!({ "type": "object", "additionalProperties": false }),
         serde_json::json!({}),
     )
-    .with_scheduling(scheduling)
 }
 
 async fn execute_runtime_batch_tool(
@@ -390,9 +364,9 @@ fn runtime_batch_provider() -> ProviderHandle {
                 tool_name: "runtime_batch".to_string(),
                 input_json: serde_json::json!({
                     "tool_calls": [
-                        { "tool": "par_a", "parameters": {} },
-                        { "tool": "ser", "parameters": {} },
-                        { "tool": "par_b", "parameters": {} }
+                        { "tool": "first", "parameters": {} },
+                        { "tool": "formerly_serial", "parameters": {} },
+                        { "tool": "last", "parameters": {} }
                     ]
                 })
                 .to_string(),
@@ -2305,7 +2279,7 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
 }
 
 #[test]
-fn turn_run_batch_tool_runs_parallel_bucket_then_serial_and_preserves_order() -> Result<()> {
+fn turn_run_batch_tool_runs_every_call_concurrently_and_preserves_order() -> Result<()> {
     run_async_test_on_stack_size("runtime-batch-tool-order-test", 8 * 1024 * 1024, || async {
         let tools = Arc::new(RuntimeBatchTools::new());
         let tool_provider: Arc<dyn ToolProvider> = tools.clone();
@@ -2356,25 +2330,15 @@ fn turn_run_batch_tool_runs_parallel_bucket_then_serial_and_preserves_order() ->
                     .expect("result tool")
             })
             .collect::<Vec<_>>();
-        assert_eq!(result_tools, ["par_a", "ser", "par_b"]);
+        assert_eq!(result_tools, ["first", "formerly_serial", "last"]);
 
-        let parallel_windows = tools.parallel_windows();
-        assert_eq!(parallel_windows.len(), 2);
-        let serial_window = tools.serial_window().expect("serial window");
-        let parallel_names = parallel_windows
+        let windows = tools.windows();
+        assert_eq!(windows.len(), 3);
+        let names = windows
             .iter()
             .map(|(name, _, _)| name.as_str())
             .collect::<BTreeSet<_>>();
-        assert_eq!(parallel_names, BTreeSet::from(["par_a", "par_b"]));
-        for (name, parallel_start, parallel_end) in parallel_windows {
-            assert!(
-                serial_window.0 >= parallel_end || serial_window.1 <= parallel_start,
-                "serial tool window {:?} overlapped parallel tool {name} window {:?}..{:?}",
-                serial_window,
-                parallel_start,
-                parallel_end
-            );
-        }
+        assert_eq!(names, BTreeSet::from(["first", "formerly_serial", "last"]));
         Ok(())
     })
 }
@@ -2434,7 +2398,7 @@ fn batch_child_tool_calls_carry_parent_call_id_linkage() -> Result<()> {
                         parent_call_id,
                         graph_key,
                         ..
-                    } if matches!(name.as_str(), "par_a" | "par_b" | "ser") => {
+                    } if matches!(name.as_str(), "first" | "formerly_serial" | "last") => {
                         Some((name.clone(), parent_call_id.clone(), graph_key.clone()))
                     }
                     _ => None,
@@ -2446,7 +2410,11 @@ fn batch_child_tool_calls_carry_parent_call_id_linkage() -> Result<()> {
                 .collect::<BTreeSet<_>>();
             assert_eq!(
                 child_names,
-                BTreeSet::from(["par_a".to_string(), "par_b".to_string(), "ser".to_string()]),
+                BTreeSet::from([
+                    "first".to_string(),
+                    "formerly_serial".to_string(),
+                    "last".to_string(),
+                ]),
                 "every batch child must surface as its own tool event"
             );
             for (name, parent, graph_key) in &child_parents {

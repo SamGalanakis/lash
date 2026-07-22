@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use lash_core::{
     PreparedToolCall, SessionSpec, SessionToolAccess, SubagentSessionContext,
     ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolDefinition, ToolPrepareContext,
-    ToolResult, ToolScheduling, sansio::PendingToolCall,
+    ToolResult, sansio::PendingToolCall,
 };
 use lash_lashlang_runtime::ToolDefinitionLashlangExt;
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
@@ -301,7 +301,6 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
         description,
         spawn_agent_input_schema(capability_names),
         examples,
-        ToolScheduling::Serial,
     )
     .with_argument_projection(
         ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),

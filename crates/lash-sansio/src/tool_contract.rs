@@ -1,41 +1,7 @@
 use crate::{SchemaContract, SchemaProjectionOverride};
 
-/// How a tool's invocations should be scheduled relative to other tools in
-/// the same batch of model-produced tool calls.
-///
-/// Tools that only *read* state (`read_file`, `grep`, `glob`, ...) can run
-/// in parallel safely and should use the default [`ToolScheduling::Parallel`].
-/// Tools that *mutate* shared state (`edit`, `write`, `exec_command`,
-/// `write_stdin`) should declare
-/// [`ToolScheduling::Serial`] so the dispatcher runs them one-at-a-time
-/// and avoids interleaving with each other.
-///
-/// This controls scheduling within a batch of tool calls; protocol ownership
-/// is selected by the host plugin stack.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolScheduling {
-    /// Safe to run concurrently with other parallel tools in the same batch.
-    #[default]
-    Parallel,
-    /// Must run one-at-a-time relative to other serial tools in the batch.
-    Serial,
-}
-
-fn default_tool_scheduling() -> ToolScheduling {
-    ToolScheduling::default()
-}
-
-fn is_default_tool_scheduling(mode: &ToolScheduling) -> bool {
-    *mode == ToolScheduling::default()
-}
-
 /// Automatic retry policy for a tool's execution.
 ///
-/// This is intentionally separate from [`ToolScheduling`]: scheduling
-/// decides whether different tool calls may run together, while retry policy
-/// decides whether one failed call may be attempted again inside its scheduled
-/// slot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolRetryPolicy {
@@ -301,11 +267,6 @@ pub struct ToolManifest {
         skip_serializing_if = "is_default_tool_argument_projection_policy"
     )]
     pub argument_projection: ToolArgumentProjectionPolicy,
-    #[serde(
-        default = "default_tool_scheduling",
-        skip_serializing_if = "is_default_tool_scheduling"
-    )]
-    pub scheduling: ToolScheduling,
     #[serde(
         default = "default_tool_retry_policy",
         skip_serializing_if = "is_default_tool_retry_policy"
@@ -582,7 +543,6 @@ impl ToolDefinition {
                 activation: ToolActivation::default(),
                 bindings: std::collections::BTreeMap::new(),
                 argument_projection: ToolArgumentProjectionPolicy::default(),
-                scheduling: default_tool_scheduling(),
                 retry_policy: default_tool_retry_policy(),
             },
             contract: ToolContract {
@@ -626,11 +586,6 @@ impl ToolDefinition {
         argument_projection: ToolArgumentProjectionPolicy,
     ) -> Self {
         self.manifest.argument_projection = argument_projection;
-        self
-    }
-
-    pub fn with_scheduling(mut self, scheduling: ToolScheduling) -> Self {
-        self.manifest.scheduling = scheduling;
         self
     }
 

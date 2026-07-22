@@ -161,11 +161,7 @@ fn mock_read_view(run_session_id: &str) -> SessionReadView {
     SessionReadView::from_persisted_state(&state)
 }
 
-fn test_tool(
-    name: &str,
-    description: &str,
-    execution_mode: lash_core::ToolScheduling,
-) -> ToolDefinition {
+fn test_tool(name: &str, description: &str) -> ToolDefinition {
     ToolDefinition::raw(
         format!("tool:{name}"),
         name,
@@ -173,7 +169,6 @@ fn test_tool(
         ToolDefinition::default_input_schema(),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_scheduling(execution_mode)
 }
 
 struct PlanModeTestTools;
@@ -190,13 +185,9 @@ fn plan_mode_test_provider() -> StaticToolProvider<PlanModeTestTools> {
 }
 
 fn plan_mode_test_tool_definition() -> ToolDefinition {
-    test_tool(
-        "plan_exit",
-        "Ask whether to exit plan mode.",
-        lash_core::ToolScheduling::Parallel,
-    )
-    .with_examples(vec!["await plan.exit({})?".to_string()])
-    .with_lashlang_binding(LashlangToolBinding::new(["plan"], "exit"))
+    test_tool("plan_exit", "Ask whether to exit plan mode.")
+        .with_examples(vec!["await plan.exit({})?".to_string()])
+        .with_lashlang_binding(LashlangToolBinding::new(["plan"], "exit"))
 }
 
 fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
@@ -451,34 +442,14 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     assert!(allowed.is_empty());
 
     let tools = vec![
-        test_tool(
-            "search_tools",
-            "Discover tools",
-            lash_core::ToolScheduling::Parallel,
-        ),
-        test_tool(
-            "read_file",
-            "Read files",
-            lash_core::ToolScheduling::Parallel,
-        ),
-        test_tool(
-            "search_web",
-            "Search the web",
-            lash_core::ToolScheduling::Parallel,
-        ),
-        test_tool("edit", "Edit files", lash_core::ToolScheduling::Serial),
-        test_tool("write", "Write files", lash_core::ToolScheduling::Serial),
+        test_tool("search_tools", "Discover tools"),
+        test_tool("read_file", "Read files"),
+        test_tool("search_web", "Search the web"),
+        test_tool("edit", "Edit files"),
+        test_tool("write", "Write files"),
         // Not in the plan-mode allow-list: must be removed from the catalog.
-        test_tool(
-            "exec_command",
-            "Run a command",
-            lash_core::ToolScheduling::Serial,
-        ),
-        test_tool(
-            "plan_exit",
-            "Exit plan mode",
-            lash_core::ToolScheduling::Parallel,
-        ),
+        test_tool("exec_command", "Run a command"),
+        test_tool("plan_exit", "Exit plan mode"),
     ];
     let contracts = tools
         .iter()

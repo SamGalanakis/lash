@@ -2,8 +2,8 @@
 
 use lash_core::{
     AssembledTurn, CausalRef, InputItem, SessionCreateRequest, SessionSnapshot, SessionSpec,
-    SessionToolAccess, SubagentSessionContext, ToolDefinition, ToolResult, ToolScheduling,
-    TurnFinish, TurnInput, TurnOutcome, TurnStop,
+    SessionToolAccess, SubagentSessionContext, ToolDefinition, ToolResult, TurnFinish, TurnInput,
+    TurnOutcome, TurnStop,
 };
 use lash_lashlang_runtime::ToolDefinitionLashlangExt;
 use serde_json::{Value, json};
@@ -167,7 +167,6 @@ pub(crate) fn tool_definition(
     description: impl Into<String>,
     input_schema: Value,
     examples: Vec<String>,
-    execution_mode: ToolScheduling,
 ) -> ToolDefinition {
     ToolDefinition::raw(
         format!("tool:{name}"),
@@ -177,7 +176,6 @@ pub(crate) fn tool_definition(
         json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(examples)
-    .with_scheduling(execution_mode)
 }
 
 pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
@@ -232,7 +230,6 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
         ["task"],
         "fail",
     ))
-    .with_scheduling(ToolScheduling::Serial)
 }
 
 fn submit_error_output_schema() -> Value {

@@ -33,8 +33,7 @@ use tokio::time::timeout;
 
 use lash_core::{
     AttachmentCreateMeta, MediaType, ToolCallOutput, ToolContext, ToolDefinition, ToolFailure,
-    ToolFailureClass, ToolFailureSource, ToolResult, ToolRetryDisposition, ToolScheduling,
-    ToolValue,
+    ToolFailureClass, ToolFailureSource, ToolResult, ToolRetryDisposition, ToolValue,
 };
 use lash_tool_support::ToolDefinitionLashlangExt;
 
@@ -242,9 +241,8 @@ impl McpConnectionPool {
         // before issuing the request. `rmcp::Peer` is a cheap, cloneable handle
         // (an mpsc sender plus an internal request-id provider) that supports
         // concurrent in-flight requests, so holding the mutex across the network
-        // await would needlessly serialize parallel tool calls to the same
-        // server (these tools advertise `ToolScheduling::Parallel`) and risk a
-        // guard held across `.await`.
+        // await would needlessly serialize tool calls to the same server and
+        // risk a guard held across `.await`.
         let peer = {
             let service_guard = entry.service.lock().await;
             match service_guard.as_ref() {
@@ -585,8 +583,7 @@ fn import_tools(
                     input_schema,
                     output_schema,
                 )
-                .with_lashlang_binding(lashlang_binding)
-                .with_scheduling(ToolScheduling::Parallel),
+                .with_lashlang_binding(lashlang_binding),
             },
         );
     }

@@ -60,12 +60,12 @@ async fn await_external_completion(call: ToolCall<'_>) -> ToolResult {
 
 fn enqueue_external_work(_key: lash::AwaitEventKey) {}
 
-fn serial_tool(
+fn batched_tool(
     input_schema: serde_json::Value,
     output_schema: serde_json::Value,
 ) -> lash::tools::ToolDefinition {
-    // docs:start:serial-tool
-    use lash::tools::{ToolDefinition, ToolScheduling};
+    // docs:start:batched-tool
+    use lash::tools::ToolDefinition;
 
     ToolDefinition::raw(
         "tool:write_file",
@@ -74,8 +74,7 @@ fn serial_tool(
         input_schema,
         output_schema,
     )
-    .with_scheduling(ToolScheduling::Serial)
-    // docs:end:serial-tool
+    // docs:end:batched-tool
 }
 
 fn budget_stack() -> lash::PluginStack {

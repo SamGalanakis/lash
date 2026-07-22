@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
+use lash_core::{ToolCall, ToolDefinition, ToolResult};
 
 use lash_tool_support::{
     StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, object_schema, require_str,
@@ -118,7 +118,6 @@ fn fetch_url_tool_definition() -> ToolDefinition {
                 "fetch",
                 &["fetch", "open_url"],
             ))
-            .with_scheduling(ToolScheduling::Parallel)
 }
 
 #[cfg(test)]

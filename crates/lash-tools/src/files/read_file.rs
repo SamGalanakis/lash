@@ -4,7 +4,7 @@ use serde_json::json;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
+use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy};
 
 use lash_tool_support::{
     StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt, execute_typed_tool_result,
@@ -113,7 +113,6 @@ fn read_file_tool_definition() -> ToolDefinition {
                 "read",
                 &["cat", "view_file"],
             ))
-            .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
 

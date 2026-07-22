@@ -5,7 +5,6 @@ use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext};
 use lash_core::{
     DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
     PluginSpec, PluginSpecFactory, ToolCall, ToolContext, ToolDefinition, ToolProvider, ToolResult,
-    ToolScheduling,
 };
 use lash_tool_support::{
     LashlangToolBinding, StaticToolExecute, StaticToolProvider, ToolDefinitionLashlangExt,
@@ -174,7 +173,6 @@ pub fn llm_query_tool_definition() -> ToolDefinition {
             r#"summary = await llm.query({ task: "Summarize the supplied notes in three bullets", inputs: { notes: notes } })?"#.into(),
             r#"claims = await llm.query({ task: "Extract the key claim from each supplied chunk", inputs: { chunks: chunks }, output: { claims: "list[str]" } })?"#.into(),
         ],
-        ToolScheduling::Parallel,
     )
     .with_lashlang_binding(LashlangToolBinding::new(["llm"], "query"))
     .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
@@ -287,7 +285,6 @@ fn tool_definition(
     description: impl Into<String>,
     input_schema: Value,
     examples: Vec<String>,
-    execution_mode: ToolScheduling,
 ) -> ToolDefinition {
     ToolDefinition::raw(
         format!("tool:{name}"),
@@ -297,7 +294,6 @@ fn tool_definition(
         json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(examples)
-    .with_scheduling(execution_mode)
 }
 
 fn required_string(args: &Value, key: &str) -> Result<String, String> {
