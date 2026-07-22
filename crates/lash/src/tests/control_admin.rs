@@ -188,7 +188,7 @@ async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> R
         .state()
         .compact_context(
             Some("focus on durable summary".to_string()),
-            runtime_operation_scope("compact-context-test"),
+            runtime_operation_scope(&core, "compact-context-test"),
         )
         .await?;
 
@@ -505,7 +505,7 @@ async fn trigger_emit_does_not_append_session_node_or_queue_work() -> Result<()>
 
     let source_key = lash_core::empty_trigger_source_key("ui.button.pressed")?;
     let scoped_effect_controller = lash_core::ScopedEffectController::shared(
-        Arc::new(lash_core::InlineRuntimeEffectController),
+        Arc::new(lash_core::InlineRuntimeEffectController::default()),
         lash_core::ExecutionScope::runtime_operation("trigger:button-press-1"),
     )?;
     let report = core
@@ -703,7 +703,7 @@ async fn processes_cancel_all_uses_host_cancel_ability() -> Result<()> {
 
     let mut summaries = session
         .processes()
-        .cancel_all(runtime_operation_scope("host-cancel-all"))
+        .cancel_all(runtime_operation_scope(&core, "host-cancel-all"))
         .await?;
     summaries.sort_by(|left, right| left.process_id.cmp(&right.process_id));
     let mut calls = ability.calls();

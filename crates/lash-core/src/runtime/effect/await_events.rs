@@ -14,12 +14,18 @@ use crate::RuntimeError;
 use super::executor::{
     AwaitEventKey, AwaitEventWaitIdentity, ExecutionScope, Resolution, ResolveOutcome,
 };
+use super::promise_semantics::{
+    PromiseState, PromiseTransition, SessionRevocationTransition, cancel_sweep, constant_time_eq,
+    derive_key_id, resolve, revoke_session, session_allows_access,
+};
 
 type HmacSha256 = Hmac<sha2::Sha256>;
 
 const COMPLETED_TURN_CONTROL_KEY_LIMIT: usize = 4_096;
 const REVOKED_SESSION_LIMIT: usize = 4_096;
 
+/// Compatibility owner for the turn-control trait defaults that FIG-547.3
+/// removes. Explicit inline hosts and controllers never use this registry.
 pub(super) fn inline_await_events() -> &'static AwaitEventRegistry {
     static REGISTRY: OnceLock<AwaitEventRegistry> = OnceLock::new();
     REGISTRY.get_or_init(AwaitEventRegistry::new)
@@ -28,7 +34,6 @@ pub(super) fn inline_await_events() -> &'static AwaitEventRegistry {
 #[derive(Debug)]
 struct AwaitEventEntry {
     verified_key: AwaitEventKey,
-    turn_control: bool,
     terminal: Option<Resolution>,
     notify: Arc<Notify>,
 }
@@ -37,7 +42,6 @@ impl AwaitEventEntry {
     fn for_key(key: &AwaitEventKey) -> Self {
         Self {
             verified_key: key.clone(),
-            turn_control: key.wait.is_turn_control(),
             terminal: None,
             notify: Arc::new(Notify::new()),
         }
@@ -84,7 +88,7 @@ pub(super) struct AwaitEventRegistry {
 }
 
 impl AwaitEventRegistry {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::with_limits(COMPLETED_TURN_CONTROL_KEY_LIMIT, REVOKED_SESSION_LIMIT)
     }
 
@@ -161,13 +165,31 @@ impl AwaitEventRegistry {
     ) -> Result<AwaitEventKey, RuntimeError> {
         scope.validate()?;
         wait.validate()?;
-        let key_id =
-            crate::stable_hash::stable_json_sha256_hex(&(scope, &wait)).map_err(|err| {
-                RuntimeError::new(
-                    "await_event_key_hash",
-                    format!("failed to hash await-event identity: {err}"),
-                )
-            })?;
+        match scope.session_id() {
+            Some(session_id) => {
+                if let Some(shard) = self.existing_session_shard(session_id)? {
+                    let state = Self::locked_state(&shard)?;
+                    if !session_allows_access(state.revoked) {
+                        return Err(Self::unknown_or_revoked());
+                    }
+                }
+            }
+            None => {
+                let state = Self::locked_state(&self.unscoped_shard)?;
+                if !session_allows_access(state.revoked) {
+                    return Err(Self::unknown_or_revoked());
+                }
+            }
+        }
+        self.derive_key(scope, wait)
+    }
+
+    fn derive_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        let key_id = derive_key_id(scope, &wait)?;
         let signature = self.signature(scope, &wait, &key_id)?;
         Ok(AwaitEventKey {
             scope: scope.clone(),
@@ -204,7 +226,17 @@ impl AwaitEventRegistry {
         self.verify_uncached_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let expected = self.signature(&key.scope, &key.wait, &key.key_id)?;
-        Ok(expected == key.signature)
+        Ok(constant_time_eq(
+            expected.as_bytes(),
+            key.signature.as_bytes(),
+        ))
+    }
+
+    fn verified_key_matches(stored: &AwaitEventKey, presented: &AwaitEventKey) -> bool {
+        stored.scope == presented.scope
+            && stored.wait == presented.wait
+            && stored.key_id == presented.key_id
+            && constant_time_eq(stored.signature.as_bytes(), presented.signature.as_bytes())
     }
 
     fn unknown_or_revoked() -> RuntimeError {
@@ -219,36 +251,54 @@ impl AwaitEventRegistry {
         key: &AwaitEventKey,
         resolution: Resolution,
     ) -> Result<ResolveOutcome, RuntimeError> {
-        let shard = self.shard_for_scope(&key.scope)?;
-        let mut state = Self::locked_state(&shard)?;
-        if state.revoked {
+        if !self.verify_uncached(key)? {
             return Ok(ResolveOutcome::UnknownOrRevoked);
         }
+        let shard = self.shard_for_scope(&key.scope)?;
+        let mut state = Self::locked_state(&shard)?;
+        let session_state = state.revoked.then_some(PromiseState::Revoked);
+        if let Some(transition) = session_state.map(|state| resolve(state, resolution.clone())) {
+            return Ok(transition
+                .resolve_outcome()
+                .expect("revoked resolve always has a public outcome"));
+        }
         if let Some(completed) = state.completed_turn_control.get(&key.key_id) {
-            if completed.verified_key != *key {
+            if !Self::verified_key_matches(&completed.verified_key, key) {
                 return Ok(ResolveOutcome::UnknownOrRevoked);
             }
-            return Ok(ResolveOutcome::AlreadyResolved {
-                terminal: completed.terminal.clone(),
-            });
+            return Ok(resolve(
+                PromiseState::Resolved(completed.terminal.clone()),
+                resolution,
+            )
+            .resolve_outcome()
+            .expect("resolved promise always has a public outcome"));
         }
         if let Some(entry) = state.entries.get_mut(&key.key_id) {
-            if entry.verified_key != *key {
+            if !Self::verified_key_matches(&entry.verified_key, key) {
                 return Ok(ResolveOutcome::UnknownOrRevoked);
             }
-            if let Some(terminal) = &entry.terminal {
-                return Ok(ResolveOutcome::AlreadyResolved {
-                    terminal: terminal.clone(),
-                });
+            let observed = entry
+                .terminal
+                .clone()
+                .map_or(PromiseState::Pending, PromiseState::Resolved);
+            match resolve(observed, resolution) {
+                PromiseTransition::Store(terminal) => {
+                    entry.terminal = Some(terminal);
+                    entry.notify.notify_waiters();
+                }
+                transition => {
+                    return Ok(transition
+                        .resolve_outcome()
+                        .expect("normal resolve always has a public outcome"));
+                }
             }
-            entry.terminal = Some(resolution);
-            entry.notify.notify_waiters();
         } else {
-            if !self.verify_uncached(key)? {
-                return Ok(ResolveOutcome::UnknownOrRevoked);
-            }
             let mut entry = AwaitEventEntry::for_key(key);
-            entry.terminal = Some(resolution);
+            let PromiseTransition::Store(terminal) = resolve(PromiseState::Missing, resolution)
+            else {
+                unreachable!("missing promise always buffers the proposed terminal")
+            };
+            entry.terminal = Some(terminal);
             entry.notify.notify_waiters();
             state.entries.insert(key.key_id.clone(), entry);
         }
@@ -268,13 +318,13 @@ impl AwaitEventRegistry {
             return Err(Self::unknown_or_revoked());
         }
         if let Some(completed) = state.completed_turn_control.get(&key.key_id) {
-            if completed.verified_key != *key {
+            if !Self::verified_key_matches(&completed.verified_key, key) {
                 return Err(Self::unknown_or_revoked());
             }
             return Ok(Some(completed.terminal.clone()));
         }
         if let Some(entry) = state.entries.get(&key.key_id) {
-            if entry.verified_key != *key {
+            if !Self::verified_key_matches(&entry.verified_key, key) {
                 return Err(Self::unknown_or_revoked());
             }
             return Ok(entry.terminal.clone());
@@ -290,7 +340,8 @@ impl AwaitEventRegistry {
         state: &mut AwaitEventRegistryState,
         terminal_key: &AwaitEventKey,
     ) -> Result<(), RuntimeError> {
-        let gate_key = self.key_for(&terminal_key.scope, AwaitEventWaitIdentity::TurnCancelGate)?;
+        let gate_key =
+            self.derive_key(&terminal_key.scope, AwaitEventWaitIdentity::TurnCancelGate)?;
         for key_id in [&gate_key.key_id, &terminal_key.key_id] {
             let Some(entry) = state.entries.remove(key_id) else {
                 continue;
@@ -352,13 +403,13 @@ impl AwaitEventRegistry {
                     return Err(Self::unknown_or_revoked());
                 }
                 if let Some(completed) = state.completed_turn_control.get(&key.key_id) {
-                    if completed.verified_key != *key {
+                    if !Self::verified_key_matches(&completed.verified_key, key) {
                         return Err(Self::unknown_or_revoked());
                     }
                     return Ok(completed.terminal.clone());
                 }
                 if let Some(entry) = state.entries.get(&key.key_id)
-                    && entry.verified_key != *key
+                    && !Self::verified_key_matches(&entry.verified_key, key)
                 {
                     return Err(Self::unknown_or_revoked());
                 }
@@ -426,7 +477,8 @@ impl AwaitEventRegistry {
         let shard = self.shard_for_session(session_id)?;
         let newly_revoked = {
             let mut state = Self::locked_state(&shard)?;
-            let newly_revoked = !state.revoked;
+            let transition = revoke_session(state.revoked);
+            let newly_revoked = transition == SessionRevocationTransition::MarkRevoked;
             state.revoked = true;
             for entry in state.entries.values() {
                 entry.notify.notify_waiters();
@@ -507,11 +559,16 @@ impl AwaitEventRegistry {
         };
         let mut state = Self::locked_state(&shard)?;
         for entry in state.entries.values_mut() {
-            if entry.turn_control || entry.terminal.is_some() {
-                continue;
+            let observed = entry
+                .terminal
+                .clone()
+                .map_or(PromiseState::Pending, PromiseState::Resolved);
+            if let PromiseTransition::Store(terminal) =
+                cancel_sweep(&entry.verified_key.wait, observed)
+            {
+                entry.terminal = Some(terminal);
+                entry.notify.notify_waiters();
             }
-            entry.terminal = Some(Resolution::Cancelled);
-            entry.notify.notify_waiters();
         }
         Ok(())
     }
@@ -525,6 +582,24 @@ mod tests {
 
     fn turn_scope(session_id: &str, turn_id: &str) -> ExecutionScope {
         ExecutionScope::turn(session_id, turn_id)
+    }
+
+    #[test]
+    fn key_derivation_does_not_register_or_materialize_session_state() {
+        let registry = AwaitEventRegistry::new();
+        let scope = turn_scope("pure-key", "turn");
+
+        registry
+            .key_for(&scope, AwaitEventWaitIdentity::tool_completion("tool-call"))
+            .expect("derive key");
+
+        assert!(
+            registry
+                .existing_session_shard("pure-key")
+                .expect("read registry")
+                .is_none(),
+            "key derivation must remain a pure read with no registration write"
+        );
     }
 
     #[tokio::test]

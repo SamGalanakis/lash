@@ -1203,7 +1203,9 @@ mod tests {
                         .into_trigger()?
                         .execute(&operation_id, *command)
                         .await?;
-                    Ok(lash_core::RuntimeEffectOutcome::Trigger { result })
+                    Ok(lash_core::RuntimeEffectOutcome::Trigger {
+                        result: Box::new(result),
+                    })
                 }
                 _ => local_executor.execute(envelope).await,
             }

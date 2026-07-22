@@ -193,18 +193,33 @@ fn restate_await_event_key(
     scope: &ExecutionScope,
     wait: AwaitEventWaitIdentity,
 ) -> Result<AwaitEventKey, RuntimeError> {
-    let key_id = serde_json::to_string(&(scope, &wait)).map_err(|err| {
-        RuntimeError::new(
-            "await_event_key_hash",
-            format!("failed to encode Restate await-event identity: {err}"),
-        )
-    })?;
+    let key_id = lash_core::promise_semantics::derive_key_id(scope, &wait)?;
     Ok(AwaitEventKey {
         scope: scope.clone(),
         wait,
         key_id,
         signature: "restate-handler".to_string(),
     })
+}
+
+fn restate_await_event_key_is_valid(key: &AwaitEventKey) -> bool {
+    let Ok(expected) = restate_await_event_key(&key.scope, key.wait.clone()) else {
+        return false;
+    };
+    lash_core::promise_semantics::constant_time_eq(
+        expected.key_id.as_bytes(),
+        key.key_id.as_bytes(),
+    ) && lash_core::promise_semantics::constant_time_eq(
+        expected.signature.as_bytes(),
+        key.signature.as_bytes(),
+    )
+}
+
+fn restate_unknown_or_revoked() -> RuntimeError {
+    RuntimeError::new(
+        "await_event_unknown_or_revoked",
+        "await-event key is invalid or revoked",
+    )
 }
 
 const DURABLE_WAIT_PROMISE_KEY: &str = "resolution";
@@ -514,7 +529,7 @@ fn restate_await_event_turn_cancel_wait_request(
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 struct RecordedRuntimeEffect {
-    envelope: CanonicalRuntimeEffectEnvelope,
+    envelope: Arc<CanonicalRuntimeEffectEnvelope>,
     outcome: Result<RuntimeEffectOutcome, RuntimeEffectControllerError>,
 }
 
@@ -731,10 +746,52 @@ impl RestateIngressClient {
         T: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        self.call_workflow_json_inner(workflow, workflow_key, handler, body, None)
+            .await
+    }
+
+    async fn call_workflow_json_idempotent<T, R>(
+        &self,
+        workflow: &str,
+        workflow_key: &str,
+        handler: &str,
+        body: &T,
+        idempotency_key: &str,
+    ) -> Result<R, RestateHttpError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        self.call_workflow_json_inner(workflow, workflow_key, handler, body, Some(idempotency_key))
+            .await
+    }
+
+    async fn call_workflow_json_inner<T, R>(
+        &self,
+        workflow: &str,
+        workflow_key: &str,
+        handler: &str,
+        body: &T,
+        idempotency_key: Option<&str>,
+    ) -> Result<R, RestateHttpError>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
         let workflow_key = restate_path_component(workflow_key);
         let path = format!("{workflow}/{workflow_key}/{handler}");
         let url = format_restate_url(self.connection.ingress_url(), &path);
-        let response = self.post_json("Restate workflow call", &url, body).await?;
+        let body = serde_json::to_vec(body).map_err(|source| RestateHttpError::Encode {
+            operation: "Restate workflow call",
+            url: url.clone(),
+            source,
+        })?;
+        let mut request =
+            HttpRequest::post(&url, body).with_header("content-type", "application/json");
+        if let Some(idempotency_key) = idempotency_key {
+            request = request.with_header("idempotency-key", idempotency_key);
+        }
+        let response = send_request(&self.connection, "Restate workflow call", request).await?;
         if !response.is_success() {
             return Err(status_error("Restate workflow call", url, response).await);
         }
@@ -1230,7 +1287,7 @@ impl AwaitEventResolver for RestateEffectHost {
         scope: &ExecutionScope,
         wait: AwaitEventWaitIdentity,
     ) -> Result<AwaitEventKey, RuntimeError> {
-        restate_await_event_key(scope, wait)
+        self.controller.await_event_key(scope, wait).await
     }
 
     async fn resolve_await_event(
@@ -1332,6 +1389,68 @@ async fn update_restate_session_waits_via_ingress(
         .map_err(|err| RuntimeError::new("restate_await_event_session_update", err.to_string()))
 }
 
+async fn restate_session_is_revoked_via_ingress(
+    ingress: &RestateAwaitEventIngress,
+    session_id: &str,
+) -> Result<bool, RuntimeError> {
+    ingress
+        .ingress
+        .call_object_json::<_, bool>("LashDurableWaitIndex", session_id, "is_revoked", &())
+        .await
+        .map_err(|err| RuntimeError::new("restate_await_event_revocation_read", err.to_string()))
+}
+
+async fn ensure_restate_key_access_via_ingress(
+    ingress: &RestateAwaitEventIngress,
+    key: &AwaitEventKey,
+) -> Result<(), RuntimeError> {
+    if !restate_await_event_key_is_valid(key) {
+        return Err(restate_unknown_or_revoked());
+    }
+    if let Some(session_id) = key.scope.session_id()
+        && restate_session_is_revoked_via_ingress(ingress, session_id).await?
+    {
+        return Err(restate_unknown_or_revoked());
+    }
+    Ok(())
+}
+
+async fn await_restate_await_event_via_ingress(
+    ingress: &RestateAwaitEventIngress,
+    key: &AwaitEventKey,
+    cancel: tokio_util::sync::CancellationToken,
+    deadline: Option<std::time::Instant>,
+    effect_replay_key: Option<&str>,
+) -> Result<Resolution, RuntimeError> {
+    let request = restate_durable_wait_request(key, deadline, &lash_core::SystemClock);
+    let workflow_key = request.address.workflow_key.clone();
+    tokio::select! {
+        result = async {
+            match effect_replay_key {
+                Some(replay_key) => ingress.ingress.call_workflow_json_idempotent::<_, Resolution>(
+                    "LashDurableWaitWorkflow",
+                    &workflow_key,
+                    "await_resolution",
+                    &request,
+                    replay_key,
+                ).await,
+                None => ingress.ingress.call_workflow_json::<_, Resolution>(
+                    "LashDurableWaitWorkflow",
+                    &workflow_key,
+                    "await_resolution",
+                    &request,
+                ).await,
+            }
+        } => result.map_err(|err| {
+            RuntimeError::new("restate_await_event_await", err.to_string())
+        }),
+        _ = cancel.cancelled() => Err(RuntimeError::new(
+            "restate_await_event_cancelled",
+            "Restate await-event ingress observation was cancelled locally",
+        )),
+    }
+}
+
 #[derive(Default)]
 struct RestateEffectHostController {
     await_event_ingress: Option<RestateAwaitEventIngress>,
@@ -1343,11 +1462,30 @@ impl AwaitEventResolver for RestateEffectHostController {
         DurabilityTier::Durable
     }
 
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        let Some(ingress) = &self.await_event_ingress else {
+            return Err(restate_await_event_ingress_required());
+        };
+        if let Some(session_id) = scope.session_id()
+            && restate_session_is_revoked_via_ingress(ingress, session_id).await?
+        {
+            return Err(restate_unknown_or_revoked());
+        }
+        restate_await_event_key(scope, wait)
+    }
+
     async fn resolve_await_event(
         &self,
         key: &AwaitEventKey,
         resolution: Resolution,
     ) -> Result<ResolveOutcome, RuntimeError> {
+        if !restate_await_event_key_is_valid(key) {
+            return Ok(ResolveOutcome::UnknownOrRevoked);
+        }
         match &self.await_event_ingress {
             Some(ingress) => {
                 resolve_restate_await_event_via_ingress(ingress, key, resolution).await
@@ -1363,6 +1501,7 @@ impl AwaitEventResolver for RestateEffectHostController {
         let Some(ingress) = &self.await_event_ingress else {
             return Err(restate_await_event_ingress_required());
         };
+        ensure_restate_key_access_via_ingress(ingress, key).await?;
         let workflow_key = RestateDurableWaitAddress::for_key(key).workflow_key;
         ingress
             .ingress
@@ -1384,22 +1523,8 @@ impl AwaitEventResolver for RestateEffectHostController {
         let Some(ingress) = &self.await_event_ingress else {
             return Err(restate_await_event_ingress_required());
         };
-        let request = restate_durable_wait_request(key, deadline, &lash_core::SystemClock);
-        let workflow_key = request.address.workflow_key.clone();
-        tokio::select! {
-            result = ingress.ingress.call_workflow_json::<_, Resolution>(
-                "LashDurableWaitWorkflow",
-                &workflow_key,
-                "await_resolution",
-                &request,
-            ) => result.map_err(|err| {
-                RuntimeError::new("restate_await_event_await", err.to_string())
-            }),
-            _ = cancel.cancelled() => Err(RuntimeError::new(
-                "restate_await_event_cancelled",
-                "Restate await-event ingress observation was cancelled locally",
-            )),
-        }
+        ensure_restate_key_access_via_ingress(ingress, key).await?;
+        await_restate_await_event_via_ingress(ingress, key, cancel, deadline, None).await
     }
 
     async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
@@ -1426,8 +1551,36 @@ impl RuntimeEffectController for RestateEffectHostController {
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,
-        _local_executor: RuntimeEffectLocalExecutor<'_>,
+        local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        let effect_replay_key = envelope.stable_hash()?;
+        if let RuntimeEffectCommand::AwaitEvent { key } = &envelope.command {
+            if !restate_await_event_key_is_valid(key) {
+                return Err(RuntimeEffectControllerError::from(
+                    restate_unknown_or_revoked(),
+                ));
+            }
+            let Some(ingress) = &self.await_event_ingress else {
+                return Err(RuntimeEffectControllerError::from(
+                    restate_await_event_ingress_required(),
+                ));
+            };
+            let RuntimeAwaitEventOptions {
+                cancellation,
+                deadline,
+                ..
+            } = local_executor.into_await_event_options()?;
+            let resolution = await_restate_await_event_via_ingress(
+                ingress,
+                key,
+                cancellation,
+                deadline,
+                Some(&effect_replay_key),
+            )
+            .await
+            .map_err(RuntimeEffectControllerError::from)?;
+            return Ok(RuntimeEffectOutcome::AwaitEvent { resolution });
+        }
         Err(RuntimeEffectControllerError::new(
             "restate_effect_host_requires_handler_scope",
             format!(
@@ -2433,6 +2586,7 @@ impl LashDurableWaitWorkflow for LashDurableWaitWorkflowImpl {
 /// cancellation, and revocation atomic for one session.
 #[restate_sdk::object]
 pub trait LashDurableWaitIndex {
+    async fn is_revoked(request: Json<()>) -> HandlerResult<Json<bool>>;
     async fn register(
         request: Json<RestateDurableWaitIndexRequest>,
     ) -> HandlerResult<Json<RestateDurableWaitRegistration>>;
@@ -2595,6 +2749,24 @@ fn split_cancellable_waits(
 }
 
 impl LashDurableWaitIndex for LashDurableWaitIndexImpl {
+    async fn is_revoked(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(()): Json<()>,
+    ) -> HandlerResult<Json<bool>> {
+        if let Some(Json(metadata)) = ctx
+            .get::<Json<RestateDurableWaitIndexMetadata>>(DURABLE_WAIT_INDEX_METADATA_KEY)
+            .await?
+        {
+            return Ok(Json(metadata.revoked));
+        }
+        let revoked = ctx
+            .get::<Json<RestateDurableWaitIndexState>>(LEGACY_DURABLE_WAIT_INDEX_STATE_KEY)
+            .await?
+            .is_some_and(|Json(state)| state.revoked);
+        Ok(Json(revoked))
+    }
+
     async fn register(
         &self,
         ctx: ObjectContext<'_>,
@@ -3079,6 +3251,16 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
     ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
+
+    fn session_is_revoked<'run>(
+        &'run self,
+        _session_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 macro_rules! impl_restate_controller_context {
@@ -3463,6 +3645,30 @@ macro_rules! impl_restate_controller_context {
                         Ok(())
                     })
                 }
+
+                fn session_is_revoked<'run>(
+                    &'run self,
+                    session_id: String,
+                ) -> Pin<Box<dyn Future<Output = Result<bool, TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    let request: restate_sdk::context::Request<'_, Json<()>, Json<bool>> =
+                        ContextClient::request(
+                            self,
+                            RequestTarget::object(
+                                "LashDurableWaitIndex",
+                                session_id,
+                                "is_revoked",
+                            ),
+                            Json(()),
+                        );
+                    let call = request.call();
+                    Box::pin(async move {
+                        let Json(revoked) = call.await?;
+                        Ok(revoked)
+                    })
+                }
             }
         )+
     };
@@ -3521,15 +3727,18 @@ where
         ScopedEffectController::borrowed(self, scope)
     }
 
-    async fn record_effect<'run, T, Fut>(
+    async fn record_effect<'run, T>(
         &'run self,
         metadata: RuntimeInvocation,
-        future: Fut,
+        // Keep the full journaled-effect executor behind one allocation. The
+        // Restate SDK stores this future in its ctx.run state machine, so
+        // accepting it inline here makes every composed turn carry the whole
+        // executor frame through the durable adapter.
+        future: Pin<Box<dyn Future<Output = T> + Send + 'run>>,
     ) -> Result<T, RestateEffectError>
     where
         'ctx: 'run,
         T: Serialize + DeserializeOwned + Send + 'static,
-        Fut: Future<Output = T> + Send + 'run,
     {
         let effect_name = restate_effect_name(&metadata);
         let run_retry_policy = self.options.run_retry_policy.clone();
@@ -3567,6 +3776,17 @@ where
         scope: &ExecutionScope,
         wait: AwaitEventWaitIdentity,
     ) -> Result<AwaitEventKey, RuntimeError> {
+        if let Some(session_id) = scope.session_id()
+            && self
+                .context
+                .session_is_revoked(session_id.to_string())
+                .await
+                .map_err(|err| {
+                    RuntimeError::new("restate_await_event_revocation_read", err.to_string())
+                })?
+        {
+            return Err(restate_unknown_or_revoked());
+        }
         restate_await_event_key(scope, wait)
     }
 
@@ -3575,6 +3795,9 @@ where
         key: &AwaitEventKey,
         resolution: Resolution,
     ) -> Result<ResolveOutcome, RuntimeError> {
+        if !restate_await_event_key_is_valid(key) {
+            return Ok(ResolveOutcome::UnknownOrRevoked);
+        }
         resolve_restate_await_event(&self.context, key, resolution).await
     }
 
@@ -3582,6 +3805,20 @@ where
         &self,
         key: &AwaitEventKey,
     ) -> Result<Option<Resolution>, RuntimeError> {
+        if !restate_await_event_key_is_valid(key) {
+            return Err(restate_unknown_or_revoked());
+        }
+        if let Some(session_id) = key.scope.session_id()
+            && self
+                .context
+                .session_is_revoked(session_id.to_string())
+                .await
+                .map_err(|err| {
+                    RuntimeError::new("restate_await_event_revocation_read", err.to_string())
+                })?
+        {
+            return Err(restate_unknown_or_revoked());
+        }
         self.context
             .peek_event(RestateDurableWaitAddress::for_key(key))
             .await
@@ -3594,6 +3831,20 @@ where
         cancel: tokio_util::sync::CancellationToken,
         deadline: Option<std::time::Instant>,
     ) -> Result<Resolution, RuntimeError> {
+        if !restate_await_event_key_is_valid(key) {
+            return Err(restate_unknown_or_revoked());
+        }
+        if let Some(session_id) = key.scope.session_id()
+            && self
+                .context
+                .session_is_revoked(session_id.to_string())
+                .await
+                .map_err(|err| {
+                    RuntimeError::new("restate_await_event_revocation_read", err.to_string())
+                })?
+        {
+            return Err(restate_unknown_or_revoked());
+        }
         let clock = lash_core::SystemClock;
         self.context
             .await_event(restate_durable_wait_request(key, deadline, &clock), cancel)
@@ -3734,19 +3985,32 @@ where
                     )),
                 }
             }
+            RestateEffectExecution::PeekAwaitEvent => {
+                let RuntimeEffectCommand::PeekAwaitEvent { key } = envelope.command else {
+                    unreachable!("peek execution is only selected for await-event reads");
+                };
+                self.peek_await_event(&key)
+                    .await
+                    .map(|resolution| RuntimeEffectOutcome::PeekAwaitEvent { resolution })
+                    .map_err(RuntimeEffectControllerError::from)
+            }
             RestateEffectExecution::JournaledRun => {
                 let reconstructed_envelope = envelope.canonical_form()?;
                 let replay_trace = local_executor.replay_validation_trace().cloned();
                 let invocation = envelope.invocation.clone();
-                let recorded_envelope = reconstructed_envelope.clone();
+                let recorded_envelope = Arc::new(reconstructed_envelope.clone());
                 let recorded = self
-                    .record_effect(invocation, async move {
-                        let outcome = local_executor.execute(envelope).await;
-                        RecordedRuntimeEffect {
-                            envelope: recorded_envelope,
-                            outcome,
-                        }
-                    })
+                    .record_effect(
+                        invocation,
+                        Box::pin(async move {
+                            let outcome =
+                                execute_restate_journaled_effect(envelope, local_executor).await;
+                            RecordedRuntimeEffect {
+                                envelope: recorded_envelope,
+                                outcome,
+                            }
+                        }),
+                    )
                     .await
                     .map_err(|err| {
                         RuntimeEffectControllerError::new(
@@ -3760,6 +4024,29 @@ where
                     replay_trace.as_ref(),
                 )?
             }
+        }
+    }
+}
+
+async fn execute_restate_journaled_effect(
+    envelope: RuntimeEffectEnvelope,
+    local_executor: RuntimeEffectLocalExecutor<'_>,
+) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+    let RuntimeEffectEnvelope {
+        invocation,
+        command,
+    } = envelope;
+    match command {
+        RuntimeEffectCommand::Trigger { command } => {
+            local_executor.execute_trigger(invocation, *command).await
+        }
+        command => {
+            local_executor
+                .execute(RuntimeEffectEnvelope {
+                    invocation,
+                    command,
+                })
+                .await
         }
     }
 }
@@ -3830,7 +4117,9 @@ where
                 .map_err(|err| {
                     RuntimeEffectControllerError::new("restate_process_await", err.to_string())
                 })?;
-            Ok(ProcessEffectOutcome::Await { output })
+            Ok(ProcessEffectOutcome::Await {
+                output: Box::new(output),
+            })
         }
         ProcessCommand::Cancel { process_id, reason } => {
             let record = registry
@@ -3945,6 +4234,7 @@ enum RestateEffectExecution {
     DirectLocal,
     Timer,
     AwaitEvent,
+    PeekAwaitEvent,
     JournaledRun,
 }
 
@@ -3956,6 +4246,7 @@ fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExec
         }
         RuntimeEffectCommand::Sleep { .. } => RestateEffectExecution::Timer,
         RuntimeEffectCommand::AwaitEvent { .. } => RestateEffectExecution::AwaitEvent,
+        RuntimeEffectCommand::PeekAwaitEvent { .. } => RestateEffectExecution::PeekAwaitEvent,
         RuntimeEffectCommand::LlmCall { .. }
         | RuntimeEffectCommand::Direct { .. }
         | RuntimeEffectCommand::ToolAttempt { .. }
@@ -3984,7 +4275,7 @@ fn validate_recorded_effect_envelope(
 ) -> Result<Result<RuntimeEffectOutcome, RuntimeEffectControllerError>, RuntimeEffectControllerError>
 {
     validate_replayed_effect_envelope(
-        &recorded.envelope,
+        recorded.envelope.as_ref(),
         reconstructed,
         "restate_effect_hash_mismatch",
         trace,

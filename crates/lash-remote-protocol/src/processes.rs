@@ -981,6 +981,7 @@ pub enum RemoteRuntimeEffectKind {
     SyncExecutionEnvironment,
     Sleep,
     AwaitEvent,
+    PeekAwaitEvent,
     DurableStep,
 }
 

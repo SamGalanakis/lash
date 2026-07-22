@@ -418,9 +418,9 @@ pub async fn effect_controller_journaled_effect_replay(
                     RuntimeEffectCommand::Trigger { .. }
                 ));
                 Ok(RuntimeEffectOutcome::Trigger {
-                    result: Ok(crate::TriggerCommandOutcome::List {
+                    result: Box::new(Ok(crate::TriggerCommandOutcome::List {
                         records: Vec::new(),
-                    }),
+                    })),
                 })
             }),
         )
@@ -435,9 +435,9 @@ pub async fn effect_controller_journaled_effect_replay(
                     envelope.clone(),
                     RuntimeEffectLocalExecutor::testing(move |_| async move {
                         Ok(RuntimeEffectOutcome::Trigger {
-                            result: Err(crate::TriggerOperationError::Invalid {
+                            result: Box::new(Err(crate::TriggerOperationError::Invalid {
                                 message: format!("recorded {operation} outcome"),
-                            }),
+                            })),
                         })
                     }),
                 )
@@ -1491,7 +1491,7 @@ fn replay_conformance_tool_attempt_outcome(
     tool_name: &'static str,
 ) -> RuntimeEffectOutcome {
     RuntimeEffectOutcome::ToolAttempt {
-        launch: crate::ToolAttemptLaunch::Done {
+        launch: Box::new(crate::ToolAttemptLaunch::Done {
             record: crate::ToolCallRecord {
                 call_id: Some(call_id.to_string()),
                 tool: tool_name.to_string(),
@@ -1502,7 +1502,7 @@ fn replay_conformance_tool_attempt_outcome(
                 })),
                 duration_ms: 0,
             },
-        },
+        }),
         triggers: Vec::new(),
     }
 }
@@ -1510,7 +1510,7 @@ fn replay_conformance_tool_attempt_outcome(
 #[cfg(any(test, feature = "testing"))]
 fn replay_conformance_exec_outcome(effect_id: &str) -> RuntimeEffectOutcome {
     RuntimeEffectOutcome::ExecCode {
-        result: Ok(crate::ExecResponse {
+        result: Box::new(Ok(crate::ExecResponse {
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -1519,7 +1519,7 @@ fn replay_conformance_exec_outcome(effect_id: &str) -> RuntimeEffectOutcome {
             error: None,
             duration_ms: 0,
             terminal_finish: Some(serde_json::json!(effect_id)),
-        }),
+        })),
     }
 }
 
@@ -1545,7 +1545,7 @@ fn assert_replay_conformance_tool_attempt_marker(
     let RuntimeEffectOutcome::ToolAttempt { launch, .. } = outcome else {
         panic!("expected tool-attempt effect outcome");
     };
-    let crate::ToolAttemptLaunch::Done { record } = launch else {
+    let crate::ToolAttemptLaunch::Done { record } = *launch else {
         panic!("expected completed tool-attempt launch");
     };
     assert_eq!(record.call_id.as_deref(), Some(expected_call_id));

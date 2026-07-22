@@ -370,6 +370,7 @@ pub use provider::{
 };
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;
+pub use runtime::promise_semantics;
 pub use runtime::{
     AbandonEvidence, AbandonRequest, AbandonWriter, AgentFrameRun, AssembledTurn, AssistantOutput,
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, BoundaryReason, CausalRef, Clock,
@@ -430,11 +431,11 @@ pub(crate) use runtime::{
     LlmAttachmentSpec, ProcessEventSemantics, QueuedCheckpointTurnInput, QueuedCheckpointWork,
     QueuedTurnWork, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
     QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
-    RuntimeReplay, RuntimeScope, RuntimeSubject, load_process_execution_env,
-    materialize_process_event_semantics, persist_process_execution_env,
-    prepare_process_event_append, prepare_process_registration, process_event_invocation,
-    process_event_payload_hash, process_wake_batch_draft, process_wake_input_from_event_payload,
-    process_wake_turn_cause, process_wake_turn_text, require_event_replay,
+    RuntimeReplay, RuntimeSubject, load_process_execution_env, materialize_process_event_semantics,
+    persist_process_execution_env, prepare_process_event_append, prepare_process_registration,
+    process_event_invocation, process_event_payload_hash, process_wake_batch_draft,
+    process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
+    require_event_replay,
 };
 pub use session_model::{
     PLUGIN_RUNTIME_PROTOCOL_PLUGIN_ID, PersistedPluginRuntimeEvent,
@@ -448,7 +449,7 @@ pub use runtime::{
     ProcessEventSemanticsSpec, RuntimeAwaitEventOptions, RuntimeEffectCommand,
     RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
     RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeEffectReplayMismatchSummary, RuntimeEffectReplayTrace, RuntimeInvocation,
+    RuntimeEffectReplayMismatchSummary, RuntimeEffectReplayTrace, RuntimeInvocation, RuntimeScope,
     RuntimeSessionState, RuntimeSleepOptions, ToolAttemptEffectOutcome, ToolAttemptLaunch,
     ToolBatchEffectOutcome, validate_replayed_effect_envelope,
 };

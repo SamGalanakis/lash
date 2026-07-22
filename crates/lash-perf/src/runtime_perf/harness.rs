@@ -53,11 +53,13 @@ trait ExplicitEphemeralFacets: Sized {
 
 impl ExplicitEphemeralFacets for lash::LashCoreBuilder {
     fn with_explicit_ephemeral_facets(self) -> Self {
-        self.effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-            .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-            .process_env_store(Arc::new(
-                lash::persistence::InMemoryProcessExecutionEnvStore::new(),
-            ))
+        self.effect_host(Arc::new(
+            lash::durability::InlineEffectHost::default().allow_process_lifetime_completion_keys(),
+        ))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
     }
 }
 
@@ -581,9 +583,13 @@ pub(crate) fn build_embed_core(
     scenario: RuntimePerfScenario,
     store: Arc<RuntimePerfStore>,
 ) -> anyhow::Result<BenchmarkCore> {
+    let effect_host = Arc::new(
+        lash::durability::InlineEffectHost::default().allow_process_lifetime_completion_keys(),
+    );
     match scenario {
         RuntimePerfScenario::EmbedStandard => lash::LashCore::standard_builder()
             .with_explicit_ephemeral_facets()
+            .effect_host(effect_host.clone())
             .provider(benchmark_provider(scenario).into_handle())
             .model(benchmark_model_spec())
             .store_factory(Arc::new(RuntimePerfStoreFactory::new(store)))
@@ -597,7 +603,8 @@ pub(crate) fn build_embed_core(
             );
             lash::LashCore::rlm_builder(factory)
                 .with_explicit_ephemeral_facets()
-                .tools(Arc::new(BenchmarkEchoTool))
+                .effect_host(effect_host.clone())
+                .tools(Arc::new(BenchmarkEchoTool::new(effect_host)))
                 .provider(benchmark_provider(scenario).into_handle())
                 .model(benchmark_model_spec())
                 .store_factory(Arc::new(RuntimePerfStoreFactory::new(store)))
@@ -644,11 +651,17 @@ pub(crate) async fn build_runtime_with_store(
                 (provider.into_handle(), control)
             }
         };
-    let effect_host = matches!(scenario, RuntimePerfScenario::TurnStartGate).then(|| {
-        Arc::new(lash_core::InlineEffectHost::new(Arc::new(
-            RetryingStartGateController::default(),
-        ))) as Arc<dyn lash_core::EffectHost>
-    });
+    let effect_host: Arc<dyn lash_core::EffectHost> =
+        if matches!(scenario, RuntimePerfScenario::TurnStartGate) {
+            Arc::new(
+                lash_core::InlineEffectHost::new(Arc::new(RetryingStartGateController::default()))
+                    .allow_process_lifetime_completion_keys(),
+            )
+        } else {
+            Arc::new(
+                lash_core::InlineEffectHost::default().allow_process_lifetime_completion_keys(),
+            )
+        };
     let store = store.unwrap_or_else(|| Arc::new(RuntimePerfStore::default()));
     let mut plugin_stack = standard_tool_stack(StandardToolStackOptions {
         standard_context_approach: standard_context_approach.clone(),
@@ -657,7 +670,8 @@ pub(crate) async fn build_runtime_with_store(
     });
     plugin_stack.push(Arc::new(StaticPluginFactory::new(
         "runtime_perf_tools",
-        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
+        PluginSpec::new()
+            .with_tool_provider(Arc::new(BenchmarkEchoTool::new(Arc::clone(&effect_host)))),
     )));
     if matches!(scenario, RuntimePerfScenario::RlmLlmQuery) {
         plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
@@ -699,12 +713,10 @@ pub(crate) async fn build_runtime_with_store(
         ExecutionMode::Standard => {
             let mut builder = lash::LashCore::standard_builder()
                 .with_explicit_ephemeral_facets()
+                .effect_host(Arc::clone(&effect_host))
                 .provider(provider)
                 .model(benchmark_model_spec())
                 .plugins(plugin_stack);
-            if let Some(effect_host) = effect_host.clone() {
-                builder = builder.effect_host(effect_host);
-            }
             if let Some(config) = trace_config {
                 if let Some(path) = config.trace_jsonl_path {
                     builder = builder.trace_jsonl_path(path);
@@ -737,13 +749,11 @@ pub(crate) async fn build_runtime_with_store(
             }
             let mut builder = lash::LashCore::rlm_builder(factory)
                 .with_explicit_ephemeral_facets()
+                .effect_host(Arc::clone(&effect_host))
                 .provider(provider)
                 .model(benchmark_model_spec())
                 .plugins(plugin_stack)
                 .max_turns(RUNTIME_PERF_MAX_TURNS);
-            if let Some(effect_host) = effect_host {
-                builder = builder.effect_host(effect_host);
-            }
             if let Some(config) = trace_config {
                 if let Some(path) = config.trace_jsonl_path {
                     builder = builder.trace_jsonl_path(path);
@@ -773,9 +783,18 @@ pub(crate) async fn build_runtime_with_store(
     })
 }
 
-#[derive(Default)]
 struct RetryingStartGateController {
     attempts_by_key: Mutex<HashMap<String, usize>>,
+    delegate: lash_core::InlineRuntimeEffectController,
+}
+
+impl Default for RetryingStartGateController {
+    fn default() -> Self {
+        Self {
+            attempts_by_key: Mutex::new(HashMap::new()),
+            delegate: lash_core::InlineRuntimeEffectController::default(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -785,9 +804,7 @@ impl lash_core::AwaitEventResolver for RetryingStartGateController {
         scope: &lash_core::ExecutionScope,
         wait: lash_core::AwaitEventWaitIdentity,
     ) -> Result<lash_core::AwaitEventKey, lash_core::RuntimeError> {
-        lash_core::InlineRuntimeEffectController
-            .await_event_key(scope, wait)
-            .await
+        self.delegate.await_event_key(scope, wait).await
     }
 
     async fn resolve_await_event(
@@ -795,9 +812,7 @@ impl lash_core::AwaitEventResolver for RetryingStartGateController {
         key: &lash_core::AwaitEventKey,
         resolution: lash_core::Resolution,
     ) -> Result<lash_core::ResolveOutcome, lash_core::RuntimeError> {
-        lash_core::InlineRuntimeEffectController
-            .resolve_await_event(key, resolution)
-            .await
+        self.delegate.resolve_await_event(key, resolution).await
     }
 
     async fn peek_await_event(
@@ -818,9 +833,7 @@ impl lash_core::AwaitEventResolver for RetryingStartGateController {
                 ));
             }
         }
-        lash_core::InlineRuntimeEffectController
-            .peek_await_event(key)
-            .await
+        self.delegate.peek_await_event(key).await
     }
 
     async fn await_await_event(
@@ -829,16 +842,14 @@ impl lash_core::AwaitEventResolver for RetryingStartGateController {
         cancel: tokio_util::sync::CancellationToken,
         deadline: Option<std::time::Instant>,
     ) -> Result<lash_core::Resolution, lash_core::RuntimeError> {
-        lash_core::InlineRuntimeEffectController
-            .await_await_event(key, cancel, deadline)
-            .await
+        self.delegate.await_await_event(key, cancel, deadline).await
     }
 
     async fn revoke_await_events_for_session(
         &self,
         session_id: &str,
     ) -> Result<(), lash_core::RuntimeError> {
-        lash_core::InlineRuntimeEffectController
+        self.delegate
             .revoke_await_events_for_session(session_id)
             .await
     }
@@ -847,7 +858,7 @@ impl lash_core::AwaitEventResolver for RetryingStartGateController {
         &self,
         session_id: &str,
     ) -> Result<(), lash_core::RuntimeError> {
-        lash_core::InlineRuntimeEffectController
+        self.delegate
             .cancel_await_events_for_session(session_id)
             .await
     }
@@ -860,9 +871,7 @@ impl lash_core::RuntimeEffectController for RetryingStartGateController {
         envelope: lash_core::RuntimeEffectEnvelope,
         local_executor: lash_core::RuntimeEffectLocalExecutor<'_>,
     ) -> Result<lash_core::RuntimeEffectOutcome, lash_core::RuntimeEffectControllerError> {
-        lash_core::InlineRuntimeEffectController
-            .execute_effect(envelope, local_executor)
-            .await
+        self.delegate.execute_effect(envelope, local_executor).await
     }
 }
 
@@ -967,11 +976,6 @@ pub(crate) async fn build_runtime_with_sqlite_store(
         tavily_api_key: None,
         include_cancel_process: mode_id.is_standard(),
     });
-    plugin_stack.push(Arc::new(StaticPluginFactory::new(
-        "runtime_perf_tools",
-        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
-    )));
-
     let sessions_root = root.join("sessions");
     let attachments_root = root.join("attachments");
     let artifacts_db = root.join("artifacts.db");
@@ -984,6 +988,10 @@ pub(crate) async fn build_runtime_with_sqlite_store(
             .await
             .map_err(|err| anyhow::anyhow!(err.to_string()))?,
     );
+    plugin_stack.push(Arc::new(StaticPluginFactory::new(
+        "runtime_perf_tools",
+        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool::new(effect_host.clone()))),
+    )));
     let attachment_store = Arc::new(lash::persistence::FileAttachmentStore::new(
         attachments_root,
     ));

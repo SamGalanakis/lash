@@ -447,7 +447,7 @@ mod tests {
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             trigger_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
+                crate::InlineRuntimeEffectController::default(),
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -566,7 +566,7 @@ mod tests {
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             trigger_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
+                crate::InlineRuntimeEffectController::default(),
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -661,7 +661,7 @@ mod tests {
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             trigger_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
+                crate::InlineRuntimeEffectController::default(),
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -745,7 +745,7 @@ mod tests {
             process_cancel_ability: ability.clone(),
             trigger_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
+                crate::InlineRuntimeEffectController::default(),
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",

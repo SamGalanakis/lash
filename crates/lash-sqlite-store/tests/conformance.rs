@@ -113,7 +113,7 @@ fn exec_envelope(replay_key: &str, code: &str) -> RuntimeEffectEnvelope {
 
 fn exec_outcome(marker: &str) -> RuntimeEffectOutcome {
     RuntimeEffectOutcome::ExecCode {
-        result: Ok(lash_core::ExecResponse {
+        result: Box::new(Ok(lash_core::ExecResponse {
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -122,7 +122,7 @@ fn exec_outcome(marker: &str) -> RuntimeEffectOutcome {
             error: None,
             duration_ms: 0,
             terminal_finish: Some(serde_json::json!(marker)),
-        }),
+        })),
     }
 }
 

@@ -2422,7 +2422,7 @@ finish initial
             uuid::Uuid::new_v4()
         );
         let scoped_effect_controller = lash::runtime::ScopedEffectController::shared(
-            Arc::new(lash::runtime::InlineRuntimeEffectController),
+            Arc::new(lash::runtime::InlineRuntimeEffectController::default()),
             lash::runtime::ExecutionScope::runtime_operation(format!("trigger:{idempotency_key}")),
         )
         .expect("inline trigger occurrence execution scope");

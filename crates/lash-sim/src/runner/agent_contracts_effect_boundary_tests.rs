@@ -140,12 +140,13 @@ impl lash_core::ToolProvider for RecordingToolProvider {
 fn recording_effect_host(
     recorder: Arc<ToolAttemptInvariantRecorder>,
 ) -> Arc<dyn lash_core::EffectHost> {
-    Arc::new(lash_core::InlineEffectHost::new(Arc::new(
-        RecordingInlineEffectController {
+    Arc::new(
+        lash_core::InlineEffectHost::new(Arc::new(RecordingInlineEffectController {
             recorder,
-            delegate: lash_core::InlineRuntimeEffectController,
-        },
-    )))
+            delegate: lash_core::InlineRuntimeEffectController::default(),
+        }))
+        .allow_process_lifetime_completion_keys(),
+    )
 }
 
 struct BatchEnvelopeProbeTools;

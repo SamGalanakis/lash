@@ -329,7 +329,8 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
+            crate::InlineRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
         )),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
@@ -379,7 +380,8 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
+            crate::InlineRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
         )),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
@@ -436,7 +438,8 @@ fn projection_policy_dispatch_context(
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
+            crate::InlineRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
         )),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
@@ -629,7 +632,8 @@ fn lazy_contract_dispatch_context(
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
+            crate::InlineRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
         )),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
@@ -686,7 +690,8 @@ fn hidden_member_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispat
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
+            crate::InlineRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
         )),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
@@ -730,7 +735,8 @@ fn exact_dispatch_context_with_plugins(
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
+            crate::InlineRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
         )),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
@@ -858,7 +864,8 @@ fn pending_dispatch_context(
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
+            crate::InlineRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
         )),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
@@ -920,7 +927,8 @@ fn parallel_dispatch_context(
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         trigger_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController,
+            crate::InlineRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
         )),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",

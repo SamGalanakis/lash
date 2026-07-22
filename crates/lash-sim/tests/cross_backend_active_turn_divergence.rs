@@ -579,7 +579,7 @@ async fn sqlite_reopen_preserves_cancelled_turn_commit_and_allows_next_turn() {
         &sqlite_dir,
         1,
         Arc::new(YieldBeforeCancelWatchController {
-            inner: InlineRuntimeEffectController,
+            inner: InlineRuntimeEffectController::default(),
         }),
     )
     .await;

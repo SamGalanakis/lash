@@ -215,7 +215,9 @@ async fn async_main() -> anyhow_like::Result<()> {
         .then(|| RestateTurnDeployment::new(restate_ingress_url.clone()));
     let core = match durability {
         AgentServiceDurability::Local => core_builder
-            .effect_host(Arc::new(InlineEffectHost::default()))
+            .effect_host(Arc::new(
+                InlineEffectHost::default().allow_process_lifetime_completion_keys(),
+            ))
             .process_registry(Arc::clone(&process_registry))
             .build()
             .map_err(|err| err.to_string())?,

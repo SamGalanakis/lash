@@ -292,7 +292,7 @@ async fn delete_session_process_command_revokes_edges_and_reports_orphans() {
         )
         .await
         .expect("grant remaining");
-    let controller = crate::InlineRuntimeEffectController;
+    let controller = crate::InlineRuntimeEffectController::default();
     let invocation = crate::RuntimeInvocation::effect(
         crate::RuntimeScope::new("deleted"),
         "process:delete-session:deleted",

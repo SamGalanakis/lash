@@ -4165,7 +4165,7 @@ async fn session_manager_can_run_child_session_turn() {
         .expect("child session");
     let turn_id = "child-lifecycle-turn";
     let scoped_effect_controller = crate::ScopedEffectController::shared(
-        Arc::new(crate::InlineRuntimeEffectController),
+        Arc::new(crate::InlineRuntimeEffectController::default()),
         crate::ExecutionScope::turn(&handle.session_id, turn_id),
     )
     .expect("scoped child turn");
@@ -4382,7 +4382,7 @@ async fn runtime_can_activate_managed_child_session() {
             turn_context: crate::TurnContext::default(),
         },
         crate::ScopedEffectController::shared(
-            Arc::new(crate::InlineRuntimeEffectController),
+            Arc::new(crate::InlineRuntimeEffectController::default()),
             crate::ExecutionScope::turn("child", "activated-child-turn"),
         )
         .expect("scoped activated child turn"),

@@ -308,7 +308,10 @@ fn code_execution_context_with_tool_provider_catalog_and_trigger_router(
         provider,
         tool_catalog,
         trigger_router,
-        Arc::new(crate::InlineRuntimeEffectController),
+        Arc::new(
+            crate::InlineRuntimeEffectController::default()
+                .allow_process_lifetime_completion_keys(),
+        ),
     )
 }
 
@@ -711,13 +714,12 @@ impl crate::ProcessService for MockSessionManager {
         process_id: &str,
         _scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessRecord, PluginError> {
-        crate::InlineRuntimeEffectController
-            .request_process_cancel(
-                self.process_registry.clone(),
-                process_id,
-                Some("requested by test".to_string()),
-            )
-            .await
+        crate::InlineRuntimeEffectController::request_process_cancel(
+            self.process_registry.clone(),
+            process_id,
+            Some("requested by test".to_string()),
+        )
+        .await
     }
 
     async fn signal(
@@ -801,13 +803,12 @@ impl crate::ProcessService for MockSessionManager {
                 continue;
             }
             cancelled.push(
-                crate::InlineRuntimeEffectController
-                    .request_process_cancel(
-                        self.process_registry.clone(),
-                        &grant.process_id,
-                        Some("unreferenced by test".to_string()),
-                    )
-                    .await?,
+                crate::InlineRuntimeEffectController::request_process_cancel(
+                    self.process_registry.clone(),
+                    &grant.process_id,
+                    Some("unreferenced by test".to_string()),
+                )
+                .await?,
             );
         }
 

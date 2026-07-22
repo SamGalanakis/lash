@@ -46,6 +46,12 @@ impl lash_core::RuntimeEffectController for RecordingDurableEffectController {
                 turn_id: envelope.invocation.scope.turn_id.clone(),
                 replay_key: envelope.invocation.replay_key().map(ToOwned::to_owned),
             });
+        if matches!(
+            &envelope.command,
+            lash_core::RuntimeEffectCommand::PeekAwaitEvent { .. }
+        ) {
+            return Ok(lash_core::RuntimeEffectOutcome::PeekAwaitEvent { resolution: None });
+        }
         local_executor.execute(envelope).await
     }
 }
@@ -82,6 +88,12 @@ impl lash_core::RuntimeEffectController for RecordingInlineEffectController {
                 turn_id: envelope.invocation.scope.turn_id.clone(),
                 replay_key: envelope.invocation.replay_key().map(ToOwned::to_owned),
             });
+        if matches!(
+            &envelope.command,
+            lash_core::RuntimeEffectCommand::PeekAwaitEvent { .. }
+        ) {
+            return Ok(lash_core::RuntimeEffectOutcome::PeekAwaitEvent { resolution: None });
+        }
         local_executor.execute(envelope).await
     }
 }
@@ -128,7 +140,7 @@ impl lash_core::EffectHost for DurableNoopEffectHost {
         scope: lash_core::ExecutionScope,
     ) -> std::result::Result<lash_core::ScopedEffectController<'run>, lash_core::RuntimeError> {
         lash_core::ScopedEffectController::shared(
-            Arc::new(lash_core::InlineRuntimeEffectController),
+            Arc::new(lash_core::InlineRuntimeEffectController::default()),
             scope,
         )
     }
@@ -141,7 +153,7 @@ impl lash_core::EffectHost for DurableNoopEffectHost {
         lash_core::RuntimeError,
     > {
         Ok(Some(lash_core::ScopedEffectController::shared(
-            Arc::new(lash_core::InlineRuntimeEffectController),
+            Arc::new(lash_core::InlineRuntimeEffectController::default()),
             scope,
         )?))
     }

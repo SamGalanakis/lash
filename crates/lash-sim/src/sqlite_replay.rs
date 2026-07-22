@@ -937,7 +937,9 @@ async fn runtime_core_for_scripts(
             .map_err(|err| SqliteReplayError::Runtime(err.to_string()))?,
     );
     let core = lash::LashCore::standard_builder()
-        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .effect_host(Arc::new(
+            lash::durability::InlineEffectHost::default().allow_process_lifetime_completion_keys(),
+        ))
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             database_root.join("attachments"),
         )))

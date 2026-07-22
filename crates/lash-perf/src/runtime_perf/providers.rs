@@ -12,8 +12,8 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    AwaitEventResolver, DirectJsonSchema, DirectRequest, Resolution, ToolContract, ToolDefinition,
-    ToolManifest, ToolOutputContract, ToolProvider, ToolResult, TriggerOccurrenceRequest,
+    DirectJsonSchema, DirectRequest, Resolution, ToolContract, ToolDefinition, ToolManifest,
+    ToolOutputContract, ToolProvider, ToolResult, TriggerOccurrenceRequest,
     empty_trigger_source_key,
 };
 #[cfg(test)]
@@ -146,8 +146,18 @@ pub(crate) fn benchmark_provider_with_control(
     (provider, control)
 }
 
-#[derive(Default)]
-pub(crate) struct BenchmarkEchoTool;
+#[derive(Clone)]
+pub(crate) struct BenchmarkEchoTool {
+    completion_resolver: Arc<dyn lash_core::EffectHost>,
+}
+
+impl BenchmarkEchoTool {
+    pub(crate) fn new(completion_resolver: Arc<dyn lash_core::EffectHost>) -> Self {
+        Self {
+            completion_resolver,
+        }
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct BenchmarkWorkbenchMailTool;
@@ -226,7 +236,9 @@ impl ToolProvider for BenchmarkEchoTool {
         match call.name {
             "benchmark_echo" => execute_benchmark_echo(call).await,
             "benchmark_slow" => execute_benchmark_slow(call).await,
-            "benchmark_async" => execute_benchmark_async(call).await,
+            "benchmark_async" => {
+                execute_benchmark_async(Arc::clone(&self.completion_resolver), call).await
+            }
             _ => ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name)),
         }
     }
@@ -458,7 +470,10 @@ async fn execute_benchmark_slow(call: lash_core::ToolCall<'_>) -> ToolResult {
     }))
 }
 
-async fn execute_benchmark_async(call: lash_core::ToolCall<'_>) -> ToolResult {
+async fn execute_benchmark_async(
+    completion_resolver: Arc<dyn lash_core::EffectHost>,
+    call: lash_core::ToolCall<'_>,
+) -> ToolResult {
     let key = match call.context.completion_key().await {
         Ok(key) => key,
         Err(err) => return ToolResult::err_fmt(err),
@@ -477,7 +492,7 @@ async fn execute_benchmark_async(call: lash_core::ToolCall<'_>) -> ToolResult {
         if delay_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
-        let _ = lash_core::InlineRuntimeEffectController
+        let _ = completion_resolver
             .resolve_await_event(
                 &key,
                 Resolution::Ok(serde_json::json!({

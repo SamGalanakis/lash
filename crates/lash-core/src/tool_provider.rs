@@ -522,6 +522,16 @@ impl<'run> ToolContext<'run> {
             )
         })?;
         let scoped = self.effect_controller.scoped();
+        if scoped.controller().durability_tier() == crate::DurabilityTier::Inline
+            && !scoped
+                .controller()
+                .allows_process_lifetime_completion_keys()
+        {
+            return Err(crate::RuntimeError::new(
+                "tool_completion_key_process_lifetime",
+                "completion keys on an Inline-tier host die with the current process; construct the InlineEffectHost with allow_process_lifetime_completion_keys() only for an explicitly single-process deployment",
+            ));
+        }
         let key = scoped
             .controller()
             .await_event_key(
@@ -631,7 +641,8 @@ impl<'run> ToolContext<'run> {
             processes,
             Arc::new(crate::DefaultProcessCancelAbility),
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
+                crate::InlineRuntimeEffectController::default()
+                    .allow_process_lifetime_completion_keys(),
             )),
             attachment_store,
             direct_completions,
@@ -668,7 +679,8 @@ impl<'run> ToolContext<'run> {
             processes,
             process_cancel_ability,
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
+                crate::InlineRuntimeEffectController::default()
+                    .allow_process_lifetime_completion_keys(),
             )),
             attachment_store,
             direct_completions,
@@ -1020,7 +1032,7 @@ mod tests {
             Arc::new(crate::UnavailableProcessService),
             Arc::new(crate::DefaultProcessCancelAbility),
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
+                crate::InlineRuntimeEffectController::default(),
             )),
             Arc::new(crate::SessionAttachmentStore::in_memory()),
             crate::DirectCompletionClient::unavailable(
@@ -1040,5 +1052,46 @@ mod tests {
         );
         assert_eq!(context.async_process_id(), Some("process-1"));
         assert!(context.cancellation_token().is_some());
+    }
+
+    #[tokio::test]
+    async fn inline_completion_key_requires_process_lifetime_opt_in() {
+        let prepared = PreparedToolCall::from_parts(
+            "call-inline-risk",
+            "tool:demo_tool",
+            "demo_tool",
+            serde_json::json!({}),
+            None,
+            serde_json::json!({}),
+        );
+        let context = ToolContext::builder(
+            "session-inline-risk".to_string(),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::UnavailableProcessService),
+            Arc::new(crate::DefaultProcessCancelAbility),
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            Arc::new(crate::SessionAttachmentStore::in_memory()),
+            crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+        )
+        .prepared_call(&prepared)
+        .build();
+
+        let error = context
+            .completion_key()
+            .await
+            .expect_err("Inline completion keys must refuse by default");
+        assert_eq!(error.code.as_str(), "tool_completion_key_process_lifetime");
+        assert!(error.message.contains("die with the current process"));
+        assert!(
+            error
+                .message
+                .contains("allow_process_lifetime_completion_keys")
+        );
     }
 }

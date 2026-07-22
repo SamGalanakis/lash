@@ -12,6 +12,7 @@
 
 mod artifact_store;
 mod attachment_store;
+mod await_event_cold;
 mod effect_host;
 mod helpers;
 mod live_replay;
@@ -27,6 +28,7 @@ mod turn_control;
 
 pub use artifact_store::*;
 pub use attachment_store::*;
+pub use await_event_cold::*;
 pub use effect_host::*;
 pub use helpers::*;
 pub use live_replay::*;

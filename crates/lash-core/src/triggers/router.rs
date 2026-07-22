@@ -517,7 +517,7 @@ mod tests {
         )
         .await;
         let router = TriggerRouter::new(store, Some(Arc::clone(&registry)), None);
-        let controller = crate::InlineRuntimeEffectController;
+        let controller = crate::InlineRuntimeEffectController::default();
 
         let report = router
             .emit(
@@ -571,7 +571,7 @@ mod tests {
         )
         .await;
         let router = TriggerRouter::new(store, None, None);
-        let controller = crate::InlineRuntimeEffectController;
+        let controller = crate::InlineRuntimeEffectController::default();
 
         let report = router
             .emit(

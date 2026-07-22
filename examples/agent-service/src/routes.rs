@@ -830,7 +830,10 @@ finish "done through route"
             .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
                 data_dir.join("lash-sessions"),
             )))
-            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .effect_host(Arc::new(
+                lash::durability::InlineEffectHost::default()
+                    .allow_process_lifetime_completion_keys(),
+            ))
             .process_env_store(Arc::new(
                 lash_sqlite_store::Store::open(&data_dir.join("process-env.db"))
                     .await

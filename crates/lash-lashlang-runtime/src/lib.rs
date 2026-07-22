@@ -954,11 +954,9 @@ mod tests {
             ),
             Some(lash_core::BoundaryReason::JournalBudget)
         );
+        let inline = lash_core::InlineRuntimeEffectController::default();
         assert_eq!(
-            lash_core::RuntimeEffectController::wants_segment_boundary(
-                &lash_core::InlineRuntimeEffectController,
-                &progress,
-            ),
+            lash_core::RuntimeEffectController::wants_segment_boundary(&inline, &progress,),
             None
         );
     }
