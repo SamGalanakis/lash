@@ -1,8 +1,16 @@
 use std::sync::Arc;
 
-use lash_trace::{TraceError, TraceEvent, TraceProviderStreamEvent, TraceRuntimeStreamEvent};
+use lash_trace::{
+    TraceError, TraceEvent, TraceProviderRequestEvent, TraceProviderStreamEvent,
+    TraceRuntimeStreamEvent,
+};
 
 use super::*;
+
+/// Largest exact provider request body retained as structured JSON in a trace.
+/// Larger bodies keep their byte length and wire-byte digest without inflating
+/// each JSONL record and optional OpenTelemetry payload attribute.
+pub(crate) const MAX_PROVIDER_REQUEST_BODY_JSON_BYTES: usize = 2_048;
 
 /// Result of running stream hooks over a visible chunk. Carries both
 /// the (possibly rewritten) text and an `abort_requested` flag that the
@@ -631,16 +639,47 @@ impl RuntimeTurnDriver<'_> {
         Some(LlmProviderTraceSender::new(
             move |provider_event: LlmProviderTraceEvent| {
                 let sequence = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let elapsed_ms = clock
+                    .now()
+                    .saturating_duration_since(created_at)
+                    .as_millis() as u64;
+                if let Some(endpoint) = provider_event.request_endpoint() {
+                    let body_len = provider_event.raw.len();
+                    let (body_json, body_json_omitted_reason) =
+                        if body_len > MAX_PROVIDER_REQUEST_BODY_JSON_BYTES {
+                            (None, Some("size_limit".to_string()))
+                        } else {
+                            match serde_json::from_str(&provider_event.raw) {
+                                Ok(body_json) => (Some(body_json), None),
+                                Err(_) => (None, Some("invalid_json".to_string())),
+                            }
+                        };
+                    let event = TraceProviderRequestEvent {
+                        provider: provider_event.provider.to_string(),
+                        sequence,
+                        elapsed_ms,
+                        endpoint: endpoint.to_string(),
+                        body_len,
+                        body_sha256: lash_trace::sha256_hex(provider_event.raw.as_bytes()),
+                        body_json,
+                        body_json_omitted_reason,
+                    };
+                    crate::trace::emit_trace(
+                        &sink,
+                        &base_context,
+                        context.clone().for_llm_call(llm_call_id.clone()),
+                        TraceEvent::ProviderRequest { event },
+                        clock.as_ref(),
+                    );
+                    return;
+                }
                 let raw_json = serde_json::from_str::<serde_json::Value>(&provider_event.raw).ok();
                 let item_id = raw_json.as_ref().and_then(provider_item_id);
                 let output_index = raw_json.as_ref().and_then(provider_output_index);
                 let event = TraceProviderStreamEvent {
                     provider: provider_event.provider.to_string(),
                     sequence,
-                    elapsed_ms: clock
-                        .now()
-                        .saturating_duration_since(created_at)
-                        .as_millis() as u64,
+                    elapsed_ms,
                     event_name: provider_event.event_name,
                     item_id,
                     output_index,

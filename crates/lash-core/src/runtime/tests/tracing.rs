@@ -376,14 +376,33 @@ async fn standard_runtime_trace_records_stream_event_entries() {
 }
 
 #[tokio::test]
-async fn extended_runtime_trace_records_provider_stream_events() {
+async fn extended_runtime_trace_records_provider_request_and_stream_events() {
     let transport = TestProvider::builder()
         .kind("mock")
         .requires_streaming(true)
         .complete(|req| async move {
             if let Some(tx) = req.provider_trace.as_ref() {
+                tx.send(LlmProviderTraceEvent::request(
+                    "mock",
+                    "responses",
+                    serde_json::json!({
+                        "model": "mock-model",
+                        "input": "x".repeat(3_000),
+                    })
+                    .to_string(),
+                ));
+                tx.send(LlmProviderTraceEvent::request(
+                    "mock",
+                    "chat/completions",
+                    r#"{"model":"small"}"#.to_string(),
+                ));
+                tx.send(LlmProviderTraceEvent::request(
+                    "mock",
+                    "invalid",
+                    "not-json".to_string(),
+                ));
                 tx.send(LlmProviderTraceEvent {
-                    provider: "codex",
+                    provider: "mock",
                     event_name: "response.output_item.done".to_string(),
                     raw: serde_json::json!({
                         "type": "response.output_item.done",
@@ -393,7 +412,7 @@ async fn extended_runtime_trace_records_provider_stream_events() {
                     .to_string(),
                 });
                 tx.send(LlmProviderTraceEvent {
-                    provider: "codex",
+                    provider: "mock",
                     event_name: "response.output_item.done".to_string(),
                     raw: serde_json::json!({
                         "type": "response.output_item.done",
@@ -460,6 +479,55 @@ async fn extended_runtime_trace_records_provider_stream_events() {
         .iter()
         .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("provider_stream_event"))
         .collect::<Vec<_>>();
+    let provider_requests = entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("provider_request"))
+        .collect::<Vec<_>>();
+    assert_eq!(provider_requests.len(), 3, "provider traces: {entries:?}");
+    let request_event = provider_requests
+        .iter()
+        .find(|entry| entry["event"]["endpoint"] == "responses")
+        .expect("large provider request")["event"]
+        .clone();
+    let expected_body = serde_json::json!({
+        "model": "mock-model",
+        "input": "x".repeat(3_000),
+    });
+    let expected_serialized = expected_body.to_string();
+    assert_eq!(request_event["provider"], "mock");
+    assert_eq!(request_event["endpoint"], "responses");
+    assert!(request_event.get("body_json").is_none());
+    assert_eq!(request_event["body_json_omitted_reason"], "size_limit");
+    assert_eq!(request_event["body_len"], expected_serialized.len());
+    assert!(request_event["body_len"].as_u64().unwrap() > 2_048);
+    assert_eq!(
+        request_event["body_sha256"],
+        lash_trace::sha256_hex(expected_serialized.as_bytes())
+    );
+    let small_request = provider_requests
+        .iter()
+        .find(|entry| entry["event"]["endpoint"] == "chat/completions")
+        .expect("small provider request");
+    assert_eq!(small_request["event"]["body_json"]["model"], "small");
+    assert!(
+        small_request["event"]
+            .get("body_json_omitted_reason")
+            .is_none()
+    );
+    let invalid_request = provider_requests
+        .iter()
+        .find(|entry| entry["event"]["endpoint"] == "invalid")
+        .expect("invalid provider request");
+    assert!(invalid_request["event"].get("body_json").is_none());
+    assert_eq!(
+        invalid_request["event"]["body_json_omitted_reason"],
+        "invalid_json"
+    );
+    assert_eq!(invalid_request["event"]["body_len"], "not-json".len());
+    assert_eq!(
+        invalid_request["event"]["body_sha256"],
+        lash_trace::sha256_hex(b"not-json")
+    );
     assert_eq!(
         provider_events.len(),
         2,
@@ -479,6 +547,65 @@ async fn extended_runtime_trace_records_provider_stream_events() {
     );
 
     let _ = std::fs::remove_file(&trace_path);
+}
+
+#[tokio::test]
+async fn provider_request_trace_sender_requires_extended_level_and_sink() {
+    async fn assert_sender_absent(host: EmbeddedRuntimeHost, turn_id: &str) {
+        let transport = TestProvider::builder()
+            .kind("mock")
+            .requires_streaming(true)
+            .complete(|req| async move {
+                assert!(req.provider_trace.is_none());
+                Ok(LlmResponse {
+                    full_text: "Hello".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "Hello".to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            })
+            .build();
+        let mut runtime = standard_runtime_with_transport_and_host(transport, host).await;
+        runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hello".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    protocol_turn_options: None,
+                    trace_turn_id: None,
+                    protocol_extension: None,
+                    turn_context: crate::TurnContext::default(),
+                },
+                CancellationToken::new(),
+                named_turn_scope("root", turn_id),
+            )
+            .await
+            .expect("turn");
+    }
+
+    let trace_path = std::env::temp_dir().join(format!(
+        "lash-provider-gate-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    assert_sender_absent(
+        test_host_config_with_trace_path(trace_path.clone()),
+        "standard-trace-level",
+    )
+    .await;
+
+    let mut no_sink = test_host_config();
+    no_sink.core.tracing.trace_level = lash_trace::TraceLevel::Extended;
+    assert_sender_absent(no_sink, "extended-without-sink").await;
+
+    let _ = std::fs::remove_file(trace_path);
 }
 
 #[tokio::test]

@@ -24,7 +24,9 @@ pub(crate) use lash_llm_transport::normalize::{
 };
 pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 pub(crate) use lash_llm_transport::timeouts::response_start_timeout;
-pub(crate) use lash_llm_transport::util::{emit_provider_trace, parse_i64};
+pub(crate) use lash_llm_transport::util::{
+    emit_provider_request_trace, emit_provider_trace, parse_i64,
+};
 pub(crate) use lash_llm_transport::{
     LlmHttpRequest, LlmHttpTransport, ReqwestLlmHttpTransport, first_header_value,
     read_http_body_text,

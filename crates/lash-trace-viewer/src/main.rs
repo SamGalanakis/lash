@@ -278,6 +278,14 @@ fn interpret_typed(event: &TraceEvent, raw: &Value) -> (String, String, bool) {
         TraceEvent::LlmCallFailed { error, .. } => {
             (error.message.clone(), failure_detail(error), true)
         }
+        TraceEvent::ProviderRequest { event } => (
+            format!("{}: {}", event.provider, event.endpoint),
+            format!(
+                "seq {}, {} ms, body {} bytes, sha {}",
+                event.sequence, event.elapsed_ms, event.body_len, event.body_sha256
+            ),
+            false,
+        ),
         TraceEvent::ToolCallStarted { name, args, .. } => (name.clone(), json_compact(args), false),
         TraceEvent::ToolCallCompleted {
             name,
@@ -1165,9 +1173,9 @@ mod tests {
     use lash_trace::{
         TraceAgentFrameSwitch, TraceContentBlock, TraceContext, TraceError, TraceEvent,
         TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity, TraceLashlangMap,
-        TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TraceProviderStreamEvent, TraceRecord,
-        TraceRuntimeScope, TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceTokenUsage,
-        TraceToolCallOutcome, TraceToolCallOutput,
+        TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TraceProviderRequestEvent,
+        TraceProviderStreamEvent, TraceRecord, TraceRuntimeScope, TraceRuntimeStreamEvent,
+        TraceRuntimeSubject, TraceTokenUsage, TraceToolCallOutcome, TraceToolCallOutput,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1276,6 +1284,18 @@ mod tests {
                     raw: None,
                 },
                 stream_summary: None,
+            },
+            TraceEvent::ProviderRequest {
+                event: TraceProviderRequestEvent {
+                    provider: "openai_compatible".to_string(),
+                    sequence: 0,
+                    elapsed_ms: 1,
+                    endpoint: "responses".to_string(),
+                    body_len: 13,
+                    body_sha256: "sha".to_string(),
+                    body_json: Some(serde_json::json!({"model": "m"})),
+                    body_json_omitted_reason: None,
+                },
             },
             TraceEvent::ProviderStreamEvent {
                 event: TraceProviderStreamEvent {

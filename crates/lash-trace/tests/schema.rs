@@ -11,8 +11,9 @@ use std::collections::BTreeSet;
 use lash_trace::{
     TraceContext, TraceError, TraceEvent, TraceLashlangExecutionEvent,
     TraceLashlangExecutionIdentity, TraceLashlangStatus, TraceLlmRequest, TraceLlmResponse,
-    TraceProviderStreamEvent, TraceRecord, TraceRuntimeScope, TraceRuntimeStreamEvent,
-    TraceRuntimeSubject, TraceTokenUsage, TraceToolCallOutcome, TraceToolCallOutput,
+    TraceProviderRequestEvent, TraceProviderStreamEvent, TraceRecord, TraceRuntimeScope,
+    TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceTokenUsage, TraceToolCallOutcome,
+    TraceToolCallOutput,
 };
 use serde_json::json;
 
@@ -112,6 +113,18 @@ fn event_samples() -> Vec<TraceEvent> {
             },
             stream_summary: None,
         },
+        TraceEvent::ProviderRequest {
+            event: TraceProviderRequestEvent {
+                provider: "test".to_string(),
+                sequence: 0,
+                elapsed_ms: 0,
+                endpoint: "chat/completions".to_string(),
+                body_len: 13,
+                body_sha256: "abcd".to_string(),
+                body_json: Some(json!({ "model": "m" })),
+                body_json_omitted_reason: None,
+            },
+        },
         TraceEvent::ProviderStreamEvent {
             event: TraceProviderStreamEvent {
                 provider: "test".to_string(),
@@ -190,6 +203,7 @@ const ALL_TRACE_EVENT_KINDS: &[&str] = &[
     "llm_call_started",
     "llm_call_completed",
     "llm_call_failed",
+    "provider_request",
     "provider_stream_event",
     "runtime_stream_event",
     "tool_call_started",

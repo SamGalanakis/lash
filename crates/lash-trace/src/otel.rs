@@ -234,6 +234,11 @@ where
                     self.emit_instant(record, "lash.llm", None);
                 }
             }
+            TraceEvent::ProviderRequest { .. } => {
+                if !self.add_llm_event(record, "lash.provider_request") {
+                    self.emit_instant(record, "lash.provider_request", None);
+                }
+            }
             TraceEvent::ProviderStreamEvent { .. } => {
                 if !self.add_llm_event(record, "lash.provider_stream_event") {
                     self.emit_instant(record, "lash.provider_stream_event", None);
@@ -466,6 +471,37 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
                 stream_summary,
             );
             push_payload_json(&mut attrs, options, "lash.error.raw", &error.raw);
+        }
+        TraceEvent::ProviderRequest { event } => {
+            attrs.push(KeyValue::new("lash.provider.name", event.provider.clone()));
+            attrs.push(KeyValue::new(
+                "lash.provider.endpoint",
+                event.endpoint.clone(),
+            ));
+            attrs.push(KeyValue::new("lash.stream.sequence", event.sequence as i64));
+            attrs.push(KeyValue::new(
+                "lash.stream.elapsed_ms",
+                event.elapsed_ms as i64,
+            ));
+            attrs.push(KeyValue::new(
+                "lash.request.body_len",
+                event.body_len as i64,
+            ));
+            attrs.push(KeyValue::new(
+                "lash.request.body_sha256",
+                event.body_sha256.clone(),
+            ));
+            push_payload_json(
+                &mut attrs,
+                options,
+                "lash.request.body_json",
+                &event.body_json,
+            );
+            push_opt(
+                &mut attrs,
+                "lash.request.body_json_omitted_reason",
+                &event.body_json_omitted_reason,
+            );
         }
         TraceEvent::ProviderStreamEvent { event } => {
             attrs.push(KeyValue::new("lash.provider.name", event.provider.clone()));
@@ -979,6 +1015,7 @@ fn event_type(event: &TraceEvent) -> &'static str {
         TraceEvent::LlmCallStarted { .. } => "llm_call_started",
         TraceEvent::LlmCallCompleted { .. } => "llm_call_completed",
         TraceEvent::LlmCallFailed { .. } => "llm_call_failed",
+        TraceEvent::ProviderRequest { .. } => "provider_request",
         TraceEvent::ProviderStreamEvent { .. } => "provider_stream_event",
         TraceEvent::RuntimeStreamEvent { .. } => "runtime_stream_event",
         TraceEvent::LashlangExecution { .. } => "lashlang_execution",

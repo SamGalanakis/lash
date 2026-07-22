@@ -117,6 +117,7 @@ pub struct ScriptedWsServer {
     /// `ws://…` URL to point [`crate::codex::CodexProvider::with_endpoint_urls`] at.
     pub url: String,
     captured: Arc<Mutex<Vec<Value>>>,
+    captured_raw: Arc<Mutex<Vec<Vec<u8>>>>,
     handshakes: CapturedHandshakes,
     close_frames: Arc<Mutex<u32>>,
     task: JoinHandle<()>,
@@ -126,6 +127,14 @@ impl ScriptedWsServer {
     /// Every JSON request the server received, in order.
     pub fn captured(&self) -> Vec<Value> {
         self.captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Every request payload exactly as received from the WebSocket frame.
+    pub fn captured_raw(&self) -> Vec<Vec<u8>> {
+        self.captured_raw
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -161,10 +170,12 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
     let addr = listener.local_addr().expect("ws addr");
     let actions = Arc::new(Mutex::new(VecDeque::from(actions)));
     let captured = Arc::new(Mutex::new(Vec::new()));
+    let captured_raw = Arc::new(Mutex::new(Vec::new()));
     let handshakes = Arc::new(Mutex::new(Vec::new()));
     let close_frames = Arc::new(Mutex::new(0u32));
     let task_actions = Arc::clone(&actions);
     let task_captured = Arc::clone(&captured);
+    let task_captured_raw = Arc::clone(&captured_raw);
     let task_handshakes = Arc::clone(&handshakes);
     let task_close_frames = Arc::clone(&close_frames);
     let task = tokio::spawn(async move {
@@ -174,6 +185,7 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
             };
             let actions = Arc::clone(&task_actions);
             let captured = Arc::clone(&task_captured);
+            let captured_raw = Arc::clone(&task_captured_raw);
             let handshakes = Arc::clone(&task_handshakes);
             let close_frames = Arc::clone(&task_close_frames);
             tokio::spawn(async move {
@@ -214,6 +226,10 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
                             continue;
                         }
                     };
+                    captured_raw
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(text.as_bytes().to_vec());
                     let request: Value = serde_json::from_str(&text).expect("ws request json");
                     captured
                         .lock()
@@ -341,6 +357,7 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
     ScriptedWsServer {
         url: format!("ws://{addr}/codex/responses"),
         captured,
+        captured_raw,
         handshakes,
         close_frames,
         task,

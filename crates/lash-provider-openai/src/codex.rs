@@ -27,7 +27,7 @@ use lash_core::provider::{
 use lash_core::{ProviderSchemaCapabilities, SchemaPurpose};
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::response_start_timeout;
-use lash_llm_transport::util::emit_provider_trace;
+use lash_llm_transport::util::{emit_provider_request_trace, emit_provider_trace};
 use lash_llm_transport::{
     LlmHttpMethod, LlmHttpRequest, LlmHttpTransport, first_header_value, header_contains,
     http_error_envelope, openai_terminal_reason_from_response_value,
@@ -1191,6 +1191,12 @@ impl CodexProvider {
                 });
             }
         };
+        emit_provider_request_trace(
+            provider_trace.as_ref(),
+            "codex",
+            "responses",
+            request_body.as_bytes(),
+        );
         let diagnostics = CodexWebsocketAttemptDiagnostics {
             configured_transport: self.transport,
             reused_connection: lease.reused,
@@ -1644,8 +1650,6 @@ impl Provider for CodexProvider {
         }
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
-        let access_token = credential.access_token.clone();
-        let account_id = credential.account_id.clone();
         let timeouts = self.options.llm_timeouts();
 
         let body = self.build_request_body(&req, stream_events.is_some())?;
@@ -1654,7 +1658,10 @@ impl Provider for CodexProvider {
         let body_bytes = serde_json::to_vec(&body).map_err(|e| {
             LlmTransportError::new(format!("Failed to serialize Codex request: {e}"))
         })?;
+        emit_provider_request_trace(provider_trace.as_ref(), "codex", "responses", &body_bytes);
 
+        let access_token = credential.access_token.clone();
+        let account_id = credential.account_id.clone();
         let mut headers = vec![
             (
                 "Authorization".to_string(),

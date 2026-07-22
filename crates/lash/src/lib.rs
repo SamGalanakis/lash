@@ -412,9 +412,9 @@ pub mod tracing {
     pub use lash_core::{
         JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceError,
         TraceEvent, TraceLabelMetadata, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse,
-        TracePromptComponent, TraceProviderStreamEvent, TraceRecord, TraceRuntimeScope,
-        TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceSinkError, TraceTokenUsage,
-        TraceToolSpec,
+        TracePromptComponent, TraceProviderRequestEvent, TraceProviderStreamEvent, TraceRecord,
+        TraceRuntimeScope, TraceRuntimeStreamEvent, TraceRuntimeSubject, TraceSinkError,
+        TraceTokenUsage, TraceToolSpec,
     };
     #[cfg(feature = "otel-trace")]
     pub use lash_core::{OtelTraceOptions, OtelTraceSink};

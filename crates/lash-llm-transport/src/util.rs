@@ -33,6 +33,28 @@ pub fn emit_provider_trace(tx: Option<&LlmProviderTraceSender>, provider: &'stat
     });
 }
 
+/// Forward the exact serialized provider request body to the extended trace
+/// channel. The runtime only installs this sender when extended tracing and a
+/// trace sink are both configured.
+pub fn emit_provider_request_trace(
+    tx: Option<&LlmProviderTraceSender>,
+    provider: &'static str,
+    endpoint: &str,
+    body: &[u8],
+) {
+    let Some(tx) = tx else {
+        return;
+    };
+    let Ok(body) = std::str::from_utf8(body) else {
+        return;
+    };
+    tx.send(LlmProviderTraceEvent::request(
+        provider,
+        endpoint,
+        body.to_string(),
+    ));
+}
+
 /// Coerce a JSON value into an `i64`, accepting both numbers and numeric
 /// strings (some providers report token counts as strings). Missing or
 /// non-numeric values yield `0`.
