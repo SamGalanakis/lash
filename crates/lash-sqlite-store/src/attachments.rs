@@ -235,22 +235,30 @@ impl AttachmentManifest for Store {
             let session_id = intent.session_id.as_str().to_string();
             let canonical_uri = intent.canonical_uri.as_str().to_string();
             let intent_at_ms = intent.intent_at_epoch_ms as i64;
+            let owner_kind = intent.owner_kind.map(AttachmentOwnerKind::as_str);
+            let owner_id = intent.owner_id;
             self.conn
                 .call(move |conn| {
-                    // Re-recording an intent REFRESHES `intent_at_ms` (the
-                    // `DO UPDATE SET intent_at_ms` below). A long-lived retry loop
-                    // re-`put`ting the same content id keeps bumping the timestamp
-                    // forward, so the crash-orphan reconciliation — which deletes
-                    // uncommitted intents at/before the grace cutoff — never
-                    // collects a blob a session is still actively retrying.
+                    // Re-recording refreshes the timestamp and durable owner
+                    // together. GC later composes this age with owner-death proof.
                     conn.execute(
                         "INSERT INTO attachment_manifest
-                            (attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms)
-                         VALUES (?1, ?2, ?3, ?4, NULL)
+                            (attachment_id, session_id, canonical_uri, intent_at_ms,
+                             committed_at_ms, owner_kind, owner_id)
+                         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)
                          ON CONFLICT(session_id, attachment_id) DO UPDATE SET
                             canonical_uri = excluded.canonical_uri,
-                            intent_at_ms = excluded.intent_at_ms",
-                        params![attachment_id, session_id, canonical_uri, intent_at_ms],
+                            intent_at_ms = excluded.intent_at_ms,
+                            owner_kind = excluded.owner_kind,
+                            owner_id = excluded.owner_id",
+                        params![
+                            attachment_id,
+                            session_id,
+                            canonical_uri,
+                            intent_at_ms,
+                            owner_kind,
+                            owner_id
+                        ],
                     )
                 })
                 .await
@@ -301,7 +309,8 @@ impl AttachmentManifest for Store {
             self.conn
                 .call(move |conn| {
                     let mut stmt = conn.prepare(
-                        "SELECT attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms
+                        "SELECT attachment_id, session_id, canonical_uri, intent_at_ms,
+                                committed_at_ms, owner_kind, owner_id
                          FROM attachment_manifest
                          WHERE committed_at_ms IS NULL AND intent_at_ms <= ?1
                          ORDER BY intent_at_ms ASC",
@@ -312,12 +321,20 @@ impl AttachmentManifest for Store {
                         let canonical_uri: String = row.get(2)?;
                         let intent_at_ms: i64 = row.get(3)?;
                         let committed_at_ms: Option<i64> = row.get(4)?;
+                        let owner_kind: Option<String> = row.get(5)?;
+                        let owner_id: Option<String> = row.get(6)?;
                         Ok(AttachmentManifestEntry {
                             attachment_id: AttachmentId::new(id),
                             session_id,
                             canonical_uri,
                             intent_at_epoch_ms: intent_at_ms as u64,
                             committed_at_epoch_ms: committed_at_ms.map(|v| v as u64),
+                            owner_kind: match owner_kind.as_deref() {
+                                Some("turn") => Some(AttachmentOwnerKind::Turn),
+                                Some("process") => Some(AttachmentOwnerKind::Process),
+                                _ => None,
+                            },
+                            owner_id,
                         })
                     })?;
                     Ok(rows.filter_map(Result::ok).collect())
@@ -333,18 +350,45 @@ impl AttachmentManifest for Store {
     ) -> Result<(), StoreError> {
         block_on_store(async {
             let cutoff = intent_grace_cutoff_epoch_ms as i64;
+            let process_registry_attached = self.process_registry_attached;
             self.conn
                 .write(move |tx| {
-                    // One conditional DELETE inside the write transaction — the age
-                    // predicate lives in the statement, not in a prior read. A
-                    // concurrent `record_intent` that refreshes `intent_at_ms` past
-                    // the cutoff no longer matches, so a freshly-refreshed live
-                    // intent is never deleted (no list-then-forget race).
-                    tx.execute(
-                        "DELETE FROM attachment_manifest
-                         WHERE committed_at_ms IS NULL AND intent_at_ms <= ?1",
-                        params![cutoff],
-                    )?;
+                    // One conditional DELETE composes age with owner-death proof.
+                    // The attached process DB makes the NOT EXISTS predicate part
+                    // of this same SQLite statement/transaction, avoiding a
+                    // read-process-then-forget race across the per-session topology.
+                    let process_dead = if process_registry_attached {
+                        "OR (
+                            manifest.owner_kind = 'process'
+                            AND NOT EXISTS (
+                                SELECT 1 FROM process_registry.processes AS process
+                                WHERE process.process_id = manifest.owner_id
+                            )
+                        )"
+                    } else {
+                        // Without a configured process registry, conservatively
+                        // retain process-owned rows rather than guess liveness.
+                        ""
+                    };
+                    let sql = format!(
+                        "DELETE FROM attachment_manifest AS manifest
+                         WHERE manifest.committed_at_ms IS NULL
+                           AND manifest.intent_at_ms <= ?1
+                           AND (
+                                manifest.owner_kind IS NULL
+                                OR (
+                                    manifest.owner_kind = 'turn'
+                                    AND EXISTS (
+                                        SELECT 1 FROM runtime_turn_commits AS turn_commit
+                                        WHERE turn_commit.session_id = manifest.session_id
+                                          AND turn_commit.turn_id <> manifest.owner_id
+                                          AND turn_commit.committed_at_ms > manifest.intent_at_ms
+                                    )
+                                )
+                                {process_dead}
+                           )"
+                    );
+                    tx.execute(&sql, params![cutoff])?;
                     Ok(())
                 })
                 .await
@@ -361,15 +405,44 @@ impl AttachmentManifest for Store {
         block_on_store(async {
             let attachment_id = attachment_id.as_str().to_string();
             let cutoff = intent_grace_cutoff_epoch_ms as i64;
+            let process_registry_attached = self.process_registry_attached;
             self.conn
                 .call(move |conn| {
-                    // A GC-live ref: a committed row, or an uncommitted intent
-                    // younger than the cutoff. Aged orphan intents do not count.
+                    let process_dead = if process_registry_attached {
+                        "OR (
+                            manifest.owner_kind = 'process'
+                            AND NOT EXISTS (
+                                SELECT 1 FROM process_registry.processes AS process
+                                WHERE process.process_id = manifest.owner_id
+                            )
+                        )"
+                    } else {
+                        ""
+                    };
+                    let sql = format!(
+                        "SELECT 1 FROM attachment_manifest AS manifest
+                         WHERE manifest.attachment_id = ?1
+                           AND NOT (
+                                manifest.committed_at_ms IS NULL
+                                AND manifest.intent_at_ms <= ?2
+                                AND (
+                                    manifest.owner_kind IS NULL
+                                    OR (
+                                        manifest.owner_kind = 'turn'
+                                        AND EXISTS (
+                                            SELECT 1 FROM runtime_turn_commits AS turn_commit
+                                            WHERE turn_commit.session_id = manifest.session_id
+                                              AND turn_commit.turn_id <> manifest.owner_id
+                                              AND turn_commit.committed_at_ms > manifest.intent_at_ms
+                                        )
+                                    )
+                                    {process_dead}
+                                )
+                           )
+                         LIMIT 1"
+                    );
                     conn.query_row(
-                        "SELECT 1 FROM attachment_manifest
-                         WHERE attachment_id = ?1
-                           AND (committed_at_ms IS NOT NULL OR intent_at_ms > ?2)
-                         LIMIT 1",
+                        &sql,
                         params![attachment_id, cutoff],
                         |_| Ok(()),
                     )

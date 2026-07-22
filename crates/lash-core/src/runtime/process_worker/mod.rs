@@ -8,10 +8,11 @@ use tokio_util::sync::CancellationToken;
 use super::effect::ProcessRunner;
 use super::session_manager::RuntimeSessionServices;
 use super::{EmbeddedRuntimeBuilder, ProcessWorkDriver, QueuedWorkDriver, RuntimeHostConfig};
+use crate::InMemorySessionStore;
 use crate::{
-    AbandonEvidence, AbandonWriter, InMemorySessionStore, LashRuntime, PluginError, PluginFactory,
-    PluginHost, PluginStack, ProcessAwaitOutput, ProcessExecutionContext, ProcessInput,
-    ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    AbandonEvidence, AbandonWriter, LashRuntime, PluginError, PluginFactory, PluginHost,
+    PluginStack, ProcessAwaitOutput, ProcessExecutionContext, ProcessInput, ProcessLease,
+    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
     RecoveryDisposition, SessionStoreFactory,
 };
 
@@ -537,6 +538,18 @@ impl DurableProcessWorker {
             )
             .await?;
         let mut runtime = self.runtime_for_registration(&registration).await?;
+        let _attachment_owner_binding = matches!(
+            registration.input.as_ref(),
+            ProcessInput::ToolCall { .. } | ProcessInput::Engine { .. }
+        )
+        .then(|| {
+            runtime
+                .host
+                .core
+                .durability
+                .attachment_store
+                .bind_process_scoped(registration.id.clone())
+        });
         let originator_scope = if let crate::ProcessOriginator::Session { scope } =
             &registration.provenance.originator
         {
@@ -1326,8 +1339,8 @@ impl DurableProcessWorker {
         if policy.recorded_provider_id().is_empty() {
             policy.provider_id = self.config.session_policy.provider_id.clone();
         }
-        self.build_ephemeral_runtime(
-            format!("process-session-turn:{}", registration.id),
+        self.build_process_runtime(
+            crate::process_runtime_session_ids(&registration.id)[1].clone(),
             policy,
             create_request.plugin_options.clone(),
             "session turn request",
@@ -1354,8 +1367,8 @@ impl DurableProcessWorker {
             env_ref,
         )
         .await?;
-        self.build_ephemeral_runtime(
-            format!("process-env:{}", registration.id),
+        self.build_process_runtime(
+            crate::process_runtime_session_ids(&registration.id)[0].clone(),
             env.policy,
             env.plugin_options,
             env_ref.as_str(),
@@ -1363,13 +1376,30 @@ impl DurableProcessWorker {
         .await
     }
 
-    async fn build_ephemeral_runtime(
+    async fn build_process_runtime(
         &self,
         session_id: String,
         policy: crate::SessionPolicy,
         plugin_options: crate::PluginOptions,
         source_label: &str,
     ) -> Result<LashRuntime, PluginError> {
+        let attachment_manifest_store = self
+            .config
+            .session_store_factory
+            .create_store(&crate::SessionStoreCreateRequest {
+                session_id: session_id.clone(),
+                relation: crate::SessionRelation::default(),
+                policy: policy.clone(),
+            })
+            .await
+            .map_err(|err| {
+                PluginError::Session(format!(
+                    "failed to open process attachment owner store for `{session_id}`: {err}"
+                ))
+            })?;
+        // Process execution sessions are reconstruction-only and must not alias
+        // a parent-bound factory's runtime state. Attachment intents still use
+        // the factory store so their process owner remains durable.
         let store = Arc::new(InMemorySessionStore::default());
         let process_work_driver = self.config.process_work_driver.clone().unwrap_or_else(|| {
             if let Some(hub) = self.config.process_change_hub.clone() {
@@ -1393,6 +1423,7 @@ impl DurableProcessWorker {
             .with_process_registry(Arc::clone(&self.config.process_registry))
             .with_process_work_driver(process_work_driver)
             .with_residency(self.config.residency)
+            .with_attachment_manifest_store(attachment_manifest_store)
             .with_store(store);
         if let Some(driver) = self.config.queued_work_driver.clone() {
             builder = builder.with_queued_work_driver(driver);

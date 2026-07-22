@@ -58,11 +58,11 @@ use lash_core::store::{
 };
 use lash_core::{
     AbandonRequest, AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
-    BlobRef, DeliveryPolicy, DurabilityTier, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness,
-    MergeKey, PROCESS_LEASE_SCHEMA_VERSION, PersistedSegmentHandover, ProcessAwaitOutput,
-    ProcessChangeCursor, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
-    ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessListFilter,
+    AttachmentOwnerKind, BlobRef, DeliveryPolicy, DurabilityTier, GcReport, LeaseOwnerIdentity,
+    LeaseOwnerLiveness, MergeKey, PROCESS_LEASE_SCHEMA_VERSION, PersistedSegmentHandover,
+    ProcessAwaitOutput, ProcessChangeCursor, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessLease, ProcessLeaseClaimOutcome, ProcessLeaseCompletion, ProcessListFilter,
     ProcessLiveReferenceSummary, ProcessPruneReport, ProcessRecord, ProcessRegistration,
     ProcessRegistry, ProcessStarted, QueuedWorkStore, RuntimePersistence, SessionCommitStore,
     SessionExecutionLease, SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion,
@@ -116,6 +116,7 @@ pub struct Store {
     artifact_cache: Mutex<BTreeMap<lashlang::ModuleRef, Arc<lashlang::ModuleArtifact>>>,
     options: StoreOptions,
     commit_count: AtomicU64,
+    process_registry_attached: bool,
     #[cfg(test)]
     checkpoint_probe_count: AtomicUsize,
     #[cfg(test)]
@@ -130,6 +131,7 @@ pub struct Store {
 pub struct SqliteProcessRegistry {
     conn: SqliteConnection,
     clock: Arc<dyn lash_core::Clock>,
+    process_session_store_root: Option<PathBuf>,
 }
 
 fn sqlite_error(err: rusqlite::Error) -> StoreError {
@@ -283,22 +285,57 @@ pub struct StoredSessionCheckpoint {
 #[derive(Clone, Debug)]
 pub struct SqliteSessionStoreFactory {
     root: PathBuf,
+    process_registry_path: Option<PathBuf>,
     options: StoreOptions,
     clock: Arc<dyn lash_core::Clock>,
 }
 
 impl SqliteSessionStoreFactory {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        warn_process_registry_not_wired();
         Self {
-            root: root.into(),
+            root,
+            process_registry_path: None,
             options: StoreOptions::default(),
             clock: Arc::new(lash_core::SystemClock),
         }
     }
 
     pub fn with_options(root: impl Into<PathBuf>, options: StoreOptions) -> Self {
+        let root = root.into();
+        warn_process_registry_not_wired();
+        Self {
+            root,
+            process_registry_path: None,
+            options,
+            clock: Arc::new(lash_core::SystemClock),
+        }
+    }
+
+    /// Construct a factory with explicit process-owner liveness wiring for
+    /// attachment GC. This is the warning-free durable constructor when the
+    /// deployment uses a Lash SQLite process registry.
+    pub fn new_with_process_registry(
+        root: impl Into<PathBuf>,
+        process_registry_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             root: root.into(),
+            process_registry_path: Some(process_registry_path.into()),
+            options: StoreOptions::default(),
+            clock: Arc::new(lash_core::SystemClock),
+        }
+    }
+
+    pub fn with_options_and_process_registry(
+        root: impl Into<PathBuf>,
+        options: StoreOptions,
+        process_registry_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            process_registry_path: Some(process_registry_path.into()),
             options,
             clock: Arc::new(lash_core::SystemClock),
         }
@@ -327,9 +364,14 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
         std::fs::create_dir_all(&self.root).map_err(|err| err.to_string())?;
         let path = self.path_for_session(&request.session_id);
         let store = Arc::new(
-            Store::open_with_options_and_clock(&path, self.options, Arc::clone(&self.clock))
-                .await
-                .map_err(|err| err.to_string())?,
+            Store::open_with_options_clock_and_process_registry(
+                &path,
+                self.options,
+                Arc::clone(&self.clock),
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?,
         );
         if store.load_session_meta().await.is_none() {
             store
@@ -360,21 +402,7 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), String> {
-        let db_path = self.path_for_session(session_id);
-        for path in [
-            db_path.clone(),
-            sqlite_sidecar_path(&db_path, "-wal"),
-            sqlite_sidecar_path(&db_path, "-shm"),
-        ] {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(format!("remove session store {}: {err}", path.display()));
-                }
-            }
-        }
-        Ok(())
+        delete_session_files(&self.root, session_id)
     }
 
     async fn live_attachment_refs(
@@ -425,18 +453,22 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
             // A primary session database that fails to open might still hold live
             // refs. Aborting the whole sweep is the safe choice: treating it as
             // empty would let GC delete blobs it actually references.
-            let store =
-                Store::open_with_options_and_clock(&path, self.options, Arc::clone(&self.clock))
-                    .await
-                    .map_err(|err| {
-                        lash_core::StoreError::Backend(format!(
-                            "attachment GC aborted: session database {} could not be opened: {err}",
-                            path.display()
-                        ))
-                    })?;
-            // Reconcile crash orphans in this session database atomically: one
-            // conditional DELETE of uncommitted intents aged past the cutoff (no
-            // list-then-forget race against a concurrent `record_intent` refresh),
+            let store = Store::open_with_options_clock_and_process_registry(
+                &path,
+                self.options,
+                Arc::clone(&self.clock),
+                self.process_registry_path.as_deref(),
+            )
+            .await
+            .map_err(|err| {
+                lash_core::StoreError::Backend(format!(
+                    "attachment GC aborted: session database {} could not be opened: {err}",
+                    path.display()
+                ))
+            })?;
+            // Reconcile terminal-owner intents in this session database
+            // atomically: one conditional DELETE combines age with owner death
+            // (no list-then-forget race against a concurrent intent refresh),
             // then union what remains.
             lash_core::AttachmentManifest::forget_aged_uncommitted_intents(
                 &store,
@@ -478,10 +510,11 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
             if !is_primary_session_db_name(file_name) {
                 continue;
             }
-            let store = Store::open_with_options_and_clock(
+            let store = Store::open_with_options_clock_and_process_registry(
                 &path,
                 self.options,
                 Arc::clone(&self.clock),
+                self.process_registry_path.as_deref(),
             )
                 .await
                 .map_err(|err| {
@@ -500,6 +533,30 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
         }
         Ok(false)
     }
+}
+
+fn warn_process_registry_not_wired() {
+    tracing::warn!(
+        "SQLite attachment GC process-owner liveness is not wired; process-owned intents will be retained indefinitely. Call SqliteSessionStoreFactory::new_with_process_registry(...)."
+    );
+}
+
+fn delete_session_files(root: &Path, session_id: &str) -> Result<(), String> {
+    let db_path = root.join(safe_session_db_file_name(session_id));
+    for path in [
+        db_path.clone(),
+        sqlite_sidecar_path(&db_path, "-wal"),
+        sqlite_sidecar_path(&db_path, "-shm"),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!("remove session store {}: {err}", path.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether `file_name` is a primary session database rather than a per-session
@@ -826,6 +883,8 @@ mod tests {
                     session_id: "sess-1".to_string(),
                     canonical_uri: format!("lash-attachment://sha256/{attachment_id}"),
                     intent_at_epoch_ms: 1_000,
+                    owner_kind: None,
+                    owner_id: None,
                 },
             )
             .expect("record intent");
@@ -1012,7 +1071,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("processes.db");
         {
-            let registry = SqliteProcessRegistry::open(&path)
+            let registry = SqliteProcessRegistry::open(&path, dir.path().join("sessions"))
                 .await
                 .expect("open registry");
             let session_scope = lash_core::SessionScope::new("session");
@@ -1042,7 +1101,7 @@ mod tests {
         }
 
         let registry = Arc::new(
-            SqliteProcessRegistry::open(&path)
+            SqliteProcessRegistry::open(&path, dir.path().join("sessions"))
                 .await
                 .expect("reopen registry"),
         ) as Arc<dyn lash_core::ProcessRegistry>;

@@ -1001,9 +1001,12 @@ pub(crate) async fn build_runtime_with_sqlite_store(
             .map_err(|err| anyhow::anyhow!(err.to_string()))?,
     );
     let process_registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?,
     );
     let trigger_store = Arc::new(
         lash_sqlite_store::SqliteTriggerStore::open(&triggers_db)

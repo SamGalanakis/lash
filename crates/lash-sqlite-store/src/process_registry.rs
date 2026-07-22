@@ -1346,6 +1346,36 @@ impl ProcessRegistry for SqliteProcessRegistry {
     ) -> Result<ProcessPruneReport, lash_core::PluginError> {
         let cutoff = cutoff_epoch_ms as i64;
         let max_change_seq = up_to_change_seq.map(ProcessChangeCursor::store_sequence);
+        if let Some(root) = self.process_session_store_root.as_ref() {
+            let selection_filter = filter.clone();
+            let prunable = self
+                .conn
+                .call(move |conn| {
+                    crate::process_registry_change::prunable_terminal_process_ids_conn(
+                        conn,
+                        cutoff,
+                        selection_filter,
+                        max_change_seq,
+                    )
+                    .map_err(|err| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                            err.to_string(),
+                        )))
+                    })
+                })
+                .await
+                .map_err(process_sqlite_error)?;
+            // Delete process-owned session stores first. If this fails, the
+            // terminal process row remains and the prune leaks conservatively;
+            // the final transaction below revalidates eligibility before it
+            // removes any process row.
+            for process_id in prunable {
+                for session_id in lash_core::process_runtime_session_ids(&process_id) {
+                    delete_session_files(root, &session_id)
+                        .map_err(lash_core::PluginError::Session)?;
+                }
+            }
+        }
         self.conn
             .write_flow(move |tx| {
                 Ok(tx_outcome(

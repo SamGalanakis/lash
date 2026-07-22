@@ -47,8 +47,9 @@ where
 
 fn open_registry(path: &Path) -> Arc<dyn ProcessRegistry> {
     let path = path.to_path_buf();
+    let sessions = path.with_extension("sessions");
     Arc::new(sync_await(async move {
-        SqliteProcessRegistry::open(&path)
+        SqliteProcessRegistry::open(&path, sessions)
             .await
             .expect("file registry")
     })) as Arc<dyn ProcessRegistry>
@@ -225,6 +226,91 @@ async fn sqlite_session_store_factory_satisfies_conformance() {
         DurabilityTier::Durable,
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sqlite_attachment_owner_cold_replay_conformance() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clock = Arc::new(ConformanceClock::new(
+        current_epoch_ms_for_test().saturating_sub(100_000),
+    ));
+    let process_path = dir.path().join("processes.db");
+    let registry = Arc::new(
+        SqliteProcessRegistry::open_with_clock(
+            &process_path,
+            clock.clone(),
+            dir.path().join("sessions"),
+        )
+        .await
+        .expect("process registry"),
+    ) as Arc<dyn ProcessRegistry>;
+    let factory = Arc::new(
+        SqliteSessionStoreFactory::new_with_process_registry(
+            dir.path().join("sessions"),
+            &process_path,
+        )
+        .with_clock(clock.clone()),
+    ) as Arc<dyn SessionStoreFactory>;
+    let effect_path = dir.path().join("effects.db");
+    let scope = ExecutionScope::turn("attachment-owner-cold-replay", "attachment-owner-turn");
+    let first = Arc::new(
+        SqliteRuntimeEffectController::open_with_clock(&effect_path, scope.clone(), clock.clone())
+            .await
+            .expect("first effect controller"),
+    ) as Arc<dyn RuntimeEffectController>;
+    let reopen_effect_controller = {
+        let effect_path = effect_path.clone();
+        let clock = clock.clone();
+        Arc::new(move || {
+            let effect_path = effect_path.clone();
+            let scope = scope.clone();
+            let clock = clock.clone();
+            Box::pin(async move {
+                Arc::new(
+                    SqliteRuntimeEffectController::open_with_clock(&effect_path, scope, clock)
+                        .await
+                        .expect("cold replay effect controller"),
+                ) as Arc<dyn RuntimeEffectController>
+            })
+                as std::pin::Pin<Box<dyn Future<Output = Arc<dyn RuntimeEffectController>> + Send>>
+        })
+    };
+    let advance_clock = {
+        let clock = clock.clone();
+        Arc::new(move |duration_ms| clock.advance(duration_ms)) as Arc<dyn Fn(u64) + Send + Sync>
+    };
+
+    lash_core::testing::conformance::attachment_owner_cold_replay(
+        lash_core::testing::conformance::AttachmentOwnerColdReplayBackend {
+            session_store_factory: factory,
+            process_registry: registry,
+            attachment_store: Arc::new(lash_core::InMemoryAttachmentStore::new()),
+            first_effect_controller: Some(first),
+            reopen_effect_controller,
+            clock,
+            advance_clock,
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_process_prune_deletes_owned_session_stores() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let process_path = dir.path().join("processes.db");
+    let sessions = dir.path().join("sessions");
+    let registry = Arc::new(
+        SqliteProcessRegistry::open(&process_path, &sessions)
+            .await
+            .expect("process registry"),
+    ) as Arc<dyn ProcessRegistry>;
+    let factory = Arc::new(SqliteSessionStoreFactory::new_with_process_registry(
+        &sessions,
+        &process_path,
+    )) as Arc<dyn SessionStoreFactory>;
+
+    lash_core::testing::conformance::process_prune_deletes_owned_session_stores(factory, registry)
+        .await;
 }
 
 #[tokio::test]

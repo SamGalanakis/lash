@@ -4634,9 +4634,12 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
         temp.path().join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
     let registry_a = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("open registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
     let worker_a = recovery_worker(Arc::clone(&registry_a), Arc::clone(&store_factory));
     let _root_store = store_factory
@@ -4704,9 +4707,12 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
     drop(registry_a);
 
     let registry_b = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("reopen registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
     let grants = registry_b
         .list_handle_grants(&creator_scope)
@@ -4797,9 +4803,12 @@ async fn sqlite_process_recovery_rebuilds_snapshot_plugin_options_after_worker_r
         temp.path().join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
     let registry_a = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("open registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
     let env_ref = persist_snapshot_recovery_env_ref("tool-authority:sha256:ok").await;
     registry_a
@@ -4809,9 +4818,12 @@ async fn sqlite_process_recovery_rebuilds_snapshot_plugin_options_after_worker_r
     drop(registry_a);
 
     let registry_b = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("reopen registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
     let worker_b = recovery_worker_with_plugins(
         Arc::clone(&registry_b),
@@ -4843,9 +4855,12 @@ async fn sqlite_process_recovery_terminalizes_revoked_snapshot_plugin_options() 
         temp.path().join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
     let registry_a = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("open registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
     let env_ref = persist_snapshot_recovery_env_ref("tool-authority:sha256:revoked").await;
     registry_a
@@ -4855,9 +4870,12 @@ async fn sqlite_process_recovery_terminalizes_revoked_snapshot_plugin_options() 
     drop(registry_a);
 
     let registry_b = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("reopen registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
     let worker_b = recovery_worker_with_plugins(
         Arc::clone(&registry_b),
@@ -4981,9 +4999,12 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
     // the durable row exists and is non-terminal. We register it directly to
     // model exactly that mid-flight crash state.
     let registry_a = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("open registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
     registry_a
         .register_process(trigger_lashlang_registration("trigger-notify", "issue-42").await)
@@ -5004,9 +5025,12 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
     // by workflow key; Restate coalesces duplicates and the workflow writes the
     // terminal outcome.
     let registry_b = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("reopen registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
     let reopened_record = registry_b
         .get_process("trigger-notify")
@@ -5201,9 +5225,12 @@ async fn sqlite_sweep_abandons_started_owner_bound_without_rerunning_but_reruns_
     // The crashed host: it started an OwnerBound row and a Rerunnable row, then
     // died. We register that mid-flight state directly on the durable registry.
     let registry_a = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("open registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
     let dead_holder = local_process_owner("crashed-host", "before-the-crash");
     registry_a
@@ -5254,9 +5281,12 @@ async fn sqlite_sweep_abandons_started_owner_bound_without_rerunning_but_reruns_
     // The recovery counterpart: reopen the registry, stand up a fresh worker
     // whose lease owner can render the provably-dead verdict, and sweep.
     let registry_b = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
-            .await
-            .expect("reopen registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &process_db,
+            process_db.with_extension("sessions"),
+        )
+        .await
+        .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
     let executions = Arc::new(AtomicUsize::new(0));
     let worker = recovery_worker_local_owner(

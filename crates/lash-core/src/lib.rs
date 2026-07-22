@@ -91,6 +91,7 @@ pub use lash_sansio::{
     reasoning_part, render_turn_causes_prompt, resolve_prompt_layers, resolve_schema, shared_parts,
     validate_tool_input, visible_response_parts, visible_response_text_from_parts,
 };
+pub use store::AttachmentOwnerKind;
 
 /// Project a successful tool control into its terminal turn outcome.
 ///
@@ -420,10 +421,11 @@ pub use runtime::{
     TurnInputCompletion, TurnInputIngress, TurnInputState, TurnIssue, TurnOptions, TurnTerminal,
     TurnWorkDriver, UnavailableProcessService, UsageReportRow, UsageTotals, WaitKind, WaitState,
     apply_process_status_projection, current_epoch_ms, diff_token_ledger, diff_usage_reports,
-    ensure_durable_effect_input, epoch_ms_from_system_time, process_signal_event_type,
-    process_signal_name_from_event_type, process_signal_wait_key, process_wake_delivery,
-    system_time_from_epoch_ms, terminal_append_request, terminal_event_type_name,
-    validate_process_signal_name, watch_process_registry, watch_process_registry_with_sink,
+    ensure_durable_effect_input, epoch_ms_from_system_time, process_runtime_session_ids,
+    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
+    process_wake_delivery, system_time_from_epoch_ms, terminal_append_request,
+    terminal_event_type_name, validate_process_signal_name, watch_process_registry,
+    watch_process_registry_with_sink,
 };
 pub use runtime::{DEFAULT_PROCESS_EXECUTION_CONCURRENCY, ProcessExecutionConcurrencyError};
 #[allow(unused_imports)]

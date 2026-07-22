@@ -1,5 +1,94 @@
 use super::*;
 use crate::ToolProvider as _;
+use std::sync::atomic::AtomicUsize;
+
+struct AttachmentPutTool;
+
+fn attachment_put_tool_definition() -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        "tool:attachment_put",
+        "attachment_put",
+        "Write an attachment through the active runtime facade.",
+        crate::ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+}
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for AttachmentPutTool {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        vec![attachment_put_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == "attachment_put").then(|| Arc::new(attachment_put_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        let reference = call
+            .context
+            .attachments()
+            .put(
+                b"turn-owned-tool-attachment".to_vec(),
+                crate::AttachmentCreateMeta::new(
+                    crate::MediaType::Image(crate::ImageMediaType::Png),
+                    Some(1),
+                    Some(1),
+                    Some("turn-owned.png".to_string()),
+                ),
+            )
+            .await
+            .expect("tool attachment put");
+        crate::ToolResult::from_output(crate::ToolCallOutput::success(
+            crate::ToolValue::Attachment(reference),
+        ))
+    }
+}
+
+fn attachment_put_transport() -> TestProvider {
+    let call_index = Arc::new(AtomicUsize::new(0));
+    TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_| {
+            let call_index = Arc::clone(&call_index);
+            async move {
+                Ok(match call_index.fetch_add(1, Ordering::SeqCst) {
+                    0 => LlmResponse {
+                        parts: vec![LlmOutputPart::ToolCall {
+                            call_id: "attachment-put-call".to_string(),
+                            tool_name: "attachment_put".to_string(),
+                            input_json: "{}".to_string(),
+                            replay: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    },
+                    1 => LlmResponse {
+                        full_text: "attachment stored".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "attachment stored".to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    },
+                    index => panic!("unexpected attachment provider call {index}"),
+                })
+            }
+        })
+        .build()
+}
+
+fn assert_turn_owned_attachment(store: &RecordingStore, turn_id: &str) {
+    let entries = store.attachment_manifest_entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].owner_kind,
+        Some(crate::AttachmentOwnerKind::Turn)
+    );
+    assert_eq!(entries[0].owner_id.as_deref(), Some(turn_id));
+}
 
 fn lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {
     crate::LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
@@ -2351,6 +2440,86 @@ async fn claimed_plugin_abort_commits_and_settles_input() {
             .iter()
             .all(|input| input.input_id != inbound.input_id)
     );
+}
+
+#[tokio::test]
+async fn stream_turn_tool_put_is_bound_to_the_turn_id() {
+    const TURN_ID: &str = "attachment-owner-stream-turn";
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(AttachmentPutTool),
+        attachment_put_transport(),
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+
+    runtime
+        .stream_turn(
+            TurnInput::text("store an attachment"),
+            TurnOptions::new(CancellationToken::new(), named_turn_scope("root", TURN_ID)),
+        )
+        .await
+        .expect("stream turn succeeds");
+
+    assert_turn_owned_attachment(store.as_ref(), TURN_ID);
+}
+
+#[tokio::test]
+async fn stream_prepared_turn_tool_put_is_bound_to_the_turn_id() {
+    const TURN_ID: &str = "attachment-owner-prepared-turn";
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(AttachmentPutTool),
+        attachment_put_transport(),
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    let messages = crate::MessageSequence::from_owned(vec![Message {
+        id: "prepared-attachment-user".to_string(),
+        role: MessageRole::User,
+        parts: vec![Part {
+            id: "prepared-attachment-user.p0".to_string(),
+            kind: PartKind::Text,
+            content: "store an attachment".to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]
+        .into(),
+        origin: None,
+    }]);
+
+    runtime
+        .stream_prepared_turn(
+            messages,
+            None,
+            None,
+            None,
+            crate::TurnContext::default(),
+            Vec::new(),
+            TURN_ID.to_string(),
+            1,
+            &NoopEventSink,
+            &NoopTurnActivitySink,
+            named_turn_scope("root", TURN_ID),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .expect("prepared stream turn succeeds");
+
+    assert_turn_owned_attachment(store.as_ref(), TURN_ID);
 }
 
 #[tokio::test]

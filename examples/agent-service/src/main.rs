@@ -152,9 +152,14 @@ async fn async_main() -> anyhow_like::Result<()> {
         worker_incarnation,
         worker_host,
     );
-    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-        data_dir.join("lash-sessions"),
-    ));
+    let process_registry_path = data_dir.join("processes.db");
+    let session_store_root = data_dir.join("lash-sessions");
+    let store_factory = Arc::new(
+        lash_sqlite_store::SqliteSessionStoreFactory::new_with_process_registry(
+            &session_store_root,
+            &process_registry_path,
+        ),
+    );
     // Deployment-level Lashlang artifact store (compiled module cache), shared
     // across the session tree and durable in SQLite.
     let artifact_store = Arc::new(
@@ -202,7 +207,7 @@ async fn async_main() -> anyhow_like::Result<()> {
         .trace_level(TraceLevel::Extended)
         .trigger_store(trigger_store);
     let process_registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path, session_store_root)
             .await
             .map_err(|err| err.to_string())?,
     ) as Arc<dyn lash::process::ProcessRegistry>;

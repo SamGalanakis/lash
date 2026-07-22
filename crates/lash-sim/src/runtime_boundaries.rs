@@ -1212,14 +1212,17 @@ impl RuntimeBoundaryHarness {
             RuntimeEffectReplayStore::SqliteFile(path) => {
                 let process_path = path.with_extension("process-registry.sqlite");
                 Arc::new(
-                    lash_sqlite_store::SqliteProcessRegistry::open(&process_path)
-                        .await
-                        .map_err(|err| {
-                            RuntimeBoundaryError::new(format!(
-                                "open SQLite process registry `{}`: {err}",
-                                process_path.display()
-                            ))
-                        })?,
+                    lash_sqlite_store::SqliteProcessRegistry::open(
+                        &process_path,
+                        process_path.with_extension("sessions"),
+                    )
+                    .await
+                    .map_err(|err| {
+                        RuntimeBoundaryError::new(format!(
+                            "open SQLite process registry `{}`: {err}",
+                            process_path.display()
+                        ))
+                    })?,
                 )
             }
             RuntimeEffectReplayStore::Postgres(storage) => Arc::new(storage.process_registry()),

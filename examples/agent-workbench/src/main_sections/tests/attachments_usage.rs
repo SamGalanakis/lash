@@ -85,7 +85,7 @@ async fn run_attachment_usage_gate(
         .expect("create gate session id");
     let session_id = session_ids.current();
     let process_registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+        lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
             .await
             .expect("open gate process registry"),
     ) as Arc<dyn lash::process::ProcessRegistry>;

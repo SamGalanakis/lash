@@ -652,6 +652,8 @@ fn attachment_intent(id: &str) -> AttachmentIntent {
         session_id: "root".to_string(),
         canonical_uri: format!("sha256:{id}"),
         intent_at_epoch_ms: 100,
+        owner_kind: None,
+        owner_id: None,
     }
 }
 
@@ -1486,6 +1488,8 @@ async fn attachment_manifest_keeps_same_content_ownership_per_session(
                 session_id: session_id.to_string(),
                 canonical_uri: format!("session:{session_id}:sha256:{attachment}"),
                 intent_at_epoch_ms: 100,
+                owner_kind: None,
+                owner_id: None,
             })
             .expect("record independent owner intent");
     }
@@ -1512,6 +1516,8 @@ async fn attachment_manifest_keeps_same_content_ownership_per_session(
             session_id: "committed-owner".to_string(),
             canonical_uri: format!("session:committed-owner:sha256:{attachment}"),
             intent_at_epoch_ms: 150,
+            owner_kind: None,
+            owner_id: None,
         })
         .expect("repeat committed owner intent");
     assert!(
@@ -4283,6 +4289,8 @@ async fn attachment_manifest_reference_tracking_and_gc_root_set(
         session_id: "root".to_string(),
         canonical_uri: format!("lash-attachment://sha256/{id}"),
         intent_at_epoch_ms: at,
+        owner_kind: None,
+        owner_id: None,
     };
     store
         .record_intent(intent(&intent_id, 100))
@@ -4408,6 +4416,8 @@ async fn runtime_persistence_survives_reopen(factory: ReopenableRuntimePersisten
             session_id: "root".to_string(),
             canonical_uri: "sha256:reopen-attachment".to_string(),
             intent_at_epoch_ms: 100,
+            owner_kind: None,
+            owner_id: None,
         })
         .expect("record attachment intent");
 

@@ -42,28 +42,21 @@ references rather than inline output bytes, so neither bound may remove them.
 Tail attachments are carried by the overflow marker and remain visible to the
 ordinary tool-output attachment scan.
 
-## Why attachment commit has three sources
+## Why attachment commit combines owner promotion with explicit adoption
 
-The final turn boundary commits the union of three attachment sources. This
-union predates this ADR but had no recorded rationale:
+The final turn transaction has two complementary paths:
 
-1. `pending_manifest_commit_ids` is a local, conservative proxy for durable
-   roots that core cannot inspect. In particular, the execution-state snapshot
-   is opaque bytes and plugin trajectory nodes may carry plugin-typed values.
-   An attachment created during the turn can remain reachable only through one
-   of those roots.
-2. Attachment references in tool-call outputs are the replay-safe reachability
-   backbone. Standard calls have always populated this source; unified RLM exec
-   emission now reconstructs exec-internal calls here when a recorded response
-   is re-driven in another process.
-3. Attachment references in message parts express ordinary message
-   reachability.
+1. The store promotes every uncommitted manifest row bound to the durable
+   `RuntimeTurnCommitStamp` turn id. This is the replay-safe backbone, including
+   puts whose ids appear only in plain JSON or opaque plugin state. It needs no
+   process-local set and reconstructs nothing from tool accounting.
+2. Attachment references in typed tool outputs and message parts form the
+   explicit adoption set. They preserve cross-turn and carried-in references;
+   update-in-place deliberately no-ops when this session has no intent row.
 
-The union intentionally over-retains some abandoned scratch: source 1 can commit
-an attachment that executor code created and then discarded before the turn
-ended. The alternative is unsafe because core cannot prove that the attachment
-is absent from opaque executor or plugin state. This over-retention is bounded
-to the session lifetime, and explicit `SessionAttachmentStore::delete()` drops a
-session reference eagerly. Session deletion drops the remaining manifest roots,
-after which normal attachment GC reclaims the bytes. The existing three-source
-union therefore remains unchanged.
+Owner promotion intentionally commits attachment scratch created by a turn even
+when core cannot inspect the opaque state that retains it. Failed or superseded
+turns are not promoted: their uncommitted rows remain live through recovery and
+become reclaimable only after durable supersession proof plus the retention
+window. Explicit `SessionAttachmentStore::delete()` and session deletion still
+drop references eagerly; normal attachment GC then reclaims unrooted bytes.

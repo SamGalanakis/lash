@@ -23,15 +23,16 @@ use lash_core::store::{
 };
 use lash_core::{
     AbandonRequest, AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
-    AwaitEventResolver, BlobRef, DeliveryPolicy, DurabilityTier, EffectHost, ExecutionScope,
-    GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey, PersistedSegmentHandover,
-    ProcessAwaitOutput, ProcessChangeCursor, ProcessEvent, ProcessEventAppendRequest,
-    ProcessEventAppendResult, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessLease, ProcessLeaseCompletion, ProcessLiveReferenceSummary, ProcessPruneReport,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessStarted, QueuedWorkStore,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
-    RuntimePersistence, ScopedEffectController, SessionCommitStore, SessionExecutionLease,
+    AttachmentOwnerKind, AwaitEventResolver, BlobRef, DeliveryPolicy, DurabilityTier, EffectHost,
+    ExecutionScope, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey,
+    PersistedSegmentHandover, ProcessAwaitOutput, ProcessChangeCursor, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseCompletion,
+    ProcessLiveReferenceSummary, ProcessPruneReport, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessStarted, QueuedWorkStore, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimePersistence,
+    ScopedEffectController, SessionCommitStore, SessionExecutionLease,
     SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
     SessionExecutionLeaseStore, SessionMeta, SessionNodeRecord, SessionReadScope, SessionScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, StoreMaintenance,
@@ -64,7 +65,12 @@ const SCHEMA_COMPONENT: &str = "lash-postgres-store";
 // `claim_expires_at_ms` columns with a single `claim_session_lease_generation`
 // pinning the session-execution-lease generation the claim was taken under. This
 // is a reject-and-recreate boundary; pre-12 databases are rejected at open.
-const SCHEMA_VERSION: i32 = 14;
+//
+// Bumped to 15 for FIG-546 owner-bound attachment intents, following the
+// independently assigned version 14 trigger schema. Pre-15 manifests
+// cannot prove turn/process owner liveness and are rejected rather than read
+// through a compatibility path.
+const SCHEMA_VERSION: i32 = 15;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]
@@ -75,11 +81,14 @@ pub struct PostgresStorage {
 #[derive(Clone)]
 pub struct PostgresSessionStoreFactory {
     pool: PgPool,
+    process_registry_shared: bool,
+    clock: Arc<dyn lash_core::Clock>,
 }
 
 #[derive(Clone)]
 pub struct PostgresSessionStore {
     pool: PgPool,
+    clock: Arc<dyn lash_core::Clock>,
     /// Explicit session binding for handles created via the factory.
     session_id: Option<String>,
     /// In-memory bind-on-first-commit for an *unbound* handle. A session-store
@@ -216,14 +225,30 @@ impl PostgresStorage {
     }
 
     pub fn session_store_factory(&self) -> PostgresSessionStoreFactory {
+        warn_postgres_process_registry_not_wired();
         PostgresSessionStoreFactory {
             pool: self.pool.clone(),
+            process_registry_shared: false,
+            clock: Arc::new(lash_core::SystemClock),
+        }
+    }
+
+    /// Construct a session factory that explicitly declares this storage's
+    /// Lash process registry shares the same PostgreSQL database.
+    pub fn session_store_factory_with_shared_process_registry(
+        &self,
+    ) -> PostgresSessionStoreFactory {
+        PostgresSessionStoreFactory {
+            pool: self.pool.clone(),
+            process_registry_shared: true,
+            clock: Arc::new(lash_core::SystemClock),
         }
     }
 
     pub fn session_store(&self, session_id: impl Into<String>) -> PostgresSessionStore {
         PostgresSessionStore {
             pool: self.pool.clone(),
+            clock: Arc::new(lash_core::SystemClock),
             session_id: Some(session_id.into()),
             bound_session: Arc::new(OnceLock::new()),
             #[cfg(test)]
@@ -236,6 +261,7 @@ impl PostgresStorage {
     pub fn unbound_session_store(&self) -> PostgresSessionStore {
         PostgresSessionStore {
             pool: self.pool.clone(),
+            clock: Arc::new(lash_core::SystemClock),
             session_id: None,
             bound_session: Arc::new(OnceLock::new()),
             #[cfg(test)]
@@ -285,6 +311,21 @@ impl PostgresSessionStoreFactory {
     pub fn new(storage: &PostgresStorage) -> Self {
         storage.session_store_factory()
     }
+
+    pub fn new_with_shared_process_registry(storage: &PostgresStorage) -> Self {
+        storage.session_store_factory_with_shared_process_registry()
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn lash_core::Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+}
+
+fn warn_postgres_process_registry_not_wired() {
+    tracing::warn!(
+        "PostgreSQL attachment GC process-owner liveness is not wired; process-owned intents will be retained indefinitely. Call PostgresStorage::session_store_factory_with_shared_process_registry()."
+    );
 }
 
 impl PostgresSessionStore {

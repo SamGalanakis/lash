@@ -19,13 +19,12 @@ impl crate::AttachmentManifest for InMemorySessionStore {
             .expect("lock attachment manifest");
         match manifest.get_mut(&key) {
             Some(existing) => {
-                // Re-recording an intent REFRESHES its timestamp. A long-lived
-                // retry loop that re-`put`s the same content id keeps bumping
-                // `intent_at_epoch_ms` forward, so the crash-orphan reconciliation
-                // (which forgets intents at/before the grace cutoff) never
-                // collects a blob a session is still actively retrying.
+                // Re-recording refreshes the timestamp and durable owner as one
+                // manifest mutation. GC later composes age with owner death.
                 existing.canonical_uri = intent.canonical_uri;
                 existing.intent_at_epoch_ms = intent.intent_at_epoch_ms;
+                existing.owner_kind = intent.owner_kind;
+                existing.owner_id = intent.owner_id;
             }
             None => {
                 manifest.insert(
@@ -36,6 +35,8 @@ impl crate::AttachmentManifest for InMemorySessionStore {
                         canonical_uri: intent.canonical_uri,
                         intent_at_epoch_ms: intent.intent_at_epoch_ms,
                         committed_at_epoch_ms: None,
+                        owner_kind: intent.owner_kind,
+                        owner_id: intent.owner_id,
                     },
                 );
             }
@@ -90,17 +91,41 @@ impl crate::AttachmentManifest for InMemorySessionStore {
         &self,
         intent_grace_cutoff_epoch_ms: u64,
     ) -> Result<(), crate::store::StoreError> {
-        // Age check and removal happen under ONE lock acquisition with no await
-        // in between, so a concurrent `record_intent` cannot slip a refreshed
-        // timestamp between a read and the delete: the predicate is evaluated
-        // against the same map state the removal mutates.
+        let _transaction = self
+            .write_transaction
+            .lock()
+            .expect("lock in-memory write transaction");
+        let committed_turns = self
+            .runtime_turn_commits
+            .lock()
+            .expect("lock runtime turn commits")
+            .iter()
+            .map(|((session_id, turn_id), (_, _, committed_at_ms))| {
+                (session_id.clone(), turn_id.clone(), *committed_at_ms)
+            })
+            .collect::<Vec<_>>();
+        // Age, owner death, and removal happen under the same transaction/lock
+        // boundary. Process owners are conservatively live in the inline store;
+        // durable factories evaluate process-row existence in their database.
         self.attachment_manifest
             .lock()
             .expect("lock attachment manifest")
             .retain(|_, entry| {
-                let is_aged_orphan = entry.committed_at_epoch_ms.is_none()
-                    && entry.intent_at_epoch_ms <= intent_grace_cutoff_epoch_ms;
-                !is_aged_orphan
+                let owner_is_dead = match (entry.owner_kind, entry.owner_id.as_deref()) {
+                    (None, None) => true,
+                    (Some(crate::AttachmentOwnerKind::Turn), Some(owner_id)) => committed_turns
+                        .iter()
+                        .any(|(session_id, turn_id, committed_at_ms)| {
+                            session_id == &entry.session_id
+                                && turn_id != owner_id
+                                && *committed_at_ms > entry.intent_at_epoch_ms
+                        }),
+                    (Some(crate::AttachmentOwnerKind::Process), Some(_)) => false,
+                    _ => false,
+                };
+                !(entry.committed_at_epoch_ms.is_none()
+                    && entry.intent_at_epoch_ms <= intent_grace_cutoff_epoch_ms
+                    && owner_is_dead)
             });
         Ok(())
     }
@@ -134,15 +159,42 @@ impl crate::AttachmentManifest for InMemorySessionStore {
         attachment_id: &crate::AttachmentId,
         intent_grace_cutoff_epoch_ms: u64,
     ) -> Result<bool, crate::store::StoreError> {
+        let committed_turns = self
+            .runtime_turn_commits
+            .lock()
+            .expect("lock runtime turn commits")
+            .iter()
+            .map(|((session_id, turn_id), (_, _, committed_at_ms))| {
+                (session_id.clone(), turn_id.clone(), *committed_at_ms)
+            })
+            .collect::<Vec<_>>();
         Ok(self
             .attachment_manifest
             .lock()
             .expect("lock attachment manifest")
-            .iter()
-            .any(|((_, id), entry)| {
-                id == attachment_id
-                    && (entry.committed_at_epoch_ms.is_some()
-                        || entry.intent_at_epoch_ms > intent_grace_cutoff_epoch_ms)
+            .values()
+            .filter(|entry| &entry.attachment_id == attachment_id)
+            .any(|entry| {
+                if entry.committed_at_epoch_ms.is_some()
+                    || entry.intent_at_epoch_ms > intent_grace_cutoff_epoch_ms
+                {
+                    return true;
+                }
+                match (entry.owner_kind, entry.owner_id.as_deref()) {
+                    (None, None) => false,
+                    (Some(crate::AttachmentOwnerKind::Turn), Some(owner_id)) => !committed_turns
+                        .iter()
+                        .any(|(session_id, turn_id, committed_at_ms)| {
+                            session_id == &entry.session_id
+                                && turn_id != owner_id
+                                && *committed_at_ms > entry.intent_at_epoch_ms
+                        }),
+                    // The inline store has no durable process registry, so it
+                    // cannot prove process death and must retain the root.
+                    (Some(crate::AttachmentOwnerKind::Process), Some(_)) => true,
+                    // Invalid owner pairs are conservatively retained.
+                    _ => true,
+                }
             }))
     }
 
@@ -171,6 +223,8 @@ mod attachment_reconciliation_tests {
             session_id: session.to_string(),
             canonical_uri: format!("lash-attachment://sha256/{id}"),
             intent_at_epoch_ms: at_ms,
+            owner_kind: None,
+            owner_id: None,
         }
     }
 

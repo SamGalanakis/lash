@@ -5,18 +5,38 @@ pub(super) fn process_status_label(record: &ProcessRecord) -> &'static str {
 }
 
 impl SqliteProcessRegistry {
-    pub async fn open(path: &Path) -> tokio_rusqlite::Result<Self> {
-        Self::open_with_clock(path, Arc::new(lash_core::SystemClock)).await
+    /// Open a process registry whose terminal-retention prune removes the two
+    /// process-owned session stores from `session_store_root` before the process
+    /// row. The root is required and explicit; no sibling-directory convention
+    /// is inferred.
+    pub async fn open(
+        path: &Path,
+        session_store_root: impl Into<PathBuf>,
+    ) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_clock(path, Arc::new(lash_core::SystemClock), session_store_root).await
     }
 
     pub async fn open_with_clock(
         path: &Path,
         clock: Arc<dyn lash_core::Clock>,
+        session_store_root: impl Into<PathBuf>,
+    ) -> tokio_rusqlite::Result<Self> {
+        Self::open_configured(path, clock, session_store_root.into()).await
+    }
+
+    async fn open_configured(
+        path: &Path,
+        clock: Arc<dyn lash_core::Clock>,
+        process_session_store_root: PathBuf,
     ) -> tokio_rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path).await?;
         ensure_process_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::File).await?;
-        Ok(Self { conn, clock })
+        Ok(Self {
+            conn,
+            clock,
+            process_session_store_root: Some(process_session_store_root),
+        })
     }
 
     pub async fn memory() -> tokio_rusqlite::Result<Self> {
@@ -29,7 +49,11 @@ impl SqliteProcessRegistry {
         let conn = SqliteConnection::open_in_memory().await?;
         ensure_process_schema(&conn).await?;
         apply_pragmas(&conn, StoreBacking::Memory).await?;
-        Ok(Self { conn, clock })
+        Ok(Self {
+            conn,
+            clock,
+            process_session_store_root: None,
+        })
     }
 
     pub(crate) fn load_process_conn(

@@ -19,7 +19,7 @@
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory.clone();
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&db_path)
+            lash_sqlite_store::SqliteProcessRegistry::open(&db_path, db_path.with_extension("sessions"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;

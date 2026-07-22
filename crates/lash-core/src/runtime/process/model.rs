@@ -1036,6 +1036,14 @@ impl ProcessIdentity {
 /// carrying incarnation and liveness metadata for fenced reclaim.
 pub const PROCESS_LEASE_SCHEMA_VERSION: u32 = 2;
 
+/// Durable session stores owned exclusively by one process execution.
+pub fn process_runtime_session_ids(process_id: &str) -> [String; 2] {
+    [
+        format!("process-env:{process_id}"),
+        format!("process-session-turn:{process_id}"),
+    ]
+}
+
 /// Durable lease over a non-terminal background process.
 ///
 /// The lease pair `(owner, lease_token)` plus `fencing_token` are how lash guarantees that

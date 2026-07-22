@@ -16,11 +16,19 @@ impl WorkbenchStores {
     }
 
     async fn open_sqlite(data_dir: &std::path::Path) -> AnyhowResult<Self> {
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-            data_dir.join("lash-sessions"),
-        )) as Arc<dyn lash::persistence::SessionStoreFactory>;
+        let process_registry_path = data_dir.join("processes.db");
+        let session_store_root = data_dir.join("lash-sessions");
+        let session_store_factory = Arc::new(
+            lash_sqlite_store::SqliteSessionStoreFactory::new_with_process_registry(
+                &session_store_root,
+                &process_registry_path,
+            ),
+        ) as Arc<dyn lash::persistence::SessionStoreFactory>;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(
+                &process_registry_path,
+                session_store_root,
+            )
                 .await
                 .context("open SQLite process registry")?,
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -54,7 +62,10 @@ impl WorkbenchStores {
             .context("open Postgres workbench storage")?;
         let artifacts = Arc::new(storage.lashlang_artifact_store());
         Ok(Self {
-            session_store_factory: Arc::new(storage.session_store_factory()),
+            session_store_factory: Arc::new(
+                storage
+                    .session_store_factory_with_shared_process_registry(),
+            ),
             process_registry: Arc::new(storage.process_registry()),
             trigger_store: Arc::new(storage.trigger_store()),
             artifact_store: artifacts.clone(),

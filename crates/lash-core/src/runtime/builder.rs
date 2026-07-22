@@ -22,6 +22,7 @@ pub struct EmbeddedRuntimeBuilder {
     session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     trigger_store: Option<Arc<dyn crate::TriggerStore>>,
     store: Option<Arc<dyn RuntimePersistence>>,
+    attachment_manifest_store: Option<Arc<dyn RuntimePersistence>>,
     process_registry: Option<Arc<dyn ProcessRegistry>>,
     process_work_driver: Option<crate::ProcessWorkDriver>,
     queued_work_driver: Option<crate::QueuedWorkDriver>,
@@ -43,6 +44,7 @@ impl Default for EmbeddedRuntimeBuilder {
             session_store_factory: None,
             trigger_store: Some(Arc::new(crate::InMemoryTriggerStore::default())),
             store: None,
+            attachment_manifest_store: None,
             process_registry: None,
             process_work_driver: None,
             queued_work_driver: None,
@@ -198,6 +200,16 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub(crate) fn with_attachment_manifest_store(
+        mut self,
+        store: Arc<dyn RuntimePersistence>,
+    ) -> Self {
+        // Runtime state still uses `self.store`; only attachment intent
+        // persistence is redirected to this store.
+        self.attachment_manifest_store = Some(store);
+        self
+    }
+
     pub fn with_process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
         self.process_registry = Some(process_registry);
         self
@@ -310,6 +322,10 @@ impl EmbeddedRuntimeBuilder {
     pub async fn build(self) -> Result<LashRuntime, SessionError> {
         let state = self.resolve_state().await?;
         let plugins = self.resolve_plugins(&state)?;
+        let mut persistence = super::lifecycle::RuntimePersistenceBindings::new(self.store);
+        if let Some(manifest_store) = self.attachment_manifest_store {
+            persistence = persistence.with_attachment_manifest_store(manifest_store);
+        }
         let embedded_host = EmbeddedRuntimeHost::new(self.core)
             .with_session_store_factory_option(self.session_store_factory.clone())
             .with_trigger_store_option(self.trigger_store.clone());
@@ -319,7 +335,7 @@ impl EmbeddedRuntimeBuilder {
             state.policy.clone(),
             embedded_host,
             plugins,
-            self.store,
+            persistence,
             self.process_registry,
             state,
             self.residency,

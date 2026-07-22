@@ -47,6 +47,7 @@ pub use model::{
     ProcessSpawnProvenance, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
     ProcessStarted, ProcessStatus, ProcessStatusFilter, RecoveryDisposition, SessionScope,
     SessionScopeId, WaitKind, WaitState, load_process_execution_env, persist_process_execution_env,
+    process_runtime_session_ids,
 };
 pub use observation::{
     ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessWorkObserver,
