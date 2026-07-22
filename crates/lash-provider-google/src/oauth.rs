@@ -102,17 +102,15 @@ pub async fn refresh_tokens(refresh: &str) -> Result<OAuthTokens, OAuthError> {
         .await?;
 
     let status = resp.status();
-    let body: serde_json::Value = resp.json().await?;
+    let response_body = resp.text().await?;
     if !status.is_success() {
-        let err = body["error_description"]
-            .as_str()
-            .or(body["error"].as_str())
-            .unwrap_or("token refresh failed");
-        return Err(OAuthError::TokenEndpoint {
-            status: status.as_u16(),
-            message: err.to_string(),
-        });
+        return Err(OAuthError::token_endpoint(
+            status.as_u16(),
+            &response_body,
+            "token refresh failed",
+        ));
     }
+    let body: serde_json::Value = serde_json::from_str(&response_body)?;
 
     let now = now_secs();
     let expires_in = body["expires_in"].as_u64().unwrap_or(3600);

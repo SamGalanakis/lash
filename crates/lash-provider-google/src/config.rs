@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lash_provider_auth::{Credential, CredentialManager, CredentialRefresher, RefreshCause};
+use lash_provider_auth::{
+    Credential, CredentialManager, CredentialRefresher, RefreshCause, classify_oauth_refresh_error,
+};
 
 use crate::support::*;
 
@@ -72,30 +74,12 @@ impl CredentialRefresher<GoogleCredential> for GoogleCredentialRefresher {
     ) -> Result<GoogleCredential, CredentialError> {
         let tokens = crate::oauth::refresh_tokens(&current.refresh_token)
             .await
-            .map_err(credential_error_from_oauth)?;
+            .map_err(classify_oauth_refresh_error)?;
         Ok(GoogleCredential {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
             expires_at: tokens.expires_at,
         })
-    }
-}
-
-fn credential_error_from_oauth(error: lash_provider_auth::OAuthError) -> CredentialError {
-    let detail = error.to_string().to_ascii_lowercase();
-    if detail.contains("invalid_grant") || detail.contains("invalid grant") {
-        CredentialError::invalid_grant()
-    } else if matches!(
-        error,
-        lash_provider_auth::OAuthError::Http(_)
-            | lash_provider_auth::OAuthError::TokenEndpoint {
-                status: 408 | 429 | 500..=599,
-                ..
-            }
-    ) {
-        CredentialError::transient()
-    } else {
-        CredentialError::new(CredentialErrorKind::Other, false)
     }
 }
 
