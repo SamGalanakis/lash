@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use lash_core::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
@@ -308,7 +307,7 @@ async fn claimed_switch_is_seeded_atomic_ordered_and_exactly_once() {
     release_first_provider_tx
         .send(())
         .expect("release first provider call");
-    tokio::task::spawn_blocking(move || reached_rx.recv_timeout(Duration::from_secs(10)))
+    tokio::task::spawn_blocking(move || reached_rx.recv())
         .await
         .expect("join commit observer")
         .expect("switch commit reached observable boundary");
@@ -525,9 +524,8 @@ async fn claims_settle_for_finish_cancel_error_and_chain_bound() {
     let cancelled = tokio::spawn(async move { drain_session.queued_turn().run().await });
     provider_started_rx.await.expect("cancel provider started");
     assert_eq!(cancel_session.cancel_running_turns(), 1);
-    let cancelled = tokio::time::timeout(Duration::from_secs(10), cancelled)
+    let cancelled = cancelled
         .await
-        .expect("cancelled turn terminates")
         .expect("join cancelled turn")
         .expect("cancel drain succeeds")
         .expect("cancel input runs");

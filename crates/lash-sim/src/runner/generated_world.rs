@@ -12,7 +12,6 @@ pub(super) struct GeneratedRuntimeWorld {
     attachment_store: Arc<dyn lash::persistence::AttachmentStore>,
     process_env_store: Arc<dyn lash::persistence::ProcessExecutionEnvStore>,
     runtime_boundaries: RuntimeBoundaryHarness,
-    pub(super) peak_concurrent_live_turns: usize,
     suspending_turns: BTreeMap<String, SuspendingTurn>,
     /// When set, the driver admits at most one live provider turn at a time
     /// (see `RuntimeCompletionState::serialize_provider_turns`). Enabled for the
@@ -56,7 +55,6 @@ struct ActiveProviderTurn {
     completion_event: BoundaryEvent,
     handle: tokio::task::JoinHandle<Result<Value, FixedScriptRunnerError>>,
     final_ready_at: u64,
-    completed_sleeps_at_start: u64,
     logical_ms_at_start: u64,
 }
 
@@ -112,7 +110,6 @@ impl GeneratedRuntimeWorld {
             store_factory,
             attachment_store,
             process_env_store,
-            peak_concurrent_live_turns: 0,
             suspending_turns: BTreeMap::new(),
             serialize_provider_turns,
         }
@@ -141,15 +138,6 @@ impl GeneratedRuntimeWorld {
             .values()
             .filter(|turn| !turn.resolution_scheduled)
             .count()
-    }
-
-    /// Sample the number of provider-turn futures that are spawned and not yet
-    /// joined, tracking the runtime-observed interleaving highwater. This is the
-    /// true count of live turn futures (a superset of the event-derived measure,
-    /// which only counts a turn live once its first provider chunk releases).
-    pub(super) fn sample_live_turn_highwater(&mut self) {
-        let live = self.active_provider_turn_count();
-        self.peak_concurrent_live_turns = self.peak_concurrent_live_turns.max(live);
     }
 
     pub(super) async fn deliver_boundary(
@@ -339,7 +327,7 @@ impl GeneratedRuntimeWorld {
         }))
     }
 
-    pub(super) fn start_provider_turn(
+    pub(super) async fn start_provider_turn(
         &mut self,
         event: BoundaryEvent,
         completion_event: BoundaryEvent,
@@ -400,16 +388,33 @@ impl GeneratedRuntimeWorld {
         let transport = Arc::clone(&runtime_session.transport);
         let provider_kind = runtime_session.provider_kind.clone();
         let task_event = event.clone();
-        let handle = tokio::spawn(async move {
+        let mut handle = tokio::spawn(async move {
             run_provider_turn_task(session, transport, provider_kind, task_event).await
         });
+        tokio::select! {
+            _ = runtime_session.provider_schedule.wait_until_blocked(exchange_index, 0) => {}
+            result = &mut handle => {
+                let result = result.map_err(|err| {
+                    FixedScriptRunnerError::Runtime(format!(
+                        "provider turn `{}` task failed before its first scheduled gate: {err}",
+                        event.boundary_id
+                    ))
+                })?;
+                return match result {
+                    Ok(_) => Err(FixedScriptRunnerError::Assertion(format!(
+                        "provider turn `{}` completed before its first scheduled gate",
+                        event.boundary_id
+                    ))),
+                    Err(err) => Err(err),
+                };
+            }
+        }
         runtime_session.active_provider_turns.insert(
             event.boundary_id.clone(),
             ActiveProviderTurn {
                 completion_event,
                 handle,
                 final_ready_at,
-                completed_sleeps_at_start: self.clock.completed_sleeps(),
                 logical_ms_at_start: self.clock.logical_ms(),
             },
         );
@@ -552,7 +557,6 @@ impl GeneratedRuntimeWorld {
                     completion_event,
                     handle,
                     final_ready_at,
-                    completed_sleeps_at_start,
                     logical_ms_at_start,
                 } = active;
                 let mut observed = handle.await.map_err(|err| {
@@ -561,13 +565,9 @@ impl GeneratedRuntimeWorld {
                     ))
                 })??;
                 observed["sim_clock"] = json!({
-                    "schedule_driven": true,
+                    "virtual_time_fast_forwarded": true,
                     "logical_ms": self.clock.logical_ms(),
-                    "elapsed_ms": self.clock.logical_ms().saturating_sub(logical_ms_at_start),
-                    "completed_sleeps_during_turn": self
-                        .clock
-                        .completed_sleeps()
-                        .saturating_sub(completed_sleeps_at_start),
+                    "scheduled_elapsed_ms": self.clock.logical_ms().saturating_sub(logical_ms_at_start),
                 });
                 let runtime_session = self.sessions.get_mut(&session_alias).ok_or_else(|| {
                     FixedScriptRunnerError::Assertion(format!(
@@ -806,6 +806,7 @@ impl GeneratedRuntimeWorld {
                 lash::persistence::InMemorySessionStoreFactory::with_clock(self.clock.clone()),
             ))
             .clock(self.clock.clone())
+            .lease_timings(crate::lease::sim_runtime_lease_timings())
             .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default())
                 as Arc<dyn lash_core::ProcessRegistry>)
             .provider(provider_handle)
@@ -1050,7 +1051,12 @@ async fn run_provider_turn_task(
         .turn_id(event.boundary_id.clone())
         .run()
         .await
-        .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
+        .map_err(|err| {
+            FixedScriptRunnerError::Runtime(format!(
+                "runtime turn `{}` error: {err}",
+                event.boundary_id
+            ))
+        })?;
     let assistant_message = output.assistant_message().unwrap_or_default().to_string();
     let read_view = output.result.state.read_view();
     let graph_node_count = output.result.state.session_graph.nodes.len();

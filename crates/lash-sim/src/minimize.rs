@@ -8,7 +8,7 @@ use crate::generator::generate_workload;
 use crate::oracles::{
     abandoned_requires_evidence, backend_failure_observed, cancellation_observed, combine_oracles,
     cross_session_isolation, durable_effect_exactly_once, exec_code_observed,
-    generated_final_value_semantic_channel, generated_suspend_resume, healthy_long_turn_renewal,
+    generated_final_value_semantic_channel, generated_suspend_resume, healthy_long_turn_liveness,
     ingress_sessions_opened, lease_time_monotonic, observer_convergence,
     observer_reconnect_observed, operational_coverage, process_never_double_started,
     process_wake_observed, provider_mutation_rejected, provider_transport_mutation_classified,
@@ -744,7 +744,7 @@ fn generated_oracles(
         durable_effect_exactly_once(summary),
         worker_stale_completion_rejected(summary),
         worker_failover_continues_work(events),
-        healthy_long_turn_renewal(events),
+        healthy_long_turn_liveness(events),
         lease_time_monotonic(events),
         generated_suspend_resume(events),
         generated_final_value_semantic_channel(events),

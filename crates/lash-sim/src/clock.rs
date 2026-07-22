@@ -6,25 +6,20 @@ use std::time::{Duration, Instant};
 use chrono::TimeZone as _;
 
 const SIM_EPOCH_MS: u64 = 1_700_000_000_000;
-const RENEWAL_SETTLE_YIELDS: usize = 100_000;
-const RENEWAL_POST_REGISTRATION_YIELDS: usize = 128;
 const UNSCHEDULED_STEP_MS: u64 = 5_000;
 const UNSCHEDULED_STEP_YIELDS: usize = 32;
-type SleepWaiter = (bool, tokio::sync::oneshot::Sender<()>);
+type SleepWaiter = tokio::sync::oneshot::Sender<()>;
 type SleepersByDeadline = BTreeMap<u64, Vec<SleepWaiter>>;
 
-/// Schedule-driven clock shared by the simulated runtime and embedded stores.
+/// Virtual clock shared by the simulated runtime and embedded stores.
 ///
-/// Wall time and sleep completion are derived only from the delivered schedule.
-/// `Instant` is retained solely as the opaque origin required by the canonical
-/// `Clock::now` type; it is never read again and cannot advance simulation.
+/// Scheduled sleeps fast-forward with virtual time. Task interleaving remains
+/// under the Tokio scheduler and is not controlled by this clock.
 #[derive(Debug)]
 pub(crate) struct SimClock {
     logical_ms: AtomicU64,
     monotonic_origin: Instant,
     sleepers: Mutex<SleepersByDeadline>,
-    completed_sleeps: AtomicU64,
-    renewal_registrations: AtomicU64,
 }
 
 impl SimClock {
@@ -33,17 +28,11 @@ impl SimClock {
             logical_ms: AtomicU64::new(0),
             monotonic_origin: Instant::now(),
             sleepers: Mutex::new(BTreeMap::new()),
-            completed_sleeps: AtomicU64::new(0),
-            renewal_registrations: AtomicU64::new(0),
         })
     }
 
     pub(crate) fn logical_ms(&self) -> u64 {
         self.logical_ms.load(Ordering::SeqCst)
-    }
-
-    pub(crate) fn completed_sleeps(&self) -> u64 {
-        self.completed_sleeps.load(Ordering::SeqCst)
     }
 
     pub(crate) async fn advance_to(&self, target_ms: u64) {
@@ -66,27 +55,10 @@ impl SimClock {
                     .unwrap_or_default();
                 (next, waiters)
             };
-            let registrations_before = self.renewal_registrations.load(Ordering::SeqCst);
-            let mut renewal_count = 0_u64;
-            for (renewal, waiter) in waiters {
-                if waiter.send(()).is_ok() && renewal {
-                    renewal_count += 1;
-                }
+            for waiter in waiters {
+                let _ = waiter.send(());
             }
-            if renewal_count > 0 {
-                // Let renewal tasks perform their store write and register the
-                // next sleep before crossing another TTL window.
-                let expected = registrations_before.saturating_add(renewal_count);
-                for _ in 0..RENEWAL_SETTLE_YIELDS {
-                    if self.renewal_registrations.load(Ordering::SeqCst) >= expected {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-                for _ in 0..RENEWAL_POST_REGISTRATION_YIELDS {
-                    tokio::task::yield_now().await;
-                }
-            } else if next < target_ms {
+            if next < target_ms {
                 for _ in 0..UNSCHEDULED_STEP_YIELDS {
                     tokio::task::yield_now().await;
                 }
@@ -99,20 +71,14 @@ impl SimClock {
             .await;
     }
 
-    async fn wait_until_ms(&self, deadline_ms: u64, renewal: bool) {
+    async fn wait_until_ms(&self, deadline_ms: u64) {
         let receiver = {
             let (sender, receiver) = tokio::sync::oneshot::channel();
             let mut sleepers = self.sleepers.lock().expect("sim clock sleepers");
             if self.logical_ms() >= deadline_ms {
                 return;
             }
-            sleepers
-                .entry(deadline_ms)
-                .or_default()
-                .push((renewal, sender));
-            if renewal {
-                self.renewal_registrations.fetch_add(1, Ordering::SeqCst);
-            }
+            sleepers.entry(deadline_ms).or_default().push(sender);
             receiver
         };
         let _ = receiver.await;
@@ -144,17 +110,14 @@ impl lash_core::Clock for SimClock {
         self.wait_until_ms(
             self.logical_ms()
                 .saturating_add(duration.as_millis() as u64),
-            duration == Duration::from_millis(10_000),
         )
         .await;
-        self.completed_sleeps.fetch_add(1, Ordering::SeqCst);
     }
 
     async fn sleep_until(&self, deadline: Instant) {
         let deadline_ms = deadline
             .saturating_duration_since(self.monotonic_origin)
             .as_millis() as u64;
-        self.wait_until_ms(deadline_ms, false).await;
-        self.completed_sleeps.fetch_add(1, Ordering::SeqCst);
+        self.wait_until_ms(deadline_ms).await;
     }
 }

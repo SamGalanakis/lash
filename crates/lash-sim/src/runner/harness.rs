@@ -40,6 +40,7 @@ pub(super) fn runtime_core_for_scripts(
         .process_env_store(process_env_store)
         .store_factory(store_factory)
         .clock(clock)
+        .lease_timings(crate::lease::sim_runtime_lease_timings())
         .provider(provider_handle)
         .model(model);
     if disable_inline_queued_work_driver {
