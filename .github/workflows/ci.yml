@@ -125,7 +125,7 @@ jobs:
 
   test-shard:
     name: Test shard ${{ matrix.shard }}/3
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     strategy:
       fail-fast: false
@@ -447,7 +447,7 @@ jobs:
 
   linux-release-cache:
     name: Build Linux release cache
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     # Warms the release-profile cache that release.yml and perf.yml restore on
     # main. A cache written by a pull-request run is scoped to that PR's merge
     # ref and can only be restored by re-runs of the same pull request, so on a
@@ -551,7 +551,7 @@ jobs:
 
   restate-postgres-workers:
     name: Restate + Postgres + MinIO Workers
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     # The harness has grown to 24 workflows + turn-control gates; 30 minutes
     # was hit on 2026-07-20 (job-timeout shows as 'cancelled').
     timeout-minutes: 45
