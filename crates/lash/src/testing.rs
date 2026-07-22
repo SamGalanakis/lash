@@ -557,7 +557,11 @@ finish "registered"
             .expect("triggered process cause");
         assert!(matches!(
             &process_caused_by,
-            lash_core::CausalRef::TriggerOccurrence { occurrence_id, subscription_id }
+            lash_core::CausalRef::TriggerOccurrence {
+                occurrence_id,
+                subscription_id,
+                ..
+            }
                 if occurrence_id == &report.occurrence_id
                     && subscription_id.as_deref()
                         == report.deliveries.first().map(|delivery| delivery.subscription_id.as_str())

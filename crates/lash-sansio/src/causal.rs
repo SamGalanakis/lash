@@ -29,6 +29,10 @@ pub enum CausalRef {
         occurrence_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subscription_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription_incarnation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription_revision: Option<u64>,
     },
     SessionNode {
         session_id: String,

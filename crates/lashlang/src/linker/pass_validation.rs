@@ -54,9 +54,14 @@ impl<'module> Linker<'module> {
         scope: &Scope,
     ) -> Result<TypeExpr, LinkError> {
         match operation {
-            crate::TriggerHostOperation::Register => {
+            crate::TriggerHostOperation::Register
+            | crate::TriggerHostOperation::Update
+            | crate::TriggerHostOperation::Revive => {
                 let call = crate::register_call_args(args)
                     .map_err(|_| LinkError::InvalidTriggerRegistration { span: scope.span })?;
+                if let Some(key) = call.subscription_key {
+                    validate_trigger_subscription_key_literal(key, scope.span)?;
+                }
                 let source_ty = self.infer_expr_type(call.source, &mut scope.clone())?;
                 let event_ty = self
                     .surface
@@ -76,7 +81,28 @@ impl<'module> Linker<'module> {
                     call.inputs,
                     &mut validation_scope,
                 )?;
-                Ok(TypeExpr::TriggerHandle(Box::new(event_ty)))
+                if matches!(
+                    operation,
+                    crate::TriggerHostOperation::Update | crate::TriggerHostOperation::Revive
+                ) {
+                    let expected_revision = trigger_operation_record_entry(args, "expected_revision")
+                        .ok_or(LinkError::InvalidTriggerRegistration { span: scope.span })?;
+                    let revision_ty = self
+                        .infer_expr_type_expected(
+                            expected_revision,
+                            &mut scope.clone(),
+                            Some(&TypeExpr::Int),
+                        )?;
+                    if !self.is_type_assignable(&revision_ty, &TypeExpr::Int) {
+                        return Err(LinkError::IncompatibleOperationInput {
+                            operation: operation.receiver_method().to_string(),
+                            expected: format_type_expr(&TypeExpr::Int),
+                            actual: format_type_expr(&revision_ty),
+                            span: scope.span,
+                        });
+                    }
+                }
+                Ok(operation.output_ty())
             }
             crate::TriggerHostOperation::List => {
                 let call = crate::list_call_args(args)
@@ -119,11 +145,7 @@ impl<'module> Linker<'module> {
                 }
                 Ok(operation.output_ty())
             }
-            crate::TriggerHostOperation::Cancel => {
-                crate::cancel_call_args(args)
-                    .map_err(|_| LinkError::InvalidTriggerCancel { span: scope.span })?;
-                Ok(operation.output_ty())
-            }
+            _ => unreachable!("only definition/list operations use specialized trigger validation"),
         }
     }
 
@@ -134,8 +156,10 @@ impl<'module> Linker<'module> {
         scope: &mut Scope,
     ) -> Result<(Vec<Expr>, TypeExpr), LinkError> {
         match operation {
-            crate::TriggerHostOperation::Register => {
-                self.lower_trigger_registration_args(args, scope)
+            crate::TriggerHostOperation::Register
+            | crate::TriggerHostOperation::Update
+            | crate::TriggerHostOperation::Revive => {
+                self.lower_trigger_registration_args(operation, args, scope)
             }
             crate::TriggerHostOperation::List => {
                 let call = crate::list_call_args(args)
@@ -180,22 +204,13 @@ impl<'module> Linker<'module> {
                 }
                 Ok((vec![Expr::Record(entries)], operation.output_ty()))
             }
-            crate::TriggerHostOperation::Cancel => {
-                let call = crate::cancel_call_args(args)
-                    .map_err(|_| LinkError::InvalidTriggerCancel { span: scope.span })?;
-                Ok((
-                    vec![Expr::Record(vec![(
-                        "handle".into(),
-                        self.lower_expr(call.handle, scope)?.0,
-                    )])],
-                    operation.output_ty(),
-                ))
-            }
+            _ => unreachable!("only definition/list operations use specialized trigger lowering"),
         }
     }
 
     fn lower_trigger_registration_args(
         &self,
+        operation: crate::TriggerHostOperation,
         args: &[Expr],
         scope: &mut Scope,
     ) -> Result<(Vec<Expr>, TypeExpr), LinkError> {
@@ -231,10 +246,25 @@ impl<'module> Linker<'module> {
         if let Some(name) = call.name {
             entries.push(("name".into(), self.lower_expr(name, scope)?.0));
         }
-        Ok((
-            vec![Expr::Record(entries)],
-            TypeExpr::TriggerHandle(Box::new(event_ty)),
-        ))
+        if let Some(subscription_key) = call.subscription_key {
+            entries.push((
+                "subscription_key".into(),
+                self.lower_expr(subscription_key, scope)?.0,
+            ));
+        }
+        if matches!(
+            operation,
+            crate::TriggerHostOperation::Update | crate::TriggerHostOperation::Revive
+        ) {
+            let expected_revision = trigger_operation_record_entry(args, "expected_revision")
+                .ok_or(LinkError::InvalidTriggerRegistration { span: scope.span })?;
+            entries.push((
+                "expected_revision".into(),
+                self.lower_expr_expected(expected_revision, scope, Some(&TypeExpr::Int))?
+                    .0,
+            ));
+        }
+        Ok((vec![Expr::Record(entries)], operation.output_ty()))
     }
 
     fn lower_trigger_input_record(
@@ -719,7 +749,38 @@ impl<'module> Linker<'module> {
                     && let Some(trigger_operation) =
                         crate::TriggerHostOperation::from_receiver_method(operation.as_str())
                 {
-                    self.validate_trigger_operation_args(trigger_operation, args, scope)?
+                    validate_trigger_operation_subscription_key(
+                        trigger_operation,
+                        args,
+                        scope.span,
+                    )?;
+                    if matches!(
+                        trigger_operation,
+                        crate::TriggerHostOperation::Register
+                            | crate::TriggerHostOperation::List
+                            | crate::TriggerHostOperation::Update
+                            | crate::TriggerHostOperation::Revive
+                    ) {
+                        self.validate_trigger_operation_args(trigger_operation, args, scope)?
+                    } else {
+                        let mut arg_types = Vec::with_capacity(args.len());
+                        for arg in args {
+                            let expected_arg = expected_call_arg_type(&binding.input_ty, args.len());
+                            arg_types.push(self.infer_expr_type_expected(arg, scope, expected_arg)?);
+                        }
+                        let actual_input = call_input_type(arg_types);
+                        if !self.is_type_assignable(&actual_input, &binding.input_ty) {
+                            return Err(LinkError::IncompatibleOperationInput {
+                                operation: operation.to_string(),
+                                expected: format_type_expr(
+                                    &self.resolve_type_aliases(&binding.input_ty),
+                                ),
+                                actual: format_type_expr(&self.resolve_type_aliases(&actual_input)),
+                                span: scope.span,
+                            });
+                        }
+                        self.operation_call_output_type(binding, args)
+                    }
                 } else {
                     let mut arg_types = Vec::with_capacity(args.len());
                     for arg in args {
@@ -777,5 +838,250 @@ impl<'module> Linker<'module> {
                 binary_return_type(*op)
             }
         })
+    }
+}
+
+fn trigger_operation_record_entry<'expr>(args: &'expr [Expr], field: &str) -> Option<&'expr Expr> {
+    let [Expr::Record(entries)] = args else {
+        return None;
+    };
+    entries
+        .iter()
+        .find_map(|(name, value)| (name.as_str() == field).then_some(value))
+}
+
+fn validate_trigger_operation_subscription_key(
+    operation: crate::TriggerHostOperation,
+    args: &[Expr],
+    span: Option<Span>,
+) -> Result<(), LinkError> {
+    if operation == crate::TriggerHostOperation::List {
+        return Ok(());
+    }
+    let [Expr::Record(entries)] = args else {
+        return Ok(());
+    };
+    if let Some((_, key)) = entries
+        .iter()
+        .find(|(name, _)| name.as_str() == "subscription_key")
+    {
+        validate_trigger_subscription_key_literal(key, span)?;
+    }
+    Ok(())
+}
+
+fn validate_trigger_subscription_key_literal(
+    key: &Expr,
+    span: Option<Span>,
+) -> Result<(), LinkError> {
+    let Expr::String(key) = key else {
+        return Err(LinkError::InvalidTriggerSubscriptionKey { span });
+    };
+    if key.as_str().is_empty() || key.as_str().starts_with("lash.internal/") {
+        return Err(LinkError::InvalidTriggerSubscriptionKey { span });
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+enum StaticTriggerBinding {
+    Source {
+        source_type: String,
+        normalized_source: String,
+    },
+    Target(String),
+    Json(serde_json::Value),
+}
+
+fn validate_default_trigger_key_collisions(program: &Program) -> Result<(), LinkError> {
+    let mut seen = BTreeSet::new();
+    for declaration in &program.declarations {
+        if let Declaration::Process(process) = declaration {
+            let mut bindings = process
+                .params
+                .iter()
+                .filter_map(|param| {
+                    let TypeExpr::Ref(source_type) = &param.ty else {
+                        return None;
+                    };
+                    Some((
+                        param.name.to_string(),
+                        StaticTriggerBinding::Source {
+                            source_type: source_type.to_string(),
+                            normalized_source: format!("process-param:{}", param.name),
+                        },
+                    ))
+                })
+                .collect();
+            inspect_trigger_key_collisions(&process.body, &mut bindings, &mut seen)?;
+        }
+    }
+    inspect_trigger_key_collisions(&program.main, &mut BTreeMap::new(), &mut seen)
+}
+
+fn inspect_trigger_key_collisions(
+    expr: &Expr,
+    bindings: &mut BTreeMap<String, StaticTriggerBinding>,
+    seen: &mut BTreeSet<(String, String, String)>,
+) -> Result<(), LinkError> {
+    match expr {
+        Expr::Block(expressions) => {
+            for expression in expressions {
+                inspect_trigger_key_collisions(expression, bindings, seen)?;
+            }
+            return Ok(());
+        }
+        Expr::Assign { target, expr } => {
+            inspect_trigger_key_collisions(expr, bindings, seen)?;
+            if target.is_simple() {
+                if let Some(binding) = static_trigger_binding(expr, bindings) {
+                    bindings.insert(target.root.to_string(), binding);
+                } else {
+                    bindings.remove(target.root.as_str());
+                }
+            }
+            return Ok(());
+        }
+        Expr::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            inspect_trigger_key_collisions(condition, bindings, seen)?;
+            inspect_trigger_key_collisions(then_block, &mut bindings.clone(), seen)?;
+            inspect_trigger_key_collisions(else_block, &mut bindings.clone(), seen)?;
+            return Ok(());
+        }
+        Expr::For { iterable, body, .. } => {
+            inspect_trigger_key_collisions(iterable, bindings, seen)?;
+            inspect_trigger_key_collisions(body, &mut bindings.clone(), seen)?;
+            return Ok(());
+        }
+        Expr::While { condition, body } => {
+            inspect_trigger_key_collisions(condition, bindings, seen)?;
+            inspect_trigger_key_collisions(body, &mut bindings.clone(), seen)?;
+            return Ok(());
+        }
+        Expr::ReceiverCall {
+            receiver,
+            operation,
+            args,
+        } if operation.as_str() == crate::TriggerHostOperation::Register.receiver_method()
+            && matches!(
+                receiver.as_ref(),
+                Expr::ResourceRef(resource) if crate::is_trigger_resource_type(resource.resource_type.as_str())
+            ) =>
+        {
+            if let Ok(call) = crate::register_call_args(args)
+                && call.subscription_key.is_none()
+                && let Some((source_type, normalized_source)) =
+                    static_trigger_source(call.source, bindings)
+                && let Some(process) = static_trigger_target(call.target, bindings)
+                && !seen.insert((
+                    process.clone(),
+                    source_type.clone(),
+                    normalized_source,
+                ))
+            {
+                return Err(LinkError::DuplicateDerivedTriggerSubscriptionKey {
+                    process,
+                    source_type,
+                    span: None,
+                });
+            }
+        }
+        _ => {}
+    }
+    for child in expr.children() {
+        inspect_trigger_key_collisions(child, bindings, seen)?;
+    }
+    Ok(())
+}
+
+fn static_trigger_binding(
+    expr: &Expr,
+    bindings: &BTreeMap<String, StaticTriggerBinding>,
+) -> Option<StaticTriggerBinding> {
+    if let Some((source_type, normalized_source)) = static_trigger_source(expr, bindings) {
+        return Some(StaticTriggerBinding::Source {
+            source_type,
+            normalized_source,
+        });
+    }
+    if let Some(process) = static_trigger_target(expr, bindings) {
+        return Some(StaticTriggerBinding::Target(process));
+    }
+    static_trigger_json(expr, bindings).map(StaticTriggerBinding::Json)
+}
+
+fn static_trigger_source(
+    expr: &Expr,
+    bindings: &BTreeMap<String, StaticTriggerBinding>,
+) -> Option<(String, String)> {
+    match expr {
+        Expr::Variable(name) => match bindings.get(name.as_str())? {
+            StaticTriggerBinding::Source {
+                source_type,
+                normalized_source,
+            } => Some((source_type.clone(), normalized_source.clone())),
+            StaticTriggerBinding::Target(_) | StaticTriggerBinding::Json(_) => None,
+        },
+        Expr::HostDescriptorConstructor { type_name, input } => {
+            let normalized_source = static_trigger_json(input, bindings)
+                .map(|value| serde_json::to_string(&value).expect("JSON values serialize"))
+                .or_else(|| {
+                    serde_json::to_string(input)
+                        .ok()
+                        .map(|input| format!("dynamic-expression:{input}"))
+                })?;
+            Some((
+                type_name.to_string(),
+                normalized_source,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn static_trigger_target(
+    expr: &Expr,
+    bindings: &BTreeMap<String, StaticTriggerBinding>,
+) -> Option<String> {
+    match expr {
+        Expr::Variable(name) => match bindings.get(name.as_str())? {
+            StaticTriggerBinding::Target(process) => Some(process.clone()),
+            StaticTriggerBinding::Source { .. } | StaticTriggerBinding::Json(_) => None,
+        },
+        Expr::ProcessRef { process } => Some(process.to_string()),
+        _ => None,
+    }
+}
+
+fn static_trigger_json(
+    expr: &Expr,
+    bindings: &BTreeMap<String, StaticTriggerBinding>,
+) -> Option<serde_json::Value> {
+    match expr {
+        Expr::Null => Some(serde_json::Value::Null),
+        Expr::Bool(value) => Some((*value).into()),
+        Expr::Number(value) => serde_json::Number::from_f64(*value).map(Into::into),
+        Expr::String(value) => Some(value.to_string().into()),
+        Expr::Variable(name) => match bindings.get(name.as_str())? {
+            StaticTriggerBinding::Json(value) => Some(value.clone()),
+            StaticTriggerBinding::Source { .. } | StaticTriggerBinding::Target(_) => None,
+        },
+        Expr::Tuple(items) | Expr::List(items) => items
+            .iter()
+            .map(|item| static_trigger_json(item, bindings))
+            .collect::<Option<Vec<_>>>()
+            .map(Into::into),
+        Expr::Record(entries) => entries
+            .iter()
+            .map(|(name, value)| {
+                Some((name.to_string(), static_trigger_json(value, bindings)?))
+            })
+            .collect::<Option<serde_json::Map<_, _>>>()
+            .map(Into::into),
+        _ => None,
     }
 }

@@ -492,6 +492,22 @@ impl<'module> Linker<'module> {
                 };
                 if let Some(trigger_operation) = trigger_operation {
                     self.ensure_feature(self.surface.abilities.triggers, "triggers", scope.span)?;
+                    validate_trigger_operation_subscription_key(
+                        trigger_operation,
+                        args,
+                        scope.span,
+                    )?;
+                }
+                let trigger_operation = trigger_operation.filter(|operation| {
+                    matches!(
+                        operation,
+                        crate::TriggerHostOperation::Register
+                            | crate::TriggerHostOperation::List
+                            | crate::TriggerHostOperation::Update
+                            | crate::TriggerHostOperation::Revive
+                    )
+                });
+                if let Some(trigger_operation) = trigger_operation {
                     let (lowered_args, output_ty) =
                         self.lower_trigger_operation_args(trigger_operation, args, scope)?;
                     return Ok((

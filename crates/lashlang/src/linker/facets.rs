@@ -66,6 +66,10 @@ impl LinkError {
             Self::IncompatibleExpectedLiteral { .. } => "incompatible_expected_literal",
             Self::IncompatibleProcessReturn { .. } => "incompatible_process_return",
             Self::InvalidTriggerRegistration { .. } => "invalid_trigger_registration",
+            Self::InvalidTriggerSubscriptionKey { .. } => "invalid_trigger_subscription_key",
+            Self::DuplicateDerivedTriggerSubscriptionKey { .. } => {
+                "duplicate_derived_trigger_subscription_key"
+            }
             Self::InvalidTriggerInputs { .. } => "invalid_trigger_inputs",
             Self::DuplicateTriggerInput { .. } => "duplicate_trigger_input",
             Self::MissingTriggerInput { .. } => "missing_trigger_input",
@@ -74,7 +78,6 @@ impl LinkError {
             Self::TriggerEventOutsideInputs { .. } => "trigger_event_outside_inputs",
             Self::TriggerEventProjection { .. } => "trigger_event_projection",
             Self::InvalidTriggerList { .. } => "invalid_trigger_list",
-            Self::InvalidTriggerCancel { .. } => "invalid_trigger_cancel",
             Self::UnknownTriggerEventType { .. } => "unknown_trigger_event_type",
             Self::InvalidTriggerTarget { .. } => "invalid_trigger_target",
             Self::TriggerEventMismatch { .. } => "trigger_event_mismatch",

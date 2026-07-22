@@ -1036,6 +1036,8 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             .retain(|process_id, _| !prunable.contains(process_id));
         if let Some(trigger_store) = self.trigger_store.as_ref() {
             trigger_store.delete_deliveries_by_process_ids(&prunable)?;
+            crate::TriggerStore::prune_mutation_receipts(trigger_store.as_ref(), cutoff_epoch_ms)
+                .await?;
         }
         Ok(ProcessPruneReport {
             pruned_processes: prunable.len(),

@@ -431,17 +431,35 @@ async fn set_trigger_enabled(
 ) -> Result<Json<TriggerMutationResponse>, AppError> {
     let session_id = query.resolve(&state)?;
     let record = trigger_record_for_session(&state, &session_id, &handle).await?;
-    let changed = state
+    let changed = record.enabled != request.enabled;
+    let command = if request.enabled {
+        lash::triggers::TriggerCommand::Enable {
+            owner_scope: record.owner_scope.clone(),
+            actor: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(&session_id)),
+            subscription_key: record.subscription_key.clone(),
+            expected_revision: record.revision,
+        }
+    } else {
+        lash::triggers::TriggerCommand::Disable {
+            owner_scope: record.owner_scope.clone(),
+            actor: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(&session_id)),
+            subscription_key: record.subscription_key.clone(),
+            expected_revision: record.revision,
+        }
+    };
+    let outcome = state
         .trigger_store
-        .set_subscription_enabled(
-            &record.registrant_scope_id(),
-            &record.handle,
-            request.enabled,
+        .execute_command(
+            &format!("workbench-trigger-enabled-{}", uuid::Uuid::new_v4()),
+            command,
         )
         .await
+        .map_err(AppError::internal)?
         .map_err(AppError::internal)?;
-    let mut registration = lash::triggers::TriggerRegistration::from(&record);
-    registration.enabled = request.enabled;
+    let lash::triggers::TriggerCommandOutcome::Mutation { receipt } = outcome else {
+        return Err(AppError::internal("trigger mutation returned a list outcome"));
+    };
+    let registration = lash::triggers::TriggerRegistration::from(&receipt.record_snapshot);
     state.trace_for_session(
         &session_id,
         "api.triggers.enabled",
@@ -464,11 +482,21 @@ async fn delete_trigger(
 ) -> Result<Json<TriggerMutationResponse>, AppError> {
     let session_id = query.resolve(&state)?;
     let record = trigger_record_for_session(&state, &session_id, &handle).await?;
-    let changed = state
+    state
         .trigger_store
-        .delete_subscription(&record.registrant_scope_id(), &record.handle)
+        .execute_command(
+            &format!("workbench-trigger-delete-{}", uuid::Uuid::new_v4()),
+            lash::triggers::TriggerCommand::Delete {
+                owner_scope: record.owner_scope.clone(),
+                actor: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(&session_id)),
+                subscription_key: record.subscription_key.clone(),
+                expected_revision: record.revision,
+            },
+        )
         .await
+        .map_err(AppError::internal)?
         .map_err(AppError::internal)?;
+    let changed = true;
     state.trace_for_session(
         &session_id,
         "api.triggers.delete",
@@ -486,7 +514,7 @@ async fn trigger_record_for_session(
     handle: &str,
 ) -> Result<lash::triggers::TriggerSubscriptionRecord, AppError> {
     let mut filter = lash::triggers::TriggerSubscriptionFilter::for_session(session_id);
-    filter.handle = Some(handle.to_string());
+    filter.subscription_key = Some(handle.to_string());
     state
         .trigger_store
         .list_subscriptions(filter)

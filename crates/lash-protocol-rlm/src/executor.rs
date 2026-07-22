@@ -1173,6 +1173,113 @@ mod tests {
         resources
     }
 
+    #[derive(Clone, Default)]
+    struct CapturingTriggerEffectController {
+        envelopes: Arc<std::sync::Mutex<Vec<lash_core::RuntimeEffectEnvelope>>>,
+    }
+
+    impl lash_core::AwaitEventResolver for CapturingTriggerEffectController {}
+
+    #[async_trait::async_trait]
+    impl lash_core::RuntimeEffectController for CapturingTriggerEffectController {
+        async fn execute_effect(
+            &self,
+            envelope: lash_core::RuntimeEffectEnvelope,
+            local_executor: lash_core::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<lash_core::RuntimeEffectOutcome, lash_core::RuntimeEffectControllerError>
+        {
+            self.envelopes
+                .lock()
+                .expect("trigger effect envelopes")
+                .push(envelope.clone());
+            match envelope.command {
+                lash_core::RuntimeEffectCommand::Trigger { command } => {
+                    let operation_id = envelope
+                        .invocation
+                        .effect_id()
+                        .expect("captured trigger effect id")
+                        .to_string();
+                    let result = local_executor
+                        .into_trigger()?
+                        .execute(&operation_id, *command)
+                        .await?;
+                    Ok(lash_core::RuntimeEffectOutcome::Trigger { result })
+                }
+                _ => local_executor.execute(envelope).await,
+            }
+        }
+    }
+
+    impl CapturingTriggerEffectController {
+        fn trigger_effects(&self) -> Vec<(String, &'static str)> {
+            self.envelopes
+                .lock()
+                .expect("trigger effect envelopes")
+                .iter()
+                .filter_map(|envelope| {
+                    let lash_core::RuntimeEffectCommand::Trigger { command } = &envelope.command
+                    else {
+                        return None;
+                    };
+                    let operation = match command.as_ref() {
+                        lash_core::TriggerCommand::Register { .. } => "register",
+                        lash_core::TriggerCommand::List { .. } => "list",
+                        lash_core::TriggerCommand::Update { .. } => "update",
+                        lash_core::TriggerCommand::Enable { .. } => "enable",
+                        lash_core::TriggerCommand::Disable { .. } => "disable",
+                        lash_core::TriggerCommand::Delete { .. } => "delete",
+                        lash_core::TriggerCommand::Revive { .. } => "revive",
+                    };
+                    Some((
+                        envelope
+                            .invocation
+                            .effect_id()
+                            .unwrap_or_default()
+                            .to_string(),
+                        operation,
+                    ))
+                })
+                .collect()
+        }
+    }
+
+    async fn execute_with_capturing_trigger_effects(
+        code: &str,
+        controller: CapturingTriggerEffectController,
+    ) -> ExecResponse {
+        let state = RlmExecutionState::new().expect("state");
+        let ctx =
+            lash_core::testing::code_execution_context_with_trigger_store_and_effect_controller(
+                Arc::new(lash_core::InMemoryTriggerStore::default()),
+                Arc::new(controller),
+            );
+        let surface = LashlangSurface::new(
+            lashlang::LashlangAbilities::default()
+                .with_processes()
+                .with_triggers(),
+            lashlang::LashlangLanguageFeatures::default(),
+            timer_trigger_resources(),
+        );
+        let (_, response) = execute_code(
+            state,
+            ctx,
+            ExecRequest {
+                language: "lashlang".to_string(),
+                code: code.to_string(),
+                accept_finish: true,
+            },
+            lashlang::global_in_memory_lashlang_artifact_store(),
+            surface,
+            None,
+            RlmProjectedBindings::default(),
+            Arc::new(ProjectionRegistry::new()),
+            RlmLashlangExecutionTraceConfig::default(),
+        )
+        .await
+        .expect("execute trigger code");
+        response
+    }
+
     async fn execute_with_trigger_environment(code: &str) -> ExecResponse {
         execute_with_lashlang_host_environment(
             code,
@@ -1227,11 +1334,290 @@ mod tests {
                 finish["registrations"][0]["source"]["$lash_host_descriptor_value"]["expr"],
                 serde_json::json!("0 8 * * *")
             );
+            assert_eq!(
+                finish["registrations"][0]["revision"],
+                finish["handle"]["revision"]
+            );
+            assert_eq!(
+                finish["registrations"][0]["incarnation"],
+                finish["handle"]["incarnation"]
+            );
         });
     }
 
     #[test]
-    fn trigger_cancel_disables_future_registry_entries() {
+    fn keyless_trigger_registration_reaches_effect_and_owner_scoped_store() {
+        block_on(async {
+            let store = Arc::new(lash_core::InMemoryTriggerStore::default());
+            let controller = CapturingTriggerEffectController::default();
+            let ctx =
+                lash_core::testing::code_execution_context_with_trigger_store_and_effect_controller(
+                    store.clone(),
+                    Arc::new(controller.clone()),
+                );
+            let surface = LashlangSurface::new(
+                lashlang::LashlangAbilities::default()
+                    .with_processes()
+                    .with_triggers(),
+                lashlang::LashlangLanguageFeatures::default(),
+                timer_trigger_resources(),
+            );
+            let (_, response) = execute_code(
+                RlmExecutionState::new().expect("state"),
+                ctx,
+                ExecRequest {
+                    language: "lashlang".to_string(),
+                    code: r#"
+                        process remember(tick: timer.Tick) { finish tick.fired_at }
+                        source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+                        handle = await triggers.register({
+                          source: source,
+                          target: remember,
+                          inputs: { tick: trigger.event }
+                        })?
+                        finish handle
+                    "#
+                    .to_string(),
+                    accept_finish: true,
+                },
+                lashlang::global_in_memory_lashlang_artifact_store(),
+                surface,
+                None,
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
+            )
+            .await
+            .expect("execute keyless trigger registration");
+            assert!(response.error.is_none(), "{:?}", response.error);
+
+            let source = serde_json::json!({ "expr": "0 8 * * *", "tz": "UTC" });
+            let source_key =
+                lash_core::default_trigger_source_key("timer.Schedule", &source).unwrap();
+            let expected_key =
+                lash_core::derived_subscription_key("remember", "timer.Schedule", &source_key)
+                    .unwrap();
+            let (effect_owner_scope, effect_subscription_key) = {
+                let envelopes = controller
+                    .envelopes
+                    .lock()
+                    .expect("trigger effect envelopes");
+                let lash_core::RuntimeEffectCommand::Trigger { command } = &envelopes[0].command
+                else {
+                    panic!("expected trigger effect")
+                };
+                let lash_core::TriggerCommand::Register {
+                    owner_scope, draft, ..
+                } = command.as_ref()
+                else {
+                    panic!("expected register command")
+                };
+                (owner_scope.clone(), draft.subscription_key.clone())
+            };
+            assert_eq!(
+                effect_owner_scope,
+                lash_core::TriggerOwnerScope::session("test-session")
+            );
+            assert_eq!(effect_subscription_key, expected_key);
+
+            let stored = lash_core::TriggerStore::list_subscriptions(
+                store.as_ref(),
+                lash_core::TriggerSubscriptionFilter::for_session("test-session"),
+            )
+            .await
+            .expect("list stored keyless registration");
+            assert_eq!(stored.len(), 1);
+            assert_eq!(
+                stored[0].owner_scope,
+                lash_core::TriggerOwnerScope::session("test-session")
+            );
+            assert_eq!(stored[0].subscription_key, expected_key);
+        });
+    }
+
+    #[test]
+    fn reordered_keyless_registration_calls_keep_derived_keys_across_module_regeneration() {
+        block_on(async {
+            async fn capture(code: &str) -> Vec<(String, String, String)> {
+                let controller = CapturingTriggerEffectController::default();
+                let response =
+                    execute_with_capturing_trigger_effects(code, controller.clone()).await;
+                assert!(response.error.is_none(), "{:?}", response.error);
+                controller
+                    .envelopes
+                    .lock()
+                    .expect("trigger effect envelopes")
+                    .iter()
+                    .filter_map(|envelope| {
+                        let lash_core::RuntimeEffectCommand::Trigger { command } =
+                            &envelope.command
+                        else {
+                            return None;
+                        };
+                        let lash_core::TriggerCommand::Register { draft, .. } = command.as_ref()
+                        else {
+                            return None;
+                        };
+                        Some((
+                            draft.source_key.clone(),
+                            draft.subscription_key.clone(),
+                            draft.target_identity.definition.as_ref()?["module_ref"]
+                                .as_str()?
+                                .to_string(),
+                        ))
+                    })
+                    .collect()
+            }
+
+            let first = capture(
+                r#"
+                process remember(tick: timer.Tick) { finish tick.fired_at }
+                morning = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+                evening = timer.Schedule({ expr: "0 18 * * *", tz: "UTC" })
+                await triggers.register({ source: morning, target: remember, inputs: { tick: trigger.event } })?
+                await triggers.register({ source: evening, target: remember, inputs: { tick: trigger.event } })?
+                finish true
+                "#,
+            )
+            .await;
+            let second = capture(
+                r#"
+                process remember(tick: timer.Tick) { finish tick.fired_at }
+                morning = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+                evening = timer.Schedule({ expr: "0 18 * * *", tz: "UTC" })
+                await triggers.register({ source: evening, target: remember, inputs: { tick: trigger.event } })?
+                await triggers.register({ source: morning, target: remember, inputs: { tick: trigger.event } })?
+                finish true
+                "#,
+            )
+            .await;
+
+            let first_keys = first
+                .iter()
+                .map(|(source, key, _)| (source, key))
+                .collect::<BTreeMap<_, _>>();
+            let second_keys = second
+                .iter()
+                .map(|(source, key, _)| (source, key))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(first_keys, second_keys);
+            assert_ne!(first[0].2, second[0].2, "the artifacts were regenerated");
+        });
+    }
+
+    #[test]
+    fn scalar_and_batched_trigger_verbs_emit_typed_effect_envelopes() {
+        block_on(async {
+            let scalar = CapturingTriggerEffectController::default();
+            let response = execute_with_capturing_trigger_effects(
+                r#"
+                process remember(tick: timer.Tick) { finish true }
+                source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+                registered = await triggers.register({
+                  source: source, target: remember, inputs: { tick: trigger.event },
+                  name: "scalar", subscription_key: "scalar"
+                })?
+                listed = await triggers.list({ target: remember })?
+                updated = await triggers.update({
+                  subscription_key: "scalar", expected_revision: registered.revision,
+                  source: source, target: remember, inputs: { tick: trigger.event },
+                  name: "scalar-updated"
+                })?
+                disabled = await triggers.disable({
+                  subscription_key: "scalar", expected_revision: updated.revision
+                })?
+                enabled = await triggers.enable({
+                  subscription_key: "scalar", expected_revision: disabled.revision
+                })?
+                deleted = await triggers.delete({
+                  subscription_key: "scalar", expected_revision: enabled.revision
+                })?
+                finish len(listed)
+                "#,
+                scalar.clone(),
+            )
+            .await;
+            assert!(response.error.is_none(), "{:?}", response.error);
+            let scalar_effects = scalar.trigger_effects();
+            assert_eq!(
+                scalar_effects
+                    .iter()
+                    .map(|(_, operation)| *operation)
+                    .collect::<Vec<_>>(),
+                ["register", "list", "update", "disable", "enable", "delete"]
+            );
+            assert!(
+                scalar_effects
+                    .iter()
+                    .all(|(effect_id, _)| !effect_id.contains(":child:"))
+            );
+
+            let batched = CapturingTriggerEffectController::default();
+            let response = execute_with_capturing_trigger_effects(
+                r#"
+                process remember(tick: timer.Tick) { finish true }
+                source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+                update_seed = await triggers.register({
+                  source: source, target: remember, inputs: { tick: trigger.event },
+                  subscription_key: "batch-update"
+                })?
+                enable_seed = await triggers.register({
+                  source: source, target: remember, inputs: { tick: trigger.event },
+                  subscription_key: "batch-enable"
+                })?
+                enable_seed = await triggers.disable({
+                  subscription_key: "batch-enable", expected_revision: enable_seed.revision
+                })?
+                disable_seed = await triggers.register({
+                  source: source, target: remember, inputs: { tick: trigger.event },
+                  subscription_key: "batch-disable"
+                })?
+                delete_seed = await triggers.register({
+                  source: source, target: remember, inputs: { tick: trigger.event },
+                  subscription_key: "batch-delete"
+                })?
+                results = await {
+                  registered: triggers.register({
+                    source: source, target: remember, inputs: { tick: trigger.event },
+                    subscription_key: "batch-register"
+                  })?,
+                  listed: triggers.list({})?,
+                  updated: triggers.update({
+                    subscription_key: "batch-update", expected_revision: update_seed.revision,
+                    source: source, target: remember, inputs: { tick: trigger.event },
+                    name: "batch-updated"
+                  })?,
+                  enabled: triggers.enable({
+                    subscription_key: "batch-enable", expected_revision: enable_seed.revision
+                  })?,
+                  disabled: triggers.disable({
+                    subscription_key: "batch-disable", expected_revision: disable_seed.revision
+                  })?,
+                  deleted: triggers.delete({
+                    subscription_key: "batch-delete", expected_revision: delete_seed.revision
+                  })?
+                }
+                finish len(results.listed)
+                "#,
+                batched.clone(),
+            )
+            .await;
+            assert!(response.error.is_none(), "{:?}", response.error);
+            let batch_effects = batched
+                .trigger_effects()
+                .into_iter()
+                .filter(|(effect_id, _)| effect_id.contains(":child:"))
+                .map(|(_, operation)| operation)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                batch_effects,
+                ["register", "list", "update", "enable", "disable", "delete"]
+            );
+        });
+    }
+
+    #[test]
+    fn trigger_disable_is_revision_checked_and_keeps_registry_entry() {
         block_on(async {
             let response = execute_with_trigger_environment(
                 r#"
@@ -1244,11 +1630,15 @@ mod tests {
                   source: source,
                   target: remember,
                   inputs: { tick: trigger.event },
-                  name: "remembered"
+                  name: "remembered",
+                  subscription_key: "remembered"
                 })?
-                cancelled = await triggers.cancel({ handle: handle })?
+                disabled = await triggers.disable({
+                  subscription_key: "remembered",
+                  expected_revision: handle.revision
+                })?
                 registrations = await triggers.list({ target: remember })?
-                finish { cancelled: cancelled, enabled: registrations[0].enabled }
+                finish { disposition: disabled.disposition, enabled: registrations[0].enabled }
                 "#,
             )
             .await;
@@ -1256,7 +1646,7 @@ mod tests {
             assert!(response.error.is_none(), "{:?}", response.error);
             assert_eq!(
                 response.terminal_finish,
-                Some(serde_json::json!({ "cancelled": true, "enabled": false }))
+                Some(serde_json::json!({ "disposition": "disabled", "enabled": false }))
             );
         });
     }

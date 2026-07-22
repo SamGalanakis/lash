@@ -1244,9 +1244,7 @@ impl SimTriggerHarness {
         let source_type = "sim.trigger";
         if self.registered_source_keys.insert(source_key.clone()) {
             let draft = lash_core::TriggerSubscriptionDraft::for_process(
-                lash_core::ProcessOriginator::session(lash_core::SessionScope::new(
-                    session.clone(),
-                )),
+                format!("sim/{}", event.boundary_id),
                 lash_core::ProcessExecutionEnvRef::new("process-env:sim-trigger"),
                 source_type,
                 source_key.clone(),
@@ -1259,13 +1257,23 @@ impl SimTriggerHarness {
             )
             .with_wake_target(lash_core::SessionScope::new(session.clone()));
             self.store
-                .register_subscription(draft)
+                .execute_command(
+                    &format!("sim-trigger-register:{}", event.boundary_id),
+                    lash_core::TriggerCommand::Register {
+                        owner_scope: lash_core::TriggerOwnerScope::session(session.clone()),
+                        actor: lash_core::ProcessOriginator::session(lash_core::SessionScope::new(
+                            session.clone(),
+                        )),
+                        draft,
+                    },
+                )
                 .await
+                .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?
                 .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
         }
-        let occurrence = self
+        let ingress = self
             .store
-            .record_occurrence(
+            .ingest_occurrence(
                 lash_core::TriggerOccurrenceRequest::new(
                     source_type,
                     source_key.clone(),
@@ -1279,17 +1287,12 @@ impl SimTriggerHarness {
             )
             .await
             .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
-        let reservations = self
-            .store
-            .reserve_matching_deliveries(&occurrence.occurrence_id)
-            .await
-            .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
         Ok(json!({
             "session": session,
             "trigger_delivered": true,
             "source_key": source_key,
-            "occurrence_id": occurrence.occurrence_id,
-            "reservation_count": reservations.len(),
+            "occurrence_id": ingress.occurrence.occurrence_id,
+            "reservation_count": ingress.reservations.len(),
             "started_process": event.payload.get("started_process").cloned().unwrap_or(Value::Bool(true)),
         }))
     }

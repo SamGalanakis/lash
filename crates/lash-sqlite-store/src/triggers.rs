@@ -6,15 +6,6 @@
 
 use super::*;
 
-#[cfg(test)]
-static RESERVATION_STATEMENT_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-fn record_reservation_statement() {
-    RESERVATION_STATEMENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-}
-
 pub struct SqliteTriggerStore {
     conn: SqliteConnection,
     clock: Arc<dyn lash_core::Clock>,
@@ -93,22 +84,22 @@ impl SqliteTriggerStore {
     async fn list_deliveries_where(
         &self,
         where_clause: &'static str,
-        value: String,
+        values: Vec<rusqlite::types::Value>,
     ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
         self.conn
             .call(move |conn| {
                 Ok((|| {
                     let sql = format!(
-                        "SELECT d.process_id, d.created_at_ms, o.record_json, s.record_json
+                        "SELECT d.process_id, d.created_at_ms, o.record_json,
+                                d.subscription_snapshot_json
                          FROM trigger_deliveries d
                          JOIN trigger_occurrences o ON o.occurrence_id = d.occurrence_id
-                         JOIN trigger_subscriptions s ON s.subscription_id = d.subscription_id
                          WHERE {where_clause}
                          ORDER BY d.created_at_ms ASC, d.occurrence_id ASC, d.subscription_id ASC"
                     );
                     let mut stmt = conn.prepare(&sql).map_err(process_sqlite_error)?;
                     let rows = stmt
-                        .query_map(params![value.as_str()], |row| {
+                        .query_map(rusqlite::params_from_iter(values.iter()), |row| {
                             Ok((
                                 row.get::<_, String>(0)?,
                                 row.get::<_, i64>(1)?,
@@ -152,60 +143,125 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
         DurabilityTier::Durable
     }
 
-    async fn register_subscription(
+    async fn execute_command(
         &self,
-        draft: lash_core::TriggerSubscriptionDraft,
-    ) -> Result<lash_core::TriggerSubscriptionRecord, lash_core::PluginError> {
-        draft.validate()?;
+        operation_id: &str,
+        command: lash_core::TriggerCommand,
+    ) -> Result<lash_core::TriggerEffectResult, lash_core::PluginError> {
+        if let lash_core::TriggerCommand::List {
+            owner_scope,
+            mut filter,
+        } = command
+        {
+            filter.registrant_scope_id = Some(owner_scope.namespace());
+            return self
+                .list_subscriptions(filter)
+                .await
+                .map(|records| Ok(lash_core::TriggerCommandOutcome::List { records }));
+        }
+        let public_operation_id = operation_id.to_string();
+        let operation_id =
+            lash_core::trigger_operation_receipt_id(command.owner_scope(), operation_id)?;
+        let request_hash = lash_core::trigger_command_hash(&command)?;
+        let owner_scope = command.owner_scope().clone();
+        let subscription_key = command.subscription_key().unwrap_or_default().to_string();
+        let subscription_id =
+            lash_core::deterministic_subscription_id(&owner_scope, &subscription_key)?;
         let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(trigger_tx_outcome((|| {
-                    tx.execute("INSERT INTO trigger_subscription_seq DEFAULT VALUES", [])
+                    let receipt: Option<(String, String)> = tx
+                        .query_row(
+                            "SELECT request_hash, result_json
+                             FROM trigger_mutation_receipts WHERE operation_id = ?1",
+                            params![operation_id.as_str()],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
                         .map_err(process_sqlite_error)?;
-                    let seq = tx.last_insert_rowid();
-                    let handle = format!("trigger:{seq}");
-                    let subscription_id = format!("subscription:{seq}");
-                    let record = lash_core::TriggerSubscriptionRecord {
-                        subscription_id: subscription_id.clone(),
-                        registrant: draft.registrant,
-                        env_ref: draft.env_ref,
-                        wake_target: draft.wake_target,
-                        handle,
-                        name: draft.name,
-                        source_type: draft.source_type,
-                        source_key: draft.source_key,
-                        source: draft.source,
-                        payload_schema: draft.payload_schema,
-                        target: draft.target,
-                        target_identity: draft.target_identity,
-                        event_types: draft.event_types,
-                        input_template: draft.input_template,
-                        target_label: draft.target_label,
-                        enabled: true,
-                        created_at_ms: now,
-                        updated_at_ms: now,
-                    };
-                    tx.execute(
-                        "INSERT INTO trigger_subscriptions (
-                            subscription_id, registrant_scope_id, handle, source_type, source_key,
-                            enabled, created_at_ms, updated_at_ms, record_json
+                    if let Some((stored_hash, json)) = receipt {
+                        if stored_hash != request_hash {
+                            return Ok(Err(lash_core::TriggerOperationError::Conflict {
+                                subscription_key,
+                                existing_revision: None,
+                                existing_definition_hash: Some(stored_hash),
+                                requested_definition_hash: Some(request_hash),
+                                reason: format!(
+                                    "operation id `{public_operation_id}` was reused with different content"
+                                ),
+                            }));
+                        }
+                        return serde_json::from_str(&json).map_err(|err| {
+                            lash_core::PluginError::Session(format!(
+                                "failed to decode trigger mutation receipt: {err}"
+                            ))
+                        });
+                    }
+                    let current = tx
+                        .query_row(
+                            "SELECT record_json FROM trigger_subscriptions
+                             WHERE subscription_id = ?1",
+                            params![subscription_id.as_str()],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                        .map_err(process_sqlite_error)?
+                        .map(Self::decode_subscription)
+                        .transpose()?;
+                    let result = lash_core::evaluate_trigger_mutation(current, command, now)?;
+                    if let Ok(lash_core::TriggerCommandOutcome::Mutation { receipt }) = &result {
+                        let record = &receipt.record_snapshot;
+                        tx.execute(
+                            "INSERT INTO trigger_subscriptions (
+                            subscription_id, owner_scope, subscription_key, incarnation, revision,
+                            definition_hash, source_type, source_key, enabled, tombstoned,
+                            created_at_ms, updated_at_ms, record_json
                          )
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                         ON CONFLICT(subscription_id) DO UPDATE SET
+                            owner_scope = excluded.owner_scope,
+                            subscription_key = excluded.subscription_key,
+                            incarnation = excluded.incarnation,
+                            revision = excluded.revision,
+                            definition_hash = excluded.definition_hash,
+                            source_type = excluded.source_type,
+                            source_key = excluded.source_key,
+                            enabled = excluded.enabled,
+                            tombstoned = excluded.tombstoned,
+                            updated_at_ms = excluded.updated_at_ms,
+                            record_json = excluded.record_json",
+                            params![
+                                record.subscription_id.as_str(),
+                                record.owner_scope.namespace(),
+                                record.subscription_key.as_str(),
+                                record.incarnation.as_str(),
+                                record.revision as i64,
+                                record.definition_hash.as_str(),
+                                record.source_type.as_str(),
+                                record.source_key.as_str(),
+                                i64::from(record.enabled),
+                                i64::from(record.tombstoned),
+                                record.created_at_ms as i64,
+                                record.updated_at_ms as i64,
+                                Self::encode_json(&record)?,
+                            ],
+                        )
+                        .map_err(process_sqlite_error)?;
+                    }
+                    tx.execute(
+                        "INSERT INTO trigger_mutation_receipts (
+                            operation_id, request_hash, result_json, created_at_ms
+                         ) VALUES (?1, ?2, ?3, ?4)",
                         params![
-                            record.subscription_id.as_str(),
-                            record.registrant_scope_id().as_str(),
-                            record.handle.as_str(),
-                            record.source_type.as_str(),
-                            record.source_key.as_str(),
-                            i64::from(record.enabled),
-                            record.created_at_ms as i64,
-                            record.updated_at_ms as i64,
-                            Self::encode_json(&record)?,
+                            operation_id.as_str(),
+                            request_hash.as_str(),
+                            Self::encode_json(&result)?,
+                            now as i64,
                         ],
                     )
                     .map_err(process_sqlite_error)?;
-                    Ok(record)
+                    Ok(result)
                 })()))
             })
             .await
@@ -224,12 +280,12 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                             .to_string();
                     let mut values = Vec::<rusqlite::types::Value>::new();
                     if let Some(registrant_scope_id) = filter.effective_registrant_scope_id() {
-                        sql.push_str(" AND registrant_scope_id = ?");
+                        sql.push_str(" AND owner_scope = ?");
                         values.push(registrant_scope_id.into());
                     }
-                    if let Some(handle) = filter.handle.as_ref() {
-                        sql.push_str(" AND handle = ?");
-                        values.push(handle.clone().into());
+                    if let Some(subscription_key) = filter.subscription_key.as_ref() {
+                        sql.push_str(" AND subscription_key = ?");
+                        values.push(subscription_key.clone().into());
                     }
                     if let Some(source_type) = filter.source_type.as_ref() {
                         sql.push_str(" AND source_type = ?");
@@ -243,7 +299,9 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         sql.push_str(" AND enabled = ?");
                         values.push(i64::from(enabled).into());
                     }
-                    sql.push_str(" ORDER BY registrant_scope_id ASC, handle ASC");
+                    sql.push_str(
+                        " AND tombstoned = 0 ORDER BY owner_scope ASC, subscription_key ASC",
+                    );
                     let mut stmt = conn.prepare(&sql).map_err(process_sqlite_error)?;
                     let rows = stmt
                         .query_map(rusqlite::params_from_iter(values.iter()), |row| {
@@ -275,116 +333,12 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
             .map_err(process_sqlite_error)?
     }
 
-    async fn cancel_subscription(
-        &self,
-        registrant_scope_id: &str,
-        handle: &str,
-    ) -> Result<bool, lash_core::PluginError> {
-        self.set_subscription_enabled(registrant_scope_id, handle, false)
-            .await
-    }
-
-    async fn set_subscription_enabled(
-        &self,
-        registrant_scope_id: &str,
-        handle: &str,
-        enabled: bool,
-    ) -> Result<bool, lash_core::PluginError> {
-        let registrant_scope_id = registrant_scope_id.to_string();
-        let handle = handle.to_string();
-        let updated_at_ms = self.clock.timestamp_ms();
-        self.conn
-            .write_flow(move |tx| {
-                Ok(trigger_tx_outcome((|| {
-                    let selected: Option<(String, i64, String)> = tx
-                        .query_row(
-                            "SELECT subscription_id, enabled, record_json
-                             FROM trigger_subscriptions
-                             WHERE registrant_scope_id = ?1 AND handle = ?2",
-                            params![registrant_scope_id.as_str(), handle.as_str()],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                        )
-                        .optional()
-                        .map_err(process_sqlite_error)?;
-                    let Some((subscription_id, stored_enabled, json)) = selected else {
-                        return Ok(false);
-                    };
-                    let changed = (stored_enabled != 0) != enabled;
-                    match Self::decode_subscription(json) {
-                        Ok(mut record) => {
-                            record.enabled = enabled;
-                            record.updated_at_ms = updated_at_ms;
-                            tx.execute(
-                                "UPDATE trigger_subscriptions
-                                 SET enabled = ?3, updated_at_ms = ?4, record_json = ?5
-                                 WHERE subscription_id = ?1 AND handle = ?2",
-                                params![
-                                    subscription_id.as_str(),
-                                    handle.as_str(),
-                                    i64::from(record.enabled),
-                                    record.updated_at_ms as i64,
-                                    Self::encode_json(&record)?,
-                                ],
-                            )
-                            .map_err(process_sqlite_error)?;
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                subscription_id,
-                                handle,
-                                "disabling malformed trigger subscription without rewriting record JSON"
-                            );
-                            tx.execute(
-                                "UPDATE trigger_subscriptions
-                                 SET enabled = ?3, updated_at_ms = ?4
-                                 WHERE subscription_id = ?1 AND handle = ?2",
-                                params![
-                                    subscription_id.as_str(),
-                                    handle.as_str(),
-                                    i64::from(enabled),
-                                    updated_at_ms as i64,
-                                ],
-                            )
-                            .map_err(process_sqlite_error)?;
-                        }
-                    }
-                    Ok(changed)
-                })()))
-            })
-            .await
-            .map_err(process_sqlite_error)?
-    }
-
-    async fn delete_subscription(
-        &self,
-        registrant_scope_id: &str,
-        handle: &str,
-    ) -> Result<bool, lash_core::PluginError> {
-        let registrant_scope_id = registrant_scope_id.to_string();
-        let handle = handle.to_string();
-        self.conn
-            .write_flow(move |tx| {
-                Ok(trigger_tx_outcome((|| {
-                    let deleted = tx
-                        .execute(
-                            "DELETE FROM trigger_subscriptions
-                             WHERE registrant_scope_id = ?1 AND handle = ?2",
-                            params![registrant_scope_id.as_str(), handle.as_str()],
-                        )
-                        .map_err(process_sqlite_error)?;
-                    Ok(deleted != 0)
-                })()))
-            })
-            .await
-            .map_err(process_sqlite_error)?
-    }
-
     async fn delete_session_subscriptions(
         &self,
         session_id: &str,
     ) -> Result<usize, lash_core::PluginError> {
         let session_id = session_id.to_string();
+        let now = self.clock.timestamp_ms();
         self.conn
             .write_flow(move |tx| {
                 Ok(trigger_tx_outcome((|| {
@@ -396,7 +350,7 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                         })
                         .map_err(process_sqlite_error)?;
-                    let mut subscription_ids = Vec::new();
+                    let mut subscriptions = Vec::new();
                     for row in rows {
                         let (subscription_id, json) = row.map_err(process_sqlite_error)?;
                         let record = match Self::decode_subscription(json) {
@@ -410,17 +364,32 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                                 continue;
                             }
                         };
-                        if record.registrant_session_id() == Some(session_id.as_str()) {
-                            subscription_ids.push(subscription_id);
+                        if record.registrant_session_id() == Some(session_id.as_str())
+                            && !record.tombstoned
+                        {
+                            subscriptions.push((subscription_id, record));
                         }
                     }
                     drop(stmt);
                     let mut deleted = 0usize;
-                    for subscription_id in subscription_ids {
+                    for (subscription_id, mut record) in subscriptions {
+                        record.enabled = false;
+                        record.tombstoned = true;
+                        record.deleted_at_ms = Some(now);
+                        record.revision = record.revision.saturating_add(1);
+                        record.updated_at_ms = now;
                         deleted = deleted.saturating_add(
                             tx.execute(
-                                "DELETE FROM trigger_subscriptions WHERE subscription_id = ?1",
-                                params![subscription_id.as_str()],
+                                "UPDATE trigger_subscriptions
+                                 SET enabled = 0, tombstoned = 1, revision = ?2,
+                                     updated_at_ms = ?3, record_json = ?4
+                                 WHERE subscription_id = ?1",
+                                params![
+                                    subscription_id.as_str(),
+                                    record.revision as i64,
+                                    now as i64,
+                                    Self::encode_json(&record)?,
+                                ],
                             )
                             .map_err(process_sqlite_error)?,
                         );
@@ -432,10 +401,10 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
             .map_err(process_sqlite_error)?
     }
 
-    async fn record_occurrence(
+    async fn ingest_occurrence(
         &self,
         request: lash_core::TriggerOccurrenceRequest,
-    ) -> Result<lash_core::TriggerOccurrenceRecord, lash_core::PluginError> {
+    ) -> Result<lash_core::TriggerIngressResult, lash_core::PluginError> {
         lash_core::validate_trigger_occurrence_request(&request)?;
         let request_hash = lash_core::trigger_occurrence_request_hash(&request)?;
         let occurrence_id = lash_core::deterministic_occurrence_id(&request)?;
@@ -453,43 +422,57 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                         )
                         .optional()
                         .map_err(process_sqlite_error)?;
-                    if let Some((existing_hash, existing_json)) = existing {
+                    let (record, is_new) = if let Some((existing_hash, existing_json)) = existing {
                         if existing_hash != request_hash {
                             return Err(lash_core::PluginError::Session(format!(
                                 "trigger occurrence idempotency conflict for `{}`",
                                 request.idempotency_key
                             )));
                         }
-                        return Self::decode_occurrence(existing_json);
-                    }
-                    let record = lash_core::TriggerOccurrenceRecord {
-                        occurrence_id: occurrence_id.clone(),
-                        source_type: request.source_type,
-                        source_key: request.source_key,
-                        payload: request.payload,
-                        idempotency_key: request.idempotency_key,
-                        source: request.source,
-                        session_id: request.session_id,
-                        occurred_at_ms,
+                        (Self::decode_occurrence(existing_json)?, false)
+                    } else {
+                        let record = lash_core::TriggerOccurrenceRecord {
+                            occurrence_id: occurrence_id.clone(),
+                            source_type: request.source_type,
+                            source_key: request.source_key,
+                            payload: request.payload,
+                            idempotency_key: request.idempotency_key,
+                            source: request.source,
+                            session_id: request.session_id,
+                            occurred_at_ms,
+                        };
+                        tx.execute(
+                            "INSERT INTO trigger_occurrences (
+                                occurrence_id, idempotency_key, request_hash, source_type,
+                                source_key, occurred_at_ms, record_json
+                             )
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                record.occurrence_id.as_str(),
+                                record.idempotency_key.as_str(),
+                                request_hash.as_str(),
+                                record.source_type.as_str(),
+                                record.source_key.as_str(),
+                                record.occurred_at_ms as i64,
+                                Self::encode_json(&record)?,
+                            ],
+                        )
+                        .map_err(process_sqlite_error)?;
+                        (record, true)
                     };
-                    tx.execute(
-                        "INSERT INTO trigger_occurrences (
-                            occurrence_id, idempotency_key, request_hash, source_type,
-                            source_key, occurred_at_ms, record_json
-                         )
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![
-                            record.occurrence_id.as_str(),
-                            record.idempotency_key.as_str(),
-                            request_hash.as_str(),
-                            record.source_type.as_str(),
-                            record.source_key.as_str(),
-                            record.occurred_at_ms as i64,
-                            Self::encode_json(&record)?,
-                        ],
-                    )
-                    .map_err(process_sqlite_error)?;
-                    Ok(record)
+                    let reservations = if is_new {
+                        reserve_sqlite_deliveries(tx, &record, occurred_at_ms)?
+                    } else {
+                        sqlite_delivery_snapshots(
+                            tx,
+                            &record,
+                            lash_core::TriggerDeliveryReservationStatus::AlreadyReserved,
+                        )?
+                    };
+                    Ok(lash_core::TriggerIngressResult {
+                        occurrence: record,
+                        reservations,
+                    })
                 })()))
             })
             .await
@@ -549,310 +532,163 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
             .map_err(process_sqlite_error)?
     }
 
-    async fn reserve_matching_deliveries(
-        &self,
-        occurrence_id: &str,
-    ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
-        let occurrence_id = occurrence_id.to_string();
-        let created_at_ms = self.clock.timestamp_ms();
-        self.conn
-            .write_flow(move |tx| {
-                Ok(trigger_tx_outcome((|| {
-                    let occurrence_json: Option<String> = tx
-                        .query_row(
-                            "SELECT record_json
-                             FROM trigger_occurrences
-                             WHERE occurrence_id = ?1",
-                            params![occurrence_id.as_str()],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(process_sqlite_error)?;
-                    let Some(occurrence_json) = occurrence_json else {
-                        return Err(lash_core::PluginError::Session(format!(
-                            "unknown trigger occurrence `{occurrence_id}`"
-                        )));
-                    };
-                    let occurrence = Self::decode_occurrence(occurrence_json)?;
-                    let subscriptions = {
-                        let mut sql =
-                            "SELECT subscription_id, record_json
-                             FROM trigger_subscriptions
-                             WHERE enabled = 1 AND source_type = ? AND source_key = ?"
-                                .to_string();
-                        let mut values: Vec<rusqlite::types::Value> = vec![
-                            occurrence.source_type.clone().into(),
-                            occurrence.source_key.clone().into(),
-                        ];
-                        if let Some(session_id) = occurrence.session_id.as_deref() {
-                            let scope_id = format!("session:{session_id}");
-                            sql.push_str(
-                                " AND (registrant_scope_id = ? OR registrant_scope_id LIKE ? ESCAPE '\\')",
-                            );
-                            values.push(scope_id.clone().into());
-                            values.push(
-                                format!("{}/frame:%", escape_sqlite_like(&scope_id)).into(),
-                            );
-                        }
-                        sql.push_str(" ORDER BY registrant_scope_id ASC, handle ASC");
-                        let mut stmt = tx
-                            .prepare(&sql)
-                            .map_err(process_sqlite_error)?;
-                        let rows = stmt
-                            .query_map(rusqlite::params_from_iter(values.iter()), |row| {
-                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                            })
-                            .map_err(process_sqlite_error)?;
-                        let mut subscriptions = Vec::new();
-                        for row in rows {
-                            let (subscription_id, json) = row.map_err(process_sqlite_error)?;
-                            match Self::decode_subscription(json) {
-                                Ok(subscription) => subscriptions.push(subscription),
-                                Err(err) => tracing::warn!(
-                                    error = %err,
-                                    subscription_id,
-                                    occurrence_id = %occurrence.occurrence_id,
-                                    "skipping malformed trigger subscription during delivery reservation"
-                                ),
-                            }
-                        }
-                        subscriptions
-                    };
-                    let mut planned = Vec::with_capacity(subscriptions.len());
-                    for subscription in subscriptions {
-                        let process_id = lash_core::deterministic_delivery_process_id(
-                            &occurrence.occurrence_id,
-                            &subscription.subscription_id,
-                        )?;
-                        planned.push((subscription, process_id));
-                    }
-                    if planned.is_empty() {
-                        return Ok(Vec::new());
-                    }
-
-                    let mut insert =
-                        "INSERT INTO trigger_deliveries (
-                            occurrence_id, subscription_id, process_id, created_at_ms
-                         ) VALUES "
-                            .to_string();
-                    let mut insert_values: Vec<rusqlite::types::Value> =
-                        Vec::with_capacity(planned.len() * 4);
-                    for (index, (subscription, process_id)) in planned.iter().enumerate() {
-                        if index > 0 {
-                            insert.push_str(", ");
-                        }
-                        insert.push_str("(?, ?, ?, ?)");
-                        insert_values.push(occurrence.occurrence_id.clone().into());
-                        insert_values.push(subscription.subscription_id.clone().into());
-                        insert_values.push(process_id.clone().into());
-                        insert_values.push((created_at_ms as i64).into());
-                    }
-                    insert.push_str(
-                        " ON CONFLICT DO NOTHING RETURNING subscription_id, created_at_ms",
-                    );
-                    #[cfg(test)]
-                    record_reservation_statement();
-                    let mut stmt = tx.prepare(&insert).map_err(process_sqlite_error)?;
-                    let inserted_rows = stmt
-                        .query_map(rusqlite::params_from_iter(insert_values.iter()), |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                        })
-                        .map_err(process_sqlite_error)?
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(process_sqlite_error)?;
-                    drop(stmt);
-                    let mut created_at_by_subscription =
-                        std::collections::BTreeMap::from_iter(inserted_rows);
-                    let inserted_subscription_ids = created_at_by_subscription
-                        .keys()
-                        .cloned()
-                        .collect::<std::collections::BTreeSet<_>>();
-                    let conflicted = planned
-                        .iter()
-                        .filter(|(subscription, _)| {
-                            !inserted_subscription_ids.contains(&subscription.subscription_id)
-                        })
-                        .collect::<Vec<_>>();
-                    if !conflicted.is_empty() {
-                        let mut select =
-                            "SELECT subscription_id, created_at_ms FROM trigger_deliveries
-                             WHERE (occurrence_id, subscription_id) IN ("
-                                .to_string();
-                        let mut select_values: Vec<rusqlite::types::Value> =
-                            Vec::with_capacity(conflicted.len() * 2);
-                        for (index, (subscription, _)) in conflicted.iter().enumerate() {
-                            if index > 0 {
-                                select.push_str(", ");
-                            }
-                            select.push_str("(?, ?)");
-                            select_values.push(occurrence.occurrence_id.clone().into());
-                            select_values.push(subscription.subscription_id.clone().into());
-                        }
-                        select.push(')');
-                        #[cfg(test)]
-                        record_reservation_statement();
-                        let mut stmt = tx.prepare(&select).map_err(process_sqlite_error)?;
-                        let rows = stmt
-                            .query_map(rusqlite::params_from_iter(select_values.iter()), |row| {
-                                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                            })
-                            .map_err(process_sqlite_error)?;
-                        for row in rows {
-                            let (subscription_id, stored_created_at_ms) =
-                                row.map_err(process_sqlite_error)?;
-                            created_at_by_subscription
-                                .insert(subscription_id, stored_created_at_ms);
-                        }
-                    }
-
-                    let mut reservations = Vec::with_capacity(planned.len());
-                    for (subscription, process_id) in planned {
-                        let inserted =
-                            inserted_subscription_ids.contains(&subscription.subscription_id);
-                        let stored_created_at_ms = created_at_by_subscription
-                            .get(&subscription.subscription_id)
-                            .copied()
-                            .ok_or_else(|| {
-                                lash_core::PluginError::Session(format!(
-                                    "trigger delivery `{}/{}` disappeared during reservation",
-                                    occurrence.occurrence_id, subscription.subscription_id
-                                ))
-                            })?;
-                        reservations.push(lash_core::TriggerDeliveryReservation {
-                            occurrence: occurrence.clone(),
-                            subscription,
-                            process_id,
-                            created_at_ms: stored_created_at_ms as u64,
-                            reservation_status: if inserted {
-                                lash_core::TriggerDeliveryReservationStatus::Reserved
-                            } else {
-                                lash_core::TriggerDeliveryReservationStatus::AlreadyReserved
-                            },
-                        });
-                    }
-                    Ok(reservations)
-                })()))
-            })
-            .await
-            .map_err(process_sqlite_error)?
-    }
-
     async fn list_deliveries_by_occurrence_id(
         &self,
         occurrence_id: &str,
     ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
-        self.list_deliveries_where("d.occurrence_id = ?1", occurrence_id.to_string())
-            .await
+        self.list_deliveries_where(
+            "d.occurrence_id = ?1",
+            vec![occurrence_id.to_string().into()],
+        )
+        .await
     }
 
     async fn list_deliveries_by_subscription_id(
         &self,
         subscription_id: &str,
     ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
-        self.list_deliveries_where("d.subscription_id = ?1", subscription_id.to_string())
-            .await
+        self.list_deliveries_where(
+            "d.subscription_id = ?1",
+            vec![subscription_id.to_string().into()],
+        )
+        .await
     }
 
     async fn list_deliveries_by_process_id(
         &self,
         process_id: &str,
     ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
-        self.list_deliveries_where("d.process_id = ?1", process_id.to_string())
+        self.list_deliveries_where("d.process_id = ?1", vec![process_id.to_string().into()])
             .await
     }
+
+    async fn list_deliveries(
+        &self,
+    ) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
+        self.list_deliveries_where("1 = 1", Vec::new()).await
+    }
+
+    async fn prune_mutation_receipts(
+        &self,
+        cutoff_epoch_ms: u64,
+    ) -> Result<usize, lash_core::PluginError> {
+        let cutoff_epoch_ms = i64::try_from(cutoff_epoch_ms).unwrap_or(i64::MAX);
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "DELETE FROM trigger_mutation_receipts WHERE created_at_ms < ?1",
+                    params![cutoff_epoch_ms],
+                )
+            })
+            .await
+            .map_err(process_sqlite_error)
+    }
 }
 
-fn escape_sqlite_like(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
+fn reserve_sqlite_deliveries(
+    tx: &rusqlite::Transaction<'_>,
+    occurrence: &lash_core::TriggerOccurrenceRecord,
+    created_at_ms: u64,
+) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
+    let mut sql = "SELECT subscription_id, record_json FROM trigger_subscriptions
+         WHERE enabled = 1 AND tombstoned = 0 AND source_type = ?1 AND source_key = ?2"
+        .to_string();
+    let mut values: Vec<rusqlite::types::Value> = vec![
+        occurrence.source_type.clone().into(),
+        occurrence.source_key.clone().into(),
+    ];
+    if let Some(session_id) = occurrence.session_id.as_deref() {
+        sql.push_str(" AND owner_scope = ?3");
+        values.push(format!("session:{session_id}").into());
     }
-    escaped
+    sql.push_str(" ORDER BY owner_scope ASC, subscription_key ASC");
+    let mut stmt = tx.prepare(&sql).map_err(process_sqlite_error)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(process_sqlite_error)?;
+    let mut subscriptions = Vec::new();
+    for row in rows {
+        let (subscription_id, json) = row.map_err(process_sqlite_error)?;
+        match SqliteTriggerStore::decode_subscription(json) {
+            Ok(subscription) => subscriptions.push(subscription),
+            Err(err) => tracing::warn!(
+                error = %err,
+                subscription_id,
+                "skipping malformed trigger subscription during occurrence ingress"
+            ),
+        }
+    }
+    drop(stmt);
+
+    let mut reservations = Vec::with_capacity(subscriptions.len());
+    for subscription in subscriptions {
+        let process_id = lash_core::deterministic_delivery_process_id(
+            &occurrence.occurrence_id,
+            &subscription.subscription_id,
+            &subscription.incarnation,
+            subscription.revision,
+        )?;
+        tx.execute(
+            "INSERT INTO trigger_deliveries (
+                occurrence_id, subscription_id, process_id, subscription_incarnation,
+                subscription_revision, subscription_snapshot_json, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                occurrence.occurrence_id.as_str(),
+                subscription.subscription_id.as_str(),
+                process_id.as_str(),
+                subscription.incarnation.as_str(),
+                subscription.revision as i64,
+                SqliteTriggerStore::encode_json(&subscription)?,
+                created_at_ms as i64,
+            ],
+        )
+        .map_err(process_sqlite_error)?;
+        reservations.push(lash_core::TriggerDeliveryReservation {
+            occurrence: occurrence.clone(),
+            subscription,
+            process_id,
+            created_at_ms,
+            reservation_status: lash_core::TriggerDeliveryReservationStatus::Reserved,
+        });
+    }
+    Ok(reservations)
 }
 
-#[cfg(test)]
-mod perf_tests {
-    use super::*;
-    use lash_core::TriggerStore;
-
-    fn subscription_draft(
-        session_id: &str,
-        source_key: &str,
-        index: usize,
-    ) -> lash_core::TriggerSubscriptionDraft {
-        let scope = lash_core::SessionScope::new(session_id);
-        lash_core::TriggerSubscriptionDraft {
-            registrant: lash_core::ProcessOriginator::session(scope.clone()),
-            env_ref: lash_core::ProcessExecutionEnvRef::new(format!("env:{index}")),
-            wake_target: Some(scope),
-            name: Some(format!("subscription-{index}")),
-            source_type: "perf.trigger".to_string(),
-            source_key: source_key.to_string(),
-            source: serde_json::json!({}),
-            payload_schema: lash_core::LashSchema::new(serde_json::json!({ "type": "object" })),
-            target: lash_core::ProcessInput::Engine {
-                kind: "test".to_string(),
-                payload: serde_json::json!({ "index": index }),
-            },
-            target_identity: lash_core::ProcessIdentity::new("test"),
-            event_types: Vec::new(),
-            input_template: BTreeMap::new(),
-            target_label: None,
-        }
+fn sqlite_delivery_snapshots(
+    tx: &rusqlite::Transaction<'_>,
+    occurrence: &lash_core::TriggerOccurrenceRecord,
+    reservation_status: lash_core::TriggerDeliveryReservationStatus,
+) -> Result<Vec<lash_core::TriggerDeliveryReservation>, lash_core::PluginError> {
+    let mut stmt = tx
+        .prepare(
+            "SELECT process_id, created_at_ms, subscription_snapshot_json
+             FROM trigger_deliveries
+             WHERE occurrence_id = ?1
+             ORDER BY created_at_ms ASC, subscription_id ASC",
+        )
+        .map_err(process_sqlite_error)?;
+    let rows = stmt
+        .query_map(params![occurrence.occurrence_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(process_sqlite_error)?;
+    let mut reservations = Vec::new();
+    for row in rows {
+        let (process_id, created_at_ms, snapshot_json) = row.map_err(process_sqlite_error)?;
+        reservations.push(lash_core::TriggerDeliveryReservation {
+            occurrence: occurrence.clone(),
+            subscription: SqliteTriggerStore::decode_subscription(snapshot_json)?,
+            process_id,
+            created_at_ms: created_at_ms as u64,
+            reservation_status: reservation_status.clone(),
+        });
     }
-
-    #[tokio::test]
-    async fn reservation_statement_budget_is_constant_across_fanout() {
-        for subscription_count in [1, 8, 64] {
-            let store = SqliteTriggerStore::memory().await.expect("trigger store");
-            let source_key =
-                lash_core::empty_trigger_source_key("perf.trigger").expect("source key");
-            for index in 0..subscription_count {
-                store
-                    .register_subscription(subscription_draft(
-                        &format!("session-{index}"),
-                        &source_key,
-                        index,
-                    ))
-                    .await
-                    .expect("register subscription");
-            }
-            let occurrence = store
-                .record_occurrence(lash_core::TriggerOccurrenceRequest::new(
-                    "perf.trigger",
-                    &source_key,
-                    serde_json::json!({ "fanout": subscription_count }),
-                    format!("fanout-{subscription_count}"),
-                ))
-                .await
-                .expect("record occurrence");
-
-            RESERVATION_STATEMENT_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
-            let fresh = store
-                .reserve_matching_deliveries(&occurrence.occurrence_id)
-                .await
-                .expect("fresh reservation");
-            let fresh_statements =
-                RESERVATION_STATEMENT_COUNT.load(std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(fresh.len(), subscription_count);
-            assert_eq!(fresh_statements, 1);
-
-            RESERVATION_STATEMENT_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
-            let replay = store
-                .reserve_matching_deliveries(&occurrence.occurrence_id)
-                .await
-                .expect("replayed reservation");
-            let replay_statements =
-                RESERVATION_STATEMENT_COUNT.load(std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(replay.len(), subscription_count);
-            assert_eq!(replay_statements, 2);
-            eprintln!(
-                "trigger fanout N={subscription_count}: old={} statements, fresh={fresh_statements}, replay={replay_statements}",
-                subscription_count * 2,
-            );
-        }
-    }
+    Ok(reservations)
 }

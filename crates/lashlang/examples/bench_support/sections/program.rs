@@ -498,23 +498,28 @@ daily_handle = await triggers.register({
   source: cron.Schedule({ expr: "0 8 * * *", tz: "UTC" }),
   target: daily_digest,
   inputs: { tick: trigger.event },
-  name: "daily_digest"
+  name: "daily_digest",
+  subscription_key: "daily-digest"
 })?
 button_handle = await triggers.register({
   source: ui.button.pressed({}),
   target: on_button,
   inputs: { event: trigger.event },
-  name: "button watcher"
+  name: "button watcher",
+  subscription_key: "button-watcher"
 })?
 registrations = await triggers.list({ target: daily_digest })?
-cancelled = await triggers.cancel({ handle: daily_handle })?
+disabled = await triggers.disable({
+  subscription_key: "daily-digest",
+  expected_revision: daily_handle.revision
+})?
 finish {
   daily_handle: daily_handle.id,
   button_handle: button_handle.id,
   registration_count: len(registrations),
   listed_target: registrations[0].target.process_name,
   listed_source: registrations[0].source_type,
-  cancelled: cancelled
+  disabled: disabled.enabled
 }
 "#
         }

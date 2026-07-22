@@ -132,7 +132,7 @@ pub struct RemoteTriggerSubscriptionFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
+    pub subscription_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,7 +151,7 @@ impl Default for RemoteTriggerSubscriptionFilter {
             protocol_version: REMOTE_PROTOCOL_VERSION,
             registrant_scope_id: None,
             session_id: None,
-            handle: None,
+            subscription_key: None,
             name: None,
             source_type: None,
             source_key: None,
@@ -193,7 +193,9 @@ impl RemoteTriggerSubscriptionFilter {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteTriggerRegistration {
-    pub handle: String,
+    pub subscription_key: String,
+    pub incarnation: String,
+    pub revision: u64,
     pub source_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -245,10 +247,18 @@ pub enum RemoteTriggerInputBinding {
     Fixed { value: serde_json::Value },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RemoteTriggerOwnerScope {
+    Session { session_id: String },
+    Host { binding_id: String },
+    Platform,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteTriggerSubscriptionDraft {
     pub protocol_version: u32,
-    pub registrant: RemoteProcessOriginator,
+    pub subscription_key: String,
     pub env_ref: RemoteProcessExecutionEnvRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target: Option<RemoteSessionScope>,
@@ -272,7 +282,7 @@ pub struct RemoteTriggerSubscriptionDraft {
 
 impl RemoteTriggerSubscriptionDraft {
     pub fn for_process(
-        registrant: RemoteProcessOriginator,
+        subscription_key: impl Into<String>,
         env_ref: RemoteProcessExecutionEnvRef,
         source_type: impl Into<String>,
         source_key: impl Into<String>,
@@ -282,7 +292,7 @@ impl RemoteTriggerSubscriptionDraft {
         let target_label = target_identity.label.clone();
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            registrant,
+            subscription_key: subscription_key.into(),
             env_ref,
             wake_target: None,
             name: None,
@@ -338,7 +348,11 @@ impl RemoteTriggerSubscriptionDraft {
 
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
         ensure_protocol_version(self.protocol_version)?;
-        self.registrant.validate("RemoteTriggerSubscriptionDraft")?;
+        require_non_empty(
+            "RemoteTriggerSubscriptionDraft",
+            "subscription_key",
+            &self.subscription_key,
+        )?;
         self.env_ref.validate("RemoteTriggerSubscriptionDraft")?;
         if let Some(wake_target) = &self.wake_target {
             wake_target.validate("RemoteTriggerSubscriptionDraft")?;
@@ -372,11 +386,15 @@ impl RemoteTriggerSubscriptionDraft {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteTriggerSubscriptionRecord {
     pub subscription_id: String,
+    pub owner_scope: RemoteTriggerOwnerScope,
+    pub subscription_key: String,
+    pub incarnation: String,
+    pub revision: u64,
+    pub definition_hash: String,
     pub registrant: RemoteProcessOriginator,
     pub env_ref: RemoteProcessExecutionEnvRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target: Option<RemoteSessionScope>,
-    pub handle: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub source_type: String,
@@ -395,6 +413,10 @@ pub struct RemoteTriggerSubscriptionRecord {
     pub target_label: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub tombstoned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at_ms: Option<u64>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -402,12 +424,14 @@ pub struct RemoteTriggerSubscriptionRecord {
 impl RemoteTriggerSubscriptionRecord {
     pub fn validate(&self, type_name: &'static str) -> Result<(), RemoteProtocolError> {
         require_non_empty(type_name, "subscription_id", &self.subscription_id)?;
+        require_non_empty(type_name, "subscription_key", &self.subscription_key)?;
+        require_non_empty(type_name, "incarnation", &self.incarnation)?;
+        require_non_empty(type_name, "definition_hash", &self.definition_hash)?;
         self.registrant.validate(type_name)?;
         self.env_ref.validate(type_name)?;
         if let Some(wake_target) = &self.wake_target {
             wake_target.validate(type_name)?;
         }
-        require_non_empty(type_name, "handle", &self.handle)?;
         require_non_empty(type_name, "source_type", &self.source_type)?;
         require_non_empty(type_name, "source_key", &self.source_key)?;
         self.target.validate(type_name)?;
@@ -490,52 +514,5 @@ impl RemoteTriggerListSubscriptionsResponse {
             record.validate("RemoteTriggerListSubscriptionsResponse")?;
         }
         Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteTriggerCancelSubscriptionRequest {
-    pub protocol_version: u32,
-    pub session_id: String,
-    pub handle: String,
-}
-
-impl RemoteTriggerCancelSubscriptionRequest {
-    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
-        ensure_protocol_version(self.protocol_version)?;
-        require_non_empty(
-            "RemoteTriggerCancelSubscriptionRequest",
-            "session_id",
-            &self.session_id,
-        )?;
-        require_non_empty(
-            "RemoteTriggerCancelSubscriptionRequest",
-            "handle",
-            &self.handle,
-        )
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RemoteTriggerCancelSubscriptionResult {
-    pub protocol_version: u32,
-    pub session_id: String,
-    pub handle: String,
-    pub cancelled: bool,
-}
-
-impl RemoteTriggerCancelSubscriptionResult {
-    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
-        ensure_protocol_version(self.protocol_version)?;
-        require_non_empty(
-            "RemoteTriggerCancelSubscriptionResult",
-            "session_id",
-            &self.session_id,
-        )?;
-        require_non_empty(
-            "RemoteTriggerCancelSubscriptionResult",
-            "handle",
-            &self.handle,
-        )
     }
 }

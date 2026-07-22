@@ -131,9 +131,26 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
         "continue_as" => Ok(continue_as_record(args)),
         "triggers.register" => Ok(trigger_register_record(args)),
         "triggers.list" => Ok(trigger_list_value(args)),
-        "triggers.cancel" => Ok(Value::Bool(true)),
+        "triggers.disable" => Ok(trigger_mutation_record(args, "disabled")),
         _ => Err(unknown_tool(name)),
     }
+}
+
+fn trigger_mutation_record(args: &Record, disposition: &str) -> Value {
+    let mut record = Record::default();
+    record.insert(
+        "subscription_key".to_string(),
+        args.get("subscription_key")
+            .cloned()
+            .unwrap_or_else(|| Value::String("bench-trigger".into())),
+    );
+    record.insert("revision".to_string(), Value::Number(2.0));
+    record.insert(
+        "disposition".to_string(),
+        Value::String(disposition.into()),
+    );
+    record.insert("enabled".to_string(), Value::Bool(false));
+    Value::Record(Arc::new(record))
 }
 
 fn trigger_register_record(args: &Record) -> Value {

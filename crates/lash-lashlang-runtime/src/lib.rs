@@ -589,14 +589,14 @@ impl LashlangProcessInput {
 
     pub fn remote_trigger_subscription_draft(
         &self,
-        registrant: lash_remote_protocol::RemoteProcessOriginator,
+        subscription_key: impl Into<String>,
         env_ref: lash_remote_protocol::RemoteProcessExecutionEnvRef,
         source_type: impl Into<String>,
         source_key: impl Into<String>,
     ) -> Result<lash_remote_protocol::RemoteTriggerSubscriptionDraft, serde_json::Error> {
         Ok(
             lash_remote_protocol::RemoteTriggerSubscriptionDraft::for_process(
-                registrant,
+                subscription_key,
                 env_ref,
                 source_type,
                 source_key,
@@ -1094,7 +1094,7 @@ mod tests {
 
         let draft = input
             .remote_trigger_subscription_draft(
-                lash_remote_protocol::RemoteProcessOriginator::Host { scope: None },
+                "button-main",
                 "process-env:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .parse()
                     .expect("canonical env ref"),

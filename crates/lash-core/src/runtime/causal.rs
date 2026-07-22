@@ -279,9 +279,15 @@ fn causal_replay_discriminator(caused_by: &CausalRef) -> String {
         CausalRef::TriggerOccurrence {
             occurrence_id,
             subscription_id,
+            subscription_incarnation,
+            subscription_revision,
         } => {
             if let Some(subscription_id) = subscription_id {
-                format!("cause:trigger:{occurrence_id}:{subscription_id}:")
+                format!(
+                    "cause:trigger:{occurrence_id}:{subscription_id}:{}:{}:",
+                    subscription_incarnation.as_deref().unwrap_or_default(),
+                    subscription_revision.map_or_else(String::new, |value| value.to_string())
+                )
             } else {
                 format!("cause:trigger:{occurrence_id}:")
             }

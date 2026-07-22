@@ -13,7 +13,7 @@ fi
 is_test_rust_file() {
   local file="$1"
   case "$file" in
-    */tests/*|*/test/*|*/testing/*|*/src/tests.rs|*/src/test.rs|*/src/*/tests.rs|*/src/*/test.rs|*/language/support.rs)
+    */tests/*|*/test/*|*/testing/*|*/src/tests.rs|*/src/test.rs|*/src/*/tests.rs|*/src/*/test.rs|*/src/*_tests.rs|*/language/support.rs)
       return 0
       ;;
     *)

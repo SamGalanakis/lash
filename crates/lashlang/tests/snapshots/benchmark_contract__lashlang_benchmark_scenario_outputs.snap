@@ -1,5 +1,6 @@
 ---
 source: crates/lashlang/tests/benchmark_contract.rs
+assertion_line: 33
 expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs should serialize\")"
 ---
 {
@@ -345,8 +346,8 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
   },
   "trigger_registry_host_environment": {
     "button_handle": "trigger:ui.button.pressed:on_button",
-    "cancelled": true,
     "daily_handle": "trigger:cron.Schedule:daily_digest",
+    "disabled": false,
     "listed_source": "cron.Schedule",
     "listed_target": "daily_digest",
     "registration_count": 1

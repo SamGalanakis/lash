@@ -35,9 +35,13 @@ impl From<lash_core::CausalRef> for RemoteCausalRef {
             lash_core::CausalRef::TriggerOccurrence {
                 occurrence_id,
                 subscription_id,
+                subscription_incarnation,
+                subscription_revision,
             } => Self::TriggerOccurrence {
                 occurrence_id,
                 subscription_id,
+                subscription_incarnation,
+                subscription_revision,
             },
             lash_core::CausalRef::SessionNode {
                 session_id,
@@ -87,9 +91,13 @@ impl From<RemoteCausalRef> for lash_core::CausalRef {
             RemoteCausalRef::TriggerOccurrence {
                 occurrence_id,
                 subscription_id,
+                subscription_incarnation,
+                subscription_revision,
             } => Self::TriggerOccurrence {
                 occurrence_id,
                 subscription_id,
+                subscription_incarnation,
+                subscription_revision,
             },
             RemoteCausalRef::SessionNode {
                 session_id,

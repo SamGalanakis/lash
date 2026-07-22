@@ -79,12 +79,16 @@ fn process_list_filter_matches_enriched_facets() {
         .with_caused_by(Some(crate::CausalRef::TriggerOccurrence {
             occurrence_id: "occurrence-target".to_string(),
             subscription_id: Some("subscription-target".to_string()),
+            subscription_incarnation: None,
+            subscription_revision: None,
         }));
     let mut wrong_subscription = record("wrong-subscription", "target", 100);
     wrong_subscription.provenance = ProcessProvenance::session(SessionScope::new("origin-session"))
         .with_caused_by(Some(crate::CausalRef::TriggerOccurrence {
             occurrence_id: "occurrence-target".to_string(),
             subscription_id: Some("subscription-other".to_string()),
+            subscription_incarnation: None,
+            subscription_revision: None,
         }));
     let mut missing_subscription = record("missing-subscription", "target", 100);
     missing_subscription.provenance = ProcessProvenance::session(SessionScope::new(
@@ -93,6 +97,8 @@ fn process_list_filter_matches_enriched_facets() {
     .with_caused_by(Some(crate::CausalRef::TriggerOccurrence {
         occurrence_id: "occurrence-target".to_string(),
         subscription_id: None,
+        subscription_incarnation: None,
+        subscription_revision: None,
     }));
     let wrong = record("wrong", "other", 200);
 

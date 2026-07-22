@@ -190,6 +190,14 @@ impl RuntimeEffectController for RecordingEffectController {
                 "process_unexpected",
                 "recording effect controller does not execute processes",
             )),
+            RuntimeEffectCommand::Trigger { command } => {
+                local_executor
+                    .execute(RuntimeEffectEnvelope::new(
+                        envelope.invocation,
+                        RuntimeEffectCommand::Trigger { command },
+                    ))
+                    .await
+            }
             RuntimeEffectCommand::Checkpoint { .. } => Ok(RuntimeEffectOutcome::Checkpoint {
                 result: Ok(crate::CheckpointDelivery::default()),
             }),
