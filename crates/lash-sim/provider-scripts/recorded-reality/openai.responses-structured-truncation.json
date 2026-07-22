@@ -1,0 +1,24 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "openai.responses-structured-truncation",
+  "provider_kind": "openai",
+  "endpoint": { "method": "POST", "path": "/responses" },
+  "request_match": {
+    "body": {
+      "model": { "equals": "gpt-4o-mini-2024-07-18" },
+      "stream": { "equals": true },
+      "text.format.type": { "equals": "json_schema" }
+    },
+    "headers": { "authorization": { "present": true } }
+  },
+  "timeline": [
+    { "at": 0, "event": "response_start", "status": 200, "headers": [{ "name": "content-type", "value": "text/event-stream" }] },
+    { "at": 0, "event": "sse", "data": "{\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"created_at\":1740855869,\"status\":\"incomplete\",\"completed_at\":null,\"error\":null,\"incomplete_details\":{\"reason\":\"max_tokens\"},\"instructions\":null,\"max_output_tokens\":null,\"model\":\"gpt-4o-mini-2024-07-18\",\"output\":[],\"previous_response_id\":null,\"reasoning_effort\":null,\"store\":false,\"temperature\":1,\"text\":{\"format\":{\"type\":\"text\"}},\"tool_choice\":\"auto\",\"tools\":[],\"top_p\":1,\"truncation\":\"disabled\",\"usage\":null,\"user\":null,\"metadata\":{}},\"sequence_number\":1}" },
+    { "at": 0, "event": "end" }
+  ],
+  "provenance": {
+    "kind": "provider_documentation",
+    "source": "https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete",
+    "notes": "Verbatim response.incomplete event example."
+  }
+}

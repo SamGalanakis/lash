@@ -37,4 +37,5 @@ sqlx = { workspace = true, default-features = false, features = ["postgres"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+lash-provider-auth = { workspace = true }
 tempfile = { workspace = true }

@@ -1,0 +1,22 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "openai.chat-hard-quota-429",
+  "provider_kind": "openai-compatible",
+  "endpoint": { "method": "POST", "path": "/chat/completions" },
+  "request_match": {
+    "body": { "model": { "equals": "gpt-5.4" }, "stream": { "equals": false } },
+    "headers": { "authorization": { "present": true } }
+  },
+  "timeline": [{
+    "at": 0,
+    "event": "http_error",
+    "status": 429,
+    "headers": [{ "name": "content-type", "value": "application/json" }],
+    "body": "{\"error\":{\"message\":\"You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.\",\"type\":\"insufficient_quota\",\"param\":null,\"code\":\"insufficient_quota\"}}"
+  }],
+  "provenance": {
+    "kind": "real_world_report",
+    "source": "https://github.com/langchain-ai/langchain-academy/issues/150",
+    "notes": "Verbatim OpenAI API error response reported by a consumer."
+  }
+}

@@ -93,9 +93,18 @@ impl ProviderFailureClassifier for DefaultProviderFailureClassifier {
         // metric ... per minute", which arrives as a retryable 429 and must
         // stay retryable — downgrading it also loses the throttle-deference
         // path, which requires `Quota` + `retryable: true`.
+        // A transient Google 429 with none of the RetryInfo, per-metric, or
+        // textual retry markers is indistinguishable here and will therefore
+        // be classified as terminal by this heuristic.
+        let google_hard_quota = haystack.contains("you exceeded your current quota")
+            && !haystack.contains("quota exceeded for metric")
+            && !haystack.contains("retrydelay")
+            && !haystack.contains("please retry");
         if haystack.contains("insufficient_quota")
             || haystack.contains("usage_limit_reached")
             || haystack.contains("usage_not_included")
+            || haystack.contains("credit balance is too low")
+            || google_hard_quota
         {
             failure.kind = ProviderFailureKind::Quota;
             failure.retryable = false;

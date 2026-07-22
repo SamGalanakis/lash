@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 
 pub const PROVIDER_WIRE_SCRIPT_SCHEMA: &str = "lash.provider-wire-script.v1";
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderWireScript {
     pub schema: String,
@@ -24,8 +24,10 @@ pub struct ProviderWireScript {
     pub request_match: ProviderWireRequestMatch,
     #[serde(default)]
     pub timeline: Vec<ProviderWireEvent>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_provider: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProviderWireProvenance>,
 }
 
 impl ProviderWireScript {
@@ -67,11 +69,30 @@ impl ProviderWireScript {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderWireEndpoint {
     pub method: String,
     pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderWireProvenance {
+    pub kind: ProviderWireProvenanceKind,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderWireProvenanceKind {
+    CapturedLive,
+    ProviderDocumentation,
+    RealWorldReport,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -81,7 +102,7 @@ pub struct ProviderWireHeader {
     pub value: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderWireRequestMatch {
     #[serde(default)]
@@ -90,7 +111,7 @@ pub struct ProviderWireRequestMatch {
     pub headers: BTreeMap<String, HeaderMatcher>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct JsonMatcher {
     #[serde(default)]
@@ -105,7 +126,7 @@ pub struct JsonMatcher {
     pub min_len: Option<usize>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeaderMatcher {
     #[serde(default)]
@@ -116,7 +137,7 @@ pub struct HeaderMatcher {
     pub contains: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderWireEvent {
     ResponseStart {

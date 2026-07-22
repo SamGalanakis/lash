@@ -1,0 +1,22 @@
+{
+  "schema": "lash.provider-wire-script.v1",
+  "name": "anthropic.messages-rate-limit-429",
+  "provider_kind": "anthropic",
+  "endpoint": { "method": "POST", "path": "/v1/messages" },
+  "request_match": {
+    "body": { "model": { "equals": "claude-sonnet-4-20250514" } },
+    "headers": { "x-api-key": { "present": true } }
+  },
+  "timeline": [{
+    "at": 0,
+    "event": "http_error",
+    "status": 429,
+    "headers": [{ "name": "content-type", "value": "application/json" }],
+    "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Extra usage is required for long context requests.\"},\"request_id\":\"req_011CYNj7TmYSikEg9SLgfNhr\"}"
+  }],
+  "provenance": {
+    "kind": "real_world_report",
+    "source": "https://github.com/anthropics/claude-code/issues/27603",
+    "notes": "Verbatim 429 response body from a report of a persistent plan restriction. The fixture records Lash's policy that an otherwise unknown 429 remains retryable by default; the source does not demonstrate transient throttling."
+  }
+}

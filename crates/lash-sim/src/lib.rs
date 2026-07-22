@@ -5,6 +5,10 @@ mod cache_regression;
 mod canonical_scripts;
 mod clock;
 mod lease;
+#[cfg(test)]
+mod recorded_reality;
+#[cfg(test)]
+mod request_snapshot;
 
 pub mod artifacts;
 pub mod backend_contention;
@@ -14,6 +18,7 @@ pub mod oracles;
 pub mod postgres_replay;
 pub mod provider;
 pub mod provider_mutations;
+pub mod recording;
 pub mod replay;
 pub mod runner;
 pub mod runtime_boundaries;
@@ -30,9 +35,11 @@ pub use artifacts::{
     GeneratedSimProfileReport, ScriptHashManifest,
 };
 pub use provider::{
-    ProviderWireEndpoint, ProviderWireEvent, ProviderWireRequestMatch, ProviderWireScript,
-    ScriptedLlmHttpTransport, ScriptedTransportSchedule,
+    ProviderWireEndpoint, ProviderWireEvent, ProviderWireProvenance, ProviderWireProvenanceKind,
+    ProviderWireRequestMatch, ProviderWireScript, ScriptedLlmHttpTransport,
+    ScriptedTransportSchedule,
 };
+pub use recording::{ProviderRecordingConfig, RecordingLlmHttpTransport};
 pub use runner::{
     FIXED_SCRIPT_PROFILE, run_fixed_script_profile, run_generated_postgres_replay_for_seeds,
     run_generated_sim_profile, run_generated_sim_profile_for_seeds,
