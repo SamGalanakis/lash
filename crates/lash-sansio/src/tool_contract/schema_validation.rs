@@ -1,4 +1,9 @@
+use std::collections::HashMap;
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex, OnceLock};
+
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::tool_contract::ToolContract;
 
@@ -31,20 +36,134 @@ impl LashSchema {
     }
 
     pub fn validate(&self, value: &Value) -> Result<(), String> {
-        reject_non_local_references(&self.schema)?;
-        let compiled =
-            jsonschema::JSONSchema::compile(&self.schema).map_err(|error| error.to_string())?;
-        if compiled.is_valid(value) {
-            return Ok(());
-        }
-        compiled.validate(value).map_err(|mut errors| {
-            format_validation_error(errors.next().expect("validation failure contains an error"))
-        })
+        validate_schema(&self.schema, value)
     }
 }
 
+const COMPILED_SCHEMA_CACHE_CAPACITY: usize = 1_024;
+const COMPILED_SCHEMA_CACHE_SCHEMA_BYTES: usize = 16 * 1024 * 1024;
+
+struct CachedSchema {
+    schema: Value,
+    compiled: Result<Arc<jsonschema::JSONSchema>, String>,
+}
+
+#[derive(Default)]
+struct CompiledSchemaCache {
+    entries: HashMap<[u8; 32], Vec<CachedSchema>>,
+    entry_count: usize,
+    schema_bytes: usize,
+}
+
+impl CompiledSchemaCache {
+    fn find_compiled(
+        &self,
+        hash: &[u8; 32],
+        schema: &Value,
+    ) -> Option<Result<Arc<jsonschema::JSONSchema>, String>> {
+        self.entries
+            .get(hash)
+            .and_then(|entries| entries.iter().find(|entry| entry.schema == *schema))
+            .map(|entry| entry.compiled.clone())
+    }
+
+    fn insert(
+        &mut self,
+        hash: [u8; 32],
+        schema: &Value,
+        serialized_bytes: usize,
+        compiled: Result<Arc<jsonschema::JSONSchema>, String>,
+    ) {
+        // The byte cap accounts for serialized schema input rather than the
+        // validator's opaque heap use; the entry cap is a second backstop.
+        if self.entry_count >= COMPILED_SCHEMA_CACHE_CAPACITY
+            || serialized_bytes
+                > COMPILED_SCHEMA_CACHE_SCHEMA_BYTES.saturating_sub(self.schema_bytes)
+        {
+            return;
+        }
+        self.entries.entry(hash).or_default().push(CachedSchema {
+            schema: schema.clone(),
+            compiled,
+        });
+        self.entry_count += 1;
+        self.schema_bytes += serialized_bytes;
+    }
+}
+
+fn compiled_schema_cache() -> &'static Mutex<CompiledSchemaCache> {
+    static CACHE: OnceLock<Mutex<CompiledSchemaCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(CompiledSchemaCache::default()))
+}
+
+fn schema_content_fingerprint(schema: &Value) -> Result<([u8; 32], usize), String> {
+    struct DigestWriter<'a> {
+        digest: &'a mut Sha256,
+        bytes_written: usize,
+    }
+
+    impl Write for DigestWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.digest.update(bytes);
+            self.bytes_written = self.bytes_written.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut digest = Sha256::new();
+    let serialized_bytes = {
+        let mut writer = DigestWriter {
+            digest: &mut digest,
+            bytes_written: 0,
+        };
+        serde_json::to_writer(&mut writer, schema).map_err(|error| error.to_string())?;
+        writer.bytes_written
+    };
+    Ok((digest.finalize().into(), serialized_bytes))
+}
+
+fn compiled_schema(schema: &Value) -> Result<Arc<jsonschema::JSONSchema>, String> {
+    let (hash, serialized_bytes) = schema_content_fingerprint(schema)?;
+    if let Some(cached) = compiled_schema_cache()
+        .lock()
+        .expect("compiled schema cache lock")
+        .find_compiled(&hash, schema)
+    {
+        return cached;
+    }
+
+    let compiled = reject_non_local_references(schema).and_then(|()| {
+        jsonschema::JSONSchema::compile(schema)
+            .map(Arc::new)
+            .map_err(|error| error.to_string())
+    });
+
+    let mut cache = compiled_schema_cache()
+        .lock()
+        .expect("compiled schema cache lock");
+    if let Some(existing) = cache.find_compiled(&hash, schema) {
+        return existing;
+    }
+    cache.insert(hash, schema, serialized_bytes, compiled.clone());
+    compiled
+}
+
+fn validate_schema(schema: &Value, value: &Value) -> Result<(), String> {
+    let compiled = compiled_schema(schema)?;
+    if compiled.is_valid(value) {
+        return Ok(());
+    }
+    compiled.validate(value).map_err(|mut errors| {
+        format_validation_error(errors.next().expect("validation failure contains an error"))
+    })
+}
+
 pub fn validate_tool_input(contract: &ToolContract, args: &Value) -> Result<(), String> {
-    LashSchema::new(contract.input_schema.canonical().clone()).validate(args)
+    validate_schema(contract.input_schema.canonical(), args)
 }
 
 fn reject_non_local_references(schema: &Value) -> Result<(), String> {
@@ -88,6 +207,48 @@ mod tests {
     use super::*;
     use crate::ToolDefinition;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn repeated_schema_compilation_reuses_the_cached_validator() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "cache_probe_20260723": { "type": "string" } }
+        });
+
+        let first = compiled_schema(&schema).expect("compile schema once");
+        let second = compiled_schema(&schema).expect("reuse compiled schema");
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn cache_hits_require_structural_equality_after_hash_match() {
+        let hash = [7; 32];
+        let first_schema = serde_json::json!({ "type": "string" });
+        let second_schema = serde_json::json!({ "type": "integer" });
+        let first = Arc::new(
+            jsonschema::JSONSchema::compile(&first_schema).expect("compile first validator"),
+        );
+        let second = Arc::new(
+            jsonschema::JSONSchema::compile(&second_schema).expect("compile second validator"),
+        );
+        let mut cache = CompiledSchemaCache::default();
+        cache.insert(hash, &first_schema, 17, Ok(first.clone()));
+        cache.insert(hash, &second_schema, 18, Ok(second.clone()));
+
+        let first_hit = cache
+            .find_compiled(&hash, &first_schema)
+            .expect("find first colliding schema")
+            .expect("first validator");
+        let second_hit = cache
+            .find_compiled(&hash, &second_schema)
+            .expect("find second colliding schema")
+            .expect("second validator");
+
+        assert!(Arc::ptr_eq(&first, &first_hit));
+        assert!(Arc::ptr_eq(&second, &second_hit));
+        assert!(!Arc::ptr_eq(&first_hit, &second_hit));
+    }
 
     #[test]
     fn validation_rejects_values_that_violate_local_refs() {
