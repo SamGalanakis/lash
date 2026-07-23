@@ -12,6 +12,9 @@ use crate::ast::{
 use crate::linker::{
     LashlangAbilities, LashlangHostCatalog, LashlangLanguageFeatures, ResourceOperationBinding,
 };
+use crate::trigger_manifest::{
+    CurrentTriggerKeyManifest, TriggerKeyManifest, TriggerManifestReplacement,
+};
 
 pub const LASHLANG_SEMANTIC_HASH_VERSION: &str = "lashlang-semantic-v2";
 pub const LASHLANG_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -133,6 +136,8 @@ pub struct ModuleArtifact {
     pub host_requirements_ref: HostRequirementsRef,
     pub host_requirements: HostRequirements,
     pub exports: ModuleExports,
+    #[serde(default)]
+    pub trigger_key_manifest: TriggerKeyManifest,
     pub canonical_ir: Program,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<ModuleRef>,
@@ -159,12 +164,14 @@ impl ModuleArtifact {
     ) -> Result<Self, ModuleArtifactError> {
         let host_requirements_ref = host_requirements_ref(&requirements);
         let exports = module_exports(&canonical_ir);
+        let trigger_key_manifest = TriggerKeyManifest::from_program(&canonical_ir);
         let module_ref = module_ref(&canonical_ir, &host_requirements_ref, &exports);
         Ok(Self {
             module_ref,
             host_requirements_ref,
             host_requirements: requirements,
             exports,
+            trigger_key_manifest,
             canonical_ir,
             dependencies: Vec::new(),
         })
@@ -254,6 +261,13 @@ impl ModuleArtifact {
                 actual: "artifact exports".to_string(),
             });
         }
+        if rebuilt.trigger_key_manifest != self.trigger_key_manifest {
+            return Err(ModuleArtifactError::HashMismatch {
+                field: "trigger_key_manifest",
+                expected: "canonical trigger key manifest".to_string(),
+                actual: "artifact trigger key manifest".to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -318,6 +332,19 @@ pub trait LashlangArtifactStore: Send + Sync {
         module_ref: &ModuleRef,
     ) -> Result<Option<Arc<ModuleArtifact>>, ArtifactStoreError>;
 
+    /// Atomically make `artifact` the current module for an owner namespace and
+    /// return the key-set delta from the prior current artifact.
+    async fn replace_current_trigger_manifest(
+        &self,
+        owner_namespace: &str,
+        artifact: &ModuleArtifact,
+    ) -> Result<TriggerManifestReplacement, ArtifactStoreError>;
+
+    async fn get_current_trigger_manifest(
+        &self,
+        owner_namespace: &str,
+    ) -> Result<Option<CurrentTriggerKeyManifest>, ArtifactStoreError>;
+
     async fn put_artifact_bytes(
         &self,
         artifact_ref: &str,
@@ -334,6 +361,7 @@ pub trait LashlangArtifactStore: Send + Sync {
 #[derive(Clone, Default)]
 pub struct InMemoryLashlangArtifactStore {
     modules: Arc<Mutex<BTreeMap<ModuleRef, Arc<ModuleArtifact>>>>,
+    current_trigger_manifests: Arc<Mutex<BTreeMap<String, CurrentTriggerKeyManifest>>>,
     artifacts: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
 }
 
@@ -373,6 +401,44 @@ impl LashlangArtifactStore for InMemoryLashlangArtifactStore {
             .lock()
             .map_err(|_| ArtifactStoreError::Backend("artifact store lock poisoned".to_string()))?;
         Ok(modules.get(module_ref).cloned())
+    }
+
+    async fn replace_current_trigger_manifest(
+        &self,
+        owner_namespace: &str,
+        artifact: &ModuleArtifact,
+    ) -> Result<TriggerManifestReplacement, ArtifactStoreError> {
+        let mut manifests = self.current_trigger_manifests.lock().map_err(|_| {
+            ArtifactStoreError::Backend("current trigger manifest lock poisoned".to_string())
+        })?;
+        let previous = manifests.insert(
+            owner_namespace.to_string(),
+            CurrentTriggerKeyManifest {
+                module_ref: artifact.module_ref.clone(),
+                manifest: artifact.trigger_key_manifest.clone(),
+            },
+        );
+        Ok(TriggerManifestReplacement {
+            previous_module_ref: previous.as_ref().map(|entry| entry.module_ref.clone()),
+            current_module_ref: artifact.module_ref.clone(),
+            diff: previous
+                .map(|entry| entry.manifest.diff(&artifact.trigger_key_manifest))
+                .unwrap_or_default(),
+        })
+    }
+
+    async fn get_current_trigger_manifest(
+        &self,
+        owner_namespace: &str,
+    ) -> Result<Option<CurrentTriggerKeyManifest>, ArtifactStoreError> {
+        Ok(self
+            .current_trigger_manifests
+            .lock()
+            .map_err(|_| {
+                ArtifactStoreError::Backend("current trigger manifest lock poisoned".to_string())
+            })?
+            .get(owner_namespace)
+            .cloned())
     }
 
     async fn put_artifact_bytes(

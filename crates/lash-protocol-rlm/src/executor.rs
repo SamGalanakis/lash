@@ -20,7 +20,7 @@ use lash_lashlang_runtime::{
 };
 use lashlang::{ExecutionOutcome, State as FlowState};
 
-use self::host_bridge::{HostBridge, LashlangExecutionTrace};
+use self::host_bridge::{HostBridge, HostBridgeConfig, LashlangExecutionTrace};
 use crate::projection::{
     ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
     flow_to_json_value, json_to_flow_value, projected_bindings, prune_projected_binding_names,
@@ -190,6 +190,54 @@ async fn execute_code_inner(
             .stored_lashlang_modules
             .insert(linked_module.module_ref.clone());
     }
+    let owner_namespace = match ctx.trigger_owner_scope() {
+        Ok(owner_scope) => owner_scope.namespace(),
+        Err(err) => {
+            return ExecResponse {
+                observations: Vec::new(),
+                observation_truncation: Vec::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                printed_images: Vec::new(),
+                error: Some(format!("failed to resolve trigger owner namespace: {err}")),
+                duration_ms: start.elapsed().as_millis() as u64,
+                terminal_finish: None,
+            };
+        }
+    };
+    let manifest_replacement = artifact_store
+        .replace_current_trigger_manifest(&owner_namespace, &linked_module.artifact)
+        .await;
+    let manifest_replacement = match manifest_replacement {
+        Ok(replacement) => replacement,
+        Err(err) => {
+            return ExecResponse {
+                observations: Vec::new(),
+                observation_truncation: Vec::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                printed_images: Vec::new(),
+                error: Some(format!(
+                    "failed to replace current trigger key manifest: {err}"
+                )),
+                duration_ms: start.elapsed().as_millis() as u64,
+                terminal_finish: None,
+            };
+        }
+    };
+    let reconcile_warnings = manifest_replacement
+        .diff
+        .removed
+        .iter()
+        .map(|subscription_key| {
+            format!(
+                "RECONCILE WARNING: trigger subscription `{subscription_key}` is absent from \
+                 the replacement artifact for owner `{owner_namespace}` and may be orphaned; \
+                 inspect it with `triggers.list({{}})` and remove it explicitly with \
+                 `triggers.prune({{ subscription_keys: [\"{subscription_key}\"] }})`"
+            )
+        })
+        .collect::<Vec<_>>();
     let compiled = cached_program.compiled_program();
 
     let rehydrated = {
@@ -239,15 +287,17 @@ async fn execute_code_inner(
     if let Some(trace) = &lashlang_execution_trace {
         emit_foreground_execution_started(trace, &linked_module.artifact);
     }
-    let host = HostBridge::new(
-        ctx.clone(),
-        Arc::new(crate::rlm_support::print_history_projector()),
+    let host = HostBridge::new(HostBridgeConfig {
+        ctx: ctx.clone(),
+        print_projector: Arc::new(crate::rlm_support::print_history_projector()),
         tool_result_projectors,
-        lashlang_execution_trace.clone(),
+        lashlang_execution_trace: lashlang_execution_trace.clone(),
         host_environment,
         deferred_execution_grants,
-        Arc::clone(&artifact_store),
-    );
+        artifact_store: Arc::clone(&artifact_store),
+        trigger_key_manifest: linked_module.artifact.trigger_key_manifest.clone(),
+        initial_observations: reconcile_warnings,
+    });
     let env = lashlang::ExecutionEnvironment::new(&host)
         .traced()
         .with_scratch(std::mem::take(&mut state.scratch))
@@ -1231,6 +1281,7 @@ mod tests {
                         lash_core::TriggerCommand::Disable { .. } => "disable",
                         lash_core::TriggerCommand::Delete { .. } => "delete",
                         lash_core::TriggerCommand::Revive { .. } => "revive",
+                        lash_core::TriggerCommand::Prune { .. } => "prune",
                     };
                     Some((
                         envelope
@@ -1508,6 +1559,113 @@ mod tests {
     }
 
     #[test]
+    fn regenerated_trigger_manifest_warns_and_list_marks_the_orphan() {
+        block_on(async {
+            let trigger_store = Arc::new(lash_core::InMemoryTriggerStore::default());
+            let artifact_store = Arc::new(lashlang::InMemoryLashlangArtifactStore::new());
+            let surface = LashlangSurface::new(
+                lashlang::LashlangAbilities::default()
+                    .with_processes()
+                    .with_triggers(),
+                lashlang::LashlangLanguageFeatures::default(),
+                timer_trigger_resources(),
+            );
+            let mut state = RlmExecutionState::new().expect("state");
+
+            let (next, first) = execute_code(
+                state,
+                lash_core::testing::code_execution_context_with_trigger_store(
+                    trigger_store.clone(),
+                ),
+                ExecRequest {
+                    language: "lashlang".to_string(),
+                    code: r#"
+                        process remember(tick: timer.Tick) { finish tick.fired_at }
+                        source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+                        await triggers.register({
+                          source: source,
+                          target: remember,
+                          inputs: { tick: trigger.event },
+                          subscription_key: "old-schedule"
+                        })?
+                        finish true
+                    "#
+                    .to_string(),
+                    accept_finish: true,
+                },
+                artifact_store.clone(),
+                surface.clone(),
+                None,
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
+            )
+            .await
+            .expect("execute original trigger artifact");
+            assert!(first.error.is_none(), "{:?}", first.error);
+            state = next;
+
+            let (_next, replacement) = execute_code(
+                state,
+                lash_core::testing::code_execution_context_with_trigger_store(
+                    trigger_store.clone(),
+                ),
+                ExecRequest {
+                    language: "lashlang".to_string(),
+                    code: r#"
+                        process remember(tick: timer.Tick) { finish tick.fired_at }
+                        source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+                        await triggers.register({
+                          source: source,
+                          target: remember,
+                          inputs: { tick: trigger.event },
+                          subscription_key: "new-schedule"
+                        })?
+                        finish await triggers.list({})?
+                    "#
+                    .to_string(),
+                    accept_finish: true,
+                },
+                artifact_store,
+                surface,
+                None,
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+                RlmLashlangExecutionTraceConfig::default(),
+            )
+            .await
+            .expect("execute replacement trigger artifact");
+
+            assert!(replacement.error.is_none(), "{:?}", replacement.error);
+            assert!(
+                replacement.observations.iter().any(|warning| {
+                    warning.contains("RECONCILE WARNING")
+                        && warning.contains("old-schedule")
+                        && warning.contains("triggers.prune")
+                }),
+                "{:?}",
+                replacement.observations
+            );
+            let registrations = replacement
+                .terminal_finish
+                .expect("replacement returns reconciled list");
+            let registrations = registrations.as_array().expect("list result");
+            let old = registrations
+                .iter()
+                .find(|record| record["subscription_key"] == "old-schedule")
+                .expect("old subscription remains visible");
+            let new = registrations
+                .iter()
+                .find(|record| record["subscription_key"] == "new-schedule")
+                .expect("new subscription is visible");
+            assert_eq!(old["manifest_membership"], "orphaned");
+            assert_eq!(new["manifest_membership"], "present_in_current_artifact");
+            assert!(old["registrant"].is_object());
+            assert!(new["registrant"].is_object());
+        });
+    }
+
+    #[test]
     fn scalar_and_batched_trigger_verbs_emit_typed_effect_envelopes() {
         block_on(async {
             let scalar = CapturingTriggerEffectController::default();
@@ -1534,6 +1692,11 @@ mod tests {
                 deleted = await triggers.delete({
                   subscription_key: "scalar", expected_revision: enabled.revision
                 })?
+                await triggers.register({
+                  source: source, target: remember, inputs: { tick: trigger.event },
+                  subscription_key: "prune-me"
+                })?
+                pruned = await triggers.prune({ subscription_keys: ["prune-me"] })?
                 finish len(listed)
                 "#,
                 scalar.clone(),
@@ -1546,7 +1709,10 @@ mod tests {
                     .iter()
                     .map(|(_, operation)| *operation)
                     .collect::<Vec<_>>(),
-                ["register", "list", "update", "disable", "enable", "delete"]
+                [
+                    "register", "list", "update", "disable", "enable", "delete", "register",
+                    "prune"
+                ]
             );
             assert!(
                 scalar_effects

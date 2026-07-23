@@ -750,6 +750,50 @@ mod tests {
     }
 
     #[test]
+    fn linked_artifact_manifest_contains_explicit_and_materialized_keys() {
+        let source = serde_json::json!({ "expr": "0 8 * * *" });
+        let source_key = semantic_trigger_source_key("timer.Schedule", &source);
+        let derived_key =
+            semantic_trigger_subscription_key("scan", "timer.Schedule", &source_key);
+        let program = crate::parse(
+            r#"
+            process scan(tick: timer.Tick) {
+              finish tick.fired_at
+            }
+            morning = timer.Schedule({ expr: "0 8 * * *" })
+            evening = timer.Schedule({ expr: "0 18 * * *" })
+            await triggers.register({
+              source: morning,
+              target: scan,
+              inputs: { tick: trigger.event }
+            })?
+            await triggers.register({
+              source: evening,
+              target: scan,
+              inputs: { tick: trigger.event },
+              subscription_key: "evening-scan"
+            })?
+            "#,
+        )
+        .expect("parse trigger manifest module");
+        let linked =
+            LinkedModule::link(program, full_host_environment()).expect("link manifest module");
+
+        assert_eq!(
+            linked.artifact.trigger_key_manifest.subscription_keys,
+            BTreeSet::from([derived_key.clone(), "evening-scan".to_string()])
+        );
+        let canonical = linked
+            .artifact
+            .canonical_source()
+            .expect("canonical linked source");
+        assert!(
+            canonical.contains(&format!("subscription_key: \"{derived_key}\"")),
+            "{canonical}"
+        );
+    }
+
+    #[test]
     fn linked_module_captures_concrete_process_body_resources_statically() {
         let program = crate::parse(
             r#"

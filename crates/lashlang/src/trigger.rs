@@ -23,6 +23,7 @@ pub enum TriggerHostOperation {
     Disable,
     Delete,
     Revive,
+    Prune,
 }
 
 impl TriggerHostOperation {
@@ -35,6 +36,7 @@ impl TriggerHostOperation {
             Self::Disable => "triggers.disable",
             Self::Delete => "triggers.delete",
             Self::Revive => "triggers.revive",
+            Self::Prune => "triggers.prune",
         }
     }
 
@@ -47,6 +49,7 @@ impl TriggerHostOperation {
             Self::Disable => "disable",
             Self::Delete => "delete",
             Self::Revive => "revive",
+            Self::Prune => "prune",
         }
     }
 
@@ -110,6 +113,10 @@ impl TriggerHostOperation {
                 required_field("subscription_key", TypeExpr::Str),
                 required_field("expected_revision", TypeExpr::Int),
             ]),
+            Self::Prune => TypeExpr::Object(vec![required_field(
+                "subscription_keys",
+                TypeExpr::List(Box::new(TypeExpr::Str)),
+            )]),
         }
     }
 
@@ -120,10 +127,13 @@ impl TriggerHostOperation {
             Self::Update | Self::Enable | Self::Disable | Self::Delete | Self::Revive => {
                 TypeExpr::TriggerHandle(Box::new(TypeExpr::Any))
             }
+            Self::Prune => {
+                TypeExpr::List(Box::new(TypeExpr::TriggerHandle(Box::new(TypeExpr::Any))))
+            }
         }
     }
 
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Register,
         Self::List,
         Self::Update,
@@ -131,6 +141,7 @@ impl TriggerHostOperation {
         Self::Disable,
         Self::Delete,
         Self::Revive,
+        Self::Prune,
     ];
 }
 
@@ -147,6 +158,15 @@ pub fn add_trigger_resource_operations(catalog: &mut LashlangHostCatalog) {
                     required_field("subscription_key", TypeExpr::Str),
                     required_field("incarnation", TypeExpr::Str),
                     required_field("revision", TypeExpr::Int),
+                    required_field("registrant", TypeExpr::Dict),
+                    required_field(
+                        "manifest_membership",
+                        TypeExpr::Enum(vec![
+                            "present_in_current_artifact".into(),
+                            "orphaned".into(),
+                            "unknown".into(),
+                        ]),
+                    ),
                     required_field("source_key", TypeExpr::Str),
                     optional_field("name", TypeExpr::Str),
                     required_field("source_type", TypeExpr::Str),
@@ -411,6 +431,45 @@ impl TriggerListRequest {
                 TriggerHostOperation::List,
             )?,
             enabled: optional_bool_filter(request, "enabled", TriggerHostOperation::List)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerPruneRequest {
+    pub subscription_keys: Vec<String>,
+}
+
+impl TriggerPruneRequest {
+    pub fn decode(request: &serde_json::Value) -> Result<Self, TriggerRequestDecodeError> {
+        let value = required_json_field(request, "subscription_keys", TriggerHostOperation::Prune)?;
+        let values = value
+            .as_array()
+            .ok_or_else(|| TriggerRequestDecodeError::InvalidField {
+                operation: TriggerHostOperation::Prune.host_operation(),
+                field: "subscription_keys",
+                message: "expected a list of subscription key strings".to_string(),
+            })?;
+        let mut subscription_keys = BTreeSet::new();
+        for value in values {
+            let key = value
+                .as_str()
+                .ok_or_else(|| TriggerRequestDecodeError::InvalidField {
+                    operation: TriggerHostOperation::Prune.host_operation(),
+                    field: "subscription_keys",
+                    message: "expected a list of subscription key strings".to_string(),
+                })?;
+            if key.trim().is_empty() {
+                return Err(TriggerRequestDecodeError::InvalidField {
+                    operation: TriggerHostOperation::Prune.host_operation(),
+                    field: "subscription_keys",
+                    message: "subscription keys must be non-empty".to_string(),
+                });
+            }
+            subscription_keys.insert(key.to_string());
+        }
+        Ok(Self {
+            subscription_keys: subscription_keys.into_iter().collect(),
         })
     }
 }

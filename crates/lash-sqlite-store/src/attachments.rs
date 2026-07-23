@@ -24,6 +24,7 @@ use super::*;
 pub(crate) const MODULE_ARTIFACT_NAMESPACE: &str = "lashlang_module";
 pub(crate) const RAW_ARTIFACT_NAMESPACE: &str = "lashlang_artifact";
 pub(crate) const PROCESS_ENV_NAMESPACE: &str = "process_execution_env";
+pub(crate) const CURRENT_TRIGGER_MANIFEST_NAMESPACE: &str = "lashlang_trigger_manifest";
 
 impl Store {
     async fn put_artifact_ref_blob(
@@ -153,6 +154,86 @@ impl lashlang::LashlangArtifactStore for Store {
             })?
             .insert(module_ref.clone(), artifact.clone());
         Ok(Some(artifact))
+    }
+
+    async fn replace_current_trigger_manifest(
+        &self,
+        owner_namespace: &str,
+        artifact: &lashlang::ModuleArtifact,
+    ) -> Result<lashlang::TriggerManifestReplacement, lashlang::ArtifactStoreError> {
+        let current = lashlang::CurrentTriggerKeyManifest {
+            module_ref: artifact.module_ref.clone(),
+            manifest: artifact.trigger_key_manifest.clone(),
+        };
+        let bytes = serde_json::to_vec(&current)
+            .map_err(|err| lashlang::ArtifactStoreError::Encode(err.to_string()))?;
+        let owner_namespace = owner_namespace.to_string();
+        let blob_profile = self.options.blob_profile;
+        let previous_bytes = self
+            .conn
+            .write(move |tx| {
+                let previous_blob_ref: Option<String> = tx
+                    .query_row(
+                        "SELECT blob_ref FROM artifact_refs
+                         WHERE namespace = ?1 AND artifact_ref = ?2",
+                        params![CURRENT_TRIGGER_MANIFEST_NAMESPACE, owner_namespace.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let previous_bytes = previous_blob_ref
+                    .and_then(|blob_ref| Self::get_blob_conn(tx, &BlobRef(blob_ref)));
+                let blob_ref = Self::insert_artifact_blob_conn(
+                    tx,
+                    BlobArtifactDescriptor::lashlang_module(),
+                    &bytes,
+                    blob_profile,
+                )?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO artifact_refs (namespace, artifact_ref, blob_ref)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        CURRENT_TRIGGER_MANIFEST_NAMESPACE,
+                        owner_namespace.as_str(),
+                        blob_ref.as_str()
+                    ],
+                )?;
+                Ok(previous_bytes)
+            })
+            .await
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        let previous = previous_bytes
+            .map(|bytes| {
+                serde_json::from_slice::<lashlang::CurrentTriggerKeyManifest>(&bytes)
+                    .map_err(|err| lashlang::ArtifactStoreError::Decode(err.to_string()))
+            })
+            .transpose()?;
+        Ok(lashlang::TriggerManifestReplacement {
+            previous_module_ref: previous.as_ref().map(|entry| entry.module_ref.clone()),
+            current_module_ref: artifact.module_ref.clone(),
+            diff: previous
+                .map(|entry| entry.manifest.diff(&artifact.trigger_key_manifest))
+                .unwrap_or_default(),
+        })
+    }
+
+    async fn get_current_trigger_manifest(
+        &self,
+        owner_namespace: &str,
+    ) -> Result<Option<lashlang::CurrentTriggerKeyManifest>, lashlang::ArtifactStoreError> {
+        let bytes = self
+            .get_artifact_ref_blob(
+                CURRENT_TRIGGER_MANIFEST_NAMESPACE,
+                owner_namespace.to_string(),
+                format!("current trigger manifest `{owner_namespace}`"),
+            )
+            .await
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        bytes
+            .map(|bytes| {
+                serde_json::from_slice(&bytes)
+                    .map_err(|err| lashlang::ArtifactStoreError::Decode(err.to_string()))
+            })
+            .transpose()
     }
 
     async fn put_artifact_bytes(

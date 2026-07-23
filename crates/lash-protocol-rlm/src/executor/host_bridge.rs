@@ -39,35 +39,41 @@ pub(super) struct HostBridge<'run> {
     host_environment: lashlang::LashlangHostEnvironment,
     deferred_execution_grants: BTreeMap<lash_core::ToolId, ToolExecutionGrant>,
     artifact_store: std::sync::Arc<dyn lashlang::LashlangArtifactStore>,
+    trigger_key_manifest: lashlang::TriggerKeyManifest,
+}
+
+pub(super) struct HostBridgeConfig<'run> {
+    pub ctx: RuntimeExecutionContext<'run>,
+    pub print_projector: std::sync::Arc<dyn ValueProjector>,
+    pub tool_result_projectors: Vec<crate::RlmToolResultProjector>,
+    pub lashlang_execution_trace: Option<LashlangExecutionTrace>,
+    pub host_environment: lashlang::LashlangHostEnvironment,
+    pub deferred_execution_grants: BTreeMap<lash_core::ToolId, ToolExecutionGrant>,
+    pub artifact_store: std::sync::Arc<dyn lashlang::LashlangArtifactStore>,
+    pub trigger_key_manifest: lashlang::TriggerKeyManifest,
+    pub initial_observations: Vec<String>,
 }
 
 type HostAbilityFuture<'a> =
     Pin<Box<dyn Future<Output = Result<AbilityResult, ExecutionHostError>> + Send + 'a>>;
 
 impl<'run> HostBridge<'run> {
-    pub(super) fn new(
-        ctx: RuntimeExecutionContext<'run>,
-        print_projector: std::sync::Arc<dyn ValueProjector>,
-        tool_result_projectors: Vec<crate::RlmToolResultProjector>,
-        lashlang_execution_trace: Option<LashlangExecutionTrace>,
-        host_environment: lashlang::LashlangHostEnvironment,
-        deferred_execution_grants: BTreeMap<lash_core::ToolId, ToolExecutionGrant>,
-        artifact_store: std::sync::Arc<dyn lashlang::LashlangArtifactStore>,
-    ) -> Self {
+    pub(super) fn new(config: HostBridgeConfig<'run>) -> Self {
         Self {
-            ctx,
-            print_projector,
-            tool_result_projectors,
-            observations: Mutex::new(Vec::new()),
+            ctx: config.ctx,
+            print_projector: config.print_projector,
+            tool_result_projectors: config.tool_result_projectors,
+            observations: Mutex::new(config.initial_observations),
             observation_truncation: Mutex::new(Vec::new()),
             printed_images: Mutex::new(Vec::new()),
             tool_calls: Mutex::new(Vec::new()),
             next_tool_index: Mutex::new(0),
             sleep_sequence: AtomicU64::new(0),
-            lashlang_execution_trace,
-            host_environment,
-            deferred_execution_grants,
-            artifact_store,
+            lashlang_execution_trace: config.lashlang_execution_trace,
+            host_environment: config.host_environment,
+            deferred_execution_grants: config.deferred_execution_grants,
+            artifact_store: config.artifact_store,
+            trigger_key_manifest: config.trigger_key_manifest,
         }
     }
 
@@ -447,6 +453,7 @@ impl HostBridge<'_> {
             lashlang::TriggerHostOperation::Revive => {
                 self.update_trigger(payload, effect_id, true).await
             }
+            lashlang::TriggerHostOperation::Prune => self.prune_triggers(payload, effect_id).await,
         }
     }
 
@@ -655,6 +662,21 @@ impl HostBridge<'_> {
         self.execute_trigger_command(effect_id, command).await
     }
 
+    async fn prune_triggers(
+        &self,
+        payload: Value,
+        effect_id: String,
+    ) -> Result<FlowValue, ExecutionHostError> {
+        let request = lashlang::TriggerPruneRequest::decode(&payload)
+            .map_err(|err| ExecutionHostError::new(err.to_string()))?;
+        let command = lash_core::TriggerCommand::Prune {
+            owner_scope: self.trigger_owner_scope()?,
+            actor: self.ctx.trigger_actor(),
+            subscription_keys: request.subscription_keys,
+        };
+        self.execute_trigger_command(effect_id, command).await
+    }
+
     fn trigger_owner_scope(&self) -> Result<lash_core::TriggerOwnerScope, ExecutionHostError> {
         self.ctx
             .trigger_owner_scope()
@@ -690,12 +712,39 @@ impl HostBridge<'_> {
             lash_core::TriggerCommandOutcome::List { records } => serde_json::to_value(
                 records
                     .iter()
-                    .map(lash_core::TriggerRegistration::from)
+                    .map(|record| {
+                        lash_core::TriggerRegistration::from_record_with_manifest(
+                            record,
+                            Some(&self.trigger_key_manifest.subscription_keys),
+                        )
+                    })
                     .collect::<Vec<_>>(),
             )
             .map_err(|err| {
                 ExecutionHostError::new(format!("failed to encode trigger records: {err}"))
             })?,
+            lash_core::TriggerCommandOutcome::Prune { receipts } => {
+                let values = receipts
+                    .iter()
+                    .map(|receipt| {
+                        let mut value = serde_json::to_value(receipt).map_err(|err| {
+                            ExecutionHostError::new(format!(
+                                "failed to encode trigger prune receipt: {err}"
+                            ))
+                        })?;
+                        let object = value.as_object_mut().ok_or_else(|| {
+                            ExecutionHostError::new("trigger prune receipt must encode as a record")
+                        })?;
+                        object.insert("type".to_string(), serde_json::json!("trigger_handle"));
+                        object.insert(
+                            "id".to_string(),
+                            serde_json::json!(receipt.subscription_key),
+                        );
+                        Ok(value)
+                    })
+                    .collect::<Result<Vec<_>, ExecutionHostError>>()?;
+                serde_json::Value::Array(values)
+            }
         };
         Ok(lashlang::from_json(value))
     }

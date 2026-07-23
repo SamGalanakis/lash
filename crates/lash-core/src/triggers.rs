@@ -333,6 +333,8 @@ pub struct TriggerRegistration {
     pub subscription_key: String,
     pub incarnation: String,
     pub revision: u64,
+    pub registrant: crate::ProcessOriginator,
+    pub manifest_membership: TriggerManifestMembership,
     pub source_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -341,6 +343,15 @@ pub struct TriggerRegistration {
     pub target: TriggerTargetSummary,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerManifestMembership {
+    PresentInCurrentArtifact,
+    Orphaned,
+    #[default]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -580,10 +591,27 @@ fn validate_trigger_subscription_target_label(
 
 impl From<&TriggerSubscriptionRecord> for TriggerRegistration {
     fn from(route: &TriggerSubscriptionRecord) -> Self {
+        Self::from_record_with_manifest(route, None)
+    }
+}
+
+impl TriggerRegistration {
+    pub fn from_record_with_manifest(
+        route: &TriggerSubscriptionRecord,
+        manifest_keys: Option<&std::collections::BTreeSet<String>>,
+    ) -> Self {
         Self {
             subscription_key: route.subscription_key.clone(),
             incarnation: route.incarnation.clone(),
             revision: route.revision,
+            registrant: route.registrant.clone(),
+            manifest_membership: manifest_keys.map_or(TriggerManifestMembership::Unknown, |keys| {
+                if keys.contains(&route.subscription_key) {
+                    TriggerManifestMembership::PresentInCurrentArtifact
+                } else {
+                    TriggerManifestMembership::Orphaned
+                }
+            }),
             source_key: route.source_key.clone(),
             name: route.name.clone(),
             source_type: TriggerEventType::new(route.source_type.clone()),
@@ -765,6 +793,11 @@ pub enum TriggerCommand {
         draft: TriggerSubscriptionDraft,
         expected_revision: u64,
     },
+    Prune {
+        owner_scope: TriggerOwnerScope,
+        actor: crate::ProcessOriginator,
+        subscription_keys: Vec<String>,
+    },
 }
 
 impl TriggerCommand {
@@ -776,7 +809,8 @@ impl TriggerCommand {
             | Self::Enable { owner_scope, .. }
             | Self::Disable { owner_scope, .. }
             | Self::Delete { owner_scope, .. }
-            | Self::Revive { owner_scope, .. } => owner_scope,
+            | Self::Revive { owner_scope, .. }
+            | Self::Prune { owner_scope, .. } => owner_scope,
         }
     }
 
@@ -799,6 +833,7 @@ impl TriggerCommand {
             | Self::Revive {
                 subscription_key, ..
             } => Some(subscription_key),
+            Self::Prune { .. } => None,
         }
     }
 
@@ -815,6 +850,9 @@ pub enum TriggerCommandOutcome {
     },
     List {
         records: Vec<TriggerSubscriptionRecord>,
+    },
+    Prune {
+        receipts: Vec<TriggerMutationReceipt>,
     },
 }
 
@@ -849,6 +887,41 @@ pub type TriggerEffectResult = Result<TriggerCommandOutcome, TriggerOperationErr
 
 // Measured 112 B on rustc 1.97.0, x86_64-unknown-linux-gnu (FIG-595).
 const _: () = assert!(std::mem::size_of::<TriggerEffectResult>() <= 144);
+
+pub fn evaluate_trigger_prune(
+    records: impl IntoIterator<Item = TriggerSubscriptionRecord>,
+    owner_scope: TriggerOwnerScope,
+    actor: crate::ProcessOriginator,
+    subscription_keys: Vec<String>,
+    now: u64,
+) -> TriggerEffectResult {
+    let requested = subscription_keys
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut receipts = Vec::new();
+    for record in records {
+        if record.owner_scope != owner_scope
+            || record.tombstoned
+            || !requested.contains(&record.subscription_key)
+        {
+            continue;
+        }
+        let command = TriggerCommand::Delete {
+            owner_scope: owner_scope.clone(),
+            actor: actor.clone(),
+            subscription_key: record.subscription_key.clone(),
+            expected_revision: record.revision,
+        };
+        match evaluate_trigger_mutation(Some(record), command, now)?? {
+            TriggerCommandOutcome::Mutation { receipt } => receipts.push(*receipt),
+            TriggerCommandOutcome::List { .. } | TriggerCommandOutcome::Prune { .. } => {
+                unreachable!("delete mutation always returns one receipt")
+            }
+        }
+    }
+    receipts.sort_by(|left, right| left.subscription_key.cmp(&right.subscription_key));
+    Ok(TriggerCommandOutcome::Prune { receipts })
+}
 
 pub fn trigger_command_hash(command: &TriggerCommand) -> Result<String, PluginError> {
     crate::stable_hash::stable_json_sha256_hex(command)

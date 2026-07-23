@@ -198,20 +198,62 @@ impl lash_core::TriggerStore for SqliteTriggerStore {
                             ))
                         });
                     }
-                    let current = tx
-                        .query_row(
-                            "SELECT record_json FROM trigger_subscriptions
-                             WHERE subscription_id = ?1",
-                            params![subscription_id.as_str()],
-                            |row| row.get::<_, String>(0),
+                    let result = if let lash_core::TriggerCommand::Prune {
+                        owner_scope,
+                        actor,
+                        subscription_keys,
+                    } = &command
+                    {
+                        let mut stmt = tx
+                            .prepare(
+                                "SELECT record_json FROM trigger_subscriptions
+                                 WHERE owner_scope = ?1 AND tombstoned = 0",
+                            )
+                            .map_err(process_sqlite_error)?;
+                        let rows = stmt
+                            .query_map(params![owner_scope.namespace()], |row| {
+                                row.get::<_, String>(0)
+                            })
+                            .map_err(process_sqlite_error)?;
+                        let mut records = Vec::new();
+                        for row in rows {
+                            records.push(Self::decode_subscription(
+                                row.map_err(process_sqlite_error)?,
+                            )?);
+                        }
+                        drop(stmt);
+                        lash_core::evaluate_trigger_prune(
+                            records,
+                            owner_scope.clone(),
+                            actor.clone(),
+                            subscription_keys.clone(),
+                            now,
                         )
-                        .optional()
-                        .map_err(process_sqlite_error)?
-                        .map(Self::decode_subscription)
-                        .transpose()?;
-                    let result = lash_core::evaluate_trigger_mutation(current, command, now)?;
-                    if let Ok(lash_core::TriggerCommandOutcome::Mutation { receipt }) = &result {
-                        let record = &receipt.record_snapshot;
+                    } else {
+                        let current = tx
+                            .query_row(
+                                "SELECT record_json FROM trigger_subscriptions
+                                 WHERE subscription_id = ?1",
+                                params![subscription_id.as_str()],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()
+                            .map_err(process_sqlite_error)?
+                            .map(Self::decode_subscription)
+                            .transpose()?;
+                        lash_core::evaluate_trigger_mutation(current, command, now)?
+                    };
+                    let records = match &result {
+                        Ok(lash_core::TriggerCommandOutcome::Mutation { receipt }) => {
+                            vec![&receipt.record_snapshot]
+                        }
+                        Ok(lash_core::TriggerCommandOutcome::Prune { receipts }) => receipts
+                            .iter()
+                            .map(|receipt| &receipt.record_snapshot)
+                            .collect(),
+                        Ok(lash_core::TriggerCommandOutcome::List { .. }) | Err(_) => Vec::new(),
+                    };
+                    for record in records {
                         tx.execute(
                             "INSERT INTO trigger_subscriptions (
                             subscription_id, owner_scope, subscription_key, incarnation, revision,

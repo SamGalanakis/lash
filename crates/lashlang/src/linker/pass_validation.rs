@@ -855,7 +855,10 @@ fn validate_trigger_operation_subscription_key(
     args: &[Expr],
     span: Option<Span>,
 ) -> Result<(), LinkError> {
-    if operation == crate::TriggerHostOperation::List {
+    if matches!(
+        operation,
+        crate::TriggerHostOperation::List | crate::TriggerHostOperation::Prune
+    ) {
         return Ok(());
     }
     let [Expr::Record(entries)] = args else {
@@ -887,14 +890,15 @@ fn validate_trigger_subscription_key_literal(
 enum StaticTriggerBinding {
     Source {
         source_type: String,
-        normalized_source: String,
+        source_key: String,
     },
     Target(String),
     Json(serde_json::Value),
 }
 
-fn validate_default_trigger_key_collisions(program: &Program) -> Result<(), LinkError> {
+fn materialize_default_trigger_keys(mut program: Program) -> Result<Program, LinkError> {
     let mut seen = BTreeSet::new();
+    let mut derived_keys = VecDeque::new();
     for declaration in &program.declarations {
         if let Declaration::Process(process) = declaration {
             let mut bindings = process
@@ -908,31 +912,106 @@ fn validate_default_trigger_key_collisions(program: &Program) -> Result<(), Link
                         param.name.to_string(),
                         StaticTriggerBinding::Source {
                             source_type: source_type.to_string(),
-                            normalized_source: format!("process-param:{}", param.name),
+                            source_key: semantic_trigger_source_key(
+                                source_type.as_str(),
+                                &serde_json::json!({
+                                    "process_param": param.name.as_str(),
+                                }),
+                            ),
                         },
                     ))
                 })
                 .collect();
-            inspect_trigger_key_collisions(&process.body, &mut bindings, &mut seen)?;
+            collect_default_trigger_keys(
+                &process.body,
+                &mut bindings,
+                &mut seen,
+                &mut derived_keys,
+            )?;
         }
     }
-    inspect_trigger_key_collisions(&program.main, &mut BTreeMap::new(), &mut seen)
+    collect_default_trigger_keys(
+        &program.main,
+        &mut BTreeMap::new(),
+        &mut seen,
+        &mut derived_keys,
+    )?;
+
+    struct Materializer<'keys> {
+        derived_keys: &'keys mut VecDeque<String>,
+    }
+
+    impl crate::ExprFolder for Materializer<'_> {
+        fn fold_expr(&mut self, expr: Expr) -> Expr {
+            let expr = match expr {
+                Expr::ReceiverCall {
+                    receiver,
+                    operation,
+                    mut args,
+                } if operation.as_str()
+                    == crate::TriggerHostOperation::Register.receiver_method()
+                    && matches!(
+                        receiver.as_ref(),
+                        Expr::ResourceRef(resource)
+                            if crate::is_trigger_resource_type(resource.resource_type.as_str())
+                    )
+                    && crate::register_call_args(&args)
+                        .is_ok_and(|call| call.subscription_key.is_none()) =>
+                {
+                    let key = self
+                        .derived_keys
+                        .pop_front()
+                        .expect("every keyless registration was collected");
+                    if let [Expr::Record(entries)] = args.as_mut_slice() {
+                        entries.push(("subscription_key".into(), Expr::String(key.into())));
+                    }
+                    Expr::ReceiverCall {
+                        receiver,
+                        operation,
+                        args,
+                    }
+                }
+                expr => expr,
+            };
+            crate::fold_expr_children(self, expr)
+        }
+    }
+
+    let mut materializer = Materializer {
+        derived_keys: &mut derived_keys,
+    };
+    for declaration in &mut program.declarations {
+        if let Declaration::Process(process) = declaration {
+            process.body =
+                crate::ExprFolder::fold_expr(&mut materializer, std::mem::replace(
+                    &mut process.body,
+                    Expr::Null,
+                ));
+        }
+    }
+    program.main = crate::ExprFolder::fold_expr(
+        &mut materializer,
+        std::mem::replace(&mut program.main, Expr::Null),
+    );
+    debug_assert!(derived_keys.is_empty());
+    Ok(program)
 }
 
-fn inspect_trigger_key_collisions(
+fn collect_default_trigger_keys(
     expr: &Expr,
     bindings: &mut BTreeMap<String, StaticTriggerBinding>,
     seen: &mut BTreeSet<(String, String, String)>,
+    derived_keys: &mut VecDeque<String>,
 ) -> Result<(), LinkError> {
     match expr {
         Expr::Block(expressions) => {
             for expression in expressions {
-                inspect_trigger_key_collisions(expression, bindings, seen)?;
+                collect_default_trigger_keys(expression, bindings, seen, derived_keys)?;
             }
             return Ok(());
         }
         Expr::Assign { target, expr } => {
-            inspect_trigger_key_collisions(expr, bindings, seen)?;
+            collect_default_trigger_keys(expr, bindings, seen, derived_keys)?;
             if target.is_simple() {
                 if let Some(binding) = static_trigger_binding(expr, bindings) {
                     bindings.insert(target.root.to_string(), binding);
@@ -947,19 +1026,29 @@ fn inspect_trigger_key_collisions(
             then_block,
             else_block,
         } => {
-            inspect_trigger_key_collisions(condition, bindings, seen)?;
-            inspect_trigger_key_collisions(then_block, &mut bindings.clone(), seen)?;
-            inspect_trigger_key_collisions(else_block, &mut bindings.clone(), seen)?;
+            collect_default_trigger_keys(condition, bindings, seen, derived_keys)?;
+            collect_default_trigger_keys(
+                then_block,
+                &mut bindings.clone(),
+                seen,
+                derived_keys,
+            )?;
+            collect_default_trigger_keys(
+                else_block,
+                &mut bindings.clone(),
+                seen,
+                derived_keys,
+            )?;
             return Ok(());
         }
         Expr::For { iterable, body, .. } => {
-            inspect_trigger_key_collisions(iterable, bindings, seen)?;
-            inspect_trigger_key_collisions(body, &mut bindings.clone(), seen)?;
+            collect_default_trigger_keys(iterable, bindings, seen, derived_keys)?;
+            collect_default_trigger_keys(body, &mut bindings.clone(), seen, derived_keys)?;
             return Ok(());
         }
         Expr::While { condition, body } => {
-            inspect_trigger_key_collisions(condition, bindings, seen)?;
-            inspect_trigger_key_collisions(body, &mut bindings.clone(), seen)?;
+            collect_default_trigger_keys(condition, bindings, seen, derived_keys)?;
+            collect_default_trigger_keys(body, &mut bindings.clone(), seen, derived_keys)?;
             return Ok(());
         }
         Expr::ReceiverCall {
@@ -974,26 +1063,37 @@ fn inspect_trigger_key_collisions(
         {
             if let Ok(call) = crate::register_call_args(args)
                 && call.subscription_key.is_none()
-                && let Some((source_type, normalized_source)) =
-                    static_trigger_source(call.source, bindings)
-                && let Some(process) = static_trigger_target(call.target, bindings)
-                && !seen.insert((
-                    process.clone(),
-                    source_type.clone(),
-                    normalized_source,
-                ))
             {
-                return Err(LinkError::DuplicateDerivedTriggerSubscriptionKey {
-                    process,
-                    source_type,
-                    span: None,
-                });
+                let Some((source_type, source_key)) =
+                    static_trigger_source(call.source, bindings)
+                else {
+                    return Err(LinkError::UnresolvedDerivedTriggerSubscriptionKey {
+                        span: None,
+                    });
+                };
+                let Some(process) = static_trigger_target(call.target, bindings) else {
+                    return Err(LinkError::UnresolvedDerivedTriggerSubscriptionKey {
+                        span: None,
+                    });
+                };
+                if !seen.insert((process.clone(), source_type.clone(), source_key.clone())) {
+                    return Err(LinkError::DuplicateDerivedTriggerSubscriptionKey {
+                        process,
+                        source_type,
+                        span: None,
+                    });
+                }
+                derived_keys.push_back(semantic_trigger_subscription_key(
+                    &process,
+                    &source_type,
+                    &source_key,
+                ));
             }
         }
         _ => {}
     }
     for child in expr.children() {
-        inspect_trigger_key_collisions(child, bindings, seen)?;
+        collect_default_trigger_keys(child, bindings, seen, derived_keys)?;
     }
     Ok(())
 }
@@ -1002,10 +1102,10 @@ fn static_trigger_binding(
     expr: &Expr,
     bindings: &BTreeMap<String, StaticTriggerBinding>,
 ) -> Option<StaticTriggerBinding> {
-    if let Some((source_type, normalized_source)) = static_trigger_source(expr, bindings) {
+    if let Some((source_type, source_key)) = static_trigger_source(expr, bindings) {
         return Some(StaticTriggerBinding::Source {
             source_type,
-            normalized_source,
+            source_key,
         });
     }
     if let Some(process) = static_trigger_target(expr, bindings) {
@@ -1022,25 +1122,51 @@ fn static_trigger_source(
         Expr::Variable(name) => match bindings.get(name.as_str())? {
             StaticTriggerBinding::Source {
                 source_type,
-                normalized_source,
-            } => Some((source_type.clone(), normalized_source.clone())),
+                source_key,
+            } => Some((source_type.clone(), source_key.clone())),
             StaticTriggerBinding::Target(_) | StaticTriggerBinding::Json(_) => None,
         },
         Expr::HostDescriptorConstructor { type_name, input } => {
-            let normalized_source = static_trigger_json(input, bindings)
-                .map(|value| serde_json::to_string(&value).expect("JSON values serialize"))
-                .or_else(|| {
-                    serde_json::to_string(input)
-                        .ok()
-                        .map(|input| format!("dynamic-expression:{input}"))
-                })?;
+            let source = static_trigger_json(input, bindings).or_else(|| {
+                serde_json::to_value(input)
+                    .ok()
+                    .map(|input| serde_json::json!({ "dynamic_expression": input }))
+            })?;
             Some((
                 type_name.to_string(),
-                normalized_source,
+                semantic_trigger_source_key(type_name.as_str(), &source),
             ))
         }
         _ => None,
     }
+}
+
+fn semantic_trigger_source_key(source_type: &str, source: &serde_json::Value) -> String {
+    let encoded = serde_json::to_vec(&(source_type, source))
+        .expect("static trigger source values always encode as JSON");
+    format!(
+        "source:{source_type}:sha256:{:x}",
+        Sha256::digest(encoded)
+    )
+}
+
+fn semantic_trigger_subscription_key(
+    process_name: &str,
+    source_type: &str,
+    source_key: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        "lash.trigger-subscription-key",
+        "1",
+        process_name,
+        source_type,
+        source_key,
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("derived/v1/{:x}", hasher.finalize())
 }
 
 fn static_trigger_target(

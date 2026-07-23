@@ -71,6 +71,10 @@ pub enum LinkError {
         source_type: String,
         span: Option<Span>,
     },
+    #[error(
+        "trigger registration is too dynamic to derive a stable manifest key; add an explicit literal subscription_key"
+    )]
+    UnresolvedDerivedTriggerSubscriptionKey { span: Option<Span> },
     #[error("trigger registration `inputs` must be a literal record")]
     InvalidTriggerInputs { span: Option<Span> },
     #[error("trigger registration input `{input}` is duplicated")]
@@ -200,6 +204,7 @@ impl LinkError {
             | Self::InvalidTriggerRegistration { span }
             | Self::InvalidTriggerSubscriptionKey { span }
             | Self::DuplicateDerivedTriggerSubscriptionKey { span, .. }
+            | Self::UnresolvedDerivedTriggerSubscriptionKey { span }
             | Self::InvalidTriggerInputs { span }
             | Self::DuplicateTriggerInput { span, .. }
             | Self::MissingTriggerInput { span, .. }

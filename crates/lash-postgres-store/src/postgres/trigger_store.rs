@@ -62,21 +62,60 @@ impl TriggerStore for PostgresTriggerStore {
             return serde_json::from_str(&result_json).map_err(process_decode_error);
         }
 
-        let current_json: Option<String> = sqlx::query_scalar(
-            "SELECT record_json FROM lash_trigger_subscriptions
-             WHERE subscription_id = $1 FOR UPDATE",
-        )
-        .bind(&subscription_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(plugin_sqlx_error)?;
-        let current = current_json
-            .map(|json| serde_json::from_str(&json).map_err(process_decode_error))
-            .transpose()?;
         let now = current_epoch_ms();
-        let result = lash_core::evaluate_trigger_mutation(current, command, now)?;
-        if let Ok(lash_core::TriggerCommandOutcome::Mutation { receipt }) = &result {
-            let record = &receipt.record_snapshot;
+        let result = if let lash_core::TriggerCommand::Prune {
+            owner_scope,
+            actor,
+            subscription_keys,
+        } = &command
+        {
+            let rows = sqlx::query(
+                "SELECT record_json FROM lash_trigger_subscriptions
+                 WHERE owner_scope = $1 AND tombstoned = FALSE FOR UPDATE",
+            )
+            .bind(owner_scope.namespace())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(plugin_sqlx_error)?;
+            let records = rows
+                .into_iter()
+                .map(|row| {
+                    let json: String = row.get(0);
+                    serde_json::from_str(&json).map_err(process_decode_error)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            lash_core::evaluate_trigger_prune(
+                records,
+                owner_scope.clone(),
+                actor.clone(),
+                subscription_keys.clone(),
+                now,
+            )
+        } else {
+            let current_json: Option<String> = sqlx::query_scalar(
+                "SELECT record_json FROM lash_trigger_subscriptions
+                 WHERE subscription_id = $1 FOR UPDATE",
+            )
+            .bind(&subscription_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(plugin_sqlx_error)?;
+            let current = current_json
+                .map(|json| serde_json::from_str(&json).map_err(process_decode_error))
+                .transpose()?;
+            lash_core::evaluate_trigger_mutation(current, command, now)?
+        };
+        let records = match &result {
+            Ok(lash_core::TriggerCommandOutcome::Mutation { receipt }) => {
+                vec![&receipt.record_snapshot]
+            }
+            Ok(lash_core::TriggerCommandOutcome::Prune { receipts }) => receipts
+                .iter()
+                .map(|receipt| &receipt.record_snapshot)
+                .collect(),
+            Ok(lash_core::TriggerCommandOutcome::List { .. }) | Err(_) => Vec::new(),
+        };
+        for record in records {
             sqlx::query(
                 "INSERT INTO lash_trigger_subscriptions (
                     subscription_id, owner_scope, subscription_key, incarnation, revision,

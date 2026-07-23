@@ -70,6 +70,9 @@ impl LinkError {
             Self::DuplicateDerivedTriggerSubscriptionKey { .. } => {
                 "duplicate_derived_trigger_subscription_key"
             }
+            Self::UnresolvedDerivedTriggerSubscriptionKey { .. } => {
+                "unresolved_derived_trigger_subscription_key"
+            }
             Self::InvalidTriggerInputs { .. } => "invalid_trigger_inputs",
             Self::DuplicateTriggerInput { .. } => "duplicate_trigger_input",
             Self::MissingTriggerInput { .. } => "missing_trigger_input",

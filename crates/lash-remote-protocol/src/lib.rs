@@ -32,8 +32,8 @@ pub use turn_input::*;
 pub use turn_result::*;
 pub use usage_activity::*;
 
-// Bumped to 14: attachment sources and turn ingress are MIME-generic.
-pub const REMOTE_PROTOCOL_VERSION: u32 = 14;
+// Bumped to 15: trigger listings carry registrant provenance and current-artifact membership.
+pub const REMOTE_PROTOCOL_VERSION: u32 = 15;
 
 pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
     if actual == REMOTE_PROTOCOL_VERSION {
