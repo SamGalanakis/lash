@@ -136,7 +136,7 @@ impl RuntimeEffectController for RecordingEffectController {
                     }]
                 };
                 Ok(RuntimeEffectOutcome::LlmCall {
-                    result: Ok(LlmResponse {
+                    result: Box::new(Ok(LlmResponse {
                         full_text: if parts
                             .iter()
                             .any(|part| matches!(part, LlmOutputPart::Text { .. }))
@@ -155,7 +155,7 @@ impl RuntimeEffectController for RecordingEffectController {
                         },
                         response_metadata: Default::default(),
                         ..LlmResponse::default()
-                    }),
+                    })),
                     text_streamed: false,
                     call_record: None,
                 })
@@ -205,7 +205,7 @@ impl RuntimeEffectController for RecordingEffectController {
                 Ok(RuntimeEffectOutcome::SyncExecutionEnvironment { result: Ok(None) })
             }
             RuntimeEffectCommand::ExecCode { .. } => Ok(RuntimeEffectOutcome::ExecCode {
-                result: Ok(crate::ExecResponse {
+                result: Box::new(Ok(crate::ExecResponse {
                     observations: Vec::new(),
                     observation_truncation: Vec::new(),
                     tool_calls: Vec::new(),
@@ -214,12 +214,15 @@ impl RuntimeEffectController for RecordingEffectController {
                     error: None,
                     duration_ms: 0,
                     terminal_finish: Some(serde_json::json!("ok")),
-                }),
+                })),
             }),
             RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
             RuntimeEffectCommand::AwaitEvent { .. } => Ok(RuntimeEffectOutcome::AwaitEvent {
                 resolution: crate::Resolution::Ok(serde_json::json!(null)),
             }),
+            RuntimeEffectCommand::PeekAwaitEvent { .. } => {
+                Ok(RuntimeEffectOutcome::PeekAwaitEvent { resolution: None })
+            }
             RuntimeEffectCommand::DurableStep { step_id, input } => {
                 let _ = (step_id, local_executor);
                 Ok(RuntimeEffectOutcome::DurableStep { value: input })
@@ -257,7 +260,7 @@ impl RuntimeEffectController for RecordingEffectController {
                     )
                 };
                 Ok(RuntimeEffectOutcome::Direct {
-                    result: Ok(LlmResponse {
+                    result: Box::new(Ok(LlmResponse {
                         full_text: text.to_string(),
                         parts: vec![LlmOutputPart::Text {
                             text: text.to_string(),
@@ -266,7 +269,7 @@ impl RuntimeEffectController for RecordingEffectController {
                         usage,
                         response_metadata: Default::default(),
                         ..LlmResponse::default()
-                    }),
+                    })),
                     call_record: Some(crate::LlmCallRecord {
                         call_id: crate::LlmCallId("direct-effect-test".to_string()),
                         label: None,
@@ -357,6 +360,12 @@ impl RuntimeEffectController for DurableAttachmentRequiredController {
         envelope: RuntimeEffectEnvelope,
         local_executor: crate::RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        if matches!(
+            &envelope.command,
+            RuntimeEffectCommand::PeekAwaitEvent { .. }
+        ) {
+            return Ok(RuntimeEffectOutcome::PeekAwaitEvent { resolution: None });
+        }
         local_executor.execute(envelope).await
     }
 }
@@ -458,6 +467,12 @@ impl RuntimeEffectController for RejectingEffectController {
         envelope: RuntimeEffectEnvelope,
         _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        if matches!(
+            &envelope.command,
+            RuntimeEffectCommand::PeekAwaitEvent { .. }
+        ) {
+            return Ok(RuntimeEffectOutcome::PeekAwaitEvent { resolution: None });
+        }
         Err(RuntimeEffectControllerError::new(
             "test_controller_rejected",
             format!("rejected {}", envelope.command.kind().as_str()),
@@ -473,9 +488,15 @@ impl crate::AwaitEventResolver for WrongOutcomeEffectController {}
 impl RuntimeEffectController for WrongOutcomeEffectController {
     async fn execute_effect(
         &self,
-        _envelope: RuntimeEffectEnvelope,
+        envelope: RuntimeEffectEnvelope,
         _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        if matches!(
+            &envelope.command,
+            RuntimeEffectCommand::PeekAwaitEvent { .. }
+        ) {
+            return Ok(RuntimeEffectOutcome::PeekAwaitEvent { resolution: None });
+        }
         Ok(RuntimeEffectOutcome::Sleep)
     }
 }
@@ -539,12 +560,15 @@ async fn standard_turn_llm_and_checkpoint_effects_cross_controller_once() {
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
     assert_eq!(recorder.count_kind(RuntimeEffectKind::LlmCall), 1);
     assert_eq!(recorder.count_kind(RuntimeEffectKind::Checkpoint), 1);
-    assert!(
-        recorder
-            .records()
-            .iter()
-            .all(|record| record.turn_id.is_some() && record.replay_key.starts_with("root:"))
-    );
+    assert_eq!(recorder.count_kind(RuntimeEffectKind::PeekAwaitEvent), 1);
+    assert!(recorder.records().iter().all(|record| {
+        record.turn_id.is_some()
+            && if record.kind == RuntimeEffectKind::PeekAwaitEvent {
+                record.replay_key == "turn_cancel.start_gate"
+            } else {
+                record.replay_key.starts_with("root:")
+            }
+    }));
 }
 
 #[tokio::test]
@@ -718,12 +742,10 @@ async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
         .expect("turn");
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
-    assert!(
-        recorder
-            .records()
-            .iter()
-            .all(|record| record.replay_key.contains("stable-scoped-turn"))
-    );
+    assert!(recorder.records().iter().all(|record| {
+        record.kind == RuntimeEffectKind::PeekAwaitEvent
+            || record.replay_key.contains("stable-scoped-turn")
+    }));
 }
 
 #[tokio::test]
@@ -1061,6 +1083,9 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
             }
 
             match envelope.command {
+                RuntimeEffectCommand::PeekAwaitEvent { .. } => {
+                    Ok(RuntimeEffectOutcome::PeekAwaitEvent { resolution: None })
+                }
                 RuntimeEffectCommand::ToolAttempt {
                     call,
                     execution_grant,
@@ -1096,7 +1121,7 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
                         }]
                     };
                     Ok(RuntimeEffectOutcome::LlmCall {
-                        result: Ok(LlmResponse {
+                        result: Box::new(Ok(LlmResponse {
                             full_text: if *llm_calls == 1 {
                                 String::new()
                             } else {
@@ -1112,7 +1137,7 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
                             },
                             response_metadata: Default::default(),
                             ..LlmResponse::default()
-                        }),
+                        })),
                         text_streamed: false,
                         call_record: None,
                     })
@@ -1811,7 +1836,7 @@ async fn direct_effect_restores_required_streaming_for_provider_execution() {
 
     let manager = runtime.runtime_session_services().expect("session manager");
     let direct = manager.direct_completion_client(
-        RuntimeEffectControllerHandle::shared(Arc::new(InlineRuntimeEffectController)),
+        RuntimeEffectControllerHandle::shared(Arc::new(InlineRuntimeEffectController::default())),
         None,
     );
     let completion = direct

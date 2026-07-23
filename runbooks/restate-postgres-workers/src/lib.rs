@@ -34,14 +34,16 @@ pub const DEFAULT_SESSION_ID: &str = "restate-postgres-workers-e2e";
 pub const ENGINE_RESTART_SLEEP_SESSION_ID: &str =
     "restate-postgres-workers-e2e-engine-restart-sleep";
 pub const ENGINE_RESTART_SLEEP_WORKFLOW_ID: &str = "e2e-engine-restart-suspended-sleep";
+pub const BREAK_GLASS_SESSION_ID: &str = "restate-postgres-workers-e2e-break-glass";
+pub const BREAK_GLASS_WORKFLOW_ID: &str = "e2e-turn-break-glass";
 
 /// Keep the restart timer independent from the pre-existing parked gate turn,
 /// since one session intentionally admits only one active turn at a time.
 pub fn turn_session_id(workflow_id: &str) -> &'static str {
-    if workflow_id == ENGINE_RESTART_SLEEP_WORKFLOW_ID {
-        ENGINE_RESTART_SLEEP_SESSION_ID
-    } else {
-        DEFAULT_SESSION_ID
+    match workflow_id {
+        ENGINE_RESTART_SLEEP_WORKFLOW_ID => ENGINE_RESTART_SLEEP_SESSION_ID,
+        BREAK_GLASS_WORKFLOW_ID => BREAK_GLASS_SESSION_ID,
+        _ => DEFAULT_SESSION_ID,
     }
 }
 pub const TURN_WORKFLOW_NAME: &str = "E2eTurnWorkflow";
@@ -79,7 +81,12 @@ pub const EXPECTED_FRAME_SWITCH_TEXT: &str = "frame-switch-complete";
 pub const EXPECTED_FRAME_SWITCH_CANCEL_TEXT: &str = "frame-switch-cancel-complete";
 pub const BUTTON_SOURCE_TYPE: &str = "ui.button.pressed";
 pub const ATTACHMENT_MIME: &str = "image/png";
-pub const E2E_PRODUCT_STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+/// Durable turns cross the Restate handler, replay controller, Lash turn
+/// driver, and provider/tool frames on one Tokio poll stack. The composed
+/// `e2e-main` turn exhausted Tokio's 2 MiB default before the recorded-effect
+/// frame was bounded. Provision 8 MiB: four times that observed failure point,
+/// with headroom for substrate and runtime growth beyond the measured turn.
+pub const E2E_PRODUCT_STACK_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 pub const LASH_E2E_TOKIO_STACK_BYTES_ENV: &str = "LASH_E2E_TOKIO_STACK_BYTES";
 
 pub fn default_session_originator_scope_id() -> String {
@@ -111,7 +118,7 @@ fn e2e_tokio_thread_stack_bytes_from_raw(raw: Option<String>) -> Result<usize> {
     })?;
     if stack_bytes > E2E_PRODUCT_STACK_BUDGET_BYTES {
         bail!(
-            "{LASH_E2E_TOKIO_STACK_BYTES_ENV}={stack_bytes} exceeds product/e2e stack budget {E2E_PRODUCT_STACK_BUDGET_BYTES}; stack growth above 2 MiB is a runtime bug, not a CI default"
+            "{LASH_E2E_TOKIO_STACK_BYTES_ENV}={stack_bytes} exceeds durable-worker stack budget {E2E_PRODUCT_STACK_BUDGET_BYTES}"
         );
     }
     Ok(stack_bytes)
@@ -135,7 +142,7 @@ mod stack_policy_tests {
     use super::{E2E_PRODUCT_STACK_BUDGET_BYTES, e2e_tokio_thread_stack_bytes_from_raw};
 
     #[test]
-    fn e2e_tokio_stack_policy_defaults_to_product_budget_and_rejects_growth() {
+    fn e2e_tokio_stack_policy_defaults_to_durable_worker_budget_and_rejects_growth() {
         assert_eq!(
             e2e_tokio_thread_stack_bytes_from_raw(None).expect("default stack budget"),
             E2E_PRODUCT_STACK_BUDGET_BYTES
@@ -152,7 +159,7 @@ mod stack_policy_tests {
         assert!(
             too_large
                 .to_string()
-                .contains("exceeds product/e2e stack budget"),
+                .contains("exceeds durable-worker stack budget"),
             "unexpected stack-budget error: {too_large:#}"
         );
         let invalid = e2e_tokio_thread_stack_bytes_from_raw(Some("not-a-number".to_string()))

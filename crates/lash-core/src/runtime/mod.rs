@@ -4,6 +4,7 @@ pub(crate) mod causal;
 mod clock;
 mod config_ops;
 mod effect;
+pub use effect::promise_semantics;
 mod environment;
 mod error;
 mod host;

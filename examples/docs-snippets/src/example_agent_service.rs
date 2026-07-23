@@ -55,7 +55,7 @@ async fn service_core(
         )
         .store_factory(store_factory)
         .effect_host(std::sync::Arc::new(
-            lash::durability::InlineEffectHost::default(),
+            lash::durability::InlineEffectHost::default().allow_process_lifetime_completion_keys(),
         ))
         .process_env_store(process_env_store)
         .trigger_store(trigger_store)

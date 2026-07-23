@@ -21,12 +21,16 @@ path = "src/bin/runner.rs"
 name = "lash-e2e-frame-crash"
 path = "src/bin/frame_crash.rs"
 
+[[bin]]
+name = "lash-e2e-await-event-helper"
+path = "src/bin/await_event_helper.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = "0.8"
 chrono = { workspace = true }
-lash-core = { workspace = true }
+lash-core = { workspace = true, features = ["testing"] }
 lash = { workspace = true, features = ["rlm"] }
 lash-llm-tools = { workspace = true }
 lash-postgres-store = { workspace = true }
@@ -43,3 +47,4 @@ tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
+uuid = { workspace = true }

@@ -233,7 +233,7 @@ impl RuntimeBoundaryHarness {
                 RuntimeEffectLocalExecutor::testing(move |_| async move {
                     local_calls_for_executor.fetch_add(1, Ordering::SeqCst);
                     Ok(RuntimeEffectOutcome::ToolAttempt {
-                        launch: ToolAttemptLaunch::Done {
+                        launch: Box::new(ToolAttemptLaunch::Done {
                             record: ToolCallRecord {
                                 call_id: Some(call_id),
                                 tool: "sim_opaque_effect".to_string(),
@@ -241,7 +241,7 @@ impl RuntimeBoundaryHarness {
                                 output: ToolCallOutput::success(scripted_result),
                                 duration_ms: 0,
                             },
-                        },
+                        }),
                         triggers: Vec::new(),
                     })
                 }),
@@ -253,7 +253,7 @@ impl RuntimeBoundaryHarness {
                 "durable effect controller returned non-tool-attempt outcome",
             ));
         };
-        let ToolAttemptLaunch::Done { record } = launch else {
+        let ToolAttemptLaunch::Done { record } = &**launch else {
             return Err(RuntimeBoundaryError::new(
                 "durable effect controller returned pending tool attempt",
             ));
@@ -345,7 +345,7 @@ impl RuntimeBoundaryHarness {
                 RuntimeEffectLocalExecutor::testing(move |_| async move {
                     local_calls_for_executor.fetch_add(1, Ordering::SeqCst);
                     Ok(RuntimeEffectOutcome::ToolAttempt {
-                        launch: ToolAttemptLaunch::Done {
+                        launch: Box::new(ToolAttemptLaunch::Done {
                             record: ToolCallRecord {
                                 call_id: Some(call_id_for_executor),
                                 tool: tool_name_for_executor,
@@ -353,7 +353,7 @@ impl RuntimeBoundaryHarness {
                                 output: ToolCallOutput::success(output_for_executor),
                                 duration_ms: 0,
                             },
-                        },
+                        }),
                         triggers: Vec::new(),
                     })
                 }),
@@ -365,7 +365,7 @@ impl RuntimeBoundaryHarness {
                 "tool controller returned non-tool-attempt outcome",
             ));
         };
-        let ToolAttemptLaunch::Done { record } = launch else {
+        let ToolAttemptLaunch::Done { record } = *launch else {
             return Err(RuntimeBoundaryError::new(
                 "sim tool boundary unexpectedly returned pending tool launch",
             ));
@@ -438,7 +438,7 @@ impl RuntimeBoundaryHarness {
                 RuntimeEffectLocalExecutor::testing(move |_| async move {
                     local_calls_for_executor.fetch_add(1, Ordering::SeqCst);
                     Ok(RuntimeEffectOutcome::ExecCode {
-                        result: Ok(response_for_executor),
+                        result: Box::new(Ok(response_for_executor)),
                     })
                 }),
             )

@@ -34,6 +34,7 @@ pub enum RuntimeEffectKind {
     SyncExecutionEnvironment,
     Sleep,
     AwaitEvent,
+    PeekAwaitEvent,
     DurableStep,
 }
 
@@ -51,6 +52,7 @@ impl RuntimeEffectKind {
             Self::SyncExecutionEnvironment => "sync_execution_environment",
             Self::Sleep => "sleep",
             Self::AwaitEvent => "await_event",
+            Self::PeekAwaitEvent => "peek_await_event",
             Self::DurableStep => "durable_step",
         }
     }
@@ -389,6 +391,9 @@ pub enum RuntimeEffectCommand {
     AwaitEvent {
         key: crate::AwaitEventKey,
     },
+    PeekAwaitEvent {
+        key: crate::AwaitEventKey,
+    },
     DurableStep {
         step_id: String,
         input: serde_json::Value,
@@ -415,6 +420,7 @@ impl RuntimeEffectCommand {
             Self::SyncExecutionEnvironment { .. } => RuntimeEffectKind::SyncExecutionEnvironment,
             Self::Sleep { .. } => RuntimeEffectKind::Sleep,
             Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
+            Self::PeekAwaitEvent { .. } => RuntimeEffectKind::PeekAwaitEvent,
             Self::DurableStep { .. } => RuntimeEffectKind::DurableStep,
         }
     }
@@ -525,7 +531,9 @@ pub enum ProcessEffectOutcome {
         report: crate::ProcessSessionDeleteReport,
     },
     Await {
-        output: ProcessAwaitOutput,
+        // Keep the full terminal record while bounding every process outcome
+        // carried through the recursive effect executor.
+        output: Box<ProcessAwaitOutput>,
     },
     Cancel {
         record: Box<ProcessRecord>,
@@ -590,12 +598,15 @@ pub type RuntimeDirectLlmOutcome = (
 );
 
 /// Serializable result of a runtime effect command.
+///
+/// Large payloads stay boxed so this boundary type remains cheap to retain in
+/// nested async controller frames. `Box<T>` is serde-transparent, so durable
+/// journal records keep their established JSON shape and full-record evidence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(clippy::large_enum_variant)]
 pub enum RuntimeEffectOutcome {
     LlmCall {
-        result: Result<LlmResponse, LlmCallError>,
+        result: Box<Result<LlmResponse, LlmCallError>>,
         text_streamed: bool,
         /// Sealed provider-attempt history. Older journal entries and calls
         /// interrupted before the provider handle returns have no record.
@@ -603,13 +614,13 @@ pub enum RuntimeEffectOutcome {
         call_record: Option<crate::LlmCallRecord>,
     },
     Direct {
-        result: Result<LlmResponse, LlmCallError>,
+        result: Box<Result<LlmResponse, LlmCallError>>,
         /// Sealed provider-attempt history for this single direct call.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_record: Option<crate::LlmCallRecord>,
     },
     ToolAttempt {
-        launch: ToolAttemptLaunch,
+        launch: Box<ToolAttemptLaunch>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         triggers: Vec<ToolTriggerEffectOutcome>,
     },
@@ -619,13 +630,13 @@ pub enum RuntimeEffectOutcome {
         triggers: Vec<ToolTriggerEffectOutcome>,
     },
     Trigger {
-        result: crate::TriggerEffectResult,
+        result: Box<crate::TriggerEffectResult>,
     },
     Process {
         result: ProcessEffectOutcome,
     },
     ExecCode {
-        result: Result<ExecResponse, String>,
+        result: Box<Result<ExecResponse, String>>,
     },
     Checkpoint {
         result: CheckpointOutcome,
@@ -636,6 +647,9 @@ pub enum RuntimeEffectOutcome {
     Sleep,
     AwaitEvent {
         resolution: crate::Resolution,
+    },
+    PeekAwaitEvent {
+        resolution: Option<crate::Resolution>,
     },
     DurableStep {
         value: serde_json::Value,
@@ -784,7 +798,7 @@ impl RuntimeEffectOutcome {
                 result,
                 text_streamed,
                 call_record,
-            } => Ok((result, text_streamed, call_record)),
+            } => Ok((*result, text_streamed, call_record)),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::LlmCall,
                 other.kind(),
@@ -799,7 +813,7 @@ impl RuntimeEffectOutcome {
             Self::Direct {
                 result,
                 call_record,
-            } => Ok((result, call_record)),
+            } => Ok((*result, call_record)),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::Direct,
                 other.kind(),
@@ -811,9 +825,10 @@ impl RuntimeEffectOutcome {
         self,
     ) -> Result<ToolAttemptEffectOutcome, RuntimeEffectControllerError> {
         match self {
-            Self::ToolAttempt { launch, triggers } => {
-                Ok(ToolAttemptEffectOutcome { launch, triggers })
-            }
+            Self::ToolAttempt { launch, triggers } => Ok(ToolAttemptEffectOutcome {
+                launch: *launch,
+                triggers,
+            }),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::ToolAttempt,
                 other.kind(),
@@ -847,7 +862,7 @@ impl RuntimeEffectOutcome {
 
     pub fn into_trigger(self) -> Result<crate::TriggerEffectResult, RuntimeEffectControllerError> {
         match self {
-            Self::Trigger { result } => Ok(result),
+            Self::Trigger { result } => Ok(*result),
             other => Err(RuntimeEffectControllerError::new(
                 "runtime_effect_wrong_outcome",
                 format!("expected trigger outcome, got {}", other.kind().as_str()),
@@ -859,7 +874,7 @@ impl RuntimeEffectOutcome {
         self,
     ) -> Result<Result<ExecResponse, String>, RuntimeEffectControllerError> {
         match self {
-            Self::ExecCode { result } => Ok(result),
+            Self::ExecCode { result } => Ok(*result),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::ExecCode,
                 other.kind(),
@@ -900,6 +915,18 @@ impl RuntimeEffectOutcome {
         }
     }
 
+    pub fn into_peek_await_event(
+        self,
+    ) -> Result<Option<crate::Resolution>, RuntimeEffectControllerError> {
+        match self {
+            Self::PeekAwaitEvent { resolution } => Ok(resolution),
+            other => Err(RuntimeEffectControllerError::wrong_outcome(
+                RuntimeEffectKind::PeekAwaitEvent,
+                other.kind(),
+            )),
+        }
+    }
+
     pub fn into_durable_step(self) -> Result<serde_json::Value, RuntimeEffectControllerError> {
         match self {
             Self::DurableStep { value } => Ok(value),
@@ -923,6 +950,7 @@ impl RuntimeEffectOutcome {
             Self::SyncExecutionEnvironment { .. } => RuntimeEffectKind::SyncExecutionEnvironment,
             Self::Sleep => RuntimeEffectKind::Sleep,
             Self::AwaitEvent { .. } => RuntimeEffectKind::AwaitEvent,
+            Self::PeekAwaitEvent { .. } => RuntimeEffectKind::PeekAwaitEvent,
             Self::DurableStep { .. } => RuntimeEffectKind::DurableStep,
         }
     }

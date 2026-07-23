@@ -128,6 +128,23 @@ fn scoped_child_turn_controller<'run>(
     scoped_effect_controller.rescope(ExecutionScope::turn(session_id, turn_id))
 }
 
+/// Select the resolver that owns turn-control promises for this deployment.
+///
+/// Inline promise identity is instance-owned, so every control operation must
+/// use the configured host that [`TurnWorkDriver`] addresses. Durable handlers
+/// keep using their run-scoped controller so control reads and writes remain
+/// replay-aware while the deployment host supplies the concurrent live watch.
+fn turn_control_resolver<'a>(
+    effect_host: &'a dyn EffectHost,
+    scoped_effect_controller: &'a ScopedEffectController<'_>,
+) -> &'a dyn AwaitEventResolver {
+    if effect_host.durability_tier() == crate::DurabilityTier::Inline {
+        effect_host
+    } else {
+        scoped_effect_controller.controller()
+    }
+}
+
 pub(in crate::runtime) fn queued_work_trace_payload(
     boundary: crate::QueuedWorkClaimBoundary,
     claim: &crate::QueuedWorkClaim,
@@ -371,6 +388,9 @@ impl LashRuntime {
         session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
         turn_control: &ActiveTurnControl,
     ) -> Result<PhysicalTurnExecution, RuntimeError> {
+        let turn_control_host = Arc::clone(&self.host.core.control.effect_host);
+        let turn_control_resolver =
+            turn_control_resolver(turn_control_host.as_ref(), scoped_effect_controller);
         let TurnFinishInput {
             mut turn_pipeline,
             assembler,
@@ -403,7 +423,7 @@ impl LashRuntime {
         let lease_was_lost = session_execution_lease.is_some_and(|lease| lease.is_lost());
         let cancellation = turn_control
             .settle_before_commit(
-                scoped_effect_controller.controller(),
+                turn_control_resolver,
                 assembled_cancelled || (cancel_state.is_cancelled() && !lease_was_lost),
             )
             .await?;
@@ -438,7 +458,7 @@ impl LashRuntime {
             self.emit_completed_turn_trace(&assembled.state, &assembled.outcome, &trace_turn_id);
             publish_terminal_after_commit(
                 turn_control,
-                scoped_effect_controller.controller(),
+                turn_control_resolver,
                 &TurnTerminal::Committed {
                     outcome: assembled.outcome.clone(),
                     cancellation: assembled.cancellation.clone(),
@@ -573,7 +593,7 @@ impl LashRuntime {
         self.state = turn_pipeline.into_final_state();
         publish_terminal_after_commit(
             turn_control,
-            scoped_effect_controller.controller(),
+            turn_control_resolver,
             &TurnTerminal::Committed {
                 outcome: returned_turn.outcome.clone(),
                 cancellation: returned_turn.cancellation.clone(),
@@ -739,9 +759,12 @@ impl LashRuntime {
         claims: LogicalTurnClaims,
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
     ) -> Result<PhysicalTurnExecution, RuntimeError> {
+        let turn_control_host = Arc::clone(&self.host.core.control.effect_host);
+        let turn_control_resolver =
+            turn_control_resolver(turn_control_host.as_ref(), &scoped_effect_controller);
         let turn_control = Arc::new(
             ActiveTurnControl::new(
-                scoped_effect_controller.controller(),
+                turn_control_resolver,
                 TurnAddress::new(&self.state.session_id, &trace_turn_id),
             )
             .await?,
@@ -1239,7 +1262,7 @@ impl LashRuntime {
         input
             .trace_turn_id
             .get_or_insert_with(|| scoped_effect_controller.scope_id().to_string());
-        self.stream_turn_inner(
+        Box::pin(self.stream_turn_inner(
             input.clone(),
             events,
             turn_events,
@@ -1250,7 +1273,7 @@ impl LashRuntime {
             materialize_initial_claims,
             session_execution_lease,
             session_execution_lease_release_policy,
-        )
+        ))
         .await
     }
 
@@ -1405,8 +1428,11 @@ impl LashRuntime {
                     .trace_turn_id
                     .clone()
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let turn_control_host = Arc::clone(&self.host.core.control.effect_host);
+                let turn_control_resolver =
+                    turn_control_resolver(turn_control_host.as_ref(), &scoped_effect_controller);
                 let turn_control = ActiveTurnControl::new(
-                    scoped_effect_controller.controller(),
+                    turn_control_resolver,
                     TurnAddress::new(&self.state.session_id, &trace_turn_id),
                 )
                 .await?
@@ -1878,9 +1904,18 @@ impl LashRuntime {
         session_execution_lease: Option<&SessionExecutionLeaseGuard>,
         session_execution_lease_release_policy: SessionExecutionLeaseReleasePolicy,
     ) -> Result<PhysicalTurnExecution, RuntimeError> {
+        let turn_control_host = Arc::clone(&self.host.core.control.effect_host);
+        let turn_control_resolver =
+            turn_control_resolver(turn_control_host.as_ref(), &scoped_effect_controller);
+        let inline_turn_control_controller =
+            if turn_control_host.durability_tier() == crate::DurabilityTier::Inline {
+                Some(turn_control_host.scoped(scoped_effect_controller.execution_scope().clone())?)
+            } else {
+                None
+            };
         let turn_control = Arc::new(
             ActiveTurnControl::new(
-                scoped_effect_controller.controller(),
+                turn_control_resolver,
                 TurnAddress::new(&self.state.session_id, &trace_turn_id),
             )
             .await?
@@ -2017,22 +2052,10 @@ impl LashRuntime {
             })?;
         let cancel_state = cancel.clone();
         let finish_scoped_effect_controller = scoped_effect_controller.clone();
-        let shared_cancel_controller = match scoped_effect_controller.shared_controller() {
-            Some(controller) => Some(controller),
-            None if scoped_effect_controller.controller().durability_tier()
-                == crate::DurabilityTier::Durable
-                && self.host.core.control.effect_host.durability_tier()
-                    == crate::DurabilityTier::Durable =>
-            {
-                self.host
-                    .core
-                    .control
-                    .effect_host
-                    .scoped_static(scoped_effect_controller.execution_scope().clone())?
-                    .and_then(|scoped| scoped.shared_controller())
-            }
-            None => None,
-        };
+        let turn_cancel_peek_controller = inline_turn_control_controller
+            .as_ref()
+            .map(ScopedEffectController::controller)
+            .unwrap_or_else(|| finish_scoped_effect_controller.controller());
         let session = self
             .session
             .take()
@@ -2070,8 +2093,8 @@ impl LashRuntime {
             cancel.clone(),
             protocol_run_offset,
             Arc::clone(&turn_control),
-            shared_cancel_controller,
-            finish_scoped_effect_controller.controller(),
+            Arc::clone(&turn_control_host),
+            turn_cancel_peek_controller,
             &mut event_rx,
             &mut assembler,
             &child_usage_event_relay,
@@ -2084,7 +2107,10 @@ impl LashRuntime {
             Err(err) if cancel.is_cancelled() => {
                 if turn_control.evidence().is_none() {
                     turn_control
-                        .observe_pending_cancel(finish_scoped_effect_controller.controller())
+                        .observe_pending_cancel(
+                            turn_cancel_peek_controller,
+                            crate::runtime::turn_control::TurnCancelPeekIdentity::PostAbortGate,
+                        )
                         .await?;
                 }
                 if turn_control.evidence().is_some() {
@@ -2239,7 +2265,7 @@ async fn run_turn_effect_loop(
     cancellation: CancellationToken,
     protocol_run_offset: usize,
     turn_control: Arc<ActiveTurnControl>,
-    shared_cancel_controller: Option<Arc<dyn RuntimeEffectController>>,
+    turn_control_host: Arc<dyn EffectHost>,
     cancel_controller: &dyn RuntimeEffectController,
     event_rx: &mut mpsc::Receiver<RuntimeStreamEvent>,
     assembler: &mut TurnAssembler,
@@ -2259,26 +2285,29 @@ async fn run_turn_effect_loop(
         "turn_cancel.start_gate",
     );
     let pending_cancel = await_turn_cancellation_start_gate(|| {
-        turn_control.observe_pending_cancel(cancel_controller)
+        turn_control.observe_pending_cancel(
+            cancel_controller,
+            crate::runtime::turn_control::TurnCancelPeekIdentity::StartGate,
+        )
     })
     .await?;
     drop(start_gate);
     if pending_cancel.is_some() {
         cancellation.cancel();
     }
-    let cancel_watcher = shared_cancel_controller.map(|controller| {
+    let cancel_watcher = crate::task::spawn({
         let turn_control = Arc::clone(&turn_control);
         let cancellation = cancellation.clone();
-        crate::task::spawn(async move {
+        async move {
             if await_turn_cancellation_with_retry(|| {
-                turn_control.await_cancel(controller.as_ref(), CancellationToken::new())
+                turn_control.await_cancel(turn_control_host.as_ref(), CancellationToken::new())
             })
             .await
             .is_some()
             {
                 cancellation.cancel();
             }
-        })
+        }
     });
     // Canonical future-size seam: `driver.run` is boxed exactly once here.
     // Driver growth is absorbed by this allocation instead of accreting
@@ -2289,34 +2318,16 @@ async fn run_turn_effect_loop(
         cancellation.clone(),
         protocol_run_offset,
     ));
-    let result = if cancel_watcher.is_some() {
-        drive_turn_to_completion(
-            run_future,
-            event_rx,
-            assembler,
-            child_usage_event_relay,
-            events,
-            turn_events,
-        )
-        .await
-    } else {
-        drive_turn_to_completion_with_cancel(
-            run_future,
-            await_turn_cancellation_with_retry(|| {
-                turn_control.await_cancel(cancel_controller, CancellationToken::new())
-            }),
-            cancellation,
-            event_rx,
-            assembler,
-            child_usage_event_relay,
-            events,
-            turn_events,
-        )
-        .await
-    };
-    if let Some(watcher) = cancel_watcher {
-        watcher.abort();
-    }
+    let result = drive_turn_to_completion(
+        run_future,
+        event_rx,
+        assembler,
+        child_usage_event_relay,
+        events,
+        turn_events,
+    )
+    .await;
+    cancel_watcher.abort();
     result
 }
 
@@ -2434,59 +2445,6 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn drive_turn_to_completion_with_cancel<F, C>(
-    mut run_future: Pin<Box<F>>,
-    cancel_future: C,
-    cancellation: CancellationToken,
-    event_rx: &mut mpsc::Receiver<RuntimeStreamEvent>,
-    assembler: &mut TurnAssembler,
-    child_usage_event_relay: &ChildUsageEventRelay,
-    events: &dyn EventSink,
-    turn_events: &dyn TurnActivitySink,
-) -> Result<(crate::MessageSequence, usize), RuntimeError>
-where
-    F: std::future::Future<Output = Result<(crate::MessageSequence, usize), RuntimeError>> + ?Sized,
-    C: std::future::Future<Output = Option<TurnCancellationEvidence>>,
-{
-    let run_result = {
-        let mut cancel_future = Box::pin(cancel_future);
-        let mut cancellation_observed = false;
-        loop {
-            tokio::select! {
-                // Keep the non-fused turn future from being re-polled when
-                // cancellation or a stream event becomes ready alongside it.
-                biased;
-
-                completed = run_future.as_mut() => {
-                    child_usage_event_relay.clear();
-                    break completed;
-                }
-                maybe_event = event_rx.recv() => {
-                    if let Some(event) = maybe_event {
-                        emit_runtime_stream_event_to_sinks(
-                            events,
-                            turn_events,
-                            event,
-                            assembler,
-                        )
-                        .await;
-                    }
-                }
-                observation = cancel_future.as_mut(), if !cancellation_observed => {
-                    cancellation_observed = true;
-                    if observation.is_some() {
-                        cancellation.cancel();
-                    }
-                }
-            }
-        }
-    };
-    while let Some(event) = event_rx.recv().await {
-        emit_runtime_stream_event_to_sinks(events, turn_events, event, assembler).await;
-    }
-    run_result
-}
-
 async fn emit_runtime_stream_event_to_sinks(
     events: &dyn EventSink,
     turn_events: &dyn TurnActivitySink,

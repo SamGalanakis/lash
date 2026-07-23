@@ -93,9 +93,7 @@ mod tests {
             Arc::new(crate::testing::MockSessionManager::default()),
             Arc::new(crate::UnavailableProcessService),
             Arc::new(crate::DefaultProcessCancelAbility),
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController,
-            )),
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(crate::InlineRuntimeEffectController::default())),
             Arc::new(crate::SessionAttachmentStore::in_memory()),
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",

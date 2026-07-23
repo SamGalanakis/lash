@@ -263,7 +263,7 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
     core.processes()
         .start(
             process.start_request("sessionless-direct"),
-            runtime_operation_scope("sessionless-direct-start"),
+            runtime_operation_scope(&core, "sessionless-direct-start"),
         )
         .await?;
     let waiting = wait_for_waiting_signal(&core, "sessionless-direct", "ready").await;
@@ -282,7 +282,7 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
         .processes()
         .cancel(
             "sessionless-direct",
-            runtime_operation_scope("sessionless-direct-cancel"),
+            runtime_operation_scope(&core, "sessionless-direct-cancel"),
         )
         .await?;
     assert_eq!(cancelled.status, lash_core::ProcessLifecycleStatus::Running);
@@ -317,7 +317,7 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
                 "sessionless-trigger-1",
             )
             .with_source(serde_json::json!({})),
-            runtime_operation_scope("sessionless-trigger"),
+            runtime_operation_scope(&core, "sessionless-trigger"),
         )
         .await?;
     let started_process_ids = report.started_process_ids();
@@ -340,7 +340,7 @@ async fn host_owned_processes_run_without_application_session() -> Result<()> {
                 "host-signal-1",
                 serde_json::json!({ "ok": true }),
             ),
-            runtime_operation_scope("sessionless-host-signal"),
+            runtime_operation_scope(&core, "sessionless-host-signal"),
         )
         .await?;
     assert_eq!(event.event_type, "signal.ready");
@@ -388,7 +388,7 @@ async fn signal_validation_rejects_undeclared_names_and_mistyped_payloads() -> R
     core.processes()
         .start(
             process.start_request(process_id),
-            runtime_operation_scope("signal-validation-start"),
+            runtime_operation_scope(&core, "signal-validation-start"),
         )
         .await?;
     wait_for_waiting_signal(&core, process_id, "ready").await;
@@ -400,7 +400,7 @@ async fn signal_validation_rejects_undeclared_names_and_mistyped_payloads() -> R
             "nope",
             "undeclared-1",
             signal_request(process_id, "nope", "undeclared-1", serde_json::json!("x")),
-            runtime_operation_scope("signal-validation-undeclared"),
+            runtime_operation_scope(&core, "signal-validation-undeclared"),
         )
         .await;
     let undeclared_err = undeclared.expect_err("undeclared signal name must be rejected");
@@ -421,7 +421,7 @@ async fn signal_validation_rejects_undeclared_names_and_mistyped_payloads() -> R
                 "mistyped-1",
                 serde_json::json!({ "not": "a string" }),
             ),
-            runtime_operation_scope("signal-validation-mistyped"),
+            runtime_operation_scope(&core, "signal-validation-mistyped"),
         )
         .await;
     assert!(
@@ -449,7 +449,7 @@ async fn signal_validation_rejects_undeclared_names_and_mistyped_payloads() -> R
             "ready",
             "valid-1",
             signal_request(process_id, "ready", "valid-1", serde_json::json!("done")),
-            runtime_operation_scope("signal-validation-valid"),
+            runtime_operation_scope(&core, "signal-validation-valid"),
         )
         .await?;
     let output = core.processes().await_output(process_id).await?;
@@ -491,7 +491,7 @@ async fn repeated_waits_on_one_signal_consume_in_order() -> Result<()> {
     core.processes()
         .start(
             process.start_request(process_id),
-            runtime_operation_scope("repeated-waits-start"),
+            runtime_operation_scope(&core, "repeated-waits-start"),
         )
         .await?;
 
@@ -505,7 +505,7 @@ async fn repeated_waits_on_one_signal_consume_in_order() -> Result<()> {
             "ready",
             "order-1",
             signal_request(process_id, "ready", "order-1", serde_json::json!(1)),
-            runtime_operation_scope("repeated-waits-signal-1"),
+            runtime_operation_scope(&core, "repeated-waits-signal-1"),
         )
         .await?;
 
@@ -529,7 +529,7 @@ async fn repeated_waits_on_one_signal_consume_in_order() -> Result<()> {
             "ready",
             "order-2",
             signal_request(process_id, "ready", "order-2", serde_json::json!(2)),
-            runtime_operation_scope("repeated-waits-signal-2"),
+            runtime_operation_scope(&core, "repeated-waits-signal-2"),
         )
         .await?;
 
@@ -588,7 +588,7 @@ async fn process_starts_and_awaits_child_process() -> Result<()> {
     core.processes()
         .start(
             process.start_request(process_id),
-            runtime_operation_scope("parent-joins-child-start"),
+            runtime_operation_scope(&core, "parent-joins-child-start"),
         )
         .await?;
     let output = core.processes().await_output(process_id).await?;
@@ -678,7 +678,7 @@ async fn process_children_inherit_session_chain_provenance() -> Result<()> {
                     Some("chain parent"),
                 ),
             })),
-            runtime_operation_scope("chain-parent-start"),
+            runtime_operation_scope(&core, "chain-parent-start"),
         )
         .await?;
     wait_for_terminal(
@@ -764,7 +764,7 @@ async fn process_outlives_deleted_session_and_resumes_from_host_signal() -> Resu
                         Some("outliving process"),
                     ),
                 })),
-            runtime_operation_scope("outliving-process-start"),
+            runtime_operation_scope(&core, "outliving-process-start"),
         )
         .await?;
     wait_for_waiting_signal(&core, process_id, "ready").await;
@@ -827,7 +827,7 @@ async fn process_outlives_deleted_session_and_resumes_from_host_signal() -> Resu
                 "outliving-host-signal",
                 serde_json::json!({ "after_delete": true }),
             ),
-            runtime_operation_scope("outliving-process-signal"),
+            runtime_operation_scope(&core, "outliving-process-signal"),
         )
         .await?;
     let output = core.processes().await_output(process_id).await?;
@@ -936,7 +936,7 @@ async fn inline_process_await_sink_and_prune_end_to_end() -> Result<()> {
     core.processes()
         .start(
             process.start_request(process_id),
-            runtime_operation_scope("e2e-start"),
+            runtime_operation_scope(&core, "e2e-start"),
         )
         .await?;
     wait_for_waiting_signal(&core, process_id, "ready").await;
@@ -955,7 +955,7 @@ async fn inline_process_await_sink_and_prune_end_to_end() -> Result<()> {
             "ready",
             "e2e-signal-1",
             signal_request(process_id, "ready", "e2e-signal-1", payload.clone()),
-            runtime_operation_scope("e2e-signal"),
+            runtime_operation_scope(&core, "e2e-signal"),
         )
         .await?;
 

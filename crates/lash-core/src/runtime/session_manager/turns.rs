@@ -192,7 +192,7 @@ impl Drop for AbortTaskOnDrop {
 mod tests {
     #[test]
     fn session_turn_request_requires_matching_scope_and_sets_trace_turn_id() {
-        let controller = crate::InlineRuntimeEffectController;
+        let controller = crate::InlineRuntimeEffectController::default();
         let scoped_effect_controller = crate::ScopedEffectController::borrowed(
             &controller,
             crate::ExecutionScope::turn("child", "child-turn"),
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn session_turn_request_rejects_mismatched_execution_scope() {
-        let controller = crate::InlineRuntimeEffectController;
+        let controller = crate::InlineRuntimeEffectController::default();
         let scoped_effect_controller = crate::ScopedEffectController::borrowed(
             &controller,
             crate::ExecutionScope::turn("child", "other-turn"),

@@ -75,14 +75,6 @@ async fn reset(storage: &PostgresStorage) {
     .execute(pool)
     .await
     .expect("reset postgres process change clock");
-    // `lash_trigger_subscription_seq` is a standalone sequence (not owned by a
-    // truncated table), so RESTART IDENTITY does not reset it. Reset it in a
-    // separate statement — sqlx's prepared protocol rejects multiple commands in
-    // one query.
-    sqlx::query("ALTER SEQUENCE lash_trigger_subscription_seq RESTART WITH 1")
-        .execute(pool)
-        .await
-        .expect("reset postgres trigger subscription sequence");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -183,7 +175,7 @@ async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
     // Restore the correct version BEFORE asserting so a failed assert never leaves
     // the shared database wedged for other cases.
     sqlx::query(
-        "UPDATE lash_schema_versions SET version = 13 WHERE component = 'lash-postgres-store'",
+        "UPDATE lash_schema_versions SET version = 14 WHERE component = 'lash-postgres-store'",
     )
     .execute(&pool)
     .await
@@ -194,7 +186,7 @@ async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
         Err(err) => err.to_string(),
     };
     assert!(
-        message.contains("version 11") && message.contains("expected 13"),
+        message.contains("version 11") && message.contains("expected 14"),
         "expected a schema-version mismatch error, got: {message}"
     );
 }

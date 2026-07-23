@@ -2,7 +2,7 @@
 
 use super::*;
 use http_body_util::{BodyExt, Empty};
-use lash_core::{ProcessInput, ProcessRegistration};
+use lash_core::{ProcessInput, ProcessRegistration, RuntimeScope};
 use lash_http_transport::{HttpResponse, HttpResponseBody, HttpTransport, HttpTransportError};
 use lash_lashlang_runtime::{LashlangToolBinding, ToolDefinitionLashlangExt};
 use restate_sdk::prelude::Endpoint;
@@ -302,6 +302,130 @@ async fn restate_handler_controller_satisfies_concurrent_replay_conformance() {
     );
 }
 
+#[tokio::test]
+async fn restate_handler_controller_journals_typed_trigger_execution() {
+    let context = Arc::new(RecordingContext::default());
+    let controller = RestateRuntimeEffectController::new(Arc::clone(&context));
+    let envelope = RuntimeEffectEnvelope::new(
+        RuntimeInvocation::effect(
+            RuntimeScope::new("restate-trigger-session"),
+            "restate-trigger-list",
+            RuntimeEffectKind::Trigger,
+            "restate-trigger-list",
+        ),
+        RuntimeEffectCommand::Trigger {
+            command: Box::new(lash_core::TriggerCommand::List {
+                owner_scope: lash_core::TriggerOwnerScope::session("restate-trigger-session"),
+                filter: lash_core::TriggerSubscriptionFilter::default(),
+            }),
+        },
+    );
+    let store =
+        Arc::new(lash_core::InMemoryTriggerStore::new()) as Arc<dyn lash_core::TriggerStore>;
+
+    let outcome = controller
+        .execute_effect(envelope, RuntimeEffectLocalExecutor::triggers(store))
+        .await
+        .expect("handler-scoped Restate controller must execute typed trigger effects")
+        .into_trigger()
+        .expect("typed trigger outcome");
+
+    assert!(matches!(
+        outcome,
+        Ok(lash_core::TriggerCommandOutcome::List { records }) if records.is_empty()
+    ));
+    assert_eq!(
+        context.runs.lock().expect("runs lock").as_slice(),
+        ["lash:restate-trigger-list"]
+    );
+}
+
+#[tokio::test]
+async fn journaled_cancel_peeks_replay_while_live_watcher_observes_later_cancel() {
+    let context = Arc::new(ReplayableRecordingContext::default());
+    let controller = RestateRuntimeEffectController::new(Arc::clone(&context));
+    let scope = ExecutionScope::turn("journaled-peek-session", "journaled-peek-turn");
+    let key = controller
+        .await_event_key(&scope, AwaitEventWaitIdentity::TurnCancelGate)
+        .await
+        .expect("cancel gate key");
+    let envelope = |identity: &str| {
+        RuntimeEffectEnvelope::new(
+            RuntimeInvocation::effect(
+                RuntimeScope {
+                    session_id: "journaled-peek-session".to_string(),
+                    turn_id: Some("journaled-peek-turn".to_string()),
+                    turn_index: None,
+                    protocol_iteration: None,
+                },
+                identity,
+                RuntimeEffectKind::PeekAwaitEvent,
+                identity,
+            ),
+            RuntimeEffectCommand::PeekAwaitEvent { key: key.clone() },
+        )
+    };
+    let start = envelope("turn_cancel.start_gate");
+    let post_abort = envelope("turn_cancel.post_abort_gate");
+    assert_ne!(
+        start.stable_hash().expect("start hash"),
+        post_abort.stable_hash().expect("post-abort hash"),
+        "later owner reads require a distinct causal identity"
+    );
+
+    let first = controller
+        .execute_effect(start.clone(), RuntimeEffectLocalExecutor::unavailable())
+        .await
+        .expect("fresh start-gate peek")
+        .into_peek_await_event()
+        .expect("start-gate outcome");
+    assert_eq!(first, None);
+
+    let cancellation = Resolution::Ok(serde_json::json!({
+        "status": "cancel_requested",
+        "request_id": "after-start"
+    }));
+    assert_eq!(
+        controller
+            .resolve_await_event(&key, cancellation.clone())
+            .await
+            .expect("resolve cancel gate"),
+        ResolveOutcome::Accepted
+    );
+    let later = controller
+        .execute_effect(
+            post_abort.clone(),
+            RuntimeEffectLocalExecutor::unavailable(),
+        )
+        .await
+        .expect("fresh post-abort peek")
+        .into_peek_await_event()
+        .expect("post-abort outcome");
+    assert_eq!(later, Some(cancellation.clone()));
+
+    context.start_replay();
+    let replayed_start = controller
+        .execute_effect(start, RuntimeEffectLocalExecutor::unavailable())
+        .await
+        .expect("replayed start-gate peek")
+        .into_peek_await_event()
+        .expect("replayed start-gate outcome");
+    let replayed_later = controller
+        .execute_effect(post_abort, RuntimeEffectLocalExecutor::unavailable())
+        .await
+        .expect("replayed post-abort peek")
+        .into_peek_await_event()
+        .expect("replayed post-abort outcome");
+    assert_eq!(replayed_start, None);
+    assert_eq!(replayed_later, Some(cancellation.clone()));
+
+    let live = controller
+        .await_await_event(&key, tokio_util::sync::CancellationToken::new(), None)
+        .await
+        .expect("live watcher observes durable cancellation");
+    assert_eq!(live, cancellation);
+}
+
 #[test]
 fn restate_handler_controller_disallows_concurrent_effect_calls() {
     let controller = RestateRuntimeEffectController::new(Arc::new(RecordingContext::default()));
@@ -321,7 +445,7 @@ fn recorded_runtime_effect_hash_mismatch_fails_explicitly() {
         .canonical_form()
         .expect("reconstructed envelope");
     let recorded = RecordedRuntimeEffect {
-        envelope: recorded_envelope,
+        envelope: Arc::new(recorded_envelope),
         outcome: Ok(RuntimeEffectOutcome::Sleep),
     };
 
@@ -344,7 +468,7 @@ fn recorded_runtime_effect_hash_match_returns_replayed_outcome() {
         .canonical_form()
         .expect("canonical envelope");
     let recorded = RecordedRuntimeEffect {
-        envelope: envelope.clone(),
+        envelope: Arc::new(envelope.clone()),
         outcome: Ok(RuntimeEffectOutcome::Sleep),
     };
 
@@ -1337,6 +1461,21 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
         }
         Box::pin(async { Ok(()) })
     }
+
+    fn session_is_revoked<'run>(
+        &'run self,
+        session_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        let revoked = self
+            .revoked_sessions
+            .lock()
+            .expect("revoked sessions lock")
+            .contains(&session_id);
+        Box::pin(async move { Ok(revoked) })
+    }
 }
 
 #[derive(Default)]
@@ -1345,6 +1484,8 @@ struct ReplayableRecordingContext {
     runs: Mutex<Vec<String>>,
     records: Mutex<HashMap<String, Vec<u8>>>,
     replaying: AtomicBool,
+    peek_records: Mutex<Vec<Option<Resolution>>>,
+    peek_cursor: AtomicUsize,
     events: Arc<RecordingContext>,
     process_worker: Mutex<Option<DurableProcessWorker>>,
 }
@@ -1352,6 +1493,7 @@ struct ReplayableRecordingContext {
 impl ReplayableRecordingContext {
     fn start_replay(&self) {
         self.replaying.store(true, Ordering::SeqCst);
+        self.peek_cursor.store(0, Ordering::SeqCst);
     }
 
     fn runs(&self) -> Vec<String> {
@@ -1650,12 +1792,38 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
 
     fn peek_event<'run>(
         &'run self,
-        _address: RestateDurableWaitAddress,
+        address: RestateDurableWaitAddress,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Resolution>, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run,
     {
-        Box::pin(async { Ok(None) })
+        let resolution = if self.replaying.load(Ordering::SeqCst) {
+            let position = self.peek_cursor.fetch_add(1, Ordering::SeqCst);
+            self.peek_records
+                .lock()
+                .expect("peek records lock")
+                .get(position)
+                .cloned()
+                .ok_or_else(|| {
+                    TerminalError::new(format!(
+                        "missing recorded await-event peek at position {position}"
+                    ))
+                })
+        } else {
+            let resolution = self
+                .events
+                .durable_events
+                .lock()
+                .expect("durable events lock")
+                .get(&address.workflow_key)
+                .cloned();
+            self.peek_records
+                .lock()
+                .expect("peek records lock")
+                .push(resolution.clone());
+            Ok(resolution)
+        };
+        Box::pin(async move { resolution })
     }
 
     fn await_process_terminal<'run>(
@@ -1797,9 +1965,9 @@ async fn restate_positional_replay_records_tool_attempt_as_one_command() {
                 |_envelope| async move {
                     local_runs.fetch_add(1, Ordering::SeqCst);
                     Ok(RuntimeEffectOutcome::ToolAttempt {
-                        launch: lash_core::ToolAttemptLaunch::Done {
+                        launch: Box::new(lash_core::ToolAttemptLaunch::Done {
                             record: completed_tool_record("call-fast", "fast_tool"),
-                        },
+                        }),
                         triggers: Vec::new(),
                     })
                 }
@@ -1812,7 +1980,7 @@ async fn restate_positional_replay_records_tool_attempt_as_one_command() {
         panic!("expected tool attempt outcome");
     };
     assert!(matches!(
-        &launch,
+        &*launch,
         lash_core::ToolAttemptLaunch::Done { record } if record.call_id.as_deref() == Some("call-fast")
     ));
     assert_eq!(context.record_count(), 1);
@@ -1834,7 +2002,7 @@ async fn restate_positional_replay_records_tool_attempt_as_one_command() {
         panic!("expected replayed tool attempt outcome");
     };
     assert!(matches!(
-        &launch,
+        &*launch,
         lash_core::ToolAttemptLaunch::Done { record } if record.call_id.as_deref() == Some("call-fast")
     ));
     assert_eq!(context.record_count(), 1);
@@ -2217,16 +2385,15 @@ async fn restate_session_delete_revokes_current_and_future_waits() {
         },
     )
     .expect("future revoked wait");
-    assert_eq!(
-        host.await_await_event(
+    let future_error = host
+        .await_await_event(
             &future_key,
             tokio_util::sync::CancellationToken::new(),
             None,
         )
         .await
-        .expect("future revoked wait result"),
-        Resolution::Cancelled
-    );
+        .expect_err("future revoked wait is not observable");
+    assert_eq!(future_error.code.as_str(), "await_event_unknown_or_revoked");
     assert_eq!(
         host.resolve_await_event(&future_key, Resolution::Ok(serde_json::json!("late")))
             .await
@@ -2246,15 +2413,22 @@ async fn restate_effect_host_without_ingress_refuses_session_mutation() {
 }
 
 #[tokio::test]
-async fn restate_effect_host_awaits_resolution_with_one_causally_linked_call() {
+async fn restate_effect_host_checks_revocation_then_awaits_resolution() {
     let expected = Resolution::Ok(serde_json::json!({ "answer": "approved" }));
-    let scripted = Arc::new(ScriptedHttpTransport::new([HttpResponse {
-        status: 200,
-        headers: vec![("content-type".to_string(), "application/json".to_string())],
-        body: HttpResponseBody::buffered(
-            serde_json::to_string(&expected).expect("encode resolution"),
-        ),
-    }]));
+    let scripted = Arc::new(ScriptedHttpTransport::new([
+        HttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: HttpResponseBody::buffered("false"),
+        },
+        HttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: HttpResponseBody::buffered(
+                serde_json::to_string(&expected).expect("encode resolution"),
+            ),
+        },
+    ]));
     let host = RestateEffectHost::with_ingress_url(RestateConnection::with_transport(
         "https://restate.example",
         scripted.clone(),
@@ -2274,12 +2448,20 @@ async fn restate_effect_host_awaits_resolution_with_one_causally_linked_call() {
 
     assert_eq!(resolution, expected);
     let requests = scripted.requests();
-    assert_eq!(requests.len(), 1, "durable wait must use one invocation");
+    assert_eq!(requests.len(), 2, "durable wait must check its tombstone");
     assert!(
-        requests[0].url.contains("/LashDurableWaitWorkflow/")
-            && requests[0].url.ends_with("/await_resolution"),
-        "durable wait must call await_resolution directly: {}",
+        requests[0]
+            .url
+            .contains("/LashDurableWaitIndex/single-call-session/")
+            && requests[0].url.ends_with("/is_revoked"),
+        "durable wait must check the session tombstone first: {}",
         requests[0].url
+    );
+    assert!(
+        requests[1].url.contains("/LashDurableWaitWorkflow/")
+            && requests[1].url.ends_with("/await_resolution"),
+        "durable wait must call await_resolution directly: {}",
+        requests[1].url
     );
 }
 
@@ -3282,7 +3464,7 @@ async fn restate_controller_awaits_and_signals_through_process_effects() {
         panic!("wrong await outcome");
     };
     assert_eq!(
-        output,
+        *output,
         ProcessAwaitOutput::Success {
             value: serde_json::json!({ "done": true }),
             control: None,
@@ -3515,7 +3697,7 @@ impl RestateProcessRunner for SegmentedRecordingRunner {
 
 fn inline_process_scope(process_id: &str) -> lash_core::ScopedEffectController<'static> {
     lash_core::ScopedEffectController::shared(
-        Arc::new(lash_core::InlineRuntimeEffectController),
+        Arc::new(lash_core::InlineRuntimeEffectController::default()),
         lash_core::ExecutionScope::process(process_id.to_string()),
     )
     .expect("inline process scope")
@@ -3643,9 +3825,9 @@ enum RestateSegmentReplayPoint {
 
 fn restate_segment_tool_attempt_outcome(ordinal: u64) -> RuntimeEffectOutcome {
     RuntimeEffectOutcome::ToolAttempt {
-        launch: lash_core::ToolAttemptLaunch::Done {
+        launch: Box::new(lash_core::ToolAttemptLaunch::Done {
             record: completed_tool_record(&format!("matrix-call-{ordinal}"), "matrix_tool"),
-        },
+        }),
         triggers: Vec::new(),
     }
 }
@@ -5351,7 +5533,7 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
             registration,
             execution_context,
             lash_core::ScopedEffectController::shared(
-                Arc::new(lash_core::InlineRuntimeEffectController),
+                Arc::new(lash_core::InlineRuntimeEffectController::default()),
                 lash_core::ExecutionScope::process("task-workflow"),
             )
             .expect("inline process scope"),
@@ -5429,7 +5611,7 @@ async fn run_registration_abandons_restarted_owner_bound_without_running() {
             registration,
             ProcessExecutionContext::default(),
             lash_core::ScopedEffectController::shared(
-                Arc::new(lash_core::InlineRuntimeEffectController),
+                Arc::new(lash_core::InlineRuntimeEffectController::default()),
                 lash_core::ExecutionScope::process("ob-restart"),
             )
             .expect("inline process scope"),
@@ -5485,7 +5667,7 @@ async fn run_registration_runs_fresh_owner_bound() {
             registration,
             ProcessExecutionContext::default(),
             lash_core::ScopedEffectController::shared(
-                Arc::new(lash_core::InlineRuntimeEffectController),
+                Arc::new(lash_core::InlineRuntimeEffectController::default()),
                 lash_core::ExecutionScope::process("ob-fresh"),
             )
             .expect("inline process scope"),
@@ -6049,6 +6231,36 @@ async fn restate_ingress_client_calls_workflow_and_decodes_output() {
         requests[0]
     );
     assert!(!requests[0].contains("/send "));
+}
+
+#[tokio::test]
+async fn restate_ingress_client_pins_effect_replay_with_idempotency_key() {
+    let (base_url, captured, server) = spawn_restate_http_capture(vec![MockHttpResponse {
+        status: "200 OK",
+        body: r#"{"status":"cancelled"}"#,
+    }])
+    .await;
+    let client = RestateIngressClient::new(base_url);
+
+    let output: Resolution = client
+        .call_workflow_json_idempotent(
+            "LashDurableWaitWorkflow",
+            "promise-key",
+            "await_resolution",
+            &serde_json::json!({}),
+            "stable-envelope-hash",
+        )
+        .await
+        .expect("call idempotent workflow");
+    server.await.expect("capture server");
+
+    assert_eq!(output, Resolution::Cancelled);
+    let requests = captured.lock().expect("captured lock");
+    assert!(
+        requests[0].contains("idempotency-key: stable-envelope-hash"),
+        "explicit effect replay identity must reach Restate: {}",
+        requests[0]
+    );
 }
 
 #[tokio::test]

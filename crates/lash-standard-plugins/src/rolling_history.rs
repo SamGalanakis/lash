@@ -558,7 +558,7 @@ mod tests {
             session_lifecycle: manager.clone(),
             session_graph: manager,
             scoped_effect_controller: lash_core::ScopedEffectController::shared(
-                Arc::new(lash_core::InlineRuntimeEffectController),
+                Arc::new(lash_core::InlineRuntimeEffectController::default()),
                 lash_core::ExecutionScope::turn(session_id, "rolling-history-test-turn"),
             )
             .expect("test scoped effect controller"),
@@ -584,7 +584,7 @@ mod tests {
             session_lifecycle: manager.clone(),
             session_graph: manager,
             scoped_effect_controller: lash_core::ScopedEffectController::shared(
-                Arc::new(lash_core::InlineRuntimeEffectController),
+                Arc::new(lash_core::InlineRuntimeEffectController::default()),
                 lash_core::ExecutionScope::runtime_operation("rolling-history-compact-test"),
             )
             .expect("test scoped effect controller"),

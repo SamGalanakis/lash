@@ -797,7 +797,10 @@ impl GeneratedRuntimeWorld {
             runtime_provider_components(OPENAI_COMPATIBLE, &transport)
                 .map_err(|err| FixedScriptRunnerError::Runtime(err.to_string()))?;
         let core = lash::LashCore::standard_builder()
-            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .effect_host(Arc::new(
+                lash::durability::InlineEffectHost::default()
+                    .allow_process_lifetime_completion_keys(),
+            ))
             .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
             .process_env_store(Arc::new(
                 lash::persistence::InMemoryProcessExecutionEnvStore::new(),

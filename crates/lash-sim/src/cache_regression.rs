@@ -147,7 +147,9 @@ async fn captured_rlm_iterations() -> Vec<LlmRequest> {
         Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
     );
     let core = lash::LashCore::rlm_builder(factory)
-        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .effect_host(Arc::new(
+            lash::durability::InlineEffectHost::default().allow_process_lifetime_completion_keys(),
+        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             lash::persistence::InMemoryProcessExecutionEnvStore::new(),

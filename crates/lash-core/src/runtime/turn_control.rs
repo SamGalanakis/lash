@@ -8,8 +8,25 @@ use crate::{ErrorEnvelope, TurnOutcome};
 
 use super::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, EffectHost, ExecutionScope,
-    Resolution, ResolveOutcome, RuntimeError,
+    Resolution, ResolveOutcome, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeError, RuntimeInvocation, RuntimeScope,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TurnCancelPeekIdentity {
+    StartGate,
+    PostAbortGate,
+}
+
+impl TurnCancelPeekIdentity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StartGate => "turn_cancel.start_gate",
+            Self::PostAbortGate => "turn_cancel.post_abort_gate",
+        }
+    }
+}
 
 /// Stable routing identity for one foreground turn.
 ///
@@ -217,7 +234,16 @@ impl TurnWorkDriver {
     ) -> Result<TurnCancelReceipt, RuntimeError> {
         request.validate()?;
         let durability_tier = self.effect_host.durability_tier();
-        let key = cancel_gate_key(self.effect_host.as_ref(), &request.address).await?;
+        let key = match cancel_gate_key(self.effect_host.as_ref(), &request.address).await {
+            Ok(key) => key,
+            Err(err) if err.code.as_str() == "await_event_unknown_or_revoked" => {
+                return Ok(TurnCancelReceipt {
+                    durability_tier,
+                    outcome: TurnCancelOutcome::UnknownOrRevoked,
+                });
+            }
+            Err(err) => return Err(err),
+        };
         let evidence = request.evidence();
         let resolution = gate_resolution(TurnGateTerminal::CancelRequested(evidence.clone()))?;
         let outcome = match self
@@ -402,9 +428,40 @@ impl ActiveTurnControl {
 
     pub(crate) async fn observe_pending_cancel(
         &self,
-        resolver: &dyn AwaitEventResolver,
+        controller: &dyn RuntimeEffectController,
+        identity: TurnCancelPeekIdentity,
     ) -> Result<Option<TurnCancellationEvidence>, RuntimeError> {
-        let Some(resolution) = resolver.peek_await_event(&self.cancel_key).await? else {
+        let causal_identity = identity.as_str();
+        let invocation = RuntimeInvocation::effect(
+            RuntimeScope {
+                session_id: self.address.session_id.clone(),
+                turn_id: Some(self.address.turn_id.clone()),
+                turn_index: None,
+                protocol_iteration: None,
+            },
+            causal_identity,
+            RuntimeEffectKind::PeekAwaitEvent,
+            causal_identity,
+        );
+        let outcome = controller
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    invocation,
+                    RuntimeEffectCommand::PeekAwaitEvent {
+                        key: self.cancel_key.clone(),
+                    },
+                ),
+                RuntimeEffectLocalExecutor::unavailable(),
+            )
+            .await
+            .map_err(|err| RuntimeError::new(err.code, err.message))?;
+        let RuntimeEffectOutcome::PeekAwaitEvent { resolution } = outcome else {
+            return Err(RuntimeError::new(
+                "turn_control_peek_outcome",
+                format!("{causal_identity} returned a non-peek runtime effect outcome"),
+            ));
+        };
+        let Some(resolution) = resolution else {
             return Ok(None);
         };
         match decode_gate(resolution)? {
@@ -609,11 +666,14 @@ mod tests {
             other => panic!("expected requested, got {other:?}"),
         };
 
+        let scoped = host
+            .scoped(address.scope())
+            .expect("scope recovered turn controller");
         let recovered = ActiveTurnControl::new(host.as_ref(), address)
             .await
             .expect("recreate active control under the recovered owner");
         let observed = recovered
-            .observe_pending_cancel(host.as_ref())
+            .observe_pending_cancel(scoped.controller(), TurnCancelPeekIdentity::StartGate)
             .await
             .expect("read recovered turn start gate")
             .expect("pending cancellation is visible before recovered effects");

@@ -960,6 +960,12 @@ mod tests {
                 .lock()
                 .expect("effect kinds")
                 .push(envelope.command.kind());
+            if matches!(
+                &envelope.command,
+                lash_core::RuntimeEffectCommand::PeekAwaitEvent { .. }
+            ) {
+                return Ok(lash_core::RuntimeEffectOutcome::PeekAwaitEvent { resolution: None });
+            }
             local_executor.execute(envelope).await
         }
     }

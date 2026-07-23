@@ -27,6 +27,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt as _, BufReader};
+use tokio::process::Command;
 
 const DEFAULT_RUNNER_STALL_TIMEOUT: Duration = Duration::from_secs(240);
 
@@ -105,6 +107,19 @@ async fn async_main() -> Result<()> {
         admin_url.clone(),
         runner_stall_timeout()?,
     ));
+
+    let conformance_ingress = ingress_url.clone();
+    lash_core::testing::conformance::effect_host_await_events_cold_instance(|| {
+        Arc::new(RestateEffectHost::with_ingress_url(
+            conformance_ingress.clone(),
+        )) as Arc<dyn lash_core::EffectHost>
+    })
+    .await;
+    println!(
+        "Restate cold-instance AwaitEvent conformance passed: layer_a_vectors={}",
+        lash_core::testing::conformance::COLD_INSTANCE_AWAIT_EVENT_VECTOR_COUNT
+    );
+    run_cold_process_await_event_vectors(&admin_url, &ingress_url).await?;
 
     let main_request = TurnRequest {
         workflow_id: "e2e-main".to_string(),
@@ -437,6 +452,78 @@ async fn async_main() -> Result<()> {
             .unwrap_or_else(|| "disabled".to_string())
     );
     watchdog.abort();
+    Ok(())
+}
+
+async fn run_cold_process_await_event_vectors(admin_url: &str, ingress_url: &str) -> Result<()> {
+    for identity in ["tool_completion", "turn_cancel_gate"] {
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut child = Command::new("/usr/local/bin/lash-e2e-await-event-helper")
+            .arg(ingress_url)
+            .arg(identity)
+            .arg(&nonce)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn cold-process helper for {identity}"))?;
+        let stdout = child.stdout.take().context("helper stdout pipe")?;
+        let mut lines = BufReader::new(stdout).lines();
+        let encoded_key = tokio::time::timeout(Duration::from_secs(30), lines.next_line())
+            .await
+            .with_context(|| format!("helper did not mint {identity} key"))??
+            .with_context(|| format!("helper exited before printing {identity} key"))?;
+        let key: AwaitEventKey = serde_json::from_str(&encoded_key)
+            .with_context(|| format!("decode helper {identity} key"))?;
+        wait_for_durable_wait_suspended(admin_url, &key).await?;
+        child
+            .kill()
+            .await
+            .with_context(|| format!("kill parked {identity} helper"))?;
+        let status = child
+            .wait()
+            .await
+            .with_context(|| format!("reap parked {identity} helper"))?;
+        anyhow::ensure!(
+            !status.success(),
+            "killed {identity} helper exited successfully"
+        );
+
+        let terminal = Resolution::Ok(json!({
+            "cold_process": true,
+            "identity": identity,
+            "nonce": nonce,
+        }));
+        let resolver = RestateEffectHost::with_ingress_url(ingress_url.to_string());
+        anyhow::ensure!(
+            matches!(
+                resolver
+                    .resolve_await_event(&key, terminal.clone())
+                    .await
+                    .with_context(|| format!("resolve killed-helper {identity} key"))?,
+                lash_core::ResolveOutcome::Accepted
+            ),
+            "killed-helper {identity} resolution did not win"
+        );
+        let observer = RestateEffectHost::with_ingress_url(ingress_url.to_string());
+        anyhow::ensure!(
+            observer
+                .peek_await_event(&key)
+                .await
+                .with_context(|| format!("peek killed-helper {identity} key"))?
+                == Some(terminal.clone()),
+            "cold observer did not see killed-helper {identity} terminal"
+        );
+        anyhow::ensure!(
+            observer
+                .await_await_event(&key, tokio_util::sync::CancellationToken::new(), None,)
+                .await
+                .with_context(|| format!("observe killed-helper {identity} key"))?
+                == terminal,
+            "cold observer did not await killed-helper {identity} terminal"
+        );
+    }
+    println!(
+        "Restate cold-process AwaitEvent conformance passed: layer_b_vectors=2 identities=tool_completion,turn_cancel_gate"
+    );
     Ok(())
 }
 
@@ -2643,7 +2730,7 @@ async fn emit_button_event(
     })?;
     let source_key = empty_trigger_source_key(BUTTON_SOURCE_TYPE)?;
     let scoped = ScopedEffectController::shared(
-        Arc::new(InlineRuntimeEffectController),
+        Arc::new(InlineRuntimeEffectController::default()),
         ExecutionScope::runtime_operation("e2e-button-trigger"),
     )?;
     let report = core

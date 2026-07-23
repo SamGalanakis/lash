@@ -508,7 +508,7 @@ impl ModelStore {
                     })),
                 };
                 let outcome = lash_core::RuntimeEffectOutcome::ExecCode {
-                    result: Ok(response),
+                    result: Box::new(Ok(response)),
                 };
                 json!({
                     "session": event.actor_alias,

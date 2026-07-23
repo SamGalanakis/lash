@@ -473,6 +473,13 @@ impl PostgresRuntimeEffectController {
             return Ok(RuntimeEffectOutcome::Sleep);
         }
         match envelope.command {
+            RuntimeEffectCommand::PeekAwaitEvent { key } => {
+                let resolution = self
+                    .peek_await_event(&key)
+                    .await
+                    .map_err(RuntimeEffectControllerError::from)?;
+                Ok(RuntimeEffectOutcome::PeekAwaitEvent { resolution })
+            }
             RuntimeEffectCommand::Process { command } => {
                 let result = local_executor.into_process()?.execute(*command).await?;
                 Ok(RuntimeEffectOutcome::Process { result })
@@ -486,7 +493,6 @@ impl AwaitEventResolver for PostgresRuntimeEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
-
 }
 
 #[async_trait::async_trait]

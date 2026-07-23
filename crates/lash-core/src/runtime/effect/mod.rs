@@ -1,7 +1,9 @@
 mod await_events;
 mod envelope;
 mod executor;
+mod inline_host;
 mod outcome;
+pub mod promise_semantics;
 mod validation;
 
 pub use envelope::{
@@ -13,11 +15,12 @@ pub use envelope::{
 };
 pub use executor::{
     AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, BoundaryReason, EffectHost,
-    ExecutionScope, ExternalCompletionError, InlineEffectHost, InlineRuntimeEffectController,
-    Resolution, ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectController,
+    ExecutionScope, ExternalCompletionError, InlineRuntimeEffectController, Resolution,
+    ResolveOutcome, RuntimeAwaitEventOptions, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectLocalExecutor, RuntimeSleepOptions,
     ScopedEffectController, SegmentProgress,
 };
+pub use inline_host::InlineEffectHost;
 pub use lash_sansio::CausalRef;
 pub use validation::{
     CanonicalRuntimeEffectEnvelope, RuntimeEffectReplayMismatchSummary, RuntimeEffectReplayTrace,
@@ -104,6 +107,45 @@ mod tests {
             envelope.invocation.replay_key()
         );
         assert_eq!(decoded.command.kind(), RuntimeEffectKind::Direct);
+    }
+
+    #[tokio::test]
+    async fn inline_host_owns_registry_and_shares_it_only_with_its_scoped_controllers() {
+        let host_a = InlineEffectHost::default();
+        let host_b = InlineEffectHost::default();
+        let scope = ExecutionScope::turn("owned-inline-session", "owned-inline-turn");
+        let key = host_a
+            .await_event_key(
+                &scope,
+                AwaitEventWaitIdentity::tool_completion("owned-inline-call"),
+            )
+            .await
+            .expect("host A key");
+        let scoped_a = host_a.scoped(scope).expect("host A scoped controller");
+        let terminal = Resolution::Ok(serde_json::json!("owned"));
+        assert_eq!(
+            scoped_a
+                .controller()
+                .resolve_await_event(&key, terminal.clone())
+                .await
+                .expect("scoped A resolves host A key"),
+            ResolveOutcome::Accepted
+        );
+        assert_eq!(
+            host_a
+                .peek_await_event(&key)
+                .await
+                .expect("host A observes scoped terminal"),
+            Some(terminal)
+        );
+        assert_eq!(
+            host_b
+                .resolve_await_event(&key, Resolution::Cancelled)
+                .await
+                .expect("independent host rejects key"),
+            ResolveOutcome::UnknownOrRevoked,
+            "independent Inline hosts must not rendezvous through process-global state"
+        );
     }
 
     #[test]
@@ -226,7 +268,7 @@ mod tests {
     #[test]
     fn tool_batch_outcome_rejects_wrong_effect_kind() {
         let error = RuntimeEffectOutcome::ToolAttempt {
-            launch: ToolAttemptLaunch::Done {
+            launch: Box::new(ToolAttemptLaunch::Done {
                 record: crate::ToolCallRecord {
                     call_id: Some("call-1".to_string()),
                     tool: "echo".to_string(),
@@ -234,7 +276,7 @@ mod tests {
                     output: crate::ToolCallOutput::success(serde_json::json!({"done": "call-1"})),
                     duration_ms: 7,
                 },
-            },
+            }),
             triggers: Vec::new(),
         }
         .into_tool_batch_effect()

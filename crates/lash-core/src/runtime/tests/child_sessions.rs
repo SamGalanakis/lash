@@ -282,7 +282,7 @@ async fn durable_managed_child_writes_to_its_own_attachment_namespace() {
         .expect("durable child session");
     let turn_id = "attachment-child-turn";
     let controller = crate::ScopedEffectController::shared(
-        Arc::new(crate::InlineRuntimeEffectController),
+        Arc::new(crate::InlineRuntimeEffectController::default()),
         crate::ExecutionScope::turn(&child.session_id, turn_id),
     )
     .expect("child effect controller");

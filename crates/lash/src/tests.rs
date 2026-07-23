@@ -1811,7 +1811,7 @@ fn rlm_core_builder() -> crate::core::LashCoreBuilder {
 
 fn inline_scope(scope: lash_core::ExecutionScope) -> lash_core::ScopedEffectController<'static> {
     lash_core::ScopedEffectController::shared(
-        Arc::new(lash_core::InlineRuntimeEffectController),
+        Arc::new(lash_core::InlineRuntimeEffectController::default()),
         scope,
     )
     .expect("inline execution scope")
@@ -1825,9 +1825,13 @@ fn turn_scope(session_id: &str) -> lash_core::ScopedEffectController<'static> {
 }
 
 fn runtime_operation_scope(
+    core: &LashCore,
     scope_id: impl Into<String>,
 ) -> lash_core::ScopedEffectController<'static> {
-    inline_scope(lash_core::ExecutionScope::runtime_operation(scope_id))
+    core.effect_host()
+        .scoped_static(lash_core::ExecutionScope::runtime_operation(scope_id))
+        .expect("runtime operation scope")
+        .expect("effect host supplies an owned runtime operation scope")
 }
 
 fn session_delete_scope(session_id: &str) -> lash_core::ScopedEffectController<'static> {
@@ -1838,7 +1842,9 @@ fn explicit_ephemeral_facets(
     builder: crate::core::LashCoreBuilder,
 ) -> crate::core::LashCoreBuilder {
     builder
-        .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
+        .effect_host(Arc::new(
+            crate::durability::InlineEffectHost::default().allow_process_lifetime_completion_keys(),
+        ))
         .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
         .process_env_store(Arc::new(
             crate::persistence::InMemoryProcessExecutionEnvStore::new(),

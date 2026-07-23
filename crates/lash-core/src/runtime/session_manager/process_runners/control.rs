@@ -61,7 +61,7 @@ impl<'scope> ProcessCommandRunner<'scope> {
             })
             .await?
         {
-            crate::ProcessEffectOutcome::Await { output } => Ok(output),
+            crate::ProcessEffectOutcome::Await { output } => Ok(*output),
             _ => Err(wrong_process_outcome("await")),
         }
     }

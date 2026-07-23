@@ -11,8 +11,8 @@ test_output="$(mktemp "${TMPDIR:-/tmp}/lash-restate-postgres-workers-e2e.XXXXXX"
 # Binaries are built on the host (sharing the normal cargo cache) and
 # bind-mounted into the compose services; see docker-compose.yml for the
 # glibc compatibility note.
-cargo build --locked -p lash-restate-postgres-workers-e2e --bins
-export LASH_E2E_BIN_DIR="${CARGO_TARGET_DIR:-$repo/target}/debug"
+cargo build --locked --release -p lash-restate-postgres-workers-e2e --bins
+export LASH_E2E_BIN_DIR="${CARGO_TARGET_DIR:-$repo/target}/release"
 
 cleanup() {
   status=$?
@@ -85,7 +85,10 @@ if [ "${LASH_E2E_WAKE_RCA_ONLY:-0}" = "1" ]; then
   exit 0
 fi
 
-deadline=$((SECONDS + 240))
+# The cold-process await-event vectors each wait for Restate to report a
+# genuinely suspended invocation before killing their helper. Leave enough
+# budget for those gates plus the existing engine-restart setup.
+deadline=$((SECONDS + 480))
 until signal_ready="$(
   "${compose[@]}" exec -T postgres \
     psql -U lash -d lash -Atqc \

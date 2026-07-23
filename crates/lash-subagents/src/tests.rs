@@ -894,7 +894,7 @@ async fn run_seed_probe_inner(
     .expect("runtime");
 
     let scoped_effect_controller = lash_core::ScopedEffectController::shared(
-        Arc::new(lash_core::InlineRuntimeEffectController),
+        Arc::new(lash_core::InlineRuntimeEffectController::default()),
         lash_core::ExecutionScope::turn("root", "subagent-test-turn"),
     )
     .expect("test execution scope");

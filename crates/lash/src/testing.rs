@@ -408,7 +408,7 @@ finish "registered"
         scope_id: impl Into<String>,
     ) -> lash_core::ScopedEffectController<'static> {
         lash_core::ScopedEffectController::shared(
-            Arc::new(lash_core::InlineRuntimeEffectController),
+            Arc::new(lash_core::InlineRuntimeEffectController::default()),
             lash_core::ExecutionScope::runtime_operation(scope_id.into()),
         )
         .expect("inline trigger occurrence execution scope")
