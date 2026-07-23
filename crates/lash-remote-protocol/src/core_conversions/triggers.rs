@@ -256,6 +256,8 @@ impl From<lash_core::TriggerRegistration> for RemoteTriggerRegistration {
             subscription_key,
             incarnation,
             revision,
+            registrant,
+            manifest_membership,
             source_key,
             name,
             source_type,
@@ -273,6 +275,18 @@ impl From<lash_core::TriggerRegistration> for RemoteTriggerRegistration {
             subscription_key,
             incarnation,
             revision,
+            registrant: registrant.into(),
+            manifest_membership: match manifest_membership {
+                lash_core::TriggerManifestMembership::PresentInCurrentArtifact => {
+                    RemoteTriggerManifestMembership::PresentInCurrentArtifact
+                }
+                lash_core::TriggerManifestMembership::Orphaned => {
+                    RemoteTriggerManifestMembership::Orphaned
+                }
+                lash_core::TriggerManifestMembership::Unknown => {
+                    RemoteTriggerManifestMembership::Unknown
+                }
+            },
             source_key,
             name,
             source_type: source_type.to_string(),
@@ -296,6 +310,8 @@ impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
             subscription_key,
             incarnation,
             revision,
+            registrant,
+            manifest_membership,
             source_key,
             name,
             source_type,
@@ -313,6 +329,18 @@ impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
             subscription_key,
             incarnation,
             revision,
+            registrant: registrant.into(),
+            manifest_membership: match manifest_membership {
+                RemoteTriggerManifestMembership::PresentInCurrentArtifact => {
+                    lash_core::TriggerManifestMembership::PresentInCurrentArtifact
+                }
+                RemoteTriggerManifestMembership::Orphaned => {
+                    lash_core::TriggerManifestMembership::Orphaned
+                }
+                RemoteTriggerManifestMembership::Unknown => {
+                    lash_core::TriggerManifestMembership::Unknown
+                }
+            },
             source_key,
             name,
             source_type: lash_core::TriggerEventType::new(source_type),

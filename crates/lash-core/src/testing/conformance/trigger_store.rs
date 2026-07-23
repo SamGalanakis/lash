@@ -19,6 +19,7 @@ where
     disable_preserves_reserved_work_and_requires_explicit_enable(make()).await;
     delete_tombstones_preserves_history_and_revive_changes_incarnation(make()).await;
     owner_namespaces_are_exact_and_session_cleanup_is_scoped(make()).await;
+    explicit_prune_is_journaled_and_owner_scoped(make()).await;
     occurrence_and_reservations_are_atomic_and_idempotent(make()).await;
 }
 
@@ -152,7 +153,9 @@ async fn mutate(
         .expect("trigger mutation outcome")
     {
         crate::TriggerCommandOutcome::Mutation { receipt } => *receipt,
-        crate::TriggerCommandOutcome::List { .. } => panic!("expected mutation receipt"),
+        crate::TriggerCommandOutcome::List { .. } | crate::TriggerCommandOutcome::Prune { .. } => {
+            panic!("expected mutation receipt")
+        }
     }
 }
 
@@ -395,6 +398,62 @@ async fn mutation_receipts_follow_retention_cutoff(store: Arc<dyn crate::Trigger
         crate::TriggerMutationDisposition::Unchanged,
         "after retention, the operation is evaluated against current state"
     );
+}
+
+async fn explicit_prune_is_journaled_and_owner_scoped(store: Arc<dyn crate::TriggerStore>) {
+    for session_id in ["prune-owner", "prune-neighbor"] {
+        mutate(
+            &store,
+            &format!("prune-register-{session_id}"),
+            register_command(
+                session_id,
+                sample_draft(session_id, "shared-key", "blue", "worker"),
+            ),
+        )
+        .await;
+    }
+    let command = crate::TriggerCommand::Prune {
+        owner_scope: owner("prune-owner"),
+        actor: actor("prune-owner"),
+        subscription_keys: vec!["shared-key".to_string()],
+    };
+    let first = execute(&store, "explicit-prune", command.clone())
+        .await
+        .expect("explicit prune succeeds");
+    let crate::TriggerCommandOutcome::Prune { receipts } = first else {
+        panic!("prune must return typed receipts");
+    };
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].owner_scope, owner("prune-owner"));
+    assert_eq!(
+        receipts[0].disposition,
+        crate::TriggerMutationDisposition::Deleted
+    );
+
+    let replay = execute(&store, "explicit-prune", command)
+        .await
+        .expect("prune replay returns its journaled result");
+    assert_eq!(
+        replay,
+        crate::TriggerCommandOutcome::Prune {
+            receipts: receipts.clone(),
+        }
+    );
+    assert!(
+        store
+            .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("prune-owner",))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let neighbor = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session(
+            "prune-neighbor",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(neighbor.len(), 1);
+    assert_eq!(neighbor[0].subscription_key, "shared-key");
 }
 
 async fn reservations_execute_the_reserved_revision(store: Arc<dyn crate::TriggerStore>) {

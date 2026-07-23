@@ -196,6 +196,8 @@ pub struct RemoteTriggerRegistration {
     pub subscription_key: String,
     pub incarnation: String,
     pub revision: u64,
+    pub registrant: RemoteProcessOriginator,
+    pub manifest_membership: RemoteTriggerManifestMembership,
     pub source_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -205,6 +207,15 @@ pub struct RemoteTriggerRegistration {
     pub target: RemoteTriggerTargetSummary,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteTriggerManifestMembership {
+    PresentInCurrentArtifact,
+    Orphaned,
+    #[default]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

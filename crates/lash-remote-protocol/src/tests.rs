@@ -385,6 +385,8 @@ fn remote_trigger_dtos_json_round_trip() {
         subscription_key: "button-watcher".to_string(),
         incarnation: "incarnation-1".to_string(),
         revision: 7,
+        registrant: RemoteProcessOriginator::Host { scope: None },
+        manifest_membership: RemoteTriggerManifestMembership::PresentInCurrentArtifact,
         source_key: "source-key".to_string(),
         name: Some("button watcher".to_string()),
         source_type: "ui.button.pressed".to_string(),
@@ -841,8 +843,8 @@ fn wrong_protocol_versions_are_rejected() {
     assert!(matches!(
         request.validate(),
         Err(RemoteProtocolError::UnsupportedProtocolVersion {
-            actual: 13,
-            expected: 14,
+            actual: 14,
+            expected: 15,
         })
     ));
 
@@ -924,7 +926,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 14);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 15);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());

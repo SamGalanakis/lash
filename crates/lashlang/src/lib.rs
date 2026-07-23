@@ -12,6 +12,7 @@ mod runtime;
 mod source;
 mod tracking;
 mod trigger;
+mod trigger_manifest;
 mod typed_output;
 mod workflow_graph;
 
@@ -88,9 +89,14 @@ pub use tracking::{
 pub use trigger::{
     HostDescriptor, HostDescriptorError, LASH_TRIGGER_EVENT_KEY, TriggerCompatibility,
     TriggerCompatibilityError, TriggerCompatibilityRequest, TriggerHostOperation,
-    TriggerInputBinding, TriggerInputTemplate, TriggerListRequest, TriggerRegistrationRequest,
-    add_trigger_resource_operations, check_trigger_compatibility, event_type_for_source,
-    is_trigger_resource_type, list_call_args, register_call_args, trigger_event_placeholder_expr,
+    TriggerInputBinding, TriggerInputTemplate, TriggerListRequest, TriggerPruneRequest,
+    TriggerRegistrationRequest, add_trigger_resource_operations, check_trigger_compatibility,
+    event_type_for_source, is_trigger_resource_type, list_call_args, register_call_args,
+    trigger_event_placeholder_expr,
+};
+pub use trigger_manifest::{
+    CurrentTriggerKeyManifest, TriggerKeyManifest, TriggerKeyManifestDiff,
+    TriggerManifestReplacement,
 };
 pub use typed_output::parse_output_schema;
 pub use workflow_graph::{
