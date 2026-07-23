@@ -13,6 +13,9 @@ description = "PostgreSQL-backed durable storage for the lash agent runtime."
 keywords = ["lash", "agent", "postgres", "persistence", "store"]
 categories = ["database", "asynchronous"]
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait = { workspace = true }
 lash-core = { workspace = true }

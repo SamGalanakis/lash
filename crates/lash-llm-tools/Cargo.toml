@@ -17,6 +17,9 @@ categories = ["asynchronous", "api-bindings"]
 default = []
 lashlang = ["lash-tool-support/lashlang"]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-core = { workspace = true }
 lash-lashlang-runtime = { workspace = true }

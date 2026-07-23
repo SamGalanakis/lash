@@ -13,6 +13,9 @@ description = "Observational-memory plugin for the lash agent runtime."
 keywords = ["lash", "agent", "memory", "plugin", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-core = { workspace = true }
 async-trait = { workspace = true }

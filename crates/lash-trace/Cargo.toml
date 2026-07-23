@@ -17,6 +17,9 @@ categories = ["asynchronous", "development-tools::debugging"]
 default = []
 otel = ["dep:opentelemetry"]
 
+[lints]
+workspace = true
+
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
 opentelemetry = { version = "0.31", optional = true }

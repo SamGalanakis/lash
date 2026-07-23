@@ -1479,7 +1479,10 @@ mod tests {
             .expect_err("rate limit error");
 
         assert_eq!(err.status, Some(429));
-        assert_eq!(err.raw.as_deref(), Some(RATE_LIMIT_BODY));
+        assert_eq!(
+            err.raw.as_deref().map(String::as_str),
+            Some(RATE_LIMIT_BODY)
+        );
         assert_eq!(
             err.headers
                 .iter()
@@ -1508,7 +1511,10 @@ mod tests {
             .expect_err("validation error");
 
         assert_eq!(err.status, Some(400));
-        assert_eq!(err.raw.as_deref(), Some(VALIDATION_BODY));
+        assert_eq!(
+            err.raw.as_deref().map(String::as_str),
+            Some(VALIDATION_BODY)
+        );
         assert_eq!(
             err.headers
                 .iter()

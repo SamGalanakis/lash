@@ -2495,14 +2495,14 @@ async fn replay_test_runtime(
     host: lash_core::RuntimeHostConfig,
     store: Arc<dyn lash_core::RuntimePersistence>,
 ) -> lash_core::LashRuntime {
-    replay_test_runtime_with_plugins(
+    Box::pin(replay_test_runtime_with_plugins(
         session_id,
         policy,
         initial_state,
         host,
         store,
         lash_core::testing::test_standard_protocol_factories(),
-    )
+    ))
     .await
 }
 
@@ -2514,7 +2514,7 @@ async fn replay_test_runtime_with_plugins(
     store: Arc<dyn lash_core::RuntimePersistence>,
     plugin_factories: Vec<Arc<dyn lash_core::PluginFactory>>,
 ) -> lash_core::LashRuntime {
-    replay_test_runtime_with_plugins_and_registry(
+    Box::pin(replay_test_runtime_with_plugins_and_registry(
         session_id,
         policy,
         initial_state,
@@ -2522,7 +2522,7 @@ async fn replay_test_runtime_with_plugins(
         store,
         plugin_factories,
         None,
-    )
+    ))
     .await
 }
 
@@ -2843,7 +2843,7 @@ finish (await handle)?
     ));
     context.install_process_worker(process_worker);
 
-    let mut first = replay_test_runtime_with_plugins_and_registry(
+    let mut first = Box::pin(replay_test_runtime_with_plugins_and_registry(
         session_id,
         policy.clone(),
         initial_state.clone(),
@@ -2851,7 +2851,7 @@ finish (await handle)?
         Arc::clone(&runtime_store),
         plugin_factories.clone(),
         Some(Arc::clone(&process_registry)),
-    )
+    ))
     .await;
     let first_context = Arc::clone(&context);
     let first_turn = tokio::spawn(async move {
@@ -2888,7 +2888,7 @@ finish (await handle)?
     let retry_store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(CommitRetryStore {
         inner: Arc::clone(&runtime_store),
     });
-    let mut replay = replay_test_runtime_with_plugins_and_registry(
+    let mut replay = Box::pin(replay_test_runtime_with_plugins_and_registry(
         session_id,
         policy,
         initial_state,
@@ -2896,7 +2896,7 @@ finish (await handle)?
         retry_store,
         plugin_factories,
         Some(process_registry),
-    )
+    ))
     .await;
     let replay_turn =
         run_restate_replay_turn(&mut replay, Arc::clone(&context), session_id, turn_id).await;

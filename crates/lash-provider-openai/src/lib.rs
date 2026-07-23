@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 mod chat;
 pub mod codex;
 mod common;

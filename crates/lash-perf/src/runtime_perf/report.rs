@@ -84,7 +84,7 @@ pub async fn run_cli(
 
     for _ in 0..warmups {
         for scenario in &scenarios {
-            let _ = run_once(*scenario, chat_turns).await?;
+            let _ = Box::pin(run_once(*scenario, chat_turns)).await?;
         }
     }
 
@@ -101,7 +101,7 @@ pub async fn run_cli(
     let mut results = Vec::with_capacity(runs * scenarios.len());
     for _ in 0..runs {
         for scenario in &scenarios {
-            let mut result = run_once(*scenario, chat_turns).await?;
+            let mut result = Box::pin(run_once(*scenario, chat_turns)).await?;
             result.stack_profile = Some(stack_profile.clone());
             results.push(result);
         }

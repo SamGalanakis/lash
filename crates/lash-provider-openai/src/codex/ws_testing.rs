@@ -189,6 +189,10 @@ pub async fn spawn_scripted_websocket(actions: Vec<ScriptedWsAction>) -> Scripte
             let handshakes = Arc::clone(&task_handshakes);
             let close_frames = Arc::clone(&task_close_frames);
             tokio::spawn(async move {
+                #[expect(
+                    clippy::result_large_err,
+                    reason = "tungstenite fixes the handshake callback error to an HTTP response"
+                )]
                 let callback = move |request: &WsHandshakeRequest,
                                      response: WsHandshakeResponse| {
                     let headers = request

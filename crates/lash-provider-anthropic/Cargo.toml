@@ -20,6 +20,9 @@ categories = ["api-bindings", "asynchronous"]
 default = ["testing"]
 testing = ["lash-llm-transport/testing"]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-core = { workspace = true }
 lash-llm-transport = { workspace = true }

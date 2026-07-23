@@ -779,6 +779,7 @@ impl TurnActivity {
 /// inside [`TurnActivity`] so every emitted item has identity.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// justification: public turn events are transient stream DTOs kept inline for allocation-free emission and stable pattern matching.
 #[allow(clippy::large_enum_variant)]
 pub enum TurnEvent {
     QueuedWorkStarted {

@@ -13,6 +13,9 @@ description = "Host-configurable HTTP transport seam for Lash integrations."
 keywords = ["lash", "transport", "http", "async"]
 categories = ["asynchronous", "network-programming"]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-sansio = { workspace = true }
 async-trait = { workspace = true }

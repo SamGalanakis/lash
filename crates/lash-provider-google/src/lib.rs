@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 mod config;
 pub mod oauth;
 mod provider;

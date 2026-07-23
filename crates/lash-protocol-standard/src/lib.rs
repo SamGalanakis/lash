@@ -298,7 +298,6 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
     }))
 }
 
-#[allow(clippy::result_large_err)]
 fn parse_batch_specs(args: &Value) -> Result<Vec<BatchCallSpec>, ToolResult> {
     let Some(raw_calls) = args.get("tool_calls").and_then(|value| value.as_array()) else {
         return Err(ToolResult::err_fmt(

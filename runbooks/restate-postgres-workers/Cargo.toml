@@ -25,6 +25,9 @@ path = "src/bin/frame_crash.rs"
 name = "lash-e2e-await-event-helper"
 path = "src/bin/await_event_helper.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }

@@ -847,6 +847,9 @@ impl From<PluginError> for TriggerOperationError {
 
 pub type TriggerEffectResult = Result<TriggerCommandOutcome, TriggerOperationError>;
 
+// Measured 112 B on rustc 1.97.0, x86_64-unknown-linux-gnu (FIG-595).
+const _: () = assert!(std::mem::size_of::<TriggerEffectResult>() <= 144);
+
 pub fn trigger_command_hash(command: &TriggerCommand) -> Result<String, PluginError> {
     crate::stable_hash::stable_json_sha256_hex(command)
         .map_err(|err| PluginError::Session(format!("failed to hash trigger command: {err}")))

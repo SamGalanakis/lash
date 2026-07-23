@@ -405,7 +405,7 @@ impl RuntimeTurnDriver<'_> {
                                 message: e.message,
                                 retryable: e.retryable,
                                 kind: e.kind,
-                                raw: e.raw,
+                                raw: e.raw.map(|raw| *raw),
                                 code: e.code,
                                 terminal_reason: e.terminal_reason,
                                 request_body: e.request_body,

@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;

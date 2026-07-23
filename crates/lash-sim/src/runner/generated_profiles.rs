@@ -127,23 +127,23 @@ pub async fn run_generated_sim_profile(
     };
     match mode {
         SimRunMode::Evidence => {
-            run_generated_evidence_profile(
+            Box::pin(run_generated_evidence_profile(
                 artifact_root.as_ref(),
                 profile,
                 &seed_values,
                 max_boundaries,
                 labels,
-            )
+            ))
             .await
         }
         SimRunMode::Search => {
-            run_generated_search_profile(
+            Box::pin(run_generated_search_profile(
                 artifact_root.as_ref(),
                 profile,
                 &seed_values,
                 max_boundaries,
                 labels,
-            )
+            ))
             .await
         }
     }
@@ -160,13 +160,13 @@ pub async fn run_generated_sim_profile_for_seeds(
         configured_seeds: seed_values.len(),
         mode: SimRunMode::Evidence,
     };
-    run_generated_evidence_profile(
+    Box::pin(run_generated_evidence_profile(
         artifact_root.as_ref(),
         profile,
         seed_values,
         max_boundaries,
         labels,
-    )
+    ))
     .await
 }
 
@@ -186,7 +186,7 @@ async fn run_generated_evidence_profile(
     std::fs::create_dir_all(artifact_root)?;
 
     let provider_dir = artifact_root.join("provider-corpus");
-    let fixed_manifest = run_fixed_script_profile(&provider_dir).await?;
+    let fixed_manifest = Box::pin(run_fixed_script_profile(&provider_dir)).await?;
     write_provider_script_manifest(artifact_root, &fixed_manifest)?;
 
     let runtime_proof = prove_runtime_facade_turn().await?;
@@ -480,7 +480,7 @@ async fn run_generated_search_profile(
     std::fs::create_dir_all(artifact_root)?;
 
     let provider_dir = artifact_root.join("provider-corpus");
-    let fixed_manifest = run_fixed_script_profile(&provider_dir).await?;
+    let fixed_manifest = Box::pin(run_fixed_script_profile(&provider_dir)).await?;
     write_provider_script_manifest(artifact_root, &fixed_manifest)?;
 
     let runtime_proof = prove_runtime_facade_turn().await?;

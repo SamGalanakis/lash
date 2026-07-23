@@ -21,6 +21,9 @@ testing = []
 # (`proptest_support`). Provider crates enable it as a dev-dependency feature.
 proptest-support = ["dep:proptest"]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-core = { workspace = true }
 lash-http-transport = { workspace = true }

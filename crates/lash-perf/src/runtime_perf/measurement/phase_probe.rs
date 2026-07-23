@@ -137,7 +137,7 @@ pub(crate) async fn run_once(
             return run_once_process_list_stress(chat_turns).await;
         }
         RuntimePerfScenario::QueuedWorkClaimStress => {
-            return run_once_queued_work_claim_stress(chat_turns).await;
+            return Box::pin(run_once_queued_work_claim_stress(chat_turns)).await;
         }
         RuntimePerfScenario::TurnInputIngressInterrupt => {
             return run_once_turn_input_ingress_interrupt(chat_turns).await;

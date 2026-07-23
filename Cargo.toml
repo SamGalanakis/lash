@@ -86,6 +86,12 @@ documentation = "https://samgalanakis.github.io/lash/"
 readme = "README.md"
 rust-version = "1.90"
 
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+large_enum_variant = "warn"
+large_futures = "warn"
+result_large_err = "warn"
+
 # The release series CI advances. `scripts/release_version.py print-next` reads
 # this channel and returns the next `<channel>.N` (or, for a clean X.Y.Z
 # channel, the next patch) from the existing tags — the manifest version above

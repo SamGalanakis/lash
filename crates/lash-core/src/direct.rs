@@ -287,7 +287,7 @@ impl DirectLlmClient {
                                 retryable: error.retryable,
                                 terminal_reason: Some(error.terminal_reason.code().to_string()),
                                 code: error.code.clone(),
-                                raw: error.raw.clone(),
+                                raw: error.raw.as_deref().cloned(),
                             },
                             stream_summary: None,
                         },

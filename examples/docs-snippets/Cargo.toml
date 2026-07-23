@@ -9,6 +9,9 @@ description = "Compiled sources for the Rust code blocks in docs/*.html. cargo c
 [features]
 default = []
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }

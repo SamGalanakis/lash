@@ -51,6 +51,7 @@ impl ProtocolEvent {
 /// Typed node accepted at session-graph append boundaries.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// justification: append nodes are public durable DTOs kept inline to preserve their established Rust construction API.
 #[allow(clippy::large_enum_variant)]
 pub enum SessionAppendNode {
     Message {
@@ -115,6 +116,7 @@ impl SessionAppendNode {
 /// future prompts. Unlike [`SessionStreamEvent`], these records are committed
 /// state rather than transient UI/progress signals.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+// justification: the generic protocol event is caller-defined durable state and must retain the public inline history shape.
 #[allow(clippy::large_enum_variant)]
 pub enum SessionHistoryRecord<PE = ()> {
     Conversation(ConversationRecord),
@@ -225,6 +227,7 @@ pub struct ErrorEnvelope {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
+// justification: this public streaming DTO stays inline to avoid per-event allocation and preserve consumer pattern matching.
 #[allow(clippy::large_enum_variant)]
 pub enum SessionStreamEvent {
     #[serde(rename = "text_delta")]

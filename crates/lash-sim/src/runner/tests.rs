@@ -500,7 +500,9 @@ async fn pending_tool_roundtrip_provider_response_shape_mutation_guard() {
 async fn fixed_script_profile_writes_deterministic_manifest() {
     let tmp = tempfile::tempdir().expect("tempdir");
 
-    let manifest = run_fixed_script_profile(tmp.path()).await.expect("profile");
+    let manifest = Box::pin(run_fixed_script_profile(tmp.path()))
+        .await
+        .expect("profile");
 
     assert_eq!(manifest.profile, FIXED_SCRIPT_PROFILE);
     assert_eq!(
@@ -573,7 +575,9 @@ async fn fixed_script_profile_writes_deterministic_manifest() {
 async fn fixed_script_manifest_schema_contains_required_proofs_and_artifact_fields() {
     let tmp = tempfile::tempdir().expect("tempdir");
 
-    run_fixed_script_profile(tmp.path()).await.expect("profile");
+    Box::pin(run_fixed_script_profile(tmp.path()))
+        .await
+        .expect("profile");
 
     let body = std::fs::read_to_string(tmp.path().join(FIXED_SCRIPT_MANIFEST)).expect("manifest");
     let manifest: serde_json::Value = serde_json::from_str(&body).expect("manifest JSON");
@@ -776,7 +780,9 @@ async fn fixed_script_manifest_schema_contains_required_proofs_and_artifact_fiel
 async fn fixed_script_timeout_proofs_preserve_timeout_envelopes() {
     let tmp = tempfile::tempdir().expect("tempdir");
 
-    run_fixed_script_profile(tmp.path()).await.expect("profile");
+    Box::pin(run_fixed_script_profile(tmp.path()))
+        .await
+        .expect("profile");
 
     for name in [
         "openai-compatible.chat-response-start-timeout",

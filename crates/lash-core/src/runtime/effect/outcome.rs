@@ -83,7 +83,7 @@ impl From<&LlmTransportError> for LlmTraceFailure {
             retryable: err.retryable,
             terminal_reason: err.terminal_reason,
             code: err.code.clone(),
-            raw: err.raw.clone(),
+            raw: err.raw.as_deref().cloned(),
         }
     }
 }
@@ -131,7 +131,7 @@ pub(crate) fn llm_call_error_from_transport(err: LlmTransportError) -> LlmCallEr
         message: err.message,
         retryable: err.retryable,
         kind: err.kind,
-        raw: err.raw,
+        raw: err.raw.map(|raw| *raw),
         code: err.code,
         terminal_reason: err.terminal_reason,
         request_body: err.request_body,

@@ -13,6 +13,9 @@ description = "RLM protocol (persistent Lashlang execution) for the lash agent r
 keywords = ["lash", "agent", "rlm", "lashlang", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-core = { workspace = true }
 lash-lashlang-runtime = { workspace = true }

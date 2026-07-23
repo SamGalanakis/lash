@@ -13,6 +13,9 @@ description = "Versioned remote embedding protocol DTOs for Lash sessions, turns
 keywords = ["lash", "agent", "runtime", "protocol"]
 categories = ["api-bindings", "data-structures"]
 
+[lints]
+workspace = true
+
 [dependencies]
 base64 = { workspace = true }
 lash-core = { workspace = true, optional = true }

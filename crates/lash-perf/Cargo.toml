@@ -21,6 +21,9 @@ path = "src/lib.rs"
 name = "lash-perf"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-core = { workspace = true, features = ["testing"] }
 lash-lashlang-runtime = { workspace = true }

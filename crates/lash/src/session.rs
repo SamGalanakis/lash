@@ -103,7 +103,7 @@ impl SessionBuilder {
         let state = self
             .load_or_default_state(&policy, store.as_deref())
             .await?;
-        self.open_resolved(policy, state, store).await
+        Box::pin(self.open_resolved(policy, state, store)).await
     }
 
     /// Open this session with a fresh resident graph, ignoring any persisted
@@ -124,7 +124,7 @@ impl SessionBuilder {
             graph_replace_required: true,
             ..RuntimeSessionState::default()
         };
-        self.open_resolved(policy, state, store).await
+        Box::pin(self.open_resolved(policy, state, store)).await
     }
 
     /// Open with an explicitly supplied runtime state.
@@ -143,7 +143,7 @@ impl SessionBuilder {
             });
         }
         reconcile_loaded_state_policy(&mut state, &policy);
-        self.open_resolved(policy, state, store).await
+        Box::pin(self.open_resolved(policy, state, store)).await
     }
 
     fn session_policy(&self) -> SessionPolicy {
@@ -981,6 +981,7 @@ impl ObservableSession {
 // boxing would only add a per-event heap allocation on the observation hot path
 // and force `*`-deref churn on every SDK consumer. The sibling
 // `RemoteSessionObservationStreamItem` keeps the same inline shape.
+// justification: the gap is transient and inline to avoid allocation and preserve the public stream-item API.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum SessionObservationStreamItem {

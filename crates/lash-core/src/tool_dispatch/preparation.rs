@@ -25,8 +25,14 @@ pub(crate) async fn dispatch_tool_call(
     progress: Option<&ProgressSender>,
 ) -> ToolDispatchOutcome {
     let tool_context = ToolContext::from_dispatch(Arc::new(context.clone())).build();
-    dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
-        .await
+    Box::pin(dispatch_tool_call_with_execution_context(
+        context,
+        tool_name,
+        args,
+        progress,
+        tool_context,
+    ))
+    .await
 }
 
 #[cfg(test)]
@@ -54,12 +60,12 @@ pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
     .await
     {
         ToolPreparationOutcome::Prepared(prepared) => {
-            dispatch_prepared_tool_call_with_execution_context(
+            Box::pin(dispatch_prepared_tool_call_with_execution_context(
                 context,
                 prepared,
                 progress,
                 tool_context,
-            )
+            ))
             .await
         }
         ToolPreparationOutcome::Completed(outcome) => *outcome,

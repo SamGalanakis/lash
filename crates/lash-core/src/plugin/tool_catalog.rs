@@ -76,6 +76,7 @@ pub(crate) fn plugin_runtime_session_events(
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// justification: directives are transient public plugin values and the common short-circuit output avoids another allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum PluginDirective {
     AbortTurn {

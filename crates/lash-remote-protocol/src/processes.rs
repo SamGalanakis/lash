@@ -213,6 +213,7 @@ impl RemoteProcessStartGrant {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// justification: this public remote DTO preserves its source-compatible inline SessionTurn construction and matching API.
 #[allow(clippy::large_enum_variant)]
 pub enum RemoteProcessInput {
     ToolCall {

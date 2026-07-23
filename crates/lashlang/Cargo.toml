@@ -19,6 +19,9 @@ categories = ["asynchronous", "api-bindings"]
 # same executable contract as the in-memory double.
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait = { workspace = true }
 compact_str = { version = "0.9.0", features = ["serde"] }

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Clippy size lints and named type-size assertions are the primary regression
+# gate (FIG-595, after the FIG-594 structural fix); this 2 MiB run is the
+# defense-in-depth backstop for dynamic poll-stack behavior.
 stack_kb="${LASH_STACK_BUDGET_KB:-2048}"
 rust_min_stack="${LASH_RUST_MIN_STACK_BUDGET:-2097152}"
 

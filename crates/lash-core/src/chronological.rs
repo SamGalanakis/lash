@@ -16,6 +16,7 @@ pub struct ChronologicalEntry {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// justification: this public owned projection preserves the inline session-history API and wire shape.
 #[allow(clippy::large_enum_variant)]
 pub enum ChronologicalPayload {
     Message(Message),

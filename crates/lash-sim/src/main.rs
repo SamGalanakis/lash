@@ -28,7 +28,7 @@ async fn run() -> Result<(), String> {
             let Some(out) = out else {
                 return Err(format!("missing --out\n\n{}", usage()));
             };
-            let manifest = lash_sim::run_fixed_script_profile(out.as_path())
+            let manifest = Box::pin(lash_sim::run_fixed_script_profile(out.as_path()))
                 .await
                 .map_err(|err| err.to_string())?;
             println!("{}", manifest.manifest_path.display());
