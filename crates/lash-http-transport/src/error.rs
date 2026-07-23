@@ -11,10 +11,12 @@ pub struct HttpTransportError {
     pub message: String,
     pub retryable: bool,
     pub status: Option<u16>,
-    pub raw: Option<String>,
+    /// Cold raw provider evidence stays off the inline `Result` error path.
+    pub raw: Option<Box<String>>,
     pub code: Option<String>,
     pub terminal_reason: LlmTerminalReason,
-    pub headers: Vec<(String, String)>,
+    /// Cold diagnostic metadata stays off the inline `Result` error path.
+    pub headers: Box<Vec<(String, String)>>,
     pub retry_after: Option<std::time::Duration>,
     pub request_body: Option<String>,
     /// Provider output observed before this failure. It is diagnostic and
@@ -32,7 +34,7 @@ impl HttpTransportError {
             raw: None,
             code: None,
             terminal_reason: LlmTerminalReason::ProviderError,
-            headers: Vec::new(),
+            headers: Box::default(),
             retry_after: None,
             request_body: None,
             partial_response: None,
@@ -58,7 +60,7 @@ impl HttpTransportError {
     }
 
     pub fn with_raw(mut self, raw: impl Into<String>) -> Self {
-        self.raw = Some(raw.into());
+        self.raw = Some(Box::new(raw.into()));
         self
     }
 
@@ -78,10 +80,12 @@ impl HttpTransportError {
         K: Into<String>,
         V: Into<String>,
     {
-        self.headers = headers
-            .into_iter()
-            .map(|(name, value)| (name.into(), value.into()))
-            .collect();
+        self.headers = Box::new(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into()))
+                .collect(),
+        );
         self.retry_after = retry_after_from_headers(&self.headers);
         self
     }

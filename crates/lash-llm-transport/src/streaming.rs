@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 use lash_core::{LlmTransportError, ProviderFailureKind};
 use lash_sansio::llm::types::{LlmEventSender, LlmStreamEvent, LlmUsage};
 

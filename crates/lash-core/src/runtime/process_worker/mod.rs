@@ -466,12 +466,12 @@ impl DurableProcessWorker {
                     "process worker effect host must provide a static process scope".to_string(),
                 )
             })?;
-        self.run_process_with_scoped_effect_controller(
+        Box::pin(self.run_process_with_scoped_effect_controller(
             registration,
             execution_context,
             scoped_effect_controller,
             cancellation,
-        )
+        ))
         .await
     }
 
@@ -484,15 +484,14 @@ impl DurableProcessWorker {
     ) -> Result<ProcessAwaitOutput, PluginError> {
         let mut handover = None;
         loop {
-            match self
-                .run_process_segment_with_scoped_effect_controller(
-                    registration.clone(),
-                    execution_context.clone(),
-                    scoped_effect_controller.clone(),
-                    cancellation.clone(),
-                    handover,
-                )
-                .await?
+            match Box::pin(self.run_process_segment_with_scoped_effect_controller(
+                registration.clone(),
+                execution_context.clone(),
+                scoped_effect_controller.clone(),
+                cancellation.clone(),
+                handover,
+            ))
+            .await?
             {
                 crate::ProcessRunOutcome::Terminal(output) => return Ok(*output),
                 crate::ProcessRunOutcome::SegmentBoundary(next) => handover = Some(next),
@@ -537,7 +536,7 @@ impl DurableProcessWorker {
                 },
             )
             .await?;
-        let mut runtime = self.runtime_for_registration(&registration).await?;
+        let mut runtime = Box::pin(self.runtime_for_registration(&registration)).await?;
         let _attachment_owner_binding = matches!(
             registration.input.as_ref(),
             ProcessInput::ToolCall { .. } | ProcessInput::Engine { .. }
@@ -658,9 +657,11 @@ impl DurableProcessWorker {
                     let _completion = completion;
                     // Install the execution budget only at the inline worker
                     // boundary, never in the shared process-segment path.
-                    PROCESS_EXECUTION_PERMIT
-                        .scope(execution_permit, worker.recover_process(record))
-                        .await;
+                    Box::pin(
+                        PROCESS_EXECUTION_PERMIT
+                            .scope(execution_permit, worker.recover_process(record)),
+                    )
+                    .await;
                 });
             }
 
@@ -943,7 +944,7 @@ impl DurableProcessWorker {
 
         match record.disposition {
             // Rerunnable: claim, (re-)run, complete — exactly today's behavior.
-            RecoveryDisposition::Rerunnable => self.run_and_complete(record, lease).await,
+            RecoveryDisposition::Rerunnable => Box::pin(self.run_and_complete(record, lease)).await,
             RecoveryDisposition::OwnerBound if record.first_started.is_some() => {
                 // Started OwnerBound work is NEVER re-run — abandonment is the
                 // only recovery. `first_started`'s owner is the lapsed owner the
@@ -990,7 +991,7 @@ impl DurableProcessWorker {
             }
             // OwnerBound, never started: first execution is not re-execution, so
             // any worker may run it; the runner records first_started first.
-            RecoveryDisposition::OwnerBound => self.run_and_complete(record, lease).await,
+            RecoveryDisposition::OwnerBound => Box::pin(self.run_and_complete(record, lease)).await,
             // Filtered above; releasing keeps the lease honest if reached.
             RecoveryDisposition::ExternallyOwned => self.release_or_log(&lease).await,
         }
@@ -1089,14 +1090,13 @@ impl DurableProcessWorker {
         let execution_context = ProcessExecutionContext::default();
         let mut handover = None;
         loop {
-            match self
-                .run_process_with_lease_renewal(
-                    registration.clone(),
-                    execution_context.clone(),
-                    lease.clone(),
-                    handover,
-                )
-                .await
+            match Box::pin(self.run_process_with_lease_renewal(
+                registration.clone(),
+                execution_context.clone(),
+                lease.clone(),
+                handover,
+            ))
+            .await
             {
                 // Ran to a terminal outcome (success or a process-level failure) while
                 // holding the lease: this owner is the single writer of the terminal.
@@ -1311,11 +1311,10 @@ impl DurableProcessWorker {
     ) -> Result<LashRuntime, PluginError> {
         match registration.input.as_ref() {
             ProcessInput::SessionTurn { create_request, .. } => {
-                self.runtime_for_session_turn(registration, create_request.as_ref())
-                    .await
+                Box::pin(self.runtime_for_session_turn(registration, create_request.as_ref())).await
             }
             ProcessInput::ToolCall { .. } | ProcessInput::Engine { .. } => {
-                self.runtime_for_process_env(registration).await
+                Box::pin(self.runtime_for_process_env(registration)).await
             }
             // Externally-owned rows are rejected before dispatch (ADR 0019), so an
             // External input has no execution runtime; fail loudly rather than

@@ -357,6 +357,10 @@ pub enum AttachmentSource {
     },
 }
 
+// Current attachment content carrier; measured 96 B on rustc 1.97.0,
+// x86_64-unknown-linux-gnu (FIG-595).
+const _: () = assert!(std::mem::size_of::<AttachmentSource>() <= 128);
+
 impl AttachmentSource {
     pub fn inline(media_type: MediaType, bytes: Vec<u8>) -> Self {
         Self::Inline { media_type, bytes }

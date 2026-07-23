@@ -1102,17 +1102,15 @@ impl RuntimeEffectLocalRunner for LocalToolBatchEffectRunner<'_> {
                 max_attempts,
             } => {
                 let child_execution_trace_hook = self.child_trace_hooks.get(&call.call_id).cloned();
-                let outcome = self
-                    .context
-                    .execute_prepared_tool_attempt_effect(
-                        call,
-                        execution_grant,
-                        attempt,
-                        max_attempts,
-                        envelope.invocation,
-                        child_execution_trace_hook,
-                    )
-                    .await?;
+                let outcome = Box::pin(self.context.execute_prepared_tool_attempt_effect(
+                    call,
+                    execution_grant,
+                    attempt,
+                    max_attempts,
+                    envelope.invocation,
+                    child_execution_trace_hook,
+                ))
+                .await?;
                 Ok(RuntimeEffectOutcome::ToolAttempt {
                     launch: Box::new(outcome.launch),
                     triggers: outcome.triggers,
@@ -1154,14 +1152,14 @@ impl RuntimeEffectLocalRunner for LocalPreparedToolAttemptEffectRunner<'_> {
         let tool_context = self
             .tool_context
             .with_attempt_dispatch(Arc::clone(&dispatch), envelope.invocation);
-        let outcome = crate::tool_dispatch::execute_prepared_tool_attempt_effect(
+        let outcome = Box::pin(crate::tool_dispatch::execute_prepared_tool_attempt_effect(
             dispatch.as_ref(),
             call,
             execution_grant,
             attempt,
             max_attempts,
             tool_context,
-        )
+        ))
         .await?;
         Ok(RuntimeEffectOutcome::ToolAttempt {
             launch: Box::new(outcome.launch),

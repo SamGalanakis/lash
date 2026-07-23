@@ -1226,15 +1226,17 @@ impl RestateProcessRunner for RestateCoreProcessRunner {
         handover: Option<lash_core::SegmentHandover>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<lash_core::ProcessRunOutcome, PluginError> {
-        self.worker
-            .run_process_segment_with_scoped_effect_controller(
-                registration,
-                execution_context,
-                scoped_effect_controller,
-                cancellation,
-                handover,
-            )
-            .await
+        Box::pin(
+            self.worker
+                .run_process_segment_with_scoped_effect_controller(
+                    registration,
+                    execution_context,
+                    scoped_effect_controller,
+                    cancellation,
+                    handover,
+                ),
+        )
+        .await
     }
 
     async fn request_process_cancel(

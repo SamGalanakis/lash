@@ -105,10 +105,12 @@ impl crate::plugin::SessionLifecycleService for RuntimeSessionLifecycleService {
         &self,
         request: SessionCreateRequest,
     ) -> Result<SessionHandle, crate::PluginError> {
-        self.services
-            .managed
-            .create_session(&self.services.current, &self.services.usage, request)
-            .await
+        Box::pin(self.services.managed.create_session(
+            &self.services.current,
+            &self.services.usage,
+            request,
+        ))
+        .await
     }
 
     async fn close_session(&self, session_id: &str) -> Result<(), crate::PluginError> {

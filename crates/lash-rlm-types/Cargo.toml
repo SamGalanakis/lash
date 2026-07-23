@@ -13,6 +13,9 @@ description = "Shared types for the RLM protocol in the lash agent runtime."
 keywords = ["lash", "agent", "rlm", "types", "lashlang"]
 categories = ["asynchronous", "api-bindings"]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-sansio = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

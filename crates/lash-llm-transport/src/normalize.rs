@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 //! Provider-neutral response-normalization primitives shared by the lash
 //! provider crates. Each of these existed in 2–4 near-identical copies across
 //! the OpenAI, Anthropic, Google, and Codex crates; this is the single
@@ -459,7 +457,10 @@ mod tests {
         assert_eq!(err.kind, ProviderFailureKind::Http);
         assert_eq!(err.status, Some(429));
         assert_eq!(err.code.as_deref(), Some("429"));
-        assert_eq!(err.raw.as_deref(), Some(r#"{"error":"rate limited"}"#));
+        assert_eq!(
+            err.raw.as_deref().map(String::as_str),
+            Some(r#"{"error":"rate limited"}"#)
+        );
         assert_eq!(err.request_body.as_deref(), Some(r#"{"model":"m"}"#));
         assert_eq!(
             err.retry_after,

@@ -21,6 +21,9 @@ categories = ["asynchronous", "api-bindings"]
 # needs both traits over one store) lives here rather than in either owner.
 testing = ["lash-core/testing", "lashlang/testing"]
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }

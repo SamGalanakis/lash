@@ -216,6 +216,9 @@ pub struct RuntimeEffectEnvelope {
     pub command: RuntimeEffectCommand,
 }
 
+// Measured 448 B on rustc 1.97.0, x86_64-unknown-linux-gnu (FIG-595).
+const _: () = assert!(std::mem::size_of::<RuntimeEffectEnvelope>() <= 576);
+
 impl RuntimeEffectEnvelope {
     pub fn new(invocation: RuntimeInvocation, command: RuntimeEffectCommand) -> Self {
         Self::try_new(invocation, command).expect("valid runtime effect invocation")
@@ -399,6 +402,9 @@ pub enum RuntimeEffectCommand {
     },
 }
 
+// Measured 200 B on rustc 1.97.0, x86_64-unknown-linux-gnu (FIG-595).
+const _: () = assert!(std::mem::size_of::<RuntimeEffectCommand>() <= 256);
+
 impl RuntimeEffectCommand {
     pub fn process(command: ProcessCommand) -> Self {
         Self::Process {
@@ -428,6 +434,7 @@ impl RuntimeEffectCommand {
 /// Serializable operation against the process admin plane.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+// justification: RuntimeEffectCommand already boxes every ProcessCommand, so boxing its Start payload again is redundant.
 #[allow(clippy::large_enum_variant)]
 pub enum ProcessCommand {
     Start {
@@ -544,6 +551,9 @@ pub enum ProcessEffectOutcome {
     },
 }
 
+// Measured 88 B on rustc 1.97.0, x86_64-unknown-linux-gnu (FIG-595).
+const _: () = assert!(std::mem::size_of::<ProcessEffectOutcome>() <= 112);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolAttemptEffectOutcome {
     pub launch: ToolAttemptLaunch,
@@ -560,10 +570,9 @@ pub struct ToolBatchEffectOutcome {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-#[allow(clippy::large_enum_variant)]
 pub enum ToolCallLaunch {
     Done {
-        result: CompletedToolCall,
+        result: Box<CompletedToolCall>,
     },
     Pending {
         key: crate::AwaitEventKey,
@@ -654,6 +663,9 @@ pub enum RuntimeEffectOutcome {
         value: serde_json::Value,
     },
 }
+
+// Measured 96 B on rustc 1.97.0, x86_64-unknown-linux-gnu (FIG-595).
+const _: () = assert!(std::mem::size_of::<RuntimeEffectOutcome>() <= 128);
 
 // =============================================================================
 // Request specs (serializable forms of LLM/Direct requests)

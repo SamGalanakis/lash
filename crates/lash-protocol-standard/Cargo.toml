@@ -13,6 +13,9 @@ description = "Standard protocol (native provider tool calls) for the lash agent
 keywords = ["lash", "agent", "mode", "tools", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-core = { workspace = true }
 lash-tool-support = { workspace = true }

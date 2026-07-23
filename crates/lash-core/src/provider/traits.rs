@@ -80,7 +80,11 @@ impl ProviderFailureClassifier for DefaultProviderFailureClassifier {
             "{}\n{}\n{}",
             failure.code.as_deref().unwrap_or_default(),
             failure.message,
-            failure.raw.as_deref().unwrap_or_default()
+            failure
+                .raw
+                .as_deref()
+                .map(String::as_str)
+                .unwrap_or_default()
         )
         .to_ascii_lowercase();
         if is_context_overflow_text(&haystack) {

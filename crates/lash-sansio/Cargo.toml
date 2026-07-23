@@ -13,6 +13,9 @@ description = "Sans-IO protocol kernel for the lash agent runtime. Pure types an
 keywords = ["lash", "agent", "sans-io", "protocol", "runtime"]
 categories = ["asynchronous", "api-bindings"]
 
+[lints]
+workspace = true
+
 [dependencies]
 jsonschema = { workspace = true, default-features = false }
 serde = { workspace = true, features = ["derive", "rc"] }

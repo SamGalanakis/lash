@@ -19,6 +19,9 @@ categories = ["asynchronous", "api-bindings"]
 name = "lash"
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait = { workspace = true }
 futures-util = { workspace = true }

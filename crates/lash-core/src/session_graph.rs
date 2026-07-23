@@ -175,6 +175,7 @@ impl<'de> serde::Deserialize<'de> for SharedJsonValue {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// justification: persisted graph nodes retain their public inline payload shape across storage and replay.
 #[allow(clippy::large_enum_variant)]
 pub enum SessionNodePayload {
     Event {

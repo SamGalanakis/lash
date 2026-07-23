@@ -128,7 +128,9 @@ fn cancelled_runtime_tool_call_launch(
     replay: Option<crate::llm::types::ProviderReplayMeta>,
 ) -> crate::runtime::ToolCallLaunch {
     crate::runtime::ToolCallLaunch::Done {
-        result: cancelled_completed_tool_call(call_id, tool_name, args, replay),
+        result: Box::new(cancelled_completed_tool_call(
+            call_id, tool_name, args, replay,
+        )),
     }
 }
 
@@ -371,7 +373,7 @@ impl RuntimeExecutionContext<'_> {
             .await;
         CoordinatedToolLaunch {
             launch: crate::runtime::ToolCallLaunch::Done {
-                result: completed.completed,
+                result: Box::new(completed.completed),
             },
             triggers: coordinated.triggers,
         }
@@ -698,14 +700,14 @@ impl RuntimeExecutionContext<'_> {
             );
         }
         let tool_context = tool_context.build();
-        crate::tool_dispatch::execute_prepared_tool_attempt_effect(
+        Box::pin(crate::tool_dispatch::execute_prepared_tool_attempt_effect(
             attempt_dispatch.as_ref(),
             prepared,
             execution_grant,
             attempt,
             max_attempts,
             tool_context,
-        )
+        ))
         .await
     }
 
@@ -1172,6 +1174,7 @@ impl RuntimeExecutionContext<'_> {
                     let call_id = prepared.call_id.clone();
                     let reply = match launch {
                         crate::runtime::ToolCallLaunch::Done { result } => {
+                            let result = *result;
                             let record = ToolCallRecord {
                                 call_id: Some(result.call_id.clone()),
                                 tool: result.tool_name.clone(),

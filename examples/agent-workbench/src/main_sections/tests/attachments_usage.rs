@@ -38,7 +38,12 @@ fn attachment_usage_gate_sqlite() {
         let resumed_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(sessions))
             as Arc<dyn lash::persistence::SessionStoreFactory>;
 
-        run_attachment_usage_gate(&data_dir, first_factory, resumed_factory).await;
+        Box::pin(run_attachment_usage_gate(
+            &data_dir,
+            first_factory,
+            resumed_factory,
+        ))
+        .await;
         std::fs::remove_dir_all(&data_dir).expect("remove SQLite gate data dir");
     });
 }
@@ -68,7 +73,12 @@ fn attachment_usage_gate_postgres() {
             ));
             std::fs::create_dir_all(&data_dir).expect("create Postgres gate data dir");
 
-            run_attachment_usage_gate(&data_dir, first_factory, resumed_factory).await;
+            Box::pin(run_attachment_usage_gate(
+                &data_dir,
+                first_factory,
+                resumed_factory,
+            ))
+            .await;
             std::fs::remove_dir_all(&data_dir).expect("remove Postgres gate data dir");
         },
     );

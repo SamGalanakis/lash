@@ -16,10 +16,12 @@ impl RuntimeSessionServices {
         // carries only persisted policy, so fill an omitted provider_id from
         // the parent runtime policy before the child session is built.
         self.inherit_session_turn_provider_id(&mut create_request);
-        let child = match self
-            .managed
-            .create_session(&self.current, &self.usage, create_request)
-            .await
+        let child = match Box::pin(self.managed.create_session(
+            &self.current,
+            &self.usage,
+            create_request,
+        ))
+        .await
         {
             Ok(child) => child,
             Err(err) => {

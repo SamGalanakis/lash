@@ -96,7 +96,7 @@ impl RuntimeTurnDriver<'_> {
                 let replay = prepared.replay.clone();
                 match launch {
                     crate::runtime::ToolCallLaunch::Done { result } => {
-                        results[source_index] = Some(result);
+                        results[source_index] = Some(*result);
                     }
                     crate::runtime::ToolCallLaunch::Pending {
                         key,

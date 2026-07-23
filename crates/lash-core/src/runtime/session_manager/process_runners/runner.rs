@@ -36,13 +36,13 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                 turn_input,
                 ..
             } => crate::ProcessRunOutcome::Terminal(Box::new(
-                self.run_process_session_turn(
+                Box::pin(self.run_process_session_turn(
                     registration,
                     *create_request.clone(),
                     *turn_input.clone(),
                     scoped_effect_controller,
                     cancellation,
-                )
+                ))
                 .await,
             )),
             crate::ProcessInput::Engine { kind, payload } => {

@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};

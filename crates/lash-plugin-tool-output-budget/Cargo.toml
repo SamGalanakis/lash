@@ -13,6 +13,9 @@ description = "Tool-output budgeting plugin for the lash agent runtime."
 keywords = ["lash", "agent", "tools", "plugin", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

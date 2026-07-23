@@ -1077,7 +1077,7 @@ impl CodexProvider {
         let haystack = format!(
             "{}\n{}\n{}",
             error.message,
-            error.raw.as_deref().unwrap_or_default(),
+            error.raw.as_deref().map(String::as_str).unwrap_or_default(),
             error.code.as_deref().unwrap_or_default()
         )
         .to_ascii_lowercase();
@@ -1503,7 +1503,14 @@ impl ProviderFailureClassifier for CodexFailureClassifier {
             .status
             .or_else(|| failure.code.as_deref().and_then(|code| code.parse().ok()));
         let summary = status.and_then(|status| {
-            CodexProvider::codex_error_summary(status, failure.raw.as_deref().unwrap_or_default())
+            CodexProvider::codex_error_summary(
+                status,
+                failure
+                    .raw
+                    .as_deref()
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            )
         });
         let mut failure = DefaultProviderFailureClassifier.classify(failure);
         if let Some(summary) = summary {

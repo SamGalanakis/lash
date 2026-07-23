@@ -20,6 +20,9 @@ lashlang = [
     "lash-tools/lashlang",
 ]
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-core = { workspace = true }
 lash-plugin-observational-memory = { workspace = true }

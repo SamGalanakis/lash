@@ -13,6 +13,9 @@ description = "OAuth helpers and credential storage shared by lash provider crat
 keywords = ["lash", "agent", "oauth", "auth", "llm"]
 categories = ["api-bindings", "authentication"]
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }

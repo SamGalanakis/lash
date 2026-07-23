@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 //! Reusable proptest strategies and scripted stream fakes for SSE property
 //! tests. Compiled only with the `proptest-support` feature; provider crates
 //! enable it as a dev-dependency feature to assert that parsing a valid SSE

@@ -21,6 +21,9 @@ otel-trace = ["lash-trace/otel"]
 # session-manager/turn fixtures with lash's own tests.
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 lash-http-transport = { workspace = true }
 lash-sansio = { workspace = true }
@@ -44,6 +47,3 @@ hmac = { workspace = true }
 proptest = "1"
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-[lints.clippy]
-disallowed_methods = "deny"

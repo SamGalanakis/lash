@@ -150,6 +150,7 @@ pub enum LogEvent {
 // already guarantees `Event: Clone`), so a manual impl keeps `Effect<M>`
 // cloneable for every protocol — which the turn checkpoint relies on.
 #[derive(Debug, Serialize, serde::Deserialize)]
+// justification: effects are short-lived machine states whose generic protocol payload remains inline for checkpoint cloning.
 #[allow(clippy::large_enum_variant)]
 pub enum Effect<M: TurnProtocol = UnitTurnProtocol> {
     /// Sync the live execution environment before the turn proceeds.
@@ -362,6 +363,7 @@ pub enum CheckpointResumeAction {
     Finish(TurnOutcome),
 }
 
+// justification: driver actions are single-step machine values and boxing generic driver state would add allocation to every iteration.
 #[allow(clippy::large_enum_variant)]
 pub enum DriverAction<M: TurnProtocol = UnitTurnProtocol> {
     Emit(SessionStreamEvent),

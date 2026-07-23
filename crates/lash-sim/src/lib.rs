@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 #[cfg(test)]
 mod cache_regression;
 mod canonical_scripts;

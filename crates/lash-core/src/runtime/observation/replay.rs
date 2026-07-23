@@ -186,6 +186,7 @@ pub enum SessionProcessEventKind {
 }
 
 #[derive(Clone, Debug)]
+// justification: the enclosing replay event is already Arc-owned, so another allocation would not bound retained event storage.
 #[allow(clippy::large_enum_variant)]
 pub enum SessionObservationEventPayload {
     TurnActivity(crate::TurnActivity),
