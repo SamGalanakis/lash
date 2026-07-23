@@ -52,6 +52,27 @@ impl<'run> DirectCompletionClient<'run> {
         }
     }
 
+    pub(crate) fn to_static(&self) -> Option<DirectCompletionClient<'static>> {
+        let source = match &self.source {
+            DirectCompletionSource::Runtime(source) => {
+                DirectCompletionSource::Runtime(RuntimeDirectSource {
+                    manager: Arc::clone(&source.manager),
+                    effect_controller: source.effect_controller.to_static()?,
+                    turn_id: source.turn_id.clone(),
+                })
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::Unavailable(message) => {
+                DirectCompletionSource::Unavailable(message.clone())
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::TestFn(invoke) => {
+                DirectCompletionSource::TestFn(Arc::clone(invoke))
+            }
+        };
+        Some(DirectCompletionClient { source })
+    }
+
     pub async fn direct_completion(
         &self,
         request: crate::DirectRequest,

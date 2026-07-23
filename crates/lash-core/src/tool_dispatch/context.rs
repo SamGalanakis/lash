@@ -103,6 +103,33 @@ impl<'run> ToolDispatchContext<'run> {
             .with_parent_invocation(self.parent_invocation.clone())
             .with_agent_frame_id(Some(self.agent_frame_id.clone()))
     }
+
+    pub(crate) fn to_static(&self) -> Option<ToolDispatchContext<'static>> {
+        Some(ToolDispatchContext {
+            plugins: Arc::clone(&self.plugins),
+            tools: Arc::clone(&self.tools),
+            tool_catalog: Arc::clone(&self.tool_catalog),
+            sessions: Arc::clone(&self.sessions),
+            session_lifecycle: Arc::clone(&self.session_lifecycle),
+            session_graph: Arc::clone(&self.session_graph),
+            processes: Arc::clone(&self.processes),
+            process_cancel_ability: Arc::clone(&self.process_cancel_ability),
+            trigger_router: self.trigger_router.clone(),
+            effect_controller: self.effect_controller.to_static()?,
+            direct_completions: self.direct_completions.to_static()?,
+            parent_invocation: self.parent_invocation.clone(),
+            execution_env_spec: self.execution_env_spec.clone(),
+            session_id: self.session_id.clone(),
+            agent_frame_id: self.agent_frame_id.clone(),
+            event_tx: self.event_tx.clone(),
+            checkpoint_messages: self.checkpoint_messages.clone(),
+            trigger_outcomes: self.trigger_outcomes.clone(),
+            attachment_store: Arc::clone(&self.attachment_store),
+            attachment_source_policy: Arc::clone(&self.attachment_source_policy),
+            turn_context: self.turn_context.clone(),
+            clock: Arc::clone(&self.clock),
+        })
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

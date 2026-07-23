@@ -158,6 +158,34 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self.session_id
     }
 
+    pub(crate) fn to_static(&self) -> Option<RuntimeExecutionContext<'static>> {
+        Some(RuntimeExecutionContext {
+            session_id: self.session_id.clone(),
+            dispatch: Arc::new(self.dispatch.to_static()?),
+            process_env_store: Arc::clone(&self.process_env_store),
+            attachment_store: Arc::clone(&self.attachment_store),
+            chronological_projection: Arc::clone(&self.chronological_projection),
+            protocol_extension: self.protocol_extension.clone(),
+            turn_context: self.turn_context.clone(),
+            execution_env_spec: self.execution_env_spec.clone(),
+            process_originator: self.process_originator.clone(),
+            runtime_process_id: self.runtime_process_id.clone(),
+            process_event_context: self.process_event_context.clone(),
+            process_env_ref: self.process_env_ref.clone(),
+            process_wake_target: self.process_wake_target.clone(),
+            parent_invocation: self.parent_invocation.clone(),
+            turn_phase_probe: self.turn_phase_probe.clone(),
+            turn_event_tx: self.turn_event_tx.clone(),
+            cancellation_token: self.cancellation_token.clone(),
+            observe_turn_cancel: self.observe_turn_cancel,
+            tracing: self.tracing.clone(),
+            code_block_graph_key: self.code_block_graph_key.clone(),
+            batch_parent_call_id: self.batch_parent_call_id.clone(),
+            process_work_driver: self.process_work_driver.clone(),
+            started_process_ids: Arc::clone(&self.started_process_ids),
+        })
+    }
+
     pub fn execution_scope_id(&self) -> String {
         self.dispatch
             .effect_controller

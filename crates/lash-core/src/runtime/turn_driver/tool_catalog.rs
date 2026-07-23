@@ -157,7 +157,7 @@ impl RuntimeTurnDriver<'_> {
 
     pub(in crate::runtime) async fn refresh_execution_environment(
         &mut self,
-        machine: &crate::TurnMachine,
+        messages: crate::MessageSequence,
         update_machine_config: bool,
     ) -> Result<Option<crate::sansio::ExecutionEnvironmentSync>, crate::SessionError> {
         if !update_machine_config {
@@ -166,7 +166,7 @@ impl RuntimeTurnDriver<'_> {
 
         let policy = self.policy.policy.clone();
         let execution_environment = self
-            .prepare_execution_environment(&policy, self.turn_index, machine.message_sequence())
+            .prepare_execution_environment(&policy, self.turn_index, messages)
             .await
             .map_err(|err| crate::SessionError::Protocol(err.to_string()))?;
         let prepared_prompt = execution_environment.build_prompt(
