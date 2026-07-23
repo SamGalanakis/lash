@@ -12,12 +12,29 @@ pub fn derive_key_id(
     scope: &ExecutionScope,
     wait: &AwaitEventWaitIdentity,
 ) -> Result<String, RuntimeError> {
+    scope.validate()?;
+    wait.validate()?;
     crate::stable_hash::stable_json_sha256_hex(&(scope, wait)).map_err(|err| {
         RuntimeError::new(
             "await_event_key_hash",
             format!("failed to hash await-event identity: {err}"),
         )
     })
+}
+
+/// Canonical bytes authenticated by HMAC-backed durable AwaitEvent adapters.
+///
+/// The key id remains in the signed material even though it is derived from
+/// `scope` and `wait`: authenticating all three serialized key fields prevents
+/// backends from accidentally accepting a key whose visible identity and
+/// routing identity disagree.
+pub fn sign_material(
+    scope: &ExecutionScope,
+    wait: &AwaitEventWaitIdentity,
+    key_id: &str,
+) -> Vec<u8> {
+    serde_json::to_vec(&(scope, wait, key_id))
+        .expect("await-event signing material contains only infallible JSON values")
 }
 
 /// State observed by a backend while holding its promise transition fence.
@@ -192,5 +209,17 @@ mod tests {
         assert!(constant_time_eq(b"same", b"same"));
         assert!(!constant_time_eq(b"same", b"sale"));
         assert!(!constant_time_eq(b"same", b"same-longer"));
+    }
+
+    #[test]
+    fn signing_material_is_the_canonical_scope_wait_key_tuple() {
+        let scope = ExecutionScope::turn("session", "turn");
+        let wait = AwaitEventWaitIdentity::tool_completion("call");
+        let key_id = derive_key_id(&scope, &wait).expect("derive key id");
+
+        assert_eq!(
+            sign_material(&scope, &wait, &key_id),
+            serde_json::to_vec(&(scope, wait, key_id)).expect("serialize tuple")
+        );
     }
 }

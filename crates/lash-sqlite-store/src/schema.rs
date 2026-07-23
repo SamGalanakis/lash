@@ -382,9 +382,40 @@ CREATE TABLE IF NOT EXISTS runtime_effect_replay (
 
 CREATE INDEX IF NOT EXISTS idx_runtime_effect_replay_lease
     ON runtime_effect_replay(status, lease_expires_at_ms);
+
+CREATE TABLE IF NOT EXISTS await_event_meta (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
+    signing_secret  BLOB NOT NULL
+);
+
+INSERT INTO await_event_meta (singleton, signing_secret)
+VALUES (1, randomblob(32))
+ON CONFLICT(singleton) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS await_event_waits (
+    key_id          TEXT PRIMARY KEY,
+    scope_json      TEXT NOT NULL,
+    wait_json       TEXT NOT NULL,
+    session_id      TEXT,
+    turn_control    INTEGER NOT NULL CHECK (turn_control IN (0, 1)),
+    terminal_json   TEXT,
+    created_at_ms   INTEGER NOT NULL,
+    resolved_at_ms  INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_await_event_waits_session
+    ON await_event_waits(session_id);
+
+CREATE TABLE IF NOT EXISTS await_event_revoked_sessions (
+    session_id      TEXT PRIMARY KEY,
+    revoked_at_ms   INTEGER NOT NULL
+);
 ";
 
-pub(crate) const EFFECT_SCHEMA_VERSION: i32 = 1;
+// FIG-561 adds durable AwaitEvent promises, the store-resident signer, and
+// session revocation tombstones. Effect databases follow the crate's alpha
+// reject-and-recreate convention rather than carrying a migration chain.
+pub(crate) const EFFECT_SCHEMA_VERSION: i32 = 2;
 
 pub(crate) async fn apply_pragmas(
     conn: &SqliteConnection,
@@ -430,8 +461,23 @@ pub(crate) async fn ensure_trigger_schema(conn: &SqliteConnection) -> rusqlite::
     .await
 }
 
-pub(crate) async fn ensure_effect_schema(conn: &SqliteConnection) -> rusqlite::Result<()> {
-    ensure_versioned_schema(conn, "effect replay", EFFECT_SCHEMA, EFFECT_SCHEMA_VERSION).await
+pub(crate) async fn ensure_effect_schema(conn: &SqliteConnection) -> rusqlite::Result<Vec<u8>> {
+    conn.call(|connection| {
+        let tx = prepare_versioned_schema(
+            connection,
+            "effect replay",
+            EFFECT_SCHEMA,
+            EFFECT_SCHEMA_VERSION,
+        )?;
+        let signing_secret = tx.query_row(
+            "SELECT signing_secret FROM await_event_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(signing_secret)
+    })
+    .await
 }
 
 /// Apply `schema` if the database is already at `schema_version`, initialise it
@@ -445,36 +491,44 @@ async fn ensure_versioned_schema(
     schema_version: i32,
 ) -> rusqlite::Result<()> {
     conn.call(move |c| {
-        // The whole check-then-initialise runs inside one `BEGIN IMMEDIATE`
-        // transaction so the write lock is held across the `user_version` read.
-        // Reading the version outside the transaction and only then upgrading to
-        // a writer races concurrent first-openers into a lock-upgrade deadlock
-        // (SQLite returns "database is locked" immediately, bypassing
-        // `busy_timeout`). Holding the write lock from the first statement makes
-        // every contender serialise on the busy handler instead.
-        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let user_version: i32 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if user_version == schema_version {
-            tx.execute_batch(schema)?;
-            tx.commit()?;
-            return Ok(());
-        }
-        if user_version == 0 && !has_user_schema_objects(&tx)? {
-            tx.execute_batch(schema)?;
-            tx.pragma_update(None, "user_version", schema_version)?;
-            tx.commit()?;
-            return Ok(());
-        }
-        Err(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
-            Some(unsupported_schema_message(
-                database_kind,
-                schema_version,
-                user_version,
-            )),
-        ))
+        let tx = prepare_versioned_schema(c, database_kind, schema, schema_version)?;
+        tx.commit()
     })
     .await
+}
+
+fn prepare_versioned_schema<'connection>(
+    connection: &'connection mut Connection,
+    database_kind: &'static str,
+    schema: &'static str,
+    schema_version: i32,
+) -> rusqlite::Result<Transaction<'connection>> {
+    // The whole check-then-initialise runs inside one `BEGIN IMMEDIATE`
+    // transaction so the write lock is held across the `user_version` read.
+    // Reading the version outside the transaction and only then upgrading to
+    // a writer races concurrent first-openers into a lock-upgrade deadlock
+    // (SQLite returns "database is locked" immediately, bypassing
+    // `busy_timeout`). Holding the write lock from the first statement makes
+    // every contender serialise on the busy handler instead.
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let user_version: i32 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if user_version == schema_version {
+        tx.execute_batch(schema)?;
+        return Ok(tx);
+    }
+    if user_version == 0 && !has_user_schema_objects(&tx)? {
+        tx.execute_batch(schema)?;
+        tx.pragma_update(None, "user_version", schema_version)?;
+        return Ok(tx);
+    }
+    Err(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+        Some(unsupported_schema_message(
+            database_kind,
+            schema_version,
+            user_version,
+        )),
+    ))
 }
 
 pub(crate) fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {

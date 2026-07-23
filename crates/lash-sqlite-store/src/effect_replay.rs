@@ -13,16 +13,19 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lash_core::{
-    AwaitEventResolver, DurabilityTier, EffectHost, ExecutionScope, LeaseTimings,
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, DurabilityTier, EffectHost,
+    ExecutionScope, LeaseTimings, Resolution, ResolveOutcome, RuntimeAwaitEventOptions,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
     ScopedEffectController,
 };
+use tokio_util::sync::CancellationToken;
 
 use super::*;
+use crate::await_event::SqliteAwaitEvents;
 
 const STATUS_IN_PROGRESS: &str = "in_progress";
 const STATUS_COMPLETED: &str = "completed";
@@ -47,6 +50,7 @@ struct SqliteEffectReplayInner {
     lease_counter: AtomicU64,
     replay_mode: AtomicBool,
     lease_timings: LeaseTimings,
+    await_events: SqliteAwaitEvents,
 }
 
 /// Deployment-level SQLite effect host.
@@ -147,9 +151,53 @@ impl SqliteEffectHost {
     }
 }
 
+#[async_trait::async_trait]
 impl AwaitEventResolver for SqliteEffectHost {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
+    }
+
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        self.inner.await_events.key_for(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.inner.await_events.resolve(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.inner.await_events.peek(key).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        self.inner
+            .await_events
+            .await_resolution(key, cancel, deadline)
+            .await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.await_events.revoke_session(session_id).await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.await_events.cancel_session(session_id).await
     }
 }
 
@@ -602,6 +650,21 @@ impl SqliteRuntimeEffectController {
                     .map_err(RuntimeEffectControllerError::from)?;
                 Ok(RuntimeEffectOutcome::PeekAwaitEvent { resolution })
             }
+            RuntimeEffectCommand::AwaitEvent { key } => {
+                let RuntimeAwaitEventOptions {
+                    cancellation,
+                    deadline,
+                    clock,
+                    ..
+                } = local_executor.into_await_event_options()?;
+                let resolution = self
+                    .inner
+                    .await_events
+                    .await_resolution_with_clock(&key, cancellation, deadline, clock.as_ref())
+                    .await
+                    .map_err(RuntimeEffectControllerError::from)?;
+                Ok(RuntimeEffectOutcome::AwaitEvent { resolution })
+            }
             RuntimeEffectCommand::Process { command } => {
                 let result = local_executor.into_process()?.execute(*command).await?;
                 Ok(RuntimeEffectOutcome::Process { result })
@@ -611,9 +674,53 @@ impl SqliteRuntimeEffectController {
     }
 }
 
+#[async_trait::async_trait]
 impl AwaitEventResolver for SqliteRuntimeEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
+    }
+
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        self.inner.await_events.key_for(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.inner.await_events.resolve(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.inner.await_events.peek(key).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        self.inner
+            .await_events
+            .await_resolution(key, cancel, deadline)
+            .await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.await_events.revoke_session(session_id).await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.await_events.cancel_session(session_id).await
     }
 }
 
@@ -657,9 +764,14 @@ async fn open_effect_replay_inner(
     clock: Arc<dyn lash_core::Clock>,
 ) -> tokio_rusqlite::Result<Arc<SqliteEffectReplayInner>> {
     let conn = SqliteConnection::open(path).await?;
-    ensure_effect_schema(&conn).await?;
+    let signing_secret = ensure_effect_schema(&conn).await?;
     apply_pragmas(&conn, backing).await?;
-    Ok(Arc::new(SqliteEffectReplayInner::new(conn, options, clock)))
+    Ok(Arc::new(SqliteEffectReplayInner::new(
+        conn,
+        options,
+        clock,
+        signing_secret,
+    )))
 }
 
 async fn open_effect_replay_memory_inner(
@@ -667,9 +779,14 @@ async fn open_effect_replay_memory_inner(
     clock: Arc<dyn lash_core::Clock>,
 ) -> tokio_rusqlite::Result<Arc<SqliteEffectReplayInner>> {
     let conn = SqliteConnection::open_in_memory().await?;
-    ensure_effect_schema(&conn).await?;
+    let signing_secret = ensure_effect_schema(&conn).await?;
     apply_pragmas(&conn, StoreBacking::Memory).await?;
-    Ok(Arc::new(SqliteEffectReplayInner::new(conn, options, clock)))
+    Ok(Arc::new(SqliteEffectReplayInner::new(
+        conn,
+        options,
+        clock,
+        signing_secret,
+    )))
 }
 
 impl SqliteEffectReplayInner {
@@ -677,9 +794,11 @@ impl SqliteEffectReplayInner {
         conn: SqliteConnection,
         options: SqliteEffectReplayOptions,
         clock: Arc<dyn lash_core::Clock>,
+        signing_secret: Vec<u8>,
     ) -> Self {
         let sequence = EFFECT_OWNER_COUNTER.fetch_add(1, Ordering::SeqCst);
         let timestamp_ms = clock.timestamp_ms();
+        let await_events = SqliteAwaitEvents::new(conn.clone(), signing_secret, Arc::clone(&clock));
         Self {
             conn,
             clock,
@@ -687,6 +806,7 @@ impl SqliteEffectReplayInner {
             lease_counter: AtomicU64::new(1),
             replay_mode: AtomicBool::new(false),
             lease_timings: options.lease_timings,
+            await_events,
         }
     }
 

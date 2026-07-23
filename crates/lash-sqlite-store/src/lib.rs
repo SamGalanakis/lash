@@ -76,6 +76,7 @@ use sha2::{Digest, Sha256};
 use conn::SqliteConnection;
 
 mod attachments;
+mod await_event;
 mod blobs;
 mod conn;
 mod effect_replay;
